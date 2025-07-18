@@ -62,6 +62,9 @@ fn main() {
             debug_log(&format!("overriding: git blame"));
             handle_blame(args);
         }
+        "test" => {
+            handle_test(args);
+        }
         "commit" => {
             // debug_log(&format!("wrapping: git commit"));
             handle_commit(args);
@@ -276,6 +279,22 @@ fn handle_commit(args: &[String]) {
             eprintln!("Failed to execute git commit: {}", e);
             std::process::exit(1);
         }
+    }
+}
+
+fn handle_test(_args: &[String]) {
+    // Find the git repository
+    let repo = match find_repository() {
+        Ok(repo) => repo,
+        Err(e) => {
+            eprintln!("Failed to find repository: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    if let Err(e) = commands::test(&repo) {
+        eprintln!("Test failed: {}", e);
+        std::process::exit(1);
     }
 }
 
