@@ -309,11 +309,9 @@ export function activate(context: vscode.ExtensionContext) {
 
       context.subscriptions.push(textDocumentChangeDisposable);
       // Show startup notification
-      if (showCheckpointMessage()) {
-        vscode.window.showInformationMessage(
-          `🤖 AI Code Detector is now active!`
-        );
-      }
+      vscode.window.showInformationMessage(
+        `🤖 AI Code Detector is now active!`
+      );
     }
   });
 }
