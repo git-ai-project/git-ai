@@ -1,263 +1,98 @@
 name: Release Build
-
 on:
   workflow_dispatch:
 
 jobs:
-  build:
-    name: Build for ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
-    outputs:
-      version: ${{ steps.get-version.outputs.version }}
+  # ---------- Linux targets (Cross) ----------
+  build-linux:
+    runs-on: ubuntu-latest
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            artifact_name: git-ai-linux-x64
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            artifact_name: git-ai-linux-arm64
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact_name: git-ai-windows-x64
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            artifact_name: git-ai-macos-arm64
-
+          - target: x86_64-unknown-linux-gnu # Linux x64
+            artifact: git-ai-linux-x64
+          - target: aarch64-unknown-linux-gnu # Linux ARM64
+            artifact: git-ai-linux-arm64
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Get version from Cargo.toml
-        id: get-version
-        shell: bash
+      - name: Extract version
+        id: ver
         run: |
-          VERSION=$(grep '^version = ' Cargo.toml | cut -d'"' -f2)
-          echo "version=v$VERSION" >> $GITHUB_OUTPUT
+          echo "VERSION=v$(grep '^version = ' Cargo.toml | cut -d'"' -f2)" >>"$GITHUB_OUTPUT"
 
-      - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          target: ${{ matrix.target }}
-          override: true
+      - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install cross-compilation dependencies (Linux ARM64)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo dpkg --add-architecture arm64
-          # Restrict existing mirrors to amd64 only to avoid 404s for missing arm64 pools
-          sudo sed -i 's/^deb \(http.*ubuntu.*\)/deb [arch=amd64] \1/' /etc/apt/sources.list || true
-          sudo sed -i 's/^deb \(http.*ubuntu.*\)/deb [arch=amd64] \1/' /etc/apt/sources.list.d/*.list || true
-          # Add ports.ubuntu.com entries for the new architecture (some mirrors don't host arm64 yet)
-          sudo tee /etc/apt/sources.list.d/ports-arm64.list > /dev/null <<'EOF'
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-updates main restricted universe multiverse
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-security main restricted universe multiverse
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-backports main restricted universe multiverse
-          EOF
+      - name: Install cross
+        run: cargo install --locked cross
 
-          sudo apt-get update
-          # Cross-compiler and basic sysroot
-          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross
-          # Install OpenSSL headers and libs for the target architecture
-          sudo apt-get install -y pkg-config zlib1g-dev:arm64 libssl-dev:arm64
+      - name: Build (${{ matrix.target }})
+        run: cross build --release --target ${{ matrix.target }}
 
-      - name: Cache dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Build release binary (Linux ARM64)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          cargo build --release --target ${{ matrix.target }}
-        env:
-          CARGO_INCREMENTAL: 0
-          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
-          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
-          PKG_CONFIG_ALLOW_CROSS: 1
-          PKG_CONFIG_SYSROOT_DIR: /
-          PKG_CONFIG_PATH: /usr/lib/aarch64-linux-gnu/pkgconfig
-          OPENSSL_DIR: /usr
-          OPENSSL_LIB_DIR: /usr/lib/aarch64-linux-gnu
-          OPENSSL_INCLUDE_DIR: /usr/include/aarch64-linux-gnu
-
-      - name: Build release binary (other targets)
-        if: matrix.target != 'aarch64-unknown-linux-gnu'
-        run: |
-          cargo build --release --target ${{ matrix.target }}
-        env:
-          CARGO_INCREMENTAL: 0
-
-      - name: Strip binary (Linux)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          strip target/${{ matrix.target }}/release/git-ai
-
-      - name: Strip binary (macOS)
-        if: matrix.os == 'macos-latest'
-        run: |
-          strip target/${{ matrix.target }}/release/git-ai
-
-      - name: Create release directory
+      - name: Package artifact
         run: |
           mkdir -p release
+          cp target/${{ matrix.target }}/release/git-ai \
+            release/${{ matrix.artifact }}
 
-      - name: Copy binary to release directory
-        if: matrix.os == 'windows-latest'
-        run: |
-          cp target/${{ matrix.target }}/release/git-ai.exe release/${{ matrix.artifact_name }}.exe
-
-      - name: Copy binary to release directory (non-Windows)
-        if: matrix.os != 'windows-latest'
-        run: |
-          cp target/${{ matrix.target }}/release/git-ai release/${{ matrix.artifact_name }}
-
-      - name: Upload artifact (Windows)
-        if: matrix.os == 'windows-latest'
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact_name }}
-          path: release/${{ matrix.artifact_name }}.exe
+          name: ${{ matrix.artifact }}
+          path: release/${{ matrix.artifact }}
           retention-days: 30
 
-      - name: Upload artifact (non-Windows)
-        if: matrix.os != 'windows-latest'
-        uses: actions/upload-artifact@v4
+  # ---------- Windows (native MSVC) ----------
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --target x86_64-pc-windows-msvc
+      - run: |
+          mkdir release
+          copy target\x86_64-pc-windows-msvc\release\git-ai.exe `
+               release\git-ai-windows-x64.exe
+      - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact_name }}
-          path: release/${{ matrix.artifact_name }}
+          name: git-ai-windows-x64
+          path: release/git-ai-windows-x64.exe
           retention-days: 30
 
-  build-macos-intel:
-    name: Build for macOS Intel
+  # ---------- macOS Intel (native) ----------
+  build-macos:
     runs-on: macos-latest
-    outputs:
-      version: ${{ steps.get-version.outputs.version }}
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Get version from Cargo.toml
-        id: get-version
-        shell: bash
-        run: |
-          VERSION=$(grep '^version = ' Cargo.toml | cut -d'"' -f2)
-          echo "version=v$VERSION" >> $GITHUB_OUTPUT
-
-      - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
-
-      - name: Cache dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Build release binary (native)
-        run: |
-          cargo build --release
-        env:
-          CARGO_INCREMENTAL: 0
-
-      - name: Strip binary (macOS)
-        run: |
-          strip target/release/git-ai
-
-      - name: Create release directory
-        run: |
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+      - run: |
           mkdir -p release
-
-      - name: Copy binary to release directory
-        run: |
           cp target/release/git-ai release/git-ai-macos-x64
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: git-ai-macos-x64
           path: release/git-ai-macos-x64
           retention-days: 30
 
-  create-release:
-    name: Create Release
-    needs: [build, build-macos-intel]
+  # ---------- Create GitHub release ----------
+  publish:
+    needs: [build-linux, build-windows, build-macos]
     runs-on: ubuntu-latest
-
     steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
+      - uses: actions/download-artifact@v4
+        with: { path: release }
 
-      - name: Create release directory
-        run: mkdir -p release
-
-      - name: Move artifacts to release directory
-        run: |
-          find artifacts -name "git-ai-*" -exec cp {} release/ \;
-
-      - name: List available artifacts
-        run: |
-          echo "Available artifacts:"
-          ls -la release/ || echo "No artifacts found"
-
-      - name: Create checksums
+      - name: Checksums
         run: |
           cd release
-          if ls git-ai-* 1> /dev/null 2>&1; then
-            sha256sum git-ai-* > SHA256SUMS
-          else
-            echo "No binaries found to create checksums for"
-            touch SHA256SUMS
-          fi
+          sha256sum git-ai-* > SHA256SUMS
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.build.outputs.version }}
-          name: Release ${{ needs.build.outputs.version }}
-          body: |
-            ## git-ai ${{ needs.build.outputs.version }}
-
-            ### Downloads
-            - **Linux (x64)**: `git-ai-linux-x64`
-            - **Linux (ARM64)**: `git-ai-linux-arm64`
-            - **Windows (x64)**: `git-ai-windows-x64.exe`
-            - **macOS (Intel)**: `git-ai-macos-x64`
-            - **macOS (Apple Silicon)**: `git-ai-macos-arm64`
-
-            ### Installation
-            Download the appropriate binary for your platform and make it executable:
-            ```bash
-            chmod +x git-ai-<platform>
-            ```
-
-            ### SHA256 Checksums
-            ```
-            $(cat release/SHA256SUMS)
-            ```
+          tag_name: ${{ needs.build-linux.outputs.ver }}
+          name: Release ${{ needs.build-linux.outputs.ver }}
           files: |
             release/git-ai-*
             release/SHA256SUMS
-          draft: false
-          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
