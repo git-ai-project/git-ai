@@ -47,6 +47,9 @@ jobs:
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo dpkg --add-architecture arm64
+          # Restrict existing mirrors to amd64 only to avoid 404s for missing arm64 pools
+          sudo sed -i 's/^deb \(http.*ubuntu.*\)/deb [arch=amd64] \1/' /etc/apt/sources.list || true
+          sudo sed -i 's/^deb \(http.*ubuntu.*\)/deb [arch=amd64] \1/' /etc/apt/sources.list.d/*.list || true
           # Add ports.ubuntu.com entries for the new architecture (some mirrors don't host arm64 yet)
           sudo tee /etc/apt/sources.list.d/ports-arm64.list > /dev/null <<'EOF'
           deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse
