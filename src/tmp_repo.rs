@@ -269,6 +269,7 @@ impl TmpRepo {
             false, // reset
             true, None, // model
             None, // human_author
+            false, // staged_only
         )
     }
 

@@ -119,7 +119,7 @@ fn test_without_staged_only_includes_all_changes() {
         .current_dir(repo_path)
         .assert()
         .success()
-        .stdout(predicate::str::contains("Claude changed 2 of the 2 file(s)"));
+        .stderr(predicate::str::contains("Claude changed 2 of the 2 file(s)"));
 }
 
 #[test]
