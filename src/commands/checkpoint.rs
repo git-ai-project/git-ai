@@ -2,7 +2,7 @@ use crate::error::GitAiError;
 use crate::git::refs::{get_reference, put_reference};
 use crate::log_fmt::working_log::{AgentMetadata, Checkpoint, Line, WorkingLogEntry};
 use crate::utils::debug_log;
-use git2::{Repository, StatusOptions};
+use git2::{Repository, StatusOptions, Status};
 use sha2::{Digest, Sha256};
 use similar::{ChangeTag, TextDiff};
 use std::collections::HashMap;
@@ -16,6 +16,7 @@ pub fn run(
     quiet: bool,
     model: Option<&str>,
     human_author: Option<&str>,
+    staged_only: bool,
 ) -> Result<(usize, usize, usize), GitAiError> {
     // Robustly handle zero-commit repos
     let base_commit = match repo.head() {
@@ -29,8 +30,26 @@ pub fn run(
         Err(_) => "initial".to_string(),
     };
 
-    // aidan
-    let files = get_all_files(repo)?;
+    // Get files based on staging preference
+    let files = if staged_only {
+        let staged_files = get_staged_files_only(repo)?;
+        
+        // Check for unstaged changes and warn user
+        if !quiet {
+            let unstaged_files = get_unstaged_files(repo)?;
+            if !unstaged_files.is_empty() {
+                eprintln!("Warning: Found {} unstaged file(s) that will be ignored:", unstaged_files.len());
+                for file in &unstaged_files {
+                    eprintln!("  {}", file);
+                }
+                eprintln!("Use 'git add' to stage changes or remove --staged-only to include unstaged changes");
+            }
+        }
+        
+        staged_files
+    } else {
+        get_all_files(repo)?
+    };
     let mut working_log = if reset {
         // If reset flag is set, start with an empty working log
         Vec::new()
@@ -238,6 +257,58 @@ fn get_all_files(repo: &Repository) -> Result<Vec<String>, GitAiError> {
                     }
 
                     walk_tree(&tree, repo, &mut files, "")?;
+                }
+            }
+        }
+    }
+
+    Ok(files)
+}
+
+fn get_staged_files_only(repo: &Repository) -> Result<Vec<String>, GitAiError> {
+    let mut files = Vec::new();
+
+    let mut status_opts = StatusOptions::new();
+    status_opts.include_untracked(false); // Don't include untracked files
+    status_opts.include_ignored(false);
+    status_opts.include_unmodified(false);
+
+    let statuses = repo.statuses(Some(&mut status_opts))?;
+    for entry in statuses.iter() {
+        let status = entry.status();
+        
+        // Only include files with staged changes
+        if status.intersects(Status::INDEX_NEW | Status::INDEX_MODIFIED | Status::INDEX_DELETED | Status::INDEX_RENAMED | Status::INDEX_TYPECHANGE) {
+            if let Some(path) = entry.path() {
+                // Only include text files
+                if is_text_file(repo, path) {
+                    files.push(path.to_string());
+                }
+            }
+        }
+    }
+
+    Ok(files)
+}
+
+fn get_unstaged_files(repo: &Repository) -> Result<Vec<String>, GitAiError> {
+    let mut files = Vec::new();
+
+    let mut status_opts = StatusOptions::new();
+    status_opts.include_untracked(true);
+    status_opts.include_ignored(false);
+    status_opts.include_unmodified(false);
+
+    let statuses = repo.statuses(Some(&mut status_opts))?;
+    for entry in statuses.iter() {
+        let status = entry.status();
+        
+        // Only include files with unstaged changes (including untracked)
+        if status.intersects(Status::WT_NEW | Status::WT_MODIFIED | Status::WT_DELETED | Status::WT_RENAMED | Status::WT_TYPECHANGE) {
+            if let Some(path) = entry.path() {
+                // Only include text files
+                if is_text_file(repo, path) {
+                    files.push(path.to_string());
                 }
             }
         }

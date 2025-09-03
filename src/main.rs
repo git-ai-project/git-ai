@@ -97,6 +97,7 @@ fn handle_checkpoint(args: &[String]) {
     let mut show_working_log = false;
     let mut reset = false;
     let mut model = None;
+    let mut staged_only = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -126,6 +127,10 @@ fn handle_checkpoint(args: &[String]) {
                     eprintln!("Error: --model requires a value");
                     std::process::exit(1);
                 }
+            }
+            "--staged-only" => {
+                staged_only = true;
+                i += 1;
             }
 
             _ => {
@@ -169,6 +174,7 @@ fn handle_checkpoint(args: &[String]) {
         false,
         model.as_deref(),
         Some(&default_user_name),
+        staged_only,
     ) {
         eprintln!("Checkpoint failed: {}", e);
         std::process::exit(1);
@@ -529,6 +535,9 @@ fn print_help() {
     eprintln!("");
     eprintln!("Commands:");
     eprintln!("  checkpoint    [new] checkpoint working changes and specify author");
+    eprintln!("    --author <name>      Specify the author for this checkpoint");
+    eprintln!("    --model <model>      Specify the AI model used (for agents)");
+    eprintln!("    --staged-only        Only track staged changes (fixes attribution accuracy)");
     eprintln!("  blame         [override] git blame with AI authorship tracking");
     eprintln!(
         "  commit        [wrapper] pass through to 'git commit' with git-ai before/after hooks"
