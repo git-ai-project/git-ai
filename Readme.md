@@ -149,8 +149,12 @@ pub fn checkpoint_internal(
 ```
 
 ### Known limitiaitons
+- Might not work with GUI based git tools
 
-- Authorship logs will not survive a rebase. Possible, but requires merging authorship logs in a `post-rewrite` hook.
+
+### Resolved Limitations
+- ~~Authorship logs will not survive a rebase. Possible, but requires merging authorship logs in a `post-rewrite` hook.~~ (Fixed in [#29](https://github.com/acunniffe/git-ai/pull/29))
+
 
 ### Development Setup
 
