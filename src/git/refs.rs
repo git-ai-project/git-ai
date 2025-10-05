@@ -3,50 +3,58 @@ use crate::git::repository::Repository;
 use crate::log_fmt::authorship_log_serialization::{AUTHORSHIP_LOG_VERSION, AuthorshipLog};
 use crate::log_fmt::working_log::Checkpoint;
 use serde_json;
-use std::fs;
 
-pub const AI_AUTHORSHIP_REFSPEC: &str = "+refs/ai/authorship/*:refs/ai/authorship/*";
+pub const AI_AUTHORSHIP_REFSPEC: &str = "+refs/notes/ai/authorship:refs/notes/ai/authorship";
 
+/// Store content as a git note
 ///
+/// This function stores content as a git note attached to a commit.
+/// The ref_name should be in the format "ai/authorship/{commit_sha}".
 pub fn put_reference(
     repo: &Repository,
     ref_name: &str,
     content: &str,
-    message: &str,
+    _message: &str,
 ) -> Result<(), GitAiError> {
-    // Create the AI namespace directory structure
-    let git_dir = repo.path();
-    let ai_refs_dir = git_dir.join("refs").join("ai");
+    // Parse ref_name to extract commit SHA
+    // Expected format: "ai/authorship/{commit_sha}"
+    let parts: Vec<&str> = ref_name.split('/').collect();
+    if parts.len() != 3 || parts[0] != "ai" || parts[1] != "authorship" {
+        return Err(GitAiError::Generic(format!(
+            "Invalid ref_name format: {}. Expected ai/authorship/{{commit_sha}}",
+            ref_name
+        )));
+    }
+    let commit_sha = parts[2];
 
-    // Create the directory if it doesn't exist
-    fs::create_dir_all(&ai_refs_dir)?;
-
-    // Create the blob object
-    let oid = repo.blob(content.as_bytes())?;
-
-    // Create the reference
-    let full_ref_name = format!("refs/{}", ref_name);
-    repo.reference(&full_ref_name, oid, true, message)?;
+    // Use git notes to store the content
+    // The notes ref is "ai/authorship" which will become "refs/notes/ai/authorship"
+    repo.notes_add("ai/authorship", commit_sha, content, true)?;
 
     Ok(())
 }
 
+/// Retrieve content from a git note
+///
+/// This function retrieves content from a git note attached to a commit.
+/// The ref_name should be in the format "ai/authorship/{commit_sha}".
 pub fn get_reference(repo: &Repository, ref_name: &str) -> Result<String, GitAiError> {
-    let full_ref_name = format!("refs/{}", ref_name);
+    // Parse ref_name to extract commit SHA
+    // Expected format: "ai/authorship/{commit_sha}"
+    let parts: Vec<&str> = ref_name.split('/').collect();
+    if parts.len() != 3 || parts[0] != "ai" || parts[1] != "authorship" {
+        return Err(GitAiError::Generic(format!(
+            "Invalid ref_name format: {}. Expected ai/authorship/{{commit_sha}}",
+            ref_name
+        )));
+    }
+    let commit_sha = parts[2];
 
-    // Get the reference
-    let reference = repo.find_reference(&full_ref_name)?;
+    // Use git notes to retrieve the content
+    // The notes ref is "ai/authorship" which will become "refs/notes/ai/authorship"
+    let content = repo.notes_show("ai/authorship", commit_sha)?;
 
-    // Get the object that the reference points to
-    let object = reference.peel_to_blob()?;
-
-    // Get the content of the blob
-    let content = object.content()?;
-
-    // Convert the blob content to a string, handling invalid UTF-8 gracefully
-    let content = String::from_utf8_lossy(&content);
-
-    Ok(content.to_string())
+    Ok(content)
 }
 
 #[allow(dead_code)]

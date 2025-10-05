@@ -102,7 +102,7 @@ impl RewriteLogEvent {
         }
     }
 
-    pub fn commit(base_commit: String, commit_sha: String) -> Self {
+    pub fn commit(base_commit: Option<String>, commit_sha: String) -> Self {
         Self::Commit {
             commit: CommitEvent::new(base_commit, commit_sha),
         }
@@ -324,13 +324,13 @@ impl CommitAmendEvent {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommitEvent {
-    pub base_commit: String,
+    pub base_commit: Option<String>,
     pub commit_sha: String,
 }
 
 impl CommitEvent {
     /// Create a new CommitEvent with the given parameters
-    pub fn new(base_commit: String, commit_sha: String) -> Self {
+    pub fn new(base_commit: Option<String>, commit_sha: String) -> Self {
         Self {
             base_commit,
             commit_sha,

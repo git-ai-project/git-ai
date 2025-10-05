@@ -16,6 +16,9 @@ pub fn handle_git_ai(args: &[String]) {
         "help" | "--help" | "-h" => {
             print_help();
         }
+        "version" | "--version" | "-v" => {
+            print_version();
+        }
         "stats-delta" => {
             handle_stats_delta(&args[1..]);
         }
@@ -73,6 +76,11 @@ fn print_help() {
     eprintln!("    <branch> <new_sha> <old_sha>  Required: branch, new commit SHA, old commit SHA");
     eprintln!("    --dry-run             Show what would be done without making changes");
     eprintln!("");
+    std::process::exit(0);
+}
+
+fn print_version() {
+    eprintln!(env!("CARGO_PKG_VERSION"));
     std::process::exit(0);
 }
 

@@ -474,8 +474,8 @@ impl Repository {
             return;
         }
 
-        self.pre_command_base_commit = Some(self.head().unwrap().target().unwrap().to_string());
-        self.pre_command_refname = Some(self.head().unwrap().name().unwrap().to_string());
+        self.pre_command_base_commit = self.head().unwrap().target().ok();
+        self.pre_command_refname = self.head().unwrap().name().map(|s| s.to_string());
     }
 
     pub fn handle_rewrite_log_event(
@@ -930,6 +930,72 @@ impl Repository {
             )));
         }
         Ok(Tree { repo: self, oid })
+    }
+
+    /// Add a note to an object using git notes
+    ///
+    /// # Arguments
+    /// * `notes_ref` - The notes ref namespace (e.g., "ai/authorship")
+    /// * `object` - The object SHA to attach the note to
+    /// * `note_content` - The content of the note
+    /// * `force` - Whether to overwrite an existing note
+    pub fn notes_add(
+        &self,
+        notes_ref: &str,
+        object: &str,
+        note_content: &str,
+        force: bool,
+    ) -> Result<(), GitAiError> {
+        let mut args = self.global_args_for_exec();
+        args.push("notes".to_string());
+        args.push("--ref".to_string());
+        args.push(notes_ref.to_string());
+        args.push("add".to_string());
+        if force {
+            args.push("-f".to_string());
+        }
+        args.push("-F".to_string());
+        args.push("-".to_string()); // Read note content from stdin
+        args.push(object.to_string());
+
+        // Use stdin to provide the note content to avoid command line length limits
+        exec_git_stdin(&args, note_content.as_bytes())?;
+        Ok(())
+    }
+
+    /// Show a note for an object
+    ///
+    /// # Arguments
+    /// * `notes_ref` - The notes ref namespace (e.g., "ai/authorship")
+    /// * `object` - The object SHA to get the note for
+    pub fn notes_show(&self, notes_ref: &str, object: &str) -> Result<String, GitAiError> {
+        let mut args = self.global_args_for_exec();
+        args.push("notes".to_string());
+        args.push("--ref".to_string());
+        args.push(notes_ref.to_string());
+        args.push("show".to_string());
+        args.push(object.to_string());
+
+        let output = exec_git(&args)?;
+        Ok(String::from_utf8(output.stdout)?)
+    }
+
+    /// Remove a note from an object
+    ///
+    /// # Arguments
+    /// * `notes_ref` - The notes ref namespace (e.g., "ai/authorship")
+    /// * `object` - The object SHA to remove the note from
+    #[allow(dead_code)]
+    pub fn notes_remove(&self, notes_ref: &str, object: &str) -> Result<(), GitAiError> {
+        let mut args = self.global_args_for_exec();
+        args.push("notes".to_string());
+        args.push("--ref".to_string());
+        args.push(notes_ref.to_string());
+        args.push("remove".to_string());
+        args.push(object.to_string());
+
+        exec_git(&args)?;
+        Ok(())
     }
 }
 

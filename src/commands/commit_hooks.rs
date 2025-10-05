@@ -59,7 +59,7 @@ pub fn commit_post_command_hook(
     } else {
         repository.handle_rewrite_log_event(
             RewriteLogEvent::commit(
-                repository.pre_command_base_commit.clone().unwrap(),
+                repository.pre_command_base_commit.clone(),
                 repository.head().unwrap().target().unwrap(),
             ),
             commit_author,
