@@ -6,6 +6,7 @@ use crate::git::refs::get_reference_as_authorship_log_v3;
 use crate::git::repository::{Commit, Repository};
 use crate::git::rewrite_log::RewriteLogEvent;
 use crate::utils::debug_log;
+use sha2::{Digest, Sha256};
 use similar::{ChangeTag, TextDiff};
 
 // Process events in the rewrite log and call the correct rewrite functions in this file
@@ -18,6 +19,61 @@ pub fn rewrite_authorship_if_needed(
 ) -> Result<(), GitAiError> {
     match last_event {
         RewriteLogEvent::Commit { commit } => {
+            // Check if there is a Merge Squash on top of the current commit
+            // and there is a working log for the current commit
+            // and there's a starting_authorship_log.json in the commit's working log
+            if let Some(merge_squash_event) = has_merge_squash_on_top(_full_log, &commit.commit_sha)
+            {
+                // Check if there is a working log for the current commit
+                let working_log = repo.storage.working_log_for_base_commit(&commit.commit_sha);
+
+                // Check if there's a starting_authorship_log.json in the commit's working log
+                let starting_authorship_log_path =
+                    working_log.dir.join("starting_authorship_log.json");
+
+                if starting_authorship_log_path.exists() {
+                    if let RewriteLogEvent::MergeSquash { merge_squash } = merge_squash_event {
+                        println!(
+                            "This is a Merge Squash on top of the current commit from {} to {}",
+                            merge_squash.source_branch, merge_squash.base_branch
+                        );
+                    } else {
+                        println!("This is a Merge Squash on top of the current commit");
+                    }
+
+                    // When there's a merge squash on top of a commit with a starting_authorship_log.json,
+                    // it means this commit was created from a squash operation that already has
+                    // authorship information prepared. We should load and apply that authorship log.
+
+                    // Read the starting authorship log
+                    let authorship_log_content =
+                        std::fs::read_to_string(&starting_authorship_log_path)?;
+                    let authorship_log = AuthorshipLog::deserialize_from_string(
+                        &authorship_log_content,
+                    )
+                    .map_err(|_| {
+                        GitAiError::Generic("Failed to parse starting authorship log".to_string())
+                    })?;
+
+                    // Save the authorship log to the commit's notes
+                    let authorship_json = authorship_log.serialize_to_string().map_err(|_| {
+                        GitAiError::Generic("Failed to serialize authorship log".to_string())
+                    })?;
+
+                    crate::git::refs::notes_add(repo, &commit.commit_sha, &authorship_json)?;
+
+                    debug_log(&format!(
+                        "✓ Applied starting authorship log from merge squash to commit {}",
+                        commit.commit_sha
+                    ));
+
+                    // Clean up the starting authorship log file since it's now been applied
+                    std::fs::remove_file(&starting_authorship_log_path)?;
+
+                    return Ok(());
+                }
+            }
+
             // This is going to become the regualar post-commit
             post_commit::post_commit(
                 repo,
@@ -46,24 +102,16 @@ pub fn rewrite_authorship_if_needed(
             repo.storage
                 .delete_working_log_for_base_commit(&merge_squash.base_head)?;
 
-            // Prepare checkpoints from the squashed changes
-            let checkpoints = prepare_working_log_after_squash(
+            // Prepare and save passthrough checkpoint from the squashed changes
+            prepare_working_log_after_squash(
                 repo,
                 &merge_squash.source_head,
                 &merge_squash.base_head,
                 &commit_author,
             )?;
 
-            // Append checkpoints to the working log for the base commit
-            let working_log = repo
-                .storage
-                .working_log_for_base_commit(&merge_squash.base_head);
-            for checkpoint in checkpoints {
-                working_log.append_checkpoint(&checkpoint)?;
-            }
-
             debug_log(&format!(
-                "✓ Prepared authorship checkpoints for merge --squash of {} into {}",
+                "✓ Prepared passthrough checkpoint and saved authorship log for merge --squash of {} into {}",
                 merge_squash.source_branch, merge_squash.base_branch
             ));
         }
@@ -179,7 +227,7 @@ pub fn prepare_working_log_after_squash(
     source_head_sha: &str,
     target_branch_head_sha: &str,
     human_author: &str,
-) -> Result<Vec<crate::authorship::working_log::Checkpoint>, GitAiError> {
+) -> Result<(), GitAiError> {
     // Step 1: Find the common origin base between source and target
     let origin_base =
         find_common_origin_base_from_head(repo, source_head_sha, target_branch_head_sha)?;
@@ -235,18 +283,159 @@ pub fn prepare_working_log_after_squash(
     // Step 8: Clean up temporary commits
     delete_hanging_commit(repo, &hanging_commit_sha)?;
     delete_hanging_commit(repo, &temp_commit.to_string())?;
+    // Clear any existing working log for this commit since we're replacing it with a passthrough checkpoint
 
-    // Step 9: Convert authorship log to checkpoints
-    let checkpoints = new_authorship_log
-        .convert_to_checkpoints_for_squash(human_author)
-        .map_err(|e| {
-            GitAiError::Generic(format!(
-                "Failed to convert authorship log to checkpoints: {}",
-                e
-            ))
-        })?;
+    let current_head = repo.head()?.target().unwrap().to_string();
+    debug_log(&format!(
+        "Current HEAD after squash merge: {}",
+        current_head
+    ));
 
-    Ok(checkpoints)
+    repo.storage
+        .delete_working_log_for_base_commit(&current_head)?;
+
+    // Step 9: Save the authorship log to .git/ai/<sha>/starting_authorship_log.json
+    let authorship_log_json = new_authorship_log
+        .serialize_to_string()
+        .map_err(|_| GitAiError::Generic("Failed to serialize authorship log".to_string()))?;
+
+    // Create the directory structure for the authorship log
+    let ai_dir = repo.path().join("ai").join("working_logs");
+    let sha_dir = ai_dir.join(&target_commit.id().to_string());
+    std::fs::create_dir_all(&sha_dir)?;
+
+    let authorship_log_path = sha_dir.join("starting_authorship_log.json");
+    std::fs::write(&authorship_log_path, &authorship_log_json)?;
+
+    debug_log(&format!(
+        "✓ Saved authorship log to {}",
+        authorship_log_path.display()
+    ));
+
+    let working_log = repo.storage.working_log_for_base_commit(&current_head);
+
+    // Step 11: Create a single passthrough checkpoint that represents all the changes
+    // This checkpoint will track line changes for offset calculations but won't attribute authorship
+    let mut all_entries = Vec::new();
+    let mut file_content_hashes = std::collections::HashMap::new();
+
+    // Get all files that have changes from the authorship log
+    let mut all_files: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for file_attestation in &new_authorship_log.attestations {
+        all_files.insert(file_attestation.file_path.clone());
+    }
+
+    // For each file, create a single entry that represents all changes
+    for file_path in &all_files {
+        // Get the current content of the file from the working tree
+        let current_content =
+            if let Ok(entry) = working_tree.get_path(std::path::Path::new(file_path)) {
+                if let Ok(blob) = repo.find_blob(entry.id()) {
+                    let content = blob.content()?;
+                    String::from_utf8_lossy(&content).to_string()
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+
+        // Get the original content from the origin base
+        let original_content = if let Ok(entry) = origin_base_commit
+            .tree()?
+            .get_path(std::path::Path::new(file_path))
+        {
+            if let Ok(blob) = repo.find_blob(entry.id()) {
+                let content = blob.content()?;
+                String::from_utf8_lossy(&content).to_string()
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+
+        // Create diff between original and current content
+        let diff = similar::TextDiff::from_lines(&original_content, &current_content);
+        let mut added_lines = Vec::new();
+        let mut deleted_lines = Vec::new();
+        let mut current_line = 1u32;
+
+        for change in diff.iter_all_changes() {
+            match change.tag() {
+                similar::ChangeTag::Equal => {
+                    current_line += change.value().lines().count() as u32;
+                }
+                similar::ChangeTag::Delete => {
+                    let line_count = change.value().lines().count() as u32;
+                    for i in 0..line_count {
+                        deleted_lines.push(current_line + i);
+                    }
+                    current_line += line_count;
+                }
+                similar::ChangeTag::Insert => {
+                    let line_count = change.value().lines().count() as u32;
+                    for i in 0..line_count {
+                        added_lines.push(current_line + i);
+                    }
+                    current_line += line_count;
+                }
+            }
+        }
+
+        if !added_lines.is_empty() || !deleted_lines.is_empty() {
+            // Convert to Line format for WorkingLogEntry
+            let added_line_objects: Vec<crate::authorship::working_log::Line> = added_lines
+                .into_iter()
+                .map(|line_num| crate::authorship::working_log::Line::Single(line_num))
+                .collect();
+
+            let deleted_line_objects: Vec<crate::authorship::working_log::Line> = deleted_lines
+                .into_iter()
+                .map(|line_num| crate::authorship::working_log::Line::Single(line_num))
+                .collect();
+
+            // Save the current file content to blob storage and get the content hash
+            // This is critical for future checkpoints to be able to diff properly
+            let content_hash = working_log.persist_file_version(&current_content)?;
+            file_content_hashes.insert(file_path.clone(), content_hash.clone());
+
+            all_entries.push(crate::authorship::working_log::WorkingLogEntry::new(
+                file_path.clone(),
+                content_hash, // Use the actual blob hash from storage
+                added_line_objects,
+                deleted_line_objects,
+            ));
+        }
+    }
+
+    // Create combined diff hash from all file hashes (ordered by file path)
+    let mut ordered_hashes: Vec<_> = file_content_hashes.iter().collect();
+    ordered_hashes.sort_by_key(|(file_path, _)| *file_path);
+
+    let mut combined_hasher = Sha256::new();
+    for (file_path, hash) in ordered_hashes {
+        combined_hasher.update(file_path.as_bytes());
+        combined_hasher.update(hash.as_bytes());
+    }
+    let combined_diff = format!("{:x}", combined_hasher.finalize());
+
+    // Create a single passthrough checkpoint
+    let passthrough_checkpoint = crate::authorship::working_log::Checkpoint::new_passthrough(
+        combined_diff,
+        human_author.to_string(),
+        all_entries,
+    );
+
+    // Save the checkpoint to the working log
+    working_log.append_checkpoint(&passthrough_checkpoint)?;
+
+    debug_log(&format!(
+        "✓ Created and saved passthrough checkpoint with {} entries",
+        passthrough_checkpoint.entries.len()
+    ));
+
+    Ok(())
 }
 
 #[allow(dead_code)]
@@ -1094,31 +1283,41 @@ mod tests {
         // Go back to master and squash merge
         tmp_repo.checkout_branch("master").unwrap();
         tmp_repo.merge_squash("feature").unwrap();
+        let new_master_head = tmp_repo.get_head_commit_sha().unwrap();
 
         // Test prepare_working_log_after_squash
-        let checkpoints = prepare_working_log_after_squash(
+        prepare_working_log_after_squash(
             &tmp_repo.gitai_repo(),
             &feature_head,
-            &master_head,
+            &new_master_head,
             "Test User <test@example.com>",
         )
         .unwrap();
 
-        // Should have 2 checkpoints: 1 human + 1 AI
-        assert_eq!(checkpoints.len(), 2);
+        // Verify the checkpoint was created by checking the working log
+        let working_log = tmp_repo
+            .gitai_repo()
+            .storage
+            .working_log_for_base_commit(&new_master_head);
+        let checkpoints = working_log.read_all_checkpoints().unwrap();
+        println!("Number of checkpoints found: {}", checkpoints.len());
+        for (i, checkpoint) in checkpoints.iter().enumerate() {
+            println!(
+                "Checkpoint {}: author={}, pass_through={}, entries={}",
+                i,
+                checkpoint.author,
+                checkpoint.pass_through_attribution_checkpoint,
+                checkpoint.entries.len()
+            );
+        }
+        assert_eq!(checkpoints.len(), 1);
 
-        // First checkpoint should be human
-        assert_eq!(checkpoints[0].author, "Test User <test@example.com>");
-        assert!(checkpoints[0].agent_id.is_none());
-        assert!(checkpoints[0].transcript.is_none());
-
-        // Second checkpoint should be AI
-        assert_eq!(checkpoints[1].author, "ai");
-        assert!(checkpoints[1].agent_id.is_some());
-        assert!(checkpoints[1].transcript.is_some());
-
-        // Verify checkpoint entries
-        assert!(!checkpoints[0].entries.is_empty() || !checkpoints[1].entries.is_empty());
+        let checkpoint = &checkpoints[0];
+        assert!(checkpoint.pass_through_attribution_checkpoint);
+        assert_eq!(checkpoint.author, "Test User <test@example.com>");
+        assert!(checkpoint.agent_id.is_none());
+        assert!(checkpoint.transcript.is_none());
+        assert!(!checkpoint.entries.is_empty());
     }
 
     /// Test merge --squash with out-of-band changes on master (handles 3-way merge)
@@ -1170,7 +1369,7 @@ mod tests {
         tmp_repo.merge_squash("feature").unwrap();
 
         // Test prepare_working_log_after_squash
-        let checkpoints = prepare_working_log_after_squash(
+        prepare_working_log_after_squash(
             &tmp_repo.gitai_repo(),
             &feature_head,
             &master_head,
@@ -1178,28 +1377,35 @@ mod tests {
         )
         .unwrap();
 
+        // Verify the checkpoint was created by checking the working log
+        let working_log = tmp_repo
+            .gitai_repo()
+            .storage
+            .working_log_for_base_commit(&master_head);
+        let checkpoints = working_log.read_all_checkpoints().unwrap();
+        assert_eq!(checkpoints.len(), 1);
+
+        let checkpoint = &checkpoints[0];
+
         // The key thing we're testing is that it doesn't crash with out-of-band changes
         // and properly handles the 3-way merge scenario
-        println!("Checkpoints generated: {}", checkpoints.len());
-        for (i, checkpoint) in checkpoints.iter().enumerate() {
-            println!(
-                "Checkpoint {}: author={}, has_agent={}, entries={}",
-                i,
-                checkpoint.author,
-                checkpoint.agent_id.is_some(),
-                checkpoint.entries.len()
-            );
-        }
-
-        // Should have at least some checkpoints
-        assert!(
-            !checkpoints.is_empty(),
-            "Should generate at least one checkpoint from squash merge"
+        println!(
+            "Checkpoint generated: author={}, has_agent={}, entries={}",
+            checkpoint.author,
+            checkpoint.agent_id.is_some(),
+            checkpoint.entries.len()
         );
 
-        // Verify at least one checkpoint has content
-        let has_content = checkpoints.iter().any(|c| !c.entries.is_empty());
-        assert!(has_content, "At least one checkpoint should have entries");
+        // Should be a passthrough checkpoint
+        assert!(checkpoint.pass_through_attribution_checkpoint);
+        assert_eq!(checkpoint.author, "Test User <test@example.com>");
+        assert!(checkpoint.agent_id.is_none());
+
+        // Verify checkpoint has content
+        assert!(
+            !checkpoint.entries.is_empty(),
+            "Checkpoint should have entries"
+        );
     }
 
     /// Test merge --squash with multiple AI sessions and human edits
@@ -1248,7 +1454,7 @@ mod tests {
         tmp_repo.merge_squash("feature").unwrap();
 
         // Test prepare_working_log_after_squash
-        let checkpoints = prepare_working_log_after_squash(
+        prepare_working_log_after_squash(
             &tmp_repo.gitai_repo(),
             &feature_head,
             &master_head,
@@ -1256,27 +1462,41 @@ mod tests {
         )
         .unwrap();
 
-        // Should have 3 checkpoints: 1 human + 2 AI sessions
-        assert_eq!(checkpoints.len(), 3);
+        // Verify the checkpoint was created by checking the working log
+        let working_log = tmp_repo
+            .gitai_repo()
+            .storage
+            .working_log_for_base_commit(&master_head);
+        let checkpoints = working_log.read_all_checkpoints().unwrap();
+        assert_eq!(checkpoints.len(), 1);
 
-        // Count AI checkpoints
-        let ai_checkpoints: Vec<_> = checkpoints
-            .iter()
-            .filter(|c| c.agent_id.is_some())
-            .collect();
-        assert_eq!(ai_checkpoints.len(), 2);
+        let checkpoint = &checkpoints[0];
 
-        // Count human checkpoints
-        let human_checkpoints: Vec<_> = checkpoints
-            .iter()
-            .filter(|c| c.agent_id.is_none())
-            .collect();
-        assert_eq!(human_checkpoints.len(), 1);
+        // Should have 1 passthrough checkpoint that represents all changes
+        assert!(checkpoint.pass_through_attribution_checkpoint);
+        assert_eq!(checkpoint.author, "Test User <test@example.com>");
+        assert!(checkpoint.agent_id.is_none());
+        assert!(checkpoint.transcript.is_none());
 
-        // Verify AI checkpoints have distinct session IDs
-        assert_ne!(
-            ai_checkpoints[0].agent_id.as_ref().unwrap().id,
-            ai_checkpoints[1].agent_id.as_ref().unwrap().id
-        );
+        // Verify checkpoint entries exist
+        assert!(!checkpoint.entries.is_empty());
     }
+}
+
+/// Check if there is a Merge Squash event that affects the given commit SHA
+/// This function looks through the rewrite log to find if there's a MergeSquash event
+/// where the base_head matches the given commit_sha
+fn has_merge_squash_on_top<'a>(
+    full_log: &'a Vec<RewriteLogEvent>,
+    commit_sha: &str,
+) -> Option<&'a RewriteLogEvent> {
+    // Look for a MergeSquash event where the base_head matches the commit_sha
+    // This indicates that a merge squash was performed on top of this commit
+    full_log.iter().find(|event| {
+        if let RewriteLogEvent::MergeSquash { merge_squash } = event {
+            merge_squash.base_head == commit_sha
+        } else {
+            false
+        }
+    })
 }
