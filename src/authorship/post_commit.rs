@@ -57,7 +57,7 @@ pub fn post_commit(
         &parent_sha,
         Some(&human_author),
     );
-    timer.start("compute_authorship_log");
+    timer.end("compute_authorship_log");
 
     // Filter the authorship log to only include committed lines
     // We need to keep ONLY lines that are in the commit, not filter out unstaged lines
