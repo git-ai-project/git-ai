@@ -6,7 +6,7 @@ use crate::commands::checkpoint_agent::agent_preset::CursorPreset;
 use crate::error::GitAiError;
 use crate::git::refs::notes_add;
 use crate::git::repository::Repository;
-use crate::utils::Timer;
+use crate::git::status::{EntryKind, StatusCode};
 use similar::{ChangeTag, TextDiff};
 use std::collections::HashMap;
 
@@ -90,9 +90,7 @@ pub fn post_commit(
         .serialize_to_string()
         .map_err(|_| GitAiError::Generic("Failed to serialize authorship log".to_string()))?;
 
-    timer.start("notes_add");
     notes_add(repo, &commit_sha, &authorship_json)?;
-    timer.end("notes_add");
 
     // Only delete the working log if there are no unstaged AI-authored lines
     // If there are unstaged AI lines, filter and transfer the working log to the new commit
@@ -152,11 +150,9 @@ pub fn post_commit(
     }
 
     if !supress_output {
-        timer.start("stats_for_commit_stats");
         let refname = repo.head()?.name().unwrap().to_string();
         let stats = stats_for_commit_stats(repo, &commit_sha, &refname)?;
         write_stats_to_terminal(&stats);
-        timer.end("stats_for_commit_stats");
     }
     Ok((commit_sha.to_string(), authorship_log))
 }
@@ -402,8 +398,8 @@ fn collect_unstaged_hunks(
 ) -> Result<HashMap<String, Vec<LineRange>>, GitAiError> {
     let mut unstaged_hunks: HashMap<String, Vec<LineRange>> = HashMap::new();
 
-    // Get all files with unstaged changes (fast - only checks tracked files)
-    let unstaged_files = repo.diff_files()?;
+    // Get all files with unstaged changes
+    let statuses = repo.status()?;
 
     // Get the HEAD commit tree (what was just committed)
     let head_commit = repo.find_commit(commit_sha.to_string())?;
@@ -411,7 +407,13 @@ fn collect_unstaged_hunks(
 
     let repo_workdir = repo.workdir()?;
 
-    for file_path in &unstaged_files {
+    for entry in &statuses {
+        // Skip files without unstaged changes
+        if entry.unstaged == StatusCode::Unmodified || entry.kind == EntryKind::Ignored {
+            continue;
+        }
+
+        let file_path = &entry.path;
         let abs_path = repo_workdir.join(file_path);
 
         // Get content from HEAD (what was just committed)
