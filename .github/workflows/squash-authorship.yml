@@ -1,0 +1,83 @@
+name: Update Authorship After Squash
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+jobs:
+  update-authorship:
+    if: github.event.pull_request.merged == true && github.event.pull_request.squash_merge_sha != null
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build git-ai
+        run: cargo build --release
+
+      - name: Get PR details
+        id: pr_details
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Get the PR branch name
+          BRANCH="${{ github.event.pull_request.head.ref }}"
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+
+          # Get the new SHA (the squashed commit on main)
+          NEW_SHA="${{ github.event.pull_request.merge_commit_sha }}"
+          echo "new_sha=$NEW_SHA" >> $GITHUB_OUTPUT
+
+          # Get the old SHA (last commit on the PR branch before squashing)
+          OLD_SHA="${{ github.event.pull_request.head.sha }}"
+          echo "old_sha=$OLD_SHA" >> $GITHUB_OUTPUT
+
+          echo "Branch: $BRANCH"
+          echo "New SHA: $NEW_SHA"
+          echo "Old SHA: $OLD_SHA"
+
+      - name: Run squash-authorship
+        run: |
+          ./target/release/git-ai squash-authorship \
+            "${{ steps.pr_details.outputs.branch }}" \
+            "${{ steps.pr_details.outputs.new_sha }}" \
+            "${{ steps.pr_details.outputs.old_sha }}"
+
+      - name: Commit and push authorship updates
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Check if there are changes to commit
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "No authorship changes to commit"
+            exit 0
+          fi
+
+          git add -A
+          git commit -m "Update authorship metadata after squash merge of PR #${{ github.event.pull_request.number }}"
+          git push origin main
