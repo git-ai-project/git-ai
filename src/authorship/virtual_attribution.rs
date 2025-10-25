@@ -14,6 +14,8 @@ pub struct VirtualAttributions {
     base_commit: String,
     // Maps file path -> (char attributions, line attributions)
     attributions: HashMap<String, (Vec<Attribution>, Vec<LineAttribution>)>,
+    // Maps file path -> file content
+    file_contents: HashMap<String, String>,
     // Timestamp to use for attributions
     ts: u128,
 }
@@ -34,6 +36,7 @@ impl VirtualAttributions {
             repo,
             base_commit,
             attributions: HashMap::new(),
+            file_contents: HashMap::new(),
             ts,
         };
 
@@ -84,9 +87,10 @@ impl VirtualAttributions {
         // Process results and store in HashMap
         for result in results {
             match result {
-                Ok(Some((file_path, char_attrs, line_attrs))) => {
+                Ok(Some((file_path, content, char_attrs, line_attrs))) => {
                     self.attributions
-                        .insert(file_path, (char_attrs, line_attrs));
+                        .insert(file_path.clone(), (char_attrs, line_attrs));
+                    self.file_contents.insert(file_path, content);
                 }
                 Ok(None) => {
                     // File had no changes or couldn't be processed, skip
@@ -134,6 +138,393 @@ impl VirtualAttributions {
     pub fn timestamp(&self) -> u128 {
         self.ts
     }
+
+    /// Get the file content for a tracked file
+    pub fn get_file_content(&self, file_path: &str) -> Option<&String> {
+        self.file_contents.get(file_path)
+    }
+
+    /// Alias for new_for_base_commit for clarity
+    pub async fn from_commit(
+        repo: Repository,
+        commit_sha: String,
+        pathspecs: &[String],
+    ) -> Result<Self, GitAiError> {
+        Self::new_for_base_commit(repo, commit_sha, pathspecs).await
+    }
+
+    /// Create VirtualAttributions from current repository state (HEAD + working log)
+    pub async fn from_repo_state(
+        repo: Repository,
+        pathspecs: &[String],
+    ) -> Result<Self, GitAiError> {
+        use crate::authorship::authorship_log_serialization::AuthorshipLog;
+        use crate::git::refs::get_reference_as_authorship_log_v3;
+
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+
+        // Step 1: Get HEAD SHA
+        let head_ref = repo.head()?;
+        let head_sha = head_ref.target()?;
+
+        // Step 2: Get HEAD's authorship log
+        let mut authorship_log = match get_reference_as_authorship_log_v3(&repo, &head_sha) {
+            Ok(log) => log,
+            Err(_) => AuthorshipLog::new(),
+        };
+
+        // Step 3: Get working log for HEAD and apply checkpoints
+        let working_log = repo.storage.working_log_for_base_commit(&head_sha);
+        if let Ok(checkpoints) = working_log.read_all_checkpoints() {
+            let mut session_additions = std::collections::HashMap::new();
+            let mut session_deletions = std::collections::HashMap::new();
+
+            for checkpoint in &checkpoints {
+                authorship_log.apply_checkpoint(
+                    checkpoint,
+                    Some(&CheckpointKind::Human.to_str()),
+                    &mut session_additions,
+                    &mut session_deletions,
+                );
+            }
+
+            authorship_log.finalize(&session_additions, &session_deletions);
+        }
+
+        // Step 4: Build attributions from working directory files
+        let mut virtual_attrs = VirtualAttributions {
+            repo: repo.clone(),
+            base_commit: head_sha,
+            attributions: HashMap::new(),
+            file_contents: HashMap::new(),
+            ts,
+        };
+
+        // Process each pathspec - read from working directory
+        // For now, we'll run the computation sequentially since we need the authorship log state
+        for file_path in pathspecs {
+            if let Ok(workdir) = repo.workdir() {
+                let abs_path = workdir.join(file_path);
+
+                // Read working directory content
+                let file_content = if abs_path.exists() {
+                    std::fs::read_to_string(&abs_path).unwrap_or_default()
+                } else {
+                    String::new()
+                };
+
+                // Get attribution from the authorship log
+                let mut line_attributions = Vec::new();
+
+                // Find file in authorship log
+                if let Some(file_attestation) = authorship_log
+                    .attestations
+                    .iter()
+                    .find(|a| a.file_path == *file_path)
+                {
+                    // Convert authorship log entries to line attributions
+                    for entry in &file_attestation.entries {
+                        for line_range in &entry.line_ranges {
+                            let (start, end) = match line_range {
+                                crate::authorship::authorship_log::LineRange::Single(line) => {
+                                    (*line, *line)
+                                }
+                                crate::authorship::authorship_log::LineRange::Range(start, end) => {
+                                    (*start, *end)
+                                }
+                            };
+
+                            line_attributions.push(LineAttribution {
+                                start_line: start,
+                                end_line: end,
+                                author_id: entry.hash.clone(),
+                                overridden: false,
+                            });
+                        }
+                    }
+                }
+
+                // Convert to character attributions
+                let char_attributions =
+                    line_attributions_to_attributions(&line_attributions, &file_content, ts);
+
+                virtual_attrs
+                    .attributions
+                    .insert(file_path.clone(), (char_attributions, line_attributions));
+                virtual_attrs
+                    .file_contents
+                    .insert(file_path.clone(), file_content);
+            }
+        }
+
+        Ok(virtual_attrs)
+    }
+
+    /// Convert this VirtualAttributions to an AuthorshipLog
+    pub fn to_authorship_log(
+        &self,
+    ) -> Result<crate::authorship::authorship_log_serialization::AuthorshipLog, GitAiError> {
+        use crate::authorship::authorship_log_serialization::AuthorshipLog;
+
+        let mut authorship_log = AuthorshipLog::new();
+        authorship_log.metadata.base_commit_sha = self.base_commit.clone();
+
+        // Process each file
+        for (file_path, (_, line_attrs)) in &self.attributions {
+            if line_attrs.is_empty() {
+                continue;
+            }
+
+            // Group line attributions by author
+            let mut author_lines: HashMap<String, Vec<u32>> = HashMap::new();
+            for line_attr in line_attrs {
+                for line in line_attr.start_line..=line_attr.end_line {
+                    author_lines
+                        .entry(line_attr.author_id.clone())
+                        .or_default()
+                        .push(line);
+                }
+            }
+
+            // Create attestation entries for each author
+            for (author_id, mut lines) in author_lines {
+                lines.sort();
+                lines.dedup();
+
+                if lines.is_empty() {
+                    continue;
+                }
+
+                // Create line ranges
+                let mut ranges = Vec::new();
+                let mut range_start = lines[0];
+                let mut range_end = lines[0];
+
+                for &line in &lines[1..] {
+                    if line == range_end + 1 {
+                        range_end = line;
+                    } else {
+                        if range_start == range_end {
+                            ranges.push(crate::authorship::authorship_log::LineRange::Single(
+                                range_start,
+                            ));
+                        } else {
+                            ranges.push(crate::authorship::authorship_log::LineRange::Range(
+                                range_start,
+                                range_end,
+                            ));
+                        }
+                        range_start = line;
+                        range_end = line;
+                    }
+                }
+
+                // Add the last range
+                if range_start == range_end {
+                    ranges.push(crate::authorship::authorship_log::LineRange::Single(
+                        range_start,
+                    ));
+                } else {
+                    ranges.push(crate::authorship::authorship_log::LineRange::Range(
+                        range_start,
+                        range_end,
+                    ));
+                }
+
+                // Create attestation entry
+                let entry = crate::authorship::authorship_log_serialization::AttestationEntry::new(
+                    author_id, ranges,
+                );
+
+                // Add to authorship log
+                let file_attestation = authorship_log.get_or_create_file(file_path);
+                file_attestation.add_entry(entry);
+            }
+        }
+
+        Ok(authorship_log)
+    }
+
+    /// Convert to initial working log state (stub for now)
+    pub fn to_initial_working_log_state(
+        &self,
+    ) -> Result<Vec<crate::authorship::working_log::Checkpoint>, GitAiError> {
+        // TODO: Implement checkpoint conversion
+        // This will require rethinking how checkpoints work
+        todo!("Checkpoint conversion not yet implemented")
+    }
+}
+
+/// Merge two VirtualAttributions, favoring the primary for overlaps
+pub fn merge_attributions_favoring_first(
+    primary: VirtualAttributions,
+    secondary: VirtualAttributions,
+    final_state: HashMap<String, String>,
+) -> Result<VirtualAttributions, GitAiError> {
+    use crate::authorship::attribution_tracker::AttributionTracker;
+
+    let tracker = AttributionTracker::new();
+    let ts = primary.ts;
+    let repo = primary.repo.clone();
+    let base_commit = primary.base_commit.clone();
+
+    let mut merged = VirtualAttributions {
+        repo,
+        base_commit,
+        attributions: HashMap::new(),
+        file_contents: HashMap::new(),
+        ts,
+    };
+
+    // Get union of all files
+    let mut all_files: std::collections::HashSet<String> =
+        primary.attributions.keys().cloned().collect();
+    all_files.extend(secondary.attributions.keys().cloned());
+    all_files.extend(final_state.keys().cloned());
+
+    for file_path in all_files {
+        let final_content = match final_state.get(&file_path) {
+            Some(content) => content,
+            None => continue, // Skip files not in final state
+        };
+
+        // Get attributions from both sources
+        let primary_attrs = primary.get_char_attributions(&file_path);
+        let secondary_attrs = secondary.get_char_attributions(&file_path);
+
+        // Get source content from both
+        let primary_content = primary.get_file_content(&file_path);
+        let secondary_content = secondary.get_file_content(&file_path);
+
+        // Transform both to final state
+        let transformed_primary =
+            if let (Some(attrs), Some(content)) = (primary_attrs, primary_content) {
+                transform_attributions_to_final(&tracker, content, attrs, final_content, ts)?
+            } else {
+                Vec::new()
+            };
+
+        let transformed_secondary =
+            if let (Some(attrs), Some(content)) = (secondary_attrs, secondary_content) {
+                transform_attributions_to_final(&tracker, content, attrs, final_content, ts)?
+            } else {
+                Vec::new()
+            };
+
+        // Merge: primary wins overlaps, secondary fills gaps
+        let merged_char_attrs = merge_char_attributions(
+            &transformed_primary,
+            &transformed_secondary,
+            final_content.len(),
+        );
+
+        // Convert to line attributions
+        let merged_line_attrs =
+            crate::authorship::attribution_tracker::attributions_to_line_attributions(
+                &merged_char_attrs,
+                final_content,
+            );
+
+        merged
+            .attributions
+            .insert(file_path.clone(), (merged_char_attrs, merged_line_attrs));
+        merged
+            .file_contents
+            .insert(file_path, final_content.clone());
+    }
+
+    Ok(merged)
+}
+
+/// Transform attributions from old content to new content
+fn transform_attributions_to_final(
+    tracker: &crate::authorship::attribution_tracker::AttributionTracker,
+    old_content: &str,
+    old_attributions: &[Attribution],
+    new_content: &str,
+    ts: u128,
+) -> Result<Vec<Attribution>, GitAiError> {
+    // Use a dummy author for new insertions (we'll discard them anyway)
+    let dummy_author = "__DUMMY__";
+
+    let transformed = tracker.update_attributions(
+        old_content,
+        new_content,
+        old_attributions,
+        dummy_author,
+        ts,
+    )?;
+
+    // Filter out dummy attributions (new insertions)
+    let filtered: Vec<Attribution> = transformed
+        .into_iter()
+        .filter(|attr| attr.author_id != dummy_author)
+        .collect();
+
+    Ok(filtered)
+}
+
+/// Merge character-level attributions, with primary winning overlaps
+fn merge_char_attributions(
+    primary: &[Attribution],
+    secondary: &[Attribution],
+    content_len: usize,
+) -> Vec<Attribution> {
+    // Create coverage map for primary
+    let mut covered = vec![false; content_len];
+    for attr in primary {
+        for i in attr.start..attr.end.min(content_len) {
+            covered[i] = true;
+        }
+    }
+
+    let mut result = Vec::new();
+
+    // Add all primary attributions
+    result.extend(primary.iter().cloned());
+
+    // Add secondary attributions only where primary doesn't cover
+    for attr in secondary {
+        let mut uncovered_ranges = Vec::new();
+        let mut range_start: Option<usize> = None;
+
+        for i in attr.start..attr.end.min(content_len) {
+            if !covered[i] {
+                if range_start.is_none() {
+                    range_start = Some(i);
+                }
+            } else {
+                if let Some(start) = range_start {
+                    uncovered_ranges.push((start, i));
+                    range_start = None;
+                }
+            }
+        }
+
+        // Handle final range
+        if let Some(start) = range_start {
+            uncovered_ranges.push((start, attr.end.min(content_len)));
+        }
+
+        // Create attributions for uncovered ranges
+        for (start, end) in uncovered_ranges {
+            if start < end {
+                result.push(Attribution::new(
+                    start,
+                    end,
+                    attr.author_id.clone(),
+                    attr.ts,
+                ));
+            }
+        }
+    }
+
+    // Sort by start position
+    result.sort_by_key(|a| (a.start, a.end));
+    result
 }
 
 /// Compute attributions for a single file at a specific commit
@@ -142,7 +533,7 @@ fn compute_attributions_for_file(
     base_commit: &str,
     file_path: &str,
     ts: u128,
-) -> Result<Option<(String, Vec<Attribution>, Vec<LineAttribution>)>, GitAiError> {
+) -> Result<Option<(String, String, Vec<Attribution>, Vec<LineAttribution>)>, GitAiError> {
     // Set up blame options
     let mut ai_blame_opts = GitAiBlameOptions::default();
     ai_blame_opts.no_output = true;
@@ -180,6 +571,7 @@ fn compute_attributions_for_file(
 
             Ok(Some((
                 file_path.to_string(),
+                file_content,
                 char_attributions,
                 line_attributions,
             )))
