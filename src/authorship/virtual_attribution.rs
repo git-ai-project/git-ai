@@ -1,11 +1,12 @@
 use crate::authorship::attribution_tracker::{
     Attribution, LineAttribution, line_attributions_to_attributions,
 };
+use crate::authorship::authorship_log::PromptRecord;
 use crate::authorship::working_log::CheckpointKind;
 use crate::commands::blame::GitAiBlameOptions;
 use crate::error::GitAiError;
 use crate::git::repository::Repository;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -16,6 +17,8 @@ pub struct VirtualAttributions {
     attributions: HashMap<String, (Vec<Attribution>, Vec<LineAttribution>)>,
     // Maps file path -> file content
     file_contents: HashMap<String, String>,
+    // Prompt records mapping session ID -> PromptRecord
+    prompts: BTreeMap<String, PromptRecord>,
     // Timestamp to use for attributions
     ts: u128,
 }
@@ -32,11 +35,18 @@ impl VirtualAttributions {
             .unwrap_or_default()
             .as_millis();
 
+        // Load prompts from base commit's authorship log
+        let prompts = match crate::git::refs::get_reference_as_authorship_log_v3(&repo, &base_commit) {
+            Ok(log) => log.metadata.prompts,
+            Err(_) => BTreeMap::new(),
+        };
+
         let mut virtual_attrs = VirtualAttributions {
             repo,
             base_commit,
             attributions: HashMap::new(),
             file_contents: HashMap::new(),
+            prompts,
             ts,
         };
 
@@ -139,6 +149,11 @@ impl VirtualAttributions {
         self.ts
     }
 
+    /// Get the prompts metadata
+    pub fn prompts(&self) -> &BTreeMap<String, PromptRecord> {
+        &self.prompts
+    }
+
     /// Get the file content for a tracked file
     pub fn get_file_content(&self, file_path: &str) -> Option<&String> {
         self.file_contents.get(file_path)
@@ -204,11 +219,13 @@ impl VirtualAttributions {
         }
 
         // Step 4: Build attributions from working directory files
+        // Prompts are already in the authorship_log we built above
         let mut virtual_attrs = VirtualAttributions {
             repo: repo.clone(),
             base_commit: head_sha,
             attributions: HashMap::new(),
             file_contents: HashMap::new(),
+            prompts: authorship_log.metadata.prompts.clone(),
             ts,
         };
 
@@ -324,11 +341,13 @@ impl VirtualAttributions {
         }
 
         // Step 3: Build attributions from working directory files
+        // Prompts are already in the authorship_log we built above
         let mut virtual_attrs = VirtualAttributions {
             repo: repo.clone(),
             base_commit,
             attributions: HashMap::new(),
             file_contents: HashMap::new(),
+            prompts: authorship_log.metadata.prompts.clone(),
             ts,
         };
 
@@ -405,6 +424,25 @@ impl VirtualAttributions {
             base_commit,
             attributions,
             file_contents,
+            prompts: BTreeMap::new(),
+            ts,
+        }
+    }
+    
+    pub fn from_raw_data_with_prompts(
+        repo: Repository,
+        base_commit: String,
+        attributions: HashMap<String, (Vec<Attribution>, Vec<LineAttribution>)>,
+        file_contents: HashMap<String, String>,
+        prompts: BTreeMap<String, PromptRecord>,
+        ts: u128,
+    ) -> Self {
+        VirtualAttributions {
+            repo,
+            base_commit,
+            attributions,
+            file_contents,
+            prompts,
             ts,
         }
     }
@@ -417,6 +455,7 @@ impl VirtualAttributions {
 
         let mut authorship_log = AuthorshipLog::new();
         authorship_log.metadata.base_commit_sha = self.base_commit.clone();
+        authorship_log.metadata.prompts = self.prompts.clone();
 
         // Process each file
         for (file_path, (_, line_attrs)) in &self.attributions {
@@ -517,11 +556,18 @@ pub fn merge_attributions_favoring_first(
     let repo = primary.repo.clone();
     let base_commit = primary.base_commit.clone();
 
+    // Merge prompts from both VAs
+    let mut merged_prompts = primary.prompts.clone();
+    for (key, value) in &secondary.prompts {
+        merged_prompts.entry(key.clone()).or_insert_with(|| value.clone());
+    }
+
     let mut merged = VirtualAttributions {
         repo,
         base_commit,
         attributions: HashMap::new(),
         file_contents: HashMap::new(),
+        prompts: merged_prompts,
         ts,
     };
 
