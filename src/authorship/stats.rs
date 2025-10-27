@@ -138,7 +138,7 @@ pub fn write_stats_to_terminal(stats: &CommitStats, print: bool) -> String {
 
     // Calculate AI acceptance percentage (capped at 100%)
     // It can go higher because AI can write on top of AI code. This feels reasonable for now
-    let ai_acceptance_percentage = if stats.ai_additions > 0 {
+    let _ai_acceptance_percentage = if stats.ai_additions > 0 {
         ((stats.ai_accepted as f64 / stats.ai_additions as f64) * 100.0).min(100.0)
     } else {
         0.0
@@ -291,7 +291,7 @@ pub fn write_stats_to_terminal(stats: &CommitStats, print: bool) -> String {
 
         let ai_acceptance_str = format!(
             "     \x1b[90m{:.0}% AI code accepted{}\x1b[0m",
-            ai_acceptance_percentage, waiting_time_str
+            _ai_acceptance_percentage, waiting_time_str
         );
         output.push_str(&ai_acceptance_str);
         output.push('\n');
@@ -302,6 +302,8 @@ pub fn write_stats_to_terminal(stats: &CommitStats, print: bool) -> String {
     return output;
 }
 
+/// Format stats into a Markdown string for display
+#[allow(dead_code)]
 pub fn write_stats_to_markdown(stats: &CommitStats) -> String {
     let mut output = String::new();
 
@@ -333,7 +335,7 @@ pub fn write_stats_to_markdown(stats: &CommitStats) -> String {
 
     // Calculate AI acceptance percentage (capped at 100%)
     // It can go higher because AI can write on top of AI code. This feels reasonable for now
-    let ai_acceptance_percentage = if stats.ai_additions > 0 {
+    let _ai_acceptance_percentage = if stats.ai_additions > 0 {
         ((stats.ai_accepted as f64 / stats.ai_additions as f64) * 100.0).min(100.0)
     } else {
         0.0

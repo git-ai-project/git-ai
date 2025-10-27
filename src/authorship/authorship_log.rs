@@ -37,6 +37,7 @@ impl LineRange {
     }
 
     /// Remove a line or range from this range, returning the remaining parts
+    #[allow(dead_code)]
     pub fn remove(&self, to_remove: &LineRange) -> Vec<LineRange> {
         match (self, to_remove) {
             (LineRange::Single(l), LineRange::Single(r)) => {
@@ -136,6 +137,7 @@ impl LineRange {
     /// - For insertions: offset is positive (shift lines down/forward)
     /// - For deletions: offset is negative (shift lines up/backward)
     /// - insertion_point: the line number where the change occurred
+    #[allow(dead_code)]
     pub fn shift(&self, insertion_point: u32, offset: i32) -> Option<LineRange> {
         match self {
             LineRange::Single(l) => {

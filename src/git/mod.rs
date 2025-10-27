@@ -3,7 +3,6 @@ pub mod diff_tree_to_tree;
 pub mod refs;
 pub mod repository;
 pub use repository::{find_repository, find_repository_in_path};
-pub mod authorship_log_cache;
 pub mod repo_storage;
 pub mod rewrite_log;
 pub mod status;

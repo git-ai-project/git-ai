@@ -58,6 +58,7 @@ impl fmt::Display for CheckpointKind {
 }
 
 impl CheckpointKind {
+    #[allow(dead_code)]
     pub fn from_str(s: &str) -> Self {
         match s {
             "human" => CheckpointKind::Human,
@@ -112,11 +113,13 @@ impl CheckpointLineStats {
     }
 
     /// Total AI additions (for authorship log - collapses ai_agent and ai_tab)
+    #[allow(dead_code)]
     pub fn total_ai_additions(&self) -> u32 {
         self.ai_agent_additions + self.ai_tab_additions
     }
 
     /// Total AI deletions (for authorship log - collapses ai_agent and ai_tab)
+    #[allow(dead_code)]
     pub fn total_ai_deletions(&self) -> u32 {
         self.ai_agent_deletions + self.ai_tab_deletions
     }

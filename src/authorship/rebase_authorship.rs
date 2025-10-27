@@ -1,13 +1,10 @@
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::post_commit;
-use crate::commands::blame::GitAiBlameOptions;
 use crate::error::GitAiError;
-use crate::git::authorship_log_cache::AuthorshipLogCache;
 use crate::git::refs::get_reference_as_authorship_log_v3;
 use crate::git::repository::{Commit, Repository};
 use crate::git::rewrite_log::RewriteLogEvent;
 use crate::utils::debug_log;
-use similar::{ChangeTag, TextDiff};
 use std::collections::HashMap;
 
 // Process events in the rewrite log and call the correct rewrite functions in this file
@@ -107,6 +104,7 @@ pub fn rewrite_authorship_if_needed(
 /// * `source_head_sha` - SHA of the feature branch that was squashed
 /// * `target_branch_head_sha` - SHA of the current HEAD (target branch where we're merging into)
 /// * `_human_author` - The human author identifier (unused in current implementation)
+#[allow(dead_code)]
 pub fn prepare_working_log_after_squash(
     repo: &Repository,
     source_head_sha: &str,
@@ -205,9 +203,7 @@ pub fn prepare_working_log_after_squash(
 /// * `original_commits` - Vector of original commit SHAs (before rebase), oldest first
 /// * `new_commits` - Vector of new commit SHAs (after rebase), oldest first
 /// * `_human_author` - The human author identifier (unused in this implementation)
-///
-/// # Returns
-/// Ok if all commits were processed successfully
+#[allow(dead_code)]
 pub fn rewrite_authorship_after_rebase_v2(
     repo: &Repository,
     original_head: &str,
@@ -380,9 +376,7 @@ pub fn rewrite_authorship_after_rebase_v2(
 /// * `source_commits` - Vector of source commit SHAs (commits being cherry-picked), oldest first
 /// * `new_commits` - Vector of new commit SHAs (after cherry-pick), oldest first
 /// * `_human_author` - The human author identifier (unused in this implementation)
-///
-/// # Returns
-/// Ok if all commits were processed successfully
+#[allow(dead_code)]
 pub fn rewrite_authorship_after_cherry_pick(
     repo: &Repository,
     source_commits: &[String],
@@ -559,6 +553,7 @@ pub fn rewrite_authorship_after_cherry_pick(
 }
 
 /// Check if two commits have identical trees
+#[allow(dead_code)]
 fn trees_identical(commit1: &Commit, commit2: &Commit) -> Result<bool, GitAiError> {
     let tree1 = commit1.tree()?;
     let tree2 = commit2.tree()?;
@@ -566,6 +561,7 @@ fn trees_identical(commit1: &Commit, commit2: &Commit) -> Result<bool, GitAiErro
 }
 
 /// Copy authorship log from one commit to another
+#[allow(dead_code)]
 fn copy_authorship_log(repo: &Repository, from_sha: &str, to_sha: &str) -> Result<(), GitAiError> {
     // Try to get the authorship log from the old commit
     match get_reference_as_authorship_log_v3(repo, from_sha) {
@@ -590,6 +586,7 @@ fn copy_authorship_log(repo: &Repository, from_sha: &str, to_sha: &str) -> Resul
 }
 
 /// Get file contents from a commit tree for specified pathspecs
+#[allow(dead_code)]
 fn get_committed_files_content(
     repo: &Repository,
     commit_sha: &str,
@@ -726,6 +723,7 @@ pub fn rewrite_authorship_after_commit_amend(
 /// # Returns
 /// A vector of commit SHAs in chronological order (oldest first) representing
 /// the path from just after origin_base to head_sha
+#[allow(dead_code)]
 pub fn build_commit_path_to_base(
     repo: &Repository,
     head_sha: &str,
@@ -797,6 +795,7 @@ pub fn walk_commits_to_base(
 }
 
 /// Get all file paths changed between two commits
+#[allow(dead_code)]
 fn get_files_changed_between_commits(
     repo: &Repository,
     from_commit: &str,
@@ -828,6 +827,7 @@ fn get_files_changed_between_commits(
 ///
 /// Uses VirtualAttributions to merge AI authorship from old_head (with working log) and
 /// target_commit, generating INITIAL checkpoints that seed the AI state on target_commit.
+#[allow(dead_code)]
 pub fn reconstruct_working_log_after_reset(
     repo: &Repository,
     target_commit_sha: &str, // Where we reset TO
@@ -985,6 +985,7 @@ pub fn reconstruct_working_log_after_reset(
 }
 
 /// Get all file paths modified across a list of commits
+#[allow(dead_code)]
 fn get_pathspecs_from_commits(
     repo: &Repository,
     commits: &[String],
@@ -1000,6 +1001,7 @@ fn get_pathspecs_from_commits(
 }
 
 /// Transform VirtualAttributions to match a new final state (single-source variant)
+#[allow(dead_code)]
 fn transform_attributions_to_final_state(
     source_va: &crate::authorship::virtual_attribution::VirtualAttributions,
     final_state: HashMap<String, String>,

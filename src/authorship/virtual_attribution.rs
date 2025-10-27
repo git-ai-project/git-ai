@@ -131,6 +131,7 @@ impl VirtualAttributions {
     }
 
     /// Add a single pathspec to the virtual attributions
+    #[allow(dead_code)]
     pub async fn add_pathspec(&mut self, pathspec: &str) -> Result<(), GitAiError> {
         self.add_pathspecs_concurrent(&[pathspec.to_string()]).await
     }
@@ -185,6 +186,7 @@ impl VirtualAttributions {
     }
 
     /// Get both character and line attributions for a file
+    #[allow(dead_code)]
     pub fn get_attributions(
         &self,
         file_path: &str,
@@ -237,6 +239,7 @@ impl VirtualAttributions {
     }
 
     /// Alias for new_for_base_commit for clarity
+    #[allow(dead_code)]
     pub async fn from_commit(
         repo: Repository,
         commit_sha: String,
@@ -246,6 +249,7 @@ impl VirtualAttributions {
     }
 
     /// Create VirtualAttributions from current repository state (HEAD + working log)
+    #[allow(dead_code)]
     pub async fn from_repo_state(
         repo: Repository,
         pathspecs: &[String],
@@ -617,6 +621,7 @@ impl VirtualAttributions {
     }
 
     /// Convert to initial working log state (stub for now)
+    #[allow(dead_code)]
     pub fn to_initial_working_log_state(
         &self,
     ) -> Result<Vec<crate::authorship::working_log::Checkpoint>, GitAiError> {
@@ -867,6 +872,7 @@ impl VirtualAttributions {
     ///
     /// This does line-level filtering: for files that are committed, it only keeps
     /// attributions for lines that are NOT in the new commit's authorship log.
+    #[allow(dead_code)]
     pub async fn from_working_log_excluding_committed(
         repo: Repository,
         original_commit: &str,
@@ -1311,13 +1317,11 @@ fn get_file_content_at_commit(
 
 mod tests {
 
-    use crate::git::find_repository_in_path;
-
     use super::*;
 
     #[test]
     fn test_virtual_attributions() {
-        let repo = find_repository_in_path(".").unwrap();
+        let repo = crate::git::find_repository_in_path(".").unwrap();
 
         let virtual_attributions = smol::block_on(async {
             VirtualAttributions::new_for_base_commit(
