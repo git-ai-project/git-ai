@@ -1,6 +1,5 @@
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::post_commit;
-use crate::authorship::working_log::CheckpointKind;
 use crate::commands::blame::GitAiBlameOptions;
 use crate::error::GitAiError;
 use crate::git::authorship_log_cache::AuthorshipLogCache;
@@ -1901,28 +1900,24 @@ pub fn reconstruct_working_log_after_reset(
         authorship_log.metadata.prompts.len()
     ));
 
-    // Step 7: Convert to INITIAL checkpoints and write working log
-    let mut checkpoints = authorship_log
-        .convert_to_checkpoints_for_squash(&final_state)
-        .map_err(|e| {
-            GitAiError::Generic(format!(
-                "Failed to convert authorship log to checkpoints: {}",
-                e
-            ))
-        })?;
+    // Step 7: Convert to INITIAL (everything is uncommitted after reset)
+    // Pass empty committed_files since nothing has been committed yet
+    let empty_committed_files: HashMap<String, String> = HashMap::new();
+    let (_authorship_log, initial_attributions) =
+        merged_va.to_authorship_log_and_initial_working_log(empty_committed_files)?;
 
-    // Filter to keep only AI checkpoints - we don't track human-only changes in working logs
-    checkpoints.retain(|checkpoint| checkpoint.kind != CheckpointKind::Human);
+    debug_log(&format!(
+        "Generated INITIAL attributions for {} files",
+        initial_attributions.files.len()
+    ));
 
-    debug_log(&format!("Generated {} AI checkpoints", checkpoints.len()));
-
-    // Step 8: Write to working log for target_commit
+    // Step 8: Write INITIAL file
     let new_working_log = repo.storage.working_log_for_base_commit(target_commit_sha);
     new_working_log.reset_working_log()?;
 
-    for checkpoint in &mut checkpoints {
-        persist_checkpoint_blobs(repo, checkpoint, target_commit_sha)?;
-        new_working_log.append_checkpoint(checkpoint)?;
+    if !initial_attributions.files.is_empty() {
+        new_working_log
+            .write_initial_attributions(initial_attributions.files, initial_attributions.prompts)?;
     }
 
     // Delete old working log
@@ -1930,48 +1925,9 @@ pub fn reconstruct_working_log_after_reset(
         .delete_working_log_for_base_commit(old_head_sha)?;
 
     debug_log(&format!(
-        "✓ Created {} checkpoints in working log for {}",
-        checkpoints.len(),
+        "✓ Wrote INITIAL attributions to working log for {}",
         target_commit_sha
     ));
-
-    Ok(())
-}
-
-/// Helper: Persist file blobs for a checkpoint (reuse from prepare_working_log_after_squash)
-fn persist_checkpoint_blobs(
-    repo: &Repository,
-    checkpoint: &mut crate::authorship::working_log::Checkpoint,
-    base_commit_sha: &str,
-) -> Result<(), GitAiError> {
-    use sha2::{Digest, Sha256};
-
-    let working_log = repo.storage.working_log_for_base_commit(base_commit_sha);
-    let mut file_hashes = Vec::new();
-
-    for entry in &mut checkpoint.entries {
-        // Read from index using git show :path
-        let mut args = repo.global_args_for_exec();
-        args.push("show".to_string());
-        args.push(format!(":{}", entry.file));
-
-        let output = crate::git::repository::exec_git(&args)?;
-        let file_content = String::from_utf8(output.stdout)
-            .map_err(|_| GitAiError::Generic(format!("Failed to read file: {}", entry.file)))?;
-
-        let blob_sha = working_log.persist_file_version(&file_content)?;
-        entry.blob_sha = blob_sha.clone();
-        file_hashes.push((entry.file.clone(), blob_sha));
-    }
-
-    // Compute combined hash
-    file_hashes.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut combined_hasher = Sha256::new();
-    for (file_path, hash) in &file_hashes {
-        combined_hasher.update(file_path.as_bytes());
-        combined_hasher.update(hash.as_bytes());
-    }
-    checkpoint.diff = format!("{:x}", combined_hasher.finalize());
 
     Ok(())
 }

@@ -74,7 +74,6 @@ fn test_reset_soft_reconstructs_working_log() {
 
 /// Test git reset --mixed (default): working directory preserved
 #[test]
-#[ignore] // TODO: Reset --mixed doesn't currently preserve AI authorship from unwound commits
 fn test_reset_mixed_reconstructs_working_log() {
     let repo = TestRepo::new();
     let mut file = repo.filename("main.rs");
@@ -336,7 +335,6 @@ fn test_reset_mixed_ai_human_changes() {
 
 /// Test git reset --merge: should be like --mixed for clean working tree
 #[test]
-#[ignore] // TODO: Reset --merge/--mixed doesn't currently preserve AI authorship from unwound commits
 fn test_reset_merge() {
     let repo = TestRepo::new();
     let mut file = repo.filename("test.txt");
