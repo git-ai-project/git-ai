@@ -381,3 +381,79 @@ fn test_ci_rebase_merge_multiple_commits() {
         "function human() { }".human()
     ]);
 }
+
+#[test]
+fn test_squash_merge_with_duplicate_lines() {
+    // This test verifies that squash merge correctly preserves AI authorship for duplicate lines
+    let repo = TestRepo::new();
+    let mut file = repo.filename("helpers.rs");
+
+    // Create master branch with first function (human-authored)
+    file.set_contents(lines![
+        "pub fn format_string(s: &str) -> String {",
+        "    s.to_uppercase()",
+        "}",
+    ]);
+    repo.stage_all_and_commit("Add format_string function")
+        .unwrap();
+
+    // Save the default branch name
+    let default_branch = repo.current_branch();
+
+    // Create feature branch
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+    // AI adds a second function
+    // The key test: the second `}` on line 6 is AI-authored, but there's already a `}` on line 3
+    file.set_contents(lines![
+        "pub fn format_string(s: &str) -> String {",
+        "    s.to_uppercase()",
+        "}",
+        "pub fn reverse_string(s: &str) -> String {".ai(),
+        "    s.chars().rev().collect()".ai(),
+        "}".ai(), // Duplicate closing brace authored by ai
+    ]);
+
+    let output = repo
+        .stage_all_and_commit("AI adds reverse_string function")
+        .unwrap();
+
+    // Switch back to default branch
+    println!(
+        "checkout: {:?}",
+        repo.git(&["checkout", &default_branch]).unwrap()
+    );
+
+    // Squash merge feature branch
+    let output = repo.git(&["merge", "--squash", "feature"]).unwrap();
+    println!("output: {:?}", output);
+
+    let working_log = repo.current_working_logs();
+    println!(
+        "initial attributions: {:?}",
+        working_log.read_initial_attributions()
+    );
+
+    println!(
+        "stage and commit: {:?}",
+        repo.stage_all_and_commit("Squash merge: add reverse_string")
+            .unwrap()
+    );
+
+    println!(
+        "diff: {:?}",
+        repo.git(&["diff", &default_branch, "feature", "--", "helpers.rs"])
+            .unwrap()
+    );
+
+    // This should pass but currently fails
+    file = repo.filename("helpers.rs");
+    file.assert_lines_and_blame(lines![
+        "pub fn format_string(s: &str) -> String {".human(),
+        "    s.to_uppercase()".human(),
+        "}".human(),
+        "pub fn reverse_string(s: &str) -> String {".ai(),
+        "    s.chars().rev().collect()".ai(),
+        "}".ai(), // Should be AI
+    ]);
+}

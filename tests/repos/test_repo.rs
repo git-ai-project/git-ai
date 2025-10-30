@@ -1,6 +1,7 @@
 use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
+use git_ai::git::refs::show_authorship_note;
 use git_ai::git::repo_storage::PersistedWorkingLog;
-use git_ai::git::repository as GitAiRepository;
+use git_ai::git::{find_repository_in_path, repository as GitAiRepository};
 use git2::Repository;
 use insta::assert_debug_snapshot;
 use rand::Rng;
@@ -204,7 +205,15 @@ impl TestRepo {
 
     pub fn stage_all_and_commit(&self, message: &str) -> Result<NewCommit, String> {
         self.git(&["add", "-A"]).expect("add --all should succeed");
-        self.commit(message)
+        let c = self.commit(message)?;
+
+        let commit_sha = &c.commit_sha;
+        let repo = find_repository_in_path(self.path.to_str().unwrap()).unwrap();
+        println!(
+            "authorship note: {:?}",
+            show_authorship_note(&repo, commit_sha)
+        );
+        Ok(c)
     }
 
     pub fn read_file(&self, filename: &str) -> Option<String> {
