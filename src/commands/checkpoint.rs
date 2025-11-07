@@ -45,12 +45,17 @@ pub fn run(
     let repo_storage = RepoStorage::for_repo_path(repo.path(), &repo.workdir()?);
     let mut working_log = repo_storage.working_log_for_base_commit(&base_commit);
 
-    // Set dirty files if available
+    // Set dirty files if available, normalizing paths to Git format
     if let Some(dirty_files) = agent_run_result
         .as_ref()
         .and_then(|result| result.dirty_files.clone())
     {
-        working_log.set_dirty_files(Some(dirty_files));
+        // Normalize all paths to Git format (forward slashes)
+        let normalized_dirty_files: HashMap<String, String> = dirty_files
+            .into_iter()
+            .map(|(path, content)| (crate::utils::normalize_path_to_git_format(&path), content))
+            .collect();
+        working_log.set_dirty_files(Some(normalized_dirty_files));
     }
 
     // Get the current timestamp in milliseconds since the Unix epoch
@@ -111,7 +116,8 @@ pub fn run(
                             }
                         }
                     }
-                    Some(path.clone())
+                    // Normalize path to Git format (forward slashes)
+                    Some(crate::utils::normalize_path_to_git_format(path))
                 })
                 .collect();
 

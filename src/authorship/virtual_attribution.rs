@@ -208,9 +208,11 @@ impl VirtualAttributions {
         for result in results {
             match result {
                 Ok(Some((file_path, content, char_attrs, line_attrs))) => {
+                    // Normalize path to Git format for consistency
+                    let normalized_path = crate::utils::normalize_path_to_git_format(&file_path);
                     self.attributions
-                        .insert(file_path.clone(), (char_attrs, line_attrs));
-                    self.file_contents.insert(file_path, content);
+                        .insert(normalized_path.clone(), (char_attrs, line_attrs));
+                    self.file_contents.insert(normalized_path, content);
                 }
                 Ok(None) => {
                     // File had no changes or couldn't be processed, skip
@@ -228,20 +230,23 @@ impl VirtualAttributions {
         &self,
         file_path: &str,
     ) -> Option<&(Vec<Attribution>, Vec<LineAttribution>)> {
-        self.attributions.get(file_path)
+        let normalized_path = crate::utils::normalize_path_to_git_format(file_path);
+        self.attributions.get(&normalized_path)
     }
 
     /// Get just character-level attributions for a file
     pub fn get_char_attributions(&self, file_path: &str) -> Option<&Vec<Attribution>> {
+        let normalized_path = crate::utils::normalize_path_to_git_format(file_path);
         self.attributions
-            .get(file_path)
+            .get(&normalized_path)
             .map(|(char_attrs, _)| char_attrs)
     }
 
     /// Get just line-level attributions for a file
     pub fn get_line_attributions(&self, file_path: &str) -> Option<&Vec<LineAttribution>> {
+        let normalized_path = crate::utils::normalize_path_to_git_format(file_path);
         self.attributions
-            .get(file_path)
+            .get(&normalized_path)
             .map(|(_, line_attrs)| line_attrs)
     }
 
@@ -267,7 +272,8 @@ impl VirtualAttributions {
 
     /// Get the file content for a tracked file
     pub fn get_file_content(&self, file_path: &str) -> Option<&String> {
-        self.file_contents.get(file_path)
+        let normalized_path = crate::utils::normalize_path_to_git_format(file_path);
+        self.file_contents.get(&normalized_path)
     }
 
     /// Get a reference to the repository
@@ -327,6 +333,7 @@ impl VirtualAttributions {
         }
 
         // Process INITIAL attributions
+        // Note: initial_attributions.files keys are already normalized by read_initial_attributions
         for (file_path, line_attrs) in &initial_attributions.files {
             // Get the latest file content from working directory
             if let Ok(workdir) = repo.workdir() {
@@ -381,23 +388,26 @@ impl VirtualAttributions {
 
             // Collect attributions from checkpoint entries
             for entry in &checkpoint.entries {
+                // Normalize path to Git format for consistency with INITIAL and git operations
+                let normalized_file = crate::utils::normalize_path_to_git_format(&entry.file);
+                
                 // Get the latest file content from working directory
                 if let Ok(workdir) = repo.workdir() {
-                    let abs_path = workdir.join(&entry.file);
+                    let abs_path = workdir.join(&normalized_file);
                     let file_content = if abs_path.exists() {
                         std::fs::read_to_string(&abs_path).unwrap_or_default()
                     } else {
                         String::new()
                     };
-                    file_contents.insert(entry.file.clone(), file_content);
+                    file_contents.insert(normalized_file.clone(), file_content);
                 }
 
                 // Use the line attributions from the checkpoint
                 let line_attrs = entry.line_attributions.clone();
-                let file_content = file_contents.get(&entry.file).cloned().unwrap_or_default();
+                let file_content = file_contents.get(&normalized_file).cloned().unwrap_or_default();
                 let char_attrs = line_attributions_to_attributions(&line_attrs, &file_content, 0);
 
-                attributions.insert(entry.file.clone(), (char_attrs, line_attrs));
+                attributions.insert(normalized_file, (char_attrs, line_attrs));
             }
         }
 

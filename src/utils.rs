@@ -1,5 +1,22 @@
 use crate::git::diff_tree_to_tree::Diff;
-use std::time::{Duration, Instant};
+
+/// Normalize a file path to Git's format (forward slashes, relative)
+///
+/// Git always uses forward slashes for paths, even on Windows.
+/// This function converts OS-native paths to Git's normalized format.
+///
+/// # Arguments
+///
+/// * `path` - The file path to normalize (can be absolute or relative, with any separator)
+///
+/// # Returns
+///
+/// A normalized path with forward slashes, relative to the working directory
+pub fn normalize_path_to_git_format(path: &str) -> String {
+    // Replace backslashes with forward slashes for Windows compatibility
+    // Git always uses forward slashes internally, even on Windows
+    path.replace('\\', "/")
+}
 
 /// Check if debug logging is enabled via environment variable
 ///
