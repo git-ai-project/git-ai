@@ -2,15 +2,13 @@ use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::rebase_authorship::rewrite_authorship_if_needed;
 use crate::config;
 use crate::error::GitAiError;
-use crate::git::cli_parser::ParsedGitInvocation;
-use crate::git::refs::{get_authorship, show_authorship_note};
+use crate::git::refs::get_authorship;
 use crate::git::repo_storage::RepoStorage;
 use crate::git::rewrite_log::RewriteLogEvent;
 use crate::git::sync_authorship::{fetch_authorship_notes, push_authorship_notes};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::OnceLock;
 
 pub struct Object<'a> {
     repo: &'a Repository,
@@ -38,7 +36,8 @@ impl<'a> Object<'a> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+
 pub struct CommitRange<'a> {
     repo: &'a Repository,
     pub start_oid: String,
@@ -193,6 +192,16 @@ impl<'a> CommitRange<'a> {
             }
             Err(_) => 0, // If they don't share lineage or error occurs, return 0
         }
+    }
+
+    pub fn all_commits(&self) -> Vec<String> {
+        let mut commits = Vec::new();
+        let itt = self.clone().into_iter();
+
+        for commit in itt {
+            commits.push(commit.oid.clone());
+        }
+        commits
     }
 }
 
@@ -433,6 +442,7 @@ impl<'a> Commit<'a> {
     }
 
     // Get the committer of this commit.
+    #[allow(dead_code)]
     pub fn committer(&self) -> Result<Signature<'a>, GitAiError> {
         let mut args = self.repo.global_args_for_exec();
         args.push("show".to_string());
@@ -456,7 +466,8 @@ impl<'a> Commit<'a> {
     }
 
     // Get the commit time (i.e. committer time) of a commit.
-    // The first element of the tuple is the time, in seconds, since the epoch. The second element is the offset, in minutes, of the time zone of the committer’s preferred time zone.
+    // The first element of the tuple is the time, in seconds, since the epoch. The second element is the offset, in minutes, of the time zone of the committer's preferred time zone.
+    #[allow(dead_code)]
     pub fn time(&self) -> Result<Time, GitAiError> {
         let signature = self.committer()?;
         Ok(signature.when())
@@ -722,6 +733,7 @@ impl<'a> Reference<'a> {
     }
 
     // Peel a reference to a commit This method recursively peels the reference until it reaches a commit.
+    #[allow(dead_code)]
     pub fn peel_to_commit(&self) -> Result<Commit<'a>, GitAiError> {
         let mut args = self.repo.global_args_for_exec();
         args.push("rev-parse".to_string());
@@ -789,7 +801,7 @@ pub struct Repository {
     pub storage: RepoStorage,
     pub pre_command_base_commit: Option<String>,
     pub pre_command_refname: Option<String>,
-    workdir_cache: OnceLock<Result<PathBuf, GitAiError>>,
+    workdir: PathBuf,
 }
 
 impl Repository {
@@ -803,6 +815,7 @@ impl Repository {
     }
 
     /// Execute an arbitrary git command and return stdout as string
+    #[allow(dead_code)]
     pub fn git(&self, args: &[&str]) -> Result<String, GitAiError> {
         let mut full_args = self.global_args_for_exec();
         full_args.extend(args.iter().map(|s| s.to_string()));
@@ -898,27 +911,8 @@ impl Repository {
     // Get the path of the working directory for this repository.
     // If this repository is bare, then None is returned.
     pub fn workdir(&self) -> Result<PathBuf, GitAiError> {
-        self.workdir_cache
-            .get_or_init(|| {
-                let mut args = self.global_args_for_exec();
-                args.push("rev-parse".to_string());
-                args.push("--show-toplevel".to_string());
-
-                let output = exec_git(&args)?;
-                let git_dir_str = String::from_utf8(output.stdout)?;
-
-                let git_dir_str = git_dir_str.trim();
-                let path = PathBuf::from(git_dir_str);
-                if !path.is_dir() {
-                    return Err(GitAiError::Generic(format!(
-                        "Git directory does not exist: {}",
-                        git_dir_str
-                    )));
-                }
-
-                Ok(path)
-            })
-            .clone()
+        // TODO Remove Result since this is determined at initialization now
+        Ok(self.workdir.clone())
     }
 
     // List all remotes for a given repository
@@ -1335,6 +1329,7 @@ impl Repository {
         Ok(remotes.get(0).map(|s| s.to_string()))
     }
 
+    #[allow(dead_code)]
     pub fn fetch_authorship<'a>(&'a self, remote_name: &str) -> Result<(), GitAiError> {
         fetch_authorship_notes(self, remote_name)
     }
@@ -1394,7 +1389,8 @@ impl Repository {
         }
     }
 
-    // Create an iterator for the repo’s references (git2-style)
+    // Create an iterator for the repo's references (git2-style)
+    #[allow(dead_code)]
     pub fn references<'a>(&'a self) -> Result<References<'a>, GitAiError> {
         let mut args = self.global_args_for_exec();
         args.push("for-each-ref".to_string());
@@ -1458,6 +1454,7 @@ impl Repository {
 
     /// Get the content of a file at a specific commit
     /// Uses `git show <commit>:<path>` for efficient single-call retrieval
+    #[allow(dead_code)]
     pub fn get_file_content(
         &self,
         file_path: &str,
@@ -1623,6 +1620,7 @@ impl Repository {
     /// Returns a HashMap of file paths to vectors of added line numbers
     ///
     /// Similar to diff_added_lines but compares against the working directory
+    #[allow(dead_code)]
     pub fn diff_workdir_added_lines(
         &self,
         from_ref: &str,
@@ -1692,26 +1690,55 @@ pub fn find_repository(global_args: &Vec<String>) -> Result<Repository, GitAiErr
     let mut args = global_args.clone();
     args.push("rev-parse".to_string());
     args.push("--absolute-git-dir".to_string());
+    args.push("--show-toplevel".to_string());
 
     let output = exec_git(&args)?;
-    let git_dir_str = String::from_utf8(output.stdout)?;
+    let both_dirs = String::from_utf8(output.stdout)?;
 
-    let git_dir_str = git_dir_str.trim();
-    let path = PathBuf::from(git_dir_str);
-    if !path.is_dir() {
+    let both_dirs = both_dirs.trim();
+    let git_dir_str = both_dirs.split("\n").next().unwrap();
+    let workdir_str = both_dirs.split("\n").nth(1).unwrap();
+    let git_dir = PathBuf::from(git_dir_str);
+    let workdir = PathBuf::from(workdir_str);
+    if !git_dir.is_dir() {
         return Err(GitAiError::Generic(format!(
             "Git directory does not exist: {}",
-            git_dir_str
+            git_dir.display()
+        )));
+    }
+    if !workdir.is_dir() {
+        return Err(GitAiError::Generic(format!(
+            "Work directory does not exist: {}",
+            workdir.display()
         )));
     }
 
+    // TODO Consider if we should canonicalize the paths (sometimes git will return symlinked paths)
+
     Ok(Repository {
         global_args: global_args.clone(),
-        storage: RepoStorage::for_repo_path(&path),
-        git_dir: path,
+        storage: RepoStorage::for_repo_path(&git_dir, &workdir),
+        git_dir,
         pre_command_base_commit: None,
         pre_command_refname: None,
-        workdir_cache: OnceLock::new(),
+        workdir,
+    })
+}
+
+pub fn from_bare_repository(git_dir: &Path) -> Result<Repository, GitAiError> {
+    let workdir = git_dir
+        .parent()
+        .ok_or_else(|| GitAiError::Generic("Git directory has no parent".to_string()))?
+        .to_path_buf();
+    let global_args = vec!["-C".to_string(), git_dir.to_string_lossy().to_string()];
+
+    Ok(Repository {
+        global_args,
+        storage: RepoStorage::for_repo_path(git_dir, &workdir),
+        git_dir: git_dir.to_path_buf(),
+        pre_command_base_commit: None,
+        pre_command_refname: None,
+        workdir,
     })
 }
 

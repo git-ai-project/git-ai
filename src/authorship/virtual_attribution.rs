@@ -1081,6 +1081,57 @@ impl VirtualAttributions {
             }
         }
     }
+
+    /// Filter prompts and attributions to only include those from specific commits
+    /// This is useful for range analysis where we only want to count AI contributions
+    /// from commits within the range, not from before
+    pub fn filter_to_commits(&mut self, commit_shas: &HashSet<String>) {
+        // Capture original AI prompt IDs before filtering
+        let original_prompt_ids: HashSet<String> = self.prompts.keys().cloned().collect();
+
+        // Filter prompts to only include those from the specified commits
+        let mut filtered_prompts = BTreeMap::new();
+
+        for (prompt_id, commits_map) in &self.prompts {
+            let filtered_commits: BTreeMap<String, PromptRecord> = commits_map
+                .iter()
+                .filter(|(commit_sha, _)| commit_shas.contains(*commit_sha))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+
+            if !filtered_commits.is_empty() {
+                filtered_prompts.insert(prompt_id.clone(), filtered_commits);
+            }
+        }
+
+        self.prompts = filtered_prompts;
+
+        // Get set of valid prompt IDs after filtering
+        let valid_prompt_ids: HashSet<String> = self.prompts.keys().cloned().collect();
+
+        // Remove attributions that reference filtered-out prompts
+        for (_file_path, (char_attrs, _line_attrs)) in self.attributions.iter_mut() {
+            char_attrs.retain(|attr| {
+                // Keep human attributions (not in original prompts at all)
+                // OR keep AI attributions that are still valid after filtering
+                !original_prompt_ids.contains(&attr.author_id)
+                    || valid_prompt_ids.contains(&attr.author_id)
+            });
+        }
+
+        // Recalculate line attributions for all files
+        for (file_path, (char_attrs, line_attrs)) in self.attributions.iter_mut() {
+            let file_content = self
+                .file_contents
+                .get(file_path)
+                .cloned()
+                .unwrap_or_default();
+            *line_attrs = crate::authorship::attribution_tracker::attributions_to_line_attributions(
+                char_attrs,
+                &file_content,
+            );
+        }
+    }
 }
 /// Merge two VirtualAttributions, favoring the primary for overlaps
 pub fn merge_attributions_favoring_first(

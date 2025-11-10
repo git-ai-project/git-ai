@@ -14,7 +14,6 @@ fn test_amend_add_lines_at_top() {
 
     repo.git(&["add", "-A"]).unwrap();
 
-
     repo.commit("Initial commit").unwrap();
 
     // AI adds lines at the top

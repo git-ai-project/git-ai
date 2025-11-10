@@ -56,6 +56,7 @@ impl LineAttribution {
     }
 
     /// Returns the number of lines this attribution covers
+    #[allow(dead_code)]
     pub fn line_count(&self) -> u32 {
         if self.start_line > self.end_line {
             0
@@ -65,16 +66,19 @@ impl LineAttribution {
     }
 
     /// Checks if this line attribution is empty
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.start_line > self.end_line
     }
 
     /// Checks if this attribution overlaps with a given line range (inclusive)
+    #[allow(dead_code)]
     pub fn overlaps(&self, start_line: u32, end_line: u32) -> bool {
         self.start_line <= end_line && self.end_line >= start_line
     }
 
     /// Returns the overlapping portion of this attribution with a given line range
+    #[allow(dead_code)]
     pub fn intersection(&self, start_line: u32, end_line: u32) -> Option<(u32, u32)> {
         let overlap_start = self.start_line.max(start_line);
         let overlap_end = self.end_line.min(end_line);
@@ -98,11 +102,13 @@ impl Attribution {
     }
 
     /// Returns the length of this attribution range
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.end - self.start
     }
 
     /// Checks if this attribution is empty
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.start >= self.end
     }
@@ -133,6 +139,7 @@ pub(crate) struct Deletion {
     /// End position in old content
     pub(crate) end: usize,
     /// The deleted bytes (may not be valid UTF-8)
+    #[allow(dead_code)]
     pub(crate) bytes: Vec<u8>,
 }
 
@@ -144,6 +151,7 @@ pub(crate) struct Insertion {
     /// End position in new content
     pub(crate) end: usize,
     /// The inserted bytes (may not be valid UTF-8)
+    #[allow(dead_code)]
     pub(crate) bytes: Vec<u8>,
 }
 
@@ -237,6 +245,7 @@ impl AttributionTracker {
     }
 
     /// Create a new attribution tracker with custom configuration
+    #[allow(dead_code)]
     pub fn with_config(config: AttributionConfig) -> Self {
         AttributionTracker {
             config,
@@ -2648,7 +2657,7 @@ fn compute() -> i32 {
         // Step 1: AI adds a newline and "AI Line 1"
         // "Base line" has no attributions, "\nAI Line 1" is inserted by AI
         let content_v2 = "Base line\nAI Line 1";
-        let mut attributions_v2 = tracker
+        let attributions_v2 = tracker
             .update_attributions(
                 old_content,
                 content_v2,
@@ -2660,7 +2669,7 @@ fn compute() -> i32 {
 
         // Step 2: Human adds "Human Line 1"
         let content_v3 = "Base line\nAI Line 1\nHuman Line 1";
-        let mut attributions_v3 = tracker
+        let attributions_v3 = tracker
             .update_attributions(
                 content_v2,
                 content_v3,
@@ -2672,7 +2681,7 @@ fn compute() -> i32 {
 
         // Step 3: AI adds "AI Line 2"
         let content_v4 = "Base line\nAI Line 1\nHuman Line 1\nAI Line 2";
-        let mut attributions_v4 = tracker
+        let attributions_v4 = tracker
             .update_attributions(
                 content_v3,
                 content_v4,
@@ -2723,7 +2732,7 @@ fn compute() -> i32 {
 
         // Step 2: AI modifies line 2
         let v2_content = "Line 1\nAI modification of line 2\n";
-        let mut v2_attributions = tracker
+        let v2_attributions = tracker
             .update_attributions(
                 v1_content,
                 v2_content,
@@ -2787,7 +2796,7 @@ fn compute() -> i32 {
 
         // Step 1: Human creates file
         let v1_content = "Line 1 from human\nLine 2 from human\nLine 3 from human\n||__AI LINE__ PENDING__||\n||__AI LINE__ PENDING__||";
-        let mut v1_attributions = tracker
+        let v1_attributions = tracker
             .update_attributions(
                 "",
                 v1_content,
@@ -2799,7 +2808,7 @@ fn compute() -> i32 {
 
         // Step 2: Replaces the two lines at the end
         let v2_content = "Line 1 from human\nLine 2 from human\nLine 3 from human\nLine 4 from AI\nLine 5 from AI";
-        let mut v2_attributions = tracker
+        let v2_attributions = tracker
             .update_attributions(
                 v1_content,
                 v2_content,
@@ -2843,7 +2852,7 @@ fn compute() -> i32 {
 
         // Step 1: Human creates file
         let v1_content = "Line 1\nLine 2\n||__AI LINE__ PENDING__||\nLine 4";
-        let mut v1_attributions = tracker
+        let v1_attributions = tracker
             .update_attributions(
                 "",
                 v1_content,
@@ -2855,7 +2864,7 @@ fn compute() -> i32 {
 
         // Step 2: Replaces the two lines at the end
         let v2_content = "Line 1\nLine 2\nLine 3\nLine 4";
-        let mut v2_attributions = tracker
+        let v2_attributions = tracker
             .update_attributions(
                 v1_content,
                 v2_content,

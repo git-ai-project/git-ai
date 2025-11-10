@@ -2,7 +2,7 @@ use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::post_commit;
 use crate::error::GitAiError;
 use crate::git::refs::get_reference_as_authorship_log_v3;
-use crate::git::repository::{Commit, Repository};
+use crate::git::repository::Repository;
 use crate::git::rewrite_log::RewriteLogEvent;
 use crate::utils::debug_log;
 use std::collections::{HashMap, HashSet};
@@ -305,6 +305,34 @@ pub fn rewrite_authorship_after_rebase_v2(
         new_commits.len()
     ));
 
+    // Filter out commits that already have authorship logs (these are commits from the target branch)
+    // Only process newly created rebased commits
+    let commits_to_process: Vec<String> = new_commits
+        .iter()
+        .filter(|commit| {
+            let has_log = get_reference_as_authorship_log_v3(repo, commit).is_ok();
+            if has_log {
+                debug_log(&format!(
+                    "Skipping commit {} (already has authorship log)",
+                    commit
+                ));
+            }
+            !has_log
+        })
+        .cloned()
+        .collect();
+
+    if commits_to_process.is_empty() {
+        debug_log("No new commits to process (all commits already have authorship logs)");
+        return Ok(());
+    }
+
+    debug_log(&format!(
+        "Processing {} newly created commits (skipped {} existing commits)",
+        commits_to_process.len(),
+        new_commits.len() - commits_to_process.len()
+    ));
+
     // Step 2: Create VirtualAttributions from original_head (before rebase)
     let repo_clone = repo.clone();
     let original_head_clone = original_head.to_string();
@@ -344,11 +372,11 @@ pub fn rewrite_authorship_after_rebase_v2(
     };
 
     // Step 3: Process each new commit in order (oldest to newest)
-    for (idx, new_commit) in new_commits.iter().enumerate() {
+    for (idx, new_commit) in commits_to_process.iter().enumerate() {
         debug_log(&format!(
             "Processing commit {}/{}: {}",
             idx + 1,
-            new_commits.len(),
+            commits_to_process.len(),
             new_commit
         ));
 
@@ -630,37 +658,6 @@ pub fn rewrite_authorship_after_cherry_pick(
     }
 
     Ok(())
-}
-
-/// Check if two commits have identical trees
-fn trees_identical(commit1: &Commit, commit2: &Commit) -> Result<bool, GitAiError> {
-    let tree1 = commit1.tree()?;
-    let tree2 = commit2.tree()?;
-    Ok(tree1.id() == tree2.id())
-}
-
-/// Copy authorship log from one commit to another
-fn copy_authorship_log(repo: &Repository, from_sha: &str, to_sha: &str) -> Result<(), GitAiError> {
-    // Try to get the authorship log from the old commit
-    match get_reference_as_authorship_log_v3(repo, from_sha) {
-        Ok(mut log) => {
-            // Update the base_commit_sha to the new commit
-            log.metadata.base_commit_sha = to_sha.to_string();
-
-            // Save to the new commit
-            let authorship_json = log.serialize_to_string().map_err(|_| {
-                GitAiError::Generic("Failed to serialize authorship log".to_string())
-            })?;
-
-            crate::git::refs::notes_add(repo, to_sha, &authorship_json)?;
-            Ok(())
-        }
-        Err(_) => {
-            // No authorship log exists for the old commit, that's ok
-            debug_log(&format!("No authorship log found for {}", from_sha));
-            Ok(())
-        }
-    }
 }
 
 /// Get file contents from a commit tree for specified pathspecs
@@ -1038,7 +1035,7 @@ fn transform_attributions_to_final_state(
             Vec::new()
         };
 
-        // Try to restore attributions from original_head_state for "new" content that existed before rebase
+        // Try to restore attributions from original_head_state using line-content matching
         // This handles commit splitting where content from original_head gets re-applied
         if let Some(original_state) = original_head_state {
             if let Some(original_content) = original_state.get_file_content(&file_path) {
@@ -1049,28 +1046,74 @@ fn transform_attributions_to_final_state(
                         transformed_attrs = original_attrs.clone();
                     }
                 } else {
-                    // Content doesn't match exactly, but we can still try to restore attributions
-                    // for matching substrings (handles commit splitting with edits)
-                    let dummy_author = "__DUMMY__";
-                    for attr in &mut transformed_attrs {
-                        if attr.author_id == dummy_author {
-                            // This is new content - check if it exists in original state
-                            let new_text =
-                                &final_content[attr.start..attr.end.min(final_content.len())];
+                    // Use line-content matching to restore attributions for lines that existed before
+                    // Build a map of line content -> author from original state
+                    let mut original_line_to_author: HashMap<String, String> = HashMap::new();
 
-                            // Search for this text in the original content
-                            if let Some(pos) = original_content.find(new_text) {
-                                // Found matching text in original - check if we have attribution for it
-                                if let Some(original_attrs) =
-                                    original_state.get_char_attributions(&file_path)
-                                {
-                                    for original_attr in original_attrs {
-                                        // Check if this original attribution covers the matched position
-                                        if original_attr.start <= pos && pos < original_attr.end {
-                                            // Restore the original author
-                                            attr.author_id = original_attr.author_id.clone();
-                                            break;
-                                        }
+                    if let Some(original_line_attrs) =
+                        original_state.get_line_attributions(&file_path)
+                    {
+                        let original_lines: Vec<&str> = original_content.lines().collect();
+
+                        for line_attr in original_line_attrs {
+                            // LineAttribution is 1-indexed
+                            for line_num in line_attr.start_line..=line_attr.end_line {
+                                let line_idx = (line_num as usize).saturating_sub(1);
+                                if line_idx < original_lines.len() {
+                                    let line_content = original_lines[line_idx].to_string();
+                                    // Store all non-human attributions (AI attributions)
+                                    // VirtualAttributions normalizes humans to "human" via return_human_authors_as_human flag
+                                    // AI authors keep their tool names (mock_ai, Claude, GPT, etc.) or prompt hashes
+                                    if line_attr.author_id != "human" {
+                                        original_line_to_author
+                                            .insert(line_content, line_attr.author_id.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Now update char attributions based on line content matching
+                    let dummy_author = "__DUMMY__";
+                    let final_lines: Vec<&str> = final_content.lines().collect();
+
+                    // Convert char attributions to line attributions to process line by line
+                    let temp_line_attrs =
+                        crate::authorship::attribution_tracker::attributions_to_line_attributions(
+                            &transformed_attrs,
+                            &final_content,
+                        );
+
+                    // For each line with dummy attribution, try to restore from original
+                    for (line_idx, line_content) in final_lines.iter().enumerate() {
+                        // Check if this line has a dummy attribution
+                        let line_num = (line_idx + 1) as u32; // LineAttribution is 1-indexed
+                        let has_dummy = temp_line_attrs.iter().any(|la| {
+                            la.start_line <= line_num
+                                && la.end_line >= line_num
+                                && la.author_id == dummy_author
+                        });
+
+                        if has_dummy {
+                            // Try to find this line content in original state
+                            if let Some(original_author) =
+                                original_line_to_author.get(*line_content)
+                            {
+                                // Update all char attributions on this line
+                                // Find the char range for this line
+                                let line_start_char: usize = final_lines[..line_idx]
+                                    .iter()
+                                    .map(|l| l.len() + 1) // +1 for newline
+                                    .sum();
+                                let line_end_char = line_start_char + line_content.len();
+
+                                // Update attributions that overlap with this line
+                                for attr in &mut transformed_attrs {
+                                    if attr.author_id == dummy_author
+                                        && attr.start < line_end_char
+                                        && attr.end > line_start_char
+                                    {
+                                        attr.author_id = original_author.clone();
                                     }
                                 }
                             }

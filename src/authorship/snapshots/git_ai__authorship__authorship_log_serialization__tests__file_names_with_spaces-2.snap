@@ -48,6 +48,9 @@ AuthorshipLogV3 {
     ],
     metadata: AuthorshipMetadata {
         schema_version: "authorship/3.0.0",
+        git_ai_version: Some(
+            "development",
+        ),
         base_commit_sha: "",
         prompts: {
             "c9883b0": PromptRecord {

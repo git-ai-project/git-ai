@@ -6,7 +6,7 @@ use crate::commands::checkpoint_agent::agent_presets::CursorPreset;
 use crate::error::GitAiError;
 use crate::git::refs::notes_add;
 use crate::git::repository::Repository;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 pub fn post_commit(
     repo: &Repository,
@@ -90,35 +90,6 @@ pub fn post_commit(
         write_stats_to_terminal(&stats, true);
     }
     Ok((commit_sha.to_string(), authorship_log))
-}
-
-/// Get file contents from a commit tree for specified pathspecs
-fn get_committed_files_content(
-    repo: &Repository,
-    commit_sha: &str,
-    pathspecs: &[String],
-) -> Result<HashMap<String, String>, GitAiError> {
-    let commit = repo.find_commit(commit_sha.to_string())?;
-    let tree = commit.tree()?;
-
-    let mut files = HashMap::new();
-
-    for file_path in pathspecs {
-        match tree.get_path(std::path::Path::new(file_path)) {
-            Ok(entry) => {
-                if let Ok(blob) = repo.find_blob(entry.id()) {
-                    let blob_content = blob.content().unwrap_or_default();
-                    let content = String::from_utf8_lossy(&blob_content).to_string();
-                    files.insert(file_path.clone(), content);
-                }
-            }
-            Err(_) => {
-                // File doesn't exist in this commit (could be deleted), skip it
-            }
-        }
-    }
-
-    Ok(files)
 }
 
 /// Filter out working log entries for untracked files

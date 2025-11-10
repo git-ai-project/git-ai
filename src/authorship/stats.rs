@@ -292,118 +292,29 @@ pub fn write_stats_to_terminal(stats: &CommitStats, print: bool) -> String {
     return output;
 }
 
-/// Format stats into a Markdown string for display
-#[allow(dead_code)]
 pub fn write_stats_to_markdown(stats: &CommitStats) -> String {
     let mut output = String::new();
 
-    // Set maximum bar width to 40 characters
-    let bar_width: usize = 40;
+    // Set maximum bar width to 20 characters
+    let bar_width: usize = 20;
 
     // Handle deletion-only commits (no additions)
     if stats.git_diff_added_lines == 0 && stats.git_diff_deleted_lines > 0 {
-        // Show gray bar for deletion-only commit
-        let mut progress_bar = String::new();
-        progress_bar.push_str("you&nbsp;&nbsp;");
-        progress_bar.push_str(&"&nbsp;".repeat(bar_width)); // Gray bar
-        progress_bar.push_str("&nbsp;ai");
-
-        output.push_str(&progress_bar);
+        output.push_str("(no additions)");
         output.push('\n');
-
-        // Show "(no additions)" message below the bar
-        let no_additions_msg = format!("{}{:^40}", "&nbsp;".repeat(6), "(no additions)");
-        output.push_str(&no_additions_msg);
-        output.push('\n');
-        // No percentage line or AI stats for deletion-only commits
         return output;
     }
 
     // Calculate total additions for the progress bar
-    // Total = pure human + mixed (AI-edited-by-human) + pure AI
-    let total_additions = stats.human_additions + stats.ai_additions;
+    // Total = pure human + mixed (AI-edited-by-human) + pure AI (accepted)
+    let total_additions = stats.git_diff_added_lines;
 
-    // Calculate AI acceptance percentage (capped at 100%)
-    // It can go higher because AI can write on top of AI code. This feels reasonable for now
-    let _ai_acceptance_percentage = if stats.ai_additions > 0 {
-        ((stats.ai_accepted as f64 / stats.ai_additions as f64) * 100.0).min(100.0)
-    } else {
-        0.0
-    };
-
-    // Create progress bar with three categories
-    // Pure human = human_additions - mixed_additions (overridden lines)
-    let pure_human = stats.human_additions.saturating_sub(stats.mixed_additions);
-
-    let pure_human_bars = if total_additions > 0 {
-        ((pure_human as f64 / total_additions as f64) * bar_width as f64) as usize
-    } else {
-        0
-    };
-
-    #[allow(unused_variables)]
-    let mixed_bars = if total_additions > 0 {
-        ((stats.mixed_additions as f64 / total_additions as f64) * bar_width as f64) as usize
-    } else {
-        0
-    };
-
-    #[allow(unused_variables)]
-    let ai_bars = if total_additions > 0 {
-        ((stats.ai_additions as f64 / total_additions as f64) * bar_width as f64) as usize
-    } else {
-        0
-    };
-
-    // Ensure human contributions get at least 2 visible blocks if they have more than 1 line
-    let min_human_bars = if stats.human_additions > 1 { 2 } else { 0 };
-    let final_pure_human_bars = if stats.human_additions > 1 {
-        pure_human_bars.max(min_human_bars)
-    } else {
-        pure_human_bars
-    };
-
-    // Adjust other bars if we had to give more space to human
-    let remaining_width = bar_width.saturating_sub(final_pure_human_bars);
-    let total_other_additions = stats.mixed_additions + stats.ai_additions;
-
-    let final_mixed_bars = if total_other_additions > 0 {
-        ((stats.mixed_additions as f64 / total_other_additions as f64) * remaining_width as f64)
-            as usize
-    } else {
-        0
-    };
-
-    let final_ai_bars = remaining_width.saturating_sub(final_mixed_bars);
-
-    // Build the progress bar with three categories
-    let mut progress_bar = String::new();
-    progress_bar.push_str("you&nbsp;&nbsp;");
-
-    // Pure human bars (darkest)
-    progress_bar.push_str(&"█".repeat(final_pure_human_bars));
-
-    // Mixed bars (medium) - AI-generated but human-edited
-    progress_bar.push_str(&"▒".repeat(final_mixed_bars));
-
-    // AI bars (lightest) - pure AI, untouched
-    progress_bar.push_str(&"░".repeat(final_ai_bars));
-
-    progress_bar.push_str("&nbsp;ai");
-
-    // Format time waiting for AI
-    #[allow(unused_variables)]
-    let waiting_time_str = if stats.time_waiting_for_ai > 0 {
-        let minutes = stats.time_waiting_for_ai / 60;
-        let seconds = stats.time_waiting_for_ai % 60;
-        if minutes > 0 {
-            format!("{}m {}s", minutes, seconds)
-        } else {
-            format!("{}s", seconds)
-        }
-    } else {
-        "0s".to_string()
-    };
+    // Pure human additions (not including mixed)
+    let pure_human = stats.human_additions;
+    // Mixed = AI lines that were edited by human
+    let mixed = stats.mixed_additions;
+    // Pure AI = AI lines accepted without changes
+    let pure_ai = stats.ai_accepted;
 
     // Calculate percentages for display
     let pure_human_percentage = if total_additions > 0 {
@@ -412,47 +323,123 @@ pub fn write_stats_to_markdown(stats: &CommitStats) -> String {
         0
     };
     let mixed_percentage = if total_additions > 0 {
-        ((stats.mixed_additions as f64 / total_additions as f64) * 100.0).round() as u32
+        ((mixed as f64 / total_additions as f64) * 100.0).round() as u32
     } else {
         0
     };
     let ai_percentage = if total_additions > 0 {
-        ((stats.ai_additions as f64 / total_additions as f64) * 100.0).round() as u32
+        ((pure_ai as f64 / total_additions as f64) * 100.0).round() as u32
     } else {
         0
     };
 
-    // Print the stats
-    output.push_str(&progress_bar);
-    output.push('\n');
-    // Print percentage line with proper spacing
-    // Block characters render much wider in markdown, so we need lots of spacing
-    if mixed_percentage > 0 {
-        // Show all three: human, mixed, ai
-        // Human% at left edge, mixed% in middle, AI% at right edge
-        let percentage_line = format!(
-            "{}{}{}mixed&nbsp;{}%{}{}%",
-            "&nbsp;".repeat(6),
-            format!("{}%", pure_human_percentage),
-            "&nbsp;".repeat(40),
-            mixed_percentage,
-            "&nbsp;".repeat(40),
-            ai_percentage
-        );
-        output.push_str(&percentage_line);
-        output.push('\n');
+    // Calculate bar sizes
+    let pure_human_bars = if total_additions > 0 {
+        let calculated =
+            ((pure_human as f64 / total_additions as f64) * bar_width as f64).round() as usize;
+        // Ensure at least 1 block if value > 0
+        if pure_human > 0 && calculated == 0 {
+            1
+        } else {
+            calculated
+        }
     } else {
-        // No mixed, just show human and ai at bar edges
-        let percentage_line = format!(
-            "{}{}{}{}%",
-            "&nbsp;".repeat(6),
-            format!("{}%", pure_human_percentage),
-            "&nbsp;".repeat(105),
-            ai_percentage
-        );
-        output.push_str(&percentage_line);
-        output.push('\n');
+        0
+    };
+
+    let mixed_bars = if total_additions > 0 {
+        let calculated =
+            ((mixed as f64 / total_additions as f64) * bar_width as f64).round() as usize;
+        // Ensure at least 1 block if value > 0
+        if mixed > 0 && calculated == 0 {
+            1
+        } else {
+            calculated
+        }
+    } else {
+        0
+    };
+
+    let ai_bars = if total_additions > 0 {
+        let calculated =
+            ((pure_ai as f64 / total_additions as f64) * bar_width as f64).round() as usize;
+        // Ensure at least 1 block if value > 0
+        if pure_ai > 0 && calculated == 0 {
+            1
+        } else {
+            calculated
+        }
+    } else {
+        0
+    };
+
+    output.push_str("Stats powered by [Git AI](https://github.com/acunniffe/git-ai)\n\n");
+    // Build the fenced code block
+    output.push_str("```text\n");
+
+    // Human line: dark blocks for human, light blocks for rest
+    output.push_str("🧠 you    ");
+    output.push_str(&"█".repeat(pure_human_bars));
+    output.push_str(&"░".repeat(bar_width.saturating_sub(pure_human_bars)));
+    output.push_str(&format!("  {}%\n", pure_human_percentage));
+
+    // Mixed line: light blocks for non-mixed, dark blocks for mixed, light blocks for rest
+    if mixed_percentage > 0 {
+        output.push_str("🤝 mixed  ");
+        output.push_str(&"░".repeat(pure_human_bars));
+        output.push_str(&"█".repeat(mixed_bars));
+        output.push_str(&"░".repeat(bar_width.saturating_sub(pure_human_bars + mixed_bars)));
+        output.push_str(&format!("  {}%\n", mixed_percentage));
     }
+
+    // AI line: light blocks for non-ai, dark blocks for ai
+    output.push_str("🤖 ai     ");
+    output.push_str(&"░".repeat(bar_width.saturating_sub(ai_bars)));
+    output.push_str(&"█".repeat(ai_bars));
+    output.push_str(&format!("  {}%\n", ai_percentage));
+
+    output.push_str("```");
+
+    // Add details section
+    output.push_str("\n\n<details>\n");
+    output.push_str("<summary>More stats</summary>\n\n");
+
+    // Calculate lines generated per line accepted
+    let lines_per_accepted = if stats.ai_accepted > 0 {
+        stats.total_ai_additions as f64 / stats.ai_accepted as f64
+    } else {
+        0.0
+    };
+    output.push_str(&format!(
+        "- {:.1} lines generated for every 1 accepted\n",
+        lines_per_accepted
+    ));
+
+    // Format time waiting for AI in minutes
+    let minutes = stats.time_waiting_for_ai / 60;
+    let seconds = stats.time_waiting_for_ai % 60;
+    let time_str = if minutes > 0 {
+        format!("{} mins {} secs", minutes, seconds)
+    } else {
+        format!("{} secs", seconds)
+    };
+    output.push_str(&format!("- {} time waiting for AI\n", time_str));
+
+    // Find top model by accepted lines
+    if !stats.tool_model_breakdown.is_empty() {
+        if let Some((model_name, model_stats)) = stats
+            .tool_model_breakdown
+            .iter()
+            .max_by_key(|(_, stats)| stats.ai_accepted)
+        {
+            output.push_str(&format!(
+                "- Top model: {} ({} accepted lines, {} generated lines)\n",
+                model_name, model_stats.ai_accepted, model_stats.total_ai_additions
+            ));
+        }
+    }
+
+    output.push_str("\n</details>");
 
     return output;
 }
@@ -542,7 +529,8 @@ pub fn stats_from_authorship_log(
         );
     }
 
-    // Human additions are the difference between total git diff and AI additions (ensure non-negative)
+    // Human additions are the difference between total git diff and AI accepted lines (ensure non-negative)
+    // This includes mixed lines (AI-generated but human-edited) as human additions
     commit_stats.human_additions = std::cmp::max(
         0,
         git_diff_added_lines.saturating_sub(commit_stats.ai_accepted),

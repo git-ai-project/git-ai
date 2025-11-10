@@ -42,8 +42,16 @@ pub fn run(
     }
 
     // Initialize the new storage system
-    let repo_storage = RepoStorage::for_repo_path(repo.path());
-    let working_log = repo_storage.working_log_for_base_commit(&base_commit);
+    let repo_storage = RepoStorage::for_repo_path(repo.path(), &repo.workdir()?);
+    let mut working_log = repo_storage.working_log_for_base_commit(&base_commit);
+
+    // Set dirty files if available
+    if let Some(dirty_files) = agent_run_result
+        .as_ref()
+        .and_then(|result| result.dirty_files.clone())
+    {
+        working_log.set_dirty_files(Some(dirty_files));
+    }
 
     // Get the current timestamp in milliseconds since the Unix epoch
     let ts = SystemTime::now()
@@ -298,6 +306,7 @@ pub fn run(
 // Gets tracked changes AND
 fn get_status_of_files(
     repo: &Repository,
+    working_log: &PersistedWorkingLog,
     edited_filepaths: HashSet<String>,
     skip_untracked: bool,
 ) -> Result<Vec<String>, GitAiError> {
@@ -337,7 +346,7 @@ fn get_status_of_files(
             let is_text = if is_deleted {
                 is_text_file_in_head(repo, &entry.path)
             } else {
-                is_text_file(repo, &entry.path)
+                is_text_file(working_log, &entry.path)
             };
 
             if is_text {
@@ -363,7 +372,7 @@ fn get_all_tracked_files(
         .unwrap_or_default();
 
     for file in working_log.read_initial_attributions().files.keys() {
-        if is_text_file(repo, &file) {
+        if is_text_file(working_log, &file) {
             files.insert(file.clone());
         }
     }
@@ -373,7 +382,7 @@ fn get_all_tracked_files(
             for entry in &checkpoint.entries {
                 if !files.contains(&entry.file) {
                     // Check if it's a text file before adding
-                    if is_text_file(repo, &entry.file) {
+                    if is_text_file(working_log, &entry.file) {
                         files.insert(entry.file.clone());
                     }
                 }
@@ -389,11 +398,24 @@ fn get_all_tracked_files(
         false
     };
 
-    let results_for_tracked_files = if is_pre_commit && !has_ai_checkpoints {
-        get_status_of_files(repo, files, true)?
+    let mut results_for_tracked_files = if is_pre_commit && !has_ai_checkpoints {
+        get_status_of_files(repo, working_log, files, true)?
     } else {
-        get_status_of_files(repo, files, false)?
+        get_status_of_files(repo, working_log, files, false)?
     };
+
+    // Ensure to always include all dirty files
+    if let Some(ref dirty_files) = working_log.dirty_files {
+        for file_path in dirty_files.keys() {
+            // Only add if not already in the files list
+            if !results_for_tracked_files.contains(&file_path) {
+                // Check if it's a text file before adding
+                if is_text_file(working_log, &file_path) {
+                    results_for_tracked_files.push(file_path.clone());
+                }
+            }
+        }
+    }
 
     Ok(results_for_tracked_files)
 }
@@ -405,16 +427,10 @@ fn save_current_file_states(
     let mut file_content_hashes = HashMap::new();
 
     for file_path in files {
-        let abs_path = working_log.repo_root.join(file_path);
-        let content = if abs_path.exists() {
-            // Read file as bytes first, then convert to string with UTF-8 lossy conversion
-            match std::fs::read(&abs_path) {
-                Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
-                Err(_) => String::new(), // If we can't read the file, treat as empty
-            }
-        } else {
-            String::new()
-        };
+        // Read file content using working_log, which respects dirty_files
+        let content = working_log
+            .read_current_file_content(file_path)
+            .unwrap_or_else(|_| String::new());
 
         // Persist the file content and get the content hash
         let content_hash = working_log.persist_file_version(&content)?;
@@ -437,8 +453,7 @@ fn get_checkpoint_entry_for_file(
     initial_attributions: Arc<HashMap<String, Vec<LineAttribution>>>,
     ts: u128,
 ) -> Result<Option<WorkingLogEntry>, GitAiError> {
-    let abs_path = working_log.repo_root.join(&file_path);
-    let current_content = std::fs::read_to_string(&abs_path).unwrap_or_else(|_| String::new());
+    let current_content = working_log.read_current_file_content(&file_path).unwrap_or_default();
     
     println!("\n========== CHECKPOINT DEBUG: {} ==========", file_path);
     println!("Checkpoint Kind: {:?}", kind);
@@ -813,8 +828,9 @@ fn compute_line_stats(
 
     // good candidate for parallelization
     for file_path in files {
-        let abs_path = working_log.repo_root.join(file_path);
-        let current_content = std::fs::read_to_string(&abs_path).unwrap_or_else(|_| String::new());
+        let current_content = working_log
+            .read_current_file_content(file_path)
+            .unwrap_or_else(|_| String::new());
 
         // Get previous content
         let previous_content = if let Some((prev_hash, _)) = previous_file_state.get(file_path) {
@@ -1049,6 +1065,7 @@ mod tests {
                 file.filename().to_string(), // This one is valid
             ]),
             will_edit_filepaths: None,
+            dirty_files: None,
         };
 
         // Run checkpoint - should not crash even with paths outside repo
@@ -1245,24 +1262,27 @@ mod tests {
     }
 }
 
-fn is_text_file(repo: &Repository, path: &str) -> bool {
-    let repo_workdir = repo.workdir().unwrap();
-    let abs_path = repo_workdir.join(path);
+fn is_text_file(working_log: &PersistedWorkingLog, path: &str) -> bool {
+    let skip_metadata_check = working_log
+        .dirty_files
+        .as_ref()
+        .map(|m| m.contains_key(path))
+        .unwrap_or(false);
 
-    if let Ok(metadata) = std::fs::metadata(&abs_path) {
-        if !metadata.is_file() {
-            return false;
+    if !skip_metadata_check {
+        if let Ok(metadata) = std::fs::metadata(working_log.to_repo_absolute_path(path)) {
+            if !metadata.is_file() {
+                return false;
+            }
+        } else {
+            return false; // If metadata can't be read, treat as non-text
         }
-    } else {
-        return false; // If metadata can't be read, treat as non-text
     }
 
-    if let Ok(content) = std::fs::read(&abs_path) {
-        // Consider a file text if it contains no null bytes
-        !content.contains(&0)
-    } else {
-        false
-    }
+    working_log
+        .read_current_file_content(path)
+        .map(|content| !content.chars().any(|c| c == '\0'))
+        .unwrap_or(false)
 }
 
 fn is_text_file_in_head(repo: &Repository, path: &str) -> bool {

@@ -88,23 +88,19 @@ pub fn range_authorship(
         debug_log(&format!("✓ Fetched {} from {}", fetch_refspec, remote));
     }
 
-    // First, collect all commit SHAs from the range
+    // Clone commit_range before consuming it
     let repository = commit_range.repo();
-    let _refname = commit_range.refname.clone();
+    let commit_range_clone = commit_range.clone();
 
-    // Extract start/end before consuming commit_range
-    let start_sha = commit_range.start_oid.clone();
-    let end_sha = commit_range.end_oid.clone();
-
+    // Collect commit SHAs from the range
     let commit_shas: Vec<String> = commit_range
         .into_iter()
         .map(|c| c.id().to_string())
         .collect();
     let commit_authorship = get_commits_with_notes_from_list(repository, &commit_shas)?;
 
-    // Calculate range stats using the extracted start/end and pre-loaded commit_authorship
-    let range_stats =
-        calculate_range_stats_direct(repository, &start_sha, &end_sha, &commit_authorship)?;
+    // Calculate range stats - now just pass start, end, and commits
+    let range_stats = calculate_range_stats_direct(repository, commit_range_clone)?;
 
     Ok(RangeAuthorshipStats {
         authorship_stats: RangeAuthorshipStatsData {
@@ -154,6 +150,7 @@ fn create_authorship_log_for_range(
     repo: &Repository,
     start_sha: &str,
     end_sha: &str,
+    commit_shas: &[String],
 ) -> Result<crate::authorship::authorship_log_serialization::AuthorshipLog, GitAiError> {
     use crate::authorship::virtual_attribution::{
         VirtualAttributions, merge_attributions_favoring_first,
@@ -175,6 +172,9 @@ fn create_authorship_log_for_range(
                 attestations: Vec::new(),
                 metadata: crate::authorship::authorship_log_serialization::AuthorshipMetadata {
                     schema_version: "3".to_string(),
+                    git_ai_version: Some(
+                        crate::authorship::authorship_log_serialization::GIT_AI_VERSION.to_string(),
+                    ),
                     base_commit_sha: end_sha.to_string(),
                     prompts: std::collections::BTreeMap::new(),
                 },
@@ -189,17 +189,24 @@ fn create_authorship_log_for_range(
 
     // Step 2: Create VirtualAttributions for start commit (older)
     let repo_clone = repo.clone();
-    let start_va = smol::block_on(async {
+    let mut start_va = smol::block_on(async {
         VirtualAttributions::new_for_base_commit(repo_clone, start_sha.to_string(), &changed_files)
             .await
     })?;
 
     // Step 3: Create VirtualAttributions for end commit (newer)
     let repo_clone = repo.clone();
-    let end_va = smol::block_on(async {
+    let mut end_va = smol::block_on(async {
         VirtualAttributions::new_for_base_commit(repo_clone, end_sha.to_string(), &changed_files)
             .await
     })?;
+
+    // Step 3.5: Filter both VirtualAttributions to only include prompts from commits in this range
+    // This ensures we only count AI contributions that happened during these commits,
+    // not AI contributions from before the range
+    let commit_set: HashSet<String> = commit_shas.iter().cloned().collect();
+    start_va.filter_to_commits(&commit_set);
+    end_va.filter_to_commits(&commit_set);
 
     // Step 4: Read committed files from end commit (final state)
     let committed_files = get_committed_files_content(repo, end_sha, &changed_files)?;
@@ -302,22 +309,22 @@ fn get_git_diff_stats_for_range(
 /// Uses VirtualAttributions approach to create an in-memory squash
 fn calculate_range_stats_direct(
     repo: &Repository,
-    start_sha: &str,
-    end_sha: &str,
-    _commit_authorship: &[CommitAuthorship],
+    commit_range: CommitRange,
 ) -> Result<CommitStats, GitAiError> {
+    let start_sha = commit_range.start_oid.clone();
+    let end_sha = commit_range.end_oid.clone();
     // Special case: single commit range (start == end)
-    // Fall back to single-commit stats calculation
     if start_sha == end_sha {
-        return stats_for_commit_stats(repo, end_sha, "");
+        return stats_for_commit_stats(repo, &end_sha, &commit_range.refname);
     }
 
     // Step 1: Get git diff stats between start and end
     let (git_diff_added_lines, git_diff_deleted_lines) =
-        get_git_diff_stats_for_range(repo, start_sha, end_sha)?;
+        get_git_diff_stats_for_range(repo, &start_sha, &end_sha)?;
 
-    // Step 2: Create in-memory authorship log for the range
-    let authorship_log = create_authorship_log_for_range(repo, start_sha, end_sha)?;
+    // Step 2: Create in-memory authorship log for the range, filtered to only commits in the range
+    let commit_shas = commit_range.clone().all_commits();
+    let authorship_log = create_authorship_log_for_range(repo, &start_sha, &end_sha, &commit_shas)?;
 
     // Step 3: Calculate stats from the authorship log
     let stats = stats_from_authorship_log(

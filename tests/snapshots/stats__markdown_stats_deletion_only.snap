@@ -1,0 +1,5 @@
+---
+source: tests/stats.rs
+expression: markdown
+---
+"(no additions)\n"

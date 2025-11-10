@@ -21,6 +21,9 @@ All options in `config.json` are optional and will fall back to default values i
 | `exclude_repositories` | `Pattern[]` | Exclude `git-ai` from these remotes. Supports glob patterns (e.g., `https://github.com/myorg/*`) | If a repository is present in both allow and exclude lists, exclusion takes precedence |
 | `telemetry_oss` | `"off"` | Disable OSS performance metrics and error logging sent to Git AI maintainers | Defaults to enabled |
 | `telemetry_enterprise_dsn` | `string` | A Sentry DSN to use to send yourself performance metrics and error logging | Defaults to none |
+| `disable_version_checks` | `boolean` | Skip automated version checks that would otherwise run on fetch/pull/push | `false` |
+| `disable_auto_updates` | `boolean` | Keep checking for updates but never install them automatically | `false` |
+| `update_channel` | `"latest" \| "next"` | Release channel to follow (`latest` = stable, `next` = prerelease) | `"latest"` |
 
 ## Example Configuration
 
@@ -33,9 +36,22 @@ All options in `config.json` are optional and will fall back to default values i
     ],
     "exclude_repositories": [
         "https://github.com/internal/private-repo.git"
-    ]
+    ],
+    "disable_version_checks": false,
+    "disable_auto_updates": false,
+    "update_channel": "latest"
 }
 ```
+
+## Update Controls
+
+Most enterprises roll out new binaries gradually. Combine these three options to match your rollout plan:
+
+- `update_channel` selects which release feed each machine follows. Use `next` for early adopters and keep the rest of the org on `latest`.
+- `disable_version_checks` completely skips the asynchronous checks that normally run on fetch/pull/push. Only use this if you manage upgrades manually.
+- `disable_auto_updates` keeps those checks but stops the background installer, so the CLI only surfaces a "run git-ai upgrade" message.
+
+Because the config file lives in each user's home directory, you can templatize these fields through MDM, your endpoint management tool, or any bootstrap script.
 
 ## Configuration Use Cases
 

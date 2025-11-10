@@ -1,5 +1,6 @@
+use crate::error::GitAiError;
 use crate::git::diff_tree_to_tree::Diff;
-use std::time::{Duration, Instant};
+use std::path::PathBuf;
 
 /// Check if debug logging is enabled via environment variable
 ///
@@ -73,4 +74,30 @@ pub fn _print_diff(diff: &Diff, old_label: &str, new_label: &str) {
     if file_count == 0 {
         println!("  No changes between {} and {}", old_label, new_label);
     }
+}
+
+pub fn current_git_ai_exe() -> Result<PathBuf, GitAiError> {
+    let path = std::env::current_exe()?;
+    
+    // Get platform-specific executable names
+    let git_name = if cfg!(windows) { "git.exe" } else { "git" };
+    let git_ai_name = if cfg!(windows) { "git-ai.exe" } else { "git-ai" };
+    
+    // Check if the filename matches the git executable name for this platform
+    if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+        if file_name == git_name {
+            // Try replacing with git-ai executable name for this platform
+            let git_ai_path = path.with_file_name(git_ai_name);
+            
+            // Check if the git-ai file exists
+            if git_ai_path.exists() {
+                return Ok(git_ai_path);
+            }
+            
+            // If it doesn't exist, return the git-ai executable name as a PathBuf
+            return Ok(PathBuf::from(git_ai_name));
+        }
+    }
+    
+    Ok(path)
 }

@@ -2,4 +2,4 @@
 source: src/authorship/authorship_log_serialization.rs
 expression: serialized
 ---
-"---\n{\n  \"schema_version\": \"authorship/3.0.0\",\n  \"base_commit_sha\": \"abc123\",\n  \"prompts\": {\n    \"c9883b0\": {\n      \"agent_id\": {\n        \"tool\": \"cursor\",\n        \"id\": \"session_123\",\n        \"model\": \"claude-3-sonnet\"\n      },\n      \"human_author\": null,\n      \"messages\": [],\n      \"total_additions\": 0,\n      \"total_deletions\": 0,\n      \"accepted_lines\": 0,\n      \"overriden_lines\": 0\n    }\n  }\n}"
+"---\n{\n  \"schema_version\": \"authorship/3.0.0\",\n  \"git_ai_version\": \"development\",\n  \"base_commit_sha\": \"abc123\",\n  \"prompts\": {\n    \"c9883b0\": {\n      \"agent_id\": {\n        \"tool\": \"cursor\",\n        \"id\": \"session_123\",\n        \"model\": \"claude-3-sonnet\"\n      },\n      \"human_author\": null,\n      \"messages\": [],\n      \"total_additions\": 0,\n      \"total_deletions\": 0,\n      \"accepted_lines\": 0,\n      \"overriden_lines\": 0\n    }\n  }\n}"

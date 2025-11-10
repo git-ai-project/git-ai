@@ -16,6 +16,38 @@ pub struct Config {
     exclude_repositories: Vec<Pattern>,
     telemetry_oss_disabled: bool,
     telemetry_enterprise_dsn: Option<String>,
+    disable_version_checks: bool,
+    disable_auto_updates: bool,
+    update_channel: UpdateChannel,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpdateChannel {
+    Latest,
+    Next,
+}
+
+impl UpdateChannel {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            UpdateChannel::Latest => "latest",
+            UpdateChannel::Next => "next",
+        }
+    }
+
+    fn from_str(input: &str) -> Option<Self> {
+        match input.trim().to_lowercase().as_str() {
+            "latest" => Some(UpdateChannel::Latest),
+            "next" => Some(UpdateChannel::Next),
+            _ => None,
+        }
+    }
+}
+
+impl Default for UpdateChannel {
+    fn default() -> Self {
+        UpdateChannel::Latest
+    }
 }
 #[derive(Deserialize)]
 struct FileConfig {
@@ -31,6 +63,12 @@ struct FileConfig {
     telemetry_oss: Option<String>,
     #[serde(default)]
     telemetry_enterprise_dsn: Option<String>,
+    #[serde(default)]
+    disable_version_checks: Option<bool>,
+    #[serde(default)]
+    disable_auto_updates: Option<bool>,
+    #[serde(default)]
+    update_channel: Option<String>,
 }
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
@@ -53,6 +91,7 @@ impl Config {
         &self.git_path
     }
 
+    #[allow(dead_code)]
     pub fn get_ignore_prompts(&self) -> bool {
         self.ignore_prompts
     }
@@ -109,6 +148,18 @@ impl Config {
     pub fn telemetry_enterprise_dsn(&self) -> Option<&str> {
         self.telemetry_enterprise_dsn.as_deref()
     }
+
+    pub fn version_checks_disabled(&self) -> bool {
+        self.disable_version_checks
+    }
+
+    pub fn auto_updates_disabled(&self) -> bool {
+        self.disable_auto_updates
+    }
+
+    pub fn update_channel(&self) -> UpdateChannel {
+        self.update_channel
+    }
 }
 
 fn build_config() -> Config {
@@ -158,6 +209,24 @@ fn build_config() -> Config {
         .as_ref()
         .and_then(|c| c.telemetry_enterprise_dsn.clone())
         .filter(|s| !s.is_empty());
+    
+    // Default to disabled (true) unless this is an OSS build
+    // OSS builds set OSS_BUILD env var at compile time to "1", which enables auto-updates by default
+    let auto_update_flags_default_disabled = option_env!("OSS_BUILD").is_none() || option_env!("OSS_BUILD").unwrap() != "1";
+    
+    let disable_version_checks = file_cfg
+        .as_ref()
+        .and_then(|c| c.disable_version_checks)
+        .unwrap_or(auto_update_flags_default_disabled);
+    let disable_auto_updates = file_cfg
+        .as_ref()
+        .and_then(|c| c.disable_auto_updates)
+        .unwrap_or(auto_update_flags_default_disabled);
+    let update_channel = file_cfg
+        .as_ref()
+        .and_then(|c| c.update_channel.as_deref())
+        .and_then(UpdateChannel::from_str)
+        .unwrap_or_default();
 
     let git_path = resolve_git_path(&file_cfg);
 
@@ -168,6 +237,9 @@ fn build_config() -> Config {
         exclude_repositories,
         telemetry_oss_disabled,
         telemetry_enterprise_dsn,
+        disable_version_checks,
+        disable_auto_updates,
+        update_channel,
     }
 }
 
@@ -265,6 +337,9 @@ mod tests {
                 .collect(),
             telemetry_oss_disabled: false,
             telemetry_enterprise_dsn: None,
+            disable_version_checks: false,
+            disable_auto_updates: false,
+            update_channel: UpdateChannel::Latest,
         }
     }
 

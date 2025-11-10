@@ -194,20 +194,51 @@ impl Repository {
             file_path.to_string()
         };
 
-        let abs_file_path = repo_root.join(&relative_file_path);
+        // Read file content either from a specific commit or from working directory
+        let (file_content, total_lines) = if let Some(ref commit) = options.newest_commit {
+            // Read file content from the specified commit
+            // This ensures blame is independent of which branch is checked out
+            let commit_obj = self.find_commit(commit.clone())?;
+            let tree = commit_obj.tree()?;
 
-        // Validate that the file exists
-        if !abs_file_path.exists() {
-            return Err(GitAiError::Generic(format!(
-                "File not found: {}",
-                abs_file_path.display()
-            )));
-        }
+            match tree.get_path(std::path::Path::new(&relative_file_path)) {
+                Ok(entry) => {
+                    if let Ok(blob) = self.find_blob(entry.id()) {
+                        let blob_content = blob.content().unwrap_or_default();
+                        let content = String::from_utf8_lossy(&blob_content).to_string();
+                        let lines_count = content.lines().count() as u32;
+                        (content, lines_count)
+                    } else {
+                        return Err(GitAiError::Generic(format!(
+                            "File '{}' is not a blob in commit {}",
+                            relative_file_path, commit
+                        )));
+                    }
+                }
+                Err(_) => {
+                    return Err(GitAiError::Generic(format!(
+                        "File '{}' not found in commit {}",
+                        relative_file_path, commit
+                    )));
+                }
+            }
+        } else {
+            // Read from working directory (existing behavior)
+            let abs_file_path = repo_root.join(&relative_file_path);
 
-        // Read the current file content
-        let file_content = fs::read_to_string(&abs_file_path)?;
+            if !abs_file_path.exists() {
+                return Err(GitAiError::Generic(format!(
+                    "File not found: {}",
+                    abs_file_path.display()
+                )));
+            }
+
+            let content = fs::read_to_string(&abs_file_path)?;
+            let lines_count = content.lines().count() as u32;
+            (content, lines_count)
+        };
+
         let lines: Vec<&str> = file_content.lines().collect();
-        let total_lines = lines.len() as u32;
 
         // Determine the line ranges to process
         let line_ranges = if options.line_ranges.is_empty() {

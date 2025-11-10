@@ -398,6 +398,7 @@ impl TmpRepo {
             repo_working_dir: None,
             edited_filepaths: None,
             will_edit_filepaths: None,
+            dirty_files: None,
         };
 
         checkpoint(

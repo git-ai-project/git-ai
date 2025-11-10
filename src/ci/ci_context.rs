@@ -12,6 +12,7 @@ pub enum CiEvent {
         head_ref: String,
         head_sha: String,
         base_ref: String,
+        #[allow(dead_code)]
         base_sha: String,
     },
 }

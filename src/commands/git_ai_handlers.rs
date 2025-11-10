@@ -1,14 +1,13 @@
 use crate::authorship::range_authorship;
 use crate::authorship::stats::stats_command;
-use crate::authorship::working_log::{AgentId, Checkpoint, CheckpointKind};
+use crate::authorship::working_log::{AgentId, CheckpointKind};
 use crate::commands;
 use crate::commands::checkpoint_agent::agent_presets::{
-    AgentCheckpointFlags, AgentCheckpointPreset, AgentRunResult, ClaudePreset, CursorPreset,
-    GithubCopilotPreset,
+    AgentCheckpointFlags, AgentCheckpointPreset, AgentRunResult, AiTabPreset, ClaudePreset,
+    CursorPreset, GithubCopilotPreset,
 };
 use crate::commands::checkpoint_agent::agent_v1_preset::AgentV1Preset;
 use crate::config;
-use crate::error::GitAiError;
 use crate::git::find_repository;
 use crate::git::find_repository_in_path;
 use crate::git::repository::CommitRange;
@@ -84,6 +83,9 @@ pub fn handle_git_ai(args: &[String]) {
         "ci" => {
             commands::ci_handlers::handle_ci(&args[1..]);
         }
+        "upgrade" => {
+            commands::upgrade::run_with_args(&args[1..]);
+        }
         "flush-logs" => {
             commands::flush_logs::handle_flush_logs(&args[1..]);
         }
@@ -101,7 +103,7 @@ fn print_help() {
     eprintln!("");
     eprintln!("Commands:");
     eprintln!("  checkpoint         Checkpoint working changes and attribute author");
-    eprintln!("    Presets: claude, cursor, github-copilot, mock_ai");
+    eprintln!("    Presets: claude, cursor, github-copilot, ai_tab, mock_ai");
     eprintln!(
         "    --hook-input <json|stdin>   JSON payload required by presets, or 'stdin' to read from stdin"
     );
@@ -120,9 +122,13 @@ fn print_help() {
     eprintln!("  ci                 Continuous integration utilities");
     eprintln!("    github                 GitHub CI helpers");
     eprintln!("  squash-authorship  Generate authorship log for squashed commits");
-    eprintln!("    <base_branch> <new_sha> <old_sha>  Required: base branch, new commit SHA, old commit SHA");
+    eprintln!(
+        "    <base_branch> <new_sha> <old_sha>  Required: base branch, new commit SHA, old commit SHA"
+    );
     eprintln!("    --dry-run             Show what would be done without making changes");
     eprintln!("  git-path           Print the path to the underlying git executable");
+    eprintln!("  upgrade            Check for updates and install if available");
+    eprintln!("    --force               Reinstall latest version even if already up to date");
     eprintln!("  version, -v, --version     Print the git-ai version");
     eprintln!("  help, -h, --help           Show this help message");
     eprintln!("");
@@ -233,6 +239,22 @@ fn handle_checkpoint(args: &[String]) {
                     }
                 }
             }
+            "ai_tab" => {
+                match AiTabPreset.run(AgentCheckpointFlags {
+                    hook_input: hook_input.clone(),
+                }) {
+                    Ok(agent_run) => {
+                        if agent_run.repo_working_dir.is_some() {
+                            repository_working_dir = agent_run.repo_working_dir.clone().unwrap();
+                        }
+                        agent_run_result = Some(agent_run);
+                    }
+                    Err(e) => {
+                        eprintln!("ai_tab preset error: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
             "agent-v1" => {
                 match AgentV1Preset.run(AgentCheckpointFlags {
                     hook_input: hook_input.clone(),
@@ -285,6 +307,7 @@ fn handle_checkpoint(args: &[String]) {
                     repo_working_dir: None,
                     edited_filepaths,
                     will_edit_filepaths: None,
+                    dirty_files: None,
                 });
             }
             _ => {}
@@ -309,7 +332,7 @@ fn handle_checkpoint(args: &[String]) {
         .map(|r| r.checkpoint_kind)
         .unwrap_or(CheckpointKind::Human);
 
-    if CheckpointKind::Human == checkpoint_kind {
+    if CheckpointKind::Human == checkpoint_kind && agent_run_result.is_none() {
         println!(
             "get_all_files_for_mock_ai HUMAN Checkpoints: {:?}",
             get_all_files_for_mock_ai(&final_working_dir)
@@ -331,6 +354,7 @@ fn handle_checkpoint(args: &[String]) {
             will_edit_filepaths: Some(get_all_files_for_mock_ai(&final_working_dir)),
             edited_filepaths: None,
             repo_working_dir: Some(final_working_dir),
+            dirty_files: None,
         });
     }
 

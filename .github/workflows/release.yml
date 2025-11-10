@@ -1,5 +1,8 @@
 name: Release Build
 
+permissions:
+  contents: write
+
 on:
   workflow_dispatch:
     inputs:
@@ -7,6 +10,11 @@ on:
         description: 'Dry Run (uncheck to create a release)'
         required: false
         default: true
+        type: boolean
+      release_production:
+        description: 'Release to latest (production) channel. For stable production releases only!'
+        required: false
+        default: false
         type: boolean
 
 jobs:
@@ -56,6 +64,7 @@ jobs:
             -w /workspace \
             -e DEBIAN_FRONTEND=noninteractive \
             -e SENTRY_OSS="${{ secrets.SENTRY_OSS }}" \
+            -e OSS_BUILD="1" \
             ${{ matrix.docker_image }} \
             bash -c "
               apt-get update && \
@@ -92,6 +101,7 @@ jobs:
         env:
           CARGO_INCREMENTAL: 0
           SENTRY_OSS: ${{ secrets.SENTRY_OSS }}
+          OSS_BUILD: "1"
 
       - name: Verify binary architecture (Linux)
         if: contains(matrix.os, 'ubuntu')
@@ -187,6 +197,7 @@ jobs:
         env:
           CARGO_INCREMENTAL: 0
           SENTRY_OSS: ${{ secrets.SENTRY_OSS }}
+          OSS_BUILD: "1"
 
       - name: Verify binary architecture
         run: |
@@ -219,6 +230,31 @@ jobs:
     if: success() && inputs.dry_run != true
 
     steps:
+      - name: Determine release metadata
+        id: release-meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE_VERSION="${{ needs.build.outputs.version }}"
+          SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
+          if [[ "${{ inputs.release_production }}" == 'true' ]]; then
+            RELEASE_TAG="$BASE_VERSION"
+            CHANNEL="latest"
+            PRERELEASE="false"
+            MAKE_LATEST="true"
+          else
+            RELEASE_TAG="${BASE_VERSION}-next-${SHORT_SHA}"
+            CHANNEL="next"
+            PRERELEASE="true"
+            MAKE_LATEST="false"
+          fi
+
+          echo "tag_name=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "release_name=Release $RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "make_latest=$MAKE_LATEST" >> "$GITHUB_OUTPUT"
+          echo "channel_label=$CHANNEL" >> "$GITHUB_OUTPUT"
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -249,10 +285,13 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.build.outputs.version }}
-          name: Release ${{ needs.build.outputs.version }}
+          tag_name: ${{ steps.release-meta.outputs.tag_name }}
+          name: ${{ steps.release-meta.outputs.release_name }}
           body: |
-            ## git-ai ${{ needs.build.outputs.version }}
+            ## git-ai ${{ steps.release-meta.outputs.tag_name }}
+
+            ### Release Channel
+            `${{ steps.release-meta.outputs.channel_label }}`
 
             ### Downloads
             - **Linux (x64)**: `git-ai-linux-x64`
@@ -275,6 +314,45 @@ jobs:
             release/git-ai-*
             release/SHA256SUMS
           draft: false
-          prerelease: false
+          prerelease: ${{ steps.release-meta.outputs.prerelease == 'true' }}
+          make_latest: ${{ steps.release-meta.outputs.make_latest }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Checkout code for version bump
+        if: inputs.release_production == true
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Bump version in Cargo.toml
+        if: inputs.release_production == true
+        id: bump-version
+        run: |
+          # Extract current version
+          CURRENT_VERSION=$(grep '^version = ' Cargo.toml | cut -d'"' -f2)
+          echo "Current version: $CURRENT_VERSION"
+          
+          # Parse version components
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
+          
+          # Bump patch version
+          NEW_PATCH=$((PATCH + 1))
+          NEW_VERSION="${MAJOR}.${MINOR}.${NEW_PATCH}"
+          echo "New version: $NEW_VERSION"
+          
+          # Update Cargo.toml
+          sed -i.bak "s/^version = \"${CURRENT_VERSION}\"/version = \"${NEW_VERSION}\"/" Cargo.toml
+          rm Cargo.toml.bak
+          
+          echo "new_version=${NEW_VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Commit and push version bump
+        if: inputs.release_production == true
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml
+          git commit -m "chore: bump version to ${{ steps.bump-version.outputs.new_version }} [skip ci]"
+          git push origin main

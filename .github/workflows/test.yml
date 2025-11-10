@@ -11,6 +11,7 @@ jobs:
     name: Test on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
 
@@ -42,4 +43,3 @@ jobs:
         run: cargo test -- --test-threads=1
         env:
           CARGO_INCREMENTAL: 0
-          GIT_AI_DEBUG_PERFORMANCE: 0

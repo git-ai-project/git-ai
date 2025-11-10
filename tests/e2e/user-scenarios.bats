@@ -315,6 +315,49 @@ EOF
     echo "step4" >> multi.txt
     run git-ai checkpoint mock_ai multi.txt
     [ "$status" -eq 0 ]
+
+
+    git add multi.txt
+    git commit -m "Test multiple checkpoints in sequence"
+
+     stats_json=$(get_stats_json)
+    
+    # Debug: show the stats output
+    echo "=== Stats JSON output ===" >&3
+    echo "$stats_json" >&3
+
+    echo "=== Blame output ===" >&3
+    git-ai blame multi.txt >&3
+
+    # Verify JSON is valid
+    verify_stats_json "$stats_json" || return 1
+
+    expected_json='{
+      "human_additions": 2,
+      "mixed_additions": 0,
+      "ai_additions": 2,
+      "ai_accepted": 2,
+      "total_ai_additions": 2,
+      "total_ai_deletions": 0,
+      "time_waiting_for_ai": 0,
+      "git_diff_deleted_lines": 0,
+      "git_diff_added_lines": 4,
+      "tool_model_breakdown": {
+        "mock_ai::unknown": {
+          "ai_additions": 2,
+          "mixed_additions": 0,
+          "ai_accepted": 2,
+          "total_ai_additions": 2,
+          "total_ai_deletions": 0,
+          "time_waiting_for_ai": 0
+        }
+      }
+    }'
+
+    # Compare JSONs using helper
+    compare_json "$expected_json" "$stats_json" "Stats JSON does not match expected" || return 1
+    
+    echo "✓ Complete JSON match verified" >&3
 }
 
 @test "git-ai stats shows AI contribution after commit" {
@@ -1472,6 +1515,162 @@ EOF
     echo "✓ AI attribution successfully preserved after conflict resolution during rebase" >&3
 }
 
+@test "git-ai stats range command works correctly" {
+    # Get the base commit (initial commit from setup)
+    base_commit=$(git rev-parse HEAD)
+    
+    # COMMIT 1: Human adds 3 lines to a file
+    cat > example.txt <<'EOF'
+H: Human Line 1
+H: Human Line 2
+H: Human Line 3
+EOF
+    
+    git-ai checkpoint
+    git add example.txt
+    git commit -m "Commit 1: Human adds 3 lines"
+    
+    commit1_sha=$(git rev-parse HEAD)
+    
+    echo "=== Commit 1 SHA: $commit1_sha ===" >&3
+    
+    # COMMIT 2: AI adds 5 more lines to the same file
+    cat > example.txt <<'EOF'
+H: Human Line 1
+H: Human Line 2
+H: Human Line 3
+AI: AI Line 1
+AI: AI Line 2
+AI: AI Line 3
+AI: AI Line 4
+AI: AI Line 5
+EOF
+    
+    git-ai checkpoint mock_ai example.txt
+    git add example.txt
+    git commit -m "Commit 2: AI adds 5 lines"
+    
+    commit2_sha=$(git rev-parse HEAD)
+    
+    echo "=== Commit 2 SHA: $commit2_sha ===" >&3
+    
+    # Test the range command: base_commit..commit2_sha
+    # This should include both commit1 and commit2
+    echo "=== Testing range: $base_commit..$commit2_sha ===" >&3
+    
+    stats_output=$(git-ai stats "$base_commit..$commit2_sha" --json 2>&1)
+    stats_json=$(echo "$stats_output" | grep -v '^\[DEBUG\]' | grep '^{')
+    
+    echo "=== Stats JSON for range ===" >&3
+    echo "$stats_json" >&3
+    
+    # Verify JSON is valid
+    if ! command -v jq &> /dev/null; then
+        echo "WARNING: jq not available, skipping JSON validation" >&3
+    else
+        echo "$stats_json" | jq . >/dev/null 2>&1 || {
+            echo "ERROR: Invalid JSON in stats output" >&3
+            return 1
+        }
+    fi
+    
+    # Expected stats for the range (both commits combined):
+    # - Commit 1: Human added 3 lines (module1.py)
+    # - Commit 2: AI added 5 lines (module2.py)
+    # Total: 3 human additions, 5 AI additions
+    # Note: Range stats are nested under "range_stats" field
+    expected_json='{
+      "authorship_stats": {
+        "total_commits": 2,
+        "commits_with_authorship": 2,
+        "authors_commiting_authorship": ["Test User <test@example.com>"],
+        "authors_not_commiting_authorship": [],
+        "commits_without_authorship": [],
+        "commits_without_authorship_with_authors": []
+      },
+      "range_stats": {
+        "human_additions": 3,
+        "mixed_additions": 0,
+        "ai_additions": 5,
+        "ai_accepted": 5,
+        "total_ai_additions": 5,
+        "total_ai_deletions": 0,
+        "time_waiting_for_ai": 0,
+        "git_diff_deleted_lines": 0,
+        "git_diff_added_lines": 8,
+        "tool_model_breakdown": {
+          "mock_ai::unknown": {
+            "ai_additions": 5,
+            "mixed_additions": 0,
+            "ai_accepted": 5,
+            "total_ai_additions": 5,
+            "total_ai_deletions": 0,
+            "time_waiting_for_ai": 0
+          }
+        }
+      }
+    }'
+    
+    compare_json "$expected_json" "$stats_json" "Range stats do not match expected" || return 1
+    
+    # Also test with just the second commit in the range
+    echo "=== Testing range: $commit1_sha..$commit2_sha ===" >&3
+    
+    stats_output_single=$(git-ai stats "$commit1_sha..$commit2_sha" --json 2>&1)
+    stats_json_single=$(echo "$stats_output_single" | grep -v '^\[DEBUG\]' | grep '^{')
+    
+    echo "=== Stats JSON for single commit range ===" >&3
+    echo "$stats_json_single" >&3
+    
+    # Verify JSON is valid
+    if ! command -v jq &> /dev/null; then
+        echo "WARNING: jq not available, skipping JSON validation" >&3
+    else
+        echo "$stats_json_single" | jq . >/dev/null 2>&1 || {
+            echo "ERROR: Invalid JSON in stats output" >&3
+            return 1
+        }
+    fi
+    
+    # Expected stats for commit1..commit2 (only commit2):
+    # - Only Commit 2: AI added 5 lines (module2.py)
+    expected_json_single='{
+      "authorship_stats": {
+        "total_commits": 1,
+        "commits_with_authorship": 1,
+        "authors_commiting_authorship": ["Test User <test@example.com>"],
+        "authors_not_commiting_authorship": [],
+        "commits_without_authorship": [],
+        "commits_without_authorship_with_authors": []
+      },
+      "range_stats": {
+        "human_additions": 0,
+        "mixed_additions": 0,
+        "ai_additions": 5,
+        "ai_accepted": 5,
+        "total_ai_additions": 5,
+        "total_ai_deletions": 0,
+        "time_waiting_for_ai": 0,
+        "git_diff_deleted_lines": 0,
+        "git_diff_added_lines": 5,
+        "tool_model_breakdown": {
+          "mock_ai::unknown": {
+            "ai_additions": 5,
+            "mixed_additions": 0,
+            "ai_accepted": 5,
+            "total_ai_additions": 5,
+            "total_ai_deletions": 0,
+            "time_waiting_for_ai": 0
+          }
+        }
+      }
+    }'
+    
+    compare_json "$expected_json_single" "$stats_json_single" "Single commit range stats do not match expected" || return 1
+    
+    echo "✓ Stats range command verified successfully" >&3
+}
+
 @test "Attribution is correct after AI deleted it's own lines from previous commit" {
     
     # COMMIT 1: AI creates initial content (3 lines)
@@ -1559,4 +1758,577 @@ EOF
     compare_json "$expected_json" "$stats_commit2" "Commit 2 stats show incorrect attribution" || return 1
     
     echo "✓ Stats correctly show human_additions: 2, ai_additions: 2" >&3
+}
+
+@test "interactive rebase with squash preserves authorship" {
+    # Create initial file with base API endpoint structure
+    cat > api_handler.py <<'EOF'
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
+
+# API endpoint placeholder
+EOF
+    git add api_handler.py
+    git commit -m "Base commit with initial API structure"
+    
+    # Remember the base commit for validation
+    base_commit_sha=$(git rev-parse HEAD)
+    
+    # COMMIT 1: Human adds 2 lines, AI adds 3 lines
+    
+    # Human adds route definition and error handling
+    cat > api_handler.py <<'EOF'
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
+
+@app.route('/api/users', methods=['POST'])
+def create_user():
+# API endpoint placeholder
+EOF
+    git-ai checkpoint  # Human added 2 lines
+    
+    # AI adds data extraction and basic validation
+    cat > api_handler.py <<'EOF'
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
+
+@app.route('/api/users', methods=['POST'])
+def create_user():
+    data = request.get_json()
+    username = data.get('username', '') if data else ''
+    return jsonify({'user': username}), 201
+# API endpoint placeholder
+EOF
+    git-ai checkpoint mock_ai api_handler.py  # AI added 3 lines
+    
+    git add api_handler.py
+    git commit -m "Commit 1: Add user creation endpoint with basic implementation"
+    commit1_sha=$(git rev-parse HEAD)
+    
+    echo "=== Commit 1 Stats ===" >&3
+    stats_commit1=$(get_stats_json "$commit1_sha")
+    echo "$stats_commit1" >&3
+    
+    # Verify Commit 1 stats
+    expected_commit1_json='{
+        "human_additions": 2,
+        "mixed_additions": 0,
+        "ai_additions": 3,
+        "ai_accepted": 3,
+        "total_ai_additions": 3,
+        "total_ai_deletions": 0,
+        "time_waiting_for_ai": 0,
+        "git_diff_deleted_lines": 0,
+        "git_diff_added_lines": 5,
+        "tool_model_breakdown": {
+            "mock_ai::unknown": {
+                "ai_additions": 3,
+                "mixed_additions": 0,
+                "ai_accepted": 3,
+                "total_ai_additions": 3,
+                "total_ai_deletions": 0,
+                "time_waiting_for_ai": 0
+            }
+        }
+    }'
+    
+    compare_json "$expected_commit1_json" "$stats_commit1" "Commit 1 stats mismatch" || return 1
+    echo "✓ Commit 1 stats verified" >&3
+    
+    # COMMIT 2: Human adds 2 lines, AI deletes 1 of its own AI lines and adds 2 lines
+    
+    # Human adds documentation comments
+    cat > api_handler.py <<'EOF'
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
+
+@app.route('/api/users', methods=['POST'])
+def create_user():
+    data = request.get_json()
+    username = data.get('username', '') if data else ''
+    return jsonify({'user': username}), 201
+    # TODO: Add proper database integration
+    # TODO: Add authentication check
+# API endpoint placeholder
+EOF
+    git-ai checkpoint  # Human added 2 lines
+    
+    # AI improves validation (removes simple return, adds validation logic)
+    cat > api_handler.py <<'EOF'
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
+
+@app.route('/api/users', methods=['POST'])
+def create_user():
+    data = request.get_json()
+    username = data.get('username', '') if data else ''
+    # TODO: Add proper database integration
+    # TODO: Add authentication check
+    if not username or len(username) < 3:
+        return jsonify({'error': 'Invalid username'}), 400
+# API endpoint placeholder
+EOF
+    git-ai checkpoint mock_ai api_handler.py  # AI deleted 1 line and added 2 lines
+    
+    git add api_handler.py
+    git commit -m "Commit 2: Add documentation and improve validation"
+    commit2_sha=$(git rev-parse HEAD)
+    
+    echo "=== Commit 2 Stats ===" >&3
+    stats_commit2=$(get_stats_json "$commit2_sha")
+    echo "$stats_commit2" >&3
+    
+    # Verify Commit 2 stats
+    # Human added 2 lines
+    # AI added 2 new lines
+    # AI deleted 1 of its own AI lines from Commit 1
+    # Expectations:
+    #  - human_additions: 2 (2 human lines added)
+    #  - ai_additions: 2 (2 new AI lines added)
+    #  - ai_accepted: 2 (2 new lines are not modified by human)
+    #  - mixed_additions: 0 (AI lines are not modified by human)
+    #  - total_ai_additions: 2 (AI added 2 new lines)
+    #  - total_ai_deletions: 1 (AI deleted one of its previous lines)
+    #  - git_diff_deleted_lines: 1 (deleted 1 AI line)
+    #  - git_diff_added_lines: 4 (2 human + 2 AI lines added)
+    expected_commit2_json='{
+        "human_additions": 2,
+        "mixed_additions": 0,
+        "ai_additions": 2,
+        "ai_accepted": 2,
+        "total_ai_additions": 2,
+        "total_ai_deletions": 1,
+        "time_waiting_for_ai": 0,
+        "git_diff_deleted_lines": 1,
+        "git_diff_added_lines": 4,
+        "tool_model_breakdown": {
+            "mock_ai::unknown": {
+                "ai_additions": 2,
+                "mixed_additions": 0,
+                "ai_accepted": 2,
+                "total_ai_additions": 2,
+                "total_ai_deletions": 1,
+                "time_waiting_for_ai": 0
+            }
+        }
+    }'
+    
+    compare_json "$expected_commit2_json" "$stats_commit2" "Commit 2 stats mismatch" || return 1
+    echo "✓ Commit 2 stats verified" >&3
+    
+    # Capture blame output BEFORE squashing
+    echo "=== Blame BEFORE squash ===" >&3
+    blame_before_squash=$(git-ai blame api_handler.py)
+    echo "$blame_before_squash" >&3
+    
+    # Perform interactive rebase to squash the last 2 commits
+    echo "=== Performing interactive rebase with squash ===" >&3
+    
+    # Use the squash-editor.sh script from the repository
+    export GIT_SEQUENCE_EDITOR="$ORIGINAL_DIR/tests/e2e/squash-editor.sh"
+    export GIT_EDITOR="echo 'Squashed: Implement user creation endpoint with validation and logging' >"
+    
+    # Perform the interactive rebase
+    git rebase -i --autosquash HEAD~2 2>&1 | tee /dev/stderr
+    
+    unset GIT_SEQUENCE_EDITOR
+    unset GIT_EDITOR
+    
+    # Verify that the rebase resulted in one commit
+    squashed_commit_sha=$(git rev-parse HEAD)
+    new_commit_count=$(git rev-list --count HEAD ^$base_commit_sha)
+    
+    if [[ "$new_commit_count" != "1" ]]; then
+        echo "ERROR: Interactive rebase did not result in one commit (got $new_commit_count)" >&3
+        git log --oneline HEAD~3..HEAD >&3
+        return 1
+    fi
+    
+    echo "✓ Successfully squashed last 2 commits into one" >&3
+    
+    # Get squashed commit stats
+    echo "=== Squashed Commit Stats ===" >&3
+    stats_squashed=$(get_stats_json "$squashed_commit_sha")
+    echo "$stats_squashed" >&3
+    
+    # Verify blame output AFTER squashing
+    echo "=== Blame AFTER squash ===" >&3
+    blame_after_squash=$(git-ai blame api_handler.py)
+    echo "$blame_after_squash" >&3
+    
+    # Verify that both AI and human attributions are preserved
+    [[ "$blame_after_squash" =~ "mock_ai" ]] || {
+        echo "ERROR: 'mock_ai' not found in squashed blame output" >&3
+        return 1
+    }
+    
+    [[ "$blame_after_squash" =~ "Test User" ]] || {
+        echo "ERROR: 'Test User' not found in squashed blame output" >&3
+        return 1
+    }
+    
+    # Verify the squashed commit has combined authorship from all commits
+    # Final file should have (compared to base):
+    # - 4 human lines (2 from commit 1: route + function, 2 from commit 2: TODO comments)
+    # - 4 AI lines in final file (2 from commit 1: data extraction + username parsing, 2 from commit 2: validation)
+    # Total git diff shows: 8 additions (4 human + 4 AI)
+    # Total AI additions across all commits: 3 + 2 = 5 (including 1 line later deleted by AI)
+    # Total AI deletions across all commits: 1 (AI replaced simple return with validation)
+    
+    expected_squashed_json='{
+        "human_additions": 4,
+        "mixed_additions": 0,
+        "ai_additions": 4,
+        "ai_accepted": 4,
+        "total_ai_additions": 5,
+        "total_ai_deletions": 1,
+        "time_waiting_for_ai": 0,
+        "git_diff_deleted_lines": 0,
+        "git_diff_added_lines": 8,
+        "tool_model_breakdown": {
+            "mock_ai::unknown": {
+                "ai_additions": 4,
+                "mixed_additions": 0,
+                "ai_accepted": 4,
+                "total_ai_additions": 5,
+                "total_ai_deletions": 1,
+                "time_waiting_for_ai": 0
+            }
+        }
+    }'
+    
+    compare_json "$expected_squashed_json" "$stats_squashed" "Squashed stats mismatch" || return 1
+    
+    echo "✓ Interactive rebase with squash successfully preserved line attributions" >&3
+}
+
+@test "rebase feature branch with mixed authorship onto diverged main" {
+    # Step 1: Create initial state on main branch (common ancestor)
+    # Create a file with clearly separated sections
+    cat > app.py <<'EOF'
+# Application Module
+# This file contains the main application logic
+
+def main():
+    print("Application starting")
+
+# Utility functions section
+# Add utility functions below
+
+# Data processing section  
+# Add data processing functions below
+
+# End of file
+EOF
+    git add app.py
+    git commit -m "Initial application setup"
+    
+    # Remember the common ancestor commit
+    common_ancestor=$(git rev-parse HEAD)
+    echo "=== Common ancestor: $common_ancestor ===" >&3
+    
+    # Step 2: Create feature branch (both branches have same head)
+    git checkout -b feature
+    
+    # Step 3: Add commit with mixed AI and Human authorship on feature branch
+    # Feature will add content in the "Data processing section"
+    # Human adds the function signature and setup
+    cat > app.py <<'EOF'
+# Application Module
+# This file contains the main application logic
+
+def main():
+    print("Application starting")
+
+# Utility functions section
+# Add utility functions below
+
+# Data processing section  
+# Add data processing functions below
+
+def process_data(input_data):
+    # Validate input
+
+# End of file
+EOF
+    git-ai checkpoint  # Human added 3 lines
+    
+    # AI adds the implementation logic
+    cat > app.py <<'EOF'
+# Application Module
+# This file contains the main application logic
+
+def main():
+    print("Application starting")
+
+# Utility functions section
+# Add utility functions below
+
+# Data processing section  
+# Add data processing functions below
+
+def process_data(input_data):
+    # Validate input
+    if not input_data:
+        return None
+    result = input_data.upper()
+    return result
+
+# End of file
+EOF
+    git-ai checkpoint mock_ai app.py  # AI added 4 lines
+    
+    git add app.py
+    git commit -m "Feature: Add data processing function"
+    
+    feature_commit_before=$(git rev-parse HEAD)
+    
+    echo "=== Feature commit stats BEFORE rebase ===" >&3
+    stats_feature_before=$(get_stats_json "$feature_commit_before")
+    echo "$stats_feature_before" >&3
+    
+    # Verify the feature commit has mixed authorship
+    expected_feature_json='{
+        "human_additions": 3,
+        "mixed_additions": 0,
+        "ai_additions": 4,
+        "ai_accepted": 4,
+        "total_ai_additions": 4,
+        "total_ai_deletions": 0,
+        "time_waiting_for_ai": 0,
+        "git_diff_deleted_lines": 0,
+        "git_diff_added_lines": 7,
+        "tool_model_breakdown": {
+            "mock_ai::unknown": {
+                "ai_additions": 4,
+                "mixed_additions": 0,
+                "ai_accepted": 4,
+                "total_ai_additions": 4,
+                "total_ai_deletions": 0,
+                "time_waiting_for_ai": 0
+            }
+        }
+    }'
+    
+    compare_json "$expected_feature_json" "$stats_feature_before" "Feature commit stats do not match expected" || return 1
+    
+    # Verify blame shows both human and AI before rebase
+    echo "=== Blame BEFORE rebase ===" >&3
+    blame_before=$(git-ai blame app.py)
+    echo "$blame_before" >&3
+    
+    [[ "$blame_before" =~ "mock_ai" ]] || {
+        echo "ERROR: 'mock_ai' not found in blame before rebase" >&3
+        return 1
+    }
+    
+    [[ "$blame_before" =~ "Test User" ]] || {
+        echo "ERROR: 'Test User' not found in blame before rebase" >&3
+        return 1
+    }
+    
+    # Step 4: Switch to main and create 3 new commits (modifying app.py)
+    # Main will add utility functions in the "Utility functions section"
+    git checkout main
+    
+    # Commit 1 on main: Add logging import and first utility
+    cat > app.py <<'EOF'
+# Application Module
+# This file contains the main application logic
+import logging
+
+def main():
+    print("Application starting")
+
+# Utility functions section
+# Add utility functions below
+
+def get_config():
+    return {"debug": True}
+
+# Data processing section  
+# Add data processing functions below
+
+# End of file
+EOF
+    git add app.py
+    git commit -m "Main: Add logging and get_config utility"
+    main_commit1=$(git rev-parse HEAD)
+    echo "=== Main commit 1: $main_commit1 ===" >&3
+    
+    # Commit 2 on main: Add second utility function
+    cat > app.py <<'EOF'
+# Application Module
+# This file contains the main application logic
+import logging
+
+def main():
+    print("Application starting")
+
+# Utility functions section
+# Add utility functions below
+
+def get_config():
+    return {"debug": True}
+
+def log_message(msg):
+    logging.info(msg)
+
+# Data processing section  
+# Add data processing functions below
+
+# End of file
+EOF
+    git add app.py
+    git commit -m "Main: Add log_message utility"
+    main_commit2=$(git rev-parse HEAD)
+    echo "=== Main commit 2: $main_commit2 ===" >&3
+    
+    # Commit 3 on main: Add third utility function
+    cat > app.py <<'EOF'
+# Application Module
+# This file contains the main application logic
+import logging
+
+def main():
+    print("Application starting")
+
+# Utility functions section
+# Add utility functions below
+
+def get_config():
+    return {"debug": True}
+
+def log_message(msg):
+    logging.info(msg)
+
+def handle_error(err):
+    logging.error(f"Error: {err}")
+
+# Data processing section  
+# Add data processing functions below
+
+# End of file
+EOF
+    git add app.py
+    git commit -m "Main: Add handle_error utility"
+    main_commit3=$(git rev-parse HEAD)
+    echo "=== Main commit 3: $main_commit3 ===" >&3
+    
+    # Verify main has 3 commits ahead of common ancestor
+    commits_ahead=$(git rev-list --count ${common_ancestor}..main)
+    [[ "$commits_ahead" == "3" ]] || {
+        echo "ERROR: Expected 3 commits ahead on main, got $commits_ahead" >&3
+        return 1
+    }
+    
+    echo "✓ Main branch has 3 commits ahead of common ancestor" >&3
+    
+    # Step 5: Rebase feature branch onto main
+    echo "=== Rebasing feature branch onto main ===" >&3
+    git checkout feature
+    
+    # Show state before rebase
+    echo "=== Git log before rebase ===" >&3
+    git log --oneline --graph --all >&3
+    
+    git rebase main
+    
+    # Show state after rebase
+    echo "=== Git log after rebase ===" >&3
+    git log --oneline --graph --all >&3
+    
+    # Step 6: Verify authorship is preserved after rebase
+    feature_commit_after=$(git rev-parse HEAD)
+    
+    echo "=== Feature commit stats AFTER rebase ===" >&3
+    stats_feature_after=$(get_stats_json "$feature_commit_after")
+    echo "$stats_feature_after" >&3
+    
+    # Verify stats after rebase - they should match the original stats
+    # The authorship attribution should be preserved during rebase
+    echo "=== Comparing stats before and after rebase ===" >&3
+    compare_json "$expected_feature_json" "$stats_feature_after" "Feature commit stats after rebase do not match expected" || return 1
+    
+    # Verify blame output after rebase
+    echo "=== Blame AFTER rebase ===" >&3
+    blame_after=$(git-ai blame app.py)
+    echo "$blame_after" >&3
+    
+    [[ "$blame_after" =~ "mock_ai" ]] || {
+        echo "ERROR: 'mock_ai' not found in blame after rebase" >&3
+        echo "Line-level AI authorship was lost during rebase" >&3
+        return 1
+    }
+    
+    [[ "$blame_after" =~ "Test User" ]] || {
+        echo "ERROR: 'Test User' not found in blame after rebase" >&3
+        return 1
+    }
+    
+    echo "✓ Authorship stats preserved after rebase" >&3
+    
+    # Verify the rebased commit is now on top of main's commits
+    merge_base=$(git merge-base main feature)
+    [[ "$merge_base" == "$main_commit3" ]] || {
+        echo "ERROR: Feature branch not properly rebased onto main" >&3
+        echo "Expected merge base: $main_commit3" >&3
+        echo "Actual merge base: $merge_base" >&3
+        return 1
+    }
+    
+    # Verify feature branch is 1 commit ahead of main
+    commits_ahead_after=$(git rev-list --count main..feature)
+    [[ "$commits_ahead_after" == "1" ]] || {
+        echo "ERROR: Expected feature to be 1 commit ahead of main, got $commits_ahead_after" >&3
+        return 1
+    }
+    
+    # Verify file content is preserved (both feature and main changes in same file)
+    echo "=== Final file listing ===" >&3
+    ls -la >&3
+    
+    echo "=== Final app.py content ===" >&3
+    cat app.py >&3
+    
+    # Verify feature branch changes (process_data function added by feature)
+    grep -q "process_data" app.py || {
+        echo "ERROR: process_data function not found after rebase" >&3
+        return 1
+    }
+    
+    grep -q "input_data.upper()" app.py || {
+        echo "ERROR: AI-contributed code (input_data.upper) not found after rebase" >&3
+        return 1
+    }
+    
+    # Verify main branch changes are present (utility functions added by main)
+    grep -q "import logging" app.py || {
+        echo "ERROR: logging import from main not found after rebase" >&3
+        return 1
+    }
+    
+    grep -q "get_config" app.py || {
+        echo "ERROR: get_config function from main not found after rebase" >&3
+        return 1
+    }
+    
+    grep -q "log_message" app.py || {
+        echo "ERROR: log_message function from main not found after rebase" >&3
+        return 1
+    }
+    
+    grep -q "handle_error" app.py || {
+        echo "ERROR: handle_error function from main not found after rebase" >&3
+        return 1
+    }
+    
+    echo "✓ Successfully rebased feature branch with mixed authorship onto diverged main" >&3
+    echo "✓ AI and Human authorship preserved after rebase" >&3
+    echo "✓ All changes from both branches present in same file (app.py)" >&3
 }

@@ -408,8 +408,11 @@ fn test_initial_attributions_in_subsequent_checkpoint() {
         .expect("write initial attributions should succeed");
 
     // NOW create fileB.txt in working directory
-    std::fs::write(repo.path().join("fileB.txt"), "line 1 from INITIAL\nline 2 from INITIAL\n")
-        .expect("write file should succeed");
+    std::fs::write(
+        repo.path().join("fileB.txt"),
+        "line 1 from INITIAL\nline 2 from INITIAL\n",
+    )
+    .expect("write file should succeed");
 
     // Make checkpoint #2 - this should use INITIAL attributions for fileB
     repo.git_ai(&["checkpoint"])
@@ -426,13 +429,13 @@ fn test_initial_attributions_in_subsequent_checkpoint() {
         .expect("blame should succeed");
 
     let normalized_b = normalize_blame_output(&blame_b);
-    
+
     // The blame output should contain "subsequent-tool" showing INITIAL worked
     assert!(
         normalized_b.contains("subsequent-tool"),
         "Expected fileB to have INITIAL attributions from subsequent-tool, but got: {}",
         normalized_b
     );
-    
+
     assert_debug_snapshot!(normalized_b);
 }

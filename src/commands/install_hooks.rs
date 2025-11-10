@@ -113,6 +113,44 @@ async fn async_run(binary_path: PathBuf, dry_run: bool) -> Result<(), GitAiError
                 }
             }
 
+            // Install/update Cursor extension (runs in addition to hooks)
+            let extension_spinner = Spinner::new("Cursor: installing extension");
+            extension_spinner.start();
+
+            if binary_exists("cursor") {
+                // Install/update Cursor extension
+                match is_vsc_editor_extension_installed("cursor", "git-ai.git-ai-vscode") {
+                    Ok(true) => {
+                        extension_spinner.success("Cursor: Extension installed");
+                    }
+                    Ok(false) => {
+                        if dry_run {
+                            extension_spinner
+                                .pending("Cursor: Pending extension install");
+                        } else {
+                            match install_vsc_editor_extension("cursor", "git-ai.git-ai-vscode") {
+                                Ok(()) => {
+                                    extension_spinner.success("Cursor: Extension installed");
+                                }
+                                Err(e) => {
+                                    debug_log(&format!(
+                                        "Cursor: Error automatically installing extension: {}",
+                                        e
+                                    ));
+                                    extension_spinner.pending("Cursor: Unable to automatically install extension. Please cmd+click on the following link to install: cursor:extension/git-ai.git-ai-vscode (or search for 'git-ai-vscode' in the Cursor extensions tab)");
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        extension_spinner.error("Cursor: Failed to check extension");
+                        eprintln!("  Error: {}", e);
+                    }
+                }
+            } else {
+                extension_spinner.pending("Cursor: Unable to automatically install extension. Please cmd+click on the following link to install: cursor:extension/git-ai.git-ai-vscode (or search for 'git-ai-vscode' in the Cursor extensions tab)");
+            }
+
             #[cfg(windows)]
             {
                 let settings_spinner = Spinner::new("Cursor: configuring git.path");
@@ -165,16 +203,16 @@ async fn async_run(binary_path: PathBuf, dry_run: bool) -> Result<(), GitAiError
 
             if binary_exists("code") {
                 // Install/update VS Code extension
-                match is_vscode_extension_installed("git-ai.git-ai-vscode") {
+                match is_vsc_editor_extension_installed("code", "git-ai.git-ai-vscode") {
                     Ok(true) => {
                         spinner.success("VS Code: Extension installed");
                     }
                     Ok(false) => {
                         if dry_run {
                             spinner
-                                .pending("VS Code: Pending extension install (git-ai for VS Code)");
+                                .pending("VS Code: Pending extension install");
                         } else {
-                            match install_vscode_extension("git-ai.git-ai-vscode") {
+                            match install_vsc_editor_extension("code", "git-ai.git-ai-vscode") {
                                 Ok(()) => {
                                     spinner.success("VS Code: Extension installed");
                                 }
@@ -1098,17 +1136,17 @@ fn get_current_binary_path() -> Result<PathBuf, GitAiError> {
     Ok(canonical)
 }
 
-fn is_vscode_extension_installed(id_or_vsix: &str) -> Result<bool, GitAiError> {
-    // NOTE: We try up to 3 times, because the code CLI is very flaky (throws intermittent JS errors)
+fn is_vsc_editor_extension_installed(program: &str, id_or_vsix: &str) -> Result<bool, GitAiError> {
+    // NOTE: We try up to 3 times, because the editor CLI can be flaky (throws intermittent JS errors)
     let mut last_error_message: Option<String> = None;
     for attempt in 1..=3 {
         #[cfg(windows)]
         let cmd_result = Command::new("cmd")
-            .args(["/C", "code", "--list-extensions"])
+            .args(["/C", program, "--list-extensions"])
             .output();
 
         #[cfg(not(windows))]
-        let cmd_result = Command::new("code").args(["--list-extensions"]).output();
+        let cmd_result = Command::new(program).args(["--list-extensions"]).output();
 
         match cmd_result {
             Ok(output) => {
@@ -1128,21 +1166,21 @@ fn is_vscode_extension_installed(id_or_vsix: &str) -> Result<bool, GitAiError> {
         }
     }
     Err(GitAiError::Generic(last_error_message.unwrap_or_else(
-        || "VS Code CLI '--list-extensions' failed".to_string(),
+        || format!("{} CLI '--list-extensions' failed", program),
     )))
 }
 
-fn install_vscode_extension(id_or_vsix: &str) -> Result<(), GitAiError> {
-    // NOTE: We try up to 3 times, because the code CLI is very flaky (throws intermittent JS errors)
+fn install_vsc_editor_extension(program: &str, id_or_vsix: &str) -> Result<(), GitAiError> {
+    // NOTE: We try up to 3 times, because the editor CLI can be flaky (throws intermittent JS errors)
     let mut last_error_message: Option<String> = None;
     for attempt in 1..=3 {
         #[cfg(windows)]
         let cmd_status = Command::new("cmd")
-            .args(["/C", "code", "--install-extension", id_or_vsix, "--force"])
+            .args(["/C", program, "--install-extension", id_or_vsix, "--force"])
             .status();
 
         #[cfg(not(windows))]
-        let cmd_status = Command::new("code")
+        let cmd_status = Command::new(program)
             .args(["--install-extension", id_or_vsix, "--force"])
             .status();
 
@@ -1151,7 +1189,7 @@ fn install_vscode_extension(id_or_vsix: &str) -> Result<(), GitAiError> {
                 if status.success() {
                     return Ok(());
                 }
-                last_error_message = Some("VS Code extension install failed".to_string());
+                last_error_message = Some(format!("{} extension install failed", program));
             }
             Err(e) => {
                 last_error_message = Some(e.to_string());
@@ -1162,7 +1200,7 @@ fn install_vscode_extension(id_or_vsix: &str) -> Result<(), GitAiError> {
         }
     }
     Err(GitAiError::Generic(last_error_message.unwrap_or_else(
-        || "VS Code extension install failed".to_string(),
+        || format!("{} extension install failed", program),
     )))
 }
 

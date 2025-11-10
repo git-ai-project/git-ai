@@ -23,6 +23,31 @@ function Write-Warning {
     Write-Host $Message -ForegroundColor Yellow
 }
 
+function Wait-ForFileAvailable {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $false)][int]$MaxWaitSeconds = 300,
+        [Parameter(Mandatory = $false)][int]$RetryIntervalSeconds = 5
+    )
+    
+    $elapsed = 0
+    while ($elapsed -lt $MaxWaitSeconds) {
+        try {
+            # Try to open the file for writing to check if it's available
+            $stream = [System.IO.File]::Open($Path, 'Open', 'Write', 'None')
+            $stream.Close()
+            return $true
+        } catch {
+            if ($elapsed -eq 0) {
+                Write-Host "Waiting for file to be available: $Path" -ForegroundColor Yellow
+            }
+            Start-Sleep -Seconds $RetryIntervalSeconds
+            $elapsed += $RetryIntervalSeconds
+        }
+    }
+    return $false
+}
+
 # GitHub repository details
 $Repo = 'acunniffe/git-ai'
 
@@ -195,14 +220,24 @@ $os = 'windows'
 
 # Determine binary name and download URLs
 $binaryName = "git-ai-$os-$arch"
-$downloadUrlExe = "https://github.com/$Repo/releases/latest/download/$binaryName.exe"
-$downloadUrlNoExt = "https://github.com/$Repo/releases/latest/download/$binaryName"
+$releaseTag = $env:GIT_AI_RELEASE_TAG
+if ([string]::IsNullOrWhiteSpace($releaseTag)) {
+    $releaseTag = 'latest'
+}
+
+if ($releaseTag -eq 'latest') {
+    $downloadUrlExe = "https://github.com/$Repo/releases/latest/download/$binaryName.exe"
+    $downloadUrlNoExt = "https://github.com/$Repo/releases/latest/download/$binaryName"
+} else {
+    $downloadUrlExe = "https://github.com/$Repo/releases/download/$releaseTag/$binaryName.exe"
+    $downloadUrlNoExt = "https://github.com/$Repo/releases/download/$releaseTag/$binaryName"
+}
 
 # Install directory: %USERPROFILE%\.git-ai\bin
 $installDir = Join-Path $HOME ".git-ai\bin"
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 
-Write-Host 'Downloading git-ai...'
+Write-Host ("Downloading git-ai (release: {0})..." -f $releaseTag)
 $tmpFile = Join-Path $installDir "git-ai.tmp.$PID.exe"
 
 function Try-Download {
@@ -237,11 +272,28 @@ try {
 }
 
 $finalExe = Join-Path $installDir 'git-ai.exe'
+
+# Wait for git-ai.exe to be available if it exists and is in use
+if (Test-Path -LiteralPath $finalExe) {
+    if (-not (Wait-ForFileAvailable -Path $finalExe -MaxWaitSeconds 300 -RetryIntervalSeconds 5)) {
+        Remove-Item -Force -ErrorAction SilentlyContinue $tmpFile
+        Write-ErrorAndExit "Timeout waiting for $finalExe to be available. Please close any running git-ai processes and try again."
+    }
+}
+
 Move-Item -Force -Path $tmpFile -Destination $finalExe
 try { Unblock-File -Path $finalExe -ErrorAction SilentlyContinue } catch { }
 
 # Create a shim so calling `git` goes through git-ai by PATH precedence
 $gitShim = Join-Path $installDir 'git.exe'
+
+# Wait for git.exe shim to be available if it exists and is in use
+if (Test-Path -LiteralPath $gitShim) {
+    if (-not (Wait-ForFileAvailable -Path $gitShim -MaxWaitSeconds 300 -RetryIntervalSeconds 5)) {
+        Write-ErrorAndExit "Timeout waiting for $gitShim to be available. Please close any running git processes and try again."
+    }
+}
+
 Copy-Item -Force -Path $finalExe -Destination $gitShim
 try { Unblock-File -Path $gitShim -ErrorAction SilentlyContinue } catch { }
 
@@ -281,14 +333,18 @@ if ($pathUpdate.MachineStatus -eq 'Updated') {
 Write-Success "Successfully installed git-ai into $installDir"
 Write-Success "You can now run 'git-ai' from your terminal"
 
-# Write JSON config at %USERPROFILE%\.git-ai\config.json
+# Write JSON config at %USERPROFILE%\.git-ai\config.json (only if it doesn't exist)
 try {
     $configDir = Join-Path $HOME '.git-ai'
     $configJsonPath = Join-Path $configDir 'config.json'
     New-Item -ItemType Directory -Force -Path $configDir | Out-Null
 
-    $cfg = @{ git_path = $stdGitPath; ignore_prompts = $false } | ConvertTo-Json -Compress
-    $cfg | Out-File -FilePath $configJsonPath -Encoding UTF8 -Force
+    if (-not (Test-Path -LiteralPath $configJsonPath)) {
+        $cfg = @{
+            git_path = $stdGitPath
+        } | ConvertTo-Json -Compress
+        $cfg | Out-File -FilePath $configJsonPath -Encoding UTF8 -Force
+    }
 } catch {
     Write-Host "Warning: Failed to write config.json: $($_.Exception.Message)" -ForegroundColor Yellow
 }
