@@ -2132,6 +2132,77 @@ fn test() {
         assert_eq!(round_trip_char_attrs[2].end, 21);
     }
 
+    #[test]
+    fn test_ai_deletion_with_human_checkpoint_in_same_commit_repro() {
+        // Reproduces integration failure from tests/simple_additions.rs::test_ai_deletion_with_human_checkpoint_in_same_commit
+        // Scenario:
+        // 1) Base content (no attributions)
+        // 2) AI adds three lines
+        // 3) Human adds two lines
+        // 4) In the same commit, AI deletes one of its own lines and adds two new lines
+        // Expected: Human lines should not be attributed to AI
+        let tracker = AttributionTracker::new();
+        let ai = CheckpointKind::AiAgent.to_str();
+        let human = CheckpointKind::Human.to_str();
+
+        // Step 1: Base content
+        let v1_content = "Base Line 1\nBase Line 2\nBase Line 3";
+        let v1_attributions: Vec<Attribution> = Vec::new();
+
+        // Step 2: AI adds three lines (between Base Line 2 and Base Line 3)
+        let v2_content =
+            "Base Line 1\nBase Line 2\nAI: Line 1\nAI: Line 2\nAI: Line 3\nBase Line 3";
+        let v2_attributions = tracker
+            .update_attributions(
+                v1_content,
+                v2_content,
+                &v1_attributions,
+                &ai,
+                TEST_TS + 1,
+            )
+            .unwrap();
+
+        // Step 3: Human adds two lines after AI lines
+        let v3_content = "Base Line 1\nBase Line 2\nAI: Line 1\nAI: Line 2\nAI: Line 3\nHuman: Line 1\nHuman: Line 2\nBase Line 3";
+        let v3_attributions = tracker
+            .update_attributions(v2_content, v3_content, &v2_attributions, &human, TEST_TS + 2)
+            .unwrap();
+
+        // Step 4: AI deletes its own "AI: Line 2" and adds two new lines
+        let v4_content = "Base Line 1\nBase Line 2\nAI: Line 1\nAI: Line 3\nHuman: Line 1\nHuman: Line 2\nAI: New Line 1\nAI: New Line 2\nBase Line 3";
+        let v4_attributions = tracker
+            .update_attributions(v3_content, v4_content, &v3_attributions, &ai, TEST_TS + 3)
+            .unwrap();
+
+        // Convert to line attributions (this filters to AI lines or Human overrides)
+        let line_attrs = attributions_to_line_attributions(&v4_attributions, v4_content);
+
+        // Sanity: we should have at least some AI attributions
+        assert!(
+            line_attrs.iter().any(|a| a.author_id == ai),
+            "Expected at least one AI line attribution, got: {:?}",
+            line_attrs
+        );
+
+        // Assert: AI attributions MUST NOT include the human lines:
+        // Line 5: "Human: Line 1"
+        // Line 6: "Human: Line 2"
+        for attr in &line_attrs {
+            if attr.author_id == ai {
+                assert!(
+                    !(attr.start_line <= 5 && attr.end_line >= 5),
+                    "AI attribution should not include line 5 (Human: Line 1); got AI range {:?}",
+                    attr
+                );
+                assert!(
+                    !(attr.start_line <= 6 && attr.end_line >= 6),
+                    "AI attribution should not include line 6 (Human: Line 2); got AI range {:?}",
+                    attr
+                );
+            }
+        }
+    }
+
     // ========== LineAttribution Tests ==========
 
     #[test]

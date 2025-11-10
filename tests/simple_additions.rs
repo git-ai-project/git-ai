@@ -625,7 +625,7 @@ fn test_ai_deletion_with_human_checkpoint_in_same_commit() {
 
     // AI checkpoint
     println!(
-        "checkpoint: {:?}",
+        "checkpoint: {}",
         repo.git_ai(&["checkpoint", "mock_ai", "data.txt"]).unwrap()
     );
 
