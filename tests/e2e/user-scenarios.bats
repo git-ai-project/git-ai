@@ -1297,7 +1297,6 @@ EOF
 
 
 @test "AI attribution is preserved after fixing conflict during rebase" {
-    skip "https://github.com/acunniffe/git-ai/issues/173"
     # Step 1: Create initial file on main branch
     cat > shared.py <<EOF
 def function_one():
