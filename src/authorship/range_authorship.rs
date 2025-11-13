@@ -190,14 +190,14 @@ fn create_authorship_log_for_range(
     // Step 2: Create VirtualAttributions for start commit (older)
     let repo_clone = repo.clone();
     let mut start_va = smol::block_on(async {
-        VirtualAttributions::new_for_base_commit(repo_clone, start_sha.to_string(), &changed_files)
+        VirtualAttributions::new_for_base_commit(repo_clone, start_sha.to_string(), &changed_files, None)
             .await
     })?;
 
     // Step 3: Create VirtualAttributions for end commit (newer)
     let repo_clone = repo.clone();
     let mut end_va = smol::block_on(async {
-        VirtualAttributions::new_for_base_commit(repo_clone, end_sha.to_string(), &changed_files)
+        VirtualAttributions::new_for_base_commit(repo_clone, end_sha.to_string(), &changed_files, None)
             .await
     })?;
 

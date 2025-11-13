@@ -49,6 +49,7 @@ pub struct GitAiBlameOptions {
     pub line_ranges: Vec<(u32, u32)>,
 
     pub newest_commit: Option<String>,
+    pub oldest_commit: Option<String>,
 
     // Output format options
     pub porcelain: bool,
@@ -115,6 +116,7 @@ impl Default for GitAiBlameOptions {
             line_ranges: Vec::new(),
             porcelain: false,
             newest_commit: None,
+            oldest_commit: None,
             line_porcelain: false,
             incremental: false,
             show_name: false,
@@ -358,8 +360,23 @@ impl Repository {
 
         // Support newest_commit option (equivalent to libgit2's newest_commit)
         // This limits blame to only consider commits up to and including the specified commit
-        if let Some(ref commit) = options.newest_commit {
-            args.push(commit.clone());
+        // When oldest_commit is also set, we use a range: oldest_commit..newest_commit
+        match (&options.oldest_commit, &options.newest_commit) {
+            (Some(oldest), Some(newest)) => {
+                // Use range format: git blame START_COMMIT..END_COMMIT -- file.txt
+                args.push(format!("{}..{}", oldest, newest));
+            }
+            (None, Some(newest)) => {
+                // Only newest_commit set, use it as the commit to blame at
+                args.push(newest.clone());
+            }
+            (Some(_oldest), None) => {
+                // oldest_commit without newest_commit doesn't make sense for blame
+                // Just ignore oldest_commit in this case
+            }
+            (None, None) => {
+                // No commit specified, blame at HEAD (default)
+            }
         }
 
         // Separator then file path

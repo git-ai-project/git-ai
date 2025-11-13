@@ -5,7 +5,10 @@ use crate::git::refs::get_reference_as_authorship_log_v3;
 use crate::git::repository::Repository;
 use crate::git::rewrite_log::RewriteLogEvent;
 use crate::utils::debug_log;
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Instant,
+};
 
 // Process events in the rewrite log and call the correct rewrite functions in this file
 pub fn rewrite_authorship_if_needed(
@@ -114,7 +117,16 @@ pub fn prepare_working_log_after_squash(
         VirtualAttributions, merge_attributions_favoring_first,
     };
 
-    // Step 1: Get list of changed files between the two branches
+    // Step 1: Find merge base between source and target to optimize blame
+    // We only need to look at commits after the merge base, not entire history
+    let merge_base = repo
+        .merge_base(
+            source_head_sha.to_string(),
+            target_branch_head_sha.to_string(),
+        )
+        .ok();
+
+    // Step 2: Get list of changed files between the two branches
     let changed_files = repo.diff_changed_files(source_head_sha, target_branch_head_sha)?;
 
     if changed_files.is_empty() {
@@ -122,13 +134,16 @@ pub fn prepare_working_log_after_squash(
         return Ok(());
     }
 
-    // Step 2: Create VirtualAttributions for both branches
+    // Step 3: Create VirtualAttributions for both branches
+    // Use merge_base to limit blame range for performance
     let repo_clone = repo.clone();
+    let merge_base_clone = merge_base.clone();
     let source_va = smol::block_on(async {
         VirtualAttributions::new_for_base_commit(
             repo_clone,
             source_head_sha.to_string(),
             &changed_files,
+            merge_base_clone,
         )
         .await
     })?;
@@ -139,6 +154,7 @@ pub fn prepare_working_log_after_squash(
             repo_clone,
             target_branch_head_sha.to_string(),
             &changed_files,
+            merge_base,
         )
         .await
     })?;
@@ -207,7 +223,16 @@ pub fn rewrite_authorship_after_squash_or_rebase(
         source_head_sha, merge_commit_sha
     ));
 
-    // Step 2: Get list of changed files between the two branches
+    // Step 2: Find merge base between source and target to optimize blame
+    // We only need to look at commits after the merge base, not entire history
+    let merge_base = repo
+        .merge_base(
+            source_head_sha.to_string(),
+            target_branch_head_sha.to_string(),
+        )
+        .ok();
+
+    // Step 3: Get list of changed files between the two branches
     let changed_files = repo.diff_changed_files(source_head_sha, &target_branch_head_sha)?;
 
     if changed_files.is_empty() {
@@ -221,13 +246,16 @@ pub fn rewrite_authorship_after_squash_or_rebase(
         changed_files.len()
     ));
 
-    // Step 3: Create VirtualAttributions for both branches
+    // Step 4: Create VirtualAttributions for both branches
+    // Use merge_base to limit blame range for performance
     let repo_clone = repo.clone();
+    let merge_base_clone = merge_base.clone();
     let source_va = smol::block_on(async {
         VirtualAttributions::new_for_base_commit(
             repo_clone,
             source_head_sha.to_string(),
             &changed_files,
+            merge_base_clone,
         )
         .await
     })?;
@@ -238,6 +266,7 @@ pub fn rewrite_authorship_after_squash_or_rebase(
             repo_clone,
             target_branch_head_sha.clone(),
             &changed_files,
+            merge_base,
         )
         .await
     })?;
@@ -343,6 +372,7 @@ pub fn rewrite_authorship_after_rebase_v2(
             repo_clone,
             original_head_clone,
             &pathspecs_clone,
+            None,
         )
         .await
     })?;
@@ -536,6 +566,7 @@ pub fn rewrite_authorship_after_cherry_pick(
             repo_clone,
             source_head_clone,
             &pathspecs_clone,
+            None,
         )
         .await
     })?;
@@ -729,6 +760,7 @@ pub fn rewrite_authorship_after_commit_amend(
             } else {
                 Some(_human_author.clone())
             },
+            None,
         )
         .await
     })?;
@@ -861,6 +893,7 @@ pub fn reconstruct_working_log_after_reset(
             old_head_clone,
             &pathspecs_clone,
             None, // Don't need human_author for this step
+            Some(target_commit_sha.to_string()),
         )
         .await
     })?;
@@ -881,6 +914,7 @@ pub fn reconstruct_working_log_after_reset(
             repo_clone,
             target_clone,
             &pathspecs_clone,
+            Some(target_commit_sha.to_string()),
         )
         .await
     })?;
@@ -926,12 +960,14 @@ pub fn reconstruct_working_log_after_reset(
 
     // Step 6: Convert to INITIAL (everything is uncommitted after reset)
     // Pass same SHA for parent and commit to get empty diff (no committed hunks)
+    // IMPORTANT: Pass pathspecs to limit diff to only changed files (major performance optimization)
+    let pathspecs_set: std::collections::HashSet<String> = pathspecs.iter().cloned().collect();
     let (authorship_log, initial_attributions) = merged_va
         .to_authorship_log_and_initial_working_log(
             repo,
             target_commit_sha,
             target_commit_sha,
-            None,
+            Some(&pathspecs_set),
         )?;
 
     debug_log(&format!(

@@ -1575,6 +1575,11 @@ impl Repository {
 
         // Add pathspecs if provided
         if let Some(paths) = pathspecs {
+            // for case where pathspec filter provided BUT not pathspecs.
+            // otherwise it would default to full repo
+            if paths.is_empty() {
+                return Ok(HashSet::new());
+            }
             args.push("--".to_string());
             for path in paths {
                 args.push(path.clone());
@@ -1614,6 +1619,11 @@ impl Repository {
 
         // Add pathspecs if provided
         if let Some(paths) = pathspecs {
+            // for case where pathspec filter provided BUT not pathspecs.
+            // otherwise it would default to full repo
+            if paths.is_empty() {
+                return Ok(HashMap::new());
+            }
             args.push("--".to_string());
             for path in paths {
                 args.push(path.clone());
@@ -1669,6 +1679,11 @@ impl Repository {
 
         // Add pathspecs if provided
         if let Some(paths) = pathspecs {
+            // for case where pathspec filter provided BUT not pathspecs.
+            // otherwise it would default to full repo
+            if paths.is_empty() {
+                return Ok(HashMap::new());
+            }
             args.push("--".to_string());
             for path in paths {
                 args.push(path.clone());
@@ -1699,6 +1714,11 @@ impl Repository {
 
         // Add pathspecs if provided
         if let Some(paths) = pathspecs {
+            // for case where pathspec filter provided BUT not pathspecs.
+            // otherwise it would default to full repo
+            if paths.is_empty() {
+                return Ok((HashMap::new(), HashMap::new()));
+            }
             args.push("--".to_string());
             for path in paths {
                 args.push(path.clone());

@@ -22,6 +22,7 @@ pub struct VirtualAttributions {
     pub prompts: BTreeMap<String, BTreeMap<String, PromptRecord>>,
     // Timestamp to use for attributions
     ts: u128,
+    pub blame_start_commit: Option<String>,
 }
 
 impl VirtualAttributions {
@@ -30,6 +31,7 @@ impl VirtualAttributions {
         repo: Repository,
         base_commit: String,
         pathspecs: &[String],
+        blame_start_commit: Option<String>,
     ) -> Result<Self, GitAiError> {
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -43,6 +45,7 @@ impl VirtualAttributions {
             file_contents: HashMap::new(),
             prompts: BTreeMap::new(),
             ts,
+            blame_start_commit,
         };
 
         // Process all pathspecs concurrently
@@ -185,6 +188,7 @@ impl VirtualAttributions {
             let repo = self.repo.clone();
             let base_commit = self.base_commit.clone();
             let ts = self.ts;
+            let blame_start_commit = self.blame_start_commit.clone();
             let semaphore = Arc::clone(&semaphore);
 
             let task = smol::spawn(async move {
@@ -193,7 +197,13 @@ impl VirtualAttributions {
 
                 // Wrap blocking git operations in smol::unblock
                 smol::unblock(move || {
-                    compute_attributions_for_file(&repo, &base_commit, &pathspec, ts)
+                    compute_attributions_for_file(
+                        &repo,
+                        &base_commit,
+                        &pathspec,
+                        ts,
+                        blame_start_commit,
+                    )
                 })
                 .await
             });
@@ -287,7 +297,7 @@ impl VirtualAttributions {
 
         // Step 2: Use new_for_base_commit to establish authorship for all pathspecs
         // This will run blame to find all old authorship and discover prompts from history
-        Self::new_for_base_commit(repo, head_sha, pathspecs).await
+        Self::new_for_base_commit(repo, head_sha, pathspecs, None).await
     }
 
     /// Create VirtualAttributions from just the working log (no blame)
@@ -416,6 +426,7 @@ impl VirtualAttributions {
             file_contents,
             prompts,
             ts: 0,
+            blame_start_commit: None,
         })
     }
 
@@ -431,10 +442,16 @@ impl VirtualAttributions {
         base_commit: String,
         pathspecs: &[String],
         human_author: Option<String>,
+        blame_start_commit: Option<String>,
     ) -> Result<Self, GitAiError> {
         // Step 1: Build base VirtualAttributions using blame (gets ALL prompts from history)
-        let blame_va =
-            Self::new_for_base_commit(repo.clone(), base_commit.clone(), pathspecs).await?;
+        let blame_va = Self::new_for_base_commit(
+            repo.clone(),
+            base_commit.clone(),
+            pathspecs,
+            blame_start_commit,
+        )
+        .await?;
 
         // Step 2: Build VirtualAttributions from just working log
         let checkpoint_va =
@@ -468,6 +485,7 @@ impl VirtualAttributions {
             file_contents,
             prompts: BTreeMap::new(),
             ts,
+            blame_start_commit: None,
         }
     }
 
@@ -486,6 +504,7 @@ impl VirtualAttributions {
             file_contents,
             prompts,
             ts,
+            blame_start_commit: None,
         }
     }
 
@@ -1157,6 +1176,7 @@ pub fn merge_attributions_favoring_first(
         file_contents: HashMap::new(),
         prompts: merged_prompts,
         ts,
+        blame_start_commit: None,
     };
 
     // Get union of all files
@@ -1342,6 +1362,7 @@ fn compute_attributions_for_file(
     base_commit: &str,
     file_path: &str,
     ts: u128,
+    blame_start_commit: Option<String>,
 ) -> Result<Option<(String, String, Vec<Attribution>, Vec<LineAttribution>)>, GitAiError> {
     // Set up blame options
     let mut ai_blame_opts = GitAiBlameOptions::default();
@@ -1349,6 +1370,7 @@ fn compute_attributions_for_file(
     ai_blame_opts.return_human_authors_as_human = true;
     ai_blame_opts.use_prompt_hashes_as_names = true;
     ai_blame_opts.newest_commit = Some(base_commit.to_string());
+    ai_blame_opts.oldest_commit = blame_start_commit.clone();
 
     // Run blame at the base commit
     let ai_blame = repo.blame(file_path, &ai_blame_opts);
@@ -1438,6 +1460,7 @@ mod tests {
                 repo,
                 "5753483e6a8d0024dacfc6eaab8b8f5b2f2301c5".to_string(),
                 &["src/utils.rs".to_string()],
+                None,
             )
             .await
         })
