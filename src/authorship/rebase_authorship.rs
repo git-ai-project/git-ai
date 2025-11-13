@@ -887,8 +887,6 @@ pub fn reconstruct_working_log_after_reset(
     let old_head_clone = old_head_sha.to_string();
     let pathspecs_clone = pathspecs.clone();
 
-    let start: Instant = Instant::now();
-
     let old_head_va = smol::block_on(async {
         crate::authorship::virtual_attribution::VirtualAttributions::from_working_log_for_commit(
             repo_clone,
@@ -899,8 +897,6 @@ pub fn reconstruct_working_log_after_reset(
         )
         .await
     })?;
-
-    println!("Time taken to build target VA: {:?}", start.elapsed());
 
     debug_log(&format!(
         "Built old_head VA with {} files, {} prompts",
@@ -913,7 +909,6 @@ pub fn reconstruct_working_log_after_reset(
     let target_clone = target_commit_sha.to_string();
     let pathspecs_clone = pathspecs.clone();
 
-    let start: Instant = Instant::now();
     let target_va = smol::block_on(async {
         crate::authorship::virtual_attribution::VirtualAttributions::new_for_base_commit(
             repo_clone,
@@ -923,8 +918,6 @@ pub fn reconstruct_working_log_after_reset(
         )
         .await
     })?;
-
-    println!("Time taken to build target VA: {:?}", start.elapsed());
 
     debug_log(&format!(
         "Built target VA with {} files, {} prompts",
