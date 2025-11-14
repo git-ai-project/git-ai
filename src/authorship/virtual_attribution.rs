@@ -981,6 +981,137 @@ impl VirtualAttributions {
         Ok((authorship_log, initial_attributions))
     }
 
+    /// Convert VirtualAttributions to AuthorshipLog only (index-only mode)
+    ///
+    /// This is a simplified version of `to_authorship_log_and_initial_working_log` that:
+    /// - Only returns an AuthorshipLog (no InitialAttributions)
+    /// - Doesn't check the working copy or unstaged hunks
+    /// - Is used for commits that have already landed
+    ///
+    /// This is useful for retroactively generating authorship logs from working logs
+    /// where we know the commit has landed and don't care about uncommitted work.
+    pub fn to_authorship_log_index_only(
+        &self,
+        repo: &Repository,
+        parent_sha: &str,
+        commit_sha: &str,
+        pathspecs: Option<&HashSet<String>>,
+    ) -> Result<crate::authorship::authorship_log_serialization::AuthorshipLog, GitAiError> {
+        use crate::authorship::authorship_log_serialization::AuthorshipLog;
+        use std::collections::HashMap as StdHashMap;
+
+        let mut authorship_log = AuthorshipLog::new();
+        authorship_log.metadata.base_commit_sha = self.base_commit.clone();
+        // Flatten the nested prompts map: take the most recent (first) prompt for each prompt_id
+        authorship_log.metadata.prompts = self
+            .prompts
+            .iter()
+            .filter_map(|(prompt_id, commits)| {
+                // Get the first (most recent) commit's PromptRecord
+                commits
+                    .values()
+                    .next()
+                    .map(|record| (prompt_id.clone(), record.clone()))
+            })
+            .collect();
+
+        // Get committed hunks only (no need to check working copy)
+        let committed_hunks = collect_committed_hunks(repo, parent_sha, commit_sha, pathspecs)?;
+
+        // Process each file
+        for (file_path, (_, line_attrs)) in &self.attributions {
+            if line_attrs.is_empty() {
+                continue;
+            }
+
+            // Get the committed hunks for this file (if any)
+            let file_committed_hunks = match committed_hunks.get(file_path) {
+                Some(hunks) => hunks,
+                None => continue, // No committed hunks for this file, skip
+            };
+
+            // Map author_id -> line numbers (in commit coordinates)
+            let mut committed_lines_map: StdHashMap<String, Vec<u32>> = StdHashMap::new();
+
+            for line_attr in line_attrs {
+                // Since we're not dealing with unstaged hunks, the line numbers in VirtualAttributions
+                // are already in the right coordinates (working log coordinates = commit coordinates)
+                for line_num in line_attr.start_line..=line_attr.end_line {
+                    // Check if this line is in any committed hunk
+                    let is_committed = file_committed_hunks
+                        .iter()
+                        .any(|hunk| hunk.contains(line_num));
+
+                    if is_committed {
+                        committed_lines_map
+                            .entry(line_attr.author_id.clone())
+                            .or_default()
+                            .push(line_num);
+                    }
+                }
+            }
+
+            // Add committed attributions to authorship log
+            if !committed_lines_map.is_empty() {
+                // Create attestation entries from committed lines
+                for (author_id, mut lines) in committed_lines_map {
+                    lines.sort();
+                    lines.dedup();
+
+                    if lines.is_empty() {
+                        continue;
+                    }
+
+                    // Create line ranges
+                    let mut ranges = Vec::new();
+                    let mut range_start = lines[0];
+                    let mut range_end = lines[0];
+
+                    for &line in &lines[1..] {
+                        if line == range_end + 1 {
+                            range_end = line;
+                        } else {
+                            if range_start == range_end {
+                                ranges.push(crate::authorship::authorship_log::LineRange::Single(
+                                    range_start,
+                                ));
+                            } else {
+                                ranges.push(crate::authorship::authorship_log::LineRange::Range(
+                                    range_start,
+                                    range_end,
+                                ));
+                            }
+                            range_start = line;
+                            range_end = line;
+                        }
+                    }
+
+                    // Add the last range
+                    if range_start == range_end {
+                        ranges.push(crate::authorship::authorship_log::LineRange::Single(
+                            range_start,
+                        ));
+                    } else {
+                        ranges.push(crate::authorship::authorship_log::LineRange::Range(
+                            range_start,
+                            range_end,
+                        ));
+                    }
+
+                    let entry =
+                        crate::authorship::authorship_log_serialization::AttestationEntry::new(
+                            author_id, ranges,
+                        );
+
+                    let file_attestation = authorship_log.get_or_create_file(file_path);
+                    file_attestation.add_entry(entry);
+                }
+            }
+        }
+
+        Ok(authorship_log)
+    }
+
     /// Merge prompts from multiple sources, picking the newest PromptRecord for each prompt_id
     ///
     /// This function collects all PromptRecords for each unique prompt_id across all sources,

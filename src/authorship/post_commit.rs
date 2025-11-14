@@ -95,7 +95,7 @@ pub fn post_commit(
 }
 
 /// Filter out working log entries for untracked files
-fn filter_untracked_files(
+pub fn filter_untracked_files(
     repo: &Repository,
     working_log: &[Checkpoint],
     commit_sha: &str,

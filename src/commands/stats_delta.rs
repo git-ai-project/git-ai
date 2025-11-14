@@ -1,10 +1,16 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
-use crate::authorship::stats::{CommitStats, stats_for_commit_stats};
+use crate::authorship::post_commit::filter_untracked_files;
+use crate::authorship::stats::{
+    CommitStats, get_git_diff_stats, stats_for_commit_stats, stats_from_authorship_log,
+};
+use crate::authorship::virtual_attribution::VirtualAttributions;
+use crate::error::GitAiError;
 use crate::git::refs::get_authorship;
 use crate::git::repository::{Repository, exec_git};
 
@@ -140,10 +146,10 @@ pub fn handle_stats_delta(repository_option: &Option<Repository>, _args: &[Strin
                         // Remove any Editing entry for this parent SHA (consolidation)
                         stats_delta_log.delete(&parent_sha);
 
-                        let stats =
-                            stats_for_commit_stats(repository, &commit_sha).unwrap_or_else(|e| {
+                        let stats = simulate_post_commit(repository, &parent_sha, &commit_sha)
+                            .unwrap_or_else(|e| {
                                 eprintln!(
-                                    "Failed to compute stats for commit {}: {}",
+                                    "Failed to simulate stats for commit {}: {}",
                                     commit_sha, e
                                 );
                                 CommitStats::default()
@@ -453,5 +459,82 @@ impl StatsDeltaLog {
         let initial_len = self.entries.len();
         self.entries.retain(|e| !predicate(e));
         initial_len - self.entries.len()
+    }
+}
+
+/// Simulate post_commit stats generation from a working log (read-only)
+///
+/// This is used for the LandedCommitHueristic case where we have a working log
+/// but the commit was made without git-ai post-commit. We simulate what the stats
+/// would have been if post_commit had run.
+fn simulate_post_commit(
+    repository: &Repository,
+    working_log_base_sha: &str,
+    commit_sha: &str,
+) -> Result<CommitStats, GitAiError> {
+    // Check if working log directory exists
+    let working_log_dir = repository.storage.working_logs.join(working_log_base_sha);
+    if !working_log_dir.exists() {
+        return Err(GitAiError::Generic(format!(
+            "Working log directory does not exist for base SHA: {}",
+            working_log_base_sha
+        )));
+    }
+
+    // Read working log checkpoints for the base SHA
+    let working_log = repository
+        .storage
+        .working_log_for_base_commit(working_log_base_sha);
+    let parent_working_log = working_log.read_all_checkpoints()?;
+
+    // Filter out untracked files from the working log
+    let filtered_working_log =
+        filter_untracked_files(repository, &parent_working_log, commit_sha, None)?;
+
+    // Create VirtualAttributions from working log with stubbed human author
+    let working_va = VirtualAttributions::from_just_working_log(
+        repository.clone(),
+        working_log_base_sha.to_string(),
+        Some("example@usegitai.com".to_string()),
+    )?;
+
+    // Get pathspecs for files in the working log
+    let pathspecs: HashSet<String> = filtered_working_log
+        .iter()
+        .flat_map(|cp| cp.entries.iter().map(|e| e.file.clone()))
+        .collect();
+
+    // Convert VirtualAttributions to authorship log (index-only mode)
+    // This only looks at committed hunks, not the working copy, since the commit has already landed
+    let authorship_log = working_va.to_authorship_log_index_only(
+        repository,
+        working_log_base_sha,
+        commit_sha,
+        Some(&pathspecs),
+    )?;
+
+    // Get git diff stats for the commit
+    let (git_diff_added_lines, git_diff_deleted_lines) =
+        get_git_diff_stats(repository, commit_sha)?;
+
+    // Generate CommitStats from the authorship log
+    Ok(stats_from_authorship_log(
+        Some(&authorship_log),
+        git_diff_added_lines,
+        git_diff_deleted_lines,
+    ))
+}
+
+mod tests {
+    use crate::git::find_repository_in_path;
+
+    use super::*;
+
+    #[test]
+    fn test_simulate_post_commit() {
+        let repository = find_repository_in_path(".").unwrap();
+        let working_log_base_sha = "a99bf9310936936f0c0e49a3ef37be80a5e3dc51";
+        let commit_sha = "1234567890";
+        let stats = simulate_post_commit(&repository, working_log_base_sha, commit_sha).unwrap();
     }
 }
