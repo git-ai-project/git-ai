@@ -89,6 +89,9 @@ pub fn handle_git_ai(args: &[String]) {
         "flush-logs" => {
             commands::flush_logs::handle_flush_logs(&args[1..]);
         }
+        "stats-delta" => {
+            commands::stats_delta::handle_stats_delta(&repository_option, &args[1..]);
+        }
         _ => {
             println!("Unknown git-ai command: {}", args[0]);
             std::process::exit(1);

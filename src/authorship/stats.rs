@@ -46,6 +46,23 @@ pub struct CommitStats {
     pub tool_model_breakdown: BTreeMap<String, ToolModelHeadlineStats>,
 }
 
+impl Default for CommitStats {
+    fn default() -> Self {
+        Self {
+            human_additions: 0,
+            mixed_additions: 0,
+            ai_additions: 0,
+            ai_accepted: 0,
+            total_ai_additions: 0,
+            total_ai_deletions: 0,
+            time_waiting_for_ai: 0,
+            git_diff_deleted_lines: 0,
+            git_diff_added_lines: 0,
+            tool_model_breakdown: BTreeMap::new(),
+        }
+    }
+}
+
 pub fn stats_command(
     repo: &Repository,
     commit_sha: Option<&str>,
