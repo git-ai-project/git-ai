@@ -190,15 +190,25 @@ fn create_authorship_log_for_range(
     // Step 2: Create VirtualAttributions for start commit (older)
     let repo_clone = repo.clone();
     let mut start_va = smol::block_on(async {
-        VirtualAttributions::new_for_base_commit(repo_clone, start_sha.to_string(), &changed_files, None)
-            .await
+        VirtualAttributions::new_for_base_commit(
+            repo_clone,
+            start_sha.to_string(),
+            &changed_files,
+            None,
+        )
+        .await
     })?;
 
     // Step 3: Create VirtualAttributions for end commit (newer)
     let repo_clone = repo.clone();
     let mut end_va = smol::block_on(async {
-        VirtualAttributions::new_for_base_commit(repo_clone, end_sha.to_string(), &changed_files, None)
-            .await
+        VirtualAttributions::new_for_base_commit(
+            repo_clone,
+            end_sha.to_string(),
+            &changed_files,
+            None,
+        )
+        .await
     })?;
 
     // Step 3.5: Filter both VirtualAttributions to only include prompts from commits in this range
@@ -315,7 +325,7 @@ fn calculate_range_stats_direct(
     let end_sha = commit_range.end_oid.clone();
     // Special case: single commit range (start == end)
     if start_sha == end_sha {
-        return stats_for_commit_stats(repo, &end_sha, &commit_range.refname);
+        return stats_for_commit_stats(repo, &end_sha);
     }
 
     // Step 1: Get git diff stats between start and end

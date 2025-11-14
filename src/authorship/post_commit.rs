@@ -56,7 +56,6 @@ pub fn post_commit(
         .flat_map(|cp| cp.entries.iter().map(|e| e.file.clone()))
         .collect();
 
-
     // Split VirtualAttributions into committed (authorship log) and uncommitted (INITIAL)
     let (mut authorship_log, initial_attributions) = working_va
         .to_authorship_log_and_initial_working_log(
@@ -89,14 +88,14 @@ pub fn post_commit(
 
     if !supress_output {
         let refname = repo.head()?.name().unwrap().to_string();
-        let stats = stats_for_commit_stats(repo, &commit_sha, &refname)?;
+        let stats = stats_for_commit_stats(repo, &commit_sha)?;
         write_stats_to_terminal(&stats, true);
     }
     Ok((commit_sha.to_string(), authorship_log))
 }
 
 /// Filter out working log entries for untracked files
-fn filter_untracked_files(
+pub fn filter_untracked_files(
     repo: &Repository,
     working_log: &[Checkpoint],
     commit_sha: &str,
@@ -132,13 +131,11 @@ fn filter_untracked_files(
 
 /// Update prompts/transcripts in working log checkpoints to their latest versions.
 /// This helps prevent race conditions where we miss the last message in a conversation.
-/// 
+///
 /// For each unique prompt/conversation (identified by agent_id), only the LAST checkpoint
 /// with that agent_id is updated. This prevents duplicating the same full transcript
 /// across multiple checkpoints when only the final version matters.
-fn update_prompts_to_latest(
-    checkpoints: &mut [Checkpoint],
-) -> Result<(), GitAiError> {
+fn update_prompts_to_latest(checkpoints: &mut [Checkpoint]) -> Result<(), GitAiError> {
     // Group checkpoints by agent ID (tool + id), tracking indices
     let mut agent_checkpoint_indices: HashMap<String, Vec<usize>> = HashMap::new();
 
@@ -161,7 +158,7 @@ fn update_prompts_to_latest(
         // Get the last checkpoint index for this agent
         let last_idx = *indices.last().unwrap();
         let checkpoint = &checkpoints[last_idx];
-        
+
         if let Some(agent_id) = &checkpoint.agent_id {
             // Dispatch to tool-specific update logic
             let updated_data = match agent_id.tool.as_str() {
