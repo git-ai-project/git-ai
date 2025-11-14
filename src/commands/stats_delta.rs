@@ -171,7 +171,7 @@ pub fn handle_stats_delta(repository_option: &Option<Repository>, _args: &[Strin
     }
 
     // Step 5: Update tracking metadata
-    stats_delta_log.set_last_indexed_commit(head_sha);
+    stats_delta_log.set_last_indexed_commit_at(head_sha.to_string(), Utc::now());
 
     // Step 6: Save and clean the log
     if let Err(e) = stats_delta_log.save_and_clean(repository) {
@@ -251,42 +251,6 @@ pub struct StatsDeltaLogData {
     pub log: Vec<StatsDeltaLogEntry>,
 }
 
-/// Manages a collection of StatsDeltaLogEntry items with load/save capabilities
-///
-/// # Example Usage
-/// ```no_run
-/// use chrono::Utc;
-/// use std::path::PathBuf;
-///
-/// // Auto-loads from disk if file exists, otherwise creates new
-/// let mut log = StatsDeltaLog::new(PathBuf::from("stats_delta.log")).unwrap();
-///
-/// // Update metadata
-/// log.set_last_indexed_commit("abc123".to_string());
-///
-/// // Add a new entry
-/// log.add(StatsDeltaLogEntry::Editing {
-///     working_log_base_sha: "abc123".to_string(),
-///     first_seen: Utc::now(),
-///     last_seen: Utc::now(),
-/// });
-///
-/// // Touch an existing entry to update last_seen
-/// log.touch("abc123");
-///
-/// // Replace an entry (state transition)
-/// log.replace(StatsDeltaLogEntry::LandedCommitHueristic {
-///     working_log_base_sha: "abc123".to_string(),
-///     stats: Default::default(),
-///     processed_at: Utc::now(),
-/// });
-///
-/// // Delete an entry
-/// log.delete("abc123");
-///
-/// // Save changes
-/// log.save().unwrap();
-/// ```
 pub struct StatsDeltaLog {
     path: PathBuf,
     last_indexed_commit: Option<String>,
@@ -416,12 +380,6 @@ impl StatsDeltaLog {
         self.last_indexed_timestamp
     }
 
-    /// Set the last indexed commit SHA and update timestamp to now
-    pub fn set_last_indexed_commit(&mut self, commit_sha: String) {
-        self.last_indexed_commit = Some(commit_sha);
-        self.last_indexed_timestamp = Some(Utc::now());
-    }
-
     /// Set the last indexed commit SHA with a specific timestamp
     pub fn set_last_indexed_commit_at(&mut self, commit_sha: String, timestamp: DateTime<Utc>) {
         self.last_indexed_commit = Some(commit_sha);
@@ -460,28 +418,6 @@ impl StatsDeltaLog {
         self.entries.push(entry);
     }
 
-    /// Replace an entry by working_log_base_sha
-    pub fn replace(&mut self, new_entry: StatsDeltaLogEntry) -> bool {
-        let sha = new_entry.working_log_base_sha().to_string();
-        if let Some(pos) = self
-            .entries
-            .iter()
-            .position(|e| e.working_log_base_sha() == sha)
-        {
-            self.entries[pos] = new_entry;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Replace an entry by working_log_base_sha, or add it if it doesn't exist
-    pub fn upsert(&mut self, entry: StatsDeltaLogEntry) {
-        if !self.replace(entry.clone()) {
-            self.add(entry);
-        }
-    }
-
     /// Delete an entry by working_log_base_sha
     pub fn delete(&mut self, working_log_base_sha: &str) -> bool {
         if let Some(pos) = self
@@ -504,16 +440,6 @@ impl StatsDeltaLog {
         } else {
             false
         }
-    }
-
-    /// Delete all entries matching a predicate
-    pub fn delete_where<F>(&mut self, predicate: F) -> usize
-    where
-        F: Fn(&StatsDeltaLogEntry) -> bool,
-    {
-        let initial_len = self.entries.len();
-        self.entries.retain(|e| !predicate(e));
-        initial_len - self.entries.len()
     }
 }
 
