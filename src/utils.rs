@@ -190,3 +190,293 @@ pub fn disable_git_ai() -> Result<(), GitAiError> {
     
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn setup_test_env() -> TempDir {
+        let temp_dir = TempDir::new().unwrap();
+        let test_home = temp_dir.path().to_string_lossy().to_string();
+        
+        // Set HOME environment variable for Unix-like systems
+        unsafe {
+            env::set_var("HOME", &test_home);
+        }
+        
+        // Set USERPROFILE for Windows (though tests will likely run on Unix)
+        #[cfg(windows)]
+        unsafe {
+            env::set_var("USERPROFILE", &test_home);
+        }
+        
+        temp_dir
+    }
+
+    fn cleanup_test_env() {
+        unsafe {
+            env::remove_var("HOME");
+        }
+        #[cfg(windows)]
+        unsafe {
+            env::remove_var("USERPROFILE");
+        }
+    }
+
+    fn create_bin_dir(temp_dir: &TempDir) {
+        let bin_dir = temp_dir.path().join(".git-ai").join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        // Verify the path matches what git_ai_bin_dir() will return
+        let expected_bin_dir = git_ai_bin_dir();
+        assert_eq!(bin_dir, expected_bin_dir, "Bin directory path mismatch");
+    }
+
+    #[test]
+    fn test_git_ai_bin_dir() {
+        let temp_dir = setup_test_env();
+        let bin_dir = git_ai_bin_dir();
+        let expected = temp_dir.path().join(".git-ai").join("bin");
+        assert_eq!(bin_dir, expected);
+        cleanup_test_env();
+    }
+
+    #[test]
+    fn test_git_bin_path() {
+        let temp_dir = setup_test_env();
+        let git_path = git_bin_path();
+        let expected_name = if cfg!(windows) { "git.exe" } else { "git" };
+        let expected = temp_dir.path().join(".git-ai").join("bin").join(expected_name);
+        assert_eq!(git_path, expected);
+        cleanup_test_env();
+    }
+
+    #[test]
+    fn test_git_disabled_bin_path() {
+        let temp_dir = setup_test_env();
+        let git_disabled_path = git_disabled_bin_path();
+        let expected_name = if cfg!(windows) { "git.disabled.exe" } else { "git.disabled" };
+        let expected = temp_dir.path().join(".git-ai").join("bin").join(expected_name);
+        assert_eq!(git_disabled_path, expected);
+        cleanup_test_env();
+    }
+
+    #[test]
+    fn test_is_git_ai_disabled_when_enabled() {
+        let temp_dir = setup_test_env();
+        create_bin_dir(&temp_dir);
+        
+        // Create git binary (enabled state)
+        let git_path = git_bin_path();
+        fs::write(&git_path, b"fake git binary").unwrap();
+        
+        assert!(!is_git_ai_disabled());
+        
+        cleanup_test_env();
+    }
+
+    #[test]
+    fn test_is_git_ai_disabled_when_disabled() {
+        let temp_dir = setup_test_env();
+        create_bin_dir(&temp_dir);
+        
+        // Create git.disabled binary (disabled state)
+        let git_disabled_path = git_disabled_bin_path();
+        fs::write(&git_disabled_path, b"fake git binary").unwrap();
+        
+        assert!(is_git_ai_disabled());
+        
+        cleanup_test_env();
+    }
+
+    #[test]
+    fn test_is_git_ai_disabled_when_neither_exists() {
+        let temp_dir = setup_test_env();
+        create_bin_dir(&temp_dir);
+        
+        // Neither git nor git.disabled exists
+        assert!(!is_git_ai_disabled());
+        
+        cleanup_test_env();
+    }
+
+    #[test]
+    fn test_disable_git_ai_success() {
+        let temp_dir = setup_test_env();
+        create_bin_dir(&temp_dir);
+        
+        // Create git binary (enabled state)
+        let git_path = git_bin_path();
+        fs::write(&git_path, b"fake git binary").unwrap();
+        
+        // Disable git-ai
+        let result = disable_git_ai();
+        assert!(result.is_ok());
+        
+        // Verify git binary is renamed to git.disabled
+        let git_disabled_path = git_disabled_bin_path();
+        assert!(!git_path.exists());
+        assert!(git_disabled_path.exists());
+        assert_eq!(fs::read_to_string(&git_disabled_path).unwrap(), "fake git binary");
+        
+        cleanup_test_env();
+    }
+
+    #[test]
+    fn test_disable_git_ai_when_already_disabled_no_git() {
+        let temp_dir = setup_test_env();
+        create_bin_dir(&temp_dir);
+        
+        // Don't create git binary - already disabled state
+        let result = disable_git_ai();
+        assert!(result.is_err());
+        
+        if let GitAiError::Generic(msg) = result.unwrap_err() {
+            assert!(msg.contains("already disabled"));
+            assert!(msg.contains("git binary not found"));
+        } else {
+            panic!("Expected Generic error");
+        }
+        
+        cleanup_test_env();
+    }
+
+    #[test]
+    fn test_disable_git_ai_when_already_disabled_git_disabled_exists() {
+        let temp_dir = setup_test_env();
+        create_bin_dir(&temp_dir);
+        
+        // Create both git and git.disabled (invalid state)
+        let git_path = git_bin_path();
+        let git_disabled_path = git_disabled_bin_path();
+        fs::write(&git_path, b"fake git binary").unwrap();
+        fs::write(&git_disabled_path, b"fake git.disabled binary").unwrap();
+        
+        let result = disable_git_ai();
+        assert!(result.is_err());
+        
+        if let GitAiError::Generic(msg) = result.unwrap_err() {
+            assert!(msg.contains("already disabled"));
+            assert!(msg.contains("git.disabled already exists"));
+        } else {
+            panic!("Expected Generic error");
+        }
+        
+        cleanup_test_env();
+    }
+
+    #[test]
+    fn test_enable_git_ai_success() {
+        let temp_dir = setup_test_env();
+        create_bin_dir(&temp_dir);
+        
+        // Create git.disabled binary (disabled state)
+        let git_disabled_path = git_disabled_bin_path();
+        fs::write(&git_disabled_path, b"fake git binary").unwrap();
+        
+        // Enable git-ai
+        let result = enable_git_ai();
+        assert!(result.is_ok());
+        
+        // Verify git.disabled is renamed back to git
+        let git_path = git_bin_path();
+        assert!(!git_disabled_path.exists());
+        assert!(git_path.exists());
+        assert_eq!(fs::read_to_string(&git_path).unwrap(), "fake git binary");
+        
+        cleanup_test_env();
+    }
+
+    #[test]
+    fn test_enable_git_ai_when_already_enabled() {
+        let temp_dir = setup_test_env();
+        create_bin_dir(&temp_dir);
+        
+        // Create git binary (already enabled state)
+        let git_path = git_bin_path();
+        fs::write(&git_path, b"fake git binary").unwrap();
+        
+        // Try to enable (should fail)
+        let result = enable_git_ai();
+        assert!(result.is_err());
+        
+        if let GitAiError::Generic(msg) = result.unwrap_err() {
+            assert!(msg.contains("already enabled"));
+            assert!(msg.contains("git.disabled not found"));
+        } else {
+            panic!("Expected Generic error");
+        }
+        
+        cleanup_test_env();
+    }
+
+    #[test]
+    fn test_enable_disable_cycle() {
+        let temp_dir = setup_test_env();
+        create_bin_dir(&temp_dir);
+        
+        // Start with enabled state
+        let git_path = git_bin_path();
+        fs::write(&git_path, b"fake git binary").unwrap();
+        
+        // Disable
+        assert!(disable_git_ai().is_ok());
+        assert!(is_git_ai_disabled());
+        assert!(!git_path.exists());
+        assert!(git_disabled_bin_path().exists());
+        
+        // Enable
+        assert!(enable_git_ai().is_ok());
+        assert!(!is_git_ai_disabled());
+        assert!(git_path.exists());
+        assert!(!git_disabled_bin_path().exists());
+        
+        // Disable again
+        assert!(disable_git_ai().is_ok());
+        assert!(is_git_ai_disabled());
+        
+        cleanup_test_env();
+    }
+
+    #[test]
+    fn test_disable_git_ai_preserves_file_content() {
+        let temp_dir = setup_test_env();
+        create_bin_dir(&temp_dir);
+        
+        let original_content = b"fake git binary content with special chars: \x00\x01\x02";
+        let git_path = git_bin_path();
+        fs::write(&git_path, original_content).unwrap();
+        
+        // Disable
+        assert!(disable_git_ai().is_ok());
+        
+        // Verify content is preserved
+        let git_disabled_path = git_disabled_bin_path();
+        let preserved_content = fs::read(&git_disabled_path).unwrap();
+        assert_eq!(preserved_content, original_content);
+        
+        cleanup_test_env();
+    }
+
+    #[test]
+    fn test_enable_git_ai_preserves_file_content() {
+        let temp_dir = setup_test_env();
+        create_bin_dir(&temp_dir);
+        
+        let original_content = b"fake git binary content with special chars: \x00\x01\x02";
+        let git_disabled_path = git_disabled_bin_path();
+        fs::write(&git_disabled_path, original_content).unwrap();
+        
+        // Enable
+        assert!(enable_git_ai().is_ok());
+        
+        // Verify content is preserved
+        let git_path = git_bin_path();
+        let preserved_content = fs::read(&git_path).unwrap();
+        assert_eq!(preserved_content, original_content);
+        
+        cleanup_test_env();
+    }
+}
