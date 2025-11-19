@@ -1,5 +1,5 @@
 use crate::error::GitAiError;
-use crate::utils::debug_log;
+use crate::utils::{debug_log, git_ai_bin_dir, home_dir};
 use indicatif::{ProgressBar, ProgressStyle};
 use jsonc_parser::ParseOptions;
 use jsonc_parser::cst::CstRootNode;
@@ -879,19 +879,6 @@ fn write_atomic(path: &Path, data: &[u8]) -> Result<(), GitAiError> {
     }
     fs::rename(&tmp_path, path)?;
     Ok(())
-}
-
-fn home_dir() -> PathBuf {
-    if let Ok(home) = std::env::var("HOME") {
-        return PathBuf::from(home);
-    }
-    #[cfg(windows)]
-    {
-        if let Ok(userprofile) = std::env::var("USERPROFILE") {
-            return PathBuf::from(userprofile);
-        }
-    }
-    PathBuf::from(".")
 }
 
 #[cfg(windows)]

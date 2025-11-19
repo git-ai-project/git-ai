@@ -12,7 +12,7 @@ use crate::git::repository::Repository;
 use crate::observability;
 
 use crate::observability::wrapper_performance_targets::log_performance_target_if_violated;
-use crate::utils::debug_log;
+use crate::utils::{debug_log, is_git_ai_disabled};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 #[cfg(unix)]
@@ -78,6 +78,12 @@ pub struct CommandHooksContext {
 }
 
 pub fn handle_git(args: &[String]) {
+    // Check if git-ai is disabled
+    if is_git_ai_disabled() {
+        eprintln!("Git-ai is disabled. To enable it run `git-ai enable`");
+        std::process::exit(1);
+    }
+
     // If we're being invoked from a shell completion context, bypass git-ai logic
     // and delegate directly to the real git so existing completion scripts work.
     if in_shell_completion_context() {

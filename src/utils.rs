@@ -1,6 +1,7 @@
 use crate::error::GitAiError;
 use crate::git::diff_tree_to_tree::Diff;
 use std::path::PathBuf;
+use std::fs;
 
 /// Check if debug logging is enabled via environment variable
 ///
@@ -106,4 +107,86 @@ pub fn current_git_ai_exe() -> Result<PathBuf, GitAiError> {
     }
     
     Ok(path)
+}
+
+/// Get the user's home directory path
+pub fn home_dir() -> PathBuf {
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home);
+    }
+    #[cfg(windows)]
+    {
+        if let Ok(userprofile) = std::env::var("USERPROFILE") {
+            return PathBuf::from(userprofile);
+        }
+    }
+    PathBuf::from(".")
+}
+
+/// Get the git-ai bin directory path
+pub fn git_ai_bin_dir() -> PathBuf {
+    home_dir().join(".git-ai").join("bin")
+}
+
+/// Check if git-ai is disabled by checking if git.disabled exists
+pub fn is_git_ai_disabled() -> bool {
+    let bin_dir = git_ai_bin_dir();
+    let git_disabled_path = bin_dir.join(if cfg!(windows) { "git.disabled.exe" } else { "git.disabled" });
+    git_disabled_path.exists()
+}
+
+/// Get the path to the git binary in git-ai bin directory
+pub fn git_bin_path() -> PathBuf {
+    git_ai_bin_dir().join(if cfg!(windows) { "git.exe" } else { "git" })
+}
+
+/// Get the path to the git.disabled binary in git-ai bin directory
+pub fn git_disabled_bin_path() -> PathBuf {
+    git_ai_bin_dir().join(if cfg!(windows) { "git.disabled.exe" } else { "git.disabled" })
+}
+
+/// Enable git-ai by renaming git.disabled back to git
+pub fn enable_git_ai() -> Result<(), GitAiError> {
+    let git_disabled = git_disabled_bin_path();
+    let git_path = git_bin_path();
+    
+    if !git_disabled.exists() {
+        return Err(GitAiError::Generic(
+            "git-ai is already enabled (git.disabled not found)".to_string(),
+        ));
+    }
+    
+    fs::rename(&git_disabled, &git_path)
+        .map_err(|e| GitAiError::Generic(format!(
+            "Failed to enable git-ai: {}",
+            e
+        )))?;
+    
+    Ok(())
+}
+
+/// Disable git-ai by renaming git to git.disabled
+pub fn disable_git_ai() -> Result<(), GitAiError> {
+    let git_path = git_bin_path();
+    let git_disabled = git_disabled_bin_path();
+    
+    if !git_path.exists() {
+        return Err(GitAiError::Generic(
+            "git-ai is already disabled (git binary not found)".to_string(),
+        ));
+    }
+    
+    if git_disabled.exists() {
+        return Err(GitAiError::Generic(
+            "git-ai is already disabled (git.disabled already exists)".to_string(),
+        ));
+    }
+    
+    fs::rename(&git_path, &git_disabled)
+        .map_err(|e| GitAiError::Generic(format!(
+            "Failed to disable git-ai: {}",
+            e
+        )))?;
+    
+    Ok(())
 }

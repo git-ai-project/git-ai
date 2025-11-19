@@ -13,6 +13,7 @@ use crate::git::find_repository_in_path;
 use crate::git::repository::CommitRange;
 use crate::observability;
 use crate::observability::wrapper_performance_targets::log_performance_for_checkpoint;
+use crate::utils;
 use std::env;
 use std::io::IsTerminal;
 use std::io::Read;
@@ -22,6 +23,13 @@ pub fn handle_git_ai(args: &[String]) {
     if args.is_empty() {
         print_help();
         return;
+    }
+
+    // Check if git-ai is disabled (except for enable/disable commands)
+    let command = args[0].as_str();
+    if command != "enable" && command != "disable" && utils::is_git_ai_disabled() {
+        eprintln!("Git-ai is disabled. To enable it run `git-ai enable`");
+        std::process::exit(1);
     }
 
     let current_dir = env::current_dir().unwrap().to_string_lossy().to_string();
@@ -36,7 +44,7 @@ pub fn handle_git_ai(args: &[String]) {
 
     let allowed_repository = config.is_allowed_repository(&repository_option);
 
-    match args[0].as_str() {
+    match command {
         "help" | "--help" | "-h" => {
             print_help();
         }
@@ -89,6 +97,30 @@ pub fn handle_git_ai(args: &[String]) {
         "flush-logs" => {
             commands::flush_logs::handle_flush_logs(&args[1..]);
         }
+        "enable" => {
+            match utils::enable_git_ai() {
+                Ok(()) => {
+                    println!("git-ai enabled successfully");
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("Failed to enable git-ai: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        "disable" => {
+            match utils::disable_git_ai() {
+                Ok(()) => {
+                    println!("git-ai disabled successfully");
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("Failed to disable git-ai: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
         _ => {
             println!("Unknown git-ai command: {}", args[0]);
             std::process::exit(1);
@@ -125,6 +157,8 @@ fn print_help() {
     eprintln!("  git-path           Print the path to the underlying git executable");
     eprintln!("  upgrade            Check for updates and install if available");
     eprintln!("    --force               Reinstall latest version even if already up to date");
+    eprintln!("  enable             Enable git-ai (renames git.disabled back to git)");
+    eprintln!("  disable            Disable git-ai (renames git to git.disabled)");
     eprintln!("  version, -v, --version     Print the git-ai version");
     eprintln!("  help, -h, --help           Show this help message");
     eprintln!("");
