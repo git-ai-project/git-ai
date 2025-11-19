@@ -11,6 +11,8 @@ use diff_match_patch_rs::traits::{Compat, Efficient};
 use diff_match_patch_rs::{DiffMatchPatch, Ops};
 use std::collections::HashMap;
 
+pub const INITIAL_ATTRIBUTION_TS: u128 = 42;
+
 /// Represents a single attribution range in the file.
 /// Ranges can overlap (multiple authors can be attributed to the same text).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]

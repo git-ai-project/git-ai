@@ -1,4 +1,4 @@
-use crate::authorship::attribution_tracker::{Attribution, AttributionTracker, LineAttribution};
+use crate::authorship::attribution_tracker::{Attribution, AttributionTracker, INITIAL_ATTRIBUTION_TS, LineAttribution};
 use crate::authorship::working_log::CheckpointKind;
 use crate::authorship::working_log::{Checkpoint, WorkingLogEntry};
 use crate::commands::blame::{GitAiBlameOptions, OLDEST_AI_BLAME_DATE};
@@ -601,7 +601,7 @@ fn get_checkpoint_entry_for_file(
             crate::authorship::attribution_tracker::line_attributions_to_attributions(
                 &prev_line_attributions,
                 content_for_line_conversion,
-                ts,
+                INITIAL_ATTRIBUTION_TS,
             );
 
         // When we have INITIAL attributions, they describe the current state of the file.
