@@ -2,7 +2,7 @@ use crate::commands::git_handlers::CommandHooksContext;
 use crate::commands::upgrade;
 use crate::git::cli_parser::{ParsedGitInvocation, is_dry_run};
 use crate::git::repository::{Repository, find_repository};
-use crate::git::sync_authorship::push_authorship_notes;
+use crate::git::sync_authorship::{fetch_authorship_notes, push_authorship_notes};
 use crate::utils::debug_log;
 
 pub fn push_pre_command_hook(
@@ -57,17 +57,23 @@ pub fn push_pre_command_hook(
 
         crate::observability::spawn_background_flush();
 
-        // Spawn background thread to push authorship notes in parallel with main push
-        Some(std::thread::spawn(move || {
-            // Recreate repository in the background thread
-            if let Ok(repo) = find_repository(&global_args) {
-                if let Err(e) = push_authorship_notes(&repo, &remote) {
-                    debug_log(&format!("authorship push failed: {}", e));
-                }
-            } else {
-                debug_log("failed to open repository for authorship push");
+        match repository.ensure_ai_notes_refspecs_in_remote_push(&remote) {
+            Ok(()) => {
+                debug_log(&format!("ai notes refspecs ensured in remote: {}", remote));
             }
-        }))
+            Err(e) => {
+                debug_log(&format!(
+                    "failed to ensure ai notes refspecs in remote: {}",
+                    e
+                ));
+            }
+        }
+
+        if let Err(e) = fetch_authorship_notes(&repository, &remote) {
+            debug_log(&format!("authorship fetch and merge failed: {}", e));
+        }
+
+        None
     } else {
         // No remotes configured; skip silently
         debug_log("no remotes found for authorship push; skipping");
