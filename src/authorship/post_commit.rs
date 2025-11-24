@@ -182,22 +182,16 @@ fn update_prompts_to_latest(checkpoints: &mut [Checkpoint]) -> Result<(), GitAiE
                     if let Some(metadata) = &checkpoint.agent_metadata {
                         if let Some(chat_session_path) = metadata.get("chat_session_path") {
                             // Try to read and parse the chat session JSON
-                            if let Ok(session_content) = std::fs::read_to_string(chat_session_path)
-                            {
-                                match GithubCopilotPreset::transcript_and_model_from_copilot_session_json(&session_content) {
-                                    Ok((transcript, model, _)) => {
-                                        // Update to the latest transcript (similar to Cursor behavior)
-                                        // This handles both cases: initial load failure and getting latest version
-                                        Some((transcript, model.unwrap_or_else(|| agent_id.model.clone())))
-                                    }
-                                    Err(_e) => {
-                                        // TODO Log error to sentry
-                                        None
-                                    }
+                            match GithubCopilotPreset::transcript_and_model_from_copilot_session_json(chat_session_path) {
+                                Ok((transcript, model, _)) => {
+                                    // Update to the latest transcript (similar to Cursor behavior)
+                                    // This handles both cases: initial load failure and getting latest version
+                                    Some((transcript, model.unwrap_or_else(|| agent_id.model.clone())))
                                 }
-                            } else {
-                                // TODO File still doesn't exist: log error to sentry
-                                None
+                                Err(_e) => {
+                                    // TODO Log error to sentry
+                                    None
+                                }
                             }
                         } else {
                             // No chat_session_path in metadata

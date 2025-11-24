@@ -3,13 +3,20 @@ mod test_utils;
 use git_ai::authorship::transcript::Message;
 use git_ai::commands::checkpoint_agent::agent_presets::GithubCopilotPreset;
 use serde_json::json;
-use test_utils::load_fixture;
+use std::io::Write;
+use test_utils::fixture_path;
 
 #[test]
 fn copilot_session_parsing_stub() {
     // Minimal valid shape with empty requests
     let sample = r#"{"requests": []}"#;
-    let result = GithubCopilotPreset::transcript_and_model_from_copilot_session_json(sample);
+
+    // Write to temporary file
+    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
+    temp_file.write_all(sample.as_bytes()).unwrap();
+    let temp_path = temp_file.path().to_str().unwrap();
+
+    let result = GithubCopilotPreset::transcript_and_model_from_copilot_session_json(temp_path);
     assert!(result.is_ok());
     let (tx, model, edited_filepaths) = result.unwrap();
     assert!(tx.messages.is_empty());
@@ -20,10 +27,11 @@ fn copilot_session_parsing_stub() {
 
 #[test]
 fn copilot_session_parsing_simple() {
-    // Load the test fixture JSON
-    let sample = load_fixture("copilot_session_simple.json");
+    // Load the test fixture path
+    let fixture = fixture_path("copilot_session_simple.json");
+    let fixture_str = fixture.to_str().unwrap();
 
-    let result = GithubCopilotPreset::transcript_and_model_from_copilot_session_json(&sample);
+    let result = GithubCopilotPreset::transcript_and_model_from_copilot_session_json(fixture_str);
     assert!(result.is_ok());
     let (tx, model, _edited_filepaths) = result.unwrap();
 
@@ -114,9 +122,10 @@ fn copilot_session_parsing_simple() {
 
 #[test]
 fn test_copilot_extracts_edited_filepaths() {
-    let sample = load_fixture("copilot_session_simple.json");
+    let fixture = fixture_path("copilot_session_simple.json");
+    let fixture_str = fixture.to_str().unwrap();
 
-    let result = GithubCopilotPreset::transcript_and_model_from_copilot_session_json(&sample);
+    let result = GithubCopilotPreset::transcript_and_model_from_copilot_session_json(fixture_str);
     assert!(result.is_ok());
     let (_tx, _model, edited_filepaths) = result.unwrap();
 
@@ -147,7 +156,12 @@ fn test_copilot_no_edited_filepaths_when_no_edits() {
         ]
     }"##;
 
-    let result = GithubCopilotPreset::transcript_and_model_from_copilot_session_json(sample);
+    // Write to temporary file
+    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
+    temp_file.write_all(sample.as_bytes()).unwrap();
+    let temp_path = temp_file.path().to_str().unwrap();
+
+    let result = GithubCopilotPreset::transcript_and_model_from_copilot_session_json(temp_path);
     assert!(result.is_ok());
     let (_tx, _model, edited_filepaths) = result.unwrap();
 
@@ -191,7 +205,12 @@ fn test_copilot_deduplicates_edited_filepaths() {
         ]
     }"##;
 
-    let result = GithubCopilotPreset::transcript_and_model_from_copilot_session_json(sample);
+    // Write to temporary file
+    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
+    temp_file.write_all(sample.as_bytes()).unwrap();
+    let temp_path = temp_file.path().to_str().unwrap();
+
+    let result = GithubCopilotPreset::transcript_and_model_from_copilot_session_json(temp_path);
     assert!(result.is_ok());
     let (_tx, _model, edited_filepaths) = result.unwrap();
 
@@ -201,4 +220,74 @@ fn test_copilot_deduplicates_edited_filepaths() {
     assert_eq!(paths.len(), 2);
     assert!(paths.contains(&"/Users/test/file.ts".to_string()));
     assert!(paths.contains(&"/Users/test/other.ts".to_string()));
+}
+
+#[test]
+#[serial_test::serial] // Run serially to avoid env var conflicts with other tests
+fn test_copilot_returns_empty_transcript_in_codespaces() {
+    // Save original values if present
+    let original_codespaces = std::env::var("CODESPACES").ok();
+
+    // Set CODESPACES to true
+    unsafe {
+        std::env::set_var("CODESPACES", "true");
+    }
+
+    // Load the test fixture path
+    let fixture = fixture_path("copilot_session_simple.json");
+    let fixture_str = fixture.to_str().unwrap();
+
+    let result = GithubCopilotPreset::transcript_and_model_from_copilot_session_json(fixture_str);
+    assert!(result.is_ok());
+    let (tx, model, edited_filepaths) = result.unwrap();
+
+    // Should return empty transcript when running in Codespaces
+    assert!(tx.messages.is_empty());
+    assert!(model.is_none());
+    assert!(edited_filepaths.is_some());
+    assert_eq!(edited_filepaths.unwrap().len(), 0);
+
+    // Restore original value or remove if it wasn't set
+    unsafe {
+        if let Some(original) = original_codespaces {
+            std::env::set_var("CODESPACES", original);
+        } else {
+            std::env::remove_var("CODESPACES");
+        }
+    }
+}
+
+#[test]
+#[serial_test::serial] // Run serially to avoid env var conflicts with other tests
+fn test_copilot_returns_empty_transcript_in_remote_containers() {
+    // Save original values if present
+    let original_remote_containers = std::env::var("REMOTE_CONTAINERS").ok();
+
+    // Set REMOTE_CONTAINERS to true
+    unsafe {
+        std::env::set_var("REMOTE_CONTAINERS", "true");
+    }
+
+    // Load the test fixture path
+    let fixture = fixture_path("copilot_session_simple.json");
+    let fixture_str = fixture.to_str().unwrap();
+
+    let result = GithubCopilotPreset::transcript_and_model_from_copilot_session_json(fixture_str);
+    assert!(result.is_ok());
+    let (tx, model, edited_filepaths) = result.unwrap();
+
+    // Should return empty transcript when running in Remote Containers
+    assert!(tx.messages.is_empty());
+    assert!(model.is_none());
+    assert!(edited_filepaths.is_some());
+    assert_eq!(edited_filepaths.unwrap().len(), 0);
+
+    // Restore original value or remove if it wasn't set
+    unsafe {
+        if let Some(original) = original_remote_containers {
+            std::env::set_var("REMOTE_CONTAINERS", original);
+        } else {
+            std::env::remove_var("REMOTE_CONTAINERS");
+        }
+    }
 }

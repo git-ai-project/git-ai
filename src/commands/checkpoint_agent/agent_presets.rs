@@ -569,11 +569,8 @@ impl AgentCheckpointPreset for GithubCopilotPreset {
             .to_string();
 
         // Read the Copilot chat session JSON (ignore errors)
-        let (transcript, detected_model, edited_filepaths) = if let Ok(session_content) =
-            std::fs::read_to_string(chat_session_path)
-        {
-            // Build transcript and model via helper
-            GithubCopilotPreset::transcript_and_model_from_copilot_session_json(&session_content)
+        let (transcript, detected_model, edited_filepaths) =
+            GithubCopilotPreset::transcript_and_model_from_copilot_session_json(chat_session_path)
                 .map(|(t, m, f)| (Some(t), m, f))
                 .unwrap_or_else(|e| {
                     // TODO Log error to sentry (JSON exists but invalid)
@@ -583,14 +580,7 @@ impl AgentCheckpointPreset for GithubCopilotPreset {
                         e
                     );
                     (None, None, None)
-                })
-        } else {
-            eprintln!(
-                "[Warning] Failed to read GitHub Copilot chat session JSON from {} (will update transcript at commit)",
-                chat_session_path
-            );
-            (None, None, None)
-        };
+                });
 
         let agent_id = AgentId {
             tool: "github-copilot".to_string(),
@@ -612,12 +602,25 @@ impl AgentCheckpointPreset for GithubCopilotPreset {
 }
 
 impl GithubCopilotPreset {
-    /// Translate a GitHub Copilot chat session JSON string into an AiTranscript, optional model, and edited filepaths.
+    /// Translate a GitHub Copilot chat session JSON file into an AiTranscript, optional model, and edited filepaths.
+    /// Returns an empty transcript if running in Codespaces or Remote Containers.
     pub fn transcript_and_model_from_copilot_session_json(
-        session_json_str: &str,
+        session_json_path: &str,
     ) -> Result<(AiTranscript, Option<String>, Option<Vec<String>>), GitAiError> {
+        // Check if running in Codespaces or Remote Containers - if so, return empty transcript
+        let is_codespaces = env::var("CODESPACES").ok().as_deref() == Some("true");
+        let is_remote_containers = env::var("REMOTE_CONTAINERS").ok().as_deref() == Some("true");
+
+        if is_codespaces || is_remote_containers {
+            return Ok((AiTranscript::new(), None, Some(Vec::new())));
+        }
+
+        // Read the session JSON file
+        let session_json_str = std::fs::read_to_string(session_json_path)
+            .map_err(|e| GitAiError::IoError(e))?;
+
         let session_json: serde_json::Value =
-            serde_json::from_str(session_json_str).map_err(|e| GitAiError::JsonError(e))?;
+            serde_json::from_str(&session_json_str).map_err(|e| GitAiError::JsonError(e))?;
 
         // Extract the requests array which represents the conversation from start to finish
         let requests = session_json
