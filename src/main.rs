@@ -3,6 +3,7 @@ mod ci;
 mod commands;
 mod config;
 mod error;
+mod feature_flags;
 mod git;
 mod observability;
 mod utils;

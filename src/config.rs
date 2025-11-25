@@ -6,6 +6,7 @@ use std::sync::OnceLock;
 use glob::Pattern;
 use serde::Deserialize;
 
+use crate::feature_flags::FeatureFlags;
 use crate::git::repository::Repository;
 
 /// Centralized configuration for the application
@@ -19,6 +20,7 @@ pub struct Config {
     disable_version_checks: bool,
     disable_auto_updates: bool,
     update_channel: UpdateChannel,
+    feature_flags: FeatureFlags,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,6 +71,8 @@ struct FileConfig {
     disable_auto_updates: Option<bool>,
     #[serde(default)]
     update_channel: Option<String>,
+    #[serde(default)]
+    feature_flags: Option<serde_json::Value>,
 }
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
@@ -160,6 +164,10 @@ impl Config {
     pub fn update_channel(&self) -> UpdateChannel {
         self.update_channel
     }
+
+    pub fn feature_flags(&self) -> &FeatureFlags {
+        &self.feature_flags
+    }
 }
 
 fn build_config() -> Config {
@@ -209,11 +217,12 @@ fn build_config() -> Config {
         .as_ref()
         .and_then(|c| c.telemetry_enterprise_dsn.clone())
         .filter(|s| !s.is_empty());
-    
+
     // Default to disabled (true) unless this is an OSS build
     // OSS builds set OSS_BUILD env var at compile time to "1", which enables auto-updates by default
-    let auto_update_flags_default_disabled = option_env!("OSS_BUILD").is_none() || option_env!("OSS_BUILD").unwrap() != "1";
-    
+    let auto_update_flags_default_disabled =
+        option_env!("OSS_BUILD").is_none() || option_env!("OSS_BUILD").unwrap() != "1";
+
     let disable_version_checks = file_cfg
         .as_ref()
         .and_then(|c| c.disable_version_checks)
@@ -230,6 +239,9 @@ fn build_config() -> Config {
 
     let git_path = resolve_git_path(&file_cfg);
 
+    // Build feature flags from file config
+    let feature_flags = build_feature_flags(&file_cfg);
+
     Config {
         git_path,
         ignore_prompts,
@@ -240,7 +252,20 @@ fn build_config() -> Config {
         disable_version_checks,
         disable_auto_updates,
         update_channel,
+        feature_flags,
     }
+}
+
+fn build_feature_flags(file_cfg: &Option<FileConfig>) -> FeatureFlags {
+    let file_flags_value = file_cfg.as_ref().and_then(|c| c.feature_flags.as_ref());
+
+    // Try to deserialize the feature flags from the JSON value
+    let file_flags = file_flags_value.and_then(|value| {
+        // Use from_value to deserialize, but ignore any errors and fall back to defaults
+        serde_json::from_value(value.clone()).ok()
+    });
+
+    FeatureFlags::from_file_config(file_flags)
 }
 
 fn resolve_git_path(file_cfg: &Option<FileConfig>) -> String {
@@ -340,6 +365,7 @@ mod tests {
             disable_version_checks: false,
             disable_auto_updates: false,
             update_channel: UpdateChannel::Latest,
+            feature_flags: FeatureFlags::default(),
         }
     }
 

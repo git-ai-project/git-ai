@@ -3,6 +3,7 @@ pub mod ci;
 pub mod commands;
 pub mod config;
 pub mod error;
+pub mod feature_flags;
 pub mod git;
 pub mod observability;
 pub mod utils;
