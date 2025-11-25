@@ -1,6 +1,6 @@
 use crate::authorship::transcript::Message;
 use crate::error::GitAiError;
-use crate::git::refs::get_authorship;
+use crate::git::refs::{get_authorship, grep_ai_notes_paths, read_note_from_path};
 use crate::git::repository::Repository;
 use crate::{authorship::authorship_log::LineRange, utils::debug_log};
 use serde::{Deserialize, Serialize};
@@ -565,14 +565,71 @@ pub fn stats_for_commit_stats(
     let (git_diff_added_lines, git_diff_deleted_lines) = get_git_diff_stats(repo, commit_sha)?;
 
     // Step 2: get the authorship log for this commit
-    let authorship_log = get_authorship(repo, &commit_sha);
+    let authorship_log = get_authorship(repo, commit_sha);
 
-    // Step 3: Calculate stats from authorship log
+    // Step 3: Resolve foreign prompts - prompts that are referenced in attestations but stored in other commits
+    let resolved_log = authorship_log.map(|mut log| {
+        resolve_foreign_prompts(repo, &mut log);
+        log
+    });
+
+    // Step 4: Calculate stats from authorship log
     Ok(stats_from_authorship_log(
-        authorship_log.as_ref(),
+        resolved_log.as_ref(),
         git_diff_added_lines,
         git_diff_deleted_lines,
     ))
+}
+
+/// Resolve foreign prompts - prompts referenced in attestations but stored in other commits' notes.
+/// This happens when authorship data is merged/squashed across branches without copying the full prompt records.
+fn resolve_foreign_prompts(
+    repo: &Repository,
+    log: &mut crate::authorship::authorship_log_serialization::AuthorshipLog,
+) {
+    use std::collections::HashSet;
+
+    // Collect all hashes referenced in attestations that don't have a local prompt
+    let mut missing_hashes: HashSet<String> = HashSet::new();
+    for file_attestation in &log.attestations {
+        for entry in &file_attestation.entries {
+            if !log.metadata.prompts.contains_key(&entry.hash) {
+                missing_hashes.insert(entry.hash.clone());
+            }
+        }
+    }
+
+    if missing_hashes.is_empty() {
+        return;
+    }
+
+    debug_log(&format!(
+        "Resolving {} foreign prompts for stats calculation",
+        missing_hashes.len()
+    ));
+
+    // Look up each missing prompt from other commits' notes
+    for hash in missing_hashes {
+        // Use git grep to find note paths that contain this prompt hash
+        // This returns note blob paths even for deleted commits
+        if let Ok(note_paths) =
+            grep_ai_notes_paths(repo, &format!("\"{}\"", &hash))
+        {
+            // Try each note path until we find the prompt
+            for note_path in note_paths {
+                if let Some(other_log) = read_note_from_path(repo, &note_path) {
+                    if let Some(prompt_record) = other_log.metadata.prompts.get(&hash) {
+                        debug_log(&format!(
+                            "Found foreign prompt {} in note path {}",
+                            hash, note_path
+                        ));
+                        log.metadata.prompts.insert(hash.clone(), prompt_record.clone());
+                        break;
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Get git diff statistics between commit and its parent
@@ -977,6 +1034,125 @@ mod tests {
         assert_eq!(
             stats.git_diff_deleted_lines, 0,
             "Git diff shows 0 deleted lines"
+        );
+    }
+
+    #[test]
+    fn test_stats_resolves_foreign_prompts_via_note_path() {
+        // This test verifies that stats correctly resolves "foreign prompts" -
+        // prompts that are referenced in attestations but stored in other commits' notes.
+        //
+        // This bug occurs when:
+        // 1. A commit has attestations pointing to a prompt hash (e.g., "10d7219")
+        // 2. The prompts section is empty in that commit's note
+        // 3. The prompt exists in another commit's note (possibly a deleted commit)
+        //
+        // The fix uses grep_ai_notes_paths() and read_note_from_path() to find
+        // prompts even when the original commit has been deleted.
+
+        use crate::authorship::authorship_log_serialization::{
+            AttestationEntry, AuthorshipLog, AuthorshipMetadata, FileAttestation,
+            AUTHORSHIP_LOG_VERSION,
+        };
+        use crate::authorship::authorship_log::LineRange;
+        use crate::git::refs::notes_add;
+
+        let tmp_repo = TmpRepo::new().unwrap();
+
+        // Step 1: Create initial commit with a file
+        let mut file = tmp_repo.write_file("test.txt", "Line1\n", true).unwrap();
+        tmp_repo
+            .trigger_checkpoint_with_author("test_user")
+            .unwrap();
+        tmp_repo.commit_with_message("Initial commit").unwrap();
+
+        // Step 2: Create a commit with AI authorship - this generates a note with both
+        // attestations and prompts
+        file.append("AI Line 2\nAI Line 3\n").unwrap();
+        tmp_repo
+            .trigger_checkpoint_with_ai("Claude", Some("claude-3-sonnet"), Some("cursor"))
+            .unwrap();
+        tmp_repo.commit_with_message("AI adds lines").unwrap();
+
+        let ai_commit_sha = tmp_repo.get_head_commit_sha().unwrap();
+
+        // Get the authorship log from the AI commit to extract the prompt hash
+        let ai_commit_log = get_authorship(&tmp_repo.gitai_repo(), &ai_commit_sha).unwrap();
+
+        // Verify the AI commit has prompts
+        assert!(
+            !ai_commit_log.metadata.prompts.is_empty(),
+            "AI commit should have prompts in its note"
+        );
+
+        // Extract the prompt hash from the AI commit
+        let prompt_hash = ai_commit_log
+            .metadata
+            .prompts
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+
+        // Step 3: Create a new commit with human changes
+        file.append("Human Line 4\nHuman Line 5\n").unwrap();
+        tmp_repo
+            .trigger_checkpoint_with_author("test_user")
+            .unwrap();
+        tmp_repo
+            .commit_with_message("Human adds lines after AI")
+            .unwrap();
+
+        let new_commit_sha = tmp_repo.get_head_commit_sha().unwrap();
+
+        // Step 4: Manually create a note for the new commit that has attestations
+        // pointing to the AI prompt hash, but with EMPTY prompts.
+        // This simulates the bug where prompts are stored in a different commit's note.
+        let mut orphaned_note = AuthorshipLog::new();
+        orphaned_note.metadata = AuthorshipMetadata {
+            schema_version: AUTHORSHIP_LOG_VERSION.to_string(),
+            git_ai_version: Some("test".to_string()),
+            base_commit_sha: new_commit_sha.clone(),
+            prompts: std::collections::BTreeMap::new(), // Empty prompts - this is the bug!
+        };
+
+        // Add attestation referencing the foreign prompt hash
+        let mut file_attestation = FileAttestation::new("test.txt".to_string());
+        file_attestation.add_entry(AttestationEntry::new(
+            prompt_hash.clone(),
+            vec![LineRange::Single(2), LineRange::Single(3)], // Lines 2-3 are AI
+        ));
+        orphaned_note.attestations.push(file_attestation);
+
+        // Write this crafted note (with empty prompts) to the new commit
+        let note_content = orphaned_note.serialize_to_string().unwrap();
+        notes_add(&tmp_repo.gitai_repo(), &new_commit_sha, &note_content).unwrap();
+
+        // Verify the note was written with empty prompts
+        let written_log = get_authorship(&tmp_repo.gitai_repo(), &new_commit_sha).unwrap();
+        assert!(
+            written_log.metadata.prompts.is_empty(),
+            "The crafted note should have empty prompts (simulating the bug)"
+        );
+        assert!(
+            !written_log.attestations.is_empty(),
+            "The crafted note should have attestations referencing the foreign prompt"
+        );
+
+        // Step 5: Verify that stats correctly resolves the foreign prompt
+        // by searching note paths (not commit SHAs which may not exist).
+        //
+        // Without the fix: ai_accepted = 0, ai_additions = 0
+        // With the fix: finds the prompt via grep_ai_notes_paths + read_note_from_path
+        let stats_result = stats_for_commit_stats(&tmp_repo.gitai_repo(), &new_commit_sha).unwrap();
+
+        assert_eq!(
+            stats_result.ai_accepted, 2,
+            "Stats should resolve foreign prompt and show 2 AI-accepted lines"
+        );
+        assert!(
+            stats_result.ai_additions > 0,
+            "Stats should show AI additions after resolving foreign prompt"
         );
     }
 }

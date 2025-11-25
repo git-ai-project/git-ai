@@ -180,49 +180,6 @@ pub fn get_reference_as_authorship_log_v3(
     Ok(authorship_log)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::git::test_utils::TmpRepo;
-
-    #[test]
-    fn test_notes_add_and_show_authorship_note() {
-        // Create a temporary repository
-        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
-
-        // Create a commit first
-        tmp_repo
-            .commit_with_message("Initial commit")
-            .expect("Failed to create initial commit");
-
-        // Get the commit SHA
-        let commit_sha = tmp_repo
-            .get_head_commit_sha()
-            .expect("Failed to get head commit SHA");
-
-        // Test data - simple string content
-        let note_content = "This is a test authorship note with some random content!";
-
-        // Add the authorship note (force overwrite since commit_with_message already created one)
-        notes_add(tmp_repo.gitai_repo(), &commit_sha, note_content)
-            .expect("Failed to add authorship note");
-
-        // Read the note back
-        let retrieved_content = show_authorship_note(tmp_repo.gitai_repo(), &commit_sha)
-            .expect("Failed to retrieve authorship note");
-
-        // Assert the content matches exactly
-        assert_eq!(retrieved_content, note_content);
-
-        // Test that non-existent commit returns None
-        let non_existent_content = show_authorship_note(
-            tmp_repo.gitai_repo(),
-            "0000000000000000000000000000000000000000",
-        );
-        assert!(non_existent_content.is_none());
-    }
-}
-
 /// Sanitize a remote name to create a safe ref name
 /// Replaces special characters with underscores to ensure valid ref names
 fn sanitize_remote_name(remote: &str) -> String {
@@ -341,5 +298,237 @@ pub fn grep_ai_notes(repo: &Repository, pattern: &str) -> Result<Vec<String>, Gi
         Ok(stdout.lines().map(|s| s.to_string()).collect())
     } else {
         Ok(shas.into_iter().collect())
+    }
+}
+
+/// Search AI notes for a pattern and return matching note paths (not commit SHAs).
+/// This works even for notes attached to deleted commits.
+/// (hopefully no scm platform deletes hanging notes)
+pub fn grep_ai_notes_paths(repo: &Repository, pattern: &str) -> Result<Vec<String>, GitAiError> {
+    let mut args = repo.global_args_for_exec();
+    args.push("--no-pager".to_string());
+    args.push("grep".to_string());
+    args.push("-l".to_string()); // Only show file paths
+    args.push(pattern.to_string());
+    args.push("refs/notes/ai".to_string());
+
+    let output = exec_git(&args)?;
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|_| GitAiError::Generic("Failed to parse git grep output".to_string()))?;
+
+    // Parse output format: refs/notes/ai:ab/cdef123...
+    // Extract the path portion (ab/cdef123...)
+    let mut paths: HashSet<String> = HashSet::new();
+    for line in stdout.lines() {
+        if let Some(path) = line.strip_prefix("refs/notes/ai:") {
+            paths.insert(path.to_string());
+        }
+    }
+
+    Ok(paths.into_iter().collect())
+}
+
+/// Read a note directly from its path in the notes tree.
+/// This works even when the commit the note is attached to has been deleted.
+/// Accepts paths in either format: "ab/cdef123..." or "abcdef123..."
+/// Git uses flat paths for small repos and tree paths (with slash) for large repos.
+pub fn read_note_from_path(repo: &Repository, note_path: &str) -> Option<AuthorshipLog> {
+    let original = note_path.to_string();
+    let flat = note_path.replace('/', "");
+    let tree = if flat.len() >= 2 {
+        format!("{}/{}", &flat[..2], &flat[2..])
+    } else {
+        return None;
+    };
+
+    // Build deduped list: original first, then flat, then tree
+    let mut paths = Vec::with_capacity(3);
+    for path in [original, flat, tree] {
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+
+    for path in paths {
+        let mut args = repo.global_args_for_exec();
+        args.push("show".to_string());
+        args.push(format!("refs/notes/ai:{}", path));
+
+        if let Ok(output) = exec_git(&args) {
+            if let Ok(content) = String::from_utf8(output.stdout) {
+                if let Ok(log) = AuthorshipLog::deserialize_from_string(&content) {
+                    return Some(log);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::git::test_utils::TmpRepo;
+
+    #[test]
+    fn test_notes_add_and_show_authorship_note() {
+        // Create a temporary repository
+        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
+
+        // Create a commit first
+        tmp_repo
+            .commit_with_message("Initial commit")
+            .expect("Failed to create initial commit");
+
+        // Get the commit SHA
+        let commit_sha = tmp_repo
+            .get_head_commit_sha()
+            .expect("Failed to get head commit SHA");
+
+        // Test data - simple string content
+        let note_content = "This is a test authorship note with some random content!";
+
+        // Add the authorship note (force overwrite since commit_with_message already created one)
+        notes_add(tmp_repo.gitai_repo(), &commit_sha, note_content)
+            .expect("Failed to add authorship note");
+
+        // Read the note back
+        let retrieved_content = show_authorship_note(tmp_repo.gitai_repo(), &commit_sha)
+            .expect("Failed to retrieve authorship note");
+
+        // Assert the content matches exactly
+        assert_eq!(retrieved_content, note_content);
+
+        // Test that non-existent commit returns None
+        let non_existent_content = show_authorship_note(
+            tmp_repo.gitai_repo(),
+            "0000000000000000000000000000000000000000",
+        );
+        assert!(non_existent_content.is_none());
+    }
+
+    #[test]
+    fn test_read_note_from_path_both_formats() {
+        // Test that read_note_from_path can read notes using both path formats:
+        // - Flat path: "abcdef123..." (used by git for small repos)
+        // - Tree path: "ab/cdef123..." (used by git for large repos)
+        //
+        // The function should handle both formats transparently.
+
+        let tmp_repo = TmpRepo::new().unwrap();
+
+        // Create a commit with AI authorship
+        let mut file = tmp_repo.write_file("test.txt", "Line1\n", true).unwrap();
+        tmp_repo
+            .trigger_checkpoint_with_author("test_user")
+            .unwrap();
+        tmp_repo.commit_with_message("Initial commit").unwrap();
+
+        file.append("AI Line 2\n").unwrap();
+        tmp_repo
+            .trigger_checkpoint_with_ai("TestAI", Some("test-model"), Some("test-tool"))
+            .unwrap();
+        tmp_repo.commit_with_message("AI commit").unwrap();
+
+        let commit_sha = tmp_repo.get_head_commit_sha().unwrap();
+
+        // Generate both path formats from the commit SHA
+        let flat_path = commit_sha.clone();
+        let tree_path = format!("{}/{}", &commit_sha[..2], &commit_sha[2..]);
+
+        // Test flat path format (abcdef123...)
+        // This should work in small repos where git stores notes flat
+        let note_flat = read_note_from_path(&tmp_repo.gitai_repo(), &flat_path);
+        assert!(
+            note_flat.is_some(),
+            "Should be able to read note from flat path {}",
+            flat_path
+        );
+        assert!(
+            !note_flat.unwrap().metadata.prompts.is_empty(),
+            "Note from flat path should have prompts"
+        );
+
+        // Test tree path format (ab/cdef123...)
+        // The function should normalize this to flat format if needed
+        let note_tree = read_note_from_path(&tmp_repo.gitai_repo(), &tree_path);
+        assert!(
+            note_tree.is_some(),
+            "Should be able to read note from tree path {} (normalized to flat)",
+            tree_path
+        );
+        assert!(
+            !note_tree.unwrap().metadata.prompts.is_empty(),
+            "Note from tree path should have prompts"
+        );
+    }
+
+    #[test]
+    fn test_grep_ai_notes_paths_finds_unreachable_commits() {
+        // Test that grep_ai_notes_paths can find notes even when the commit
+        // they're attached to is no longer reachable from any branch
+        // (e.g., after a reset or rebase). The commit object may still exist
+        // in the object store but is not reachable via any ref.
+        use crate::git::repository::exec_git;
+
+        let tmp_repo = TmpRepo::new().unwrap();
+
+        // Create initial commit
+        let mut file = tmp_repo.write_file("test.txt", "Line1\n", true).unwrap();
+        tmp_repo
+            .trigger_checkpoint_with_author("test_user")
+            .unwrap();
+        tmp_repo.commit_with_message("Initial commit").unwrap();
+        let initial_sha = tmp_repo.get_head_commit_sha().unwrap();
+
+        // Create a commit with AI authorship
+        file.append("AI Line 2\n").unwrap();
+        tmp_repo
+            .trigger_checkpoint_with_ai("TestAI", Some("test-model"), Some("test-tool"))
+            .unwrap();
+        tmp_repo.commit_with_message("AI commit").unwrap();
+
+        let ai_commit_sha = tmp_repo.get_head_commit_sha().unwrap();
+
+        // Get the prompt hash before we make the commit unreachable
+        let log = get_authorship(&tmp_repo.gitai_repo(), &ai_commit_sha).unwrap();
+        let prompt_hash = log.metadata.prompts.keys().next().unwrap().clone();
+
+        // Make the AI commit unreachable by resetting to the initial commit
+        // The note will still exist in refs/notes/ai even though the commit is unreachable
+        let mut args = tmp_repo.gitai_repo().global_args_for_exec();
+        args.extend(["reset", "--hard", &initial_sha].map(String::from));
+        exec_git(&args).expect("Failed to reset");
+
+        // Verify the commit is no longer reachable from HEAD
+        let mut args = tmp_repo.gitai_repo().global_args_for_exec();
+        args.extend(["branch", "--contains", &ai_commit_sha].map(String::from));
+        let result = exec_git(&args).expect("branch --contains failed");
+        let branches = String::from_utf8_lossy(&result.stdout);
+        assert!(
+            branches.trim().is_empty(),
+            "The AI commit should not be reachable from any branch after reset"
+        );
+
+        // grep_ai_notes_paths should still find the note
+        let paths =
+            grep_ai_notes_paths(&tmp_repo.gitai_repo(), &format!("\"{}\"", prompt_hash)).unwrap();
+
+        assert!(
+            !paths.is_empty(),
+            "grep_ai_notes_paths should find notes even for unreachable commits"
+        );
+
+        // And we should be able to read the note content
+        let note = read_note_from_path(&tmp_repo.gitai_repo(), &paths[0]);
+        assert!(
+            note.is_some(),
+            "Should be able to read note from unreachable commit via path"
+        );
+        assert!(
+            note.unwrap().metadata.prompts.contains_key(&prompt_hash),
+            "Note should contain the expected prompt"
+        );
     }
 }
