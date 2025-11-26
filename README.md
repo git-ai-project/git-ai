@@ -86,3 +86,4 @@ A PR Bot aggregates `git-ai` data at the PR, Repository and Organization levels:
 | _your agent here_                                                                          |            |         |
 
 > **Building a Coding Agent?** [Add support for Git AI by following this guide](https://usegitai.com/docs/add-your-agent)
+# Test rebase approach
