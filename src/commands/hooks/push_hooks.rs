@@ -4,6 +4,7 @@ use crate::git::repository::Repository;
 use crate::git::sync_authorship::{NotesExistence, fetch_authorship_notes};
 use crate::utils::debug_log;
 
+// testing
 const AUTHORSHIP_REFSPEC: &str = "refs/notes/ai:refs/notes/ai";
 
 pub fn push_pre_command_hook(parsed_args: &mut ParsedGitInvocation, repository: &Repository) {
