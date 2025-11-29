@@ -4,7 +4,6 @@ use serde::Deserialize;
 #[derive(Debug, Clone)]
 pub struct FeatureFlags {
     pub rewrite_stash: bool,
-    pub proxy_push_notes_with_head: bool,
 }
 
 impl Default for FeatureFlags {
@@ -13,13 +12,11 @@ impl Default for FeatureFlags {
         {
             return FeatureFlags {
                 rewrite_stash: true,
-                proxy_push_notes_with_head: false,
             };
         }
         #[cfg(not(debug_assertions))]
         FeatureFlags {
             rewrite_stash: false,
-            proxy_push_notes_with_head: false,
         }
     }
 }
@@ -31,8 +28,6 @@ impl Default for FeatureFlags {
 pub(crate) struct FileFeatureFlags {
     #[serde(default, rename = "rewrite.stash")]
     rewrite_stash: Option<bool>,
-    #[serde(default, rename = "proxy.push_notes_with_head")]
-    proxy_push_notes_with_head: Option<bool>,
 }
 
 impl FeatureFlags {
@@ -48,9 +43,6 @@ impl FeatureFlags {
 
         FeatureFlags {
             rewrite_stash: file_flags.rewrite_stash.unwrap_or(defaults.rewrite_stash),
-            proxy_push_notes_with_head: file_flags
-                .proxy_push_notes_with_head
-                .unwrap_or(defaults.proxy_push_notes_with_head),
         }
     }
 }
@@ -63,7 +55,6 @@ mod tests {
     fn test_default_feature_flags() {
         let flags = FeatureFlags::default();
         assert!(flags.rewrite_stash);
-        assert!(flags.proxy_push_notes_with_head);
     }
 
     #[test]
@@ -71,7 +62,6 @@ mod tests {
         let flags = FeatureFlags::from_file_config(None);
         // Should match defaults
         assert!(flags.rewrite_stash);
-        assert!(flags.proxy_push_notes_with_head);
     }
 
     #[test]
@@ -93,29 +83,24 @@ mod tests {
         let flags = FeatureFlags::from_file_config(Some(file_flags));
         // Should match defaults
         assert!(flags.rewrite_stash);
-        assert!(flags.proxy_push_notes_with_head);
     }
 
     #[test]
     fn test_from_file_config_with_values() {
         let file_flags = FileFeatureFlags {
             rewrite_stash: Some(true),
-            proxy_push_notes_with_head: Some(true),
         };
         let flags = FeatureFlags::from_file_config(Some(file_flags));
         assert!(flags.rewrite_stash);
-        assert!(flags.proxy_push_notes_with_head);
     }
 
     #[test]
     fn test_partial_config() {
         let file_flags = FileFeatureFlags {
             rewrite_stash: Some(true),
-            proxy_push_notes_with_head: None,
         };
         let flags = FeatureFlags::from_file_config(Some(file_flags));
         assert!(flags.rewrite_stash);
-        assert!(flags.proxy_push_notes_with_head);
     }
 
     #[test]
@@ -126,6 +111,5 @@ mod tests {
 
         let file_flags = file_flags.unwrap();
         assert_eq!(file_flags.rewrite_stash, Some(true));
-        assert_eq!(file_flags.proxy_push_notes_with_head, Some(false));
     }
 }
