@@ -127,24 +127,32 @@ impl<'a> CommitRange<'a> {
     }
 
     pub fn is_valid(&self) -> Result<(), GitAiError> {
+        const EMPTY_TREE_HASH: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
         // Check that both commits exist
-        self.repo.find_commit(self.start_oid.clone())?;
+        // Skip validation for empty tree hash - it's a special git object that may not exist in the repo
+        if self.start_oid != EMPTY_TREE_HASH {
+            self.repo.find_commit(self.start_oid.clone())?;
+        }
         self.repo.find_commit(self.end_oid.clone())?;
 
         // Check that both commits exist on the refname
         // Use git merge-base --is-ancestor <commit> <refname>
-        let mut args = self.repo.global_args_for_exec();
-        args.push("merge-base".to_string());
-        args.push("--is-ancestor".to_string());
-        args.push(self.start_oid.clone());
-        args.push(self.refname.clone());
+        // Skip merge-base check for empty tree hash since it's not part of commit history
+        if self.start_oid != EMPTY_TREE_HASH {
+            let mut args = self.repo.global_args_for_exec();
+            args.push("merge-base".to_string());
+            args.push("--is-ancestor".to_string());
+            args.push(self.start_oid.clone());
+            args.push(self.refname.clone());
 
-        exec_git(&args).map_err(|_| {
-            GitAiError::Generic(format!(
-                "Commit {} is not reachable from refname {}",
-                self.start_oid, self.refname
-            ))
-        })?;
+            exec_git(&args).map_err(|_| {
+                GitAiError::Generic(format!(
+                    "Commit {} is not reachable from refname {}",
+                    self.start_oid, self.refname
+                ))
+            })?;
+        }
 
         let mut args = self.repo.global_args_for_exec();
         args.push("merge-base".to_string());
@@ -160,18 +168,21 @@ impl<'a> CommitRange<'a> {
         })?;
 
         // Check that start is an ancestor of end (direct path between them)
-        let mut args = self.repo.global_args_for_exec();
-        args.push("merge-base".to_string());
-        args.push("--is-ancestor".to_string());
-        args.push(self.start_oid.clone());
-        args.push(self.end_oid.clone());
+        // Skip for empty tree hash - it's not part of the commit DAG
+        if self.start_oid != EMPTY_TREE_HASH {
+            let mut args = self.repo.global_args_for_exec();
+            args.push("merge-base".to_string());
+            args.push("--is-ancestor".to_string());
+            args.push(self.start_oid.clone());
+            args.push(self.end_oid.clone());
 
-        exec_git(&args).map_err(|_| {
-            GitAiError::Generic(format!(
-                "Commit {} is not an ancestor of {}",
-                self.start_oid, self.end_oid
-            ))
-        })?;
+            exec_git(&args).map_err(|_| {
+                GitAiError::Generic(format!(
+                    "Commit {} is not an ancestor of {}",
+                    self.start_oid, self.end_oid
+                ))
+            })?;
+        }
 
         Ok(())
     }

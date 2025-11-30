@@ -5,6 +5,13 @@ use repos::test_file::ExpectedLineExt;
 use repos::test_repo::TestRepo;
 use serde_json;
 
+/// Extract the first complete JSON object from mixed stdout/stderr output.
+fn extract_json_object(output: &str) -> String {
+    let start = output.find('{').unwrap_or(0);
+    let end = output.rfind('}').unwrap_or(output.len().saturating_sub(1));
+    output[start..=end].to_string()
+}
+
 #[test]
 fn test_authorship_log_stats() {
     let repo = TestRepo::new();
@@ -57,9 +64,9 @@ fn test_authorship_log_stats() {
 
     assert_eq!(first_commit.authorship_log.attestations.len(), 1);
 
-    let mut stats = repo.git_ai(&["stats", "--json"]).unwrap();
-    stats = stats.split("}}}").next().unwrap().to_string() + "}}}";
-    let stats: CommitStats = serde_json::from_str(&stats).unwrap();
+    let raw = repo.git_ai(&["stats", "--json"]).unwrap();
+    let json = extract_json_object(&raw);
+    let stats: CommitStats = serde_json::from_str(&json).unwrap();
     assert_eq!(stats.human_additions, 4);
     assert_eq!(stats.mixed_additions, 1);
     assert_eq!(stats.ai_additions, 6); // Includes the one mixed line (Neptune (override))
@@ -118,6 +125,84 @@ fn test_authorship_log_stats() {
             .time_waiting_for_ai,
         0
     );
+}
+
+#[test]
+fn test_stats_cli_range() {
+    let repo = TestRepo::new();
+
+    // Initial human commit
+    let mut file = repo.filename("range.txt");
+    file.set_contents(lines!["Line 1".human()]);
+    let first = repo.stage_all_and_commit("Initial human").unwrap();
+
+    // AI adds a line in a second commit
+    file.set_contents(lines!["Line 1".human(), "Line 2".ai()]);
+    let second = repo.stage_all_and_commit("AI adds line").unwrap();
+
+    // Sanity check individual commit stats
+    let range = format!("{}..{}", first.commit_sha, second.commit_sha);
+    let raw = repo
+        .git_ai(&["stats", &range, "--json"])
+        .expect("git-ai stats range should succeed");
+
+    let output = extract_json_object(&raw);
+    let stats: git_ai::authorship::range_authorship::RangeAuthorshipStats =
+        serde_json::from_str(&output).unwrap();
+
+    // Range should only include the AI commit's diff and report at least one AI-added line
+    assert_eq!(stats.authorship_stats.total_commits, 1);
+    assert!(
+        stats.range_stats.ai_additions >= 1,
+        "expected at least one AI addition in range, got {}",
+        stats.range_stats.ai_additions
+    );
+    assert!(
+        stats.range_stats.git_diff_added_lines >= stats.range_stats.ai_additions,
+        "git diff added lines ({}) should be >= ai_additions ({})",
+        stats.range_stats.git_diff_added_lines,
+        stats.range_stats.ai_additions
+    );
+}
+
+#[test]
+fn test_stats_cli_empty_tree_range() {
+    let repo = TestRepo::new();
+
+    // First commit: AI line
+    let mut file = repo.filename("history.txt");
+    file.set_contents(lines!["AI Line 1".ai()]);
+    let _first = repo.stage_all_and_commit("Initial AI").unwrap();
+
+    // Second commit: human line
+    file.set_contents(lines!["AI Line 1".ai(), "Human Line 2".human()]);
+    repo.stage_all_and_commit("Human adds line").unwrap();
+
+    // Git's empty tree OID
+    let empty_tree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+    let head = repo
+        .git(&["rev-parse", "HEAD"])
+        .expect("rev-parse HEAD should succeed")
+        .trim()
+        .to_string();
+    let range = format!("{}..{}", empty_tree, head);
+
+    let raw = repo
+        .git_ai(&["stats", &range, "--json"])
+        .expect("git-ai stats empty-tree range should succeed");
+
+    let output = extract_json_object(&raw);
+    let stats: git_ai::authorship::range_authorship::RangeAuthorshipStats =
+        serde_json::from_str(&output).unwrap();
+
+    // Entire history from empty tree to HEAD:
+    // - 2 commits in range
+    // - 1 AI-added line, 1 human-added line in final diff
+    assert_eq!(stats.authorship_stats.total_commits, 2);
+    assert_eq!(stats.range_stats.git_diff_added_lines, 2);
+    assert_eq!(stats.range_stats.ai_additions, 1);
+    // human_additions is computed as git_diff_added_lines - ai_accepted
+    assert_eq!(stats.range_stats.human_additions, 1);
 }
 
 #[test]

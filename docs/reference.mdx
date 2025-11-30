@@ -40,13 +40,21 @@ git-ai stats
 # Show stats for specific commit
 git-ai stats <commit-sha>
 
+# Show stats for a range of commits (same semantics as `git log <start>..<end>`)
+git-ai stats <start>..<end>
+
+# Show stats for the entire history (from Git's empty tree to HEAD)
+git-ai stats 4b825dc642cb6eb9a060e54bf8d69288fbee4904..HEAD
+
 # Output in JSON format
 git-ai stats --json
 git-ai stats <commit-sha> --json
+git-ai stats <start>..<end> --json
 ```
 
 **Options:**
 - `<commit-sha>` - Optional commit SHA (defaults to HEAD)
+- `<start>..<end>` - Optional commit range; when provided, stats are computed over the entire range rather than a single commit
 - `--json` - Output statistics in JSON format
 
 **Output**
