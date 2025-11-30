@@ -812,7 +812,7 @@ fn test_rebase_commit_splitting() {
 
     // Create initial commit
     let mut base_file = repo.filename("base.txt");
-    base_file.set_contents(lines!["base content"]);
+    base_file.set_contents(lines!["base content", ""]);
     repo.stage_all_and_commit("Initial commit").unwrap();
 
     let default_branch = repo.current_branch();
@@ -823,7 +823,8 @@ fn test_rebase_commit_splitting() {
     let mut features_file = repo.filename("features.txt");
     features_file.set_contents(lines![
         "// AI feature 1".ai(),
-        "function feature1() {}".ai()
+        "function feature1() {}".ai(),
+        "".ai()
     ]);
     repo.stage_all_and_commit("AI feature 1").unwrap();
 
@@ -836,7 +837,7 @@ fn test_rebase_commit_splitting() {
     // Advance main branch
     repo.git(&["checkout", &default_branch]).unwrap();
     let mut main_file = repo.filename("main.txt");
-    main_file.set_contents(lines!["main content"]);
+    main_file.set_contents(lines!["main content", ""]);
     repo.stage_all_and_commit("Main advances").unwrap();
 
     // Rebase feature onto main (hooks will handle authorship)
