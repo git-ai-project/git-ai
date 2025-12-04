@@ -532,12 +532,11 @@ impl AgentCheckpointPreset for GithubCopilotPreset {
             .map_err(|e| GitAiError::PresetError(format!("Invalid JSON in hook_input: {}", e)))?;
 
         // Extract hook_event_name to determine checkpoint type
+        // Fallback to "after_edit" if not set (for older versions of the VS Code extension)
         let hook_event_name = hook_data
             .get("hook_event_name")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                GitAiError::PresetError("hook_event_name not found in hook_input".to_string())
-            })?;
+            .unwrap_or("after_edit");
 
         // Validate hook_event_name
         if hook_event_name != "before_edit" && hook_event_name != "after_edit" {
