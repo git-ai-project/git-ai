@@ -8,7 +8,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::OnceLock;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod repos;
 use git_ai::observability::wrapper_performance_targets::BenchmarkResult;
@@ -625,40 +625,45 @@ impl Sampler {
         self.sample_with_setup(
             test_repo,
             |repo| {
-                // Default setup: Reset to clean state before each run (not timed)
+                // Optimized setup: Since each test commits its changes, the working tree
+                // is clean after each run. We just need to get back to the default branch.
 
-                // 1. Clean any untracked files and directories
-                repo.git_og(&["clean", "-fd"])
-                    .expect("Clean should succeed");
+                let setup_start = Instant::now();
 
-                // 2. Reset --hard to clean any changes
-                repo.git_og(&["reset", "--hard"])
-                    .expect("Reset --hard should succeed");
-
-                // 3. Get the default branch from the remote
-                // Try to get the symbolic ref for origin/HEAD to find the default branch
+                // 1. Get the default branch (fast - just reading refs)
                 let default_branch = repo
-                    .git(&["symbolic-ref", "refs/remotes/origin/HEAD"])
+                    .git_og(&["symbolic-ref", "refs/remotes/origin/HEAD"])
                     .ok()
                     .and_then(|output| {
-                        // Extract branch name from "refs/remotes/origin/main"
                         output
                             .trim()
                             .strip_prefix("refs/remotes/origin/")
                             .map(|b| b.to_string())
                     })
                     .unwrap_or_else(|| {
-                        // Fallback: try main, then master
-                        if repo.git(&["rev-parse", "--verify", "main"]).is_ok() {
+                        if repo.git_og(&["rev-parse", "--verify", "main"]).is_ok() {
                             "main".to_string()
                         } else {
                             "master".to_string()
                         }
                     });
 
-                // 4. Checkout the default branch
-                repo.git(&["checkout", &default_branch])
+                // 2. Get current branch name to delete it later (if it's a test branch)
+                let current_branch = repo
+                    .git_og(&["branch", "--show-current"])
+                    .ok()
+                    .map(|s| s.trim().to_string());
+
+                // 3. Checkout default branch with force to discard any uncommitted changes
+                repo.git_og(&["checkout", "-f", &default_branch])
                     .expect(&format!("Checkout {} should succeed", default_branch));
+
+                // 4. Delete the old test branch if it was a test-bench branch
+                if let Some(branch) = current_branch {
+                    if branch.starts_with("test-bench/") {
+                        let _ = repo.git_og(&["branch", "-D", &branch]);
+                    }
+                }
 
                 // 5. Create a new branch with timestamp for isolation
                 let timestamp_nanos = SystemTime::now()
@@ -666,8 +671,10 @@ impl Sampler {
                     .expect("Time went backwards")
                     .as_nanos();
                 let branch_name = format!("test-bench/{}", timestamp_nanos);
-                repo.git(&["checkout", "-b", &branch_name])
+                repo.git_og(&["checkout", "-b", &branch_name])
                     .expect("Create branch should succeed");
+
+                println!("Time taken to setup: {:?}", setup_start.elapsed());
             },
             operation,
         )
