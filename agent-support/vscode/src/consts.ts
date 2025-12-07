@@ -1,6 +1,6 @@
 import { IDEHostKind } from "./utils/host-kind";
 
-export const MIN_GIT_AI_VERSION = "1.0.22";
+export const MIN_GIT_AI_VERSION = "1.0.23";
 
 // Use GitHub URL to avoid VS Code open URL safety prompt
 export const GIT_AI_INSTALL_DOCS_URL = "https://github.com/acunniffe/git-ai?tab=readme-ov-file#quick-start";

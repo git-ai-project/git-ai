@@ -310,16 +310,17 @@ fn test_copilot_returns_empty_transcript_in_remote_containers() {
 // ============================================================================
 
 #[test]
-fn test_copilot_preset_before_edit_human_checkpoint() {
+fn test_copilot_preset_before_edit_human_checkpoint_snake_case() {
     use git_ai::commands::checkpoint_agent::agent_presets::{
         AgentCheckpointFlags, AgentCheckpointPreset,
     };
 
+    // Test with snake_case (new format)
     let hook_input = json!({
         "hook_event_name": "before_edit",
-        "workspaceFolder": "/Users/test/project",
+        "workspace_folder": "/Users/test/project",
         "will_edit_filepaths": ["/Users/test/project/file.ts"],
-        "dirtyFiles": {
+        "dirty_files": {
             "/Users/test/project/file.ts": "console.log('hello');"
         }
     });
@@ -368,16 +369,68 @@ fn test_copilot_preset_before_edit_human_checkpoint() {
     assert_eq!(run_result.agent_id.model, "human");
 }
 
+// TODO: Remove this test when all users have updated to the latest VS Code extension
+// This test validates backward compatibility with camelCase field names
+#[test]
+fn test_copilot_preset_before_edit_human_checkpoint_camel_case() {
+    use git_ai::commands::checkpoint_agent::agent_presets::{
+        AgentCheckpointFlags, AgentCheckpointPreset,
+    };
+
+    // Test with camelCase (old format) for backward compatibility
+    let hook_input = json!({
+        "hook_event_name": "before_edit",
+        "workspaceFolder": "/Users/test/project",
+        "will_edit_filepaths": ["/Users/test/project/file.ts"],
+        "dirtyFiles": {
+            "/Users/test/project/file.ts": "console.log('hello');"
+        }
+    });
+
+    let flags = AgentCheckpointFlags {
+        hook_input: Some(hook_input.to_string()),
+    };
+
+    let preset = GithubCopilotPreset;
+    let result = preset.run(flags);
+
+    assert!(result.is_ok());
+    let run_result = result.unwrap();
+
+    // Verify it's a human checkpoint
+    assert_eq!(
+        run_result.checkpoint_kind,
+        git_ai::authorship::working_log::CheckpointKind::Human
+    );
+
+    // Verify will_edit_filepaths is set
+    assert!(run_result.will_edit_filepaths.is_some());
+    assert_eq!(
+        run_result.will_edit_filepaths.unwrap(),
+        vec!["/Users/test/project/file.ts"]
+    );
+
+    // Verify dirty files are included
+    assert!(run_result.dirty_files.is_some());
+    let dirty_files = run_result.dirty_files.unwrap();
+    assert_eq!(dirty_files.len(), 1);
+    assert_eq!(
+        dirty_files.get("/Users/test/project/file.ts").unwrap(),
+        "console.log('hello');"
+    );
+}
+
 #[test]
 fn test_copilot_preset_before_edit_requires_will_edit_filepaths() {
     use git_ai::commands::checkpoint_agent::agent_presets::{
         AgentCheckpointFlags, AgentCheckpointPreset,
     };
 
+    // Test with snake_case (new format)
     let hook_input = json!({
         "hook_event_name": "before_edit",
-        "workspaceFolder": "/Users/test/project",
-        "dirtyFiles": {}
+        "workspace_folder": "/Users/test/project",
+        "dirty_files": {}
     });
 
     let flags = AgentCheckpointFlags {
@@ -401,11 +454,12 @@ fn test_copilot_preset_before_edit_requires_non_empty_filepaths() {
         AgentCheckpointFlags, AgentCheckpointPreset,
     };
 
+    // Test with snake_case (new format)
     let hook_input = json!({
         "hook_event_name": "before_edit",
-        "workspaceFolder": "/Users/test/project",
+        "workspace_folder": "/Users/test/project",
         "will_edit_filepaths": [],
-        "dirtyFiles": {}
+        "dirty_files": {}
     });
 
     let flags = AgentCheckpointFlags {
@@ -429,6 +483,37 @@ fn test_copilot_preset_after_edit_requires_session_id() {
         AgentCheckpointFlags, AgentCheckpointPreset,
     };
 
+    // Test with snake_case (new format)
+    let hook_input = json!({
+        "hook_event_name": "after_edit",
+        "workspace_folder": "/Users/test/project",
+        "dirty_files": {}
+    });
+
+    let flags = AgentCheckpointFlags {
+        hook_input: Some(hook_input.to_string()),
+    };
+
+    let preset = GithubCopilotPreset;
+    let result = preset.run(flags);
+
+    // Should fail because chat_session_path is missing for after_edit
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("chat_session_path or chatSessionPath not found"));
+}
+
+// TODO: Remove this test when all users have updated to the latest VS Code extension
+// This test validates backward compatibility with camelCase field names
+#[test]
+fn test_copilot_preset_after_edit_requires_session_id_camel_case() {
+    use git_ai::commands::checkpoint_agent::agent_presets::{
+        AgentCheckpointFlags, AgentCheckpointPreset,
+    };
+
+    // Test with camelCase (old format) for backward compatibility
     let hook_input = json!({
         "hook_event_name": "after_edit",
         "workspaceFolder": "/Users/test/project",
@@ -447,7 +532,7 @@ fn test_copilot_preset_after_edit_requires_session_id() {
     assert!(result
         .unwrap_err()
         .to_string()
-        .contains("chatSessionPath not found"));
+        .contains("chat_session_path or chatSessionPath not found"));
 }
 
 #[test]
@@ -456,9 +541,10 @@ fn test_copilot_preset_invalid_hook_event_name() {
         AgentCheckpointFlags, AgentCheckpointPreset,
     };
 
+    // Test with snake_case (new format)
     let hook_input = json!({
         "hook_event_name": "invalid_event",
-        "workspaceFolder": "/Users/test/project"
+        "workspace_folder": "/Users/test/project"
     });
 
     let flags = AgentCheckpointFlags {
@@ -474,11 +560,54 @@ fn test_copilot_preset_invalid_hook_event_name() {
 }
 
 #[test]
-fn test_copilot_preset_before_edit_multiple_files() {
+fn test_copilot_preset_before_edit_multiple_files_snake_case() {
     use git_ai::commands::checkpoint_agent::agent_presets::{
         AgentCheckpointFlags, AgentCheckpointPreset,
     };
 
+    // Test with snake_case (new format)
+    let hook_input = json!({
+        "hook_event_name": "before_edit",
+        "workspace_folder": "/Users/test/project",
+        "will_edit_filepaths": [
+            "/Users/test/project/file1.ts",
+            "/Users/test/project/file2.ts",
+            "/Users/test/project/file3.ts"
+        ],
+        "dirty_files": {
+            "/Users/test/project/file1.ts": "content1",
+            "/Users/test/project/file2.ts": "content2"
+        }
+    });
+
+    let flags = AgentCheckpointFlags {
+        hook_input: Some(hook_input.to_string()),
+    };
+
+    let preset = GithubCopilotPreset;
+    let result = preset.run(flags);
+
+    assert!(result.is_ok());
+    let run_result = result.unwrap();
+
+    // Verify all files are in will_edit_filepaths
+    assert!(run_result.will_edit_filepaths.is_some());
+    let files = run_result.will_edit_filepaths.unwrap();
+    assert_eq!(files.len(), 3);
+    assert!(files.contains(&"/Users/test/project/file1.ts".to_string()));
+    assert!(files.contains(&"/Users/test/project/file2.ts".to_string()));
+    assert!(files.contains(&"/Users/test/project/file3.ts".to_string()));
+}
+
+// TODO: Remove this test when all users have updated to the latest VS Code extension
+// This test validates backward compatibility with camelCase field names
+#[test]
+fn test_copilot_preset_before_edit_multiple_files_camel_case() {
+    use git_ai::commands::checkpoint_agent::agent_presets::{
+        AgentCheckpointFlags, AgentCheckpointPreset,
+    };
+
+    // Test with camelCase (old format) for backward compatibility
     let hook_input = json!({
         "hook_event_name": "before_edit",
         "workspaceFolder": "/Users/test/project",
@@ -510,4 +639,128 @@ fn test_copilot_preset_before_edit_multiple_files() {
     assert!(files.contains(&"/Users/test/project/file1.ts".to_string()));
     assert!(files.contains(&"/Users/test/project/file2.ts".to_string()));
     assert!(files.contains(&"/Users/test/project/file3.ts".to_string()));
+}
+
+// TODO: Remove this test when all users have updated to the latest VS Code extension
+// This test validates backward compatibility with camelCase field names for after_edit
+#[test]
+fn test_copilot_preset_after_edit_camel_case() {
+    use git_ai::commands::checkpoint_agent::agent_presets::{
+        AgentCheckpointFlags, AgentCheckpointPreset,
+    };
+    use std::io::Write;
+
+    // Create a temporary chat session file
+    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
+    temp_file.write_all(r#"{"requests": []}"#.as_bytes()).unwrap();
+    let temp_path = temp_file.path().to_str().unwrap().to_string();
+
+    // Test with camelCase (old format) for backward compatibility
+    let hook_input = json!({
+        "hook_event_name": "after_edit",
+        "workspaceFolder": "/Users/test/project",
+        "chatSessionPath": temp_path,
+        "sessionId": "test-session-123",
+        "edited_filepaths": ["/Users/test/project/file.ts"],
+        "dirtyFiles": {
+            "/Users/test/project/file.ts": "console.log('hello');"
+        }
+    });
+
+    let flags = AgentCheckpointFlags {
+        hook_input: Some(hook_input.to_string()),
+    };
+
+    let preset = GithubCopilotPreset;
+    let result = preset.run(flags);
+
+    assert!(result.is_ok());
+    let run_result = result.unwrap();
+
+    // Verify it's an AI checkpoint
+    assert_eq!(
+        run_result.checkpoint_kind,
+        git_ai::authorship::working_log::CheckpointKind::AiAgent
+    );
+
+    // Verify session ID is extracted correctly
+    assert_eq!(run_result.agent_id.id, "test-session-123");
+    assert_eq!(run_result.agent_id.tool, "github-copilot");
+
+    // Verify edited_filepaths is set
+    assert!(run_result.edited_filepaths.is_some());
+    assert_eq!(
+        run_result.edited_filepaths.unwrap(),
+        vec!["/Users/test/project/file.ts"]
+    );
+
+    // Verify dirty files are included
+    assert!(run_result.dirty_files.is_some());
+    let dirty_files = run_result.dirty_files.unwrap();
+    assert_eq!(dirty_files.len(), 1);
+    assert_eq!(
+        dirty_files.get("/Users/test/project/file.ts").unwrap(),
+        "console.log('hello');"
+    );
+}
+
+#[test]
+fn test_copilot_preset_after_edit_snake_case() {
+    use git_ai::commands::checkpoint_agent::agent_presets::{
+        AgentCheckpointFlags, AgentCheckpointPreset,
+    };
+    use std::io::Write;
+
+    // Create a temporary chat session file
+    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
+    temp_file.write_all(r#"{"requests": []}"#.as_bytes()).unwrap();
+    let temp_path = temp_file.path().to_str().unwrap().to_string();
+
+    // Test with snake_case (new format)
+    let hook_input = json!({
+        "hook_event_name": "after_edit",
+        "workspace_folder": "/Users/test/project",
+        "chat_session_path": temp_path,
+        "session_id": "test-session-456",
+        "edited_filepaths": ["/Users/test/project/file.ts"],
+        "dirty_files": {
+            "/Users/test/project/file.ts": "console.log('hello');"
+        }
+    });
+
+    let flags = AgentCheckpointFlags {
+        hook_input: Some(hook_input.to_string()),
+    };
+
+    let preset = GithubCopilotPreset;
+    let result = preset.run(flags);
+
+    assert!(result.is_ok());
+    let run_result = result.unwrap();
+
+    // Verify it's an AI checkpoint
+    assert_eq!(
+        run_result.checkpoint_kind,
+        git_ai::authorship::working_log::CheckpointKind::AiAgent
+    );
+
+    // Verify session ID is extracted correctly
+    assert_eq!(run_result.agent_id.id, "test-session-456");
+    assert_eq!(run_result.agent_id.tool, "github-copilot");
+
+    // Verify edited_filepaths is set
+    assert!(run_result.edited_filepaths.is_some());
+    assert_eq!(
+        run_result.edited_filepaths.unwrap(),
+        vec!["/Users/test/project/file.ts"]
+    );
+
+    // Verify dirty files are included
+    assert!(run_result.dirty_files.is_some());
+    let dirty_files = run_result.dirty_files.unwrap();
+    assert_eq!(dirty_files.len(), 1);
+    assert_eq!(
+        dirty_files.get("/Users/test/project/file.ts").unwrap(),
+        "console.log('hello');"
+    );
 }

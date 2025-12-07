@@ -3,7 +3,7 @@ use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::stats::{stats_for_commit_stats, write_stats_to_terminal};
 use crate::authorship::virtual_attribution::VirtualAttributions;
 use crate::authorship::working_log::Checkpoint;
-use crate::commands::checkpoint_agent::agent_presets::{CursorPreset, GithubCopilotPreset};
+use crate::commands::checkpoint_agent::agent_presets::{ClaudePreset, CursorPreset, GeminiPreset, GithubCopilotPreset};
 use crate::config::Config;
 use crate::error::GitAiError;
 use crate::git::refs::notes_add;
@@ -209,7 +209,56 @@ fn update_prompts_to_latest(checkpoints: &mut [Checkpoint]) -> Result<(), GitAiE
                         None
                     }
                 }
-                // TODO: Implement for other AI agents
+                "claude" => {
+                    // Try to load transcript from agent_metadata if available
+                    if let Some(metadata) = &checkpoint.agent_metadata {
+                        if let Some(transcript_path) = metadata.get("transcript_path") {
+                            // Try to read and parse the transcript JSONL
+                            match ClaudePreset::transcript_and_model_from_claude_code_jsonl(transcript_path) {
+                                Ok((transcript, model)) => {
+                                    // Update to the latest transcript (similar to Cursor behavior)
+                                    // This handles both cases: initial load failure and getting latest version
+                                    Some((transcript, model.unwrap_or_else(|| agent_id.model.clone())))
+                                }
+                                Err(_e) => {
+                                    // TODO Log error to sentry
+                                    None
+                                }
+                            }
+                        } else {
+                            // No transcript_path in metadata
+                            None
+                        }
+                    } else {
+                        // No agent_metadata available
+                        None
+                    }
+                }
+                "gemini" => {
+                    // Try to load transcript from agent_metadata if available
+                    if let Some(metadata) = &checkpoint.agent_metadata {
+                        if let Some(transcript_path) = metadata.get("transcript_path") {
+                            // Try to read and parse the transcript JSON
+                            match GeminiPreset::transcript_and_model_from_gemini_json(transcript_path) {
+                                Ok((transcript, model)) => {
+                                    // Update to the latest transcript (similar to Cursor behavior)
+                                    // This handles both cases: initial load failure and getting latest version
+                                    Some((transcript, model.unwrap_or_else(|| agent_id.model.clone())))
+                                }
+                                Err(_e) => {
+                                    // TODO Log error to sentry
+                                    None
+                                }
+                            }
+                        } else {
+                            // No transcript_path in metadata
+                            None
+                        }
+                    } else {
+                        // No agent_metadata available
+                        None
+                    }
+                }
                 _ => {
                     // Unknown tool, skip updating
                     None

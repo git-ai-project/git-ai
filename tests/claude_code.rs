@@ -1,16 +1,15 @@
 mod test_utils;
 
-use git_ai::authorship::transcript::{AiTranscript, Message};
+use git_ai::authorship::transcript::Message;
 use git_ai::commands::checkpoint_agent::agent_presets::{
     AgentCheckpointFlags, AgentCheckpointPreset, ClaudePreset,
 };
-use test_utils::load_fixture;
+use test_utils::fixture_path;
 
 #[test]
 fn test_parse_example_claude_code_jsonl_with_model() {
-    let jsonl_content = load_fixture("example-claude-code.jsonl");
-
-    let (transcript, model) = AiTranscript::from_claude_code_jsonl_with_model(&jsonl_content)
+    let fixture = fixture_path("example-claude-code.jsonl");
+    let (transcript, model) = ClaudePreset::transcript_and_model_from_claude_code_jsonl(fixture.to_str().unwrap())
         .expect("Failed to parse JSONL");
 
     // Verify we parsed some messages

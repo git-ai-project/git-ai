@@ -181,10 +181,11 @@ export class AIEditManager {
               console.log('[git-ai] AIEditManager: Dirty files with saved file content:', dirtyFiles);
               this.checkpoint("ai", JSON.stringify({
                 hook_event_name: "after_edit",
-                chatSessionPath,
-                sessionId,
-                workspaceFolder: workspaceFolder.uri.fsPath,
-                dirtyFiles,
+                chat_session_path: chatSessionPath,
+                session_id: sessionId,
+                edited_filepaths: [filePath],
+                workspace_folder: workspaceFolder.uri.fsPath,
+                dirty_files: dirtyFiles,
               }));
               checkpointTriggered = true;
               }
@@ -264,9 +265,9 @@ export class AIEditManager {
     // Prepare hook input for human checkpoint (session ID is not reliable, so we skip it)
     const hookInput = JSON.stringify({
       hook_event_name: "before_edit",
-      workspaceFolder: workspaceFolder.uri.fsPath,
+      workspace_folder: workspaceFolder.uri.fsPath,
       will_edit_filepaths: filesToCheckpoint,
-      dirtyFiles: dirtyFiles,
+      dirty_files: dirtyFiles,
     });
 
     this.checkpoint("human", hookInput);

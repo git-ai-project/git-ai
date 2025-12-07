@@ -2,6 +2,16 @@ use std::{fs, path::PathBuf};
 
 use insta::assert_debug_snapshot;
 
+/// AI author names that indicate AI-generated content
+const AI_AUTHOR_NAMES: &[&str] = &[
+    "mock_ai",
+    "claude",
+    "gpt",
+    "copilot",
+    "cursor",
+    "gemini",
+];
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum AuthorType {
     Human,
@@ -160,6 +170,12 @@ impl<'a> TestFile<'a> {
         }
     }
 
+    /// Helper function to check if an author string indicates AI authorship
+    fn is_ai_author_helper(author: &str) -> bool {
+        let author_lower = author.to_lowercase();
+        AI_AUTHOR_NAMES.iter().any(|&name| author_lower.contains(name))
+    }
+
     /// Static version of parse_blame_line for use in from_existing_file
     fn parse_blame_line_static(line: &str) -> (String, String) {
         if let Some(start_paren) = line.find('(') {
@@ -187,13 +203,7 @@ impl<'a> TestFile<'a> {
 
     /// Static version of is_ai_author for use in from_existing_file
     fn is_ai_author_static(author: &str) -> bool {
-        let author_lower = author.to_lowercase();
-        author_lower.contains("mock_ai")
-            || author_lower.contains("mock_ai")
-            || author_lower.contains("claude")
-            || author_lower.contains("gpt")
-            || author_lower.contains("copilot")
-            || author_lower.contains("cursor")
+        Self::is_ai_author_helper(author)
     }
 
     pub fn stage(&self) {
@@ -519,13 +529,7 @@ impl<'a> TestFile<'a> {
     /// Check if an author string indicates AI authorship
     /// AI authors typically contain keywords like "mock_ai", agent names, etc.
     fn is_ai_author(&self, author: &str) -> bool {
-        let author_lower = author.to_lowercase();
-        author_lower.contains("mock_ai")
-            || author_lower.contains("mock_ai")
-            || author_lower.contains("claude")
-            || author_lower.contains("gpt")
-            || author_lower.contains("copilot")
-            || author_lower.contains("cursor")
+        Self::is_ai_author_helper(author)
     }
 
     /// Get lines with a specific author type
