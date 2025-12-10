@@ -5,6 +5,7 @@ use crate::{
     },
     error::GitAiError,
     git::repo_storage::RepoStorage,
+    utils::normalize_to_posix,
 };
 use chrono::{TimeZone, Utc};
 use rusqlite::{Connection, OpenFlags};
@@ -894,7 +895,24 @@ impl CursorPreset {
         let checkpoints = working_log.read_all_checkpoints().ok()?;
 
         // Convert file_path to repo-relative format for comparison
-        let relative_file_path = working_log.to_repo_relative_path(file_path);
+        let mut relative_file_path = working_log.to_repo_relative_path(file_path);
+        // If still absolute (can happen on Windows with short paths), try again manually
+        if std::path::Path::new(&relative_file_path).is_absolute() {
+            let repo_workdir = repo_workdir_path.clone();
+            let canonical_repo = repo_workdir.canonicalize().ok();
+            let canonical_file = std::path::Path::new(file_path).canonicalize().ok();
+
+            if let (Some(repo_canon), Some(file_canon)) = (canonical_repo, canonical_file) {
+                if file_canon.starts_with(&repo_canon) {
+                    if let Ok(rel) = file_canon.strip_prefix(&repo_canon) {
+                        relative_file_path = normalize_to_posix(&rel.to_string_lossy());
+                    }
+                }
+            }
+        } else {
+            // Normalize separators to POSIX for git lookups
+            relative_file_path = normalize_to_posix(&relative_file_path);
+        }
 
         // Find the most recent checkpoint that has an entry for this file
         for checkpoint in checkpoints.iter().rev() {
