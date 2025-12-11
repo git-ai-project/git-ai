@@ -20,7 +20,7 @@ use super::test_file::TestFile;
 pub struct TestRepo {
     path: PathBuf,
     pub feature_flags: FeatureFlags,
-    config_patch: Option<ConfigPatch>,
+    pub(crate) config_patch: Option<ConfigPatch>,
 }
 
 impl TestRepo {
@@ -441,6 +441,6 @@ fn compile_binary() -> PathBuf {
     binary_path
 }
 
-fn get_binary_path() -> &'static PathBuf {
+pub(crate) fn get_binary_path() -> &'static PathBuf {
     COMPILED_BINARY.get_or_init(compile_binary)
 }
