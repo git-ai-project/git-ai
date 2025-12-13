@@ -8,6 +8,8 @@
 </div>
 <p align="left">Track the AI Code in your repositories</p>
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/acunniffe/git-ai)
+
 <video src="https://github.com/user-attachments/assets/68304ca6-b262-4638-9fb6-0a26f55c7986" muted loop controls autoplay></video>
 
 ## Quick Start
