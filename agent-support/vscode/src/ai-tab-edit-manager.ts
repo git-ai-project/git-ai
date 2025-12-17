@@ -74,8 +74,8 @@ export class AITabEditManager {
     // Before edit checkpoint
     await this.aiEditManager.checkpoint("ai_tab", JSON.stringify({
       hook_event_name: 'before_edit',
-      tool: 'github-copilot-tab',
-      model: 'default',
+      tool: 'github-copilot',
+      model: 'tab',
       will_edit_filepaths: [last.document.uri.fsPath],
       dirty_files: {
         ...this.aiEditManager.getDirtyFiles(),
@@ -86,8 +86,8 @@ export class AITabEditManager {
     // After edit checkpoint
     await this.aiEditManager.checkpoint("ai_tab", JSON.stringify({
       hook_event_name: 'after_edit',
-      tool: 'github-copilot-tab',
-      model: 'default',
+      tool: 'github-copilot',
+      model: 'tab',
       edited_filepaths: [last.document.uri.fsPath],
       dirty_files: {
         ...this.aiEditManager.getDirtyFiles(),

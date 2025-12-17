@@ -148,9 +148,15 @@ pub fn filter_untracked_files(
 /// across multiple checkpoints when only the final version matters.
 fn update_prompts_to_latest(checkpoints: &mut [Checkpoint]) -> Result<(), GitAiError> {
     // Group checkpoints by agent ID (tool + id), tracking indices
+    // Only process AiAgent checkpoints (skip AiTab and Human)
     let mut agent_checkpoint_indices: HashMap<String, Vec<usize>> = HashMap::new();
 
     for (idx, checkpoint) in checkpoints.iter().enumerate() {
+        // Skip non-AiAgent checkpoints
+        if checkpoint.kind != crate::authorship::working_log::CheckpointKind::AiAgent {
+            continue;
+        }
+
         if let Some(agent_id) = &checkpoint.agent_id {
             let key = format!("{}:{}", agent_id.tool, agent_id.id);
             agent_checkpoint_indices
