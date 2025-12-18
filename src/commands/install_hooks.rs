@@ -236,43 +236,6 @@ async fn async_run(binary_path: PathBuf, dry_run: bool) -> Result<(), GitAiError
                 }
             }
 
-            // Install/update Windsurf extension (runs in addition to hooks)
-            let extension_spinner = Spinner::new("Windsurf: installing extension");
-            extension_spinner.start();
-
-            // TODO: Also include windsurf-next here
-            if binary_exists("windsurf") {
-                // Install/update Windsurf extension
-                match is_vsc_editor_extension_installed("windsurf", "git-ai.git-ai-vscode") {
-                    Ok(true) => {
-                        extension_spinner.success("Windsurf: Extension installed");
-                    }
-                    Ok(false) => {
-                        if dry_run {
-                            extension_spinner.pending("Windsurf: Pending extension install");
-                        } else {
-                            match install_vsc_editor_extension("windsurf", "git-ai.git-ai-vscode") {
-                                Ok(()) => {
-                                    extension_spinner.success("Windsurf: Extension installed");
-                                }
-                                Err(e) => {
-                                    debug_log(&format!(
-                                        "Windsurf: Error automatically installing extension: {}",
-                                        e
-                                    ));
-                                    extension_spinner.pending("Windsurf: Unable to automatically install extension. Please cmd+click on the following link to install: windsurf:extension/git-ai.git-ai-vscode (or search for 'git-ai-vscode' in the Windsurf extensions tab)");
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        extension_spinner.error("Windsurf: Failed to check extension");
-                        eprintln!("  Error: {}", e);
-                    }
-                }
-            } else {
-                extension_spinner.pending("Windsurf: Unable to automatically install extension. Please cmd+click on the following link to install: windsurf:extension/git-ai.git-ai-vscode (or search for 'git-ai-vscode' in the Windsurf extensions tab)");
-            }
         }
         Ok(false) => {
             // Windsurf not detected
@@ -1354,13 +1317,6 @@ fn install_windsurf_hooks(binary_path: &Path, dry_run: bool) -> Result<Option<St
 
     // Merge desired into existing
     let mut merged = existing.clone();
-
-    // Ensure version is set
-    if merged.get("version").is_none() {
-        if let Some(obj) = merged.as_object_mut() {
-            obj.insert("version".to_string(), json!(1));
-        }
-    }
 
     // Merge hooks object
     let mut hooks_obj = merged.get("hooks").cloned().unwrap_or_else(|| json!({}));
