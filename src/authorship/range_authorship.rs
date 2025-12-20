@@ -48,8 +48,8 @@ pub struct RangeAuthorshipStats {
 pub struct RangeAuthorshipStatsData {
     pub total_commits: usize,
     pub commits_with_authorship: usize,
-    pub authors_commiting_authorship: HashSet<String>,
-    pub authors_not_commiting_authorship: HashSet<String>,
+    pub authors_committing_authorship: HashSet<String>,
+    pub authors_not_committing_authorship: HashSet<String>,
     pub commits_without_authorship: Vec<String>,
     pub commits_without_authorship_with_authors: Vec<(String, String)>, // (sha, git_author)
 }
@@ -140,14 +140,14 @@ pub fn range_authorship(
                 .iter()
                 .filter(|ca| matches!(ca, CommitAuthorship::Log { .. }))
                 .count(),
-            authors_commiting_authorship: commit_authorship
+            authors_committing_authorship: commit_authorship
                 .iter()
                 .filter_map(|ca| match ca {
                     CommitAuthorship::Log { git_author, .. } => Some(git_author.clone()),
                     _ => None,
                 })
                 .collect(),
-            authors_not_commiting_authorship: commit_authorship
+            authors_not_committing_authorship: commit_authorship
                 .iter()
                 .filter_map(|ca| match ca {
                     CommitAuthorship::NoLog { git_author, .. } => Some(git_author.clone()),

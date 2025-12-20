@@ -1582,8 +1582,8 @@ EOF
       "authorship_stats": {
         "total_commits": 2,
         "commits_with_authorship": 2,
-        "authors_commiting_authorship": ["Test User <test@example.com>"],
-        "authors_not_commiting_authorship": [],
+        "authors_committing_authorship": ["Test User <test@example.com>"],
+        "authors_not_committing_authorship": [],
         "commits_without_authorship": [],
         "commits_without_authorship_with_authors": []
       },
@@ -1637,8 +1637,8 @@ EOF
       "authorship_stats": {
         "total_commits": 1,
         "commits_with_authorship": 1,
-        "authors_commiting_authorship": ["Test User <test@example.com>"],
-        "authors_not_commiting_authorship": [],
+        "authors_committing_authorship": ["Test User <test@example.com>"],
+        "authors_not_committing_authorship": [],
         "commits_without_authorship": [],
         "commits_without_authorship_with_authors": []
       },
