@@ -1,3 +1,4 @@
+use crate::authorship::virtual_attribution::VirtualAttributions;
 use crate::commands::hooks::cherry_pick_hooks;
 use crate::commands::hooks::clone_hooks;
 use crate::commands::hooks::commit_hooks;
@@ -78,6 +79,9 @@ pub struct CommandHooksContext {
     pub fetch_authorship_handle: Option<std::thread::JoinHandle<()>>,
     pub stash_sha: Option<String>,
     pub push_authorship_handle: Option<std::thread::JoinHandle<()>>,
+    /// VirtualAttributions captured before a pull --rebase --autostash operation.
+    /// Used to preserve uncommitted AI attributions that git's internal stash would lose.
+    pub stashed_va: Option<VirtualAttributions>,
 }
 
 pub fn handle_git(args: &[String]) {
@@ -125,6 +129,7 @@ pub fn handle_git(args: &[String]) {
             fetch_authorship_handle: None,
             stash_sha: None,
             push_authorship_handle: None,
+            stashed_va: None,
         };
 
         let repository = repository_option.as_mut().unwrap();
@@ -196,10 +201,7 @@ fn run_pre_command_hooks(
                     fetch_hooks::fetch_pull_pre_command_hook(parsed_args, repository);
             }
             Some("pull") => {
-                command_hooks_context.fetch_authorship_handle =
-                    fetch_hooks::fetch_pull_pre_command_hook(parsed_args, repository);
-                // Capture HEAD before pull to detect fast-forward
-                repository.require_pre_command_head();
+                fetch_hooks::pull_pre_command_hook(parsed_args, repository, command_hooks_context);
             }
             Some("stash") => {
                 let config = config::Config::get();

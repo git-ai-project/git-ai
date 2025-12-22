@@ -1029,6 +1029,36 @@ impl Repository {
         }
     }
 
+    /// Get all config values matching a regex pattern.
+    /// Returns a HashMap of key -> value for all matching config entries.
+    pub fn config_get_regexp(
+        &self,
+        pattern: &str,
+    ) -> Result<std::collections::HashMap<String, String>, GitAiError> {
+        let mut args = self.global_args_for_exec();
+        args.push("config".to_string());
+        args.push("--get-regexp".to_string());
+        args.push(pattern.to_string());
+        match exec_git(&args) {
+            Ok(output) => {
+                let stdout = String::from_utf8(output.stdout)?;
+                let mut result = std::collections::HashMap::new();
+                for line in stdout.lines() {
+                    // Format: "key value" (space-separated)
+                    if let Some((key, value)) = line.split_once(' ') {
+                        result.insert(key.to_string(), value.to_string());
+                    }
+                }
+                Ok(result)
+            }
+            // Exit code 1 means no matches found
+            Err(GitAiError::GitCliError { code: Some(1), .. }) => {
+                Ok(std::collections::HashMap::new())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     #[allow(dead_code)]
     pub fn config_set_str(&self, key: &str, value: &str) -> Result<(), GitAiError> {
         let mut args = self.global_args_for_exec();
