@@ -29,6 +29,22 @@ pub fn notes_add(
     Ok(())
 }
 
+/// Remove the authorship note for a given commit
+pub fn notes_remove(
+    repo: &Repository,
+    commit_sha: &str,
+) -> Result<(), GitAiError> {
+    let mut args = repo.global_args_for_exec();
+    args.push("notes".to_string());
+    args.push("--ref=ai".to_string());
+    args.push("remove".to_string());
+    args.push(commit_sha.to_string());
+
+    // Ignore errors if the note doesn't exist
+    let _ = exec_git(&args);
+    Ok(())
+}
+
 // Check which commits from the given list have authorship notes.
 // Uses git cat-file --batch-check to efficiently check multiple commits in one invocation.
 // Returns a Vec of CommitAuthorship for each commit.

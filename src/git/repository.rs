@@ -582,6 +582,19 @@ impl<'a> Commit<'a> {
             self.oid, refname
         )))
     }
+
+    /// Get the full commit message (including body)
+    pub fn message(&self) -> Result<String, GitAiError> {
+        let mut args = self.repo.global_args_for_exec();
+        args.push("show".to_string());
+        args.push("-s".to_string());
+        args.push("--no-notes".to_string());
+        args.push("--encoding=UTF-8".to_string());
+        args.push("--format=%B".to_string());
+        args.push(self.oid.clone());
+        let output = exec_git(&args)?;
+        Ok(String::from_utf8(output.stdout)?.trim().to_string())
+    }
 }
 
 pub struct TreeEntry<'a> {
@@ -1799,6 +1812,44 @@ impl Repository {
         args.push(branch_name.to_string());
         exec_git(&args)?;
         Ok(())
+    }
+
+    /// Amend the current HEAD commit with a new message
+    /// This uses git commit --amend to change the commit message
+    pub fn amend_commit_message(&self, new_message: &str) -> Result<String, GitAiError> {
+        // Get the current HEAD commit SHA before amending
+        let head_sha = self.head()?.target()?.to_string();
+
+        // Use git commit --amend to change the message
+        let mut args = self.global_args_for_exec();
+        args.push("commit".to_string());
+        args.push("--amend".to_string());
+        args.push("-m".to_string());
+        args.push(new_message.to_string());
+        args.push("--allow-empty".to_string());
+        args.push("--no-verify".to_string());
+
+        let output = exec_git(&args)?;
+
+        if !output.status.success() {
+            return Err(GitAiError::Generic(format!(
+                "Failed to amend commit: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+
+        // Get the new commit SHA after amending
+        let new_head = self.head()?;
+        let new_sha = new_head.target()?.to_string();
+
+        // Verify the SHA changed (commit was amended)
+        if new_sha == head_sha {
+            return Err(GitAiError::Generic(
+                "Commit amend did not change the SHA".to_string(),
+            ));
+        }
+
+        Ok(new_sha)
     }
 }
 

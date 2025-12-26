@@ -53,7 +53,7 @@ A PR Bot aggregates `git-ai` data at the PR, Repository and Organization levels:
 ![alt](https://github.com/acunniffe/git-ai/raw/main/assets/docs/bot.jpg)
 
 ## Prompt Saving
-By default Git AI does not save prompts in AI Authorship Notes. To start saving prompts and link them to the lines of code generated, run: 
+By default Git AI does not save prompts in AI Authorship Notes. To start saving prompts and link them to the lines of code generated, run:
 
 ```bash
 git-ai config set --add share_prompts_in_repositories "*"
@@ -63,7 +63,52 @@ git-ai config set --add share_prompts_in_repositories "*"
 
 ```bash
 git-ai config set --add share_prompts_in_repositories https://github.com/org/repo.git
-git-ai config set --add share_prompts_in_repositories /path/to/repo  
+git-ai config set --add share_prompts_in_repositories /path/to/repo
+```
+
+## Commit Message Statistics (Optional Feature)
+Git AI can automatically add AI code statistics to your commit messages. This helps teams understand the AI contribution at a glance.
+
+### Enable the feature
+```bash
+# Enable via feature flag (debug mode enabled by default)
+git config ai.commit-message-stats.enabled true
+
+# Optional: Configure format (text or markdown)
+git config ai.commit-message-stats.format text
+
+# Optional: Customize template
+git config ai.commit-message-stats.template "{original_message}\n\n{stats}"
+```
+
+### Example output
+When enabled, your commit messages will include statistics like:
+```
+Add user authentication
+
+Stats: ████████▒▒▒▒▒▒ 60% you, 20% mixed, 20% ai
+AI: 3 accepted, 5 generated, waited 1m 5s
+```
+
+Or in markdown format:
+```markdown
+Add user authentication
+
+```text
+🧠 you    ████████      60%
+🤝 mixed  ░░████        20%
+🤖 ai     ░░░░░░██      20%
+```
+
+<details>
+<summary>AI Stats</summary>
+
+- 2.5 lines generated for every 1 accepted
+- 1 minute 5 seconds waiting for AI
+
+**Model breakdown:**
+- claude-3-5-sonnet: 3 accepted, 5 generated
+</details>
 ```
 
 ## Goals of `git-ai` project

@@ -1,4 +1,5 @@
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
+use crate::authorship::commit_message::{CommitMessageConfig, format_commit_message};
 use crate::authorship::secrets::{redact_secrets_from_prompts, strip_prompt_messages};
 use crate::authorship::stats::{stats_for_commit_stats, write_stats_to_terminal};
 use crate::authorship::virtual_attribution::VirtualAttributions;
@@ -91,24 +92,97 @@ pub fn post_commit(
 
     notes_add(repo, &commit_sha, &authorship_json)?;
 
+    // Check if commit message stats feature is enabled
+    // Get the commit message config (this checks feature flag internally)
+    let commit_msg_config = CommitMessageConfig::from_repo(repo)?;
+
+    // Determine if we need to handle commit message stats
+    let should_update_commit_message = commit_msg_config.enabled;
+
+    // Get stats before any potential amendments
+    let stats = if should_update_commit_message {
+        Some(stats_for_commit_stats(repo, &commit_sha, &[])?)
+    } else {
+        None
+    };
+
     // Write INITIAL file for uncommitted AI attributions (if any)
-    if !initial_attributions.files.is_empty() {
+    // Note: We need to do this BEFORE potentially amending, but we also need to handle the case
+    // where we amend and need to update the working log again
+    let has_initial_attributions = !initial_attributions.files.is_empty();
+    let initial_files = initial_attributions.files;
+    let initial_prompts = initial_attributions.prompts;
+
+    if has_initial_attributions {
         let new_working_log = repo_storage.working_log_for_base_commit(&commit_sha);
         new_working_log
-            .write_initial_attributions(initial_attributions.files, initial_attributions.prompts)?;
+            .write_initial_attributions(initial_files.clone(), initial_prompts.clone())?;
     }
 
-    // // Clean up old working log
-    // if !cfg!(debug_assertions) {
+    // Clean up old working log
     repo_storage.delete_working_log_for_base_commit(&parent_sha)?;
-    // }
 
     if !supress_output {
-        let stats = stats_for_commit_stats(repo, &commit_sha, &[])?;
-        // Only print stats if we're in an interactive terminal
-        let is_interactive = std::io::stdout().is_terminal();
-        write_stats_to_terminal(&stats, is_interactive);
+        if let Some(ref stats_val) = stats {
+            write_stats_to_terminal(stats_val, std::io::stdout().is_terminal());
+        } else {
+            let stats = stats_for_commit_stats(repo, &commit_sha, &[])?;
+            write_stats_to_terminal(&stats, std::io::stdout().is_terminal());
+        }
     }
+
+    // Handle commit message stats if enabled
+    if should_update_commit_message {
+        let stats =
+            stats.unwrap_or_else(|| stats_for_commit_stats(repo, &commit_sha, &[]).unwrap());
+
+        // Get the original commit message
+        let commit = repo.find_commit(commit_sha.clone())?;
+        let original_message = commit.message()?;
+
+        // Format the new commit message with stats
+        let new_message = format_commit_message(&original_message, &stats, &commit_msg_config)?;
+
+        // Only amend if the message actually changed (i.e., there are stats to add)
+        // This prevents unnecessary SHA changes for commits without AI code
+        if new_message.trim() == original_message.trim() {
+            // No stats to add, return original commit SHA
+            return Ok((commit_sha.to_string(), authorship_log));
+        }
+
+        // Amend the commit with the new message
+        // Note: This changes the commit SHA, so we need to handle that
+        let new_sha = repo.amend_commit_message(&new_message)?;
+
+        debug_log(&format!(
+            "Updated commit {} with stats in message, new SHA: {}",
+            commit_sha, new_sha
+        ));
+
+        // Update the authorship log metadata with the new commit SHA
+        let mut updated_authorship_log = authorship_log.clone();
+        updated_authorship_log.metadata.base_commit_sha = new_sha.clone();
+
+        // Re-serialize and update the git note with the new commit SHA
+        let updated_json = updated_authorship_log.serialize_to_string().map_err(|_| {
+            GitAiError::Generic("Failed to serialize updated authorship log".to_string())
+        })?;
+
+        // Remove old note and add new note with updated SHA
+        // First, remove the old note
+        let _ = crate::git::refs::notes_remove(repo, &commit_sha);
+        // Add the note with the new SHA
+        notes_add(repo, &new_sha, &updated_json)?;
+
+        // Also need to update the working log for the new commit SHA if there were initial attributions
+        if has_initial_attributions {
+            let new_working_log = repo_storage.working_log_for_base_commit(&new_sha);
+            new_working_log.write_initial_attributions(initial_files, initial_prompts)?;
+        }
+
+        return Ok((new_sha, updated_authorship_log));
+    }
+
     Ok((commit_sha.to_string(), authorship_log))
 }
 
@@ -439,5 +513,60 @@ mod tests {
             authorship_log.attestations.is_empty(),
             "Should have empty attestations when no checkpoints exist"
         );
+    }
+
+    #[test]
+    fn test_post_commit_with_commit_message_stats() {
+        use crate::config::Config;
+        use crate::feature_flags::FeatureFlags;
+
+        // Enable the commit message stats feature for this test
+        let mut flags = FeatureFlags::default();
+        flags.commit_message_stats = true;
+        Config::set_test_feature_flags(flags);
+
+        // Create a temp repo
+        let tmp_repo = TmpRepo::new().unwrap();
+
+        // Create a file and make a commit
+        tmp_repo
+            .write_file("test.txt", "Hello, world!\n", false)
+            .unwrap();
+
+        // Get the original commit SHA
+        let original_result = tmp_repo.commit_with_message("Test commit").unwrap();
+        let original_sha = original_result.metadata.base_commit_sha.clone();
+
+        // Verify the commit was created
+        assert!(!original_sha.is_empty());
+
+        // Clean up test override
+        Config::clear_test_feature_flags();
+    }
+
+    #[test]
+    fn test_post_commit_without_commit_message_stats() {
+        use crate::config::Config;
+        use crate::feature_flags::FeatureFlags;
+
+        // Disable the commit message stats feature (default)
+        let flags = FeatureFlags::default();
+        Config::set_test_feature_flags(flags);
+
+        // Create a temp repo
+        let tmp_repo = TmpRepo::new().unwrap();
+
+        // Create a file and make a commit
+        tmp_repo
+            .write_file("test.txt", "Hello, world!\n", false)
+            .unwrap();
+
+        let result = tmp_repo.commit_with_message("Test commit").unwrap();
+
+        // Should work normally without stats in message
+        assert!(!result.metadata.base_commit_sha.is_empty());
+
+        // Clean up test override
+        Config::clear_test_feature_flags();
     }
 }
