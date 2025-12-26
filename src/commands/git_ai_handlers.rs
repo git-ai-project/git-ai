@@ -95,6 +95,9 @@ pub fn handle_git_ai(args: &[String]) {
         "flush-logs" => {
             commands::flush_logs::handle_flush_logs(&args[1..]);
         }
+        "flush-cas" => {
+            commands::flush_cas::handle_flush_cas(&args[1..]);
+        }
         "show-prompt" => {
             commands::show_prompt::handle_show_prompt(&args[1..]);
         }

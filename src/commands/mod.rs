@@ -4,6 +4,7 @@ pub mod checkpoint_agent;
 pub mod ci_handlers;
 pub mod config;
 pub mod diff;
+pub mod flush_cas;
 pub mod flush_logs;
 pub mod git_ai_handlers;
 pub mod git_handlers;

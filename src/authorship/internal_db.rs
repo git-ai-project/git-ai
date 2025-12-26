@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 /// Current schema version (must match MIGRATIONS.len())
-const SCHEMA_VERSION: usize = 1;
+const SCHEMA_VERSION: usize = 2;
 
 /// Database migrations - each migration upgrades the schema by one version
 /// Migration at index N upgrades from version N to version N+1
@@ -43,9 +43,28 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX idx_prompts_updated_at
         ON prompts(updated_at);
     "#,
-    // Future migrations go here as new entries
-    // Migration 1 -> 2: (example)
-    // r#"ALTER TABLE prompts ADD COLUMN new_field TEXT;"#,
+    // Migration 1 -> 2: Add CAS sync queue
+    r#"
+    CREATE TABLE cas_sync_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        hash TEXT NOT NULL UNIQUE,
+        data TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'processing')),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_sync_error TEXT,
+        last_sync_at INTEGER,
+        next_retry_at INTEGER NOT NULL,
+        processing_started_at INTEGER,
+        created_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX idx_cas_sync_queue_status_retry
+        ON cas_sync_queue(status, next_retry_at);
+    CREATE INDEX idx_cas_sync_queue_hash
+        ON cas_sync_queue(hash);
+    CREATE INDEX idx_cas_sync_queue_stale_processing
+        ON cas_sync_queue(processing_started_at) WHERE status = 'processing';
+    "#,
 ];
 
 /// Global database singleton
@@ -119,6 +138,15 @@ impl PromptDbRecord {
             overriden_lines: self.overridden_lines.unwrap_or(0),
         }
     }
+}
+
+/// CAS sync queue record
+#[derive(Debug, Clone)]
+pub struct CasSyncRecord {
+    pub id: i64,
+    pub hash: String,
+    pub data: String,  // Base64-encoded content
+    pub attempts: u32,
 }
 
 /// Database wrapper for internal git-ai storage
@@ -235,14 +263,14 @@ impl InternalDatabase {
             self.apply_migration(target_version)?;
 
             // Update version in database
-            if current_version == 0 {
-                // First migration - insert version
+            if target_version == 0 {
+                // First migration (0->1) - insert version
                 self.conn.execute(
                     "INSERT INTO schema_metadata (key, value) VALUES ('version', ?1)",
                     params![(target_version + 1).to_string()],
                 )?;
             } else {
-                // Subsequent migrations - update version
+                // Subsequent migrations (1->2, etc.) - update version
                 self.conn.execute(
                     "UPDATE schema_metadata SET value = ?1 WHERE key = 'version'",
                     params![(target_version + 1).to_string()],
@@ -489,6 +517,134 @@ impl InternalDatabase {
 
         Ok(records)
     }
+
+    /// Enqueue a CAS object for syncing
+    pub fn enqueue_cas_object(&mut self, hash: &str, data: &str) -> Result<(), GitAiError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        self.conn.execute(
+            r#"
+            INSERT OR IGNORE INTO cas_sync_queue (
+                hash, data, status, attempts, next_retry_at, created_at
+            ) VALUES (?1, ?2, 'pending', 0, ?3, ?3)
+            "#,
+            params![hash, data, now],
+        )?;
+
+        Ok(())
+    }
+
+    /// Dequeue a batch of CAS objects for syncing (with lock acquisition)
+    pub fn dequeue_cas_batch(&mut self, batch_size: usize) -> Result<Vec<CasSyncRecord>, GitAiError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        // Step 1: Recover stale locks (processing for >10 minutes)
+        let stale_threshold = now - 600; // 10 minutes
+        self.conn.execute(
+            r#"
+            UPDATE cas_sync_queue
+            SET status = 'pending', processing_started_at = NULL
+            WHERE status = 'processing'
+              AND processing_started_at < ?1
+            "#,
+            params![stale_threshold],
+        )?;
+
+        // Step 2: Atomically lock and fetch batch using UPDATE...RETURNING
+        // Note: SQLite's UPDATE...RETURNING is atomic
+        let mut stmt = self.conn.prepare(
+            r#"
+            UPDATE cas_sync_queue
+            SET status = 'processing', processing_started_at = ?1
+            WHERE id IN (
+                SELECT id FROM cas_sync_queue
+                WHERE status = 'pending'
+                  AND next_retry_at <= ?2
+                  AND attempts < 6
+                ORDER BY next_retry_at
+                LIMIT ?3
+            )
+            RETURNING id, hash, data, attempts
+            "#,
+        )?;
+
+        let rows = stmt.query_map(params![now, now, batch_size], |row| {
+            Ok(CasSyncRecord {
+                id: row.get(0)?,
+                hash: row.get(1)?,
+                data: row.get(2)?,
+                attempts: row.get(3)?,
+            })
+        })?;
+
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+
+        Ok(records)
+    }
+
+    /// Delete a CAS sync record (on successful sync)
+    pub fn delete_cas_sync_record(&mut self, id: i64) -> Result<(), GitAiError> {
+        self.conn.execute(
+            "DELETE FROM cas_sync_queue WHERE id = ?",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    /// Update CAS sync record on failure (release lock, increment attempts, set next retry)
+    pub fn update_cas_sync_failure(&mut self, id: i64, error: &str) -> Result<(), GitAiError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        // Get current attempts count to calculate next retry
+        let attempts: u32 = self.conn.query_row(
+            "SELECT attempts FROM cas_sync_queue WHERE id = ?",
+            params![id],
+            |row| row.get(0),
+        )?;
+
+        let next_retry = calculate_next_retry(attempts + 1, now);
+
+        self.conn.execute(
+            r#"
+            UPDATE cas_sync_queue
+            SET status = 'pending',
+                processing_started_at = NULL,
+                attempts = attempts + 1,
+                last_sync_error = ?1,
+                last_sync_at = ?2,
+                next_retry_at = ?3
+            WHERE id = ?4
+            "#,
+            params![error, now, next_retry, id],
+        )?;
+
+        Ok(())
+    }
+}
+
+/// Calculate next retry timestamp based on attempt number
+fn calculate_next_retry(attempts: u32, now: i64) -> i64 {
+    let delay_seconds = match attempts {
+        1 => 5 * 60,          // 5 minutes
+        2 => 30 * 60,         // 30 minutes
+        3 => 2 * 60 * 60,     // 2 hours
+        4 => 6 * 60 * 60,     // 6 hours
+        5 => 12 * 60 * 60,    // 12 hours
+        _ => 24 * 60 * 60,    // 24 hours (attempts >= 6)
+    };
+    now + delay_seconds
 }
 
 #[cfg(test)]
@@ -562,7 +718,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "1");
+        assert_eq!(version, "2");
     }
 
     #[test]
@@ -714,5 +870,331 @@ mod tests {
         assert_eq!(retrieved.total_deletions, Some(13));
         assert_eq!(retrieved.accepted_lines, None);
         assert_eq!(retrieved.overridden_lines, None);
+    }
+
+    // CAS sync queue tests
+
+    #[test]
+    fn test_cas_sync_queue_schema() {
+        let (db, _temp_dir) = create_test_db();
+
+        // Verify cas_sync_queue table exists
+        let count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='cas_sync_queue'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // Verify status column has correct default and check constraint
+        let status: String = db
+            .conn
+            .query_row(
+                "SELECT dflt_value FROM pragma_table_info('cas_sync_queue') WHERE name='status'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "'pending'");
+    }
+
+    #[test]
+    fn test_enqueue_cas_object() {
+        let (mut db, _temp_dir) = create_test_db();
+
+        // Enqueue an object
+        db.enqueue_cas_object("abc123", "base64data").unwrap();
+
+        // Verify it was inserted with correct defaults
+        let (hash, data, status, attempts): (String, String, String, u32) = db
+            .conn
+            .query_row(
+                "SELECT hash, data, status, attempts FROM cas_sync_queue WHERE hash = 'abc123'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+
+        assert_eq!(hash, "abc123");
+        assert_eq!(data, "base64data");
+        assert_eq!(status, "pending");
+        assert_eq!(attempts, 0);
+    }
+
+    #[test]
+    fn test_enqueue_duplicate_hash() {
+        let (mut db, _temp_dir) = create_test_db();
+
+        // Enqueue the same hash twice
+        db.enqueue_cas_object("abc123", "data1").unwrap();
+        db.enqueue_cas_object("abc123", "data2").unwrap();
+
+        // Verify only one record exists (INSERT OR IGNORE)
+        let count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM cas_sync_queue WHERE hash = 'abc123'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // Verify it kept the first data
+        let data: String = db
+            .conn
+            .query_row(
+                "SELECT data FROM cas_sync_queue WHERE hash = 'abc123'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(data, "data1");
+    }
+
+    #[test]
+    fn test_dequeue_cas_batch() {
+        let (mut db, _temp_dir) = create_test_db();
+
+        // Enqueue multiple objects
+        db.enqueue_cas_object("hash1", "data1").unwrap();
+        db.enqueue_cas_object("hash2", "data2").unwrap();
+        db.enqueue_cas_object("hash3", "data3").unwrap();
+
+        // Dequeue batch of 2
+        let batch = db.dequeue_cas_batch(2).unwrap();
+        assert_eq!(batch.len(), 2);
+
+        // Verify records are marked as processing
+        let processing_count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM cas_sync_queue WHERE status = 'processing'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(processing_count, 2);
+
+        // Verify one is still pending
+        let pending_count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM cas_sync_queue WHERE status = 'pending'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending_count, 1);
+    }
+
+    #[test]
+    fn test_dequeue_respects_next_retry() {
+        let (mut db, _temp_dir) = create_test_db();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        // Insert one record ready to retry (past)
+        db.conn.execute(
+            "INSERT INTO cas_sync_queue (hash, data, status, attempts, next_retry_at, created_at) VALUES (?, ?, 'pending', 0, ?, ?)",
+            params!["hash1", "data1", now - 100, now],
+        ).unwrap();
+
+        // Insert one record not ready yet (future)
+        db.conn.execute(
+            "INSERT INTO cas_sync_queue (hash, data, status, attempts, next_retry_at, created_at) VALUES (?, ?, 'pending', 0, ?, ?)",
+            params!["hash2", "data2", now + 1000, now],
+        ).unwrap();
+
+        // Dequeue should only return the first one
+        let batch = db.dequeue_cas_batch(10).unwrap();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].hash, "hash1");
+    }
+
+    #[test]
+    fn test_dequeue_locks_records() {
+        let (mut db, _temp_dir) = create_test_db();
+
+        db.enqueue_cas_object("hash1", "data1").unwrap();
+
+        // Dequeue
+        let batch = db.dequeue_cas_batch(10).unwrap();
+        assert_eq!(batch.len(), 1);
+
+        // Verify status is 'processing'
+        let status: String = db
+            .conn
+            .query_row(
+                "SELECT status FROM cas_sync_queue WHERE hash = 'hash1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "processing");
+
+        // Verify processing_started_at is set
+        let processing_started_at: Option<i64> = db
+            .conn
+            .query_row(
+                "SELECT processing_started_at FROM cas_sync_queue WHERE hash = 'hash1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(processing_started_at.is_some());
+
+        // Try to dequeue again - should get empty (already locked)
+        let batch2 = db.dequeue_cas_batch(10).unwrap();
+        assert_eq!(batch2.len(), 0);
+    }
+
+    #[test]
+    fn test_stale_lock_recovery() {
+        let (mut db, _temp_dir) = create_test_db();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        // Insert a record in 'processing' state with old timestamp (>10 minutes ago)
+        let stale_time = now - 700; // 11+ minutes ago
+        db.conn.execute(
+            "INSERT INTO cas_sync_queue (hash, data, status, attempts, next_retry_at, processing_started_at, created_at) VALUES (?, ?, 'processing', 0, ?, ?, ?)",
+            params!["hash1", "data1", now, stale_time, now],
+        ).unwrap();
+
+        // Dequeue should recover the stale lock
+        let batch = db.dequeue_cas_batch(10).unwrap();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].hash, "hash1");
+    }
+
+    #[test]
+    fn test_max_attempts_limit() {
+        let (mut db, _temp_dir) = create_test_db();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        // Insert a record with 6 attempts (max reached)
+        db.conn.execute(
+            "INSERT INTO cas_sync_queue (hash, data, status, attempts, next_retry_at, created_at) VALUES (?, ?, 'pending', 6, ?, ?)",
+            params!["hash1", "data1", now - 100, now],
+        ).unwrap();
+
+        // Insert a record with 5 attempts (still eligible)
+        db.conn.execute(
+            "INSERT INTO cas_sync_queue (hash, data, status, attempts, next_retry_at, created_at) VALUES (?, ?, 'pending', 5, ?, ?)",
+            params!["hash2", "data2", now - 100, now],
+        ).unwrap();
+
+        // Dequeue should only return the one with 5 attempts
+        let batch = db.dequeue_cas_batch(10).unwrap();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].hash, "hash2");
+        assert_eq!(batch[0].attempts, 5);
+    }
+
+    #[test]
+    fn test_update_cas_sync_failure() {
+        let (mut db, _temp_dir) = create_test_db();
+
+        db.enqueue_cas_object("hash1", "data1").unwrap();
+        let batch = db.dequeue_cas_batch(10).unwrap();
+        let record = &batch[0];
+
+        // Update with failure
+        db.update_cas_sync_failure(record.id, "test error").unwrap();
+
+        // Verify status is back to 'pending'
+        let status: String = db
+            .conn
+            .query_row(
+                "SELECT status FROM cas_sync_queue WHERE id = ?",
+                params![record.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "pending");
+
+        // Verify processing_started_at is cleared
+        let processing_started_at: Option<i64> = db
+            .conn
+            .query_row(
+                "SELECT processing_started_at FROM cas_sync_queue WHERE id = ?",
+                params![record.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(processing_started_at.is_none());
+
+        // Verify attempts incremented
+        let attempts: u32 = db
+            .conn
+            .query_row(
+                "SELECT attempts FROM cas_sync_queue WHERE id = ?",
+                params![record.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(attempts, 1);
+
+        // Verify error recorded
+        let error: String = db
+            .conn
+            .query_row(
+                "SELECT last_sync_error FROM cas_sync_queue WHERE id = ?",
+                params![record.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(error, "test error");
+    }
+
+    #[test]
+    fn test_delete_cas_sync_record() {
+        let (mut db, _temp_dir) = create_test_db();
+
+        db.enqueue_cas_object("hash1", "data1").unwrap();
+        let batch = db.dequeue_cas_batch(10).unwrap();
+        let record = &batch[0];
+
+        // Delete the record
+        db.delete_cas_sync_record(record.id).unwrap();
+
+        // Verify it's gone
+        let count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM cas_sync_queue WHERE id = ?",
+                params![record.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_exponential_backoff() {
+        let now = 1000000i64;
+
+        // Test each attempt's backoff
+        assert_eq!(calculate_next_retry(1, now), now + 5 * 60);           // 5 min
+        assert_eq!(calculate_next_retry(2, now), now + 30 * 60);          // 30 min
+        assert_eq!(calculate_next_retry(3, now), now + 2 * 60 * 60);      // 2 hours
+        assert_eq!(calculate_next_retry(4, now), now + 6 * 60 * 60);      // 6 hours
+        assert_eq!(calculate_next_retry(5, now), now + 12 * 60 * 60);     // 12 hours
+        assert_eq!(calculate_next_retry(6, now), now + 24 * 60 * 60);     // 24 hours
+        assert_eq!(calculate_next_retry(7, now), now + 24 * 60 * 60);     // 24 hours (max)
     }
 }

@@ -115,9 +115,7 @@ pub fn post_commit(
     }
 
     // // Clean up old working log
-    // if !cfg!(debug_assertions) {
     repo_storage.delete_working_log_for_base_commit(&parent_sha)?;
-    // }
 
     if !supress_output {
         let stats = stats_for_commit_stats(repo, &commit_sha, &[])?;
