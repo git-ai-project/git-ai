@@ -1,5 +1,5 @@
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
-use crate::authorship::secrets::{redact_secrets_from_prompts};
+use crate::authorship::secrets::{redact_secrets_from_prompts, strip_prompt_messages};
 use crate::authorship::stats::{stats_for_commit_stats, write_stats_to_terminal};
 use crate::authorship::virtual_attribution::VirtualAttributions;
 use crate::authorship::working_log::{Checkpoint, CheckpointKind};
@@ -389,14 +389,6 @@ fn update_prompts_to_latest(checkpoints: &mut [Checkpoint]) -> Result<(), GitAiE
     }
 
     Ok(())
-}
-
-/// Strip messages from prompts when sharing is not enabled for this repository.
-/// This is called only in post_commit when writing prompts to git history.
-fn strip_prompt_messages(prompts: &mut std::collections::BTreeMap<String, PromptRecord>) {
-    for record in prompts.values_mut() {
-        record.messages.clear();
-    }
 }
 
 /// Batch upsert all prompts from checkpoints to the internal database
