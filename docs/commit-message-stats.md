@@ -24,12 +24,9 @@ git-ai config set feature_flags.commit_message_stats true
 ```
 
 ### Via Git Config (Optional Settings)
-Once the feature flag is enabled, you can configure the behavior:
+Once the feature flag is enabled, you can configure the display format:
 
 ```bash
-# Enable the feature for this repository
-git config ai.commit-message-stats.enabled true
-
 # Set format: "text" or "markdown"
 git config ai.commit-message-stats.format text
 
@@ -47,11 +44,6 @@ git config ai.commit-message-stats.template "{original_message}\n\n{stats}"
 ```
 
 ## Configuration Options
-
-### `ai.commit-message-stats.enabled`
-- **Type:** boolean
-- **Default:** false (requires feature flag to be enabled first)
-- **Description:** Whether to add statistics to commit messages
 
 ### `ai.commit-message-stats.format`
 - **Type:** string
@@ -165,10 +157,14 @@ The following statistics are calculated and included:
 
 ## Disabling the Feature
 
-To disable the feature for a repository:
+To disable the feature entirely:
 
 ```bash
-git config ai.commit-message-stats.enabled false
+# Disable via feature flag
+git-ai config set feature_flags.commit_message_stats false
+
+# Or unset the feature flag
+git-ai config unset feature_flags.commit_message_stats
 ```
 
 Or disable via environment variable:
@@ -181,8 +177,7 @@ unset GIT_AI_COMMIT_MESSAGE_STATS
 
 ### Feature not working?
 1. Check if the feature flag is enabled: `git-ai config get feature_flags.commit_message_stats`
-2. Verify git config: `git config --get ai.commit-message-stats.enabled`
-3. Check for errors in debug log: `export GIT_AI_DEBUG=1` then commit
+2. Check for errors in debug log: `export GIT_AI_DEBUG=1` then commit
 
 ### Commit message too long?
 Use a custom template to limit the output:

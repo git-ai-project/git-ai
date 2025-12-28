@@ -71,13 +71,13 @@ Git AI can automatically add AI code statistics to your commit messages. This he
 
 ### Enable the feature
 ```bash
-# Enable via feature flag (debug mode enabled by default)
-git config ai.commit-message-stats.enabled true
+# 1. Enable the feature (required)
+git-ai config set --add feature_flags.commit_message_stats true
 
-# Optional: Configure format (text or markdown)
+# 2. Optional: Configure format (text or markdown)
 git config ai.commit-message-stats.format text
 
-# Optional: Customize template
+# 3. Optional: Customize template
 git config ai.commit-message-stats.template "{original_message}\n\n{stats}"
 ```
 
@@ -98,17 +98,6 @@ Add user authentication
 🧠 you    ████████      60%
 🤝 mixed  ░░████        20%
 🤖 ai     ░░░░░░██      20%
-```
-
-<details>
-<summary>AI Stats</summary>
-
-- 2.5 lines generated for every 1 accepted
-- 1 minute 5 seconds waiting for AI
-
-**Model breakdown:**
-- claude-3-5-sonnet: 3 accepted, 5 generated
-</details>
 ```
 
 ## Goals of `git-ai` project

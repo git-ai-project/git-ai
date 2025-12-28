@@ -51,7 +51,8 @@ mkdir /tmp/test-stats && cd /tmp/test-stats
 git init
 git config user.name "Test"
 git config user.email "test@test.com"
-git config ai.commit-message-stats.enabled true
+# Enable the feature (required)
+/path/to/git-ai/target/debug/git-ai config set --add feature_flags.commit_message_stats true
 
 # 2. Test without AI
 echo "test" > file.txt

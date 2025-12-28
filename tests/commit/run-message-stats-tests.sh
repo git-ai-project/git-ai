@@ -53,7 +53,7 @@ init_repo() {
     git init
     git config user.name "Test User"
     git config user.email "test@example.com"
-    git config ai.commit-message-stats.enabled true
+    git-ai config set --add feature_flags.commit_message_stats true
 }
 
 # Test 1: Commit without AI code
@@ -169,7 +169,7 @@ echo ""
 # Test 7: Disabled feature
 echo "Test 7: Disabled feature"
 echo "----------------------------------------"
-git config ai.commit-message-stats.enabled false
+git-ai config set --add feature_flags.commit_message_stats false
 echo "test" > test.txt
 git add test.txt
 GIT_AI=git git commit -m "Disabled test" 2>&1 | grep -v "^\[" || true
@@ -187,7 +187,7 @@ echo ""
 # Test 8: Custom template
 echo "Test 8: Custom template"
 echo "----------------------------------------"
-git config ai.commit-message-stats.enabled true
+git-ai config set --add feature_flags.commit_message_stats true
 git config ai.commit-message-stats.template "📝 {original_message}\\n\\n📊 {stats}"
 echo "// AI" > custom.rs
 git add custom.rs

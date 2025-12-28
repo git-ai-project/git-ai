@@ -10,9 +10,8 @@ use repos::test_repo::TestRepo;
 fn test_commit_message_stats_enabled() {
     let repo = TestRepo::new();
 
-    // Enable commit message stats feature
-    repo.run_git(&["config", "ai.commit-message-stats.enabled", "true"])
-        .unwrap();
+    // Enable commit message stats feature via environment variable
+    std::env::set_var("GIT_AI_COMMIT_MESSAGE_STATS", "true");
 
     // Create an initial commit
     let mut readme = repo.filename("README.md");
@@ -34,6 +33,9 @@ fn test_commit_message_stats_enabled() {
     // Get the current commit message
     let output = repo.run_git(&["log", "-1", "--pretty=%B"]).unwrap();
 
+    // Clean up environment variable
+    std::env::remove_var("GIT_AI_COMMIT_MESSAGE_STATS");
+
     // The commit message should contain stats
     assert!(
         output.contains("Stats:") || output.contains("you") || output.contains("ai"),
@@ -47,9 +49,7 @@ fn test_commit_message_stats_enabled() {
 fn test_commit_message_stats_disabled() {
     let repo = TestRepo::new();
 
-    // Explicitly disable commit message stats feature (or leave as default)
-    repo.run_git(&["config", "ai.commit-message-stats.enabled", "false"])
-        .unwrap();
+    // Don't set environment variable - feature defaults to disabled
 
     // Create an initial commit
     let mut readme = repo.filename("README.md");
@@ -84,8 +84,9 @@ fn test_commit_message_stats_markdown_format() {
     let repo = TestRepo::new();
 
     // Enable with markdown format
-    repo.run_git(&["config", "ai.commit-message-stats.enabled", "true"])
-        .unwrap();
+    std::env::set_var("GIT_AI_COMMIT_MESSAGE_STATS", "true");
+
+    // Set format via git config
     repo.run_git(&["config", "ai.commit-message-stats.format", "markdown"])
         .unwrap();
 
@@ -104,6 +105,9 @@ fn test_commit_message_stats_markdown_format() {
     // Get the current commit message
     let output = repo.run_git(&["log", "-1", "--pretty=%B"]).unwrap();
 
+    // Clean up
+    std::env::remove_var("GIT_AI_COMMIT_MESSAGE_STATS");
+
     // Should contain markdown code block
     assert!(
         output.contains("```") || output.contains("🧠") || output.contains("🤖"),
@@ -118,12 +122,13 @@ fn test_commit_message_stats_custom_template() {
     let repo = TestRepo::new();
 
     // Enable with custom template
-    repo.run_git(&["config", "ai.commit-message-stats.enabled", "true"])
-        .unwrap();
+    std::env::set_var("GIT_AI_COMMIT_MESSAGE_STATS", "true");
+
+    // Set template via git config
     repo.run_git(&[
         "config",
         "ai.commit-message-stats.template",
-        "📝 {original_message}\n\n📊 {stats}",
+        "📝 {original_message}\\n\\n📊 {stats}",
     ])
     .unwrap();
 
@@ -142,6 +147,9 @@ fn test_commit_message_stats_custom_template() {
     // Get the current commit message
     let output = repo.run_git(&["log", "-1", "--pretty=%B"]).unwrap();
 
+    // Clean up
+    std::env::remove_var("GIT_AI_COMMIT_MESSAGE_STATS");
+
     // Should contain custom template elements
     assert!(
         output.contains("📝") && output.contains("📊"),
@@ -155,8 +163,7 @@ fn test_commit_message_stats_custom_template() {
 fn test_commit_message_stats_feature_flag() {
     let repo = TestRepo::new();
 
-    // Don't enable via git config - rely on feature flag
-    // This test assumes the feature flag is disabled by default in release mode
+    // Don't enable feature flag - rely on default (false in release mode)
 
     // Create an initial commit
     let mut readme = repo.filename("README.md");
@@ -174,7 +181,6 @@ fn test_commit_message_stats_feature_flag() {
     let output = repo.run_git(&["log", "-1", "--pretty=%B"]).unwrap();
 
     // Without feature flag enabled, no stats should be added
-    // (This test may need adjustment based on default feature flag values)
     assert!(
         !output.contains("Stats:") || output.trim() == "Add utils",
         "Without feature flag, commit message should be unchanged. Got: {}",
