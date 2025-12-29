@@ -11,7 +11,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap},
     Frame, Terminal,
 };
 use std::io;
@@ -37,6 +37,8 @@ struct PromptPickerState {
     search_active: bool,
     /// Whether preview mode is active
     preview_mode: bool,
+    /// Scroll offset for preview mode
+    preview_scroll: usize,
     /// Whether more prompts can be loaded
     has_more: bool,
     /// Batch size for loading prompts
@@ -68,6 +70,7 @@ impl PromptPickerState {
             search_query: String::new(),
             search_active: false,
             preview_mode: false,
+            preview_scroll: 0,
             has_more: true,
             batch_size: 50,
             current_workdir,
@@ -242,15 +245,25 @@ enum KeyResult {
 
 fn handle_key_event(state: &mut PromptPickerState, key: KeyEvent) -> Result<KeyResult, GitAiError> {
     if state.preview_mode {
-        // Preview mode: Esc to close, Enter to select
+        // Preview mode: Esc to close, Enter to select, arrows/jk to scroll
         match key.code {
             KeyCode::Esc => {
                 state.preview_mode = false;
+                state.preview_scroll = 0;
                 Ok(KeyResult::Continue)
             }
             KeyCode::Enter => {
                 state.preview_mode = false;
+                state.preview_scroll = 0;
                 Ok(KeyResult::Select)
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                state.preview_scroll = state.preview_scroll.saturating_sub(1);
+                Ok(KeyResult::Continue)
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                state.preview_scroll = state.preview_scroll.saturating_add(1);
+                Ok(KeyResult::Continue)
             }
             _ => Ok(KeyResult::Continue),
         }
@@ -300,6 +313,7 @@ fn handle_key_event(state: &mut PromptPickerState, key: KeyEvent) -> Result<KeyR
             }
             KeyCode::Char('p') | KeyCode::Char('P') => {
                 state.preview_mode = true;
+                state.preview_scroll = 0;
                 Ok(KeyResult::Continue)
             }
             KeyCode::Char('/') => {
@@ -314,6 +328,12 @@ fn handle_key_event(state: &mut PromptPickerState, key: KeyEvent) -> Result<KeyR
 }
 
 fn render(f: &mut Frame, state: &PromptPickerState) {
+    // If in preview mode, render full-page preview instead of list
+    if state.preview_mode {
+        render_preview_page(f, state);
+        return;
+    }
+
     // Main layout: [Title 1] [Tabs 3] [Search 3] [List Min10] [Footer 3]
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -343,11 +363,6 @@ fn render(f: &mut Frame, state: &PromptPickerState) {
 
     // Render footer
     render_footer(f, chunks[4], state);
-
-    // Render preview overlay if active
-    if state.preview_mode {
-        render_preview_overlay(f, state);
-    }
 }
 
 fn render_tabs(f: &mut Frame, area: Rect, state: &PromptPickerState) {
@@ -469,55 +484,93 @@ fn render_footer(f: &mut Frame, area: Rect, state: &PromptPickerState) {
     f.render_widget(footer, area);
 }
 
-fn render_preview_overlay(f: &mut Frame, state: &PromptPickerState) {
+fn format_messages_for_display(
+    transcript: &crate::authorship::transcript::AiTranscript,
+) -> Vec<Line> {
+    use crate::authorship::transcript::Message;
+
+    let mut all_lines: Vec<Line> = Vec::new();
+
+    // Iterate through messages (oldest first, newest last as per user request)
+    for message in &transcript.messages {
+        match message {
+            Message::User { text, .. } => {
+                all_lines.push(Line::from(Span::styled(
+                    format!("User: {}", text),
+                    Style::default().fg(Color::Cyan),
+                )));
+            }
+            Message::Assistant { text, .. } => {
+                all_lines.push(Line::from(Span::styled(
+                    format!("Assistant: {}", text),
+                    Style::default().fg(Color::Green),
+                )));
+            }
+            Message::ToolUse { name, .. } => {
+                all_lines.push(Line::from(Span::styled(
+                    format!("Tool: {}", name),
+                    Style::default().fg(Color::Yellow),
+                )));
+            }
+        }
+        // Add blank line between messages
+        all_lines.push(Line::from(""));
+    }
+
+    all_lines
+}
+
+fn render_preview_page(f: &mut Frame, state: &PromptPickerState) {
     let Some(prompt) = state.get_selected() else {
         return;
     };
 
-    // Calculate centered overlay area (80% of screen)
-    let area = f.area();
-    let popup_area = centered_rect(80, 80, area);
-
-    // Format prompt data as JSON for preview
-    let preview_text = format!(
-        "Prompt ID: {}\nTool: {}\nModel: {}\nMessages: {}\nCreated: {}\n\n{}",
-        prompt.id,
-        prompt.tool,
-        prompt.model,
-        prompt.message_count(),
-        prompt.relative_time(),
-        serde_json::to_string_pretty(&prompt.messages).unwrap_or_else(|_| "(Unable to serialize)".to_string())
-    );
-
-    let preview = Paragraph::new(preview_text)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Preview (Enter to select, Esc to close)"),
-        )
-        .wrap(Wrap { trim: false })
-        .scroll((0, 0));
-
-    f.render_widget(Clear, popup_area);
-    f.render_widget(preview, popup_area);
-}
-
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let popup_layout = Layout::default()
+    // Full-page layout: [Header 5] [Messages Min(10)] [Footer 3]
+    let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Length(5),  // Header with metadata
+            Constraint::Min(10),    // Messages
+            Constraint::Length(3),  // Footer
         ])
-        .split(r);
+        .split(f.area());
 
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(popup_layout[1])[1]
+    // Render header with prompt metadata
+    let header_text = vec![
+        Line::from(Span::styled(
+            format!("ID: {}", prompt.id),
+            Style::default().fg(Color::Cyan),
+        )),
+        Line::from(Span::styled(
+            format!("Tool: {} | Model: {}", prompt.tool, prompt.model),
+            Style::default().fg(Color::Cyan),
+        )),
+        Line::from(Span::styled(
+            format!("Messages: {} | Created: {}", prompt.message_count(), prompt.relative_time()),
+            Style::default().fg(Color::Cyan),
+        )),
+    ];
+
+    let header = Paragraph::new(header_text)
+        .block(Block::default().borders(Borders::ALL).title("Preview"))
+        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+    f.render_widget(header, chunks[0]);
+
+    // Render messages
+    let message_lines = format_messages_for_display(&prompt.messages);
+
+    let messages_widget = Paragraph::new(message_lines)
+        .block(Block::default().borders(Borders::ALL).title("Messages"))
+        .wrap(Wrap { trim: false })
+        .scroll((state.preview_scroll as u16, 0));
+    f.render_widget(messages_widget, chunks[1]);
+
+    // Render footer with help text
+    let footer_text = "↑↓/jk: Scroll | Enter: Select | Esc: Back";
+    let footer = Paragraph::new(footer_text)
+        .block(Block::default().borders(Borders::ALL))
+        .style(Style::default().fg(Color::Cyan))
+        .alignment(Alignment::Center);
+    f.render_widget(footer, chunks[2]);
 }
+

@@ -52,50 +52,53 @@ impl ShareConfig {
 }
 
 pub fn run_tui() -> Result<(), GitAiError> {
-    // Step 1: Use prompt_picker to select a prompt
     let repo = find_repository(&Vec::<String>::new()).ok();
-    let selected_prompt = prompt_picker::pick_prompt(repo.as_ref(), "Select Prompt to Share")?;
 
-    let selected_prompt = match selected_prompt {
-        Some(p) => p,
-        None => return Ok(()), // User cancelled
-    };
+    loop {
+        // Step 1: Use prompt_picker to select a prompt
+        let selected_prompt = prompt_picker::pick_prompt(repo.as_ref(), "Select Prompt to Share")?;
 
-    // Step 2: Show share configuration screen
-    let config = show_share_config_screen(&selected_prompt)?;
+        let selected_prompt = match selected_prompt {
+            Some(p) => p,
+            None => return Ok(()), // User cancelled from picker
+        };
 
-    let config = match config {
-        Some(c) => c,
-        None => {
-            // User went back - could re-launch picker, but for now just exit
-            return Ok(());
+        // Step 2: Show share configuration screen
+        let config = show_share_config_screen(&selected_prompt)?;
+
+        let config = match config {
+            Some(c) => c,
+            None => {
+                // User went back - re-launch picker
+                continue;
+            }
+        };
+
+        // Step 3: Create and submit bundle
+        let include_all_in_commit = config.scope_selection == ShareScope::AllInCommit;
+
+        // Validate "All in PR" not implemented
+        if config.scope_selection == ShareScope::AllInPR {
+            eprintln!("Error: PR bundles are not yet implemented");
+            std::process::exit(1);
         }
-    };
 
-    // Step 3: Create and submit bundle
-    let include_all_in_commit = config.scope_selection == ShareScope::AllInCommit;
+        let prompt_record = selected_prompt.to_prompt_record();
 
-    // Validate "All in PR" not implemented
-    if config.scope_selection == ShareScope::AllInPR {
-        eprintln!("Error: PR bundles are not yet implemented");
-        std::process::exit(1);
+        let response = crate::commands::share::create_bundle(
+            selected_prompt.id,
+            prompt_record,
+            config.title,
+            include_all_in_commit,
+        )?;
+
+        // Display result
+        println!("Bundle created successfully!");
+        println!("ID: {}", response.id);
+        println!("URL: {}", response.url);
+
+        return Ok(());
     }
-
-    let prompt_record = selected_prompt.to_prompt_record();
-
-    let response = crate::commands::share::create_bundle(
-        selected_prompt.id,
-        prompt_record,
-        config.title,
-        include_all_in_commit,
-    )?;
-
-    // Display result
-    println!("Bundle created successfully!");
-    println!("ID: {}", response.id);
-    println!("URL: {}", response.url);
-
-    Ok(())
 }
 
 fn show_share_config_screen(prompt: &PromptDbRecord) -> Result<Option<ShareConfig>, GitAiError> {
