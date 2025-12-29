@@ -104,6 +104,9 @@ pub fn handle_git_ai(args: &[String]) {
         "share" => {
             commands::share::handle_share(&args[1..]);
         }
+        "sync-prompts" => {
+            commands::sync_prompts::handle_sync_prompts(&args[1..]);
+        }
         #[cfg(debug_assertions)]
         "show-transcript" => {
             handle_show_transcript(&args[1..]);
@@ -143,6 +146,10 @@ fn print_help() {
     );
     eprintln!("  share <id>         Share a prompt by creating a bundle");
     eprintln!("    --title <title>       Custom title for the bundle (default: auto-generated)");
+    eprintln!("  sync-prompts       Update prompts in database to latest versions");
+    eprintln!("    --since <time>        Only sync prompts updated after this time");
+    eprintln!("                          Formats: '1d', '2h', '1w', Unix timestamp, ISO8601, YYYY-MM-DD");
+    eprintln!("    --workdir <path>      Only sync prompts from specific repository");
     eprintln!("  config             View and manage git-ai configuration");
     eprintln!("                        Show all config as formatted JSON");
     eprintln!("    <key>                 Show specific config value (supports dot notation)");

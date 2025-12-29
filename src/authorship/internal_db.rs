@@ -2,6 +2,7 @@ use crate::authorship::authorship_log_serialization::generate_short_hash;
 use crate::authorship::transcript::AiTranscript;
 use crate::authorship::working_log::Checkpoint;
 use crate::error::GitAiError;
+use crate::utils::debug_log;
 use dirs;
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
@@ -24,13 +25,14 @@ const MIGRATIONS: &[&str] = &[
         external_thread_id TEXT NOT NULL,
         messages TEXT NOT NULL,
         commit_sha TEXT,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
+        agent_metadata TEXT,
         human_author TEXT,
         total_additions INTEGER,
         total_deletions INTEGER,
         accepted_lines INTEGER,
-        overridden_lines INTEGER
+        overridden_lines INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
     );
 
     CREATE INDEX idx_prompts_tool
@@ -48,8 +50,8 @@ const MIGRATIONS: &[&str] = &[
     r#"
     CREATE TABLE cas_sync_queue (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        hash TEXT NOT NULL UNIQUE,
-        data TEXT NOT NULL,
+        hash BLOB NOT NULL UNIQUE,
+        data BLOB NOT NULL,
         metadata TEXT NOT NULL DEFAULT '{}',
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'processing')),
         attempts INTEGER NOT NULL DEFAULT 0,
@@ -75,20 +77,21 @@ static INTERNAL_DB: OnceLock<Mutex<InternalDatabase>> = OnceLock::new();
 /// Prompt record for database storage
 #[derive(Debug, Clone)]
 pub struct PromptDbRecord {
-    pub id: String,                        // 16-char short hash
-    pub workdir: Option<String>,           // Repository working directory
-    pub tool: String,                      // Agent tool name
-    pub model: String,                     // Model name
-    pub external_thread_id: String,        // Original agent_id.id
-    pub messages: AiTranscript,            // Transcript
-    pub commit_sha: Option<String>,        // Commit SHA (nullable)
-    pub created_at: i64,                   // Unix timestamp
-    pub updated_at: i64,                   // Unix timestamp
-    pub human_author: Option<String>,      // Human author from checkpoint
-    pub total_additions: Option<u32>,      // Line additions from checkpoint stats
-    pub total_deletions: Option<u32>,      // Line deletions from checkpoint stats
-    pub accepted_lines: Option<u32>,       // Lines accepted in commit (future)
-    pub overridden_lines: Option<u32>,     // Lines overridden in commit (future)
+    pub id: String,                                // 16-char short hash
+    pub workdir: Option<String>,                   // Repository working directory
+    pub tool: String,                              // Agent tool name
+    pub model: String,                             // Model name
+    pub external_thread_id: String,                // Original agent_id.id
+    pub messages: AiTranscript,                    // Transcript
+    pub commit_sha: Option<String>,                // Commit SHA (nullable)
+    pub agent_metadata: Option<HashMap<String, String>>,  // Agent metadata (transcript paths, etc.)
+    pub human_author: Option<String>,              // Human author from checkpoint
+    pub total_additions: Option<u32>,              // Line additions from checkpoint stats
+    pub total_deletions: Option<u32>,              // Line deletions from checkpoint stats
+    pub accepted_lines: Option<u32>,               // Lines accepted in commit (future)
+    pub overridden_lines: Option<u32>,             // Lines overridden in commit (future)
+    pub created_at: i64,                           // Unix timestamp
+    pub updated_at: i64,                           // Unix timestamp
 }
 
 impl PromptDbRecord {
@@ -111,13 +114,14 @@ impl PromptDbRecord {
             external_thread_id: agent_id.id.clone(),
             messages: transcript.clone(),
             commit_sha,
-            created_at: checkpoint.timestamp as i64,
-            updated_at: checkpoint.timestamp as i64,
+            agent_metadata: checkpoint.agent_metadata.clone(),
             human_author: Some(checkpoint.author.clone()),
             total_additions: Some(checkpoint.line_stats.additions),
             total_deletions: Some(checkpoint.line_stats.deletions),
             accepted_lines: None,      // Not yet calculated
             overridden_lines: None,    // Not yet calculated
+            created_at: checkpoint.timestamp as i64,
+            updated_at: checkpoint.timestamp as i64,
         })
     }
 
@@ -221,8 +225,8 @@ impl PromptDbRecord {
 #[derive(Debug, Clone)]
 pub struct CasSyncRecord {
     pub id: i64,
-    pub hash: String,
-    pub data: String,
+    pub hash: Vec<u8>,
+    pub data: Vec<u8>,
     pub metadata: HashMap<String, String>,
     pub attempts: u32,
 }
@@ -331,11 +335,11 @@ impl InternalDatabase {
 
         // Step 4: Apply all missing migrations sequentially
         for target_version in current_version..SCHEMA_VERSION {
-            eprintln!(
+            debug_log(&format!(
                 "[Migration] Upgrading database from version {} to {}",
                 target_version,
                 target_version + 1
-            );
+            ));
 
             // Apply the migration (FATAL on error)
             self.apply_migration(target_version)?;
@@ -355,10 +359,10 @@ impl InternalDatabase {
                 )?;
             }
 
-            eprintln!(
+            debug_log(&format!(
                 "[Migration] Successfully upgraded to version {}",
                 target_version + 1
-            );
+            ));
         }
 
         // Step 5: Verify final version matches expected
@@ -409,26 +413,31 @@ impl InternalDatabase {
     /// Upsert a prompt record
     pub fn upsert_prompt(&mut self, record: &PromptDbRecord) -> Result<(), GitAiError> {
         let messages_json = serde_json::to_string(&record.messages)?;
+        let metadata_json = record
+            .agent_metadata
+            .as_ref()
+            .and_then(|m| serde_json::to_string(m).ok());
 
         self.conn.execute(
             r#"
             INSERT INTO prompts (
                 id, workdir, tool, model, external_thread_id,
-                messages, commit_sha, created_at, updated_at,
-                human_author, total_additions, total_deletions,
-                accepted_lines, overridden_lines
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                messages, commit_sha, agent_metadata, human_author,
+                total_additions, total_deletions, accepted_lines,
+                overridden_lines, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
             ON CONFLICT(id) DO UPDATE SET
                 workdir = excluded.workdir,
                 model = excluded.model,
                 messages = excluded.messages,
                 commit_sha = excluded.commit_sha,
-                updated_at = excluded.updated_at,
+                agent_metadata = excluded.agent_metadata,
                 human_author = excluded.human_author,
                 total_additions = excluded.total_additions,
                 total_deletions = excluded.total_deletions,
                 accepted_lines = excluded.accepted_lines,
-                overridden_lines = excluded.overridden_lines
+                overridden_lines = excluded.overridden_lines,
+                updated_at = excluded.updated_at
             "#,
             params![
                 record.id,
@@ -438,13 +447,14 @@ impl InternalDatabase {
                 record.external_thread_id,
                 messages_json,
                 record.commit_sha,
-                record.created_at,
-                record.updated_at,
+                metadata_json,
                 record.human_author,
                 record.total_additions,
                 record.total_deletions,
                 record.accepted_lines,
                 record.overridden_lines,
+                record.created_at,
+                record.updated_at,
             ],
         )?;
 
@@ -461,26 +471,31 @@ impl InternalDatabase {
 
         for record in records {
             let messages_json = serde_json::to_string(&record.messages)?;
+            let metadata_json = record
+                .agent_metadata
+                .as_ref()
+                .and_then(|m| serde_json::to_string(m).ok());
 
             tx.execute(
                 r#"
                 INSERT INTO prompts (
                     id, workdir, tool, model, external_thread_id,
-                    messages, commit_sha, created_at, updated_at,
-                    human_author, total_additions, total_deletions,
-                    accepted_lines, overridden_lines
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                    messages, commit_sha, agent_metadata, human_author,
+                    total_additions, total_deletions, accepted_lines,
+                    overridden_lines, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
                 ON CONFLICT(id) DO UPDATE SET
                     workdir = excluded.workdir,
                     model = excluded.model,
                     messages = excluded.messages,
                     commit_sha = excluded.commit_sha,
-                    updated_at = excluded.updated_at,
+                    agent_metadata = excluded.agent_metadata,
                     human_author = excluded.human_author,
                     total_additions = excluded.total_additions,
                     total_deletions = excluded.total_deletions,
                     accepted_lines = excluded.accepted_lines,
-                    overridden_lines = excluded.overridden_lines
+                    overridden_lines = excluded.overridden_lines,
+                    updated_at = excluded.updated_at
                 "#,
                 params![
                     record.id,
@@ -490,13 +505,14 @@ impl InternalDatabase {
                     record.external_thread_id,
                     messages_json,
                     record.commit_sha,
-                    record.created_at,
-                    record.updated_at,
+                    metadata_json,
                     record.human_author,
                     record.total_additions,
                     record.total_deletions,
                     record.accepted_lines,
                     record.overridden_lines,
+                    record.created_at,
+                    record.updated_at,
                 ],
             )?;
         }
@@ -508,8 +524,10 @@ impl InternalDatabase {
     /// Get a prompt by ID
     pub fn get_prompt(&self, id: &str) -> Result<Option<PromptDbRecord>, GitAiError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, workdir, tool, model, external_thread_id, messages, commit_sha, created_at, updated_at,
-                    human_author, total_additions, total_deletions, accepted_lines, overridden_lines
+            "SELECT id, workdir, tool, model, external_thread_id, messages,
+                    commit_sha, agent_metadata, human_author,
+                    total_additions, total_deletions, accepted_lines,
+                    overridden_lines, created_at, updated_at
              FROM prompts WHERE id = ?1"
         )?;
 
@@ -523,6 +541,10 @@ impl InternalDatabase {
                 )
             })?;
 
+            let agent_metadata: Option<HashMap<String, String>> = row
+                .get::<_, Option<String>>(7)?
+                .and_then(|json| serde_json::from_str(&json).ok());
+
             Ok(PromptDbRecord {
                 id: row.get(0)?,
                 workdir: row.get(1)?,
@@ -531,13 +553,14 @@ impl InternalDatabase {
                 external_thread_id: row.get(4)?,
                 messages,
                 commit_sha: row.get(6)?,
-                created_at: row.get(7)?,
-                updated_at: row.get(8)?,
-                human_author: row.get(9)?,
-                total_additions: row.get(10)?,
-                total_deletions: row.get(11)?,
-                accepted_lines: row.get(12)?,
-                overridden_lines: row.get(13)?,
+                agent_metadata,
+                human_author: row.get(8)?,
+                total_additions: row.get(9)?,
+                total_deletions: row.get(10)?,
+                accepted_lines: row.get(11)?,
+                overridden_lines: row.get(12)?,
+                created_at: row.get(13)?,
+                updated_at: row.get(14)?,
             })
         });
 
@@ -555,8 +578,10 @@ impl InternalDatabase {
         commit_sha: &str,
     ) -> Result<Vec<PromptDbRecord>, GitAiError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, workdir, tool, model, external_thread_id, messages, commit_sha, created_at, updated_at,
-                    human_author, total_additions, total_deletions, accepted_lines, overridden_lines
+            "SELECT id, workdir, tool, model, external_thread_id, messages,
+                    commit_sha, agent_metadata, human_author,
+                    total_additions, total_deletions, accepted_lines,
+                    overridden_lines, created_at, updated_at
              FROM prompts WHERE commit_sha = ?1"
         )?;
 
@@ -570,6 +595,10 @@ impl InternalDatabase {
                 )
             })?;
 
+            let agent_metadata: Option<HashMap<String, String>> = row
+                .get::<_, Option<String>>(7)?
+                .and_then(|json| serde_json::from_str(&json).ok());
+
             Ok(PromptDbRecord {
                 id: row.get(0)?,
                 workdir: row.get(1)?,
@@ -578,13 +607,14 @@ impl InternalDatabase {
                 external_thread_id: row.get(4)?,
                 messages,
                 commit_sha: row.get(6)?,
-                created_at: row.get(7)?,
-                updated_at: row.get(8)?,
-                human_author: row.get(9)?,
-                total_additions: row.get(10)?,
-                total_deletions: row.get(11)?,
-                accepted_lines: row.get(12)?,
-                overridden_lines: row.get(13)?,
+                agent_metadata,
+                human_author: row.get(8)?,
+                total_additions: row.get(9)?,
+                total_deletions: row.get(10)?,
+                accepted_lines: row.get(11)?,
+                overridden_lines: row.get(12)?,
+                created_at: row.get(13)?,
+                updated_at: row.get(14)?,
             })
         })?;
 
@@ -596,23 +626,44 @@ impl InternalDatabase {
         Ok(records)
     }
 
-    /// List prompts with optional workdir filter, ordered by updated_at DESC
+    /// List prompts with optional workdir and since filters, ordered by updated_at DESC
     pub fn list_prompts(
         &self,
         workdir: Option<&str>,
+        since: Option<i64>,
         limit: usize,
         offset: usize,
     ) -> Result<Vec<PromptDbRecord>, GitAiError> {
-        let (query, params): (String, Vec<Box<dyn rusqlite::ToSql>>) = match workdir {
-            Some(wd) => (
-                "SELECT id, workdir, tool, model, external_thread_id, messages, commit_sha, created_at, updated_at,
-                        human_author, total_additions, total_deletions, accepted_lines, overridden_lines
+        let (query, params): (String, Vec<Box<dyn rusqlite::ToSql>>) = match (workdir, since) {
+            (Some(wd), Some(ts)) => (
+                "SELECT id, workdir, tool, model, external_thread_id, messages,
+                        commit_sha, agent_metadata, human_author,
+                        total_additions, total_deletions, accepted_lines,
+                        overridden_lines, created_at, updated_at
+                 FROM prompts WHERE workdir = ?1 AND updated_at >= ?2 ORDER BY updated_at DESC LIMIT ?3 OFFSET ?4".to_string(),
+                vec![Box::new(wd.to_string()), Box::new(ts), Box::new(limit as i64), Box::new(offset as i64)],
+            ),
+            (Some(wd), None) => (
+                "SELECT id, workdir, tool, model, external_thread_id, messages,
+                        commit_sha, agent_metadata, human_author,
+                        total_additions, total_deletions, accepted_lines,
+                        overridden_lines, created_at, updated_at
                  FROM prompts WHERE workdir = ?1 ORDER BY updated_at DESC LIMIT ?2 OFFSET ?3".to_string(),
                 vec![Box::new(wd.to_string()), Box::new(limit as i64), Box::new(offset as i64)],
             ),
-            None => (
-                "SELECT id, workdir, tool, model, external_thread_id, messages, commit_sha, created_at, updated_at,
-                        human_author, total_additions, total_deletions, accepted_lines, overridden_lines
+            (None, Some(ts)) => (
+                "SELECT id, workdir, tool, model, external_thread_id, messages,
+                        commit_sha, agent_metadata, human_author,
+                        total_additions, total_deletions, accepted_lines,
+                        overridden_lines, created_at, updated_at
+                 FROM prompts WHERE updated_at >= ?1 ORDER BY updated_at DESC LIMIT ?2 OFFSET ?3".to_string(),
+                vec![Box::new(ts), Box::new(limit as i64), Box::new(offset as i64)],
+            ),
+            (None, None) => (
+                "SELECT id, workdir, tool, model, external_thread_id, messages,
+                        commit_sha, agent_metadata, human_author,
+                        total_additions, total_deletions, accepted_lines,
+                        overridden_lines, created_at, updated_at
                  FROM prompts ORDER BY updated_at DESC LIMIT ?1 OFFSET ?2".to_string(),
                 vec![Box::new(limit as i64), Box::new(offset as i64)],
             ),
@@ -631,6 +682,10 @@ impl InternalDatabase {
                 )
             })?;
 
+            let agent_metadata: Option<HashMap<String, String>> = row
+                .get::<_, Option<String>>(7)?
+                .and_then(|json| serde_json::from_str(&json).ok());
+
             Ok(PromptDbRecord {
                 id: row.get(0)?,
                 workdir: row.get(1)?,
@@ -639,13 +694,14 @@ impl InternalDatabase {
                 external_thread_id: row.get(4)?,
                 messages,
                 commit_sha: row.get(6)?,
-                created_at: row.get(7)?,
-                updated_at: row.get(8)?,
-                human_author: row.get(9)?,
-                total_additions: row.get(10)?,
-                total_deletions: row.get(11)?,
-                accepted_lines: row.get(12)?,
-                overridden_lines: row.get(13)?,
+                agent_metadata,
+                human_author: row.get(8)?,
+                total_additions: row.get(9)?,
+                total_deletions: row.get(10)?,
+                accepted_lines: row.get(11)?,
+                overridden_lines: row.get(12)?,
+                created_at: row.get(13)?,
+                updated_at: row.get(14)?,
             })
         })?;
 
@@ -669,14 +725,18 @@ impl InternalDatabase {
 
         let (query, params): (String, Vec<Box<dyn rusqlite::ToSql>>) = match workdir {
             Some(wd) => (
-                "SELECT id, workdir, tool, model, external_thread_id, messages, commit_sha, created_at, updated_at,
-                        human_author, total_additions, total_deletions, accepted_lines, overridden_lines
+                "SELECT id, workdir, tool, model, external_thread_id, messages,
+                        commit_sha, agent_metadata, human_author,
+                        total_additions, total_deletions, accepted_lines,
+                        overridden_lines, created_at, updated_at
                  FROM prompts WHERE messages LIKE ?1 AND workdir = ?2 ORDER BY updated_at DESC LIMIT ?3 OFFSET ?4".to_string(),
                 vec![Box::new(search_pattern), Box::new(wd.to_string()), Box::new(limit as i64), Box::new(offset as i64)],
             ),
             None => (
-                "SELECT id, workdir, tool, model, external_thread_id, messages, commit_sha, created_at, updated_at,
-                        human_author, total_additions, total_deletions, accepted_lines, overridden_lines
+                "SELECT id, workdir, tool, model, external_thread_id, messages,
+                        commit_sha, agent_metadata, human_author,
+                        total_additions, total_deletions, accepted_lines,
+                        overridden_lines, created_at, updated_at
                  FROM prompts WHERE messages LIKE ?1 ORDER BY updated_at DESC LIMIT ?2 OFFSET ?3".to_string(),
                 vec![Box::new(search_pattern), Box::new(limit as i64), Box::new(offset as i64)],
             ),
@@ -695,6 +755,10 @@ impl InternalDatabase {
                 )
             })?;
 
+            let agent_metadata: Option<HashMap<String, String>> = row
+                .get::<_, Option<String>>(7)?
+                .and_then(|json| serde_json::from_str(&json).ok());
+
             Ok(PromptDbRecord {
                 id: row.get(0)?,
                 workdir: row.get(1)?,
@@ -703,13 +767,14 @@ impl InternalDatabase {
                 external_thread_id: row.get(4)?,
                 messages,
                 commit_sha: row.get(6)?,
-                created_at: row.get(7)?,
-                updated_at: row.get(8)?,
-                human_author: row.get(9)?,
-                total_additions: row.get(10)?,
-                total_deletions: row.get(11)?,
-                accepted_lines: row.get(12)?,
-                overridden_lines: row.get(13)?,
+                agent_metadata,
+                human_author: row.get(8)?,
+                total_additions: row.get(9)?,
+                total_deletions: row.get(10)?,
+                accepted_lines: row.get(11)?,
+                overridden_lines: row.get(12)?,
+                created_at: row.get(13)?,
+                updated_at: row.get(14)?,
             })
         })?;
 
@@ -724,8 +789,8 @@ impl InternalDatabase {
     /// Enqueue a CAS object for syncing
     pub fn enqueue_cas_object(
         &mut self,
-        hash: &str,
-        data: &str,
+        hash: &[u8],
+        data: &[u8],
         metadata: Option<&HashMap<String, String>>,
     ) -> Result<(), GitAiError> {
         let now = std::time::SystemTime::now()
@@ -787,10 +852,12 @@ impl InternalDatabase {
         let rows = stmt.query_map(params![now, now, batch_size], |row| {
             let metadata_json: String = row.get(3)?;
             let metadata: HashMap<String, String> = serde_json::from_str(&metadata_json).unwrap_or_default();
+            let hash_blob: Vec<u8> = row.get(1)?;
+            let data_blob: Vec<u8> = row.get(2)?;
             Ok(CasSyncRecord {
                 id: row.get(0)?,
-                hash: row.get(1)?,
-                data: row.get(2)?,
+                hash: hash_blob,
+                data: data_blob,
                 attempts: row.get(4)?,
                 metadata,
             })
@@ -897,13 +964,14 @@ mod tests {
             external_thread_id: "test-session-123".to_string(),
             messages: transcript,
             commit_sha: None,
-            created_at: 1234567890,
-            updated_at: 1234567890,
+            agent_metadata: None,
             human_author: Some("John Doe".to_string()),
             total_additions: Some(10),
             total_deletions: Some(5),
             accepted_lines: None,
             overridden_lines: None,
+            created_at: 1234567890,
+            updated_at: 1234567890,
         }
     }
 
@@ -1122,15 +1190,18 @@ mod tests {
         metadata.insert("key1".to_string(), "value1".to_string());
         metadata.insert("key2".to_string(), "value2".to_string());
 
+        let hash = b"abc123".to_vec();
+        let data = b"rawdata".to_vec();
+
         // Enqueue an object with metadata
-        db.enqueue_cas_object("abc123", "base64data", Some(&metadata)).unwrap();
+        db.enqueue_cas_object(&hash, &data, Some(&metadata)).unwrap();
 
         // Verify metadata was stored correctly
         let metadata_json: String = db
             .conn
             .query_row(
-                "SELECT metadata FROM cas_sync_queue WHERE hash = 'abc123'",
-                [],
+                "SELECT metadata FROM cas_sync_queue WHERE hash = ?",
+                params![hash],
                 |row| row.get(0),
             )
             .unwrap();
@@ -1142,6 +1213,8 @@ mod tests {
         // Verify dequeue returns metadata correctly
         let batch = db.dequeue_cas_batch(10).unwrap();
         assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].hash, hash);
+        assert_eq!(batch[0].data, data);
         assert_eq!(batch[0].metadata.get("key1"), Some(&"value1".to_string()));
         assert_eq!(batch[0].metadata.get("key2"), Some(&"value2".to_string()));
     }
@@ -1150,21 +1223,24 @@ mod tests {
     fn test_enqueue_cas_object() {
         let (mut db, _temp_dir) = create_test_db();
 
+        let hash = b"abc123".to_vec();
+        let data = b"rawdata".to_vec();
+
         // Enqueue an object
-        db.enqueue_cas_object("abc123", "base64data", None).unwrap();
+        db.enqueue_cas_object(&hash, &data, None).unwrap();
 
         // Verify it was inserted with correct defaults
-        let (hash, data, metadata, status, attempts): (String, String, String, String, u32) = db
+        let (stored_hash, stored_data, metadata, status, attempts): (Vec<u8>, Vec<u8>, String, String, u32) = db
             .conn
             .query_row(
-                "SELECT hash, data, metadata, status, attempts FROM cas_sync_queue WHERE hash = 'abc123'",
-                [],
+                "SELECT hash, data, metadata, status, attempts FROM cas_sync_queue WHERE hash = ?",
+                params![hash],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             )
             .unwrap();
 
-        assert_eq!(hash, "abc123");
-        assert_eq!(data, "base64data");
+        assert_eq!(stored_hash, hash);
+        assert_eq!(stored_data, data);
         assert_eq!(status, "pending");
         assert_eq!(attempts, 0);
         assert_eq!(metadata, "{}");
@@ -1174,31 +1250,35 @@ mod tests {
     fn test_enqueue_duplicate_hash() {
         let (mut db, _temp_dir) = create_test_db();
 
+        let hash = b"abc123".to_vec();
+        let data1 = b"data1".to_vec();
+        let data2 = b"data2".to_vec();
+
         // Enqueue the same hash twice
-        db.enqueue_cas_object("abc123", "data1", None).unwrap();
-        db.enqueue_cas_object("abc123", "data2", None).unwrap();
+        db.enqueue_cas_object(&hash, &data1, None).unwrap();
+        db.enqueue_cas_object(&hash, &data2, None).unwrap();
 
         // Verify only one record exists (INSERT OR IGNORE)
         let count: i64 = db
             .conn
             .query_row(
-                "SELECT COUNT(*) FROM cas_sync_queue WHERE hash = 'abc123'",
-                [],
+                "SELECT COUNT(*) FROM cas_sync_queue WHERE hash = ?",
+                params![hash],
                 |row| row.get(0),
             )
             .unwrap();
         assert_eq!(count, 1);
 
         // Verify it kept the first data
-        let data: String = db
+        let data: Vec<u8> = db
             .conn
             .query_row(
-                "SELECT data FROM cas_sync_queue WHERE hash = 'abc123'",
-                [],
+                "SELECT data FROM cas_sync_queue WHERE hash = ?",
+                params![hash],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(data, "data1");
+        assert_eq!(data, data1);
     }
 
     #[test]
@@ -1206,9 +1286,9 @@ mod tests {
         let (mut db, _temp_dir) = create_test_db();
 
         // Enqueue multiple objects
-        db.enqueue_cas_object("hash1", "data1", None).unwrap();
-        db.enqueue_cas_object("hash2", "data2", None).unwrap();
-        db.enqueue_cas_object("hash3", "data3", None).unwrap();
+        db.enqueue_cas_object(b"hash1", b"data1", None).unwrap();
+        db.enqueue_cas_object(b"hash2", b"data2", None).unwrap();
+        db.enqueue_cas_object(b"hash3", b"data3", None).unwrap();
 
         // Dequeue batch of 2
         let batch = db.dequeue_cas_batch(2).unwrap();
@@ -1246,29 +1326,35 @@ mod tests {
             .unwrap()
             .as_secs() as i64;
 
+        let hash1 = b"hash1".to_vec();
+        let hash2 = b"hash2".to_vec();
+        let data1 = b"data1".to_vec();
+        let data2 = b"data2".to_vec();
+
         // Insert one record ready to retry (past)
         db.conn.execute(
             "INSERT INTO cas_sync_queue (hash, data, metadata, status, attempts, next_retry_at, created_at) VALUES (?, ?, '{}', 'pending', 0, ?, ?)",
-            params!["hash1", "data1", now - 100, now],
+            params![hash1, data1, now - 100, now],
         ).unwrap();
 
         // Insert one record not ready yet (future)
         db.conn.execute(
             "INSERT INTO cas_sync_queue (hash, data, metadata, status, attempts, next_retry_at, created_at) VALUES (?, ?, '{}', 'pending', 0, ?, ?)",
-            params!["hash2", "data2", now + 1000, now],
+            params![hash2, data2, now + 1000, now],
         ).unwrap();
 
         // Dequeue should only return the first one
         let batch = db.dequeue_cas_batch(10).unwrap();
         assert_eq!(batch.len(), 1);
-        assert_eq!(batch[0].hash, "hash1");
+        assert_eq!(batch[0].hash, hash1);
     }
 
     #[test]
     fn test_dequeue_locks_records() {
         let (mut db, _temp_dir) = create_test_db();
 
-        db.enqueue_cas_object("hash1", "data1", None).unwrap();
+        let hash = b"hash1".to_vec();
+        db.enqueue_cas_object(&hash, b"data1", None).unwrap();
 
         // Dequeue
         let batch = db.dequeue_cas_batch(10).unwrap();
@@ -1278,8 +1364,8 @@ mod tests {
         let status: String = db
             .conn
             .query_row(
-                "SELECT status FROM cas_sync_queue WHERE hash = 'hash1'",
-                [],
+                "SELECT status FROM cas_sync_queue WHERE hash = ?",
+                params![hash],
                 |row| row.get(0),
             )
             .unwrap();
@@ -1289,8 +1375,8 @@ mod tests {
         let processing_started_at: Option<i64> = db
             .conn
             .query_row(
-                "SELECT processing_started_at FROM cas_sync_queue WHERE hash = 'hash1'",
-                [],
+                "SELECT processing_started_at FROM cas_sync_queue WHERE hash = ?",
+                params![hash],
                 |row| row.get(0),
             )
             .unwrap();
@@ -1310,17 +1396,20 @@ mod tests {
             .unwrap()
             .as_secs() as i64;
 
+        let hash = b"hash1".to_vec();
+        let data = b"data1".to_vec();
+
         // Insert a record in 'processing' state with old timestamp (>10 minutes ago)
         let stale_time = now - 700; // 11+ minutes ago
         db.conn.execute(
             "INSERT INTO cas_sync_queue (hash, data, metadata, status, attempts, next_retry_at, processing_started_at, created_at) VALUES (?, ?, '{}', 'processing', 0, ?, ?, ?)",
-            params!["hash1", "data1", now, stale_time, now],
+            params![hash, data, now, stale_time, now],
         ).unwrap();
 
         // Dequeue should recover the stale lock
         let batch = db.dequeue_cas_batch(10).unwrap();
         assert_eq!(batch.len(), 1);
-        assert_eq!(batch[0].hash, "hash1");
+        assert_eq!(batch[0].hash, hash);
     }
 
     #[test]
@@ -1332,22 +1421,27 @@ mod tests {
             .unwrap()
             .as_secs() as i64;
 
+        let hash1 = b"hash1".to_vec();
+        let hash2 = b"hash2".to_vec();
+        let data1 = b"data1".to_vec();
+        let data2 = b"data2".to_vec();
+
         // Insert a record with 6 attempts (max reached)
         db.conn.execute(
             "INSERT INTO cas_sync_queue (hash, data, metadata, status, attempts, next_retry_at, created_at) VALUES (?, ?, '{}', 'pending', 6, ?, ?)",
-            params!["hash1", "data1", now - 100, now],
+            params![hash1, data1, now - 100, now],
         ).unwrap();
 
         // Insert a record with 5 attempts (still eligible)
         db.conn.execute(
             "INSERT INTO cas_sync_queue (hash, data, metadata, status, attempts, next_retry_at, created_at) VALUES (?, ?, '{}', 'pending', 5, ?, ?)",
-            params!["hash2", "data2", now - 100, now],
+            params![hash2, data2, now - 100, now],
         ).unwrap();
 
         // Dequeue should only return the one with 5 attempts
         let batch = db.dequeue_cas_batch(10).unwrap();
         assert_eq!(batch.len(), 1);
-        assert_eq!(batch[0].hash, "hash2");
+        assert_eq!(batch[0].hash, hash2);
         assert_eq!(batch[0].attempts, 5);
     }
 
@@ -1355,7 +1449,7 @@ mod tests {
     fn test_update_cas_sync_failure() {
         let (mut db, _temp_dir) = create_test_db();
 
-        db.enqueue_cas_object("hash1", "data1", None).unwrap();
+        db.enqueue_cas_object(b"hash1", b"data1", None).unwrap();
         let batch = db.dequeue_cas_batch(10).unwrap();
         let record = &batch[0];
 
@@ -1411,7 +1505,7 @@ mod tests {
     fn test_delete_cas_sync_record() {
         let (mut db, _temp_dir) = create_test_db();
 
-        db.enqueue_cas_object("hash1", "data1", None).unwrap();
+        db.enqueue_cas_object(b"hash1", b"data1", None).unwrap();
         let batch = db.dequeue_cas_batch(10).unwrap();
         let record = &batch[0];
 

@@ -98,7 +98,7 @@ impl PromptPickerState {
         };
 
         let new_prompts = if self.search_query.is_empty() {
-            db_guard.list_prompts(workdir_filter, self.batch_size, offset)?
+            db_guard.list_prompts(workdir_filter, None, self.batch_size, offset)?
         } else {
             db_guard.search_prompts(&self.search_query, workdir_filter, self.batch_size, offset)?
         };

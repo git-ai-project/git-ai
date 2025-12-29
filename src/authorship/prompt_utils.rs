@@ -1,8 +1,15 @@
 use crate::authorship::authorship_log::PromptRecord;
 use crate::authorship::internal_db::InternalDatabase;
+use crate::authorship::transcript::AiTranscript;
+use crate::commands::checkpoint_agent::agent_presets::{
+    ClaudePreset, ContinueCliPreset, CursorPreset, GeminiPreset, GithubCopilotPreset,
+};
 use crate::error::GitAiError;
 use crate::git::refs::{get_authorship, grep_ai_notes};
 use crate::git::repository::Repository;
+use crate::observability::log_error;
+use crate::utils::debug_log;
+use std::collections::HashMap;
 
 /// Find a prompt in the repository history
 ///
@@ -138,5 +145,232 @@ pub fn find_prompt_with_db_fallback(
             "Prompt '{}' not found in database and no repository provided",
             prompt_id
         )))
+    }
+}
+
+/// Result of attempting to update a prompt from a tool
+pub enum PromptUpdateResult {
+    Updated(AiTranscript, String), // (new_transcript, new_model)
+    Unchanged,                      // No update available or needed
+    Failed(GitAiError),             // Error occurred but not fatal
+}
+
+/// Update a prompt by fetching latest transcript from the tool
+///
+/// This function NEVER panics or stops execution on errors.
+/// Errors are logged but returned as PromptUpdateResult::Failed.
+pub fn update_prompt_from_tool(
+    tool: &str,
+    external_thread_id: &str,
+    agent_metadata: Option<&HashMap<String, String>>,
+    current_model: &str,
+) -> PromptUpdateResult {
+    match tool {
+        "cursor" => update_cursor_prompt(external_thread_id),
+        "claude" => update_claude_prompt(agent_metadata, current_model),
+        "gemini" => update_gemini_prompt(agent_metadata, current_model),
+        "github-copilot" => update_github_copilot_prompt(agent_metadata, current_model),
+        "continue-cli" => update_continue_cli_prompt(agent_metadata, current_model),
+        _ => {
+            debug_log(&format!("Unknown tool: {}", tool));
+            PromptUpdateResult::Unchanged
+        }
+    }
+}
+
+/// Update Cursor prompt by fetching from Cursor's database
+fn update_cursor_prompt(conversation_id: &str) -> PromptUpdateResult {
+    let res = CursorPreset::fetch_latest_cursor_conversation(conversation_id);
+    match res {
+        Ok(Some((latest_transcript, latest_model))) => {
+            PromptUpdateResult::Updated(latest_transcript, latest_model)
+        }
+        Ok(None) => PromptUpdateResult::Unchanged,
+        Err(e) => {
+            debug_log(&format!(
+                "Failed to fetch latest Cursor conversation for ID {}: {}",
+                conversation_id, e
+            ));
+            log_error(
+                &e,
+                Some(serde_json::json!({
+                    "agent_tool": "cursor",
+                    "operation": "fetch_latest_cursor_conversation"
+                })),
+            );
+            PromptUpdateResult::Failed(e)
+        }
+    }
+}
+
+/// Update Claude prompt from transcript file
+fn update_claude_prompt(
+    metadata: Option<&HashMap<String, String>>,
+    current_model: &str,
+) -> PromptUpdateResult {
+    // Try to load transcript from agent_metadata if available
+    if let Some(metadata) = metadata {
+        if let Some(transcript_path) = metadata.get("transcript_path") {
+            // Try to read and parse the transcript JSONL
+            match ClaudePreset::transcript_and_model_from_claude_code_jsonl(transcript_path) {
+                Ok((transcript, model)) => {
+                    // Update to the latest transcript (similar to Cursor behavior)
+                    // This handles both cases: initial load failure and getting latest version
+                    PromptUpdateResult::Updated(
+                        transcript,
+                        model.unwrap_or_else(|| current_model.to_string()),
+                    )
+                }
+                Err(e) => {
+                    debug_log(&format!(
+                        "Failed to parse Claude JSONL transcript from {}: {}",
+                        transcript_path, e
+                    ));
+                    log_error(
+                        &e,
+                        Some(serde_json::json!({
+                            "agent_tool": "claude",
+                            "operation": "transcript_and_model_from_claude_code_jsonl"
+                        })),
+                    );
+                    PromptUpdateResult::Failed(e)
+                }
+            }
+        } else {
+            // No transcript_path in metadata
+            PromptUpdateResult::Unchanged
+        }
+    } else {
+        // No agent_metadata available
+        PromptUpdateResult::Unchanged
+    }
+}
+
+/// Update Gemini prompt from transcript file
+fn update_gemini_prompt(
+    metadata: Option<&HashMap<String, String>>,
+    current_model: &str,
+) -> PromptUpdateResult {
+    // Try to load transcript from agent_metadata if available
+    if let Some(metadata) = metadata {
+        if let Some(transcript_path) = metadata.get("transcript_path") {
+            // Try to read and parse the transcript JSON
+            match GeminiPreset::transcript_and_model_from_gemini_json(transcript_path) {
+                Ok((transcript, model)) => {
+                    // Update to the latest transcript (similar to Cursor behavior)
+                    // This handles both cases: initial load failure and getting latest version
+                    PromptUpdateResult::Updated(
+                        transcript,
+                        model.unwrap_or_else(|| current_model.to_string()),
+                    )
+                }
+                Err(e) => {
+                    debug_log(&format!(
+                        "Failed to parse Gemini JSON transcript from {}: {}",
+                        transcript_path, e
+                    ));
+                    log_error(
+                        &e,
+                        Some(serde_json::json!({
+                            "agent_tool": "gemini",
+                            "operation": "transcript_and_model_from_gemini_json"
+                        })),
+                    );
+                    PromptUpdateResult::Failed(e)
+                }
+            }
+        } else {
+            // No transcript_path in metadata
+            PromptUpdateResult::Unchanged
+        }
+    } else {
+        // No agent_metadata available
+        PromptUpdateResult::Unchanged
+    }
+}
+
+/// Update GitHub Copilot prompt from chat session file
+fn update_github_copilot_prompt(
+    metadata: Option<&HashMap<String, String>>,
+    current_model: &str,
+) -> PromptUpdateResult {
+    // Try to load transcript from agent_metadata if available
+    if let Some(metadata) = metadata {
+        if let Some(chat_session_path) = metadata.get("chat_session_path") {
+            // Try to read and parse the chat session JSON
+            match GithubCopilotPreset::transcript_and_model_from_copilot_session_json(
+                chat_session_path,
+            ) {
+                Ok((transcript, model, _)) => {
+                    // Update to the latest transcript (similar to Cursor behavior)
+                    // This handles both cases: initial load failure and getting latest version
+                    PromptUpdateResult::Updated(
+                        transcript,
+                        model.unwrap_or_else(|| current_model.to_string()),
+                    )
+                }
+                Err(e) => {
+                    debug_log(&format!(
+                        "Failed to parse GitHub Copilot chat session JSON from {}: {}",
+                        chat_session_path, e
+                    ));
+                    log_error(
+                        &e,
+                        Some(serde_json::json!({
+                            "agent_tool": "github-copilot",
+                            "operation": "transcript_and_model_from_copilot_session_json"
+                        })),
+                    );
+                    PromptUpdateResult::Failed(e)
+                }
+            }
+        } else {
+            // No chat_session_path in metadata
+            PromptUpdateResult::Unchanged
+        }
+    } else {
+        // No agent_metadata available
+        PromptUpdateResult::Unchanged
+    }
+}
+
+/// Update Continue CLI prompt from transcript file
+fn update_continue_cli_prompt(
+    metadata: Option<&HashMap<String, String>>,
+    current_model: &str,
+) -> PromptUpdateResult {
+    // Try to load transcript from agent_metadata if available
+    if let Some(metadata) = metadata {
+        if let Some(transcript_path) = metadata.get("transcript_path") {
+            // Try to read and parse the transcript JSON
+            match ContinueCliPreset::transcript_from_continue_json(transcript_path) {
+                Ok(transcript) => {
+                    // Update to the latest transcript (similar to Cursor behavior)
+                    // This handles both cases: initial load failure and getting latest version
+                    // IMPORTANT: Always preserve the original model from agent_id (don't overwrite)
+                    PromptUpdateResult::Updated(transcript, current_model.to_string())
+                }
+                Err(e) => {
+                    debug_log(&format!(
+                        "Failed to parse Continue CLI JSON transcript from {}: {}",
+                        transcript_path, e
+                    ));
+                    log_error(
+                        &e,
+                        Some(serde_json::json!({
+                            "agent_tool": "continue-cli",
+                            "operation": "transcript_from_continue_json"
+                        })),
+                    );
+                    PromptUpdateResult::Failed(e)
+                }
+            }
+        } else {
+            // No transcript_path in metadata
+            PromptUpdateResult::Unchanged
+        }
+    } else {
+        // No agent_metadata available
+        PromptUpdateResult::Unchanged
     }
 }

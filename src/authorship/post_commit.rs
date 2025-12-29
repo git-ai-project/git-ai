@@ -1,16 +1,13 @@
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
+use crate::authorship::prompt_utils::{update_prompt_from_tool, PromptUpdateResult};
 use crate::authorship::secrets::{redact_secrets_from_prompts, strip_prompt_messages};
 use crate::authorship::stats::{stats_for_commit_stats, write_stats_to_terminal};
 use crate::authorship::virtual_attribution::VirtualAttributions;
 use crate::authorship::working_log::{Checkpoint, CheckpointKind};
-use crate::commands::checkpoint_agent::agent_presets::{
-    ClaudePreset, ContinueCliPreset, CursorPreset, GeminiPreset, GithubCopilotPreset,
-};
 use crate::config::Config;
 use crate::error::GitAiError;
 use crate::git::refs::notes_add;
 use crate::git::repository::Repository;
-use crate::observability::log_error;
 use crate::utils::debug_log;
 use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
@@ -192,195 +189,29 @@ fn update_prompts_to_latest(checkpoints: &mut [Checkpoint]) -> Result<(), GitAiE
         let checkpoint = &checkpoints[last_idx];
 
         if let Some(agent_id) = &checkpoint.agent_id {
-            // Dispatch to tool-specific update logic
-            let updated_data = match agent_id.tool.as_str() {
-                "cursor" => {
-                    let res = CursorPreset::fetch_latest_cursor_conversation(&agent_id.id);
-                    match res {
-                        Ok(Some((latest_transcript, latest_model))) => {
-                            Some((latest_transcript, latest_model))
-                        }
-                        Ok(None) => None,
-                        Err(e) => {
-                            debug_log(&format!(
-                                "Failed to fetch latest Cursor conversation for agent_id {}: {}",
-                                agent_id.id, e
-                            ));
-                            log_error(
-                                &e,
-                                Some(serde_json::json!({
-                                    "agent_tool": "cursor",
-                                    "operation": "fetch_latest_cursor_conversation"
-                                })),
-                            );
-                            None
-                        }
-                    }
-                }
-                "github-copilot" => {
-                    // Try to load transcript from agent_metadata if available
-                    if let Some(metadata) = &checkpoint.agent_metadata {
-                        if let Some(chat_session_path) = metadata.get("chat_session_path") {
-                            // Try to read and parse the chat session JSON
-                            match GithubCopilotPreset::transcript_and_model_from_copilot_session_json(chat_session_path) {
-                                Ok((transcript, model, _)) => {
-                                    // Update to the latest transcript (similar to Cursor behavior)
-                                    // This handles both cases: initial load failure and getting latest version
-                                    Some((transcript, model.unwrap_or_else(|| agent_id.model.clone())))
-                                }
-                                Err(e) => {
-                                    debug_log(&format!(
-                                        "Failed to parse GitHub Copilot chat session JSON from {} for agent_id {}: {}",
-                                        chat_session_path, agent_id.id, e
-                                    ));
-                                    log_error(
-                                        &e,
-                                        Some(serde_json::json!({
-                                            "agent_tool": "github-copilot",
-                                            "operation": "transcript_and_model_from_copilot_session_json"
-                                        })),
-                                    );
-                                    None
-                                }
-                            }
-                        } else {
-                            // No chat_session_path in metadata
-                            None
-                        }
-                    } else {
-                        // No agent_metadata available
-                        None
-                    }
-                }
-                "claude" => {
-                    // Try to load transcript from agent_metadata if available
-                    if let Some(metadata) = &checkpoint.agent_metadata {
-                        if let Some(transcript_path) = metadata.get("transcript_path") {
-                            // Try to read and parse the transcript JSONL
-                            match ClaudePreset::transcript_and_model_from_claude_code_jsonl(
-                                transcript_path,
-                            ) {
-                                Ok((transcript, model)) => {
-                                    // Update to the latest transcript (similar to Cursor behavior)
-                                    // This handles both cases: initial load failure and getting latest version
-                                    Some((
-                                        transcript,
-                                        model.unwrap_or_else(|| agent_id.model.clone()),
-                                    ))
-                                }
-                                Err(e) => {
-                                    debug_log(&format!(
-                                        "Failed to parse Claude JSONL transcript from {} for agent_id {}: {}",
-                                        transcript_path, agent_id.id, e
-                                    ));
-                                    log_error(
-                                        &e,
-                                        Some(serde_json::json!({
-                                            "agent_tool": "claude",
-                                            "operation": "transcript_and_model_from_claude_code_jsonl"
-                                        })),
-                                    );
-                                    None
-                                }
-                            }
-                        } else {
-                            // No transcript_path in metadata
-                            None
-                        }
-                    } else {
-                        // No agent_metadata available
-                        None
-                    }
-                }
-                "gemini" => {
-                    // Try to load transcript from agent_metadata if available
-                    if let Some(metadata) = &checkpoint.agent_metadata {
-                        if let Some(transcript_path) = metadata.get("transcript_path") {
-                            // Try to read and parse the transcript JSON
-                            match GeminiPreset::transcript_and_model_from_gemini_json(
-                                transcript_path,
-                            ) {
-                                Ok((transcript, model)) => {
-                                    // Update to the latest transcript (similar to Cursor behavior)
-                                    // This handles both cases: initial load failure and getting latest version
-                                    Some((
-                                        transcript,
-                                        model.unwrap_or_else(|| agent_id.model.clone()),
-                                    ))
-                                }
-                                Err(e) => {
-                                    debug_log(&format!(
-                                        "Failed to parse Gemini JSON transcript from {} for agent_id {}: {}",
-                                        transcript_path, agent_id.id, e
-                                    ));
-                                    log_error(
-                                        &e,
-                                        Some(serde_json::json!({
-                                            "agent_tool": "gemini",
-                                            "operation": "transcript_and_model_from_gemini_json"
-                                        })),
-                                    );
-                                    None
-                                }
-                            }
-                        } else {
-                            // No transcript_path in metadata
-                            None
-                        }
-                    } else {
-                        // No agent_metadata available
-                        None
-                    }
-                }
-                "continue-cli" => {
-                    // Try to load transcript from agent_metadata if available
-                    if let Some(metadata) = &checkpoint.agent_metadata {
-                        if let Some(transcript_path) = metadata.get("transcript_path") {
-                            // Try to read and parse the transcript JSON
-                            match ContinueCliPreset::transcript_from_continue_json(transcript_path)
-                            {
-                                Ok(transcript) => {
-                                    // Update to the latest transcript (similar to Cursor behavior)
-                                    // This handles both cases: initial load failure and getting latest version
-                                    // IMPORTANT: Always preserve the original model from agent_id (don't overwrite)
-                                    Some((transcript, agent_id.model.clone()))
-                                }
-                                Err(e) => {
-                                    debug_log(&format!(
-                                        "Failed to parse Continue CLI JSON transcript from {} for agent_id {}: {}",
-                                        transcript_path, agent_id.id, e
-                                    ));
-                                    log_error(
-                                        &e,
-                                        Some(serde_json::json!({
-                                            "agent_tool": "continue-cli",
-                                            "operation": "transcript_from_continue_json"
-                                        })),
-                                    );
-                                    None
-                                }
-                            }
-                        } else {
-                            // No transcript_path in metadata
-                            None
-                        }
-                    } else {
-                        // No agent_metadata available
-                        None
-                    }
-                }
-                _ => {
-                    // Unknown tool, skip updating
-                    None
-                }
-            };
+            // Use shared update logic from prompt_updater module
+            let result = update_prompt_from_tool(
+                &agent_id.tool,
+                &agent_id.id,
+                checkpoint.agent_metadata.as_ref(),
+                &agent_id.model,
+            );
 
             // Apply the update to the last checkpoint only
-            if let Some((latest_transcript, latest_model)) = updated_data {
-                let checkpoint = &mut checkpoints[last_idx];
-                checkpoint.transcript = Some(latest_transcript);
-                if let Some(agent_id) = &mut checkpoint.agent_id {
-                    agent_id.model = latest_model;
+            match result {
+                PromptUpdateResult::Updated(latest_transcript, latest_model) => {
+                    let checkpoint = &mut checkpoints[last_idx];
+                    checkpoint.transcript = Some(latest_transcript);
+                    if let Some(agent_id) = &mut checkpoint.agent_id {
+                        agent_id.model = latest_model;
+                    }
+                }
+                PromptUpdateResult::Unchanged => {
+                    // No update available, keep existing transcript
+                }
+                PromptUpdateResult::Failed(_e) => {
+                    // Error already logged in update_prompt_from_tool
+                    // Continue processing other checkpoints
                 }
             }
         }
