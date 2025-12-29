@@ -4,6 +4,7 @@ use crate::authorship::working_log::Checkpoint;
 use crate::error::GitAiError;
 use dirs;
 use rusqlite::{params, Connection};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
@@ -49,6 +50,7 @@ const MIGRATIONS: &[&str] = &[
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         hash TEXT NOT NULL UNIQUE,
         data TEXT NOT NULL,
+        metadata TEXT NOT NULL DEFAULT '{}',
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'processing')),
         attempts INTEGER NOT NULL DEFAULT 0,
         last_sync_error TEXT,
@@ -220,7 +222,8 @@ impl PromptDbRecord {
 pub struct CasSyncRecord {
     pub id: i64,
     pub hash: String,
-    pub data: String,  // Base64-encoded content
+    pub data: String,
+    pub metadata: HashMap<String, String>,
     pub attempts: u32,
 }
 
@@ -719,19 +722,26 @@ impl InternalDatabase {
     }
 
     /// Enqueue a CAS object for syncing
-    pub fn enqueue_cas_object(&mut self, hash: &str, data: &str) -> Result<(), GitAiError> {
+    pub fn enqueue_cas_object(
+        &mut self,
+        hash: &str,
+        data: &str,
+        metadata: Option<&HashMap<String, String>>,
+    ) -> Result<(), GitAiError> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
 
+        let metadata_json = serde_json::to_string(metadata.unwrap_or(&HashMap::new()))?;
+
         self.conn.execute(
             r#"
             INSERT OR IGNORE INTO cas_sync_queue (
-                hash, data, status, attempts, next_retry_at, created_at
-            ) VALUES (?1, ?2, 'pending', 0, ?3, ?3)
+                hash, data, metadata, status, attempts, next_retry_at, created_at
+            ) VALUES (?1, ?2, ?3, 'pending', 0, ?4, ?4)
             "#,
-            params![hash, data, now],
+            params![hash, data, metadata_json, now],
         )?;
 
         Ok(())
@@ -770,16 +780,19 @@ impl InternalDatabase {
                 ORDER BY next_retry_at
                 LIMIT ?3
             )
-            RETURNING id, hash, data, attempts
+            RETURNING id, hash, data, metadata, attempts
             "#,
         )?;
 
         let rows = stmt.query_map(params![now, now, batch_size], |row| {
+            let metadata_json: String = row.get(3)?;
+            let metadata: HashMap<String, String> = serde_json::from_str(&metadata_json).unwrap_or_default();
             Ok(CasSyncRecord {
                 id: row.get(0)?,
                 hash: row.get(1)?,
                 data: row.get(2)?,
-                attempts: row.get(3)?,
+                attempts: row.get(4)?,
+                metadata,
             })
         })?;
 
@@ -1102,19 +1115,51 @@ mod tests {
     }
 
     #[test]
+    fn test_enqueue_cas_object_with_metadata() {
+        let (mut db, _temp_dir) = create_test_db();
+
+        let mut metadata = HashMap::new();
+        metadata.insert("key1".to_string(), "value1".to_string());
+        metadata.insert("key2".to_string(), "value2".to_string());
+
+        // Enqueue an object with metadata
+        db.enqueue_cas_object("abc123", "base64data", Some(&metadata)).unwrap();
+
+        // Verify metadata was stored correctly
+        let metadata_json: String = db
+            .conn
+            .query_row(
+                "SELECT metadata FROM cas_sync_queue WHERE hash = 'abc123'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        let stored_metadata: HashMap<String, String> = serde_json::from_str(&metadata_json).unwrap();
+        assert_eq!(stored_metadata.get("key1"), Some(&"value1".to_string()));
+        assert_eq!(stored_metadata.get("key2"), Some(&"value2".to_string()));
+
+        // Verify dequeue returns metadata correctly
+        let batch = db.dequeue_cas_batch(10).unwrap();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].metadata.get("key1"), Some(&"value1".to_string()));
+        assert_eq!(batch[0].metadata.get("key2"), Some(&"value2".to_string()));
+    }
+
+    #[test]
     fn test_enqueue_cas_object() {
         let (mut db, _temp_dir) = create_test_db();
 
         // Enqueue an object
-        db.enqueue_cas_object("abc123", "base64data").unwrap();
+        db.enqueue_cas_object("abc123", "base64data", None).unwrap();
 
         // Verify it was inserted with correct defaults
-        let (hash, data, status, attempts): (String, String, String, u32) = db
+        let (hash, data, metadata, status, attempts): (String, String, String, String, u32) = db
             .conn
             .query_row(
-                "SELECT hash, data, status, attempts FROM cas_sync_queue WHERE hash = 'abc123'",
+                "SELECT hash, data, metadata, status, attempts FROM cas_sync_queue WHERE hash = 'abc123'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             )
             .unwrap();
 
@@ -1122,6 +1167,7 @@ mod tests {
         assert_eq!(data, "base64data");
         assert_eq!(status, "pending");
         assert_eq!(attempts, 0);
+        assert_eq!(metadata, "{}");
     }
 
     #[test]
@@ -1129,8 +1175,8 @@ mod tests {
         let (mut db, _temp_dir) = create_test_db();
 
         // Enqueue the same hash twice
-        db.enqueue_cas_object("abc123", "data1").unwrap();
-        db.enqueue_cas_object("abc123", "data2").unwrap();
+        db.enqueue_cas_object("abc123", "data1", None).unwrap();
+        db.enqueue_cas_object("abc123", "data2", None).unwrap();
 
         // Verify only one record exists (INSERT OR IGNORE)
         let count: i64 = db
@@ -1160,9 +1206,9 @@ mod tests {
         let (mut db, _temp_dir) = create_test_db();
 
         // Enqueue multiple objects
-        db.enqueue_cas_object("hash1", "data1").unwrap();
-        db.enqueue_cas_object("hash2", "data2").unwrap();
-        db.enqueue_cas_object("hash3", "data3").unwrap();
+        db.enqueue_cas_object("hash1", "data1", None).unwrap();
+        db.enqueue_cas_object("hash2", "data2", None).unwrap();
+        db.enqueue_cas_object("hash3", "data3", None).unwrap();
 
         // Dequeue batch of 2
         let batch = db.dequeue_cas_batch(2).unwrap();
@@ -1202,13 +1248,13 @@ mod tests {
 
         // Insert one record ready to retry (past)
         db.conn.execute(
-            "INSERT INTO cas_sync_queue (hash, data, status, attempts, next_retry_at, created_at) VALUES (?, ?, 'pending', 0, ?, ?)",
+            "INSERT INTO cas_sync_queue (hash, data, metadata, status, attempts, next_retry_at, created_at) VALUES (?, ?, '{}', 'pending', 0, ?, ?)",
             params!["hash1", "data1", now - 100, now],
         ).unwrap();
 
         // Insert one record not ready yet (future)
         db.conn.execute(
-            "INSERT INTO cas_sync_queue (hash, data, status, attempts, next_retry_at, created_at) VALUES (?, ?, 'pending', 0, ?, ?)",
+            "INSERT INTO cas_sync_queue (hash, data, metadata, status, attempts, next_retry_at, created_at) VALUES (?, ?, '{}', 'pending', 0, ?, ?)",
             params!["hash2", "data2", now + 1000, now],
         ).unwrap();
 
@@ -1222,7 +1268,7 @@ mod tests {
     fn test_dequeue_locks_records() {
         let (mut db, _temp_dir) = create_test_db();
 
-        db.enqueue_cas_object("hash1", "data1").unwrap();
+        db.enqueue_cas_object("hash1", "data1", None).unwrap();
 
         // Dequeue
         let batch = db.dequeue_cas_batch(10).unwrap();
@@ -1267,7 +1313,7 @@ mod tests {
         // Insert a record in 'processing' state with old timestamp (>10 minutes ago)
         let stale_time = now - 700; // 11+ minutes ago
         db.conn.execute(
-            "INSERT INTO cas_sync_queue (hash, data, status, attempts, next_retry_at, processing_started_at, created_at) VALUES (?, ?, 'processing', 0, ?, ?, ?)",
+            "INSERT INTO cas_sync_queue (hash, data, metadata, status, attempts, next_retry_at, processing_started_at, created_at) VALUES (?, ?, '{}', 'processing', 0, ?, ?, ?)",
             params!["hash1", "data1", now, stale_time, now],
         ).unwrap();
 
@@ -1288,13 +1334,13 @@ mod tests {
 
         // Insert a record with 6 attempts (max reached)
         db.conn.execute(
-            "INSERT INTO cas_sync_queue (hash, data, status, attempts, next_retry_at, created_at) VALUES (?, ?, 'pending', 6, ?, ?)",
+            "INSERT INTO cas_sync_queue (hash, data, metadata, status, attempts, next_retry_at, created_at) VALUES (?, ?, '{}', 'pending', 6, ?, ?)",
             params!["hash1", "data1", now - 100, now],
         ).unwrap();
 
         // Insert a record with 5 attempts (still eligible)
         db.conn.execute(
-            "INSERT INTO cas_sync_queue (hash, data, status, attempts, next_retry_at, created_at) VALUES (?, ?, 'pending', 5, ?, ?)",
+            "INSERT INTO cas_sync_queue (hash, data, metadata, status, attempts, next_retry_at, created_at) VALUES (?, ?, '{}', 'pending', 5, ?, ?)",
             params!["hash2", "data2", now - 100, now],
         ).unwrap();
 
@@ -1309,7 +1355,7 @@ mod tests {
     fn test_update_cas_sync_failure() {
         let (mut db, _temp_dir) = create_test_db();
 
-        db.enqueue_cas_object("hash1", "data1").unwrap();
+        db.enqueue_cas_object("hash1", "data1", None).unwrap();
         let batch = db.dequeue_cas_batch(10).unwrap();
         let record = &batch[0];
 
@@ -1365,7 +1411,7 @@ mod tests {
     fn test_delete_cas_sync_record() {
         let (mut db, _temp_dir) = create_test_db();
 
-        db.enqueue_cas_object("hash1", "data1").unwrap();
+        db.enqueue_cas_object("hash1", "data1", None).unwrap();
         let batch = db.dequeue_cas_batch(10).unwrap();
         let record = &batch[0];
 
