@@ -261,6 +261,10 @@ impl InternalDatabase {
                 Err(e) => {
                     // Log error during initialization
                     eprintln!("[Error] Failed to initialize internal database: {}", e);
+                    crate::observability::log_error(
+                        &e,
+                        Some(serde_json::json!({"function": "InternalDatabase::global"}))
+                    );
                     // Create a dummy connection that will fail on any operation
                     // This allows the program to continue even if DB init fails
                     let temp_path = std::env::temp_dir().join("git-ai-db-failed");
@@ -274,6 +278,21 @@ impl InternalDatabase {
         });
 
         Ok(db_mutex)
+    }
+
+    /// Start database initialization in a background thread.
+    /// This allows the main thread to continue with other work while
+    /// the database connection and schema migrations are prepared.
+    ///
+    /// The OnceLock guarantees thread-safe initialization - if warmup
+    /// completes before any caller needs the DB, they get instant access.
+    /// If a caller needs DB before warmup completes, they wait normally.
+    pub fn warmup() {
+        std::thread::spawn(|| {
+            if let Err(e) = Self::global() {
+                debug_log(&format!("DB warmup failed: {}", e));
+            }
+        });
     }
 
     /// Create a new database connection

@@ -1,5 +1,6 @@
 use serde_json::json;
 
+use crate::authorship::internal_db::InternalDatabase;
 use crate::authorship::range_authorship;
 use crate::authorship::stats::stats_command;
 use crate::authorship::working_log::{AgentId, CheckpointKind};
@@ -38,6 +39,14 @@ pub fn handle_git_ai(args: &[String]) {
     let config = config::Config::get();
 
     let allowed_repository = config.is_allowed_repository(&repository_option);
+
+    // Start DB warmup early for commands that need database access
+    match args[0].as_str() {
+        "checkpoint" | "show-prompt" | "share" | "sync-prompts" | "flush-cas" => {
+            InternalDatabase::warmup();
+        }
+        _ => {}
+    }
 
     match args[0].as_str() {
         "help" | "--help" | "-h" => {
