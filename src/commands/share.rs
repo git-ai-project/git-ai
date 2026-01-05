@@ -34,6 +34,9 @@ pub fn handle_share(args: &[String]) {
 
 /// CLI mode for share command (when prompt_id is provided)
 fn handle_share_cli(parsed: ParsedArgs) {
+    // Sync recent prompts before lookup to ensure fresh data
+    let _ = crate::commands::sync_prompts::sync_recent_prompts_silent(20);
+
     // Try to find repository (optional - prompt might be in DB)
     let repo = find_repository(&Vec::<String>::new()).ok();
 

@@ -1,3 +1,4 @@
+use chrono::DateTime;
 use serde::{Deserialize, Serialize};
 
 /// Represents a single message in an AI transcript
@@ -56,6 +57,15 @@ impl Message {
     pub fn is_tool_use(&self) -> bool {
         matches!(self, Message::ToolUse { .. })
     }
+
+    /// Get the timestamp if present
+    pub fn timestamp(&self) -> Option<&String> {
+        match self {
+            Message::User { timestamp, .. }
+            | Message::Assistant { timestamp, .. }
+            | Message::ToolUse { timestamp, .. } => timestamp.as_ref(),
+        }
+    }
 }
 
 /// Represents a complete AI transcript (collection of messages)
@@ -95,6 +105,26 @@ impl AiTranscript {
         Self {
             messages: filtered_messages,
         }
+    }
+
+    /// Get first message timestamp as Unix i64 (for created_at)
+    /// Returns None if no messages or first message has no timestamp
+    pub fn first_message_timestamp_unix(&self) -> Option<i64> {
+        self.messages
+            .first()
+            .and_then(|msg| msg.timestamp())
+            .and_then(|ts| DateTime::parse_from_rfc3339(ts).ok())
+            .map(|dt| dt.timestamp())
+    }
+
+    /// Get last message timestamp as Unix i64 (for updated_at)
+    /// Returns None if no messages or last message has no timestamp
+    pub fn last_message_timestamp_unix(&self) -> Option<i64> {
+        self.messages
+            .last()
+            .and_then(|msg| msg.timestamp())
+            .and_then(|ts| DateTime::parse_from_rfc3339(ts).ok())
+            .map(|dt| dt.timestamp())
     }
 }
 

@@ -106,6 +106,16 @@ impl PromptDbRecord {
 
         let short_hash = generate_short_hash(&agent_id.id, &agent_id.tool);
 
+        // Use first message timestamp for created_at, fall back to checkpoint timestamp
+        let created_at = transcript
+            .first_message_timestamp_unix()
+            .unwrap_or(checkpoint.timestamp as i64);
+
+        // Use last message timestamp for updated_at, fall back to checkpoint timestamp
+        let updated_at = transcript
+            .last_message_timestamp_unix()
+            .unwrap_or(checkpoint.timestamp as i64);
+
         Some(Self {
             id: short_hash,
             workdir,
@@ -120,8 +130,8 @@ impl PromptDbRecord {
             total_deletions: Some(checkpoint.line_stats.deletions),
             accepted_lines: None,      // Not yet calculated
             overridden_lines: None,    // Not yet calculated
-            created_at: checkpoint.timestamp as i64,
-            updated_at: checkpoint.timestamp as i64,
+            created_at,
+            updated_at,
         })
     }
 

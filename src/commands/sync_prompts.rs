@@ -217,19 +217,63 @@ fn update_prompt_record(
                 return Ok(None); // No actual change
             }
 
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64;
+            // Use last message timestamp for updated_at, fall back to now if unavailable
+            let updated_at = new_transcript.last_message_timestamp_unix().unwrap_or_else(|| {
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64
+            });
 
             let mut updated_record = record.clone();
             updated_record.messages = new_transcript;
             updated_record.model = new_model;
-            updated_record.updated_at = now;
+            updated_record.updated_at = updated_at;
 
             Ok(Some(updated_record))
         }
         PromptUpdateResult::Unchanged => Ok(None),
         PromptUpdateResult::Failed(e) => Err(e),
     }
+}
+
+/// Sync recent prompts silently (for share command pre-refresh).
+/// This refreshes the database with the latest transcript data before showing/uploading.
+///
+/// Args:
+///   limit: Maximum number of prompts to sync
+///
+/// Returns Ok(()) on success. Errors on individual prompts are silently ignored.
+pub fn sync_recent_prompts_silent(limit: usize) -> Result<(), GitAiError> {
+    let db = InternalDatabase::global()?;
+    let mut db_lock = db
+        .lock()
+        .map_err(|e| GitAiError::Generic(format!("Failed to lock database: {}", e)))?;
+
+    // Get most recent prompts (no workdir filter, no since filter)
+    let prompts = db_lock.list_prompts(None, None, limit, 0)?;
+
+    if prompts.is_empty() {
+        return Ok(());
+    }
+
+    // Deduplicate by agent_id (keep latest per conversation)
+    let prompts_to_update = deduplicate_by_agent_id(&prompts);
+
+    // Update each prompt, collecting successful updates
+    let mut updated_records = Vec::new();
+
+    for record in prompts_to_update {
+        if let Ok(Some(updated_record)) = update_prompt_record(&record) {
+            updated_records.push(updated_record);
+        }
+        // Silently skip errors and unchanged prompts
+    }
+
+    // Batch upsert updated records
+    if !updated_records.is_empty() {
+        db_lock.batch_upsert_prompts(&updated_records)?;
+    }
+
+    Ok(())
 }

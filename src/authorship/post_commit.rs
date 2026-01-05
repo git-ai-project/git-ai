@@ -282,13 +282,8 @@ fn batch_upsert_prompts_to_db(
     commit_sha: &str,
 ) -> Result<(), GitAiError> {
     use crate::authorship::internal_db::{InternalDatabase, PromptDbRecord};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     let workdir = working_log.repo_workdir.to_string_lossy().to_string();
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
 
     // Group checkpoints by agent_id, keeping track of the LAST index for each.
     // This mirrors the logic in update_prompts_to_latest().
@@ -306,15 +301,15 @@ fn batch_upsert_prompts_to_db(
     }
 
     // Only create records for the LAST checkpoint of each agent_id
+    // Note: from_checkpoint now uses message timestamps for created_at/updated_at
     let mut records = Vec::new();
     for (_agent_key, idx) in last_checkpoint_by_agent {
         let checkpoint = &checkpoints[idx];
-        if let Some(mut record) = PromptDbRecord::from_checkpoint(
+        if let Some(record) = PromptDbRecord::from_checkpoint(
             checkpoint,
             Some(workdir.clone()),
             Some(commit_sha.to_string()),
         ) {
-            record.updated_at = now;
             records.push(record);
         }
     }

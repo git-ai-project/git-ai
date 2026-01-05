@@ -48,6 +48,9 @@ impl ShareConfig {
 pub fn run_tui() -> Result<(), GitAiError> {
     let repo = find_repository(&Vec::<String>::new()).ok();
 
+    // Sync recent prompts before showing picker to ensure fresh data
+    let _ = crate::commands::sync_prompts::sync_recent_prompts_silent(20);
+
     loop {
         // Step 1: Use prompt_picker to select a prompt
         let selected_prompt = prompt_picker::pick_prompt(repo.as_ref(), "Select Prompt to Share")?;
