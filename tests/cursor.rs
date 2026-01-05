@@ -177,58 +177,119 @@ fn test_extract_transcript_from_test_conversation() {
 }
 
 #[test]
-#[ignore]
-
-fn test_cursor_preset_extracts_edited_filepath() {
+fn test_cursor_preset_multi_root_workspace_detection() {
+    use git_ai::authorship::working_log::CheckpointKind;
     use git_ai::commands::checkpoint_agent::agent_presets::{
         AgentCheckpointFlags, AgentCheckpointPreset, CursorPreset,
     };
 
-    let hook_input = r##"{
+    // Helper function to test workspace selection
+    let test_workspace_selection =
+        |workspace_roots: &[&str], file_path: &str, expected_workspace: &str, description: &str| {
+            let workspace_roots_json: Vec<String> = workspace_roots
+                .iter()
+                .map(|s| format!("\"{}\"", s))
+                .collect();
+
+            let file_path_json = if file_path.is_empty() {
+                String::new()
+            } else {
+                format!(",\n        \"file_path\": \"{}\"", file_path)
+            };
+
+            let hook_input = format!(
+                r##"{{
         "conversation_id": "test-conversation-id",
-        "workspace_roots": ["/Users/test/workspace"],
-        "hook_event_name": "afterFileEdit",
-        "file_path": "/Users/test/workspace/src/main.rs",
+        "workspace_roots": [{}],
+        "hook_event_name": "beforeSubmitPrompt"{},
         "model": "model-name-from-hook-test"
-    }"##;
+    }}"##,
+                workspace_roots_json.join(", "),
+                file_path_json
+            );
 
-    let flags = AgentCheckpointFlags {
-        hook_input: Some(hook_input.to_string()),
-    };
+            let flags = AgentCheckpointFlags {
+                hook_input: Some(hook_input),
+            };
 
-    let preset = CursorPreset;
-    let result = preset.run(flags);
+            let preset = CursorPreset;
+            let result = preset
+                .run(flags)
+                .expect(&format!("Should succeed for: {}", description));
 
-    // This test will fail because the conversation doesn't exist in the test DB
-    // But we can verify the error occurs after filepath extraction logic
-    // In a real scenario with valid conversation, edited_filepaths would be populated
-    assert!(result.is_err());
-}
+            assert_eq!(
+                result.repo_working_dir,
+                Some(expected_workspace.to_string()),
+                "{}",
+                description
+            );
 
-#[test]
-#[ignore]
-fn test_cursor_preset_no_filepath_when_missing() {
-    use git_ai::commands::checkpoint_agent::agent_presets::{
-        AgentCheckpointFlags, AgentCheckpointPreset, CursorPreset,
-    };
+            assert_eq!(result.checkpoint_kind, CheckpointKind::Human);
+        };
 
-    let hook_input = r##"{
-        "conversation_id": "test-conversation-id",
-        "workspace_roots": ["/Users/test/workspace"],
-        "hook_event_name": "afterFileEdit",
-        "model": "model-name-from-hook-test"
-    }"##;
+    // Test 1: File in second workspace root
+    test_workspace_selection(
+        &[
+            "/Users/test/workspace1",
+            "/Users/test/workspace2",
+            "/Users/test/workspace3",
+        ],
+        "/Users/test/workspace2/src/main.rs",
+        "/Users/test/workspace2",
+        "Should select workspace2 as it contains the file path",
+    );
 
-    let flags = AgentCheckpointFlags {
-        hook_input: Some(hook_input.to_string()),
-    };
+    // Test 2: File in third workspace root
+    test_workspace_selection(
+        &[
+            "/Users/test/workspace1",
+            "/Users/test/workspace2",
+            "/Users/test/workspace3",
+        ],
+        "/Users/test/workspace3/lib/utils.rs",
+        "/Users/test/workspace3",
+        "Should select workspace3 as it contains the file path",
+    );
 
-    let preset = CursorPreset;
-    let result = preset.run(flags);
+    // Test 3: File path doesn't match any workspace (should fall back to first)
+    test_workspace_selection(
+        &["/Users/test/workspace1", "/Users/test/workspace2"],
+        "/Users/other/project/src/main.rs",
+        "/Users/test/workspace1",
+        "Should fall back to first workspace when file path doesn't match any workspace",
+    );
 
-    // This test will fail because the conversation doesn't exist in the test DB
-    // But we can verify the error occurs after filepath extraction logic
-    assert!(result.is_err());
+    // Test 4: No file path provided (should use first workspace)
+    test_workspace_selection(
+        &["/Users/test/workspace1", "/Users/test/workspace2"],
+        "",
+        "/Users/test/workspace1",
+        "Should use first workspace when no file path is provided",
+    );
+
+    // Test 5: Workspace root with trailing slash
+    test_workspace_selection(
+        &["/Users/test/workspace1/", "/Users/test/workspace2/"],
+        "/Users/test/workspace2/src/main.rs",
+        "/Users/test/workspace2/",
+        "Should handle workspace roots with trailing slashes",
+    );
+
+    // Test 6: File path without leading separator after workspace root
+    test_workspace_selection(
+        &["/Users/test/workspace1", "/Users/test/workspace2"],
+        "/Users/test/workspace2/main.rs",
+        "/Users/test/workspace2",
+        "Should correctly match workspace even with immediate file after root",
+    );
+
+    // Test 7: Ambiguous prefix (workspace1 is prefix of workspace10)
+    test_workspace_selection(
+        &["/Users/test/workspace1", "/Users/test/workspace10"],
+        "/Users/test/workspace10/src/main.rs",
+        "/Users/test/workspace10",
+        "Should correctly distinguish workspace10 from workspace1",
+    );
 }
 
 #[test]
