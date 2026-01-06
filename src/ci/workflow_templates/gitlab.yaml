@@ -13,9 +13,10 @@
 #    - Masked: checked
 
 git-ai:
-  stage: .pre
+  stage: build
   rules:
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "push"
+      when: always
   script:
     - curl -fsSL https://usegitai.com/install.sh | bash
     - export PATH="$HOME/.git-ai/bin:$PATH"
