@@ -825,13 +825,40 @@ pub fn walk_commits_to_base(
     head: &str,
     base: &str,
 ) -> Result<Vec<String>, crate::error::GitAiError> {
-    let mut commits = Vec::new();
-    let mut current = repository.find_commit(head.to_string())?;
-    let base_str = base.to_string();
+    use std::collections::{HashSet, VecDeque};
 
-    while current.id().to_string() != base_str {
-        commits.push(current.id().to_string());
-        current = current.parent(0)?;
+    let mut commits = Vec::new();
+    let mut visited = HashSet::new();
+    let mut queue = VecDeque::new();
+
+    let base_str = base.to_string();
+    let head_commit = repository.find_commit(head.to_string())?;
+
+    queue.push_back(head_commit);
+
+    while let Some(current) = queue.pop_front() {
+        let commit_id = current.id().to_string();
+
+        // Skip if we've reached the base
+        if commit_id == base_str {
+            continue;
+        }
+
+        // Skip if already visited
+        if visited.contains(&commit_id) {
+            continue;
+        }
+
+        visited.insert(commit_id.clone());
+        commits.push(commit_id);
+
+        // Add all parents to the queue (handles merge commits)
+        let parent_count = current.parent_count().unwrap_or(0);
+        for i in 0..parent_count {
+            if let Ok(parent) = current.parent(i) {
+                queue.push_back(parent);
+            }
+        }
     }
 
     Ok(commits)
