@@ -47,16 +47,17 @@ pub fn get_gitlab_ci_context() -> Result<Option<CiContext>, GitAiError> {
     println!("  CI_PROJECT_ID: {}", project_id);
     println!("  CI_PROJECT_PATH: {}", project_path);
 
-    // Get auth token - prefer CI_JOB_TOKEN, fall back to GITLAB_TOKEN
-    let (auth_header_name, auth_token) = if let Ok(job_token) = std::env::var("CI_JOB_TOKEN") {
-        println!("  Auth: CI_JOB_TOKEN");
-        ("JOB-TOKEN", job_token)
-    } else if let Ok(gitlab_token) = std::env::var("GITLAB_TOKEN") {
+    // Get auth token - prefer GITLAB_TOKEN (explicitly configured with proper permissions),
+    // fall back to CI_JOB_TOKEN (auto-provided but may lack API permissions)
+    let (auth_header_name, auth_token) = if let Ok(gitlab_token) = std::env::var("GITLAB_TOKEN") {
         println!("  Auth: GITLAB_TOKEN");
         ("PRIVATE-TOKEN", gitlab_token)
+    } else if let Ok(job_token) = std::env::var("CI_JOB_TOKEN") {
+        println!("  Auth: CI_JOB_TOKEN");
+        ("JOB-TOKEN", job_token)
     } else {
         return Err(GitAiError::Generic(
-            "Neither CI_JOB_TOKEN nor GITLAB_TOKEN environment variable is set".to_string(),
+            "Neither GITLAB_TOKEN nor CI_JOB_TOKEN environment variable is set".to_string(),
         ));
     };
 
