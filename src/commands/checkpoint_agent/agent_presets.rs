@@ -72,9 +72,13 @@ impl AgentCheckpointPreset for ClaudePreset {
                 )
             })?;
 
+        // Read the file content
+        let jsonl_content =
+            std::fs::read_to_string(transcript_path).map_err(|e| GitAiError::IoError(e))?;
+
         // Parse into transcript and extract model
         let (transcript, model) =
-            match ClaudePreset::transcript_and_model_from_claude_code_jsonl(transcript_path) {
+            match ClaudePreset::transcript_and_model_from_claude_code_jsonl(&jsonl_content) {
                 Ok((transcript, model)) => (transcript, model),
                 Err(e) => {
                     eprintln!("[Warning] Failed to parse Claude JSONL: {e}");
@@ -178,21 +182,14 @@ impl ClaudePreset {
                         } else if let Some(content_array) =
                             raw_entry["message"]["content"].as_array()
                         {
-                            // Handle user messages with content array
+                            // Handle user messages with content array (like tool results)
                             for item in content_array {
-                                // Skip tool_result items - those are system-generated responses, not human input
-                                if item["type"].as_str() == Some("tool_result") {
-                                    continue;
-                                }
-                                // Handle text content blocks from actual user input
-                                if item["type"].as_str() == Some("text") {
-                                    if let Some(text) = item["text"].as_str() {
-                                        if !text.trim().is_empty() {
-                                            transcript.add_message(Message::User {
-                                                text: text.to_string(),
-                                                timestamp: timestamp.clone(),
-                                            });
-                                        }
+                                if let Some(text) = item["content"].as_str() {
+                                    if !text.trim().is_empty() {
+                                        transcript.add_message(Message::User {
+                                            text: text.to_string(),
+                                            timestamp: timestamp.clone(),
+                                        });
                                     }
                                 }
                             }
@@ -720,9 +717,33 @@ impl AgentCheckpointPreset for CursorPreset {
             )));
         }
 
-        let repo_working_dir = workspace_roots.first().cloned().ok_or_else(|| {
-            GitAiError::PresetError("No workspace root found in hook_input".to_string())
-        })?;
+        let file_path = hook_data
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let repo_working_dir = if !file_path.is_empty() {
+            workspace_roots
+                .iter()
+                .find(|root| {
+                    let root_str = root.as_str();
+                    file_path.starts_with(root_str)
+                        && (file_path.len() == root_str.len()
+                            || file_path[root_str.len()..].starts_with('/')
+                            || file_path[root_str.len()..].starts_with('\\')
+                            || root_str.ends_with('/')
+                            || root_str.ends_with('\\'))
+                })
+                .cloned()
+                .or_else(|| workspace_roots.first().cloned())
+                .ok_or_else(|| {
+                    GitAiError::PresetError("No workspace root found in hook_input".to_string())
+                })?
+        } else {
+            workspace_roots.first().cloned().ok_or_else(|| {
+                GitAiError::PresetError("No workspace root found in hook_input".to_string())
+            })?
+        };
 
         if hook_event_name == "beforeSubmitPrompt" {
             // early return, we're just adding a human checkpoint.
@@ -782,15 +803,11 @@ impl AgentCheckpointPreset for CursorPreset {
             Err(e) => return Err(e),
         };
 
-        // Extract edited filepaths
-        let mut edited_filepaths: Option<Vec<String>> = None;
-        let file_path = hook_data
-            .get("file_path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if !file_path.is_empty() {
-            edited_filepaths = Some(vec![file_path.to_string()]);
-        }
+        let edited_filepaths = if !file_path.is_empty() {
+            Some(vec![file_path.to_string()])
+        } else {
+            None
+        };
 
         let agent_id = AgentId {
             tool: "cursor".to_string(),
@@ -856,8 +873,9 @@ impl CursorPreset {
         #[cfg(target_os = "macos")]
         {
             // macOS: ~/Library/Application Support/Cursor/User
-            let home = dirs::home_dir()
-                .ok_or_else(|| GitAiError::Generic("Could not determine home directory".to_string()))?;
+            let home = dirs::home_dir().ok_or_else(|| {
+                GitAiError::Generic("Could not determine home directory".to_string())
+            })?;
             Ok(home
                 .join("Library")
                 .join("Application Support")
