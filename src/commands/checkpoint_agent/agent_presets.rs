@@ -1617,3 +1617,104 @@ impl AgentCheckpointPreset for AiTabPreset {
         })
     }
 }
+
+pub struct WindsurfPreset;
+
+impl AgentCheckpointPreset for WindsurfPreset {
+    fn run(&self, flags: AgentCheckpointFlags) -> Result<AgentRunResult, GitAiError> {
+        // Parse hook_input as JSON
+        let stdin_json = flags.hook_input.ok_or_else(|| {
+            GitAiError::PresetError("hook_input is required for Windsurf preset".to_string())
+        })?;
+
+        let hook_data: serde_json::Value = serde_json::from_str(&stdin_json)
+            .map_err(|e| GitAiError::PresetError(format!("Invalid JSON in hook_input: {}", e)))?;
+
+        // Extract Windsurf-specific fields
+        // agent_action_name: "pre_write_code" or "post_write_code"
+        let agent_action_name = hook_data
+            .get("agent_action_name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                GitAiError::PresetError("agent_action_name not found in hook_input".to_string())
+            })?;
+
+        // trajectory_id: unique conversation ID (stable across the whole session)
+        let trajectory_id = hook_data
+            .get("trajectory_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        // Extract file path from tool_info
+        let tool_info = hook_data.get("tool_info");
+        let file_path = tool_info
+            .and_then(|ti| ti.get("file_path"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        // For pre_write_code, extract the old_string content as dirty_files
+        // This captures the file state before the AI edit
+        let dirty_files: Option<HashMap<String, String>> =
+            if agent_action_name == "pre_write_code" {
+                if let (Some(fp), Some(edits)) = (
+                    file_path.as_ref(),
+                    tool_info.and_then(|ti| ti.get("edits")).and_then(|e| e.as_array()),
+                ) {
+                    // Combine all old_string values for this file
+                    let old_content: String = edits
+                        .iter()
+                        .filter_map(|edit| edit.get("old_string").and_then(|s| s.as_str()))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+
+                    if !old_content.is_empty() {
+                        let mut map = HashMap::new();
+                        map.insert(fp.clone(), old_content);
+                        Some(map)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+        let file_path_as_vec = file_path.map(|p| vec![p]);
+
+        // Build agent ID using trajectory_id as the conversation identifier
+        let agent_id = AgentId {
+            tool: "windsurf".to_string(),
+            id: trajectory_id,
+            model: "unknown".to_string(), // Windsurf doesn't expose model in hooks
+        };
+
+        // pre_write_code is a human checkpoint (before the edit happens)
+        if agent_action_name == "pre_write_code" {
+            return Ok(AgentRunResult {
+                agent_id,
+                agent_metadata: None,
+                checkpoint_kind: CheckpointKind::Human,
+                transcript: None,
+                repo_working_dir: None,
+                edited_filepaths: None,
+                will_edit_filepaths: file_path_as_vec,
+                dirty_files,
+            });
+        }
+
+        // post_write_code is an AI checkpoint (after the edit happened)
+        Ok(AgentRunResult {
+            agent_id,
+            agent_metadata: None,
+            checkpoint_kind: CheckpointKind::AiAgent,
+            transcript: None, // Windsurf doesn't provide transcript access via hooks
+            repo_working_dir: None,
+            edited_filepaths: file_path_as_vec,
+            will_edit_filepaths: None,
+            dirty_files: None,
+        })
+    }
+}
