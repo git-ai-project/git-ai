@@ -569,17 +569,15 @@ fn parse_attestation_section(
             continue;
         }
 
-        if line.starts_with("  ") {
-            // Attestation entry line (indented)
-            let entry_line = &line[2..]; // Remove "  " prefix
+        if let Some(entry_line) = line.strip_prefix("  ") {
+            // Attestation entry line (indented) - use strip_prefix for UTF-8 safety
 
             // Split on first space to separate hash from line ranges
-            if let Some(space_pos) = entry_line.find(' ') {
-                let hash = entry_line[..space_pos].to_string();
-                let ranges_str = &entry_line[space_pos + 1..];
+            // Use split_once for safe UTF-8 handling
+            if let Some((hash, ranges_str)) = entry_line.split_once(' ') {
                 let line_ranges = parse_line_ranges(ranges_str)?;
 
-                let entry = AttestationEntry::new(hash, line_ranges);
+                let entry = AttestationEntry::new(hash.to_string(), line_ranges);
 
                 if let Some(ref mut file_attestation) = current_file {
                     file_attestation.add_entry(entry);
@@ -597,14 +595,12 @@ fn parse_attestation_section(
                 }
             }
 
-            // Parse file path, handling quoted paths
-            let file_path = if line.starts_with('"') && line.ends_with('"') {
-                // Quoted path - remove quotes (no unescaping needed since quotes aren't allowed in file names)
-                line[1..line.len() - 1].to_string()
-            } else {
-                // Unquoted path
-                line.to_string()
-            };
+            // Parse file path, handling quoted paths (use strip_prefix/suffix for UTF-8 safety)
+            let file_path = line
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| line.to_string());
 
             current_file = Some(FileAttestation::new(file_path));
         }

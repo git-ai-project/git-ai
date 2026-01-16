@@ -220,6 +220,44 @@ fn collect_line_metadata(content: &str) -> Vec<LineMetadata> {
     metadata
 }
 
+/// Find the next valid UTF-8 char boundary at or after `index`.
+/// Returns `s.len()` if index is beyond the string.
+fn ceil_char_boundary(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        return s.len();
+    }
+    let mut i = index;
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
+/// Find the previous valid UTF-8 char boundary at or before `index`.
+/// Returns 0 if index is 0 or there's no valid boundary.
+fn floor_char_boundary(s: &str, index: usize) -> usize {
+    if index == 0 {
+        return 0;
+    }
+    let mut i = index.min(s.len());
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Safely slice a string, adjusting boundaries to valid char positions.
+/// The start is moved forward (ceil) and end is moved backward (floor).
+/// Returns an empty string if the adjusted range is invalid.
+fn safe_slice(s: &str, start: usize, end: usize) -> &str {
+    let safe_start = ceil_char_boundary(s, start);
+    let safe_end = floor_char_boundary(s, end);
+    if safe_start >= safe_end {
+        return "";
+    }
+    &s[safe_start..safe_end]
+}
+
 #[derive(Clone, Debug)]
 struct Token {
     lexeme: String,
@@ -1097,6 +1135,9 @@ fn tokenize_non_whitespace(
     starting_line: usize,
 ) -> Vec<Token> {
     let (start, end) = range;
+    // Ensure start and end are on valid UTF-8 char boundaries
+    let start = ceil_char_boundary(content, start);
+    let end = floor_char_boundary(content, end);
     if start >= end {
         return Vec::new();
     }
@@ -1183,12 +1224,12 @@ fn tokenize_non_whitespace(
             let token_start = i;
 
             // Handle hex (0x), octal (0o), binary (0b) prefixes
-            if ch == '0' && i + 1 < end {
-                let next_ch = content[i + 1..].chars().next().unwrap();
+            if ch == '0' && i + ch_len < end {
+                let next_ch = content[i + ch_len..].chars().next().unwrap();
                 if next_ch == 'x' || next_ch == 'X' || next_ch == 'o' || next_ch == 'O' || next_ch == 'b' || next_ch == 'B' {
                     lexeme.push(ch);
                     lexeme.push(next_ch);
-                    i += 1 + next_ch.len_utf8();
+                    i += ch_len + next_ch.len_utf8();
 
                     // Consume hex/octal/binary digits
                     while i < end {
@@ -1320,8 +1361,9 @@ fn append_range_diffs(
         return;
     }
 
-    let old_slice = &old_content[old_start..old_end];
-    let new_slice = &new_content[new_start..new_end];
+    // Use safe_slice to handle potential mid-character boundaries
+    let old_slice = safe_slice(old_content, old_start, old_end);
+    let new_slice = safe_slice(new_content, new_start, new_end);
 
     if !force_split && !old_slice.is_empty() && !new_slice.is_empty() && old_slice == new_slice {
         diffs.push(ByteDiff::new(ByteDiffOp::Equal, new_slice.as_bytes()));
@@ -1751,8 +1793,10 @@ fn find_dominant_author_for_line(
         }
 
         // Get the substring of the content on this line that is covered by the attribution
-        let content_slice = &full_content[std::cmp::max(line_start, attribution.start)
-            ..std::cmp::min(line_end, attribution.end)];
+        // Use safe_slice to handle potential mid-character boundaries
+        let slice_start = std::cmp::max(line_start, attribution.start);
+        let slice_end = std::cmp::min(line_end, attribution.end);
+        let content_slice = safe_slice(full_content, slice_start, slice_end);
         let attr_non_whitespace_count =
             content_slice.chars().filter(|c| !c.is_whitespace()).count();
         // Zero-length attributions are deletion markers - they indicate the author
@@ -2189,5 +2233,111 @@ mod tests {
             .expect("AI block missing");
         assert_eq!(ai_block.start_line, 2);
         assert_eq!(ai_block.end_line, 17);
+    }
+
+    // UTF-8 / Multi-byte character tests for issue #358
+    #[test]
+    fn tokenize_with_cjk_characters() {
+        // Chinese characters: 选 is 3 bytes (U+9009)
+        let content = "let x = \"选择\";";
+        let tokens = tokenize_non_whitespace(content, (0, content.len()), 1);
+        assert!(!tokens.is_empty(), "Should tokenize CJK content without panic");
+        assert!(
+            tokens.iter().any(|t| t.lexeme.contains("选择")),
+            "Should contain the CJK string token"
+        );
+    }
+
+    #[test]
+    fn tokenize_with_emoji() {
+        let content = "// Comment with 🎉 emoji\nlet x = 1;";
+        let tokens = tokenize_non_whitespace(content, (0, content.len()), 1);
+        assert!(!tokens.is_empty(), "Should tokenize emoji content without panic");
+    }
+
+    #[test]
+    fn tokenize_partial_range_with_multibyte() {
+        // 选 is at bytes 3..6 (3-byte character)
+        let content = "abc选def";
+        // Try to start from byte 4 (middle of 选) - should be adjusted to valid boundary
+        let tokens = tokenize_non_whitespace(content, (4, content.len()), 1);
+        // Should not panic and should return tokens for "def"
+        assert!(
+            tokens.iter().any(|t| t.lexeme == "def"),
+            "Should tokenize content after mid-character start"
+        );
+    }
+
+    #[test]
+    fn tokenize_partial_range_ending_mid_character() {
+        // 选 is at bytes 3..6 (3-byte character)
+        let content = "abc选def";
+        // Try to end at byte 5 (middle of 选) - should be adjusted
+        let tokens = tokenize_non_whitespace(content, (0, 5), 1);
+        // Should not panic
+        assert!(
+            tokens.iter().any(|t| t.lexeme == "abc"),
+            "Should tokenize content before mid-character end"
+        );
+    }
+
+    #[test]
+    fn update_attributions_with_cjk_changes() {
+        let tracker = AttributionTracker::new();
+        let old = "let x = \"hello\";\n";
+        let new = "let x = \"你好世界\";\n"; // Chinese: hello world
+        let old_attrs = vec![Attribution::new(0, old.len(), "Alice".into(), TEST_TS)];
+
+        let updated = tracker
+            .update_attributions(old, new, &old_attrs, "Bob", TEST_TS + 1)
+            .expect("Should not panic on CJK content");
+
+        // Bob should own the new Chinese string
+        assert!(
+            updated.iter().any(|a| a.author_id == "Bob"),
+            "Bob should have attribution for the new CJK content"
+        );
+    }
+
+    #[test]
+    fn safe_slice_handles_mid_character_boundaries() {
+        let content = "abc选def"; // 选 is at bytes 3..6
+
+        // Test ceiling boundary (start mid-character)
+        let slice = safe_slice(content, 4, content.len());
+        assert_eq!(slice, "def", "Should skip past mid-character start");
+
+        // Test floor boundary (end mid-character)
+        let slice = safe_slice(content, 0, 5);
+        assert_eq!(slice, "abc", "Should end before mid-character end");
+
+        // Test both boundaries mid-character
+        let slice = safe_slice(content, 4, 5);
+        assert_eq!(slice, "", "Should return empty for invalid range");
+
+        // Test valid boundaries
+        let slice = safe_slice(content, 3, 6);
+        assert_eq!(slice, "选", "Should return the character for valid boundaries");
+    }
+
+    #[test]
+    fn ceil_floor_char_boundary_functions() {
+        let content = "abc选def"; // 选 is at bytes 3..6
+
+        // Test ceil_char_boundary
+        assert_eq!(ceil_char_boundary(content, 0), 0);
+        assert_eq!(ceil_char_boundary(content, 3), 3); // Valid boundary
+        assert_eq!(ceil_char_boundary(content, 4), 6); // Mid-character, moves to next
+        assert_eq!(ceil_char_boundary(content, 5), 6); // Mid-character, moves to next
+        assert_eq!(ceil_char_boundary(content, 6), 6); // Valid boundary
+        assert_eq!(ceil_char_boundary(content, 100), content.len()); // Beyond end
+
+        // Test floor_char_boundary
+        assert_eq!(floor_char_boundary(content, 0), 0);
+        assert_eq!(floor_char_boundary(content, 3), 3); // Valid boundary
+        assert_eq!(floor_char_boundary(content, 4), 3); // Mid-character, moves to previous
+        assert_eq!(floor_char_boundary(content, 5), 3); // Mid-character, moves to previous
+        assert_eq!(floor_char_boundary(content, 6), 6); // Valid boundary
+        assert_eq!(floor_char_boundary(content, 100), content.len()); // Beyond end
     }
 }

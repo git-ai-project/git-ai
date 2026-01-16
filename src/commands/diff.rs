@@ -255,9 +255,9 @@ fn parse_diff_hunks(diff_text: &str) -> Result<Vec<DiffHunk>, GitAiError> {
     let mut current_file = String::new();
 
     for line in diff_text.lines() {
-        if line.starts_with("+++ b/") {
-            // New file path
-            current_file = line[6..].to_string();
+        if let Some(path) = line.strip_prefix("+++ b/") {
+            // New file path (use strip_prefix for UTF-8 safety)
+            current_file = path.to_string();
         } else if line.starts_with("@@ ") {
             // Hunk header
             if let Some(hunk) = parse_hunk_line(line, &current_file)? {
@@ -282,9 +282,8 @@ fn parse_hunk_line(line: &str, file_path: &str) -> Result<Option<DiffHunk>, GitA
     let old_part = parts[1]; // e.g., "-10,3" or "-10"
     let new_part = parts[2]; // e.g., "+15,5" or "+15"
 
-    // Parse old part
-    let (old_start, old_count) = if old_part.starts_with('-') {
-        let old_str = &old_part[1..];
+    // Parse old part (use strip_prefix for UTF-8 safety)
+    let (old_start, old_count) = if let Some(old_str) = old_part.strip_prefix('-') {
         if let Some((start_str, count_str)) = old_str.split_once(',') {
             let start: u32 = start_str.parse().unwrap_or(0);
             let count: u32 = count_str.parse().unwrap_or(0);
@@ -297,9 +296,8 @@ fn parse_hunk_line(line: &str, file_path: &str) -> Result<Option<DiffHunk>, GitA
         (0, 0)
     };
 
-    // Parse new part
-    let (new_start, new_count) = if new_part.starts_with('+') {
-        let new_str = &new_part[1..];
+    // Parse new part (use strip_prefix for UTF-8 safety)
+    let (new_start, new_count) = if let Some(new_str) = new_part.strip_prefix('+') {
         if let Some((start_str, count_str)) = new_str.split_once(',') {
             let start: u32 = start_str.parse().unwrap_or(0);
             let count: u32 = count_str.parse().unwrap_or(0);
@@ -545,8 +543,8 @@ fn get_diff_split_by_file(
             }
             current_diff = format!("{}\n", line);
             current_file.clear();
-        } else if line.starts_with("+++ b/") {
-            current_file = line[6..].to_string();
+        } else if let Some(path) = line.strip_prefix("+++ b/") {
+            current_file = path.to_string();
             current_diff.push_str(line);
             current_diff.push('\n');
         } else {
@@ -689,8 +687,8 @@ pub fn format_annotated_diff(
             result.push_str(&format_line(line, LineType::DiffHeader, use_color, None));
         } else if line.starts_with("--- ") {
             result.push_str(&format_line(line, LineType::DiffHeader, use_color, None));
-        } else if line.starts_with("+++ b/") {
-            current_file = line[6..].to_string();
+        } else if let Some(path) = line.strip_prefix("+++ b/") {
+            current_file = path.to_string();
             result.push_str(&format_line(line, LineType::DiffHeader, use_color, None));
         } else if line.starts_with("@@ ") {
             // Hunk header - update line counters
@@ -756,9 +754,8 @@ fn parse_hunk_header_for_line_nums(line: &str) -> Option<(u32, u32)> {
     let old_part = parts[1];
     let new_part = parts[2];
 
-    // Extract old_start
-    let old_start = if old_part.starts_with('-') {
-        let old_str = &old_part[1..];
+    // Extract old_start (use strip_prefix for UTF-8 safety)
+    let old_start = if let Some(old_str) = old_part.strip_prefix('-') {
         if let Some((start_str, _)) = old_str.split_once(',') {
             start_str.parse::<u32>().ok()?
         } else {
@@ -768,9 +765,8 @@ fn parse_hunk_header_for_line_nums(line: &str) -> Option<(u32, u32)> {
         return None;
     };
 
-    // Extract new_start
-    let new_start = if new_part.starts_with('+') {
-        let new_str = &new_part[1..];
+    // Extract new_start (use strip_prefix for UTF-8 safety)
+    let new_start = if let Some(new_str) = new_part.strip_prefix('+') {
         if let Some((start_str, _)) = new_str.split_once(',') {
             start_str.parse::<u32>().ok()?
         } else {

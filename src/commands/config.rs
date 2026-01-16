@@ -48,10 +48,10 @@ fn detect_pattern_type(value: &str) -> PatternType {
 /// Resolve a file path to repository remote URLs
 /// Returns the remote URLs for the repository at the given path
 fn resolve_path_to_remotes(path: &str) -> Result<Vec<String>, String> {
-    // Expand ~ to home directory
-    let expanded_path = if path.starts_with("~/") {
+    // Expand ~ to home directory (use strip_prefix for UTF-8 safety)
+    let expanded_path = if let Some(rest) = path.strip_prefix("~") {
         if let Some(home) = dirs::home_dir() {
-            format!("{}{}", home.to_string_lossy(), &path[1..])
+            format!("{}{}", home.to_string_lossy(), rest)
         } else {
             path.to_string()
         }
