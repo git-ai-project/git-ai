@@ -28,6 +28,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm http://usegitai.com/
 
 <img src="https://github.com/acunniffe/git-ai/raw/main/assets/docs/supported-agents.png" width="320" />
 
+### Documentation https://usegitai.com/docs
+- [AI Blame](https://usegitai.com/docs/cli/ai-blame)
+- [Cross-Agent Prompt Saving](https://usegitai.com/docs/cli/prompt-storage)
+- [How Git AI Works ](https://usegitai.com/docs/cli/how-git-ai-works)
+- [CLI Reference](https://usegitai.com/docs/cli/reference)
+- [Configuring Git AI for the enterprise](https://usegitai.com/docs/cli/configuration)
+
 ### Next step: **Just code and commit!**
 
 Once installed, all your Coding Agents will call Git AI in the background and mark the code they generate AI-authored.
@@ -48,25 +55,6 @@ Aggregate `git-ai` data at the PR, developer, Repository and Organization levels
 
 ![alt](https://github.com/acunniffe/git-ai/raw/main/assets/docs/dashboard.png)
 
-## Prompt Storage
-By default Git AI stores prompt data locally only. To include prompts in git notes (authorship logs), set `prompt_storage` to `notes`:
-
-```bash
-git-ai config set prompt_storage notes
-```
-
-When using notes mode, you can exclude specific repositories from having prompt data included:
-
-```bash
-git-ai config set --add exclude_prompts_in_repositories https://github.com/private-org/*
-git-ai config set --add exclude_prompts_in_repositories /path/to/private/repo
-```
-
-*or to exclude all repositories:*
-
-```bash
-git-ai config set --add exclude_prompts_in_repositories "*"
-```
 
 ## Goals of `git-ai` project
 
@@ -79,12 +67,6 @@ git-ai config set --add exclude_prompts_in_repositories "*"
 🔗 **Maintain link between prompts and code** - there is valuable context and requirements in team prompts—preserve them alongside code.
 
 🚀 **Git-native + Fast** - `git-ai` is built on git plumbing commands. Negligible impact even in large repos (&lt;100ms). Tested in [Chromium](https://github.com/chromium/chromium).
-
-## [Documentation](https://usegitai.com/docs)
-
-- How Git AI Works and its Limitations [▶️ Video](https://www.youtube.com/watch?v=b_DZTC1PKHI) [🗺️ Diagram](https://usegitai.com/docs/how-git-ai-works)
-- [Git AI Commands](https://usegitai.com/docs/reference)
-- [Configuring Git AI for the enterprise](https://usegitai.com/docs/administration/enterprise-configuration)
 
 ## Agent Support
 
