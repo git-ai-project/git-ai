@@ -59,6 +59,10 @@ const GEMINI_AFTER_TOOL_CMD: &str = "checkpoint gemini --hook-input stdin";
 const CURSOR_BEFORE_SUBMIT_CMD: &str = "checkpoint cursor --hook-input stdin";
 const CURSOR_AFTER_EDIT_CMD: &str = "checkpoint cursor --hook-input stdin";
 
+// Windsurf hooks (requires absolute path to avoid shell config loading delay)
+const WINDSURF_PRE_WRITE_CMD: &str = "checkpoint windsurf --hook-input stdin";
+const WINDSURF_POST_WRITE_CMD: &str = "checkpoint windsurf --hook-input stdin";
+
 // OpenCode plugin content (TypeScript), embedded from the source file to avoid drift
 const OPENCODE_PLUGIN_CONTENT: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -430,6 +434,51 @@ async fn async_run(
         }
     }
 
+    match check_windsurf() {
+        Ok(true) => {
+            any_checked = true;
+            // Install/update Windsurf hooks
+            let spinner = Spinner::new("Windsurf: checking hooks");
+            spinner.start();
+
+            match install_windsurf_hooks(&binary_path, dry_run) {
+                Ok(Some(diff)) => {
+                    if dry_run {
+                        spinner.pending("Windsurf: Pending updates");
+                    } else {
+                        spinner.success("Windsurf: Hooks updated");
+                    }
+                    println!(); // Blank line before diff
+                    print_diff(&diff);
+                    has_changes = true;
+                    statuses.insert("windsurf".to_string(), InstallStatus::Installed);
+                }
+                Ok(None) => {
+                    spinner.success("Windsurf: Hooks already up to date");
+                    statuses.insert("windsurf".to_string(), InstallStatus::AlreadyInstalled);
+                }
+                Err(e) => {
+                    spinner.error("Windsurf: Failed to update hooks");
+                    eprintln!("  Error: {}", e);
+                    eprintln!("  Check that ~/.codeium/windsurf/hooks.json is valid JSON");
+                    statuses.insert("windsurf".to_string(), InstallStatus::NotFound);
+                }
+            }
+        }
+        Ok(false) => {
+            // Windsurf not detected
+            statuses.insert("windsurf".to_string(), InstallStatus::NotFound);
+        }
+        Err(version_error) => {
+            any_checked = true;
+            let spinner = Spinner::new("Windsurf: checking version");
+            spinner.start();
+            spinner.error("Windsurf: Version check failed");
+            eprintln!("  Error: {}", version_error);
+            statuses.insert("windsurf".to_string(), InstallStatus::NotFound);
+        }
+    }
+
     if !any_checked {
         println!("No compatible IDEs or agent configurations detected. Nothing to install.");
     } else if has_changes && dry_run {
@@ -607,6 +656,30 @@ fn check_gemini() -> Result<bool, String> {
     }
 
     // Gemini doesn't have a minimum version requirement for now
+    // The hooks use standard APIs that should work with any version
+
+    Ok(true)
+}
+
+fn check_windsurf() -> Result<bool, String> {
+    let has_binary = binary_exists("windsurf");
+
+    // Check for Windsurf's codeium config directory (where hooks.json lives)
+    let has_codeium_dir = {
+        let home = home_dir();
+        home.join(".codeium").join("windsurf").exists()
+    };
+
+    // Also check Application Support on macOS / AppData on Windows for Windsurf app
+    let has_app_support = windsurf_settings_targets()
+        .iter()
+        .any(|path| should_process_settings_target(path));
+
+    if !has_binary && !has_codeium_dir && !has_app_support {
+        return Ok(false);
+    }
+
+    // Windsurf doesn't have a minimum version requirement for now
     // The hooks use standard APIs that should work with any version
 
     Ok(true)
@@ -1252,6 +1325,157 @@ fn install_cursor_hooks(binary_path: &Path, dry_run: bool) -> Result<Option<Stri
     Ok(Some(diff_output))
 }
 
+fn install_windsurf_hooks(binary_path: &Path, dry_run: bool) -> Result<Option<String>, GitAiError> {
+    let hooks_path = windsurf_hooks_path();
+
+    // Ensure directory exists
+    if let Some(dir) = hooks_path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+
+    // Read existing content as string
+    let existing_content = if hooks_path.exists() {
+        fs::read_to_string(&hooks_path)?
+    } else {
+        String::new()
+    };
+
+    // Parse existing JSON if present, else start with empty object
+    let existing: Value = if existing_content.trim().is_empty() {
+        json!({})
+    } else {
+        serde_json::from_str(&existing_content)?
+    };
+
+    // Build commands with absolute path
+    let pre_write_cmd = format!("{} {}", binary_path.display(), WINDSURF_PRE_WRITE_CMD);
+    let post_write_cmd = format!("{} {}", binary_path.display(), WINDSURF_POST_WRITE_CMD);
+
+    // Desired hooks payload for Windsurf
+    // Windsurf uses pre_write_code and post_write_code events
+    let desired: Value = json!({
+        "hooks": {
+            "pre_write_code": [
+                {
+                    "command": pre_write_cmd
+                }
+            ],
+            "post_write_code": [
+                {
+                    "command": post_write_cmd
+                }
+            ]
+        }
+    });
+
+    // Merge desired into existing
+    let mut merged = existing.clone();
+
+    // Merge hooks object
+    let mut hooks_obj = merged.get("hooks").cloned().unwrap_or_else(|| json!({}));
+
+    // Process both hook types
+    for hook_name in &["pre_write_code", "post_write_code"] {
+        let desired_hooks = desired
+            .get("hooks")
+            .and_then(|h| h.get(*hook_name))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        // Get existing hooks array for this hook type
+        let mut existing_hooks = hooks_obj
+            .get(*hook_name)
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        // Update outdated git-ai checkpoint commands (or add if missing)
+        for desired_hook in desired_hooks {
+            let desired_cmd = desired_hook.get("command").and_then(|c| c.as_str());
+            if desired_cmd.is_none() {
+                continue;
+            }
+            let desired_cmd = desired_cmd.unwrap();
+
+            // Look for existing git-ai checkpoint windsurf commands
+            let mut found_idx = None;
+            let mut needs_update = false;
+
+            for (idx, existing_hook) in existing_hooks.iter().enumerate() {
+                if let Some(existing_cmd) = existing_hook.get("command").and_then(|c| c.as_str()) {
+                    // Check if this is a git-ai checkpoint windsurf command
+                    if existing_cmd.contains("git-ai checkpoint windsurf")
+                        || existing_cmd.contains("git-ai")
+                            && existing_cmd.contains("checkpoint")
+                            && existing_cmd.contains("windsurf")
+                    {
+                        found_idx = Some(idx);
+                        // Check if it matches exactly what we want
+                        if existing_cmd != desired_cmd {
+                            needs_update = true;
+                        }
+                        break;
+                    }
+                }
+            }
+
+            match found_idx {
+                Some(idx) if needs_update => {
+                    // Update to latest format
+                    existing_hooks[idx] = desired_hook.clone();
+                }
+                Some(_) => {
+                    // Already up to date, skip
+                }
+                None => {
+                    // No existing command, add new one
+                    existing_hooks.push(desired_hook.clone());
+                }
+            }
+        }
+
+        // Write back merged hooks for this hook type
+        if let Some(obj) = hooks_obj.as_object_mut() {
+            obj.insert(hook_name.to_string(), Value::Array(existing_hooks));
+        }
+    }
+
+    if let Some(root) = merged.as_object_mut() {
+        root.insert("hooks".to_string(), hooks_obj);
+    }
+
+    // Generate new content
+    let new_content = serde_json::to_string_pretty(&merged)?;
+
+    // Check if there are changes
+    if existing_content.trim() == new_content.trim() {
+        return Ok(None); // No changes needed
+    }
+
+    // Generate diff
+    let changes = compute_line_changes(&existing_content, &new_content);
+    let mut diff_output = String::new();
+    diff_output.push_str(&format!("--- {}\n", hooks_path.display()));
+    diff_output.push_str(&format!("+++ {}\n", hooks_path.display()));
+
+    for change in changes {
+        let sign = match change.tag() {
+            LineChangeTag::Delete => "-",
+            LineChangeTag::Insert => "+",
+            LineChangeTag::Equal => " ",
+        };
+        diff_output.push_str(&format!("{}{}", sign, change.value()));
+    }
+
+    // Write if not dry-run
+    if !dry_run {
+        write_atomic(&hooks_path, new_content.as_bytes())?;
+    }
+
+    Ok(Some(diff_output))
+}
+
 fn install_opencode_hooks(dry_run: bool) -> Result<Option<String>, GitAiError> {
     // Install to global config directory: ~/.config/opencode/plugin/git-ai.ts
     let plugin_path = opencode_plugin_path();
@@ -1318,6 +1542,13 @@ fn gemini_settings_path() -> PathBuf {
 
 fn cursor_hooks_path() -> PathBuf {
     home_dir().join(".cursor").join("hooks.json")
+}
+
+fn windsurf_hooks_path() -> PathBuf {
+    home_dir()
+        .join(".codeium")
+        .join("windsurf")
+        .join("hooks.json")
 }
 
 fn write_atomic(path: &Path, data: &[u8]) -> Result<(), GitAiError> {
@@ -1417,6 +1648,10 @@ fn vscode_settings_targets() -> Vec<PathBuf> {
 
 fn cursor_settings_targets() -> Vec<PathBuf> {
     settings_paths_for_products(&["Cursor"])
+}
+
+fn windsurf_settings_targets() -> Vec<PathBuf> {
+    settings_paths_for_products(&["Windsurf"])
 }
 
 #[cfg(windows)]
