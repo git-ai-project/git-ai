@@ -447,43 +447,33 @@ impl AttributionTracker {
         ts: u128,
     ) -> Vec<Attribution> {
         let mut attributions = prev_attributions.to_vec();
-        let mut unattributed_char_idxs = Vec::new();
+        let mut range_start: Option<usize> = None;
 
-        // Find all unattributed character positions
-        for i in 0..content.len() {
-            if !attributions.iter().any(|a| a.overlaps(i, i + 1)) {
-                unattributed_char_idxs.push(i);
-            }
-        }
+        // Find all unattributed character ranges on UTF-8 boundaries.
+        for (idx, ch) in content.char_indices() {
+            let end = idx + ch.len_utf8();
+            let covered = attributions.iter().any(|a| a.overlaps(idx, end));
 
-        // Sort the unattributed character indices by position
-        unattributed_char_idxs.sort();
-
-        // Group contiguous unattributed ranges
-        let mut contiguous_ranges = Vec::new();
-        if !unattributed_char_idxs.is_empty() {
-            let mut start = unattributed_char_idxs[0];
-            let mut end = start + 1;
-
-            for i in 1..unattributed_char_idxs.len() {
-                let current = unattributed_char_idxs[i];
-                if current == end {
-                    // Contiguous with previous range
-                    end = current + 1;
-                } else {
-                    // Gap found, save current range and start new one
-                    contiguous_ranges.push((start, end));
-                    start = current;
-                    end = current + 1;
+            if covered {
+                if let Some(start) = range_start.take() {
+                    if start < idx {
+                        attributions.push(Attribution::new(start, idx, author.to_string(), ts));
+                    }
                 }
+            } else if range_start.is_none() {
+                range_start = Some(idx);
             }
-            // Don't forget the last range
-            contiguous_ranges.push((start, end));
         }
 
-        // Create attributions for each contiguous unattributed range
-        for (start, end) in contiguous_ranges {
-            attributions.push(Attribution::new(start, end, author.to_string(), ts));
+        if let Some(start) = range_start.take() {
+            if start < content.len() {
+                attributions.push(Attribution::new(
+                    start,
+                    content.len(),
+                    author.to_string(),
+                    ts,
+                ));
+            }
         }
 
         attributions
@@ -1609,7 +1599,7 @@ impl Default for AttributionTracker {
 
 /// Helper struct to track line boundaries in content
 struct LineBoundaries {
-    /// Maps line number (1-indexed) to (start_char, end_char) exclusive end
+    /// Maps line number (1-indexed) to (start_byte, end_byte) exclusive end
     line_ranges: Vec<(usize, usize)>,
 }
 
@@ -1647,6 +1637,22 @@ impl LineBoundaries {
             Some(self.line_ranges[line_num as usize - 1])
         }
     }
+}
+
+fn floor_char_boundary(content: &str, idx: usize) -> usize {
+    let mut i = idx.min(content.len());
+    while i > 0 && !content.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+fn ceil_char_boundary(content: &str, idx: usize) -> usize {
+    let mut i = idx.min(content.len());
+    while i < content.len() && !content.is_char_boundary(i) {
+        i += 1;
+    }
+    i
 }
 
 /// Convert line-based attributions to character-based attributions.
@@ -1751,10 +1757,27 @@ fn find_dominant_author_for_line(
         }
 
         // Get the substring of the content on this line that is covered by the attribution
-        let content_slice = &full_content[std::cmp::max(line_start, attribution.start)
-            ..std::cmp::min(line_end, attribution.end)];
-        let attr_non_whitespace_count =
-            content_slice.chars().filter(|c| !c.is_whitespace()).count();
+        let slice_start = std::cmp::max(line_start, attribution.start);
+        let slice_end = std::cmp::min(line_end, attribution.end);
+        let mut attr_non_whitespace_count = 0;
+        if slice_start < slice_end {
+            let safe_start = if full_content.is_char_boundary(slice_start) {
+                slice_start
+            } else {
+                floor_char_boundary(full_content, slice_start).max(line_start)
+            };
+            let safe_end = if full_content.is_char_boundary(slice_end) {
+                slice_end
+            } else {
+                ceil_char_boundary(full_content, slice_end).min(line_end)
+            };
+
+            if safe_start < safe_end {
+                let content_slice = &full_content[safe_start..safe_end];
+                attr_non_whitespace_count =
+                    content_slice.chars().filter(|c| !c.is_whitespace()).count();
+            }
+        }
         // Zero-length attributions are deletion markers - they indicate the author
         // deleted content at this position, so they should influence line attribution
         let is_deletion_marker = attribution.start == attribution.end;
@@ -2124,6 +2147,15 @@ mod tests {
                 .any(|a| a.author_id == "Bob" && a.start >= old.len()),
             "New multibyte tokens should belong to Bob"
         );
+    }
+
+    #[test]
+    fn line_attribution_handles_split_multibyte_ranges() {
+        let content = "选\n";
+        let attrs = vec![Attribution::new(0, 1, "Alice".into(), TEST_TS)];
+        let line_attrs = attributions_to_line_attributions(&attrs, content);
+        assert_eq!(line_attrs.len(), 1);
+        assert_eq!(line_attrs[0].author_id, "Alice");
     }
 
     #[test]

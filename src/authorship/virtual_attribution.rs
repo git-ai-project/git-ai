@@ -1367,7 +1367,7 @@ pub fn merge_attributions_favoring_first(
         let merged_char_attrs = merge_char_attributions(
             &transformed_primary,
             &transformed_secondary,
-            final_content.len(),
+            final_content,
         );
 
         // Convert to line attributions
@@ -1449,9 +1449,14 @@ fn transform_attributions_to_final(
 fn merge_char_attributions(
     primary: &[Attribution],
     secondary: &[Attribution],
-    content_len: usize,
+    content: &str,
 ) -> Vec<Attribution> {
-    // Create coverage map for primary
+    let content_len = content.len();
+    if content_len == 0 {
+        return primary.iter().cloned().collect();
+    }
+
+    // Create coverage map for primary (byte-based).
     let mut covered = vec![false; content_len];
     for attr in primary {
         for i in attr.start..attr.end.min(content_len) {
@@ -1461,38 +1466,52 @@ fn merge_char_attributions(
 
     let mut result = Vec::new();
 
-    // Add all primary attributions
+    // Add all primary attributions.
     result.extend(primary.iter().cloned());
 
-    // Add secondary attributions only where primary doesn't cover
+    // Add secondary attributions only where primary doesn't cover, on UTF-8 boundaries.
     for attr in secondary {
-        let mut uncovered_ranges = Vec::new();
         let mut range_start: Option<usize> = None;
+        let safe_start = floor_char_boundary(content, attr.start);
+        let safe_end = ceil_char_boundary(content, attr.end);
 
-        for i in attr.start..attr.end.min(content_len) {
-            if !covered[i] {
-                if range_start.is_none() {
-                    range_start = Some(i);
+        if safe_start >= safe_end {
+            continue;
+        }
+
+        let slice = &content[safe_start..safe_end];
+        for (rel_idx, ch) in slice.char_indices() {
+            let start = safe_start + rel_idx;
+            let end = start + ch.len_utf8();
+            let mut is_covered = false;
+            for i in start..end.min(content_len) {
+                if covered[i] {
+                    is_covered = true;
+                    break;
                 }
-            } else {
-                if let Some(start) = range_start {
-                    uncovered_ranges.push((start, i));
-                    range_start = None;
+            }
+
+            if is_covered {
+                if let Some(range_start_idx) = range_start.take() {
+                    if range_start_idx < start {
+                        result.push(Attribution::new(
+                            range_start_idx,
+                            start,
+                            attr.author_id.clone(),
+                            attr.ts,
+                        ));
+                    }
                 }
+            } else if range_start.is_none() {
+                range_start = Some(start);
             }
         }
 
-        // Handle final range
-        if let Some(start) = range_start {
-            uncovered_ranges.push((start, attr.end.min(content_len)));
-        }
-
-        // Create attributions for uncovered ranges
-        for (start, end) in uncovered_ranges {
-            if start < end {
+        if let Some(range_start_idx) = range_start.take() {
+            if range_start_idx < safe_end {
                 result.push(Attribution::new(
-                    start,
-                    end,
+                    range_start_idx,
+                    safe_end,
                     attr.author_id.clone(),
                     attr.ts,
                 ));
@@ -1500,9 +1519,25 @@ fn merge_char_attributions(
         }
     }
 
-    // Sort by start position
+    // Sort by start position.
     result.sort_by_key(|a| (a.start, a.end));
     result
+}
+
+fn floor_char_boundary(content: &str, idx: usize) -> usize {
+    let mut i = idx.min(content.len());
+    while i > 0 && !content.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+fn ceil_char_boundary(content: &str, idx: usize) -> usize {
+    let mut i = idx.min(content.len());
+    while i < content.len() && !content.is_char_boundary(i) {
+        i += 1;
+    }
+    i
 }
 
 /// Compute attributions for a single file at a specific commit
