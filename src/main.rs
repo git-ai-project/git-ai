@@ -37,6 +37,12 @@ fn main() {
 
     let cli = Cli::parse();
 
+    // Handle --version flag
+    if cli.args.iter().any(|arg| arg == "--version" || arg == "-v") {
+        println!("git version 2.51.0\n");
+        std::process::exit(0);
+    }
+
     #[cfg(debug_assertions)]
     {
         if std::env::var("GIT_AI").as_deref() == Ok("git") {
