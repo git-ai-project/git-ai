@@ -340,19 +340,34 @@ else
     success "Successfully set up IDE/agent hooks"
 fi
 
-# Write JSON config at ~/.git-ai/config.json (only if it doesn't exist)
+# Write JSON config at ~/.git-ai/config.json
 CONFIG_DIR="$HOME/.git-ai"
 CONFIG_JSON_PATH="$CONFIG_DIR/config.json"
 mkdir -p "$CONFIG_DIR"
 
 if [ ! -f "$CONFIG_JSON_PATH" ]; then
+    # Create new config with default settings
     TMP_CFG="$CONFIG_JSON_PATH.tmp.$$"
     cat >"$TMP_CFG" <<EOF
 {
-  "git_path": "${STD_GIT_PATH}"
+  "git_path": "${STD_GIT_PATH}",
+  "prompt_storage": "notes-no-messages"
 }
 EOF
     mv -f "$TMP_CFG" "$CONFIG_JSON_PATH"
+else
+    # Update existing config to set prompt_storage if not already set
+    if ! grep -q '"prompt_storage"' "$CONFIG_JSON_PATH" 2>/dev/null; then
+        # Add prompt_storage to existing config
+        sed -i.bak 's/}$/,\n  "prompt_storage": "notes-no-messages"\n}/' "$CONFIG_JSON_PATH"
+        rm -f "${CONFIG_JSON_PATH}.bak"
+        echo "Updated config with prompt_storage: notes-no-messages"
+    elif grep -q '"prompt_storage": "notes"' "$CONFIG_JSON_PATH" 2>/dev/null; then
+        # Update from "notes" to "notes-no-messages"
+        sed -i.bak 's/"prompt_storage": "notes"/"prompt_storage": "notes-no-messages"/' "$CONFIG_JSON_PATH"
+        rm -f "${CONFIG_JSON_PATH}.bak"
+        echo "Updated prompt_storage from 'notes' to 'notes-no-messages'"
+    fi
 fi
 
 # Add to PATH automatically if not already there
