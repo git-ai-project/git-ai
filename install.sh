@@ -370,24 +370,24 @@ else
     fi
 fi
 
-# Add to PATH automatically if not already there
-if [[ ":$PATH:" != *"$INSTALL_DIR"* ]]; then
-    if [ -n "$CONFIG_FILE" ]; then
-        # Ensure config file exists
-        touch "$CONFIG_FILE"
-        # Append PATH update if not already present
-        if ! grep -qsF "$INSTALL_DIR" "$CONFIG_FILE"; then
-            echo "" >> "$CONFIG_FILE"
-            echo "# Added by git-ai installer on $(date)" >> "$CONFIG_FILE"
-            echo "$PATH_CMD" >> "$CONFIG_FILE"
-        fi
+# Add to PATH in shell config (ensures persistence across sessions)
+if [ -n "$CONFIG_FILE" ]; then
+    # Ensure config file exists
+    touch "$CONFIG_FILE"
+    # Append PATH update if not already present in config file
+    if ! grep -qsF "$INSTALL_DIR" "$CONFIG_FILE"; then
+        echo "" >> "$CONFIG_FILE"
+        echo "# Added by git-ai installer on $(date)" >> "$CONFIG_FILE"
+        echo "$PATH_CMD" >> "$CONFIG_FILE"
         success "Updated ${CONFIG_FILE} to include ${INSTALL_DIR} in PATH"
-        echo "Restart your shell or run: source \"$CONFIG_FILE\""
     else
-        echo "Could not detect your shell config file."
-        echo "Please add the following line(s) to your shell config and restart:"
-        echo "$PATH_CMD"
+        success "PATH already configured in ${CONFIG_FILE}"
     fi
+    echo "Restart your shell or run: source \"$CONFIG_FILE\""
+else
+    echo "Could not detect your shell config file."
+    echo "Please add the following line(s) to your shell config and restart:"
+    echo "$PATH_CMD"
 fi
 
 echo -e "${YELLOW}Close and reopen your terminal and IDE sessions to use git-ai.${NC}"
