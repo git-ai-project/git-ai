@@ -462,16 +462,3 @@ jobs:
           git commit -m "chore: bump version to ${{ steps.bump-version.outputs.new_version }} [skip ci]"
           git push origin main
 
-      - name: Trigger release channel update
-        run: |
-          curl -X POST \
-            -H "Authorization: token ${{ secrets.RELEASE_CHANNEL_TOKEN }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            https://api.github.com/repos/tight-eng/git-ai-bot/actions/workflows/update-release-version.yaml/dispatches \
-            -d '{
-              "ref": "dev",
-              "inputs": {
-                "channel": "${{ steps.release-meta.outputs.channel_label }}",
-                "tag": "${{ steps.release-meta.outputs.tag_name }}"
-              }
-            }'

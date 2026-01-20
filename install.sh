@@ -10,11 +10,11 @@ YELLOW='\033[0;33m'
 NC='\033[0m' # No Color
 
 # GitHub repository details
-# Replaced during release builds with the actual repository (e.g., "acunniffe/git-ai")
-# When set to __REPO_PLACEHOLDER__, defaults to "acunniffe/git-ai"
+# Replaced during release builds with the actual repository (e.g., "prompt-security/git-ai")
+# When set to __REPO_PLACEHOLDER__, defaults to "prompt-security/git-ai"
 REPO="__REPO_PLACEHOLDER__"
 if [ "$REPO" = "__REPO_PLACEHOLDER__" ]; then
-    REPO="acunniffe/git-ai"
+    REPO="prompt-security/git-ai"
 fi
 
 # Version placeholder - replaced during release builds with actual version (e.g., "v1.0.24")
@@ -153,12 +153,12 @@ detect_std_git() {
 
     # Fail if we couldn't find a standard git
     if [ -z "$git_path" ]; then
-        error "Could not detect a standard git binary on PATH. Please ensure you have Git installed and available on your PATH. If you believe this is a bug with the installer, please file an issue at https://github.com/acunniffe/git-ai/issues."
+        error "Could not detect a standard git binary on PATH. Please ensure you have Git installed and available on your PATH. If you believe this is a bug with the installer, please file an issue at https://github.com/${REPO}/issues."
     fi
 
     # Verify detected git is usable
     if ! "$git_path" --version >/dev/null 2>&1; then
-        error "Detected git at $git_path is not usable (--version failed). Please ensure you have Git installed and available on your PATH. If you believe this is a bug with the installer, please file an issue at https://github.com/acunniffe/git-ai/issues."
+        error "Detected git at $git_path is not usable (--version failed). Please ensure you have Git installed and available on your PATH. If you believe this is a bug with the installer, please file an issue at https://github.com/${REPO}/issues."
     fi
 
     echo "$git_path"
@@ -208,15 +208,15 @@ BINARY_NAME="git-ai-${OS}-${ARCH}"
 if [ "$PINNED_VERSION" != "__VERSION_PLACEHOLDER__" ]; then
     # Version-pinned install script from a release
     RELEASE_TAG="$PINNED_VERSION"
-    DOWNLOAD_URL="https://usegitai.com/worker/releases/download/${RELEASE_TAG}/${BINARY_NAME}"
+    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${BINARY_NAME}"
 elif [ -n "${GIT_AI_RELEASE_TAG:-}" ] && [ "${GIT_AI_RELEASE_TAG:-}" != "latest" ]; then
     # Environment variable override
     RELEASE_TAG="$GIT_AI_RELEASE_TAG"
-    DOWNLOAD_URL="https://usegitai.com/worker/releases/download/${RELEASE_TAG}/${BINARY_NAME}"
+    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${BINARY_NAME}"
 else
-    # Default to latest
+    # Default to latest - use GitHub's latest release redirect
     RELEASE_TAG="latest"
-    DOWNLOAD_URL="https://usegitai.com/worker/releases/download/latest/${BINARY_NAME}"
+    DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/${BINARY_NAME}"
 fi
 
 # Install into the user's bin directory ~/.git-ai/bin
