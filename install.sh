@@ -252,6 +252,12 @@ ln -sf "${INSTALL_DIR}/git-ai" "${INSTALL_DIR}/git"
 # Symlink git-og to the detected standard git path
 ln -sf "$STD_GIT_PATH" "${INSTALL_DIR}/git-og"
 
+# Create libexec/git-core symlink structure
+# This is needed because Git expects to find executables in libexec/git-core/
+LIBEXEC_DIR="$HOME/.git-ai/libexec/git-core"
+mkdir -p "$LIBEXEC_DIR"
+ln -sf "../../bin/git-ai" "${LIBEXEC_DIR}/git"
+
 # Remove quarantine attribute on macOS
 if [ "$OS" = "macos" ]; then
     xattr -d com.apple.quarantine "${INSTALL_DIR}/git-ai" 2>/dev/null || true

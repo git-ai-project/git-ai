@@ -39,7 +39,10 @@ fn main() {
 
     // Handle --version flag
     if cli.args.iter().any(|arg| arg == "--version" || arg == "-v") {
-        println!("git version 2.51.0\n");
+        println!(
+            "git version 2.51.0\ngit-ai version {}",
+            env!("CARGO_PKG_VERSION")
+        );
         std::process::exit(0);
     }
 

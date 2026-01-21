@@ -367,6 +367,39 @@ $gitOgShimContent = "@echo off$([Environment]::NewLine)`"$stdGitPath`" %*$([Envi
 Set-Content -Path $gitOgShim -Value $gitOgShimContent -Encoding ASCII -Force
 try { Unblock-File -Path $gitOgShim -ErrorAction SilentlyContinue } catch { }
 
+# Create libexec/git-core symlink structure
+# This is needed because Git expects to find executables in libexec/git-core/
+$libexecDir = Join-Path $HOME ".git-ai\libexec\git-core"
+New-Item -ItemType Directory -Force -Path $libexecDir | Out-Null
+
+$libexecGit = Join-Path $libexecDir 'git.exe'
+
+# Wait for libexec git.exe to be available if it exists and is in use
+if (Test-Path -LiteralPath $libexecGit) {
+    if (-not (Wait-ForFileAvailable -Path $libexecGit -MaxWaitSeconds 300 -RetryIntervalSeconds 5)) {
+        Write-Warning "Timeout waiting for $libexecGit to be available. Skipping libexec symlink."
+    }
+}
+
+# Try to create a symbolic link; fall back to copy if symlinks require elevation
+try {
+    # Remove existing file/symlink first
+    if (Test-Path -LiteralPath $libexecGit) {
+        Remove-Item -Force -Path $libexecGit
+    }
+    # Create relative symlink: ..\..\bin\git-ai.exe
+    New-Item -ItemType SymbolicLink -Path $libexecGit -Target "..\..\bin\git-ai.exe" -Force | Out-Null
+    try { Unblock-File -Path $libexecGit -ErrorAction SilentlyContinue } catch { }
+} catch {
+    # Symlinks may require admin rights on Windows; fall back to copy
+    try {
+        Copy-Item -Force -Path $finalExe -Destination $libexecGit
+        try { Unblock-File -Path $libexecGit -ErrorAction SilentlyContinue } catch { }
+    } catch {
+        Write-Warning "Warning: Failed to create libexec/git-core/git.exe: $($_.Exception.Message)"
+    }
+}
+
 # Install hooks
 Write-Host 'Setting up IDE/agent hooks...'
 try {
