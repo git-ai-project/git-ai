@@ -2,6 +2,8 @@
 <img src="https://github.com/acunniffe/git-ai/raw/main/assets/docs/git-ai.png" align="right"
      alt="Git AI by acunniffe/git-ai" width="100" height="100" />
 
+
+
 </div>
 <div>
 <h1 align="left"><b>git-ai</b></h1>
