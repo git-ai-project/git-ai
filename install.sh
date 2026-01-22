@@ -91,17 +91,30 @@ detect_shell() {
     local shell_name=""
     local config_file=""
     
-    # Check for zsh first (macOS default)
-    if [ -f "$HOME/.zshrc" ]; then
+    # First, try to detect shell from $SHELL environment variable (user's default login shell)
+    local login_shell=""
+    if [ -n "$SHELL" ]; then
+        login_shell=$(basename "$SHELL")
+    fi
+    
+    # Check for fish shell (via login shell or config file existence)
+    if [ "$login_shell" = "fish" ] || [ -f "$HOME/.config/fish/config.fish" ]; then
+        shell_name="fish"
+        config_file="$HOME/.config/fish/config.fish"
+    # Check for zsh (macOS default)
+    elif [ "$login_shell" = "zsh" ] || [ -f "$HOME/.zshrc" ]; then
         shell_name="zsh"
         config_file="$HOME/.zshrc"
     # Check for bash
-    elif [ -f "$HOME/.bashrc" ] || [ -f "$HOME/.bash_profile" ]; then
+    elif [ "$login_shell" = "bash" ] || [ -f "$HOME/.bashrc" ] || [ -f "$HOME/.bash_profile" ]; then
         shell_name="bash"
         config_file="$HOME/.bashrc"
     else
-        # Fallback - try to detect from environment
-        if [ -n "$ZSH_VERSION" ]; then
+        # Fallback - try to detect from shell-specific environment variables
+        if [ -n "$FISH_VERSION" ]; then
+            shell_name="fish"
+            config_file="$HOME/.config/fish/config.fish"
+        elif [ -n "$ZSH_VERSION" ]; then
             shell_name="zsh"
             config_file="$HOME/.zshrc"
         elif [ -n "$BASH_VERSION" ]; then
@@ -257,7 +270,12 @@ if [ "$OS" = "macos" ]; then
     xattr -d com.apple.quarantine "${INSTALL_DIR}/git-ai" 2>/dev/null || true
 fi
 
-PATH_CMD="export PATH=\"$INSTALL_DIR:\$PATH\""
+# Generate shell-appropriate PATH command
+if [ "$SHELL_NAME" = "fish" ]; then
+    PATH_CMD="fish_add_path -g \"$INSTALL_DIR\""
+else
+    PATH_CMD="export PATH=\"$INSTALL_DIR:\$PATH\""
+fi
 
 success "Successfully installed git-ai into ${INSTALL_DIR}"
 success "You can now run 'git-ai' from your terminal"
@@ -292,13 +310,22 @@ fi
 # Add to PATH automatically if not already there
 if [[ ":$PATH:" != *"$INSTALL_DIR"* ]]; then
     if [ -n "$CONFIG_FILE" ]; then
+        # For Fish shell, ensure the config directory exists
+        if [ "$SHELL_NAME" = "fish" ]; then
+            mkdir -p "$(dirname "$CONFIG_FILE")"
+        fi
         # Ensure config file exists
         touch "$CONFIG_FILE"
         # Append PATH update if not already present
         if ! grep -qsF "$INSTALL_DIR" "$CONFIG_FILE"; then
             echo "" >> "$CONFIG_FILE"
-            echo "# Added by git-ai installer on $(date)" >> "$CONFIG_FILE"
-            echo "$PATH_CMD" >> "$CONFIG_FILE"
+            if [ "$SHELL_NAME" = "fish" ]; then
+                echo "# Added by git-ai installer on $(date)" >> "$CONFIG_FILE"
+                echo "$PATH_CMD" >> "$CONFIG_FILE"
+            else
+                echo "# Added by git-ai installer on $(date)" >> "$CONFIG_FILE"
+                echo "$PATH_CMD" >> "$CONFIG_FILE"
+            fi
         fi
         success "Updated ${CONFIG_FILE} to include ${INSTALL_DIR} in PATH"
         echo "Restart your shell or run: source \"$CONFIG_FILE\""
