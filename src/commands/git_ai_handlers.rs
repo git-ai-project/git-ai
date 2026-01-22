@@ -1,5 +1,3 @@
-use serde_json::json;
-
 use crate::authorship::internal_db::InternalDatabase;
 use crate::authorship::range_authorship;
 use crate::authorship::stats::stats_command;
@@ -141,6 +139,15 @@ pub fn handle_git_ai(args: &[String]) {
         "flush-cas" => {
             commands::flush_cas::handle_flush_cas(&args[1..]);
         }
+        "flush-metrics-db" => {
+            commands::flush_metrics_db::handle_flush_metrics_db(&args[1..]);
+        }
+        "login" => {
+            commands::login::handle_login(&args[1..]);
+        }
+        "logout" => {
+            commands::logout::handle_logout(&args[1..]);
+        }
         "show-prompt" => {
             commands::show_prompt::handle_show_prompt(&args[1..]);
         }
@@ -149,6 +156,9 @@ pub fn handle_git_ai(args: &[String]) {
         }
         "sync-prompts" => {
             commands::sync_prompts::handle_sync_prompts(&args[1..]);
+        }
+        "prompts" => {
+            commands::prompts_db::handle_prompts(&args[1..]);
         }
         #[cfg(debug_assertions)]
         "show-transcript" => {
@@ -182,6 +192,7 @@ fn print_help() {
     eprintln!("  stats [commit]     Show AI authorship statistics for a commit");
     eprintln!("    --json                 Output in JSON format");
     eprintln!("  status             Show uncommitted AI authorship status (debug)");
+    eprintln!("    --json                 Output in JSON format");
     eprintln!("  show <rev|range>   Display authorship logs for a revision or range");
     eprintln!("  show-prompt <id>   Display a prompt record by its ID");
     eprintln!("    --commit <rev>        Look in a specific commit only");
@@ -214,6 +225,17 @@ fn print_help() {
     eprintln!("  git-path           Print the path to the underlying git executable");
     eprintln!("  upgrade            Check for updates and install if available");
     eprintln!("    --force               Reinstall latest version even if already up to date");
+    eprintln!("  prompts            Create local SQLite database for prompt analysis");
+    eprintln!("    --since <time>        Only include prompts after this time (default: 30d)");
+    eprintln!("    --author <name>       Filter by human author (default: current git user)");
+    eprintln!("    --all-authors         Include prompts from all authors");
+    eprintln!("    --all-repositories    Include prompts from all repositories");
+    eprintln!("    exec \"<SQL>\"          Execute arbitrary SQL on prompts.db");
+    eprintln!("    list                  List prompts as TSV");
+    eprintln!("    next                  Get next prompt as JSON (iterator pattern)");
+    eprintln!("    reset                 Reset iteration pointer to start");
+    eprintln!("  login              Authenticate with Git AI");
+    eprintln!("  logout             Clear stored credentials");
     eprintln!("  version, -v, --version     Print the git-ai version");
     eprintln!("  help, -h, --help           Show this help message");
     eprintln!("");
@@ -685,6 +707,11 @@ fn handle_checkpoint(args: &[String]) {
             let elapsed = checkpoint_start.elapsed();
             log_performance_for_checkpoint(files_edited, elapsed, checkpoint_kind);
             eprintln!("Checkpoint completed in {:?}", elapsed);
+
+            // Flush logs and metrics after checkpoint (skip for human checkpoints)
+            if checkpoint_kind != CheckpointKind::Human {
+                observability::spawn_background_flush();
+            }
         }
         Err(e) => {
             let elapsed = checkpoint_start.elapsed();

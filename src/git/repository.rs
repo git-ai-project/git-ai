@@ -728,7 +728,6 @@ impl<'a> Reference<'a> {
         self.ref_name.starts_with("refs/heads/")
     }
 
-    #[allow(dead_code)]
     pub fn shorthand(&self) -> Result<String, GitAiError> {
         let mut args = self.repo.global_args_for_exec();
         args.push("rev-parse".to_string());

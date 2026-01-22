@@ -25,6 +25,13 @@ pub struct TestRepo {
 }
 
 impl TestRepo {
+    fn apply_default_config_patch(&mut self) {
+        self.patch_git_ai_config(|patch| {
+            patch.exclude_prompts_in_repositories = Some(vec![]); // No exclusions = share everywhere
+            patch.prompt_storage = Some("notes".to_string()); // Use notes mode for tests
+        });
+    }
+
     pub fn new() -> Self {
         let mut rng = rand::thread_rng();
         let n: u64 = rng.gen_range(0..10000000000);
@@ -48,10 +55,7 @@ impl TestRepo {
             test_db_path,
         };
 
-        repo.patch_git_ai_config(|patch| {
-            patch.exclude_prompts_in_repositories = Some(vec![]); // No exclusions = share everywhere
-            patch.prompt_storage = Some("notes".to_string()); // Use notes mode for tests
-        });
+        repo.apply_default_config_patch();
 
         repo
     }
@@ -82,7 +86,7 @@ impl TestRepo {
         let upstream_test_db_path = base.join(format!("{}-db", upstream_n));
         Repository::init_bare(&upstream_path).expect("failed to init bare upstream repository");
 
-        let upstream = Self {
+        let mut upstream = Self {
             path: upstream_path.clone(),
             feature_flags: FeatureFlags::default(),
             config_patch: None,
@@ -130,10 +134,8 @@ impl TestRepo {
             test_db_path: mirror_test_db_path,
         };
 
-        mirror.patch_git_ai_config(|patch| {
-            patch.exclude_prompts_in_repositories = Some(vec![]); // No exclusions = share everywhere
-            patch.prompt_storage = Some("notes".to_string()); // Use notes mode for tests
-        });
+        upstream.apply_default_config_patch();
+        mirror.apply_default_config_patch();
 
         (mirror, upstream)
     }
@@ -151,12 +153,14 @@ impl TestRepo {
         config
             .set_str("user.email", "test@example.com")
             .expect("failed to initialize git2 repository");
-        Self {
+        let mut repo = Self {
             path: path.clone(),
             feature_flags: FeatureFlags::default(),
             config_patch: None,
             test_db_path,
-        }
+        };
+        repo.apply_default_config_patch();
+        repo
     }
 
     pub fn set_feature_flags(&mut self, feature_flags: FeatureFlags) {

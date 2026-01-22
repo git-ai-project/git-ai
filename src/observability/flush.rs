@@ -1,23 +1,22 @@
-use crate::config::{Config, id_file_path};
+use crate::api::{upload_metrics_with_retry, ApiClient, ApiContext};
+use crate::config::{get_or_create_distinct_id, Config};
 use crate::git::find_repository_in_path;
+use crate::metrics::db::MetricsDatabase;
+use crate::metrics::{MetricEvent, MetricsBatch};
 use futures::stream::{self, StreamExt};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use uuid::Uuid;
 
 /// Handle the flush-logs command
 pub fn handle_flush_logs(args: &[String]) {
     let force = args.contains(&"--force".to_string());
-    if cfg!(debug_assertions) && !force {
-        eprintln!(
-            "Flush logs is disabled in debug mode, but if you really want to run it add --force flag"
-        );
-        std::process::exit(1);
-    }
+
+    // In dev builds without --force, we only send metrics envelopes (skip error/performance/message)
+    let skip_non_metrics = cfg!(debug_assertions) && !force;
 
     let config = Config::get();
 
@@ -64,10 +63,8 @@ pub fn handle_flush_logs(args: &[String]) {
             .filter(|s| !s.is_empty())
     };
 
-    // Need at least one DSN to proceed
-    if oss_dsn.is_none() && enterprise_dsn.is_none() && posthog_api_key.is_none() {
-        std::process::exit(1);
-    }
+    // Initialize metrics uploader (metrics can always be stored in local DB even if upload isn't possible)
+    let metrics_uploader = MetricsUploader::new();
 
     // Get current PID to exclude our own log file
     let current_pid = std::process::id();
@@ -121,8 +118,9 @@ pub fn handle_flush_logs(args: &[String]) {
             .map(|api_key| PostHogClient::new(api_key.clone(), posthog_host.clone()))
     };
 
-    // Check if clients are present (needed for cleanup logic later)
-    let has_clients =
+    // Check if telemetry clients are present (needed for cleanup logic later)
+    // Note: metrics are always processed (uploaded to API or stored in SQLite)
+    let has_telemetry_clients =
         oss_client.is_some() || enterprise_client.is_some() || posthog_client.is_some();
 
     eprintln!(
@@ -135,6 +133,7 @@ pub fn handle_flush_logs(args: &[String]) {
         let oss_client = Arc::new(oss_client);
         let enterprise_client = Arc::new(enterprise_client);
         let posthog_client = Arc::new(posthog_client);
+        let metrics_uploader = Arc::new(metrics_uploader);
         let remotes_info = Arc::new(remotes_info);
         let distinct_id = Arc::new(distinct_id);
 
@@ -143,6 +142,7 @@ pub fn handle_flush_logs(args: &[String]) {
                 let oss_client = Arc::clone(&oss_client);
                 let enterprise_client = Arc::clone(&enterprise_client);
                 let posthog_client = Arc::clone(&posthog_client);
+                let metrics_uploader = Arc::clone(&metrics_uploader);
                 let remotes_info = Arc::clone(&remotes_info);
                 let distinct_id = Arc::clone(&distinct_id);
 
@@ -157,8 +157,10 @@ pub fn handle_flush_logs(args: &[String]) {
                         &oss_client,
                         &enterprise_client,
                         &posthog_client,
+                        &metrics_uploader,
                         &remotes_info,
                         &distinct_id,
+                        skip_non_metrics,
                     ) {
                         Ok(count) if count > 0 => {
                             eprintln!("  ✓ {} - sent {} events", file_name, count);
@@ -198,7 +200,7 @@ pub fn handle_flush_logs(args: &[String]) {
     );
 
     // Clean up old logs if no clients configured
-    if !has_clients {
+    if !has_telemetry_clients {
         eprintln!("Cleaning up old logs (no telemetry clients configured)...");
         cleanup_old_logs(&logs_dir);
     }
@@ -370,6 +372,28 @@ impl PostHogClient {
     }
 }
 
+/// Handles metrics upload via the API or fallback to SQLite
+struct MetricsUploader {
+    client: Option<ApiClient>,
+    should_upload: bool,
+}
+
+impl MetricsUploader {
+    fn new() -> Self {
+        let context = ApiContext::new(None);
+        let api_base_url = context.base_url.clone();
+        let client = ApiClient::new(context);
+
+        let using_default_api = api_base_url == crate::config::DEFAULT_API_BASE_URL;
+        let should_upload = !using_default_api || client.is_logged_in();
+
+        Self {
+            client: Some(client),
+            should_upload,
+        }
+    }
+}
+
 fn initialize_sentry_clients(
     oss_dsn: Option<String>,
     enterprise_dsn: Option<String>,
@@ -385,8 +409,10 @@ fn process_log_file(
     oss_client: &Option<SentryClient>,
     enterprise_client: &Option<SentryClient>,
     posthog_client: &Option<PostHogClient>,
+    metrics_uploader: &MetricsUploader,
     remotes_info: &[(String, String)],
     distinct_id: &str,
+    skip_non_metrics: bool,
 ) -> Result<usize, Box<dyn std::error::Error>> {
     let content = fs::read_to_string(path)?;
     let mut count = 0;
@@ -398,26 +424,37 @@ fn process_log_file(
 
         match serde_json::from_str::<Value>(line) {
             Ok(envelope) => {
+                let event_type = envelope.get("type").and_then(|t| t.as_str());
                 let mut sent = false;
 
-                // Send to OSS if configured
-                if let Some(client) = oss_client {
-                    if send_envelope_to_sentry(&envelope, client, remotes_info, distinct_id) {
+                // Handle metrics envelopes specially - send to API (always, even in dev builds)
+                if event_type == Some("metrics") {
+                    if send_metrics_envelope(&envelope, metrics_uploader) {
                         sent = true;
                     }
-                }
+                } else if !skip_non_metrics {
+                    // Only send error/performance/message envelopes if not in dev mode
+                    // (or if --force was passed)
 
-                // Send to Enterprise if configured
-                if let Some(client) = enterprise_client {
-                    if send_envelope_to_sentry(&envelope, client, remotes_info, distinct_id) {
-                        sent = true;
+                    // Send to OSS if configured
+                    if let Some(client) = oss_client {
+                        if send_envelope_to_sentry(&envelope, client, remotes_info, distinct_id) {
+                            sent = true;
+                        }
                     }
-                }
 
-                // Send to PostHog if configured
-                if let Some(client) = posthog_client {
-                    if send_envelope_to_posthog(&envelope, client, remotes_info, distinct_id) {
-                        sent = true;
+                    // Send to Enterprise if configured
+                    if let Some(client) = enterprise_client {
+                        if send_envelope_to_sentry(&envelope, client, remotes_info, distinct_id) {
+                            sent = true;
+                        }
+                    }
+
+                    // Send to PostHog if configured
+                    if let Some(client) = posthog_client {
+                        if send_envelope_to_posthog(&envelope, client, remotes_info, distinct_id) {
+                            sent = true;
+                        }
                     }
                 }
 
@@ -642,34 +679,69 @@ fn sanitize_git_url(url: &str) -> String {
     url.to_string()
 }
 
-/// Get or create the distinct_id (UUID) from ~/.git-ai/internal/distinct_id
-/// If the file doesn't exist, generates a new UUID and writes it to the file
-fn get_or_create_distinct_id() -> String {
-    let id_path = match id_file_path() {
-        Some(path) => path,
-        None => return "unknown".to_string(),
+/// Send a metrics envelope to the API or store in SQLite as fallback
+fn send_metrics_envelope(envelope: &Value, uploader: &MetricsUploader) -> bool {
+    // Parse events from the envelope
+    let events_value = match envelope.get("events") {
+        Some(e) => e,
+        None => return false,
     };
 
-    // Try to read existing ID
-    if let Ok(existing_id) = fs::read_to_string(&id_path) {
-        let trimmed = existing_id.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
+    // Deserialize events
+    let events: Vec<MetricEvent> = match serde_json::from_value(events_value.clone()) {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+
+    if events.is_empty() {
+        return true; // Nothing to upload, but not a failure
+    }
+
+    // Build batch for upload
+    let batch = MetricsBatch::new(events.clone());
+
+    if uploader.should_upload {
+        if let Some(client) = &uploader.client {
+            // Try to upload via API
+            match upload_metrics_with_retry(client, &batch, "flush_logs") {
+                Ok(()) => return true,
+                Err(_) => {
+                    // API upload failed - fall back to SQLite DB
+                    store_metrics_in_db(&events);
+                    return true; // Stored successfully
+                }
+            }
         }
     }
 
-    // Generate new UUID
-    let new_id = Uuid::new_v4().to_string();
+    // Conditions not met - store in DB for later
+    store_metrics_in_db(&events);
+    true
+}
 
-    // Ensure directory exists
-    if let Some(parent) = id_path.parent() {
-        let _ = fs::create_dir_all(parent);
+/// Store metric events in SQLite database for later upload
+fn store_metrics_in_db(events: &[MetricEvent]) {
+    if events.is_empty() {
+        return;
     }
 
-    // Write the new ID to file
-    if let Err(e) = fs::write(&id_path, &new_id) {
-        eprintln!("Warning: Failed to write distinct_id file: {}", e);
+    let event_jsons: Vec<String> = events
+        .iter()
+        .filter_map(|e| serde_json::to_string(e).ok())
+        .collect();
+
+    if event_jsons.is_empty() {
+        return;
     }
 
-    new_id
+    match MetricsDatabase::global() {
+        Ok(db) => {
+            if let Ok(mut db_lock) = db.lock() {
+                let _ = db_lock.insert_events(&event_jsons);
+            }
+        }
+        Err(_) => {
+            // Database unavailable - events will be lost
+        }
+    }
 }

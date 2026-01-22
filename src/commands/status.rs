@@ -6,9 +6,11 @@ use crate::error::GitAiError;
 use crate::git::find_repository;
 use crate::git::repo_storage::InitialAttributions;
 use crate::git::repository::Repository;
+use serde::Serialize;
 use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[derive(Serialize)]
 struct CheckpointInfo {
     time_ago: String,
     additions: u32,
@@ -17,14 +19,33 @@ struct CheckpointInfo {
     is_human: bool,
 }
 
-pub fn handle_status(_args: &[String]) {
-    if let Err(e) = run_status() {
+#[derive(Serialize)]
+struct StatusOutput {
+    stats: CommitStats,
+    checkpoints: Vec<CheckpointInfo>,
+}
+
+pub fn handle_status(args: &[String]) {
+    let mut json_output = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json" => {
+                json_output = true;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    if let Err(e) = run_status(json_output) {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     }
 }
 
-fn run_status() -> Result<(), GitAiError> {
+fn run_status(json: bool) -> Result<(), GitAiError> {
     let repo = find_repository(&vec![])?;
 
     let default_user_name = match repo.config_get_str("user.name") {
@@ -50,18 +71,27 @@ fn run_status() -> Result<(), GitAiError> {
     let checkpoints = working_log.read_all_checkpoints()?;
 
     if checkpoints.is_empty() {
-        eprintln!(
-            "No checkpoints recorded since last commit ({})",
-            &head_sha[..7]
-        );
-        eprintln!();
+        if json {
+            let output = StatusOutput {
+                stats: CommitStats::default(),
+                checkpoints: vec![],
+            };
+            let json_str = serde_json::to_string(&output)?;
+            println!("{}", json_str);
+        } else {
+            eprintln!(
+                "No checkpoints recorded since last commit ({})",
+                &head_sha[..7]
+            );
+            eprintln!();
 
-        eprintln!(
-            "If you've made AI edits recently and don't see them here, you might need to install hooks:"
-        );
-        eprintln!();
-        eprintln!("  git-ai install-hooks");
-        eprintln!();
+            eprintln!(
+                "If you've made AI edits recently and don't see them here, you might need to install hooks:"
+            );
+            eprintln!();
+            eprintln!("  git-ai install-hooks");
+            eprintln!();
+        }
         return Ok(());
     }
 
@@ -121,6 +151,16 @@ fn run_status() -> Result<(), GitAiError> {
         total_deletions,
         ai_accepted,
     );
+
+    if json {
+        let output = StatusOutput {
+            stats,
+            checkpoints: checkpoint_infos,
+        };
+        let json_str = serde_json::to_string(&output)?;
+        println!("{}", json_str);
+        return Ok(());
+    }
 
     write_stats_to_terminal(&stats, true);
 

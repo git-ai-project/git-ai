@@ -157,6 +157,12 @@ pub fn post_commit(
 
     notes_add(repo, &commit_sha, &authorship_json)?;
 
+    // Compute stats once (needed for both metrics and terminal output)
+    let stats = stats_for_commit_stats(repo, &commit_sha, &[])?;
+
+    // Record metrics for this commit
+    record_commit_metrics(repo, &commit_sha, &parent_sha, &human_author, &authorship_log, &stats);
+
     // Write INITIAL file for uncommitted AI attributions (if any)
     if !initial_attributions.files.is_empty() {
         let new_working_log = repo_storage.working_log_for_base_commit(&commit_sha);
@@ -168,7 +174,6 @@ pub fn post_commit(
     repo_storage.delete_working_log_for_base_commit(&parent_sha)?;
 
     if !supress_output {
-        let stats = stats_for_commit_stats(repo, &commit_sha, &[])?;
         // Only print stats if we're in an interactive terminal
         let is_interactive = std::io::stdout().is_terminal();
         write_stats_to_terminal(&stats, is_interactive);
@@ -366,7 +371,9 @@ fn enqueue_prompt_messages_to_cas(
         });
 
     if let Some(url) = repo_url {
-        metadata.insert("repo_url".to_string(), url);
+        if let Ok(normalized) = crate::repo_url::normalize_repo_url(&url) {
+            metadata.insert("repo_url".to_string(), normalized);
+        }
     }
 
     // Get API base URL for constructing messages_url
@@ -391,6 +398,90 @@ fn enqueue_prompt_messages_to_cas(
     }
 
     Ok(())
+}
+
+/// Record metrics for a committed change.
+/// This is a best-effort operation - failures are silently ignored.
+fn record_commit_metrics(
+    repo: &Repository,
+    commit_sha: &str,
+    parent_sha: &str,
+    human_author: &str,
+    authorship_log: &AuthorshipLog,
+    stats: &crate::authorship::stats::CommitStats,
+) {
+    use crate::metrics::{record, CommittedValues, EventAttributes};
+
+    // Skip if no prompts (no AI involvement)
+    if authorship_log.metadata.prompts.is_empty() {
+        return;
+    }
+
+    // Skip if no AI additions (pure human commit)
+    if stats.ai_additions == 0 && stats.mixed_additions == 0 {
+        return;
+    }
+
+    // Build parallel arrays: index 0 = "all" (aggregate), index 1+ = per tool/model
+    let mut tool_model_pairs: Vec<String> = vec!["all".to_string()];
+    let mut mixed_additions: Vec<u32> = vec![stats.mixed_additions];
+    let mut ai_additions: Vec<u32> = vec![stats.ai_additions];
+    let mut ai_accepted: Vec<u32> = vec![stats.ai_accepted];
+    let mut total_ai_additions: Vec<u32> = vec![stats.total_ai_additions];
+    let mut total_ai_deletions: Vec<u32> = vec![stats.total_ai_deletions];
+    let mut time_waiting_for_ai: Vec<u64> = vec![stats.time_waiting_for_ai];
+
+    // Add per-tool/model breakdown
+    for (tool_model, tool_stats) in &stats.tool_model_breakdown {
+        tool_model_pairs.push(tool_model.clone());
+        mixed_additions.push(tool_stats.mixed_additions);
+        ai_additions.push(tool_stats.ai_additions);
+        ai_accepted.push(tool_stats.ai_accepted);
+        total_ai_additions.push(tool_stats.total_ai_additions);
+        total_ai_deletions.push(tool_stats.total_ai_deletions);
+        time_waiting_for_ai.push(tool_stats.time_waiting_for_ai);
+    }
+
+    // Build values with all stats
+    let values = CommittedValues::new()
+        .human_additions(stats.human_additions)
+        .git_diff_deleted_lines(stats.git_diff_deleted_lines)
+        .git_diff_added_lines(stats.git_diff_added_lines)
+        .tool_model_pairs(tool_model_pairs)
+        .mixed_additions(mixed_additions)
+        .ai_additions(ai_additions)
+        .ai_accepted(ai_accepted)
+        .total_ai_additions(total_ai_additions)
+        .total_ai_deletions(total_ai_deletions)
+        .time_waiting_for_ai(time_waiting_for_ai);
+
+    // Build attributes - start with version
+    let mut attrs = EventAttributes::with_version(env!("CARGO_PKG_VERSION"));
+
+    attrs = attrs.author(human_author)
+        .commit_sha(commit_sha)
+        .base_commit_sha(parent_sha);
+
+    // Get repo URL from default remote
+    if let Ok(Some(remote_name)) = repo.get_default_remote() {
+        if let Ok(remotes) = repo.remotes_with_urls() {
+            if let Some((_, url)) = remotes.into_iter().find(|(n, _)| n == &remote_name) {
+                if let Ok(normalized) = crate::repo_url::normalize_repo_url(&url) {
+                    attrs = attrs.repo_url(normalized);
+                }
+            }
+        }
+    }
+
+    // Get current branch
+    if let Ok(head_ref) = repo.head() {
+        if let Ok(short_branch) = head_ref.shorthand() {
+            attrs = attrs.branch(short_branch);
+        }
+    }
+
+    // Record the metric
+    record(values, attrs);
 }
 
 #[cfg(test)]

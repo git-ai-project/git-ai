@@ -1,6 +1,7 @@
 use crate::error::GitAiError;
 use crate::mdm::agents::get_all_installers;
 use crate::mdm::hook_installer::HookInstallerParams;
+use crate::mdm::skills_installer;
 use crate::mdm::spinner::{print_diff, Spinner};
 use crate::mdm::utils::get_current_binary_path;
 use std::collections::HashMap;
@@ -89,6 +90,14 @@ async fn async_run_install(
     let mut any_checked = false;
     let mut has_changes = false;
     let mut statuses: HashMap<String, InstallStatus> = HashMap::new();
+
+    // Install skills first (these are global, not per-agent)
+    // Skills are always nuked and reinstalled fresh (silently)
+    if let Ok(result) = skills_installer::install_skills(dry_run, verbose) {
+        if result.changed {
+            has_changes = true;
+        }
+    }
 
     let installers = get_all_installers();
 
@@ -203,6 +212,16 @@ async fn async_run_uninstall(
     let mut any_checked = false;
     let mut has_changes = false;
     let mut statuses: HashMap<String, InstallStatus> = HashMap::new();
+
+    // Uninstall skills first (these are global, not per-agent, silently)
+    if let Ok(result) = skills_installer::uninstall_skills(dry_run, verbose) {
+        if result.changed {
+            has_changes = true;
+            statuses.insert("skills".to_string(), InstallStatus::Installed);
+        } else {
+            statuses.insert("skills".to_string(), InstallStatus::AlreadyInstalled);
+        }
+    }
 
     let installers = get_all_installers();
 

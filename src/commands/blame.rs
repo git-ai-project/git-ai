@@ -41,6 +41,8 @@ pub struct BlameHunk {
     pub author_time: i64,
     /// Author timezone (e.g. "+0000")
     pub author_tz: String,
+    /// AI human author name
+    pub ai_human_author: Option<String>,
     /// Committer name
     pub committer: String,
     /// Committer email
@@ -134,6 +136,11 @@ pub struct GitAiBlameOptions {
 
     // Mark lines from commits without authorship logs as "Unknown"
     pub mark_unknown: bool,
+
+    // Split hunks when lines have different AI human authors
+    // When true, a single git blame hunk may be split into multiple hunks
+    // if different lines were authored by different humans working with AI
+    pub split_hunks_by_ai_author: bool,
 }
 
 impl Default for GitAiBlameOptions {
@@ -177,6 +184,7 @@ impl Default for GitAiBlameOptions {
             ignore_whitespace: false,
             json: false,
             mark_unknown: false,
+            split_hunks_by_ai_author: true,
         }
     }
 }
@@ -600,6 +608,7 @@ impl Repository {
                         author_email: cur_meta.author_mail.clone(),
                         author_time: cur_meta.author_time,
                         author_tz: cur_meta.author_tz.clone(),
+                        ai_human_author: None,
                         committer: cur_meta.committer.clone(),
                         committer_email: cur_meta.committer_mail.clone(),
                         committer_time: cur_meta.committer_time,
@@ -668,6 +677,7 @@ impl Repository {
                 author_email: cur_meta.author_mail.clone(),
                 author_time: cur_meta.author_time,
                 author_tz: cur_meta.author_tz.clone(),
+                ai_human_author: None,
                 committer: cur_meta.committer.clone(),
                 committer_email: cur_meta.committer_mail.clone(),
                 committer_time: cur_meta.committer_time,
@@ -676,7 +686,118 @@ impl Repository {
             });
         }
 
+        // Post-process hunks to populate ai_human_author from authorship logs
+        let hunks = self.populate_ai_human_authors(hunks, file_path, options)?;
+
         Ok(hunks)
+    }
+
+    /// Post-process blame hunks to populate ai_human_author from authorship logs.
+    /// For each hunk, looks up the authorship log for its commit and finds the human_author
+    /// from the prompt record that covers lines in the hunk.
+    /// If `split_hunks_by_ai_author` is true and different lines in a hunk have different
+    /// human_authors, the hunk is split into multiple hunks.
+    fn populate_ai_human_authors(
+        &self,
+        hunks: Vec<BlameHunk>,
+        file_path: &str,
+        options: &GitAiBlameOptions,
+    ) -> Result<Vec<BlameHunk>, GitAiError> {
+        // Cache authorship logs by commit SHA to avoid repeated lookups
+        let mut commit_authorship_cache: HashMap<String, Option<AuthorshipLog>> = HashMap::new();
+        // Cache for foreign prompts to avoid repeated grepping
+        let mut foreign_prompts_cache: HashMap<String, Option<PromptRecord>> = HashMap::new();
+
+        let mut result_hunks: Vec<BlameHunk> = Vec::new();
+
+        for hunk in hunks {
+            // Get or fetch the authorship log for this commit
+            let authorship_log = if let Some(cached) = commit_authorship_cache.get(&hunk.commit_sha)
+            {
+                cached.clone()
+            } else {
+                let authorship = match get_reference_as_authorship_log_v3(self, &hunk.commit_sha) {
+                    Ok(v3_log) => Some(v3_log),
+                    Err(_) => None, // No AI authorship data for this commit
+                };
+                commit_authorship_cache.insert(hunk.commit_sha.clone(), authorship.clone());
+                authorship
+            };
+
+            // If we have an authorship log, look up human_author for each line
+            if let Some(ref authorship_log) = authorship_log {
+                // Collect human_author for each line in this hunk
+                let num_lines = hunk.range.1 - hunk.range.0 + 1;
+                let mut line_authors: Vec<Option<String>> = Vec::with_capacity(num_lines as usize);
+
+                for i in 0..num_lines {
+                    let orig_line_num = hunk.orig_range.0 + i;
+
+                    let human_author = if let Some((_author, _prompt_hash, Some(prompt_record))) =
+                        authorship_log.get_line_attribution(
+                            self,
+                            file_path,
+                            orig_line_num,
+                            &mut foreign_prompts_cache,
+                        )
+                    {
+                        prompt_record.human_author.clone()
+                    } else {
+                        None
+                    };
+                    line_authors.push(human_author);
+                }
+
+                if options.split_hunks_by_ai_author {
+                    // Split hunk by consecutive lines with the same human_author
+                    let mut current_start_idx: u32 = 0;
+                    let mut current_author = line_authors.first().cloned().flatten();
+
+                    for (i, author) in line_authors.iter().enumerate() {
+                        let author_flat = author.clone();
+                        if author_flat != current_author {
+                            // Create a hunk for the previous group
+                            let group_start = hunk.range.0 + current_start_idx;
+                            let group_end = hunk.range.0 + (i as u32) - 1;
+                            let orig_group_start = hunk.orig_range.0 + current_start_idx;
+                            let orig_group_end = hunk.orig_range.0 + (i as u32) - 1;
+
+                            let mut new_hunk = hunk.clone();
+                            new_hunk.range = (group_start, group_end);
+                            new_hunk.orig_range = (orig_group_start, orig_group_end);
+                            new_hunk.ai_human_author = current_author.clone();
+                            result_hunks.push(new_hunk);
+
+                            // Start a new group
+                            current_start_idx = i as u32;
+                            current_author = author_flat;
+                        }
+                    }
+
+                    // Don't forget the last group
+                    let group_start = hunk.range.0 + current_start_idx;
+                    let group_end = hunk.range.1;
+                    let orig_group_start = hunk.orig_range.0 + current_start_idx;
+                    let orig_group_end = hunk.orig_range.1;
+
+                    let mut new_hunk = hunk.clone();
+                    new_hunk.range = (group_start, group_end);
+                    new_hunk.orig_range = (orig_group_start, orig_group_end);
+                    new_hunk.ai_human_author = current_author;
+                    result_hunks.push(new_hunk);
+                } else {
+                    // Don't split - just use the first human_author found
+                    let mut new_hunk = hunk;
+                    new_hunk.ai_human_author = line_authors.into_iter().flatten().next();
+                    result_hunks.push(new_hunk);
+                }
+            } else {
+                // No authorship log, keep hunk as-is
+                result_hunks.push(hunk);
+            }
+        }
+
+        Ok(result_hunks)
     }
 }
 
@@ -951,10 +1072,14 @@ fn output_porcelain_format(
     line_ranges: &[(u32, u32)],
     options: &GitAiBlameOptions,
 ) -> Result<(), GitAiError> {
+    // Use options that don't split hunks to match git's native porcelain output
+    let mut no_split_options = options.clone();
+    no_split_options.split_hunks_by_ai_author = false;
+
     // Build a map from line number to BlameHunk for fast lookup
     let mut line_to_hunk: HashMap<u32, BlameHunk> = HashMap::new();
     for (start_line, end_line) in line_ranges {
-        let h = repo.blame_hunks(file_path, *start_line, *end_line, options)?;
+        let h = repo.blame_hunks(file_path, *start_line, *end_line, &no_split_options)?;
         for hunk in h {
             for line_num in hunk.range.0..=hunk.range.1 {
                 line_to_hunk.insert(line_num, hunk.clone());
@@ -1064,10 +1189,14 @@ fn output_incremental_format(
     line_ranges: &[(u32, u32)],
     options: &GitAiBlameOptions,
 ) -> Result<(), GitAiError> {
+    // Use options that don't split hunks to match git's native incremental output
+    let mut no_split_options = options.clone();
+    no_split_options.split_hunks_by_ai_author = false;
+
     // Build a map from line number to BlameHunk for fast lookup
     let mut line_to_hunk: HashMap<u32, BlameHunk> = HashMap::new();
     for (start_line, end_line) in line_ranges {
-        let h = repo.blame_hunks(file_path, *start_line, *end_line, options)?;
+        let h = repo.blame_hunks(file_path, *start_line, *end_line, &no_split_options)?;
         for hunk in h {
             for line_num in hunk.range.0..=hunk.range.1 {
                 line_to_hunk.insert(line_num, hunk.clone());
@@ -1149,10 +1278,14 @@ fn output_default_format(
 ) -> Result<(), GitAiError> {
     let mut output = String::new();
 
+    // Use options that don't split hunks for formatting purposes
+    let mut no_split_options = options.clone();
+    no_split_options.split_hunks_by_ai_author = false;
+
     // Build a map from line number to BlameHunk for fast lookup
     let mut line_to_hunk: HashMap<u32, BlameHunk> = HashMap::new();
     for (start_line, end_line) in line_ranges {
-        let h = repo.blame_hunks(file_path, *start_line, *end_line, options)?;
+        let h = repo.blame_hunks(file_path, *start_line, *end_line, &no_split_options)?;
         for hunk in h {
             for line_num in hunk.range.0..=hunk.range.1 {
                 line_to_hunk.insert(line_num, hunk.clone());
@@ -1167,7 +1300,7 @@ fn output_default_format(
     // Calculate the maximum author name width for proper padding
     let mut max_author_width = 0;
     for (start_line, end_line) in line_ranges {
-        let h = repo.blame_hunks(file_path, *start_line, *end_line, options)?;
+        let h = repo.blame_hunks(file_path, *start_line, *end_line, &no_split_options)?;
         for hunk in h {
             let author = line_authors
                 .get(&hunk.range.0)

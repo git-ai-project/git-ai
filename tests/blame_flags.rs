@@ -1,5 +1,15 @@
 #[macro_use]
 mod repos;
+use git_ai::authorship::authorship_log::{LineRange, PromptRecord};
+use git_ai::authorship::authorship_log_serialization::{
+    AttestationEntry, AuthorshipLog, FileAttestation,
+};
+use git_ai::authorship::transcript::Message;
+use git_ai::authorship::working_log::AgentId;
+use git_ai::commands::blame::GitAiBlameOptions;
+use git_ai::git::refs::notes_add;
+use git_ai::git::repository as GitAiRepository;
+use git2::Blame;
 use insta::assert_debug_snapshot;
 use repos::test_file::ExpectedLineExt;
 use repos::test_repo::TestRepo;
@@ -822,30 +832,30 @@ fn test_blame_auto_detects_git_blame_ignore_revs_file() {
     repo.stage_all_and_commit("Initial commit").unwrap();
 
     // Get the initial commit SHA
-    let initial_sha = repo
-        .git(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
+    let initial_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
     // Create a "formatting" commit that we want to ignore
     file.set_contents(lines!["  Line 1", "  Line 2", "  Line 3"]); // Add indentation
-    repo.stage_all_and_commit("Format: add indentation").unwrap();
+    repo.stage_all_and_commit("Format: add indentation")
+        .unwrap();
 
     // Get the formatting commit SHA
-    let format_sha = repo
-        .git(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
+    let format_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
     // Create .git-blame-ignore-revs file with the formatting commit
     let ignore_revs_path = repo.path().join(".git-blame-ignore-revs");
-    std::fs::write(&ignore_revs_path, format!("# Formatting commit\n{}\n", format_sha)).unwrap();
+    std::fs::write(
+        &ignore_revs_path,
+        format!("# Formatting commit\n{}\n", format_sha),
+    )
+    .unwrap();
 
     // Run git-ai blame - it should auto-detect .git-blame-ignore-revs
     let git_ai_output = repo.git_ai(&["blame", "test.txt"]).unwrap();
-    println!("\n[DEBUG] git-ai blame with auto-detected ignore-revs:\n{}", git_ai_output);
+    println!(
+        "\n[DEBUG] git-ai blame with auto-detected ignore-revs:\n{}",
+        git_ai_output
+    );
 
     // The blame should show the initial commit, not the formatting commit
     // (because the formatting commit is in .git-blame-ignore-revs)
@@ -871,11 +881,7 @@ fn test_blame_no_ignore_revs_file_flag_disables_auto_detection() {
     repo.stage_all_and_commit("Modify line 1").unwrap();
 
     // Get the second commit SHA
-    let second_sha = repo
-        .git(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
+    let second_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
     // Create .git-blame-ignore-revs to ignore the second commit
     let ignore_revs_path = repo.path().join(".git-blame-ignore-revs");
@@ -885,7 +891,10 @@ fn test_blame_no_ignore_revs_file_flag_disables_auto_detection() {
     let output_without_ignore = repo
         .git_ai(&["blame", "--no-ignore-revs-file", "test.txt"])
         .unwrap();
-    println!("\n[DEBUG] git-ai blame with --no-ignore-revs-file:\n{}", output_without_ignore);
+    println!(
+        "\n[DEBUG] git-ai blame with --no-ignore-revs-file:\n{}",
+        output_without_ignore
+    );
 
     // The second commit should appear in the output (not ignored)
     assert!(
@@ -905,31 +914,19 @@ fn test_blame_explicit_ignore_revs_file_takes_precedence() {
     file.set_contents(lines!["Line 1"]);
     repo.stage_all_and_commit("Initial commit").unwrap();
 
-    let initial_sha = repo
-        .git(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
+    let initial_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
     // Create second commit
     file.set_contents(lines!["Line 1 modified"]);
     repo.stage_all_and_commit("Second commit").unwrap();
 
-    let second_sha = repo
-        .git(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
+    let second_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
     // Create third commit
     file.set_contents(lines!["Line 1 modified again"]);
     repo.stage_all_and_commit("Third commit").unwrap();
 
-    let third_sha = repo
-        .git(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
+    let third_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
     // Create .git-blame-ignore-revs that ignores the SECOND commit
     let default_ignore_path = repo.path().join(".git-blame-ignore-revs");
@@ -948,7 +945,10 @@ fn test_blame_explicit_ignore_revs_file_takes_precedence() {
             "test.txt",
         ])
         .unwrap();
-    println!("\n[DEBUG] git-ai blame with explicit --ignore-revs-file:\n{}", output);
+    println!(
+        "\n[DEBUG] git-ai blame with explicit --ignore-revs-file:\n{}",
+        output
+    );
 
     // The second commit (ignored by default file) should appear
     // because we're using the custom file which ignores the third commit
@@ -969,21 +969,13 @@ fn test_blame_respects_git_config_blame_ignore_revs_file() {
     file.set_contents(lines!["Line 1", "Line 2"]);
     repo.stage_all_and_commit("Initial commit").unwrap();
 
-    let initial_sha = repo
-        .git(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
+    let initial_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
     // Create a commit we want to ignore
     file.set_contents(lines!["Line 1 reformatted", "Line 2 reformatted"]);
     repo.stage_all_and_commit("Reformat code").unwrap();
 
-    let reformat_sha = repo
-        .git(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
+    let reformat_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
     // Create ignore file with a custom name (not .git-blame-ignore-revs)
     let custom_ignore_path = repo.path().join("my-ignore-revs");
@@ -995,7 +987,10 @@ fn test_blame_respects_git_config_blame_ignore_revs_file() {
 
     // Run git-ai blame - should auto-detect from git config
     let output = repo.git_ai(&["blame", "test.txt"]).unwrap();
-    println!("\n[DEBUG] git-ai blame with blame.ignoreRevsFile config:\n{}", output);
+    println!(
+        "\n[DEBUG] git-ai blame with blame.ignoreRevsFile config:\n{}",
+        output
+    );
 
     // The initial commit should appear (reformat commit should be ignored via config)
     assert!(
@@ -1019,11 +1014,7 @@ fn test_blame_without_ignore_revs_file_works_normally() {
     file.set_contents(lines!["Line 1 modified"]);
     repo.stage_all_and_commit("Second commit").unwrap();
 
-    let second_sha = repo
-        .git(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
+    let second_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
     // No .git-blame-ignore-revs file exists
 
@@ -1060,31 +1051,20 @@ fn test_blame_ignore_revs_with_multiple_commits() {
     file.set_contents(lines!["original"]);
     repo.stage_all_and_commit("Initial commit").unwrap();
 
-    let initial_sha = repo
-        .git(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
+    let initial_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
     // Create first formatting commit
     file.set_contents(lines!["  original"]);
     repo.stage_all_and_commit("Format 1: add spaces").unwrap();
 
-    let format1_sha = repo
-        .git(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
+    let format1_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
     // Create second formatting commit
     file.set_contents(lines!["    original"]);
-    repo.stage_all_and_commit("Format 2: add more spaces").unwrap();
+    repo.stage_all_and_commit("Format 2: add more spaces")
+        .unwrap();
 
-    let format2_sha = repo
-        .git(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
+    let format2_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
     // Create .git-blame-ignore-revs with both formatting commits
     let ignore_revs_path = repo.path().join(".git-blame-ignore-revs");
@@ -1099,12 +1079,113 @@ fn test_blame_ignore_revs_with_multiple_commits() {
 
     // Run git-ai blame
     let output = repo.git_ai(&["blame", "test.txt"]).unwrap();
-    println!("\n[DEBUG] git-ai blame with multiple ignored commits:\n{}", output);
+    println!(
+        "\n[DEBUG] git-ai blame with multiple ignored commits:\n{}",
+        output
+    );
 
     // Should show the initial commit (both formatting commits are ignored)
     assert!(
         output.contains(&initial_sha[..7]),
         "Both formatting commits should be ignored. Initial commit should appear. Output: {}",
         output
+    );
+}
+
+#[test]
+fn test_blame_ai_human_author() {
+    let repo = TestRepo::new();
+
+    let mut file = repo.filename("test.txt");
+
+    // Create initial commit
+    file.set_contents(lines!["first line", "second line", "third line"]);
+
+    let initial_sha = repo
+        .stage_all_and_commit("Initial commit")
+        .unwrap()
+        .commit_sha;
+
+    // Create authorship log with two prompts - one for line 1, one for line 2
+    let mut authorship_log = AuthorshipLog::new();
+    authorship_log.metadata.base_commit_sha = initial_sha.clone();
+
+    // First prompt for line 1
+    let prompt_hash_1 = "abc12345".to_string();
+    let agent_id_1 = AgentId {
+        tool: "cursor".to_string(),
+        id: "session_line1".to_string(),
+        model: "claude-3-sonnet".to_string(),
+    };
+    authorship_log.metadata.prompts.insert(
+        prompt_hash_1.clone(),
+        PromptRecord {
+            agent_id: agent_id_1,
+            human_author: Some("First <first@example.com>".to_string()),
+            messages: vec![Message::user("Add first line".to_string(), None)],
+            total_additions: 1,
+            total_deletions: 0,
+            accepted_lines: 1,
+            overriden_lines: 0,
+            messages_url: None,
+        },
+    );
+
+    // Second prompt for line 2
+    let prompt_hash_2 = "xyz67890".to_string();
+    let agent_id_2 = AgentId {
+        tool: "cursor".to_string(),
+        id: "session_line2".to_string(),
+        model: "claude-3-sonnet".to_string(),
+    };
+    authorship_log.metadata.prompts.insert(
+        prompt_hash_2.clone(),
+        PromptRecord {
+            agent_id: agent_id_2,
+            human_author: Some("Second <second@example.com>".to_string()),
+            messages: vec![Message::user("Add second line".to_string(), None)],
+            total_additions: 1,
+            total_deletions: 0,
+            accepted_lines: 1,
+            overriden_lines: 0,
+            messages_url: None,
+        },
+    );
+
+    // Add attestations - line 1 attributed to first prompt, line 2 to second
+    let mut file_attestation = FileAttestation::new("test.txt".to_string());
+    file_attestation.add_entry(AttestationEntry::new(
+        prompt_hash_1,
+        vec![LineRange::Single(1)],
+    ));
+    file_attestation.add_entry(AttestationEntry::new(
+        prompt_hash_2,
+        vec![LineRange::Single(2)],
+    ));
+    authorship_log.attestations.push(file_attestation);
+
+    // Serialize and add the note
+    let note_content = authorship_log.serialize_to_string().unwrap();
+    let gitai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("Failed to find repository");
+    notes_add(&gitai_repo, &initial_sha, &note_content).unwrap();
+
+    // Call blame_hunks on the file
+    let options = GitAiBlameOptions::default();
+    let hunks = gitai_repo
+        .blame_hunks("test.txt", 1, 2, &options)
+        .expect("Failed to get blame hunks");
+
+    let ai_human_authors = hunks
+        .iter()
+        .map(|hunk| hunk.ai_human_author.clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        ai_human_authors,
+        vec![
+            Some("First <first@example.com>".to_string()),
+            Some("Second <second@example.com>".to_string())
+        ]
     );
 }

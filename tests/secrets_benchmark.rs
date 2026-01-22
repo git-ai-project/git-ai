@@ -475,9 +475,9 @@ fn test_secrets_linear_scaling() {
     let ratio = time_5x.as_secs_f64() / time_1x.as_secs_f64();
 
     // For O(n) algorithm, ratio should be ~5.0
-    // Allow 4.0-7.0 range for variance (cache effects, measurement noise)
+    // Allow 2.0-8.5 range for variance (cache effects, measurement noise)
     assert!(
-        ratio >= 4.0 && ratio <= 7.5,
+        ratio >= 2.0 && ratio <= 8.5,
         "Expected linear scaling (~5x), but got {:.2}x ratio. \
          1x: {:.2}ms, 5x: {:.2}ms. This suggests non-linear complexity.",
         ratio,

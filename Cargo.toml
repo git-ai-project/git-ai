@@ -1,6 +1,6 @@
 [package]
 name = "git-ai"
-version = "1.0.37"
+version = "1.0.38"
 edition = "2024"
 
 [dependencies]
@@ -27,9 +27,12 @@ glob = "0.3"
 uuid = { version = "1.11", features = ["v4"] }
 ratatui = "0.28"
 crossterm = "0.28"
+keyring = { version = "3", features = ["sync-secret-service", "apple-native", "windows-native"], optional = true }
+once_cell = "1.19"
 
 [features]
 test-support = ["git2"]
+keyring = ["dep:keyring"]
 
 [dev-dependencies]
 git-ai = { path = ".", features = ["test-support"] }

@@ -2,6 +2,7 @@ use crate::authorship::attribution_tracker::{
     Attribution, AttributionTracker, INITIAL_ATTRIBUTION_TS, LineAttribution,
 };
 use crate::authorship::authorship_log::PromptRecord;
+use crate::authorship::authorship_log_serialization::generate_short_hash;
 use crate::authorship::imara_diff_utils::{LineChangeTag, compute_line_changes};
 use crate::authorship::working_log::CheckpointKind;
 use crate::authorship::working_log::{Checkpoint, WorkingLogEntry};
@@ -358,7 +359,34 @@ pub fn run(
             "[BENCHMARK] Appending checkpoint to working log took {:?}",
             append_start.elapsed()
         ));
-        checkpoints.push(checkpoint);
+        checkpoints.push(checkpoint.clone());
+
+        // Record agent usage metric for AI checkpoints
+        if kind != CheckpointKind::Human {
+            if let Some(agent_id) = &checkpoint.agent_id {
+                let prompt_id = generate_short_hash(&agent_id.id, &agent_id.tool);
+
+                let values = crate::metrics::AgentUsageValues::new();
+                let mut attrs = crate::metrics::EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
+                    .tool(&agent_id.tool)
+                    .model(&agent_id.model)
+                    .prompt_id(prompt_id)
+                    .external_prompt_id(&agent_id.id);
+
+                // Get repo URL from default remote
+                if let Ok(Some(remote_name)) = repo.get_default_remote() {
+                    if let Ok(remotes) = repo.remotes_with_urls() {
+                        if let Some((_, url)) = remotes.into_iter().find(|(n, _)| n == &remote_name) {
+                            if let Ok(normalized) = crate::repo_url::normalize_repo_url(&url) {
+                                attrs = attrs.repo_url(normalized);
+                            }
+                        }
+                    }
+                }
+
+                crate::metrics::record(values, attrs);
+            }
+        }
     }
 
     let agent_tool = if kind != CheckpointKind::Human

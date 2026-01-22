@@ -6,8 +6,13 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
+use crate::metrics::{MetricEvent, METRICS_API_VERSION};
+
 pub mod flush;
 pub mod wrapper_performance_targets;
+
+/// Maximum events per metrics envelope
+pub const MAX_METRICS_PER_ENVELOPE: usize = 250;
 
 #[derive(Serialize, Deserialize, Clone)]
 struct ErrorEnvelope {
@@ -43,12 +48,22 @@ struct PerformanceEnvelope {
     tags: Option<HashMap<String, String>>,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+struct MetricsEnvelope {
+    #[serde(rename = "type")]
+    event_type: String,
+    timestamp: String,
+    version: u8,
+    events: Vec<MetricEvent>,
+}
+
 #[derive(Clone)]
 enum LogEnvelope {
     Error(ErrorEnvelope),
     Performance(PerformanceEnvelope),
     #[allow(dead_code)]
     Message(MessageEnvelope),
+    Metrics(MetricsEnvelope),
 }
 
 impl LogEnvelope {
@@ -57,6 +72,7 @@ impl LogEnvelope {
             LogEnvelope::Error(e) => serde_json::to_value(e).ok(),
             LogEnvelope::Performance(p) => serde_json::to_value(p).ok(),
             LogEnvelope::Message(m) => serde_json::to_value(m).ok(),
+            LogEnvelope::Metrics(m) => serde_json::to_value(m).ok(),
         }
     }
 }
@@ -185,8 +201,17 @@ pub fn log_message(message: &str, level: &str, context: Option<serde_json::Value
 
 /// Spawn a background process to flush logs to Sentry
 pub fn spawn_background_flush() {
-    // Always spawn flush process - it will handle OSS/Enterprise DSN logic
-    // and cleanup when telemetry_oss is "off"
+    // Skip flush in test builds to prevent race conditions during test cleanup.
+    // Tests spawn git-ai as a subprocess which calls this function. If the background
+    // flush process is still starting when TestRepo::drop() runs, file handles may
+    // remain open causing "Directory not empty" errors. Tests set GIT_AI_TEST_DB_PATH
+    // to isolate their database, so we use that as the test detection mechanism.
+    // This check is compiled out of release builds since tests only run in debug mode.
+    #[cfg(debug_assertions)]
+    if std::env::var("GIT_AI_TEST_DB_PATH").is_ok() {
+        return;
+    }
+
     use std::process::Command;
 
     if let Ok(exe) = crate::utils::current_git_ai_exe() {
@@ -195,5 +220,28 @@ pub fn spawn_background_flush() {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn();
+    }
+}
+
+/// Log a batch of metric events to the observability log file.
+///
+/// Events are batched into envelopes of up to 250 events each.
+/// The flush-logs command will then upload them to the API or
+/// store them in SQLite for later upload.
+pub fn log_metrics(events: Vec<MetricEvent>) {
+    if events.is_empty() {
+        return;
+    }
+
+    // Split into chunks of MAX_METRICS_PER_ENVELOPE
+    for chunk in events.chunks(MAX_METRICS_PER_ENVELOPE) {
+        let envelope = MetricsEnvelope {
+            event_type: "metrics".to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            version: METRICS_API_VERSION,
+            events: chunk.to_vec(),
+        };
+
+        append_envelope(LogEnvelope::Metrics(envelope));
     }
 }

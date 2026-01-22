@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use dirs;
+use uuid::Uuid;
 
 use glob::Pattern;
 use serde::{Deserialize, Serialize};
@@ -36,6 +37,8 @@ pub struct Config {
 pub enum UpdateChannel {
     Latest,
     Next,
+    EnterpriseLatest,
+    EnterpriseNext,
 }
 
 impl UpdateChannel {
@@ -43,6 +46,8 @@ impl UpdateChannel {
         match self {
             UpdateChannel::Latest => "latest",
             UpdateChannel::Next => "next",
+            UpdateChannel::EnterpriseLatest => "enterprise-latest",
+            UpdateChannel::EnterpriseNext => "enterprise-next",
         }
     }
 
@@ -50,6 +55,8 @@ impl UpdateChannel {
         match input.trim().to_lowercase().as_str() {
             "latest" => Some(UpdateChannel::Latest),
             "next" => Some(UpdateChannel::Next),
+            "enterprise-latest" => Some(UpdateChannel::EnterpriseLatest),
+            "enterprise-next" => Some(UpdateChannel::EnterpriseNext),
             _ => None,
         }
     }
@@ -528,24 +535,75 @@ pub fn config_file_path_public() -> Option<PathBuf> {
     config_file_path()
 }
 
-/// Returns the path to the internal state directory (~/.git-ai/internal)
-/// This is where git-ai stores internal files like distinct_id, update_check, etc.
-pub fn internal_dir_path() -> Option<PathBuf> {
+/// Returns the path to the git-ai base directory (~/.git-ai)
+pub fn git_ai_dir_path() -> Option<PathBuf> {
     #[cfg(windows)]
     {
         let home = env::var("USERPROFILE").ok()?;
-        Some(Path::new(&home).join(".git-ai").join("internal"))
+        Some(Path::new(&home).join(".git-ai"))
     }
     #[cfg(not(windows))]
     {
         let home = env::var("HOME").ok()?;
-        Some(Path::new(&home).join(".git-ai").join("internal"))
+        Some(Path::new(&home).join(".git-ai"))
     }
+}
+
+/// Returns the path to the internal state directory (~/.git-ai/internal)
+/// This is where git-ai stores internal files like distinct_id, update_check, etc.
+pub fn internal_dir_path() -> Option<PathBuf> {
+    git_ai_dir_path().map(|dir| dir.join("internal"))
+}
+
+/// Returns the path to the skills directory (~/.git-ai/skills)
+/// This is where git-ai installs skills for Claude Code and other agents
+pub fn skills_dir_path() -> Option<PathBuf> {
+    git_ai_dir_path().map(|dir| dir.join("skills"))
 }
 
 /// Public accessor for ID file path (~/.git-ai/internal/distinct_id)
 pub fn id_file_path() -> Option<PathBuf> {
     internal_dir_path().map(|dir| dir.join("distinct_id"))
+}
+
+/// Cache for the distinct_id to avoid repeated file reads
+static DISTINCT_ID: OnceLock<String> = OnceLock::new();
+
+/// Get or create the distinct_id (UUID) from ~/.git-ai/internal/distinct_id
+/// If the file doesn't exist, generates a new UUID and writes it to the file.
+/// The result is cached for the lifetime of the process.
+pub fn get_or_create_distinct_id() -> String {
+    DISTINCT_ID
+        .get_or_init(|| {
+            let id_path = match id_file_path() {
+                Some(path) => path,
+                None => return "unknown".to_string(),
+            };
+
+            // Try to read existing ID
+            if let Ok(existing_id) = fs::read_to_string(&id_path) {
+                let trimmed = existing_id.trim();
+                if !trimmed.is_empty() {
+                    return trimmed.to_string();
+                }
+            }
+
+            // Generate new UUID
+            let new_id = Uuid::new_v4().to_string();
+
+            // Ensure directory exists
+            if let Some(parent) = id_path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+
+            // Write the new ID to file
+            if let Err(e) = fs::write(&id_path, &new_id) {
+                eprintln!("Warning: Failed to write distinct_id file: {}", e);
+            }
+
+            new_id
+        })
+        .clone()
 }
 
 /// Returns the path to the update check cache file (~/.git-ai/internal/update_check)
@@ -844,5 +902,40 @@ mod tests {
         assert!(config.exclude_prompts_in_repositories[0].matches("https://github.com/private/repo"));
         // Pattern should not match other repos
         assert!(!config.exclude_prompts_in_repositories[0].matches("https://github.com/public/repo"));
+    }
+
+    #[test]
+    fn test_update_channel_default_is_latest() {
+        let channel = UpdateChannel::default();
+        assert_eq!(channel, UpdateChannel::Latest);
+        assert_eq!(channel.as_str(), "latest");
+    }
+
+    #[test]
+    fn test_update_channel_enterprise_latest_maps_to_enterprise_latest() {
+        let channel = UpdateChannel::from_str("enterprise-latest").unwrap();
+        assert_eq!(channel, UpdateChannel::EnterpriseLatest);
+        assert_eq!(channel.as_str(), "enterprise-latest");
+    }
+
+    #[test]
+    fn test_update_channel_enterprise_next_maps_to_enterprise_next() {
+        let channel = UpdateChannel::from_str("enterprise-next").unwrap();
+        assert_eq!(channel, UpdateChannel::EnterpriseNext);
+        assert_eq!(channel.as_str(), "enterprise-next");
+    }
+
+    #[test]
+    fn test_update_channel_enterprise_latest_parses() {
+        let channel = UpdateChannel::from_str("enterprise-latest").unwrap();
+        assert_eq!(channel, UpdateChannel::EnterpriseLatest);
+        assert_eq!(channel.as_str(), "enterprise-latest");
+    }
+
+    #[test]
+    fn test_update_channel_enterprise_next_parses() {
+        let channel = UpdateChannel::from_str("enterprise-next").unwrap();
+        assert_eq!(channel, UpdateChannel::EnterpriseNext);
+        assert_eq!(channel.as_str(), "enterprise-next");
     }
 }

@@ -139,7 +139,10 @@ fn should_check_for_updates(channel: UpdateChannel, cache: Option<&UpdateCache>)
 }
 
 fn semver_from_tag(tag: &str) -> String {
-    let trimmed = tag.trim().trim_start_matches('v');
+    let trimmed = tag
+        .trim()
+        .trim_start_matches("enterprise-")
+        .trim_start_matches('v');
     trimmed
         .split(|c| c == '-' || c == '+')
         .next()
@@ -218,8 +221,7 @@ fn fetch_and_verify_checksums(
 ) -> Result<HashMap<String, String>, String> {
     let endpoint = format!("/worker/releases/{}/download/SHA256SUMS", channel);
 
-    let response = minreq::get(format!("{}{}", api_base_url, endpoint))
-        .with_header("User-Agent", format!("git-ai/{}", env!("CARGO_PKG_VERSION")))
+    let response = ApiContext::http_get(&format!("{}{}", api_base_url, endpoint))
         .with_timeout(30)
         .send()
         .map_err(|e| format!("Failed to fetch SHA256SUMS: {}", e))?;
@@ -260,8 +262,7 @@ fn fetch_and_verify_install_script(
 
     let endpoint = format!("/worker/releases/{}/download/{}", channel, script_name);
 
-    let response = minreq::get(format!("{}{}", api_base_url, endpoint))
-        .with_header("User-Agent", format!("git-ai/{}", env!("CARGO_PKG_VERSION")))
+    let response = ApiContext::http_get(&format!("{}{}", api_base_url, endpoint))
         .with_timeout(30)
         .send()
         .map_err(|e| format!("Failed to fetch {}: {}", script_name, e))?;
@@ -791,6 +792,8 @@ mod tests {
         assert_eq!(semver_from_tag("v1.2.3"), "1.2.3");
         assert_eq!(semver_from_tag("1.2.3"), "1.2.3");
         assert_eq!(semver_from_tag("v1.2.3-next-abc"), "1.2.3");
+        assert_eq!(semver_from_tag("enterprise-v1.2.3"), "1.2.3");
+        assert_eq!(semver_from_tag("enterprise-v1.2.3-next-abc"), "1.2.3");
     }
 
     #[test]
@@ -856,6 +859,76 @@ mod tests {
                 test_checksum, test_checksum
             )),
             UpdateChannel::Latest,
+            true,
+        );
+        assert_eq!(action, UpgradeAction::ForceReinstall);
+
+        clear_test_cache_dir();
+    }
+
+    #[test]
+    fn test_run_impl_with_url_enterprise_channels() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        set_test_cache_dir(&temp_dir);
+
+        let mock_url = |body: &str| format!("mock://{}", body);
+        let current = env!("CARGO_PKG_VERSION");
+        let test_checksum = "a".repeat(64); // Valid SHA256 length
+
+        // Newer version available - should upgrade
+        let action = run_impl_with_url(
+            false,
+            &mock_url(&format!(
+                r#"{{"channels":{{"enterprise-latest":{{"version":"v999.0.0","checksum":"{}"}},"enterprise-next":{{"version":"v999.0.0-next-deadbeef","checksum":"{}"}}}}}}"#,
+                test_checksum, test_checksum
+            )),
+            UpdateChannel::EnterpriseLatest,
+            true,
+        );
+        assert_eq!(action, UpgradeAction::UpgradeAvailable);
+
+        // Same version without --force - already latest
+        let same_version_payload = format!(
+            "{{\"channels\":{{\"enterprise-latest\":{{\"version\":\"v{}\",\"checksum\":\"{}\"}},\"enterprise-next\":{{\"version\":\"v{}-next-deadbeef\",\"checksum\":\"{}\"}}}}}}",
+            current, test_checksum, current, test_checksum
+        );
+        let action = run_impl_with_url(
+            false,
+            &mock_url(&same_version_payload),
+            UpdateChannel::EnterpriseLatest,
+            true,
+        );
+        assert_eq!(action, UpgradeAction::AlreadyLatest);
+
+        // Same version with --force - force reinstall
+        let action = run_impl_with_url(
+            true,
+            &mock_url(&same_version_payload),
+            UpdateChannel::EnterpriseLatest,
+            true,
+        );
+        assert_eq!(action, UpgradeAction::ForceReinstall);
+
+        // Older version without --force - running newer version
+        let action = run_impl_with_url(
+            false,
+            &mock_url(&format!(
+                r#"{{"channels":{{"enterprise-latest":{{"version":"v1.0.9","checksum":"{}"}},"enterprise-next":{{"version":"v1.0.9-next-deadbeef","checksum":"{}"}}}}}}"#,
+                test_checksum, test_checksum
+            )),
+            UpdateChannel::EnterpriseLatest,
+            true,
+        );
+        assert_eq!(action, UpgradeAction::RunningNewerVersion);
+
+        // Older version with --force - force reinstall
+        let action = run_impl_with_url(
+            true,
+            &mock_url(&format!(
+                r#"{{"channels":{{"enterprise-latest":{{"version":"v1.0.9","checksum":"{}"}},"enterprise-next":{{"version":"v1.0.9-next-deadbeef","checksum":"{}"}}}}}}"#,
+                test_checksum, test_checksum
+            )),
+            UpdateChannel::EnterpriseLatest,
             true,
         );
         assert_eq!(action, UpgradeAction::ForceReinstall);
