@@ -31,7 +31,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm http://usegitai.com/
 ### Documentation https://usegitai.com/docs
 - [AI Blame](https://usegitai.com/docs/cli/ai-blame)
 - [Cross-Agent Prompt Saving](https://usegitai.com/docs/cli/prompt-storage)
-- [How Git AI Works ](https://usegitai.com/docs/cli/how-git-ai-works)
 - [CLI Reference](https://usegitai.com/docs/cli/reference)
 - [Configuring Git AI for the enterprise](https://usegitai.com/docs/cli/configuration)
 
