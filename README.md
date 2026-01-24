@@ -34,13 +34,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm http://usegitai.com/
 - [CLI Reference](https://usegitai.com/docs/cli/reference)
 - [Configuring Git AI for the enterprise](https://usegitai.com/docs/cli/configuration)
 
-### Next step: **Just code and commit!**
+### Just Install and Commit
 
-Once installed, all your Coding Agents will call Git AI in the background and mark the code they generate AI-authored.
-
-After you commit, `git-ai` adds a git note to track which lines were AI-authored and scores each commit:
+Build as usual. Just prompt, edit and commit. Git AI will track every line of AI-Code and record the Coding Agent, Model, and prompt that generated it. 
 
 <img src="https://github.com/acunniffe/git-ai/raw/main/assets/docs/graph.jpg" width="400" />
+
+#### How Does it work? 
+
+Supported Coding Agents call Git AI and mark the lines they insert as AI-generated. 
+
+On commit, Git AI saves the final AI-attributions into a Git Note. These notes power AI-Blame, AI contribution stats, and more. The CLI makes sure these notes are preserved through rebases, merges, squashes, cherry-picks, etc.
+
+![Git Tree](https://github.com/user-attachments/assets/edd20990-ec0b-4a53-afa4-89fa33de9541)
+
+The format of the notes is outlined here in the [Git AI Standard v3.0.0](https://github.com/git-ai-project/git-ai/blob/main/specs/git_ai_standard_v3.0.0.md)
 
 ## Installing the Stats Bot (early access)
 
