@@ -11,5 +11,10 @@
     <extensions defaultExtensionNs="com.intellij">
         <toolWindow factoryClass="org.jetbrains.plugins.template.toolWindow.MyToolWindowFactory" id="MyToolWindow"/>
         <postStartupActivity implementation="org.jetbrains.plugins.template.startup.MyProjectActivity" />
+        <applicationService
+            serviceImplementation="org.jetbrains.plugins.template.services.DocumentChangeTrackerService"/>
+        <applicationService
+            serviceImplementation="org.jetbrains.plugins.template.services.GitAiService"/>
+        <postStartupActivity implementation="org.jetbrains.plugins.template.startup.DocumentTrackerStartupActivity"/>
     </extensions>
 </idea-plugin>

@@ -44,6 +44,9 @@ dependencies {
         // Plugin Dependencies. Uses `platformPlugins` property from the gradle.properties file for plugin from JetBrains Marketplace.
         plugins(providers.gradleProperty("platformPlugins").map { it.split(',') })
 
+        // Development-only plugin for testing (not a release dependency)
+        plugin("com.github.copilot", "1.5.63-243")
+
         // Module Dependencies. Uses `platformBundledModules` property from the gradle.properties file for bundled IntelliJ Platform modules.
         bundledModules(providers.gradleProperty("platformBundledModules").map { it.split(',') })
 
@@ -53,6 +56,9 @@ dependencies {
 
 // Configure IntelliJ Platform Gradle Plugin - read more: https://plugins.jetbrains.com/docs/intellij/tools-intellij-platform-gradle-plugin-extension.html
 intellijPlatform {
+    // Use a persistent sandbox outside of build/ so manually installed plugins survive rebuilds
+    sandboxContainer = layout.projectDirectory.dir(".sandbox")
+
     pluginConfiguration {
         name = providers.gradleProperty("pluginName")
         version = providers.gradleProperty("pluginVersion")
@@ -134,6 +140,7 @@ tasks {
     publishPlugin {
         dependsOn(patchChangelog)
     }
+
 }
 
 intellijPlatformTesting {

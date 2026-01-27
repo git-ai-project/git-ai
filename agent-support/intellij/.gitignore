@@ -4,4 +4,5 @@
 .intellijPlatform
 .kotlin
 .qodana
+.sandbox
 build
