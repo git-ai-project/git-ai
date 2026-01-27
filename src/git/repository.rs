@@ -1068,18 +1068,6 @@ impl Repository {
         }
     }
 
-    // Unused function to set a git config value
-    #[allow(dead_code)]
-    pub fn config_set_str(&self, key: &str, value: &str) -> Result<(), GitAiError> {
-        let mut args = self.global_args_for_exec();
-        args.push("config".to_string());
-        args.push("set".to_string());
-        args.push(key.to_string());
-        args.push(value.to_string());
-        exec_git(&args)?;
-        Ok(())
-    }
-
     /// Get the git version as a tuple (major, minor, patch).
     /// Returns None if the version cannot be parsed.
     pub fn git_version(&self) -> Option<(u32, u32, u32)> {
