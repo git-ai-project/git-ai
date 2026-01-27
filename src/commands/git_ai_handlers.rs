@@ -17,10 +17,102 @@ use crate::git::repository::CommitRange;
 use crate::observability::wrapper_performance_targets::log_performance_for_checkpoint;
 use crate::observability::{self, log_message};
 use crate::utils::is_interactive_terminal;
+use std::collections::HashMap;
 use std::env;
 use std::io::IsTerminal;
 use std::io::Read;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Find the git repository root for a given file path by traversing up the directory tree.
+/// Returns None if no git repository is found.
+fn find_git_repo_for_path(file_path: &str) -> Option<String> {
+    let path = Path::new(file_path);
+
+    // If it's a relative path, try to make it absolute using current dir
+    let abs_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+
+    // Start from the file's parent directory (or the path itself if it's a directory)
+    let start_dir = if abs_path.is_file() {
+        abs_path.parent()?.to_path_buf()
+    } else if abs_path.is_dir() {
+        abs_path.clone()
+    } else {
+        // Path doesn't exist yet, start from its parent
+        abs_path.parent()?.to_path_buf()
+    };
+
+    let mut current = Some(start_dir.as_path());
+    while let Some(dir) = current {
+        let git_dir = dir.join(".git");
+        if git_dir.exists() {
+            return Some(dir.to_string_lossy().to_string());
+        }
+        current = dir.parent();
+    }
+
+    None
+}
+
+/// Group file paths by their containing git repository.
+/// Returns a HashMap where keys are repository root paths and values are vectors of file paths.
+fn group_files_by_repository(file_paths: &[String]) -> HashMap<String, Vec<String>> {
+    let mut repo_groups: HashMap<String, Vec<String>> = HashMap::new();
+
+    for file_path in file_paths {
+        if let Some(repo_root) = find_git_repo_for_path(file_path) {
+            repo_groups
+                .entry(repo_root)
+                .or_insert_with(Vec::new)
+                .push(file_path.clone());
+        }
+        // Files without a git repository are silently skipped
+    }
+
+    repo_groups
+}
+
+/// Create a filtered AgentRunResult for a specific repository, containing only files from that repo.
+fn filter_agent_run_for_repo(
+    original: &AgentRunResult,
+    repo_root: &str,
+    files_for_repo: &[String],
+) -> AgentRunResult {
+    let files_set: std::collections::HashSet<&String> = files_for_repo.iter().collect();
+
+    AgentRunResult {
+        agent_id: original.agent_id.clone(),
+        agent_metadata: original.agent_metadata.clone(),
+        checkpoint_kind: original.checkpoint_kind,
+        transcript: original.transcript.clone(),
+        repo_working_dir: Some(repo_root.to_string()),
+        edited_filepaths: original.edited_filepaths.as_ref().map(|paths| {
+            paths
+                .iter()
+                .filter(|p| files_set.contains(p))
+                .cloned()
+                .collect()
+        }),
+        will_edit_filepaths: original.will_edit_filepaths.as_ref().map(|paths| {
+            paths
+                .iter()
+                .filter(|p| files_set.contains(p))
+                .cloned()
+                .collect()
+        }),
+        dirty_files: original.dirty_files.as_ref().map(|dirty| {
+            dirty
+                .iter()
+                .filter(|(k, _)| files_set.contains(k))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        }),
+    }
+}
 
 pub fn handle_git_ai(args: &[String]) {
     if args.is_empty() {
@@ -432,98 +524,212 @@ fn handle_checkpoint(args: &[String]) {
         }
     }
 
-    let final_working_dir = agent_run_result
-        .as_ref()
-        .and_then(|r| r.repo_working_dir.clone())
-        .unwrap_or_else(|| repository_working_dir);
-    // Find the git repository
-    let repo = match find_repository_in_path(&final_working_dir) {
-        Ok(repo) => repo,
-        Err(e) => {
-            eprintln!("Failed to find repository: {}", e);
-            std::process::exit(0);
-        }
-    };
-
     let checkpoint_kind = agent_run_result
         .as_ref()
         .map(|r| r.checkpoint_kind)
         .unwrap_or(CheckpointKind::Human);
 
-    if CheckpointKind::Human == checkpoint_kind && agent_run_result.is_none() {
-        // Parse pathspecs after `--` for human checkpoints
-        let will_edit_filepaths = if let Some(separator_pos) = args.iter().position(|a| a == "--") {
-            let paths: Vec<String> = args[separator_pos + 1..]
-                .iter()
-                .filter(|arg| !arg.starts_with("--"))
-                .cloned()
-                .collect();
-            if paths.is_empty() { None } else { Some(paths) }
-        } else {
-            Some(get_all_files_for_mock_ai(&final_working_dir))
-        };
+    // Collect all file paths from agent run result for multi-repo grouping
+    let all_file_paths: Vec<String> = agent_run_result
+        .as_ref()
+        .map(|r| {
+            let mut paths = Vec::new();
+            if let Some(ref edited) = r.edited_filepaths {
+                paths.extend(edited.clone());
+            }
+            if let Some(ref will_edit) = r.will_edit_filepaths {
+                paths.extend(will_edit.clone());
+            }
+            paths
+        })
+        .unwrap_or_default();
 
-        agent_run_result = Some(AgentRunResult {
-            agent_id: AgentId {
-                tool: "mock_ai".to_string(),
-                id: format!(
-                    "ai-thread-{}",
-                    SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map(|d| d.as_nanos())
-                        .unwrap_or_else(|_| 0)
-                ),
-                model: "unknown".to_string(),
-            },
-            agent_metadata: None,
-            checkpoint_kind: CheckpointKind::Human,
-            transcript: None,
-            will_edit_filepaths: Some(will_edit_filepaths.unwrap_or_default()),
-            edited_filepaths: None,
-            repo_working_dir: Some(final_working_dir),
-            dirty_files: None,
-        });
-    }
+    // Group files by their containing git repository
+    let repo_groups = if all_file_paths.is_empty() {
+        // No specific file paths provided, use the working directory approach
+        HashMap::new()
+    } else {
+        group_files_by_repository(&all_file_paths)
+    };
 
-    // Get the current user name from git config
-    let default_user_name = match repo.config_get_str("user.name") {
-        Ok(Some(name)) if !name.trim().is_empty() => name,
-        _ => {
-            eprintln!("Warning: git user.name not configured. Using 'unknown' as author.");
-            "unknown".to_string()
-        }
+    // Determine the default working directory
+    let final_working_dir = agent_run_result
+        .as_ref()
+        .and_then(|r| r.repo_working_dir.clone())
+        .unwrap_or_else(|| repository_working_dir.clone());
+
+    // If we have files grouped by repository, process each repository
+    // Otherwise, fall back to the single-repository approach
+    let repos_to_process: Vec<(String, Option<Vec<String>>)> = if repo_groups.is_empty() {
+        // Try to find a single repository from the working directory
+        vec![(final_working_dir.clone(), None)]
+    } else {
+        // Process each repository with its files
+        repo_groups
+            .into_iter()
+            .map(|(repo_path, files)| (repo_path, Some(files)))
+            .collect()
     };
 
     let checkpoint_start = std::time::Instant::now();
     let agent_tool = agent_run_result.as_ref().map(|r| r.agent_id.tool.clone());
-    let checkpoint_result = commands::checkpoint::run(
-        &repo,
-        &default_user_name,
-        checkpoint_kind,
-        show_working_log,
-        reset,
-        false,
-        agent_run_result,
-        false,
-    );
-    match checkpoint_result {
-        Ok((_, files_edited, _)) => {
-            let elapsed = checkpoint_start.elapsed();
-            log_performance_for_checkpoint(files_edited, elapsed, checkpoint_kind);
-            eprintln!("Checkpoint completed in {:?}", elapsed);
+    let mut total_files_edited = 0;
+    let mut any_checkpoint_succeeded = false;
+    let num_repos = repos_to_process.len();
+
+    for (repo_path, files_for_repo) in repos_to_process {
+        // Find the git repository for this path
+        let repo = match find_repository_in_path(&repo_path) {
+            Ok(repo) => repo,
+            Err(e) => {
+                // If this is the only repo and we can't find it, fail
+                // Otherwise, log a warning and continue with other repos
+                if num_repos == 1 {
+                    eprintln!("Failed to find repository: {}", e);
+                    std::process::exit(0);
+                } else {
+                    eprintln!(
+                        "Warning: Failed to find repository at {}: {}. Skipping.",
+                        repo_path, e
+                    );
+                    continue;
+                }
+            }
+        };
+
+        // Get the current user name from git config for this repo
+        let default_user_name = match repo.config_get_str("user.name") {
+            Ok(Some(name)) if !name.trim().is_empty() => name,
+            _ => {
+                eprintln!("Warning: git user.name not configured. Using 'unknown' as author.");
+                "unknown".to_string()
+            }
+        };
+
+        // Prepare agent_run_result for this specific repository
+        let repo_agent_run_result = if let Some(ref original_result) = agent_run_result {
+            if let Some(ref files) = files_for_repo {
+                // Filter agent run result to only include files for this repo
+                Some(filter_agent_run_for_repo(original_result, &repo_path, files))
+            } else {
+                // No specific files, use the original result for human checkpoints
+                let mut result = original_result.clone();
+                if result.repo_working_dir.is_none() {
+                    result.repo_working_dir = Some(repo_path.clone());
+                }
+
+                // Handle human checkpoint setup if needed
+                if CheckpointKind::Human == checkpoint_kind && result.will_edit_filepaths.is_none()
+                {
+                    let will_edit_filepaths =
+                        if let Some(separator_pos) = args.iter().position(|a| a == "--") {
+                            let paths: Vec<String> = args[separator_pos + 1..]
+                                .iter()
+                                .filter(|arg| !arg.starts_with("--"))
+                                .cloned()
+                                .collect();
+                            if paths.is_empty() {
+                                None
+                            } else {
+                                Some(paths)
+                            }
+                        } else {
+                            Some(get_all_files_for_mock_ai(&repo_path))
+                        };
+                    result.will_edit_filepaths = Some(will_edit_filepaths.unwrap_or_default());
+                }
+                Some(result)
+            }
+        } else if CheckpointKind::Human == checkpoint_kind {
+            // Create a new agent run result for human checkpoints
+            let will_edit_filepaths =
+                if let Some(separator_pos) = args.iter().position(|a| a == "--") {
+                    let paths: Vec<String> = args[separator_pos + 1..]
+                        .iter()
+                        .filter(|arg| !arg.starts_with("--"))
+                        .cloned()
+                        .collect();
+                    if paths.is_empty() {
+                        None
+                    } else {
+                        Some(paths)
+                    }
+                } else {
+                    Some(get_all_files_for_mock_ai(&repo_path))
+                };
+
+            Some(AgentRunResult {
+                agent_id: AgentId {
+                    tool: "mock_ai".to_string(),
+                    id: format!(
+                        "ai-thread-{}",
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_nanos())
+                            .unwrap_or_else(|_| 0)
+                    ),
+                    model: "unknown".to_string(),
+                },
+                agent_metadata: None,
+                checkpoint_kind: CheckpointKind::Human,
+                transcript: None,
+                will_edit_filepaths: Some(will_edit_filepaths.unwrap_or_default()),
+                edited_filepaths: None,
+                repo_working_dir: Some(repo_path.clone()),
+                dirty_files: None,
+            })
+        } else {
+            None
+        };
+
+        let checkpoint_result = commands::checkpoint::run(
+            &repo,
+            &default_user_name,
+            checkpoint_kind,
+            show_working_log,
+            reset,
+            false,
+            repo_agent_run_result,
+            false,
+        );
+
+        match checkpoint_result {
+            Ok((_, files_edited, _)) => {
+                total_files_edited += files_edited;
+                any_checkpoint_succeeded = true;
+                if num_repos > 1 {
+                    eprintln!(
+                        "Checkpoint completed for repository: {} ({} files)",
+                        repo_path, files_edited
+                    );
+                }
+            }
+            Err(e) => {
+                if num_repos == 1 {
+                    let elapsed = checkpoint_start.elapsed();
+                    eprintln!("Checkpoint failed after {:?} with error {}", elapsed, e);
+                    let context = serde_json::json!({
+                        "function": "checkpoint",
+                        "agent": agent_tool.clone().unwrap_or_default(),
+                        "duration": elapsed.as_millis(),
+                        "checkpoint_kind": format!("{:?}", checkpoint_kind)
+                    });
+                    observability::log_error(&e, Some(context));
+                    std::process::exit(0);
+                } else {
+                    eprintln!(
+                        "Warning: Checkpoint failed for repository {}: {}",
+                        repo_path, e
+                    );
+                }
+            }
         }
-        Err(e) => {
-            let elapsed = checkpoint_start.elapsed();
-            eprintln!("Checkpoint failed after {:?} with error {}", elapsed, e);
-            let context = serde_json::json!({
-                "function": "checkpoint",
-                "agent": agent_tool.unwrap_or_default(),
-                "duration": elapsed.as_millis(),
-                "checkpoint_kind": format!("{:?}", checkpoint_kind)
-            });
-            observability::log_error(&e, Some(context));
-            std::process::exit(0);
-        }
+    }
+
+    let elapsed = checkpoint_start.elapsed();
+    if any_checkpoint_succeeded {
+        log_performance_for_checkpoint(total_files_edited, elapsed, checkpoint_kind);
+        eprintln!("Checkpoint completed in {:?}", elapsed);
     }
 }
 
@@ -848,5 +1054,165 @@ fn handle_show_transcript(args: &[String]) {
             eprintln!("Error: {}", e);
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn setup_multi_repo_workspace() -> (TempDir, String, String, String) {
+        // Create a workspace directory with multiple git repos
+        let workspace = TempDir::new().unwrap();
+        let workspace_path = workspace.path();
+
+        // Create repo A
+        let repo_a_path = workspace_path.join("project-backend");
+        fs::create_dir_all(&repo_a_path).unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&repo_a_path)
+            .output()
+            .unwrap();
+        fs::write(repo_a_path.join("src/main.rs"), "fn main() {}").ok();
+
+        // Create repo B
+        let repo_b_path = workspace_path.join("project-frontend");
+        fs::create_dir_all(&repo_b_path).unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&repo_b_path)
+            .output()
+            .unwrap();
+        fs::write(repo_b_path.join("src/app.js"), "console.log('hello');").ok();
+
+        // Create repo C
+        let repo_c_path = workspace_path.join("shared-library");
+        fs::create_dir_all(&repo_c_path).unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&repo_c_path)
+            .output()
+            .unwrap();
+        fs::write(repo_c_path.join("lib.py"), "def foo(): pass").ok();
+
+        (
+            workspace,
+            repo_a_path.to_string_lossy().to_string(),
+            repo_b_path.to_string_lossy().to_string(),
+            repo_c_path.to_string_lossy().to_string(),
+        )
+    }
+
+    #[test]
+    fn test_find_git_repo_for_path_finds_repo() {
+        let (workspace, repo_a, _repo_b, _repo_c) = setup_multi_repo_workspace();
+
+        // Create a file in repo A
+        let file_path = format!("{}/src/main.rs", repo_a);
+        fs::create_dir_all(format!("{}/src", repo_a)).unwrap();
+        fs::write(&file_path, "fn main() {}").unwrap();
+
+        let found_repo = find_git_repo_for_path(&file_path);
+        assert!(found_repo.is_some());
+        assert_eq!(found_repo.unwrap(), repo_a);
+
+        drop(workspace);
+    }
+
+    #[test]
+    fn test_find_git_repo_for_path_returns_none_for_non_git_dir() {
+        let workspace = TempDir::new().unwrap();
+        let non_git_path = workspace.path().join("not-a-repo/file.txt");
+        fs::create_dir_all(workspace.path().join("not-a-repo")).unwrap();
+        fs::write(&non_git_path, "content").unwrap();
+
+        let found_repo = find_git_repo_for_path(non_git_path.to_str().unwrap());
+        assert!(found_repo.is_none());
+    }
+
+    #[test]
+    fn test_group_files_by_repository() {
+        let (workspace, repo_a, repo_b, repo_c) = setup_multi_repo_workspace();
+
+        // Create files in each repo
+        fs::create_dir_all(format!("{}/src", repo_a)).unwrap();
+        fs::create_dir_all(format!("{}/src", repo_b)).unwrap();
+        let file_a = format!("{}/src/main.rs", repo_a);
+        let file_b = format!("{}/src/app.js", repo_b);
+        let file_c = format!("{}/lib.py", repo_c);
+        fs::write(&file_a, "fn main() {}").unwrap();
+        fs::write(&file_b, "console.log('hello');").unwrap();
+        fs::write(&file_c, "def foo(): pass").unwrap();
+
+        let files = vec![file_a.clone(), file_b.clone(), file_c.clone()];
+        let grouped = group_files_by_repository(&files);
+
+        // Should have 3 groups, one per repo
+        assert_eq!(grouped.len(), 3);
+
+        // Each repo should have 1 file
+        assert!(grouped.contains_key(&repo_a));
+        assert!(grouped.contains_key(&repo_b));
+        assert!(grouped.contains_key(&repo_c));
+
+        assert_eq!(grouped.get(&repo_a).unwrap().len(), 1);
+        assert_eq!(grouped.get(&repo_b).unwrap().len(), 1);
+        assert_eq!(grouped.get(&repo_c).unwrap().len(), 1);
+
+        drop(workspace);
+    }
+
+    #[test]
+    fn test_group_files_by_repository_multiple_files_same_repo() {
+        let (workspace, repo_a, _repo_b, _repo_c) = setup_multi_repo_workspace();
+
+        // Create multiple files in repo A
+        fs::create_dir_all(format!("{}/src", repo_a)).unwrap();
+        let file_1 = format!("{}/src/main.rs", repo_a);
+        let file_2 = format!("{}/src/lib.rs", repo_a);
+        let file_3 = format!("{}/README.md", repo_a);
+        fs::write(&file_1, "fn main() {}").unwrap();
+        fs::write(&file_2, "pub fn lib() {}").unwrap();
+        fs::write(&file_3, "# README").unwrap();
+
+        let files = vec![file_1, file_2, file_3];
+        let grouped = group_files_by_repository(&files);
+
+        // Should have 1 group with 3 files
+        assert_eq!(grouped.len(), 1);
+        assert!(grouped.contains_key(&repo_a));
+        assert_eq!(grouped.get(&repo_a).unwrap().len(), 3);
+
+        drop(workspace);
+    }
+
+    #[test]
+    fn test_group_files_by_repository_filters_non_git_files() {
+        let (workspace, repo_a, _repo_b, _repo_c) = setup_multi_repo_workspace();
+
+        // Create a file in repo A
+        fs::create_dir_all(format!("{}/src", repo_a)).unwrap();
+        let git_file = format!("{}/src/main.rs", repo_a);
+        fs::write(&git_file, "fn main() {}").unwrap();
+
+        // Create a file outside any git repo
+        let non_git_path = workspace.path().join("non-repo-file.txt");
+        fs::write(&non_git_path, "content").unwrap();
+
+        let files = vec![
+            git_file.clone(),
+            non_git_path.to_string_lossy().to_string(),
+        ];
+        let grouped = group_files_by_repository(&files);
+
+        // Should only have 1 group (repo A), the non-git file should be filtered out
+        assert_eq!(grouped.len(), 1);
+        assert!(grouped.contains_key(&repo_a));
+        assert_eq!(grouped.get(&repo_a).unwrap().len(), 1);
+
+        drop(workspace);
     }
 }
