@@ -19,56 +19,21 @@ object StackTraceAnalyzer {
     )
 
     private data class AgentPattern(
-        val name: String,
+        val name: String,  // Tool name for git-ai (lowercase with hyphens)
         val packagePatterns: List<String>,
         val classPatterns: List<String> = emptyList()
     )
 
     private val knownAgents = listOf(
         AgentPattern(
-            name = "GitHub Copilot",
+            name = "github-copilot-jetbrains",
             packagePatterns = listOf("com.github.copilot"),
             classPatterns = listOf("copilot")
         ),
         AgentPattern(
-            name = "Augment Code",
-            packagePatterns = listOf("com.augment", "co.augment"),
-            classPatterns = listOf("augment")
-        ),
-        AgentPattern(
-            name = "Tabnine",
-            packagePatterns = listOf("com.tabnine"),
-            classPatterns = listOf("tabnine")
-        ),
-        AgentPattern(
-            name = "Codeium",
-            packagePatterns = listOf("com.codeium"),
-            classPatterns = listOf("codeium")
-        ),
-        AgentPattern(
-            name = "AWS CodeWhisperer",
-            packagePatterns = listOf("software.aws.toolkits", "software.amazon.awssdk"),
-            classPatterns = listOf("codewhisperer", "amazonq")
-        ),
-        AgentPattern(
-            name = "JetBrains AI Assistant",
-            packagePatterns = listOf("com.intellij.ml", "com.jetbrains.ml"),
-            classPatterns = listOf("aiassistant", "mlcode")
-        ),
-        AgentPattern(
-            name = "Cursor",
-            packagePatterns = listOf("com.cursor"),
-            classPatterns = listOf("cursor")
-        ),
-        AgentPattern(
-            name = "Sourcegraph Cody",
-            packagePatterns = listOf("com.sourcegraph"),
-            classPatterns = listOf("cody", "sourcegraph")
-        ),
-        AgentPattern(
-            name = "Continue",
-            packagePatterns = listOf("com.continue"),
-            classPatterns = listOf("continue")
+            name = "junie",
+            packagePatterns = listOf("com.intellij.ml.llm.matterhorn.junie"),
+            classPatterns = listOf("junie")
         )
     )
 
@@ -102,24 +67,6 @@ object StackTraceAnalyzer {
                     relevantFrames.add(frame)
                     detectedAgent = agent.name
                     confidence = Confidence.MEDIUM
-                }
-            }
-        }
-
-        // If no specific agent detected, check for generic patterns
-        if (detectedAgent == null) {
-            for (frame in stackTrace) {
-                val className = frame.className.lowercase()
-                if (className.contains("completion") ||
-                    className.contains("inlay") ||
-                    className.contains("inline") ||
-                    className.contains("suggestion")
-                ) {
-                    relevantFrames.add(frame)
-                    if (confidence == Confidence.NONE) {
-                        confidence = Confidence.LOW
-                        detectedAgent = "Unknown AI Assistant (generic pattern)"
-                    }
                 }
             }
         }

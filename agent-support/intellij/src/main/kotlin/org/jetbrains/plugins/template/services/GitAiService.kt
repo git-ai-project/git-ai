@@ -17,6 +17,9 @@ class GitAiService {
     private val logger = thisLogger()
     private val minVersion = Version(1, 0, 23)
 
+    // Stable session ID based on when the service was initialized
+    val sessionId: String = System.currentTimeMillis().toString()
+
     @Volatile
     private var availabilityChecked = false
 

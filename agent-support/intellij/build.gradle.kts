@@ -44,8 +44,9 @@ dependencies {
         // Plugin Dependencies. Uses `platformPlugins` property from the gradle.properties file for plugin from JetBrains Marketplace.
         plugins(providers.gradleProperty("platformPlugins").map { it.split(',') })
 
-        // Development-only plugin for testing (not a release dependency)
+        // Development-only plugins for testing (not release dependencies)
         plugin("com.github.copilot", "1.5.63-243")
+        plugin("org.jetbrains.junie", "252.549.165")
 
         // Module Dependencies. Uses `platformBundledModules` property from the gradle.properties file for bundled IntelliJ Platform modules.
         bundledModules(providers.gradleProperty("platformBundledModules").map { it.split(',') })

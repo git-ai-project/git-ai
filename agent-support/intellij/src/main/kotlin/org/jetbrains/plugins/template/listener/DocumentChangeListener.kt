@@ -168,7 +168,8 @@ class DocumentChangeListener : BulkAwareDocumentListener.Simple {
         val input = AgentV1Input.AiAgent(
             repoWorkingDir = pending.workspaceRoot,
             editedFilepaths = listOf(relativePath),
-            agentName = pending.agentName.lowercase().replace(" ", "-"),
+            agentName = pending.agentName,  // Already formatted by StackTraceAnalyzer
+            conversationId = GitAiService.getInstance().sessionId,
             dirtyFiles = dirtyFiles
         )
 
