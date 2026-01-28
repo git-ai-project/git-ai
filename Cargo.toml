@@ -1,6 +1,6 @@
 [package]
 name = "git-ai"
-version = "1.0.40"
+version = "1.0.41"
 edition = "2024"
 
 [dependencies]
