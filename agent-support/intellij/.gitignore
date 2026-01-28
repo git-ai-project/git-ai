@@ -1,0 +1,8 @@
+.DS_Store
+.gradle
+.idea
+.intellijPlatform
+.kotlin
+.qodana
+.sandbox
+build

@@ -1,0 +1,15 @@
+<idea-plugin>
+    <id>com.usegitai.plugins.jetbrains</id>
+    <name>Git AI</name>
+    <vendor>Git AI</vendor>
+
+    <depends>com.intellij.modules.platform</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <applicationService
+            serviceImplementation="org.jetbrains.plugins.template.services.DocumentChangeTrackerService"/>
+        <applicationService
+            serviceImplementation="org.jetbrains.plugins.template.services.GitAiService"/>
+        <postStartupActivity implementation="org.jetbrains.plugins.template.startup.DocumentTrackerStartupActivity"/>
+    </extensions>
+</idea-plugin>
