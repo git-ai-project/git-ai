@@ -1531,6 +1531,20 @@ pub fn get_user(id: i32) -> Option<User> {
     None
 }
 
+worktree_test_wrappers! {
+    test_realistic_refactoring_sequence,
+    test_realistic_api_endpoint_expansion,
+    test_realistic_test_file_evolution,
+    test_realistic_config_file_with_comments,
+    test_realistic_jsx_component_development,
+    test_realistic_class_with_multiple_methods,
+    test_realistic_middleware_chain_development,
+    test_realistic_sql_migration_sequence,
+    test_realistic_refactoring_with_deletions,
+    test_realistic_formatting_and_whitespace_changes,
+    test_realistic_multi_file_commit,
+}
+
 pub fn get_user_by_email(email: &str) -> Option<User> {
     None
 }",

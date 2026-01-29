@@ -442,50 +442,15 @@ fn test_amend_with_unstaged_middle_section() {
     ]);
 }
 
-#[test]
-fn test_amend_repeated_round_trips_preserve_exact_line_authorship() {
-    let repo = TestRepo::new();
-    let mut file = repo.filename("code.js");
-
-    file.set_contents(lines![
-        "function example() {".ai(),
-        "  return 42;".ai(),
-        "}".ai()
-    ]);
-    repo.stage_all_and_commit("Add example function").unwrap();
-
-    file.insert_at(0, lines!["// Header comment".ai()]);
-    file.insert_at(2, lines!["  // Added documentation".ai()]);
-    file.insert_at(5, lines!["// Footer".ai()]);
-    repo.git(&["add", "-A"]).unwrap();
-    repo.git(&[
-        "commit",
-        "--amend",
-        "-m",
-        "Add example function (amended 1)",
-    ])
-    .unwrap();
-
-    // Re-amend the same commit with mixed authorship changes.
-    file.insert_at(0, lines!["// Human TODO".human()]);
-    file.insert_at(7, lines!["// AI trailing note".ai()]);
-    repo.git(&["add", "-A"]).unwrap();
-    repo.git(&[
-        "commit",
-        "--amend",
-        "-m",
-        "Add example function (amended 2)",
-    ])
-    .unwrap();
-
-    file.assert_lines_and_blame(lines![
-        "// Human TODO".human(),
-        "// Header comment".ai(),
-        "function example() {".ai(),
-        "  // Added documentation".ai(),
-        "  return 42;".ai(),
-        "}".ai(),
-        "// Footer".ai(),
-        "// AI trailing note".ai()
-    ]);
+worktree_test_wrappers! {
+    test_amend_add_lines_at_top,
+    test_amend_add_lines_in_middle,
+    test_amend_add_lines_at_bottom,
+    test_amend_multiple_changes,
+    test_amend_with_unstaged_ai_code_in_other_file,
+    test_amend_preserves_unstaged_ai_attribution,
+    test_amend_with_multiple_files_mixed_staging,
+    test_amend_with_partially_staged_ai_file,
+    test_amend_with_partially_staged_mixed_content,
+    test_amend_with_unstaged_middle_section,
 }

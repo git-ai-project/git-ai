@@ -1,7 +1,7 @@
 mod repos;
 
 use repos::test_file::ExpectedLineExt;
-use repos::test_repo::{TestRepo, default_branchname};
+use repos::test_repo::TestRepo;
 
 /// Test that checkout to a different branch migrates the working log to the new HEAD.
 #[test]
@@ -147,6 +147,7 @@ fn test_switch_branch_migrates_working_log() {
 #[test]
 fn test_switch_discard_changes_deletes_working_log() {
     let repo = TestRepo::new();
+    let base_branch = repo.current_branch();
 
     // Create initial commit on main
     let mut readme = repo.filename("README.md");
@@ -167,8 +168,8 @@ fn test_switch_discard_changes_deletes_working_log() {
         .expect("feature commit should succeed");
 
     // Switch back to main
-    repo.git(&["switch", default_branchname()])
-        .expect("switch to main should succeed");
+    repo.git(&["switch", &base_branch])
+        .expect("switch to base branch should succeed");
 
     // Create AI changes on main (uncommitted)
     let mut ai_file = repo.filename("ai_work.txt");
@@ -192,6 +193,7 @@ fn test_switch_discard_changes_deletes_working_log() {
 #[test]
 fn test_switch_force_flag_deletes_working_log() {
     let repo = TestRepo::new();
+    let base_branch = repo.current_branch();
 
     // Create initial commit on main
     let mut readme = repo.filename("README.md");
@@ -208,8 +210,8 @@ fn test_switch_force_flag_deletes_working_log() {
         .expect("feature commit should succeed");
 
     // Switch back to main
-    repo.git(&["switch", default_branchname()])
-        .expect("switch to main should succeed");
+    repo.git(&["switch", &base_branch])
+        .expect("switch to base branch should succeed");
 
     // Create AI changes on main (uncommitted)
     let mut ai_file = repo.filename("ai_work.txt");
@@ -319,6 +321,7 @@ fn test_switch_merge_migrates_working_log() {
 #[test]
 fn test_checkout_same_branch_no_op() {
     let repo = TestRepo::new();
+    let base_branch = repo.current_branch();
 
     // Create initial commit
     let mut readme = repo.filename("README.md");
@@ -334,7 +337,7 @@ fn test_checkout_same_branch_no_op() {
         .expect("checkpoint should succeed");
 
     // Checkout same branch (should be no-op)
-    repo.git(&["checkout", default_branchname()])
+    repo.git(&["checkout", &base_branch])
         .expect("checkout same branch should succeed");
 
     // Commit and verify AI attribution is preserved
@@ -417,4 +420,18 @@ fn test_checkout_pathspec_multiple_files() {
     file_a.assert_lines_and_blame(vec!["Original A".human()]);
     file_b.assert_lines_and_blame(vec!["Original B".human()]);
     file_c.assert_lines_and_blame(vec!["Modified C by AI".ai()]);
+}
+
+worktree_test_wrappers! {
+    test_checkout_branch_migrates_working_log,
+    test_checkout_force_deletes_working_log,
+    test_checkout_pathspec_removes_file_attributions,
+    test_switch_branch_migrates_working_log,
+    test_switch_discard_changes_deletes_working_log,
+    test_switch_force_flag_deletes_working_log,
+    test_checkout_merge_migrates_working_log,
+    test_switch_merge_migrates_working_log,
+    test_checkout_same_branch_no_op,
+    test_checkout_with_mixed_attribution,
+    test_checkout_pathspec_multiple_files,
 }

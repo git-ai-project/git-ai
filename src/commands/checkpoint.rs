@@ -134,7 +134,8 @@ pub fn run(
 
     // Initialize the new storage system
     let storage_start = Instant::now();
-    let repo_storage = RepoStorage::for_repo_path(repo.path(), &repo.workdir()?);
+    let repo_storage =
+        RepoStorage::for_repo_path(repo.path(), repo.common_git_dir(), &repo.workdir()?);
     let mut working_log = repo_storage.working_log_for_base_commit(&base_commit);
     debug_log(&format!(
         "[BENCHMARK] Storage initialization took {:?}",

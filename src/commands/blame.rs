@@ -487,6 +487,37 @@ impl Repository {
         }
 
         let mut hunks: Vec<BlameHunk> = Vec::new();
+        let mut abbrev_cache: HashMap<String, String> = HashMap::new();
+        let mut abbreviate_sha = |sha: &str, min_len: usize| -> Result<String, GitAiError> {
+            if min_len >= sha.len() {
+                return Ok(sha.to_string());
+            }
+            if sha.chars().all(|c| c == '0') {
+                return Ok(sha[..min_len].to_string());
+            }
+            if let Some(existing) = abbrev_cache.get(sha) {
+                return Ok(existing.clone());
+            }
+
+            let abbrev_len = min_len.max(4);
+            let mut args = self.global_args_for_exec();
+            args.push("rev-parse".to_string());
+            args.push(format!("--short={}", abbrev_len));
+            args.push(sha.to_string());
+
+            let output = exec_git(&args)?;
+            let stdout = String::from_utf8(output.stdout)?;
+            let abbrev = stdout.lines().next().unwrap_or("").trim().to_string();
+
+            if abbrev.is_empty() {
+                let full = sha.to_string();
+                abbrev_cache.insert(sha.to_string(), full.clone());
+                Ok(full)
+            } else {
+                abbrev_cache.insert(sha.to_string(), abbrev.clone());
+                Ok(abbrev)
+            }
+        };
         let mut cur_commit: Option<String> = None;
         let mut cur_final_start: u32 = 0;
         let mut cur_orig_start: u32 = 0;
@@ -586,15 +617,11 @@ impl Repository {
                         orig_start
                     };
 
-                    let abbrev_len = if options.long_rev {
-                        40
-                    } else {
-                        options.abbrev.unwrap_or(7) as usize
-                    };
-                    let abbrev = if abbrev_len < prev_sha.len() {
-                        prev_sha[..abbrev_len].to_string()
-                    } else {
+                    let abbrev = if options.long_rev {
                         prev_sha.clone()
+                    } else {
+                        let abbrev_len = options.abbrev.unwrap_or(7) as usize;
+                        abbreviate_sha(&prev_sha, abbrev_len)?
                     };
 
                     hunks.push(BlameHunk {
@@ -655,15 +682,11 @@ impl Repository {
                 orig_start
             };
 
-            let abbrev_len = if options.long_rev {
-                40
-            } else {
-                options.abbrev.unwrap_or(7) as usize
-            };
-            let abbrev = if abbrev_len < prev_sha.len() {
-                prev_sha[..abbrev_len].to_string()
-            } else {
+            let abbrev = if options.long_rev {
                 prev_sha.clone()
+            } else {
+                let abbrev_len = options.abbrev.unwrap_or(7) as usize;
+                abbreviate_sha(&prev_sha, abbrev_len)?
             };
 
             hunks.push(BlameHunk {
@@ -1322,7 +1345,12 @@ fn output_default_format(
                 let hash_len = if options.long_rev {
                     40 // Full hash for long revision
                 } else if let Some(abbrev) = options.abbrev {
-                    abbrev as usize
+                    // git blame reserves one extra char in the hash column for boundary
+                    if hunk.is_boundary {
+                        abbrev as usize
+                    } else {
+                        (abbrev + 1) as usize
+                    }
                 } else {
                     7 // Default 7 chars
                 };

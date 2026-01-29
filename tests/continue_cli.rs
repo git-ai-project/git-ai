@@ -765,3 +765,10 @@ fn test_continue_cli_e2e_preserves_model_on_commit() {
     );
     assert_eq!(prompt_record.agent_id.tool, "continue-cli");
 }
+
+worktree_test_wrappers! {
+    test_continue_cli_e2e_with_attribution,
+    test_continue_cli_e2e_human_checkpoint,
+    test_continue_cli_e2e_multiple_tool_calls,
+    test_continue_cli_e2e_preserves_model_on_commit,
+}

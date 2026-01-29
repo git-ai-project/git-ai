@@ -335,3 +335,9 @@ fn test_prompt_hash_migration_unstaged_ai_lines_saved_to_working_log() {
         "ai_line7".ai(),
     ]);
 }
+
+worktree_test_wrappers! {
+    test_prompt_hash_migration_ai_adds_lines_multiple_commits,
+    test_prompt_hash_migration_ai_adds_then_commits_in_batches,
+    test_prompt_hash_migration_unstaged_ai_lines_saved_to_working_log,
+}

@@ -1095,6 +1095,7 @@ dependencies = [
  "git-ai",
  "git2",
  "gix-config",
+ "gix-ref",
  "glob",
  "humantime",
  "imara-diff",

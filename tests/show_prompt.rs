@@ -167,3 +167,18 @@ fn show_prompt_with_offset_skips_occurrences() {
         err
     );
 }
+
+worktree_test_wrappers! {
+    parse_args_requires_prompt_id,
+    parse_args_parses_basic_id,
+    parse_args_parses_commit_flag,
+    parse_args_parses_offset_flag,
+    parse_args_rejects_commit_and_offset_together,
+    parse_args_rejects_multiple_prompt_ids,
+    parse_args_requires_commit_value,
+    parse_args_requires_offset_value,
+    parse_args_rejects_invalid_offset,
+    parse_args_rejects_unknown_flag,
+    show_prompt_returns_latest_prompt_by_default,
+    show_prompt_with_offset_skips_occurrences,
+}

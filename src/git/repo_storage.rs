@@ -23,6 +23,7 @@ pub struct InitialAttributions {
 #[derive(Debug, Clone)]
 pub struct RepoStorage {
     pub repo_path: PathBuf,
+    pub common_git_dir: PathBuf,
     pub repo_workdir: PathBuf,
     pub working_logs: PathBuf,
     pub rewrite_log: PathBuf,
@@ -30,14 +31,19 @@ pub struct RepoStorage {
 }
 
 impl RepoStorage {
-    pub fn for_repo_path(repo_path: &Path, repo_workdir: &Path) -> RepoStorage {
-        let ai_dir = repo_path.join("ai");
+    pub fn for_repo_path(
+        git_dir: &Path,
+        common_git_dir: &Path,
+        repo_workdir: &Path,
+    ) -> RepoStorage {
+        let ai_dir = git_dir.join("ai");
         let working_logs_dir = ai_dir.join("working_logs");
         let rewrite_log_file = ai_dir.join("rewrite_log");
         let logs_dir = ai_dir.join("logs");
 
         let config = RepoStorage {
-            repo_path: repo_path.to_path_buf(),
+            repo_path: git_dir.to_path_buf(),
+            common_git_dir: common_git_dir.to_path_buf(),
             repo_workdir: repo_workdir.to_path_buf(),
             working_logs: working_logs_dir,
             rewrite_log: rewrite_log_file,
@@ -45,7 +51,7 @@ impl RepoStorage {
         };
 
         config.ensure_config_directory().unwrap();
-        config
+        return config;
     }
 
     fn ensure_config_directory(&self) -> Result<(), GitAiError> {
@@ -97,8 +103,9 @@ impl RepoStorage {
                 }
                 fs::rename(&working_log_dir, &old_dir)?;
                 debug_log(&format!(
-                    "Debug mode: moved checkpoint directory from {} to old-{}",
-                    sha, sha
+                    "Debug mode: moved checkpoint directory from {} to {}",
+                    sha,
+                    format!("old-{}", sha)
                 ));
             } else {
                 // In non-debug mode, delete as before
@@ -204,12 +211,6 @@ impl PersistedWorkingLog {
         let checkpoints_file = self.dir.join("checkpoints.jsonl");
         fs::write(&checkpoints_file, "")?;
 
-        // Clear INITIAL attributions file so stale attributions from a
-        // previous working state do not persist across resets
-        if self.initial_file.exists() {
-            fs::remove_file(&self.initial_file)?;
-        }
-
         Ok(())
     }
 
@@ -219,7 +220,6 @@ impl PersistedWorkingLog {
         Ok(fs::read_to_string(blob_path)?)
     }
 
-    #[allow(dead_code)]
     pub fn persist_file_version(&self, content: &str) -> Result<String, GitAiError> {
         // Create SHA256 hash of the content
         let mut hasher = Sha256::new();
@@ -296,15 +296,15 @@ impl PersistedWorkingLog {
                 .to_string();
         }
 
-        file_path.to_string()
+        return file_path.to_string();
     }
 
     pub fn read_current_file_content(&self, file_path: &str) -> Result<String, GitAiError> {
         // First try to read from dirty_files (using raw path)
-        if let Some(ref dirty_files) = self.dirty_files
-            && let Some(content) = dirty_files.get(&file_path.to_string())
-        {
-            return Ok(content.clone());
+        if let Some(ref dirty_files) = self.dirty_files {
+            if let Some(content) = dirty_files.get(&file_path.to_string()) {
+                return Ok(content.clone());
+            }
         }
 
         let file_path = self.to_repo_absolute_path(file_path);
@@ -345,16 +345,14 @@ impl PersistedWorkingLog {
             // For other tools, check if they have the necessary metadata for refetching
             // cursor can always refetch from its database
             "cursor" => false,
-            // claude, codex, gemini, continue-cli need transcript_path
-            "claude" | "codex" | "gemini" | "continue-cli" => metadata
-                .as_ref()
-                .and_then(|m| m.get("transcript_path"))
-                .is_none(),
+            // claude, gemini, continue-cli need transcript_path
+            "claude" | "gemini" | "continue-cli" => {
+                metadata.as_ref().and_then(|m| m.get("transcript_path")).is_none()
+            }
             // github-copilot needs chat_session_path
-            "github-copilot" => metadata
-                .as_ref()
-                .and_then(|m| m.get("chat_session_path"))
-                .is_none(),
+            "github-copilot" => {
+                metadata.as_ref().and_then(|m| m.get("chat_session_path")).is_none()
+            }
             // Unknown tools (like custom agent-v1 tools) can't refetch
             _ => true,
         };
@@ -422,26 +420,27 @@ impl PersistedWorkingLog {
             for entry in &mut checkpoint.entries {
                 // Replace author_ids in attributions
                 for attr in &mut entry.attributions {
-                    if attr.author_id.len() == 7
-                        && let Some(new_hash) = old_to_new_hash.get(&attr.author_id)
-                    {
-                        attr.author_id = new_hash.clone();
+                    if attr.author_id.len() == 7 {
+                        if let Some(new_hash) = old_to_new_hash.get(&attr.author_id) {
+                            attr.author_id = new_hash.clone();
+                        }
                     }
                 }
 
                 // Replace author_ids in line_attributions
                 for line_attr in &mut entry.line_attributions {
-                    if line_attr.author_id.len() == 7
-                        && let Some(new_hash) = old_to_new_hash.get(&line_attr.author_id)
-                    {
-                        line_attr.author_id = new_hash.clone();
+                    if line_attr.author_id.len() == 7 {
+                        if let Some(new_hash) = old_to_new_hash.get(&line_attr.author_id) {
+                            line_attr.author_id = new_hash.clone();
+                        }
                     }
                     // Also migrate the overrode field if it contains a 7-char hash
-                    if let Some(ref overrode_id) = line_attr.overrode
-                        && overrode_id.len() == 7
-                        && let Some(new_hash) = old_to_new_hash.get(overrode_id)
-                    {
-                        line_attr.overrode = Some(new_hash.clone());
+                    if let Some(ref overrode_id) = line_attr.overrode {
+                        if overrode_id.len() == 7 {
+                            if let Some(new_hash) = old_to_new_hash.get(overrode_id) {
+                                line_attr.overrode = Some(new_hash.clone());
+                            }
+                        }
                     }
                 }
             }
@@ -470,10 +469,10 @@ impl PersistedWorkingLog {
         // Clear attributions from entries that aren't the most recent for their file
         for (checkpoint_idx, checkpoint) in checkpoints.iter_mut().enumerate() {
             for entry in &mut checkpoint.entries {
-                if let Some(&newest_idx) = newest_for_file.get(&entry.file)
-                    && checkpoint_idx != newest_idx
-                {
-                    entry.attributions.clear();
+                if let Some(&newest_idx) = newest_for_file.get(&entry.file) {
+                    if checkpoint_idx != newest_idx {
+                        entry.attributions.clear();
+                    }
                 }
             }
         }
@@ -610,8 +609,11 @@ mod tests {
         let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
 
         // Create RepoStorage
-        let _repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap());
+        let _repo_storage = RepoStorage::for_repo_path(
+            tmp_repo.repo().path(),
+            tmp_repo.repo().commondir(),
+            &tmp_repo.repo().workdir().unwrap(),
+        );
 
         // Verify .git/ai directory exists
         let ai_dir = tmp_repo.repo().path().join("ai");
@@ -644,8 +646,11 @@ mod tests {
         let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
 
         // Create RepoStorage
-        let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap());
+        let repo_storage = RepoStorage::for_repo_path(
+            tmp_repo.repo().path(),
+            tmp_repo.repo().commondir(),
+            &tmp_repo.repo().workdir().unwrap(),
+        );
 
         // Add some content to rewrite_log
         let rewrite_log_file = tmp_repo.repo().path().join("ai").join("rewrite_log");
@@ -679,8 +684,11 @@ mod tests {
         let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
 
         // Create RepoStorage and PersistedWorkingLog
-        let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap());
+        let repo_storage = RepoStorage::for_repo_path(
+            tmp_repo.repo().path(),
+            tmp_repo.repo().commondir(),
+            &tmp_repo.repo().workdir().unwrap(),
+        );
         let working_log = repo_storage.working_log_for_base_commit("test-commit-sha");
 
         // Test persisting a file version
@@ -723,8 +731,11 @@ mod tests {
         let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
 
         // Create RepoStorage and PersistedWorkingLog
-        let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap());
+        let repo_storage = RepoStorage::for_repo_path(
+            tmp_repo.repo().path(),
+            tmp_repo.repo().commondir(),
+            &tmp_repo.repo().workdir().unwrap(),
+        );
         let working_log = repo_storage.working_log_for_base_commit("test-commit-sha");
 
         // Create a test checkpoint
@@ -780,8 +791,11 @@ mod tests {
         let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
 
         // Create RepoStorage and PersistedWorkingLog
-        let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap());
+        let repo_storage = RepoStorage::for_repo_path(
+            tmp_repo.repo().path(),
+            tmp_repo.repo().commondir(),
+            &tmp_repo.repo().workdir().unwrap(),
+        );
         let working_log = repo_storage.working_log_for_base_commit("test-commit-sha");
 
         // Build three checkpoints: missing version, wrong version, and correct version
@@ -833,8 +847,11 @@ mod tests {
         let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
 
         // Create RepoStorage and PersistedWorkingLog
-        let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap());
+        let repo_storage = RepoStorage::for_repo_path(
+            tmp_repo.repo().path(),
+            tmp_repo.repo().commondir(),
+            &tmp_repo.repo().workdir().unwrap(),
+        );
         let working_log = repo_storage.working_log_for_base_commit("test-commit-sha");
 
         // Add some blobs
@@ -902,8 +919,11 @@ mod tests {
         let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
 
         // Create RepoStorage
-        let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap());
+        let repo_storage = RepoStorage::for_repo_path(
+            tmp_repo.repo().path(),
+            tmp_repo.repo().commondir(),
+            &tmp_repo.repo().workdir().unwrap(),
+        );
 
         // Create working log for a specific commit
         let commit_sha = "abc123def456";

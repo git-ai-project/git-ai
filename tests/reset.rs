@@ -59,7 +59,7 @@ fn test_reset_soft_reconstructs_working_log() {
 
     // Verify AI authorship was preserved in the commit
     assert!(
-        !new_commit.authorship_log.attestations.is_empty(),
+        new_commit.authorship_log.attestations.len() > 0,
         "AI authorship should be preserved after reset --soft"
     );
 
@@ -98,7 +98,7 @@ fn test_reset_mixed_reconstructs_working_log() {
 
     // Verify AI authorship was preserved
     assert!(
-        !new_commit.authorship_log.attestations.is_empty(),
+        new_commit.authorship_log.attestations.len() > 0,
         "AI authorship should be preserved after reset --mixed"
     );
 
@@ -132,7 +132,7 @@ fn test_reset_to_same_commit_is_noop() {
     let new_commit = repo.stage_all_and_commit("After reset to HEAD").unwrap();
 
     assert!(
-        !new_commit.authorship_log.attestations.is_empty(),
+        new_commit.authorship_log.attestations.len() > 0,
         "AI authorship should be preserved for uncommitted changes"
     );
 
@@ -170,7 +170,7 @@ fn test_reset_multiple_commits() {
     let new_commit = repo.commit("Re-commit features").unwrap();
 
     assert!(
-        !new_commit.authorship_log.attestations.is_empty(),
+        new_commit.authorship_log.attestations.len() > 0,
         "AI authorship should be preserved for all unwound commits"
     );
 
@@ -210,7 +210,7 @@ fn test_reset_preserves_uncommitted_changes() {
     let new_commit = repo.commit("Re-commit AI changes").unwrap();
 
     assert!(
-        !new_commit.authorship_log.attestations.is_empty(),
+        new_commit.authorship_log.attestations.len() > 0,
         "AI authorship should be preserved from multiple unwound commits"
     );
 
@@ -251,7 +251,7 @@ fn test_reset_with_pathspec() {
     let new_commit = repo.stage_all_and_commit("After pathspec reset").unwrap();
 
     assert!(
-        !new_commit.authorship_log.attestations.is_empty(),
+        new_commit.authorship_log.attestations.len() > 0,
         "AI authorship should be preserved for file2"
     );
 
@@ -320,7 +320,7 @@ fn test_reset_mixed_ai_human_changes() {
     let new_commit = repo.commit("Re-commit mixed changes").unwrap();
 
     assert!(
-        !new_commit.authorship_log.attestations.is_empty(),
+        new_commit.authorship_log.attestations.len() > 0,
         "AI authorship should be preserved in mixed AI/human changes"
     );
 
@@ -357,7 +357,7 @@ fn test_reset_merge() {
     let new_commit = repo.stage_all_and_commit("Re-commit").unwrap();
 
     assert!(
-        !new_commit.authorship_log.attestations.is_empty(),
+        new_commit.authorship_log.attestations.len() > 0,
         "AI authorship should be preserved after reset"
     );
 
@@ -388,7 +388,7 @@ fn test_reset_with_new_files() {
     let new_commit = repo.commit("Re-commit with new file").unwrap();
 
     assert!(
-        !new_commit.authorship_log.attestations.is_empty(),
+        new_commit.authorship_log.attestations.len() > 0,
         "AI authorship should be preserved for new file"
     );
 
@@ -474,7 +474,7 @@ fn test_reset_mixed_pathspec_preserves_ai_authorship() {
     let new_commit = repo.stage_all_and_commit("After pathspec reset").unwrap();
 
     assert!(
-        !new_commit.authorship_log.attestations.is_empty(),
+        new_commit.authorship_log.attestations.len() > 0,
         "AI authorship should be preserved for file2 after pathspec reset"
     );
 
@@ -530,7 +530,7 @@ fn test_reset_mixed_pathspec_multiple_commits() {
     let new_commit = repo.stage_all_and_commit("After pathspec reset").unwrap();
 
     assert!(
-        !new_commit.authorship_log.attestations.is_empty(),
+        new_commit.authorship_log.attestations.len() > 0,
         "AI authorship should be preserved for lib.js after pathspec reset"
     );
 
@@ -543,25 +543,19 @@ fn test_reset_mixed_pathspec_multiple_commits() {
     ]);
 }
 
-#[test]
-fn test_reset_soft_detached_head_preserves_ai_authorship() {
-    let repo = TestRepo::new();
-
-    let mut file = repo.filename("detached.txt");
-    file.set_contents(vec!["base line".human()]);
-    repo.stage_all_and_commit("base").unwrap();
-
-    file.set_contents(vec!["base line".human(), "ai line".ai()]);
-    repo.git_ai(&["checkpoint", "mock_ai"])
-        .expect("checkpoint should succeed");
-    repo.stage_all_and_commit("ai commit").unwrap();
-
-    repo.git(&["checkout", "--detach", "HEAD"])
-        .expect("detach should succeed");
-    repo.git(&["reset", "--soft", "HEAD~1"])
-        .expect("reset --soft should succeed in detached HEAD");
-
-    repo.stage_all_and_commit("recommit from detached reset")
-        .unwrap();
-    file.assert_lines_and_blame(vec!["base line".human(), "ai line".ai()]);
+worktree_test_wrappers! {
+    test_reset_hard_deletes_working_log,
+    test_reset_soft_reconstructs_working_log,
+    test_reset_mixed_reconstructs_working_log,
+    test_reset_to_same_commit_is_noop,
+    test_reset_multiple_commits,
+    test_reset_preserves_uncommitted_changes,
+    test_reset_with_pathspec,
+    test_reset_forward_is_noop,
+    test_reset_mixed_ai_human_changes,
+    test_reset_merge,
+    test_reset_with_new_files,
+    test_reset_with_deleted_files,
+    test_reset_mixed_pathspec_preserves_ai_authorship,
+    test_reset_mixed_pathspec_multiple_commits,
 }

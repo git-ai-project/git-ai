@@ -1,3 +1,4 @@
+#[macro_use]
 mod repos;
 
 use repos::test_file::ExpectedLineExt;
@@ -24,6 +25,15 @@ fn run_ai_tab_checkpoint(repo: &TestRepo, hook_payload: serde_json::Value) {
             panic!("ai_tab checkpoint failed: {}", err);
         }
     }
+}
+
+worktree_test_wrappers! {
+    test_ai_tab_before_edit_checkpoint_includes_dirty_files,
+    test_ai_tab_after_edit_checkpoint_includes_dirty_files_and_paths,
+    test_ai_tab_rejects_invalid_hook_event,
+    test_ai_tab_requires_non_empty_tool_and_model,
+    test_ai_tab_e2e_marks_ai_lines,
+    test_ai_tab_e2e_handles_dirty_files_map,
 }
 
 #[test]

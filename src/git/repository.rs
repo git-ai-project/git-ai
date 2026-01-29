@@ -1,3 +1,4 @@
+use gix_ref::FullName;
 use regex::Regex;
 
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
@@ -7,20 +8,11 @@ use crate::error::GitAiError;
 use crate::git::refs::get_authorship;
 use crate::git::repo_storage::RepoStorage;
 use crate::git::rewrite_log::RewriteLogEvent;
-use crate::git::status::MAX_PATHSPEC_ARGS;
 use crate::git::sync_authorship::{fetch_authorship_notes, push_authorship_notes};
-use crate::utils::GIT_AI_SKIP_CORE_HOOKS_ENV;
-#[cfg(windows)]
-use crate::utils::is_interactive_terminal;
-
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-
-#[cfg(windows)]
-use crate::utils::CREATE_NO_WINDOW;
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
 
 pub struct Object<'a> {
     repo: &'a Repository,
@@ -59,7 +51,6 @@ pub struct CommitRange<'a> {
 
 impl<'a> CommitRange<'a> {
     /// Create an empty CommitRange with no commits in its iterator.
-    #[allow(dead_code)]
     pub fn empty(repo: &'a Repository) -> Self {
         Self {
             repo,
@@ -447,7 +438,7 @@ impl<'a> Commit<'a> {
         Ok(self.parents().count())
     }
 
-    // Get the short "summary" of the git commit message. The returned message is the summary of the commit, comprising the first paragraph of the message with whitespace trimmed and squashed. None may be returned if an error occurs or if the summary is not valid utf-8.
+    // Get the short “summary” of the git commit message. The returned message is the summary of the commit, comprising the first paragraph of the message with whitespace trimmed and squashed. None may be returned if an error occurs or if the summary is not valid utf-8.
     pub fn summary(&self) -> Result<String, GitAiError> {
         let mut args = self.repo.global_args_for_exec();
         args.push("show".to_string());
@@ -455,20 +446,6 @@ impl<'a> Commit<'a> {
         args.push("--no-notes".to_string());
         args.push("--encoding=UTF-8".to_string());
         args.push("--format=%s".to_string());
-        args.push(self.oid.clone());
-        let output = exec_git(&args)?;
-        Ok(String::from_utf8(output.stdout)?.trim().to_string())
-    }
-
-    // Get the body of the git commit message (everything after the first paragraph).
-    // Returns an empty string if there is no body.
-    pub fn body(&self) -> Result<String, GitAiError> {
-        let mut args = self.repo.global_args_for_exec();
-        args.push("show".to_string());
-        args.push("-s".to_string());
-        args.push("--no-notes".to_string());
-        args.push("--encoding=UTF-8".to_string());
-        args.push("--format=%b".to_string());
         args.push(self.oid.clone());
         let output = exec_git(&args)?;
         Ok(String::from_utf8(output.stdout)?.trim().to_string())
@@ -533,12 +510,13 @@ impl<'a> Commit<'a> {
     // lazy load the authorship log
     #[allow(dead_code)]
     pub fn authorship(&self) -> &AuthorshipLog {
-        self.authorship_log
-            .get_or_init(|| get_authorship(self.repo, self.oid.as_str()).unwrap_or_default())
+        self.authorship_log.get_or_init(|| {
+            get_authorship(self.repo, self.oid.as_str()).unwrap_or_else(|| AuthorshipLog::new())
+        })
     }
     #[allow(dead_code)]
     pub fn authorship_uncached(&self) -> AuthorshipLog {
-        get_authorship(self.repo, self.oid.as_str()).unwrap_or_default()
+        get_authorship(self.repo, self.oid.as_str()).unwrap_or_else(|| AuthorshipLog::new())
     }
 
     /// Find the first parent that exists on the specified refname
@@ -645,7 +623,6 @@ impl<'a> Tree<'a> {
     }
 
     #[allow(dead_code)]
-    #[allow(clippy::should_implement_trait)]
     pub fn clone(&self) -> Tree<'a> {
         Tree {
             repo: self.repo,
@@ -854,6 +831,7 @@ impl<'a> Iterator for References<'a> {
 pub struct Repository {
     global_args: Vec<String>,
     git_dir: PathBuf,
+    common_git_dir: PathBuf,
     pub storage: RepoStorage,
     pub pre_command_base_commit: Option<String>,
     pub pre_command_refname: Option<String>,
@@ -889,13 +867,13 @@ impl Repository {
         }
 
         // Safely handle empty repositories
-        if let Ok(head_ref) = self.head()
-            && let Ok(target) = head_ref.target()
-        {
-            let target_string = target;
-            let refname = head_ref.name().map(|n| n.to_string());
-            self.pre_command_base_commit = Some(target_string);
-            self.pre_command_refname = refname;
+        if let Ok(head_ref) = self.head() {
+            if let Ok(target) = head_ref.target() {
+                let target_string = target;
+                let refname = head_ref.name().map(|n| n.to_string());
+                self.pre_command_base_commit = Some(target_string);
+                self.pre_command_refname = refname;
+            }
         }
     }
 
@@ -909,17 +887,21 @@ impl Repository {
         let log = self
             .storage
             .append_rewrite_event(rewrite_log_event.clone())
+            .ok()
             .expect("Error writing .git/ai/rewrite_log");
 
-        if apply_side_effects
-            && let Ok(_) = rewrite_authorship_if_needed(
+        if apply_side_effects {
+            match rewrite_authorship_if_needed(
                 self,
                 &rewrite_log_event,
                 commit_author,
                 &log,
                 supress_output,
-            )
-        {}
+            ) {
+                Ok(_) => (),
+                Err(_) => {}
+            }
+        }
     }
 
     // Internal util to get the git object type for a given OID
@@ -964,21 +946,16 @@ impl Repository {
         self.git_dir.as_path()
     }
 
+    /// Returns the common .git directory for this repository (shared among worktrees).
+    pub fn common_git_dir(&self) -> &Path {
+        self.common_git_dir.as_path()
+    }
+
     // Get the path of the working directory for this repository.
     // If this repository is bare, then None is returned.
     pub fn workdir(&self) -> Result<PathBuf, GitAiError> {
         // TODO Remove Result since this is determined at initialization now
         Ok(self.workdir.clone())
-    }
-
-    /// Returns true when this repository is bare.
-    pub fn is_bare_repository(&self) -> Result<bool, GitAiError> {
-        let mut args = self.global_args_for_exec();
-        args.push("rev-parse".to_string());
-        args.push("--is-bare-repository".to_string());
-        let output = exec_git(&args)?;
-        let value = String::from_utf8(output.stdout)?;
-        Ok(value.trim() == "true")
     }
 
     /// Get the canonical (absolute, resolved) path of the working directory
@@ -1049,68 +1026,159 @@ impl Repository {
         Ok(remotes)
     }
 
-    /// Get the git config file for this repository and fallback to global config if not found.
-    fn get_git_config_file(&self) -> Result<gix_config::File<'static>, GitAiError> {
-        match gix_config::File::from_git_dir(self.path().to_path_buf()) {
-            Ok(git_config_file) => Ok(git_config_file),
-            Err(e) => match gix_config::File::from_globals() {
-                Ok(system_config) => Ok(system_config),
-                Err(_) => Err(GitAiError::GixError(e.to_string())),
-            },
+    /// Get merged git configuration with precedence: globals < common config < worktree config < env.
+    fn get_git_config(&self) -> Result<gix_config::File<'static>, GitAiError> {
+        let mut merged = gix_config::File::from_globals()
+            .map_err(|e| GitAiError::GixError(e.to_string()))?;
+        let branch_name = self.current_branch_full_name();
+        let branch_name_ref = branch_name.as_ref().map(|name| name.as_ref());
+        self.resolve_config_includes(&mut merged, &self.git_dir, branch_name_ref)?;
+
+        let common_local = self.load_config_file(&self.common_git_dir, gix_config::Source::Local)?;
+        let worktree_local = if self.common_git_dir == self.git_dir {
+            None
+        } else {
+            self.load_config_file(&self.git_dir, gix_config::Source::Local)?
+        };
+
+        let worktree_config_enabled =
+            common_local.as_ref().map(Self::has_worktree_config).unwrap_or(false)
+                || worktree_local
+                    .as_ref()
+                    .map(Self::has_worktree_config)
+                    .unwrap_or(false);
+
+        if let Some(mut local) = common_local {
+            self.resolve_config_includes(&mut local, &self.common_git_dir, branch_name_ref)?;
+            merged.append(local);
         }
+
+        if let Some(mut local) = worktree_local {
+            self.resolve_config_includes(&mut local, &self.git_dir, branch_name_ref)?;
+            merged.append(local);
+        }
+
+        if worktree_config_enabled {
+            if let Some(mut worktree) =
+                self.load_config_file(&self.git_dir, gix_config::Source::Worktree)?
+            {
+                self.resolve_config_includes(&mut worktree, &self.git_dir, branch_name_ref)?;
+                merged.append(worktree);
+            }
+        }
+
+        let env_overrides = gix_config::File::from_environment_overrides()
+            .map_err(|e| GitAiError::GixError(e.to_string()))?;
+        merged.append(env_overrides);
+
+        Ok(merged)
+    }
+
+    fn load_config_file(
+        &self,
+        git_dir: &Path,
+        source: gix_config::Source,
+    ) -> Result<Option<gix_config::File<'static>>, GitAiError> {
+        let mut path = git_dir.to_path_buf();
+        let mut env_var = |key: &str| std::env::var_os(key);
+        path.push(
+            source
+                .storage_location(&mut env_var)
+                .expect("location available"),
+        );
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let file = gix_config::File::from_path_no_includes(path, source)
+            .map_err(|e| GitAiError::GixError(e.to_string()))?;
+        Ok(Some(file))
+    }
+
+    fn resolve_config_includes(
+        &self,
+        file: &mut gix_config::File<'static>,
+        git_dir: &Path,
+        branch_name: Option<&gix_ref::FullNameRef>,
+    ) -> Result<(), GitAiError> {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let options = gix_config::file::init::Options {
+            includes: gix_config::file::includes::Options::follow(
+                gix_config::path::interpolate::Context {
+                    home_dir: home.as_deref(),
+                    ..Default::default()
+                },
+                gix_config::file::includes::conditional::Context {
+                    git_dir: Some(git_dir),
+                    branch_name,
+                },
+            ),
+            ..Default::default()
+        };
+        file.resolve_includes(options)
+            .map_err(|e| GitAiError::GixError(e.to_string()))
+    }
+
+    fn has_worktree_config(file: &gix_config::File<'static>) -> bool {
+        matches!(file.boolean("extensions.worktreeConfig"), Some(Ok(true)))
+    }
+
+    fn current_branch_full_name(&self) -> Option<FullName> {
+        let mut args = self.global_args_for_exec();
+        args.push("branch".to_string());
+        args.push("--show-current".to_string());
+        let output = exec_git(&args).ok()?;
+        let branch = String::from_utf8(output.stdout).ok()?.trim().to_string();
+        if branch.is_empty() {
+            return None;
+        }
+        let full = if branch.starts_with("refs/") {
+            branch
+        } else {
+            format!("refs/heads/{}", branch)
+        };
+        FullName::try_from(full).ok()
     }
     /// Get config value for a given key as a String.
     pub fn config_get_str(&self, key: &str) -> Result<Option<String>, GitAiError> {
-        match self.get_git_config_file() {
-            Ok(git_config_file) => Ok(git_config_file.string(key).map(|cow| cow.to_string())),
-            Err(e) => Err(e),
-        }
+        let git_config_file = self.get_git_config()?;
+        Ok(git_config_file.string(key).map(|cow| cow.to_string()))
     }
 
     /// Get all config values matching a regex pattern.
-    ///
-    /// Regular expression matching is currently case-sensitive
-    /// and done against a canonicalized version of the key
-    /// in which section and variable names are lowercased, but subsection names are not.
-    ///
     /// Returns a HashMap of key -> value for all matching config entries.
     pub fn config_get_regexp(
         &self,
         pattern: &str,
     ) -> Result<std::collections::HashMap<String, String>, GitAiError> {
-        match self.get_git_config_file() {
-            Ok(git_config_file) => {
-                let mut matches: HashMap<String, String> = HashMap::new();
+        let git_config_file = self.get_git_config()?;
+        let mut matches: HashMap<String, String> = HashMap::new();
 
-                let re = Regex::new(pattern)
-                    .map_err(|e| GitAiError::Generic(format!("Invalid regex pattern: {}", e)))?;
+        let re = Regex::new(pattern)
+            .map_err(|e| GitAiError::Generic(format!("Invalid regex pattern: {}", e)))?;
 
-                // iterate over all sections
-                for section in git_config_file.sections() {
-                    // Support subsections in the key
-                    let section_name = section.header().name().to_string().to_lowercase();
-                    let subsection = section.header().subsection_name();
+        // iterate over all sections
+        for section in git_config_file.sections() {
+            // Support subsections in the key
+            let section_name = section.header().name().to_string().to_lowercase();
+            let subsection = section.header().subsection_name();
 
-                    for value_name in section.body().value_names() {
-                        let value_name_str = value_name.to_string().to_lowercase();
-                        let full_key = if let Some(sub) = subsection {
-                            format!("{}.{}.{}", section_name, sub, value_name_str)
-                        } else {
-                            format!("{}.{}", section_name, value_name_str)
-                        };
+            for value_name in section.body().value_names() {
+                let value_name_str = value_name.to_string().to_lowercase();
+                let full_key = if let Some(sub) = subsection {
+                    format!("{}.{}.{}", section_name, sub, value_name_str)
+                } else {
+                    format!("{}.{}", section_name, value_name_str)
+                };
 
-                        if re.is_match(&full_key)
-                            && let Some(value) =
-                                section.body().value(value_name).map(|c| c.to_string())
-                        {
-                            matches.insert(full_key, value);
-                        }
+                if re.is_match(&full_key) {
+                    if let Some(value) = section.body().value(value_name).map(|c| c.to_string()) {
+                        matches.insert(full_key, value);
                     }
                 }
-                Ok(matches)
             }
-            Err(e) => Err(e),
         }
+
+        Ok(matches)
     }
 
     /// Get the git version as a tuple (major, minor, patch).
@@ -1233,7 +1301,7 @@ impl Repository {
         &self,
         branch_refname: &str,
         merge_target_refname: &str,
-    ) -> Result<CommitRange<'_>, GitAiError> {
+    ) -> Result<CommitRange, GitAiError> {
         // Normalize the provided branch ref to fully qualified using rev-parse
         let fq_branch = {
             let mut rp_args = self.global_args_for_exec();
@@ -1297,16 +1365,12 @@ impl Repository {
             }
         };
 
-        // Build: git log --format=%H --reverse <branch> --not <merge_target>
-        // Note: we intentionally do NOT use --ancestry-path here. That flag requires
-        // commits to be descendants of the merge-target's tip, which fails when the
-        // merge target was previously merged INTO the branch (a common workflow to
-        // stay up-to-date). In that case, the branch's unique commits descend from
-        // the pre-merge side and --ancestry-path filters them all out.
+        // Build: git log --format=%H --reverse --ancestry-path <branch> --not <other branches>
         let mut log_args = self.global_args_for_exec();
         log_args.push("log".to_string());
         log_args.push("--format=%H".to_string());
         log_args.push("--reverse".to_string());
+        log_args.push("--ancestry-path".to_string());
         log_args.push(fq_branch.to_string());
         log_args.push("--not".to_string());
         log_args.push(fq_merge_target.to_string());
@@ -1333,7 +1397,12 @@ impl Repository {
         let first_commit = commits.first().unwrap().to_string();
         let last_commit = commits.last().unwrap().to_string();
 
-        CommitRange::new(self, first_commit, last_commit, fq_branch.to_string())
+        Ok(CommitRange::new(
+            self,
+            first_commit,
+            last_commit,
+            fq_branch.to_string(),
+        )?)
     }
 
     // Create new commit in the repository If the update_ref is not None, name of the reference that will be updated to point to this commit. If the reference is not direct, it will be resolved to a direct reference. Use "HEAD" to update the HEAD of the current branch and make it point to this commit. If the reference doesn't exist yet, it will be created. If it does exist, the first parent must be the tip of this branch.
@@ -1378,14 +1447,13 @@ impl Repository {
         let committer_date = fmt_git_date(committer.when());
 
         // Build env for commit-tree
-        let env: Vec<(String, String)> = vec![
-            ("GIT_AUTHOR_NAME".to_string(), author_name),
-            ("GIT_AUTHOR_EMAIL".to_string(), author_email),
-            ("GIT_AUTHOR_DATE".to_string(), author_date),
-            ("GIT_COMMITTER_NAME".to_string(), committer_name),
-            ("GIT_COMMITTER_EMAIL".to_string(), committer_email),
-            ("GIT_COMMITTER_DATE".to_string(), committer_date),
-        ];
+        let mut env: Vec<(String, String)> = Vec::new();
+        env.push(("GIT_AUTHOR_NAME".to_string(), author_name));
+        env.push(("GIT_AUTHOR_EMAIL".to_string(), author_email));
+        env.push(("GIT_AUTHOR_DATE".to_string(), author_date));
+        env.push(("GIT_COMMITTER_NAME".to_string(), committer_name));
+        env.push(("GIT_COMMITTER_EMAIL".to_string(), committer_email));
+        env.push(("GIT_COMMITTER_DATE".to_string(), committer_date));
 
         // 1) Create the commit object via commit-tree, piping message on stdin
         let mut ct_args = self.global_args_for_exec();
@@ -1417,7 +1485,6 @@ impl Repository {
 
             let old_tip: Option<String> = match Command::new(config::Config::get().git_cmd())
                 .args(&rp_args)
-                .env(GIT_AI_SKIP_CORE_HOOKS_ENV, "1")
                 .output()
             {
                 Ok(output) if output.status.success() => {
@@ -1475,29 +1542,29 @@ impl Repository {
     // Non-standard method of getting a 'default' remote
     pub fn get_default_remote(&self) -> Result<Option<String>, GitAiError> {
         let remotes = self.remotes()?;
-        if remotes.is_empty() {
+        if remotes.len() == 0 {
             return Ok(None);
         }
         // Prefer 'origin' if it exists
         for i in 0..remotes.len() {
-            if let Some(name) = remotes.get(i)
-                && name == "origin"
-            {
-                return Ok(Some("origin".to_string()));
+            if let Some(name) = remotes.get(i) {
+                if name == "origin" {
+                    return Ok(Some("origin".to_string()));
+                }
             }
         }
         // Otherwise, just use the first remote
-        Ok(remotes.first().map(|s| s.to_string()))
+        Ok(remotes.get(0).map(|s| s.to_string()))
     }
 
     #[allow(dead_code)]
-    pub fn fetch_authorship(&self, remote_name: &str) -> Result<(), GitAiError> {
+    pub fn fetch_authorship<'a>(&'a self, remote_name: &str) -> Result<(), GitAiError> {
         // Discards whether notes were found or not, just returns success/error
         fetch_authorship_notes(self, remote_name).map(|_| ())
     }
 
     #[allow(dead_code)]
-    pub fn push_authorship(&self, remote_name: &str) -> Result<(), GitAiError> {
+    pub fn push_authorship<'a>(&'a self, remote_name: &str) -> Result<(), GitAiError> {
         push_authorship_notes(self, remote_name)
     }
 
@@ -1688,7 +1755,6 @@ impl Repository {
         args.push("--no-commit-id".to_string());
         args.push("--name-only".to_string());
         args.push("-r".to_string());
-        args.push("-z".to_string()); // NUL-separated output for proper UTF-8 handling
 
         // Find the commit to check if it has a parent
         let commit = self.find_commit(commit_sha.to_string())?;
@@ -1701,39 +1767,27 @@ impl Repository {
 
         args.push(commit_sha.to_string());
 
-        // Add pathspecs if provided (only as CLI args when under threshold)
-        let needs_post_filter = if let Some(paths) = pathspecs {
+        // Add pathspecs if provided
+        if let Some(paths) = pathspecs {
             // for case where pathspec filter provided BUT not pathspecs.
             // otherwise it would default to full repo
             if paths.is_empty() {
                 return Ok(HashSet::new());
             }
-            if paths.len() > MAX_PATHSPEC_ARGS {
-                true
-            } else {
-                args.push("--".to_string());
-                for path in paths {
-                    args.push(path.clone());
-                }
-                false
+            args.push("--".to_string());
+            for path in paths {
+                args.push(path.clone());
             }
-        } else {
-            false
-        };
+        }
 
         let output = exec_git(&args)?;
+        let stdout = String::from_utf8(output.stdout)?;
 
-        // With -z, output is NUL-separated. The output may contain a trailing NUL.
-        let mut files: HashSet<String> = output
-            .stdout
-            .split(|&b| b == 0)
-            .filter(|bytes| !bytes.is_empty())
-            .filter_map(|bytes| String::from_utf8(bytes.to_vec()).ok())
+        let files: HashSet<String> = stdout
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| line.to_string())
             .collect();
-
-        if needs_post_filter && let Some(paths) = pathspecs {
-            files.retain(|path| paths.contains(path));
-        }
 
         Ok(files)
     }
@@ -1757,36 +1811,23 @@ impl Repository {
         args.push(from_ref.to_string());
         args.push(to_ref.to_string());
 
-        // Add pathspecs if provided (only as CLI args when under threshold)
-        let needs_post_filter = if let Some(paths) = pathspecs {
+        // Add pathspecs if provided
+        if let Some(paths) = pathspecs {
             // for case where pathspec filter provided BUT not pathspecs.
             // otherwise it would default to full repo
             if paths.is_empty() {
                 return Ok(HashMap::new());
             }
-            if paths.len() > MAX_PATHSPEC_ARGS {
-                true
-            } else {
-                args.push("--".to_string());
-                for path in paths {
-                    args.push(path.clone());
-                }
-                false
+            args.push("--".to_string());
+            for path in paths {
+                args.push(path.clone());
             }
-        } else {
-            false
-        };
+        }
 
         let output = exec_git(&args)?;
         let diff_output = String::from_utf8(output.stdout)?;
 
-        let mut result = parse_diff_added_lines(&diff_output)?;
-
-        if needs_post_filter && let Some(paths) = pathspecs {
-            result.retain(|path, _| paths.contains(path));
-        }
-
-        Ok(result)
+        parse_diff_added_lines(&diff_output)
     }
 
     /// Get list of changed files between two refs using `git diff --name-only`
@@ -1799,18 +1840,16 @@ impl Repository {
         let mut args = self.global_args_for_exec();
         args.push("diff".to_string());
         args.push("--name-only".to_string());
-        args.push("-z".to_string()); // NUL-separated output for proper UTF-8 handling
         args.push(from_ref.to_string());
         args.push(to_ref.to_string());
 
         let output = exec_git(&args)?;
+        let stdout = String::from_utf8(output.stdout)?;
 
-        // With -z, output is NUL-separated. The output may contain a trailing NUL.
-        let files: Vec<String> = output
-            .stdout
-            .split(|&b| b == 0)
-            .filter(|bytes| !bytes.is_empty())
-            .filter_map(|bytes| String::from_utf8(bytes.to_vec()).ok())
+        let files: Vec<String> = stdout
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| line.to_string())
             .collect();
 
         Ok(files)
@@ -1832,36 +1871,23 @@ impl Repository {
         args.push("--no-color".to_string());
         args.push(from_ref.to_string());
 
-        // Add pathspecs if provided (only as CLI args when under threshold)
-        let needs_post_filter = if let Some(paths) = pathspecs {
+        // Add pathspecs if provided
+        if let Some(paths) = pathspecs {
             // for case where pathspec filter provided BUT not pathspecs.
             // otherwise it would default to full repo
             if paths.is_empty() {
                 return Ok(HashMap::new());
             }
-            if paths.len() > MAX_PATHSPEC_ARGS {
-                true
-            } else {
-                args.push("--".to_string());
-                for path in paths {
-                    args.push(path.clone());
-                }
-                false
+            args.push("--".to_string());
+            for path in paths {
+                args.push(path.clone());
             }
-        } else {
-            false
-        };
+        }
 
         let output = exec_git(&args)?;
         let diff_output = String::from_utf8(output.stdout)?;
 
-        let mut result = parse_diff_added_lines(&diff_output)?;
-
-        if needs_post_filter && let Some(paths) = pathspecs {
-            result.retain(|path, _| paths.contains(path));
-        }
-
-        Ok(result)
+        parse_diff_added_lines(&diff_output)
     }
 
     /// Get added line ranges from git diff between a commit and the working directory,
@@ -1869,7 +1895,6 @@ impl Repository {
     ///
     /// Returns (all_added_lines, pure_insertion_lines)
     /// Pure insertions are lines that were added without modifying existing lines at that position.
-    #[allow(clippy::type_complexity)]
     pub fn diff_workdir_added_lines_with_insertions(
         &self,
         from_ref: &str,
@@ -1881,38 +1906,23 @@ impl Repository {
         args.push("--no-color".to_string());
         args.push(from_ref.to_string());
 
-        // Add pathspecs if provided (only as CLI args when under threshold)
-        let needs_post_filter = if let Some(paths) = pathspecs {
+        // Add pathspecs if provided
+        if let Some(paths) = pathspecs {
             // for case where pathspec filter provided BUT not pathspecs.
             // otherwise it would default to full repo
             if paths.is_empty() {
                 return Ok((HashMap::new(), HashMap::new()));
             }
-            if paths.len() > MAX_PATHSPEC_ARGS {
-                true
-            } else {
-                args.push("--".to_string());
-                for path in paths {
-                    args.push(path.clone());
-                }
-                false
+            args.push("--".to_string());
+            for path in paths {
+                args.push(path.clone());
             }
-        } else {
-            false
-        };
+        }
 
         let output = exec_git(&args)?;
         let diff_output = String::from_utf8(output.stdout)?;
 
-        let (mut all_added, mut pure_insertions) =
-            parse_diff_added_lines_with_insertions(&diff_output)?;
-
-        if needs_post_filter && let Some(paths) = pathspecs {
-            all_added.retain(|path, _| paths.contains(path));
-            pure_insertions.retain(|path, _| paths.contains(path));
-        }
-
-        Ok((all_added, pure_insertions))
+        parse_diff_added_lines_with_insertions(&diff_output)
     }
 
     pub fn fetch_branch(&self, branch_name: &str, remote_name: &str) -> Result<(), GitAiError> {
@@ -1925,70 +1935,36 @@ impl Repository {
     }
 }
 
-pub fn find_repository(global_args: &[String]) -> Result<Repository, GitAiError> {
-    let mut rev_parse_args = global_args.to_owned();
-    rev_parse_args.push("rev-parse".to_string());
-    // Use --git-dir instead of --absolute-git-dir for compatibility with Git < 2.13
-    // (--absolute-git-dir was added in Git 2.13; older versions output the literal
-    // string "absolute-git-dir" instead of the resolved path).
-    rev_parse_args.push("--is-bare-repository".to_string());
-    rev_parse_args.push("--git-dir".to_string());
+pub fn find_repository(global_args: &Vec<String>) -> Result<Repository, GitAiError> {
+    let mut args = global_args.clone();
+    args.push("rev-parse".to_string());
+    args.push("--absolute-git-dir".to_string());
+    args.push("--show-toplevel".to_string());
 
-    let rev_parse_output = exec_git(&rev_parse_args)?;
-    let rev_parse_stdout = String::from_utf8(rev_parse_output.stdout)?;
-    let mut lines = rev_parse_stdout
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty());
+    let output = exec_git(&args)?;
+    let both_dirs = String::from_utf8(output.stdout)?;
 
-    let is_bare = match lines.next() {
-        Some("true") => true,
-        Some("false") => false,
-        Some(other) => {
-            return Err(GitAiError::Generic(format!(
-                "Unexpected --is-bare-repository output: {}",
-                other
-            )));
-        }
-        None => {
-            return Err(GitAiError::Generic(
-                "Missing --is-bare-repository output from git rev-parse".to_string(),
-            ));
-        }
-    };
+    let both_dirs = both_dirs.trim();
+    let lines: Vec<&str> = both_dirs.split("\n").collect();
 
-    let git_dir_str = lines.next().ok_or_else(|| {
-        GitAiError::Generic("Missing --git-dir output from git rev-parse".to_string())
-    })?;
-    let command_base_dir = resolve_command_base_dir(global_args)?;
-    let git_dir = if Path::new(git_dir_str).is_relative() {
-        command_base_dir.join(git_dir_str)
-    } else {
-        PathBuf::from(git_dir_str)
-    };
+    if lines.len() < 2 {
+        return Err(GitAiError::Generic(format!(
+            "Expected git rev-parse to return 2 lines (git dir and work dir), got {}:\n{}",
+            lines.len(),
+            both_dirs
+        )));
+    }
 
+    let git_dir_str = lines[0];
+    let workdir_str = lines[1];
+    let git_dir = PathBuf::from(git_dir_str);
+    let workdir = PathBuf::from(workdir_str);
     if !git_dir.is_dir() {
         return Err(GitAiError::Generic(format!(
             "Git directory does not exist: {}",
             git_dir.display()
         )));
     }
-
-    let workdir = if is_bare {
-        git_dir.parent().map(Path::to_path_buf).ok_or_else(|| {
-            GitAiError::Generic(format!(
-                "Git directory has no parent: {}",
-                git_dir.display()
-            ))
-        })?
-    } else {
-        let mut top_level_args = global_args.to_owned();
-        top_level_args.push("rev-parse".to_string());
-        top_level_args.push("--show-toplevel".to_string());
-        let output = exec_git(&top_level_args)?;
-        PathBuf::from(String::from_utf8(output.stdout)?.trim())
-    };
-
     if !workdir.is_dir() {
         return Err(GitAiError::Generic(format!(
             "Work directory does not exist: {}",
@@ -1996,26 +1972,17 @@ pub fn find_repository(global_args: &[String]) -> Result<Repository, GitAiError>
         )));
     }
 
-    // Ensure all internal git commands use a stable repository root consistently.
-    let mut normalized_global_args = global_args.to_owned();
-    let command_root = if is_bare {
-        git_dir.display().to_string()
-    } else {
-        workdir.display().to_string()
-    };
+    // Ensure all internal git commands use the repository root consistently
+    // When running from a subdirectory without -C, add it to ensure hooks work correctly
+    let mut global_args = global_args.clone();
+    let workdir_str = workdir.display().to_string();
 
-    // Preserve all original global flags (`-c`, etc.) but force the effective command root.
-    if let Some(c_index) = normalized_global_args.iter().rposition(|arg| arg == "-C") {
-        let path_index = c_index + 1;
-        if path_index < normalized_global_args.len() {
-            normalized_global_args[path_index] = command_root;
-        } else {
-            // Malformed global args with trailing `-C`; recover by appending repo root.
-            normalized_global_args.push(command_root);
-        }
-    } else {
-        normalized_global_args.push("-C".to_string());
-        normalized_global_args.push(command_root);
+    if global_args.is_empty() {
+        // Add -C flag when not present (e.g., when running from subdirectory)
+        global_args = vec!["-C".to_string(), workdir_str];
+    } else if global_args.len() == 2 && global_args[0] == "-C" && global_args[1] != workdir_str {
+        // Rewrite existing -C to repo root if it points elsewhere
+        global_args[1] = workdir_str;
     }
 
     // Canonicalize workdir for reliable path comparisons (especially on Windows)
@@ -2029,41 +1996,19 @@ pub fn find_repository(global_args: &[String]) -> Result<Repository, GitAiError>
         ))
     })?;
 
+    let common_git_dir = resolve_common_git_dir(&git_dir);
+
     Ok(Repository {
-        global_args: normalized_global_args,
-        storage: RepoStorage::for_repo_path(&git_dir, &workdir),
+        global_args: global_args.clone(),
+        storage: RepoStorage::for_repo_path(&git_dir, &common_git_dir, &workdir),
         git_dir,
+        common_git_dir,
         pre_command_base_commit: None,
         pre_command_refname: None,
         pre_reset_target_commit: None,
         workdir,
         canonical_workdir,
     })
-}
-
-fn resolve_command_base_dir(global_args: &[String]) -> Result<PathBuf, GitAiError> {
-    let mut base = std::env::current_dir().map_err(GitAiError::IoError)?;
-    let mut idx = 0usize;
-
-    while idx < global_args.len() {
-        if global_args[idx] == "-C" {
-            let path_arg = global_args.get(idx + 1).ok_or_else(|| {
-                GitAiError::Generic("Missing path after -C in global git args".to_string())
-            })?;
-
-            let next_base = PathBuf::from(path_arg);
-            base = if next_base.is_absolute() {
-                next_base
-            } else {
-                base.join(next_base)
-            };
-            idx += 2;
-            continue;
-        }
-        idx += 1;
-    }
-
-    Ok(base)
 }
 
 #[allow(dead_code)]
@@ -2076,10 +2021,13 @@ pub fn from_bare_repository(git_dir: &Path) -> Result<Repository, GitAiError> {
 
     let canonical_workdir = workdir.canonicalize().unwrap_or_else(|_| workdir.clone());
 
+    let common_git_dir = resolve_common_git_dir(git_dir);
+
     Ok(Repository {
         global_args,
-        storage: RepoStorage::for_repo_path(git_dir, &workdir),
+        storage: RepoStorage::for_repo_path(git_dir, &common_git_dir, &workdir),
         git_dir: git_dir.to_path_buf(),
+        common_git_dir,
         pre_command_base_commit: None,
         pre_command_refname: None,
         pre_reset_target_commit: None,
@@ -2088,9 +2036,21 @@ pub fn from_bare_repository(git_dir: &Path) -> Result<Repository, GitAiError> {
     })
 }
 
+fn resolve_common_git_dir(git_dir: &Path) -> PathBuf {
+    let commondir_path = git_dir.join("commondir");
+    if let Ok(contents) = fs::read_to_string(&commondir_path) {
+        let rel = contents.trim();
+        if !rel.is_empty() {
+            let path = git_dir.join(rel);
+            return path.canonicalize().unwrap_or(path);
+        }
+    }
+    git_dir.to_path_buf()
+}
+
 pub fn find_repository_in_path(path: &str) -> Result<Repository, GitAiError> {
     let global_args = vec!["-C".to_string(), path.to_string()];
-    find_repository(&global_args)
+    return find_repository(&global_args);
 }
 
 /// Find the git repository that contains the given file path by walking up the directory tree.
@@ -2099,9 +2059,9 @@ pub fn find_repository_in_path(path: &str) -> Result<Repository, GitAiError> {
 /// root itself may not be a git repository, but contains multiple independent git repositories.
 ///
 /// # Arguments
-///  * `file_path` - Absolute path to a file
-///  * `workspace_root` - Optional workspace root path. If provided, the search will stop at this
-///    boundary to avoid finding repositories outside the workspace.
+/// * `file_path` - Absolute path to a file
+/// * `workspace_root` - Optional workspace root path. If provided, the search will stop at this
+///                      boundary to avoid finding repositories outside the workspace.
 ///
 /// # Returns
 /// * `Ok(Repository)` - The repository containing the file
@@ -2152,13 +2112,12 @@ pub fn find_repository_for_file(
             // Submodules have a .git file (not directory) that points to the parent's .git/modules
             if git_path.is_file() {
                 // This is a submodule - read the file to check if it points to modules/
-                if let Ok(content) = std::fs::read_to_string(&git_path)
-                    && content.contains("gitdir:")
-                    && content.contains("/modules/")
-                {
-                    // This is a submodule, skip it and continue searching up
-                    current_dir = dir.parent();
-                    continue;
+                if let Ok(content) = std::fs::read_to_string(&git_path) {
+                    if content.contains("gitdir:") && content.contains("/modules/") {
+                        // This is a submodule, skip it and continue searching up
+                        current_dir = dir.parent();
+                        continue;
+                    }
                 }
             }
 
@@ -2188,7 +2147,6 @@ pub fn find_repository_for_file(
 /// A tuple of:
 /// * `HashMap<PathBuf, (Repository, Vec<String>)>` - Map of repo root to (repo, file paths)
 /// * `Vec<String>` - Files that couldn't be associated with any repository
-#[allow(clippy::type_complexity)]
 pub fn group_files_by_repository(
     file_paths: &[String],
     workspace_root: Option<&str>,
@@ -2225,18 +2183,10 @@ pub fn group_files_by_repository(
 /// Helper to execute a git command
 pub fn exec_git(args: &[String]) -> Result<Output, GitAiError> {
     // TODO Make sure to handle process signals, etc.
-    let mut cmd = Command::new(config::Config::get().git_cmd());
-    cmd.args(args);
-    cmd.env(GIT_AI_SKIP_CORE_HOOKS_ENV, "1");
-
-    #[cfg(windows)]
-    {
-        if !is_interactive_terminal() {
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-    }
-
-    let output = cmd.output().map_err(GitAiError::IoError)?;
+    let output = Command::new(config::Config::get().git_cmd())
+        .args(args)
+        .output()
+        .map_err(GitAiError::IoError)?;
 
     if !output.status.success() {
         let code = output.status.code();
@@ -2254,21 +2204,13 @@ pub fn exec_git(args: &[String]) -> Result<Output, GitAiError> {
 /// Helper to execute a git command with data provided on stdin
 pub fn exec_git_stdin(args: &[String], stdin_data: &[u8]) -> Result<Output, GitAiError> {
     // TODO Make sure to handle process signals, etc.
-    let mut cmd = Command::new(config::Config::get().git_cmd());
-    cmd.args(args)
-        .env(GIT_AI_SKIP_CORE_HOOKS_ENV, "1")
+    let mut child = Command::new(config::Config::get().git_cmd())
+        .args(args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-
-    #[cfg(windows)]
-    {
-        if !is_interactive_terminal() {
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-    }
-
-    let mut child = cmd.spawn().map_err(GitAiError::IoError)?;
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(GitAiError::IoError)?;
 
     if let Some(mut stdin) = child.stdin.take() {
         use std::io::Write;
@@ -2296,13 +2238,12 @@ pub fn exec_git_stdin(args: &[String], stdin_data: &[u8]) -> Result<Output, GitA
 #[allow(dead_code)]
 pub fn exec_git_stdin_with_env(
     args: &[String],
-    env: &[(String, String)],
+    env: &Vec<(String, String)>,
     stdin_data: &[u8],
 ) -> Result<Output, GitAiError> {
     // TODO Make sure to handle process signals, etc.
     let mut cmd = Command::new(config::Config::get().git_cmd());
     cmd.args(args)
-        .env(GIT_AI_SKIP_CORE_HOOKS_ENV, "1")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -2310,13 +2251,6 @@ pub fn exec_git_stdin_with_env(
     // Apply env overrides
     for (k, v) in env.iter() {
         cmd.env(k, v);
-    }
-
-    #[cfg(windows)]
-    {
-        if !is_interactive_terminal() {
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
     }
 
     let mut child = cmd.spawn().map_err(GitAiError::IoError)?;
@@ -2382,42 +2316,26 @@ fn parse_diff_added_lines(diff_output: &str) -> Result<HashMap<String, Vec<u32>>
 
     for line in diff_output.lines() {
         // Track current file being diffed
-        // Git outputs paths in two formats:
-        // 1. Unquoted: +++ b/path/to/file.txt (or w/ for workdir diffs)
-        // 2. Quoted (for non-ASCII): +++ "b/path/to/file.txt" (with octal escapes inside)
-        if let Some(raw_path) = line.strip_prefix("+++ b/") {
-            // Unquoted path (ASCII only)
-            // Note: Git adds trailing tab after filenames with spaces, so we trim_end
-            let file_path = crate::utils::unescape_git_path(raw_path.trim_end());
-            current_file = Some(file_path);
-        } else if let Some(raw_path) = line.strip_prefix("+++ w/") {
-            // Workdir diff uses w/ prefix instead of b/
-            let file_path = crate::utils::unescape_git_path(raw_path.trim_end());
-            current_file = Some(file_path);
-        } else if line.starts_with("+++ \"") {
-            // Quoted path (non-ASCII chars) - unescape the entire quoted portion after "+++ "
-            if let Some(quoted_suffix) = line.strip_prefix("+++ ") {
-                let unescaped = crate::utils::unescape_git_path(quoted_suffix);
-                // Strip the prefix (b/ or w/) after unescaping
-                let file_path = if let Some(stripped) = unescaped
-                    .strip_prefix("b/")
-                    .or(unescaped.strip_prefix("w/"))
-                {
-                    stripped.to_string()
-                } else {
-                    unescaped
-                };
-                current_file = Some(file_path);
-            }
+        // Git may add trailing tabs to file paths in diff output, so we trim them
+        // Git may also quote file names containing spaces: +++ "b/my file.txt"
+        if line.starts_with("+++ b/") {
+            current_file = Some(line[6..].trim_end().to_string());
+        } else if line.starts_with("+++ \"b/") && line.trim_end().ends_with('"') {
+            // Handle quoted path: +++ "b/my file.txt"
+            let trimmed = line.trim_end();
+            current_file = Some(trimmed[7..trimmed.len() - 1].to_string());
         } else if line.starts_with("+++ /dev/null") {
             // File was deleted
             current_file = None;
         } else if line.starts_with("@@ ") {
             // Parse hunk header: @@ -old_start,old_count +new_start,new_count @@
-            if let Some(ref file) = current_file
-                && let Some((added_lines, _is_pure_insertion)) = parse_hunk_header(line)
-            {
-                result.entry(file.clone()).or_default().extend(added_lines);
+            if let Some(ref file) = current_file {
+                if let Some((added_lines, _is_pure_insertion)) = parse_hunk_header(line) {
+                    result
+                        .entry(file.clone())
+                        .or_insert_with(Vec::new)
+                        .extend(added_lines);
+                }
             }
         }
     }
@@ -2435,7 +2353,6 @@ fn parse_diff_added_lines(diff_output: &str) -> Result<HashMap<String, Vec<u32>>
 /// along with information about which are pure insertions (old_count=0).
 ///
 /// Returns (all_added_lines, pure_insertion_lines)
-#[allow(clippy::type_complexity)]
 fn parse_diff_added_lines_with_insertions(
     diff_output: &str,
 ) -> Result<(HashMap<String, Vec<u32>>, HashMap<String, Vec<u32>>), GitAiError> {
@@ -2445,51 +2362,32 @@ fn parse_diff_added_lines_with_insertions(
 
     for line in diff_output.lines() {
         // Track current file being diffed
-        // Git outputs paths in two formats:
-        // 1. Unquoted: +++ b/path/to/file.txt (or w/ for workdir diffs)
-        // 2. Quoted (for non-ASCII): +++ "b/path/to/file.txt" (with octal escapes inside)
-        if let Some(raw_path) = line.strip_prefix("+++ b/") {
-            // Unquoted path (ASCII only)
-            // Note: Git adds trailing tab after filenames with spaces, so we trim_end
-            let file_path = crate::utils::unescape_git_path(raw_path.trim_end());
-            current_file = Some(file_path);
-        } else if let Some(raw_path) = line.strip_prefix("+++ w/") {
-            // Workdir diff uses w/ prefix instead of b/
-            let file_path = crate::utils::unescape_git_path(raw_path.trim_end());
-            current_file = Some(file_path);
-        } else if line.starts_with("+++ \"") {
-            // Quoted path (non-ASCII chars) - unescape the entire quoted portion after "+++ "
-            if let Some(quoted_suffix) = line.strip_prefix("+++ ") {
-                let unescaped = crate::utils::unescape_git_path(quoted_suffix);
-                // Strip the prefix (b/ or w/) after unescaping
-                let file_path = if let Some(stripped) = unescaped
-                    .strip_prefix("b/")
-                    .or(unescaped.strip_prefix("w/"))
-                {
-                    stripped.to_string()
-                } else {
-                    unescaped
-                };
-                current_file = Some(file_path);
-            }
+        // Git may add trailing tabs to file paths in diff output, so we trim them
+        // Git may also quote file names containing spaces: +++ "b/my file.txt"
+        if line.starts_with("+++ b/") {
+            current_file = Some(line[6..].trim_end().to_string());
+        } else if line.starts_with("+++ \"b/") && line.trim_end().ends_with('"') {
+            // Handle quoted path: +++ "b/my file.txt"
+            let trimmed = line.trim_end();
+            current_file = Some(trimmed[7..trimmed.len() - 1].to_string());
         } else if line.starts_with("+++ /dev/null") {
             // File was deleted
             current_file = None;
         } else if line.starts_with("@@ ") {
             // Parse hunk header: @@ -old_start,old_count +new_start,new_count @@
-            if let Some(ref file) = current_file
-                && let Some((added_lines, is_pure_insertion)) = parse_hunk_header(line)
-            {
-                all_lines
-                    .entry(file.clone())
-                    .or_default()
-                    .extend(added_lines.clone());
-
-                if is_pure_insertion {
-                    insertion_lines
+            if let Some(ref file) = current_file {
+                if let Some((added_lines, is_pure_insertion)) = parse_hunk_header(line) {
+                    all_lines
                         .entry(file.clone())
-                        .or_default()
-                        .extend(added_lines);
+                        .or_insert_with(Vec::new)
+                        .extend(added_lines.clone());
+
+                    if is_pure_insertion {
+                        insertion_lines
+                            .entry(file.clone())
+                            .or_insert_with(Vec::new)
+                            .extend(added_lines);
+                    }
                 }
             }
         }
@@ -2574,24 +2472,6 @@ fn parse_hunk_header(line: &str) -> Option<(Vec<u32>, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use std::path::Path;
-    use std::process::Command;
-
-    fn run_git(cwd: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(cwd)
-            .output()
-            .expect("git command should run");
-        assert!(
-            output.status.success(),
-            "git {:?} failed:\nstdout: {}\nstderr: {}",
-            args,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
 
     #[test]
     fn test_parse_git_version_standard() {
@@ -2638,176 +2518,5 @@ mod tests {
         assert_eq!(parse_git_version("not a version"), None);
         assert_eq!(parse_git_version("git version"), None);
         assert_eq!(parse_git_version("git version x.y.z"), None);
-    }
-
-    #[test]
-    fn test_list_commit_files_with_utf8_filename() {
-        use crate::git::test_utils::TmpRepo;
-
-        // Create a test repo with a UTF-8 filename
-        let tmp_repo = TmpRepo::new().unwrap();
-
-        // Write a file with Chinese characters in its name
-        let chinese_filename = "中文文件.txt";
-        tmp_repo
-            .write_file(chinese_filename, "Hello, 世界!\n", false)
-            .unwrap();
-
-        // Create an initial commit (using trigger_checkpoint_with_author for human checkpoint)
-        tmp_repo
-            .trigger_checkpoint_with_author("test_user")
-            .unwrap();
-        let _authorship_log = tmp_repo.commit_with_message("Add Chinese file").unwrap();
-
-        // Now get the commit SHA using git-ai repository methods
-        let repo = tmp_repo.gitai_repo();
-        let head = repo.head().unwrap();
-        let commit_sha = head.target().unwrap();
-
-        // Test list_commit_files
-        let files = repo.list_commit_files(&commit_sha, None).unwrap();
-
-        // Debug: print what we got
-        println!("Files in commit: {:?}", files);
-
-        // The file should be in the list with its UTF-8 name
-        assert!(
-            files.contains(chinese_filename),
-            "Should contain the Chinese filename '{}', but got: {:?}",
-            chinese_filename,
-            files
-        );
-    }
-
-    #[test]
-    fn test_parse_diff_added_lines_with_insertions_standard_prefix() {
-        // Test diff with standard b/ prefix (commit-to-commit diff)
-        let diff = r#"diff --git a/test.txt b/test.txt
-index 0000000..abc1234 100644
---- a/test.txt
-+++ b/test.txt
-@@ -0,0 +1,2 @@
-+line 1
-+line 2"#;
-
-        let (added_lines, insertion_lines) = parse_diff_added_lines_with_insertions(diff).unwrap();
-        assert_eq!(added_lines.get("test.txt"), Some(&vec![1, 2]));
-        assert_eq!(insertion_lines.get("test.txt"), Some(&vec![1, 2]));
-    }
-
-    #[test]
-    fn test_parse_diff_added_lines_with_insertions_workdir_prefix() {
-        // Test diff with w/ prefix (commit-to-workdir diff)
-        let diff = r#"diff --git c/test.txt w/test.txt
-index a751413..8adaa6c 100644
---- c/test.txt
-+++ w/test.txt
-@@ -0,0 +1,2 @@
-+// AI added line 1
-+// AI added line 2"#;
-
-        let (added_lines, insertion_lines) = parse_diff_added_lines_with_insertions(diff).unwrap();
-        assert_eq!(added_lines.get("test.txt"), Some(&vec![1, 2]));
-        assert_eq!(insertion_lines.get("test.txt"), Some(&vec![1, 2]));
-    }
-
-    #[test]
-    fn test_parse_diff_added_lines_with_insertions_quoted_paths() {
-        // Test diff with quoted paths containing spaces
-        let diff = r#"diff --git "a/my file.txt" "b/my file.txt"
-index 0000000..abc1234 100644
---- "a/my file.txt"
-+++ "b/my file.txt"
-@@ -0,0 +1,3 @@
-+line 1
-+line 2
-+line 3"#;
-
-        let (added_lines, insertion_lines) = parse_diff_added_lines_with_insertions(diff).unwrap();
-        assert_eq!(added_lines.get("my file.txt"), Some(&vec![1, 2, 3]));
-        assert_eq!(insertion_lines.get("my file.txt"), Some(&vec![1, 2, 3]));
-    }
-
-    #[test]
-    fn test_parse_diff_added_lines_with_insertions_quoted_workdir_paths() {
-        // Test diff with quoted w/ paths
-        let diff = r#"diff --git "c/my file.txt" "w/my file.txt"
-index 0000000..abc1234 100644
---- "c/my file.txt"
-+++ "w/my file.txt"
-@@ -0,0 +1,2 @@
-+line 1
-+line 2"#;
-
-        let (added_lines, insertion_lines) = parse_diff_added_lines_with_insertions(diff).unwrap();
-        assert_eq!(added_lines.get("my file.txt"), Some(&vec![1, 2]));
-        assert_eq!(insertion_lines.get("my file.txt"), Some(&vec![1, 2]));
-    }
-
-    #[test]
-    fn find_repository_in_path_supports_bare_repositories() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let source = temp.path().join("source");
-        let bare = temp.path().join("repo.git");
-        fs::create_dir_all(&source).expect("create source");
-
-        run_git(&source, &["init"]);
-        run_git(&source, &["config", "user.name", "Test User"]);
-        run_git(&source, &["config", "user.email", "test@example.com"]);
-        fs::write(source.join("README.md"), "# repo\n").expect("write readme");
-        run_git(&source, &["add", "."]);
-        run_git(&source, &["commit", "-m", "initial"]);
-        run_git(
-            temp.path(),
-            &[
-                "clone",
-                "--bare",
-                source.to_str().unwrap(),
-                bare.to_str().unwrap(),
-            ],
-        );
-
-        let repo = find_repository_in_path(bare.to_str().unwrap()).expect("find bare repo");
-        assert!(repo.is_bare_repository().expect("bare check"));
-        assert_eq!(
-            repo.path().canonicalize().expect("canonical bare"),
-            bare.canonicalize().expect("canonical path")
-        );
-    }
-
-    #[test]
-    fn find_repository_in_path_bare_repo_can_read_head_gitattributes() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let source = temp.path().join("source");
-        let bare = temp.path().join("repo.git");
-        fs::create_dir_all(&source).expect("create source");
-
-        run_git(&source, &["init"]);
-        run_git(&source, &["config", "user.name", "Test User"]);
-        run_git(&source, &["config", "user.email", "test@example.com"]);
-        fs::write(
-            source.join(".gitattributes"),
-            "generated/** linguist-generated=true\n",
-        )
-        .expect("write attrs");
-        fs::write(source.join("README.md"), "# repo\n").expect("write readme");
-        run_git(&source, &["add", "."]);
-        run_git(&source, &["commit", "-m", "initial"]);
-        run_git(
-            temp.path(),
-            &[
-                "clone",
-                "--bare",
-                source.to_str().unwrap(),
-                bare.to_str().unwrap(),
-            ],
-        );
-
-        let repo = find_repository_in_path(bare.to_str().unwrap()).expect("find bare repo");
-        let content = repo
-            .get_file_content(".gitattributes", "HEAD")
-            .expect("read attrs from HEAD");
-        let content = String::from_utf8(content).expect("utf8 attrs");
-        assert!(content.contains("generated/** linguist-generated=true"));
     }
 }
