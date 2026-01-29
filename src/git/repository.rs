@@ -1,3 +1,4 @@
+use gix_ref::FullName;
 use regex::Regex;
 
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
@@ -9,6 +10,7 @@ use crate::git::repo_storage::RepoStorage;
 use crate::git::rewrite_log::RewriteLogEvent;
 use crate::git::sync_authorship::{fetch_authorship_notes, push_authorship_notes};
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -829,6 +831,7 @@ impl<'a> Iterator for References<'a> {
 pub struct Repository {
     global_args: Vec<String>,
     git_dir: PathBuf,
+    common_git_dir: PathBuf,
     pub storage: RepoStorage,
     pub pre_command_base_commit: Option<String>,
     pub pre_command_refname: Option<String>,
@@ -943,6 +946,11 @@ impl Repository {
         self.git_dir.as_path()
     }
 
+    /// Returns the common .git directory for this repository (shared among worktrees).
+    pub fn common_git_dir(&self) -> &Path {
+        self.common_git_dir.as_path()
+    }
+
     // Get the path of the working directory for this repository.
     // If this repository is bare, then None is returned.
     pub fn workdir(&self) -> Result<PathBuf, GitAiError> {
@@ -1018,22 +1026,122 @@ impl Repository {
         Ok(remotes)
     }
 
-    /// Get the git config file for this repository and fallback to global config if not found.
-    fn get_git_config_file(&self) -> Result<gix_config::File<'static>, GitAiError> {
-        match gix_config::File::from_git_dir(self.path().to_path_buf()) {
-            Ok(git_config_file) => Ok(git_config_file),
-            Err(e) => match gix_config::File::from_globals() {
-                Ok(system_config) => Ok(system_config),
-                Err(_) => Err(GitAiError::GixError(e.to_string())),
-            },
+    /// Get merged git configuration with precedence: globals < common config < worktree config < env.
+    fn get_git_config(&self) -> Result<gix_config::File<'static>, GitAiError> {
+        let mut merged = gix_config::File::from_globals()
+            .map_err(|e| GitAiError::GixError(e.to_string()))?;
+        let branch_name = self.current_branch_full_name();
+        let branch_name_ref = branch_name.as_ref().map(|name| name.as_ref());
+        self.resolve_config_includes(&mut merged, &self.git_dir, branch_name_ref)?;
+
+        let common_local = self.load_config_file(&self.common_git_dir, gix_config::Source::Local)?;
+        let worktree_local = if self.common_git_dir == self.git_dir {
+            None
+        } else {
+            self.load_config_file(&self.git_dir, gix_config::Source::Local)?
+        };
+
+        let worktree_config_enabled =
+            common_local.as_ref().map(Self::has_worktree_config).unwrap_or(false)
+                || worktree_local
+                    .as_ref()
+                    .map(Self::has_worktree_config)
+                    .unwrap_or(false);
+
+        if let Some(mut local) = common_local {
+            self.resolve_config_includes(&mut local, &self.common_git_dir, branch_name_ref)?;
+            merged.append(local);
         }
+
+        if let Some(mut local) = worktree_local {
+            self.resolve_config_includes(&mut local, &self.git_dir, branch_name_ref)?;
+            merged.append(local);
+        }
+
+        if worktree_config_enabled {
+            if let Some(mut worktree) =
+                self.load_config_file(&self.git_dir, gix_config::Source::Worktree)?
+            {
+                self.resolve_config_includes(&mut worktree, &self.git_dir, branch_name_ref)?;
+                merged.append(worktree);
+            }
+        }
+
+        let env_overrides = gix_config::File::from_environment_overrides()
+            .map_err(|e| GitAiError::GixError(e.to_string()))?;
+        merged.append(env_overrides);
+
+        Ok(merged)
+    }
+
+    fn load_config_file(
+        &self,
+        git_dir: &Path,
+        source: gix_config::Source,
+    ) -> Result<Option<gix_config::File<'static>>, GitAiError> {
+        let mut path = git_dir.to_path_buf();
+        let mut env_var = |key: &str| std::env::var_os(key);
+        path.push(
+            source
+                .storage_location(&mut env_var)
+                .expect("location available"),
+        );
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let file = gix_config::File::from_path_no_includes(path, source)
+            .map_err(|e| GitAiError::GixError(e.to_string()))?;
+        Ok(Some(file))
+    }
+
+    fn resolve_config_includes(
+        &self,
+        file: &mut gix_config::File<'static>,
+        git_dir: &Path,
+        branch_name: Option<&gix_ref::FullNameRef>,
+    ) -> Result<(), GitAiError> {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let options = gix_config::file::init::Options {
+            includes: gix_config::file::includes::Options::follow(
+                gix_config::path::interpolate::Context {
+                    home_dir: home.as_deref(),
+                    ..Default::default()
+                },
+                gix_config::file::includes::conditional::Context {
+                    git_dir: Some(git_dir),
+                    branch_name,
+                },
+            ),
+            ..Default::default()
+        };
+        file.resolve_includes(options)
+            .map_err(|e| GitAiError::GixError(e.to_string()))
+    }
+
+    fn has_worktree_config(file: &gix_config::File<'static>) -> bool {
+        matches!(file.boolean("extensions.worktreeConfig"), Some(Ok(true)))
+    }
+
+    fn current_branch_full_name(&self) -> Option<FullName> {
+        let mut args = self.global_args_for_exec();
+        args.push("branch".to_string());
+        args.push("--show-current".to_string());
+        let output = exec_git(&args).ok()?;
+        let branch = String::from_utf8(output.stdout).ok()?.trim().to_string();
+        if branch.is_empty() {
+            return None;
+        }
+        let full = if branch.starts_with("refs/") {
+            branch
+        } else {
+            format!("refs/heads/{}", branch)
+        };
+        FullName::try_from(full).ok()
     }
     /// Get config value for a given key as a String.
     pub fn config_get_str(&self, key: &str) -> Result<Option<String>, GitAiError> {
-        match self.get_git_config_file() {
-            Ok(git_config_file) => Ok(git_config_file.string(key).map(|cow| cow.to_string())),
-            Err(e) => Err(e),
-        }
+        let git_config_file = self.get_git_config()?;
+        Ok(git_config_file.string(key).map(|cow| cow.to_string()))
     }
 
     /// Get all config values matching a regex pattern.
@@ -1042,40 +1150,35 @@ impl Repository {
         &self,
         pattern: &str,
     ) -> Result<std::collections::HashMap<String, String>, GitAiError> {
-        match self.get_git_config_file() {
-            Ok(git_config_file) => {
-                let mut matches: HashMap<String, String> = HashMap::new();
+        let git_config_file = self.get_git_config()?;
+        let mut matches: HashMap<String, String> = HashMap::new();
 
-                let re = Regex::new(pattern)
-                    .map_err(|e| GitAiError::Generic(format!("Invalid regex pattern: {}", e)))?;
+        let re = Regex::new(pattern)
+            .map_err(|e| GitAiError::Generic(format!("Invalid regex pattern: {}", e)))?;
 
-                // iterate over all sections
-                for section in git_config_file.sections() {
-                    // Support subsections in the key
-                    let section_name = section.header().name().to_string().to_lowercase();
-                    let subsection = section.header().subsection_name();
+        // iterate over all sections
+        for section in git_config_file.sections() {
+            // Support subsections in the key
+            let section_name = section.header().name().to_string().to_lowercase();
+            let subsection = section.header().subsection_name();
 
-                    for value_name in section.body().value_names() {
-                        let value_name_str = value_name.to_string().to_lowercase();
-                        let full_key = if let Some(sub) = subsection {
-                            format!("{}.{}.{}", section_name, sub, value_name_str)
-                        } else {
-                            format!("{}.{}", section_name, value_name_str)
-                        };
+            for value_name in section.body().value_names() {
+                let value_name_str = value_name.to_string().to_lowercase();
+                let full_key = if let Some(sub) = subsection {
+                    format!("{}.{}.{}", section_name, sub, value_name_str)
+                } else {
+                    format!("{}.{}", section_name, value_name_str)
+                };
 
-                        if re.is_match(&full_key) {
-                            if let Some(value) =
-                                section.body().value(value_name).map(|c| c.to_string())
-                            {
-                                matches.insert(full_key, value);
-                            }
-                        }
+                if re.is_match(&full_key) {
+                    if let Some(value) = section.body().value(value_name).map(|c| c.to_string()) {
+                        matches.insert(full_key, value);
                     }
                 }
-                Ok(matches)
             }
-            Err(e) => Err(e),
         }
+
+        Ok(matches)
     }
 
     /// Get the git version as a tuple (major, minor, patch).
@@ -1893,10 +1996,13 @@ pub fn find_repository(global_args: &Vec<String>) -> Result<Repository, GitAiErr
         ))
     })?;
 
+    let common_git_dir = resolve_common_git_dir(&git_dir);
+
     Ok(Repository {
         global_args: global_args.clone(),
-        storage: RepoStorage::for_repo_path(&git_dir, &workdir),
+        storage: RepoStorage::for_repo_path(&git_dir, &common_git_dir, &workdir),
         git_dir,
+        common_git_dir,
         pre_command_base_commit: None,
         pre_command_refname: None,
         pre_reset_target_commit: None,
@@ -1915,16 +2021,31 @@ pub fn from_bare_repository(git_dir: &Path) -> Result<Repository, GitAiError> {
 
     let canonical_workdir = workdir.canonicalize().unwrap_or_else(|_| workdir.clone());
 
+    let common_git_dir = resolve_common_git_dir(git_dir);
+
     Ok(Repository {
         global_args,
-        storage: RepoStorage::for_repo_path(git_dir, &workdir),
+        storage: RepoStorage::for_repo_path(git_dir, &common_git_dir, &workdir),
         git_dir: git_dir.to_path_buf(),
+        common_git_dir,
         pre_command_base_commit: None,
         pre_command_refname: None,
         pre_reset_target_commit: None,
         workdir,
         canonical_workdir,
     })
+}
+
+fn resolve_common_git_dir(git_dir: &Path) -> PathBuf {
+    let commondir_path = git_dir.join("commondir");
+    if let Ok(contents) = fs::read_to_string(&commondir_path) {
+        let rel = contents.trim();
+        if !rel.is_empty() {
+            let path = git_dir.join(rel);
+            return path.canonicalize().unwrap_or(path);
+        }
+    }
+    git_dir.to_path_buf()
 }
 
 pub fn find_repository_in_path(path: &str) -> Result<Repository, GitAiError> {

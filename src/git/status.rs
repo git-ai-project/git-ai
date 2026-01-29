@@ -120,17 +120,20 @@ impl Repository {
             staged_filenames
         };
 
-        if combined_pathspecs.is_empty() {
-            return Ok(Vec::new());
-        }
-
         let mut args = self.global_args_for_exec();
         args.push("status".to_string());
         args.push("--porcelain=v2".to_string());
         args.push("-z".to_string());
 
+        if combined_pathspecs.is_empty() && skip_untracked {
+            return Ok(Vec::new());
+        }
+
         if skip_untracked {
             args.push("--untracked-files=no".to_string());
+        } else {
+            // Ensure untracked files are included regardless of user git config
+            args.push("--untracked-files=all".to_string());
         }
 
         // Add combined pathspecs (staged files + provided paths)

@@ -1,3 +1,4 @@
+#[macro_use]
 mod repos;
 
 use git_ai::authorship::attribution_tracker::LineAttribution;
@@ -21,6 +22,14 @@ fn normalize_blame_output(blame_output: &str) -> String {
     let result = re_timestamp.replace_all(&result, "TIMESTAMP");
 
     result.to_string()
+}
+
+worktree_test_wrappers! {
+    test_initial_only_no_blame_data,
+    test_initial_wins_overlaps,
+    test_initial_and_blame_merge,
+    test_partial_file_coverage,
+    test_initial_attributions_in_subsequent_checkpoint,
 }
 
 #[test]

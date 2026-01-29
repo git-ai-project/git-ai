@@ -899,3 +899,11 @@ fn test_gemini_e2e_partial_staging() {
         // ai_line5 is not committed because it's unstaged
     ]);
 }
+
+worktree_test_wrappers! {
+    test_gemini_e2e_with_attribution,
+    test_gemini_e2e_human_checkpoint,
+    test_gemini_e2e_multiple_tool_calls,
+    test_gemini_e2e_with_resync,
+    test_gemini_e2e_partial_staging,
+}

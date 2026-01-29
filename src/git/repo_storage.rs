@@ -23,6 +23,7 @@ pub struct InitialAttributions {
 #[derive(Debug, Clone)]
 pub struct RepoStorage {
     pub repo_path: PathBuf,
+    pub common_git_dir: PathBuf,
     pub repo_workdir: PathBuf,
     pub working_logs: PathBuf,
     pub rewrite_log: PathBuf,
@@ -30,14 +31,19 @@ pub struct RepoStorage {
 }
 
 impl RepoStorage {
-    pub fn for_repo_path(repo_path: &Path, repo_workdir: &Path) -> RepoStorage {
-        let ai_dir = repo_path.join("ai");
+    pub fn for_repo_path(
+        git_dir: &Path,
+        common_git_dir: &Path,
+        repo_workdir: &Path,
+    ) -> RepoStorage {
+        let ai_dir = git_dir.join("ai");
         let working_logs_dir = ai_dir.join("working_logs");
         let rewrite_log_file = ai_dir.join("rewrite_log");
         let logs_dir = ai_dir.join("logs");
 
         let config = RepoStorage {
-            repo_path: repo_path.to_path_buf(),
+            repo_path: git_dir.to_path_buf(),
+            common_git_dir: common_git_dir.to_path_buf(),
             repo_workdir: repo_workdir.to_path_buf(),
             working_logs: working_logs_dir,
             rewrite_log: rewrite_log_file,
@@ -603,8 +609,11 @@ mod tests {
         let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
 
         // Create RepoStorage
-        let _repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), &tmp_repo.repo().workdir().unwrap());
+        let _repo_storage = RepoStorage::for_repo_path(
+            tmp_repo.repo().path(),
+            tmp_repo.repo().commondir(),
+            &tmp_repo.repo().workdir().unwrap(),
+        );
 
         // Verify .git/ai directory exists
         let ai_dir = tmp_repo.repo().path().join("ai");
@@ -638,7 +647,8 @@ mod tests {
 
         // Create RepoStorage
         let repo_storage = RepoStorage::for_repo_path(
-            &tmp_repo.repo().path(),
+            tmp_repo.repo().path(),
+            tmp_repo.repo().commondir(),
             &tmp_repo.repo().workdir().unwrap(),
         );
 
@@ -674,8 +684,11 @@ mod tests {
         let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
 
         // Create RepoStorage and PersistedWorkingLog
-        let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), &tmp_repo.repo().workdir().unwrap());
+        let repo_storage = RepoStorage::for_repo_path(
+            tmp_repo.repo().path(),
+            tmp_repo.repo().commondir(),
+            &tmp_repo.repo().workdir().unwrap(),
+        );
         let working_log = repo_storage.working_log_for_base_commit("test-commit-sha");
 
         // Test persisting a file version
@@ -718,8 +731,11 @@ mod tests {
         let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
 
         // Create RepoStorage and PersistedWorkingLog
-        let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), &tmp_repo.repo().workdir().unwrap());
+        let repo_storage = RepoStorage::for_repo_path(
+            tmp_repo.repo().path(),
+            tmp_repo.repo().commondir(),
+            &tmp_repo.repo().workdir().unwrap(),
+        );
         let working_log = repo_storage.working_log_for_base_commit("test-commit-sha");
 
         // Create a test checkpoint
@@ -775,8 +791,11 @@ mod tests {
         let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
 
         // Create RepoStorage and PersistedWorkingLog
-        let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), &tmp_repo.repo().workdir().unwrap());
+        let repo_storage = RepoStorage::for_repo_path(
+            tmp_repo.repo().path(),
+            tmp_repo.repo().commondir(),
+            &tmp_repo.repo().workdir().unwrap(),
+        );
         let working_log = repo_storage.working_log_for_base_commit("test-commit-sha");
 
         // Build three checkpoints: missing version, wrong version, and correct version
@@ -828,8 +847,11 @@ mod tests {
         let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
 
         // Create RepoStorage and PersistedWorkingLog
-        let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), &tmp_repo.repo().workdir().unwrap());
+        let repo_storage = RepoStorage::for_repo_path(
+            tmp_repo.repo().path(),
+            tmp_repo.repo().commondir(),
+            &tmp_repo.repo().workdir().unwrap(),
+        );
         let working_log = repo_storage.working_log_for_base_commit("test-commit-sha");
 
         // Add some blobs
@@ -897,8 +919,11 @@ mod tests {
         let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
 
         // Create RepoStorage
-        let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), &tmp_repo.repo().workdir().unwrap());
+        let repo_storage = RepoStorage::for_repo_path(
+            tmp_repo.repo().path(),
+            tmp_repo.repo().commondir(),
+            &tmp_repo.repo().workdir().unwrap(),
+        );
 
         // Create working log for a specific commit
         let commit_sha = "abc123def456";
