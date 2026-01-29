@@ -14,7 +14,7 @@ NC='\033[0m' # No Color
 # When set to __REPO_PLACEHOLDER__, defaults to "acunniffe/git-ai"
 REPO="__REPO_PLACEHOLDER__"
 if [ "$REPO" = "__REPO_PLACEHOLDER__" ]; then
-    REPO="acunniffe/git-ai"
+    REPO="Retired-com/git-ai"
 fi
 
 # Version placeholder - replaced during release builds with actual version (e.g., "v1.0.24")
@@ -90,24 +90,24 @@ verify_checksum() {
 # Returns shell configurations in format: "shell_name|config_file" (one per line)
 detect_all_shells() {
     local shells=""
-    
+
     # Check for bash configs (prefer .bashrc over .bash_profile)
     if [ -f "$HOME/.bashrc" ]; then
         shells="${shells}bash|$HOME/.bashrc\n"
     elif [ -f "$HOME/.bash_profile" ]; then
         shells="${shells}bash|$HOME/.bash_profile\n"
     fi
-    
+
     # Check for zsh config
     if [ -f "$HOME/.zshrc" ]; then
         shells="${shells}zsh|$HOME/.zshrc\n"
     fi
-    
+
     # Check for fish config
     if [ -f "$HOME/.config/fish/config.fish" ]; then
         shells="${shells}fish|$HOME/.config/fish/config.fish\n"
     fi
-    
+
     # If no configs found, fall back to $SHELL detection and create config for that shell only
     if [ -z "$shells" ]; then
         local login_shell=""
@@ -126,7 +126,7 @@ detect_all_shells() {
                 ;;
         esac
     fi
-    
+
     # Remove trailing newline and output
     printf '%b' "$shells" | sed '/^$/d'
 }
@@ -220,15 +220,15 @@ BINARY_NAME="git-ai-${OS}-${ARCH}"
 if [ "$PINNED_VERSION" != "__VERSION_PLACEHOLDER__" ]; then
     # Version-pinned install script from a release
     RELEASE_TAG="$PINNED_VERSION"
-    DOWNLOAD_URL="https://usegitai.com/worker/releases/download/${RELEASE_TAG}/${BINARY_NAME}"
+    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${BINARY_NAME}"
 elif [ -n "${GIT_AI_RELEASE_TAG:-}" ] && [ "${GIT_AI_RELEASE_TAG:-}" != "latest" ]; then
     # Environment variable override
     RELEASE_TAG="$GIT_AI_RELEASE_TAG"
-    DOWNLOAD_URL="https://usegitai.com/worker/releases/download/${RELEASE_TAG}/${BINARY_NAME}"
+    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${BINARY_NAME}"
 else
     # Default to latest
     RELEASE_TAG="latest"
-    DOWNLOAD_URL="https://usegitai.com/worker/releases/download/latest/${BINARY_NAME}"
+    DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/${BINARY_NAME}"
 fi
 
 # Install into the user's bin directory ~/.git-ai/bin
@@ -305,7 +305,7 @@ SHELLS_ALREADY_CONFIGURED=""
 
 while IFS='|' read -r shell_name config_file; do
     [ -z "$shell_name" ] && continue
-    
+
     # Generate shell-appropriate PATH command
     if [ "$shell_name" = "fish" ]; then
         path_cmd="fish_add_path -g \"$INSTALL_DIR\""
@@ -314,10 +314,10 @@ while IFS='|' read -r shell_name config_file; do
     else
         path_cmd="export PATH=\"$INSTALL_DIR:\$PATH\""
     fi
-    
+
     # Create config file if it doesn't exist (for fallback case when no configs found)
     touch "$config_file"
-    
+
     # Append if not already present
     if ! grep -qsF "$INSTALL_DIR" "$config_file"; then
         echo "" >> "$config_file"
@@ -337,7 +337,7 @@ if [ -n "$SHELLS_CONFIGURED" ]; then
         [ -z "$shell_name" ] && continue
         success "  ✓ $config_file"
     done
-    
+
     echo ""
     echo "To apply changes immediately:"
     printf '%b' "$SHELLS_CONFIGURED" | while IFS='|' read -r shell_name config_file; do

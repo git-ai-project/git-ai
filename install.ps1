@@ -29,7 +29,7 @@ function Wait-ForFileAvailable {
         [Parameter(Mandatory = $false)][int]$MaxWaitSeconds = 300,
         [Parameter(Mandatory = $false)][int]$RetryIntervalSeconds = 5
     )
-    
+
     $elapsed = 0
     while ($elapsed -lt $MaxWaitSeconds) {
         try {
@@ -89,7 +89,7 @@ function Verify-Checksum {
 # When set to __REPO_PLACEHOLDER__, defaults to "acunniffe/git-ai"
 $Repo = '__REPO_PLACEHOLDER__'
 if ($Repo -eq '__REPO_PLACEHOLDER__') {
-    $Repo = 'acunniffe/git-ai'
+    $Repo = 'Retired-com/git-ai'
 }
 
 # Version placeholder - replaced during release builds with actual version (e.g., "v1.0.24")
@@ -276,18 +276,18 @@ $binaryName = "git-ai-$os-$arch"
 if ($PinnedVersion -ne '__VERSION_PLACEHOLDER__') {
     # Version-pinned install script from a release
     $releaseTag = $PinnedVersion
-    $downloadUrlExe = "https://usegitai.com/worker/releases/download/$releaseTag/$binaryName.exe"
-    $downloadUrlNoExt = "https://usegitai.com/worker/releases/download/$releaseTag/$binaryName"
+    $downloadUrlExe = "https://github.com/$Repo/releases/download/$releaseTag/$binaryName.exe"
+    $downloadUrlNoExt = "https://github.com/$Repo/releases/download/$releaseTag/$binaryName"
 } elseif (-not [string]::IsNullOrWhiteSpace($env:GIT_AI_RELEASE_TAG) -and $env:GIT_AI_RELEASE_TAG -ne 'latest') {
     # Environment variable override
     $releaseTag = $env:GIT_AI_RELEASE_TAG
-    $downloadUrlExe = "https://usegitai.com/worker/releases/download/$releaseTag/$binaryName.exe"
-    $downloadUrlNoExt = "https://usegitai.com/worker/releases/download/$releaseTag/$binaryName"
+    $downloadUrlExe = "https://github.com/$Repo/releases/download/$releaseTag/$binaryName.exe"
+    $downloadUrlNoExt = "https://github.com/$Repo/releases/download/$releaseTag/$binaryName"
 } else {
     # Default to latest
     $releaseTag = 'latest'
-    $downloadUrlExe = "https://usegitai.com/worker/releases/download/latest/$binaryName.exe"
-    $downloadUrlNoExt = "https://usegitai.com/worker/releases/download/latest/$binaryName"
+    $downloadUrlExe = "https://github.com/$Repo/releases/latest/download/$binaryName.exe"
+    $downloadUrlNoExt = "https://github.com/$Repo/releases/latest/download/$binaryName"
 }
 
 # Install directory: %USERPROFILE%\.git-ai\bin
