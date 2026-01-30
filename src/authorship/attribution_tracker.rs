@@ -736,6 +736,32 @@ impl AttributionTracker {
         ts: u128,
         substantive_new_ranges: &[(usize, usize)],
     ) -> Vec<Attribution> {
+        #[derive(Clone)]
+        struct AttributionCursor<'a> {
+            attrs: &'a [Attribution],
+            idx: usize,
+        }
+
+        impl<'a> AttributionCursor<'a> {
+            fn new(attrs: &'a [Attribution]) -> Self {
+                Self { attrs, idx: 0 }
+            }
+
+            fn overlaps_in_range(&mut self, start: usize, end: usize) -> &'a [Attribution] {
+                while self.idx < self.attrs.len() && self.attrs[self.idx].end <= start {
+                    self.idx += 1;
+                }
+                let mut end_idx = self.idx;
+                while end_idx < self.attrs.len() && self.attrs[end_idx].start < end {
+                    end_idx += 1;
+                }
+                &self.attrs[self.idx..end_idx]
+            }
+        }
+
+        let mut sorted_attributions = old_attributions.to_vec();
+        sorted_attributions.sort_by_key(|a| (a.start, a.end, a.ts));
+
         let mut new_attributions = Vec::new();
 
         // Build lookup maps for moves
@@ -766,6 +792,8 @@ impl AttributionTracker {
         let mut insertion_idx = 0;
         let mut prev_whitespace_delete = false;
 
+        let mut cursor = AttributionCursor::new(&sorted_attributions);
+
         for diff in diffs {
             let op = diff.op();
             let len = diff.data().len();
@@ -776,7 +804,8 @@ impl AttributionTracker {
                     let old_range = (old_pos, old_pos + len);
                     let new_range = (new_pos, new_pos + len);
 
-                    for attr in old_attributions {
+                    let overlaps = cursor.overlaps_in_range(old_range.0, old_range.1);
+                    for attr in overlaps {
                         if let Some((overlap_start, overlap_end)) =
                             attr.intersection(old_range.0, old_range.1)
                         {
@@ -799,6 +828,7 @@ impl AttributionTracker {
                 }
                 ByteDiffOp::Delete => {
                     let deletion_range = (old_pos, old_pos + len);
+                    let deletion_overlaps = cursor.overlaps_in_range(deletion_range.0, deletion_range.1);
 
                     // Check if this deletion is part of a move
                     if let Some(mappings) = deletion_to_move.get(&deletion_idx) {
@@ -810,7 +840,7 @@ impl AttributionTracker {
                             if source_start < source_end {
                                 let target_start = insertion.start + mapping.target_range.0;
 
-                                for attr in old_attributions {
+                                for attr in deletion_overlaps {
                                     if let Some((overlap_start, overlap_end)) =
                                         attr.intersection(source_start, source_end)
                                     {
@@ -1719,24 +1749,112 @@ pub fn attributions_to_line_attributions(
         return Vec::new();
     }
 
-    // For each line, determine the dominant author
+    // Sort attributions by start to enable sweep-line processing.
+    let mut sorted_attrs: Vec<&Attribution> = attributions.iter().collect();
+    sorted_attrs.sort_by_key(|a| (a.start, a.end, a.ts));
+
+    let mut active: Vec<&Attribution> = Vec::new();
+    let mut attr_idx = 0usize;
+
+    // For each line, determine the dominant author using only active attributions.
     let mut line_authors: Vec<Option<(String, Option<String>)>> =
         Vec::with_capacity(line_count as usize);
 
     for line_num in 1..=line_count {
-        let (author, overrode) =
-            find_dominant_author_for_line(line_num, &boundaries, attributions, content);
-        line_authors.push(Some((author, overrode)));
+        let (line_start, line_end) = boundaries.get_line_range(line_num).unwrap();
+
+        while attr_idx < sorted_attrs.len() && sorted_attrs[attr_idx].start < line_end {
+            active.push(sorted_attrs[attr_idx]);
+            attr_idx += 1;
+        }
+
+        // Remove attributions that end before this line.
+        active.retain(|attr| attr.end > line_start && attr.start < line_end);
+
+        let line_content = &content[line_start..line_end];
+        let is_line_empty =
+            line_content.is_empty() || line_content.chars().all(|c| c.is_whitespace());
+
+        let mut candidate_attrs: Vec<&Attribution> = Vec::new();
+        for attribution in &active {
+            if !attribution.overlaps(line_start, line_end) {
+                continue;
+            }
+
+            let is_deletion_marker = attribution.start == attribution.end
+                && attribution.start >= line_start
+                && attribution.start <= line_end;
+
+            let slice_start = std::cmp::max(line_start, attribution.start);
+            let slice_end = std::cmp::min(line_end, attribution.end);
+            let mut attr_non_whitespace_count = 0;
+            if slice_start < slice_end {
+                let safe_start = if content.is_char_boundary(slice_start) {
+                    slice_start
+                } else {
+                    floor_char_boundary(content, slice_start).max(line_start)
+                };
+                let safe_end = if content.is_char_boundary(slice_end) {
+                    slice_end
+                } else {
+                    ceil_char_boundary(content, slice_end).min(line_end)
+                };
+
+                if safe_start < safe_end {
+                    let content_slice = &content[safe_start..safe_end];
+                    attr_non_whitespace_count =
+                        content_slice.chars().filter(|c| !c.is_whitespace()).count();
+                }
+            }
+
+            if attr_non_whitespace_count > 0 || is_line_empty || is_deletion_marker {
+                candidate_attrs.push(*attribution);
+            }
+        }
+
+        if candidate_attrs.is_empty() {
+            line_authors.push(Some((CheckpointKind::Human.to_str(), None)));
+            continue;
+        }
+
+        // Choose the author with the latest timestamp
+        let latest_timestamp = candidate_attrs
+            .iter()
+            .max_by_key(|a| a.ts)
+            .unwrap()
+            .ts;
+        let latest_author = candidate_attrs
+            .iter()
+            .filter(|a| a.ts == latest_timestamp)
+            .map(|a| a.author_id.clone())
+            .collect::<Vec<String>>();
+        let last_ai_edit = candidate_attrs
+            .iter()
+            .filter(|a| a.author_id != CheckpointKind::Human.to_str())
+            .last();
+        let last_human_edit = candidate_attrs
+            .iter()
+            .filter(|a| a.author_id == CheckpointKind::Human.to_str())
+            .last();
+        let overrode = match (last_ai_edit, last_human_edit) {
+            (Some(ai), Some(h)) => {
+                if h.ts > ai.ts {
+                    Some(ai.author_id.clone())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
+        line_authors.push(Some((latest_author[0].clone(), overrode)));
     }
 
     // Merge consecutive lines with the same author
-    let mut merged_line_authors = merge_consecutive_line_attributions(line_authors);
+    let merged_line_authors = merge_consecutive_line_attributions(line_authors);
 
     // Strip away all human lines (only AI lines need to be retained)
-    merged_line_authors.retain(|line_attr| {
-        line_attr.author_id != CheckpointKind::Human.to_str() || line_attr.overrode.is_some()
-    });
-    merged_line_authors
+    filter_human_line_attributions(merged_line_authors)
 }
 
 /// Find the dominant author for a specific line based on non-whitespace character count
@@ -1822,7 +1940,7 @@ fn find_dominant_author_for_line(
 }
 
 /// Merge consecutive lines with the same author into LineAttribution ranges
-fn merge_consecutive_line_attributions(
+pub(crate) fn merge_consecutive_line_attributions(
     line_authorship: Vec<Option<(String, Option<String>)>>,
 ) -> Vec<LineAttribution> {
     let mut result = Vec::new();
@@ -1883,6 +2001,67 @@ fn merge_consecutive_line_attributions(
     }
 
     result
+}
+
+pub(crate) fn filter_human_line_attributions(
+    mut line_attributions: Vec<LineAttribution>,
+) -> Vec<LineAttribution> {
+    line_attributions.retain(|line_attr| {
+        line_attr.author_id != CheckpointKind::Human.to_str() || line_attr.overrode.is_some()
+    });
+    line_attributions
+}
+
+pub(crate) fn build_line_authorship_from_ranges(
+    line_attributions: &[LineAttribution],
+    total_lines: u32,
+    default_author: &str,
+) -> Vec<(String, Option<String>)> {
+    let mut line_authors = vec![(default_author.to_string(), None); total_lines as usize];
+    for attr in line_attributions {
+        let start = attr.start_line.max(1);
+        let end = attr.end_line.min(total_lines);
+        for line in start..=end {
+            let idx = (line - 1) as usize;
+            line_authors[idx] = (attr.author_id.clone(), attr.overrode.clone());
+        }
+    }
+    line_authors
+}
+
+pub(crate) fn attributions_cover_content(
+    content: &str,
+    attributions: &[Attribution],
+) -> bool {
+    if content.is_empty() {
+        return true;
+    }
+    if attributions.is_empty() {
+        return false;
+    }
+
+    let mut ranges: Vec<&Attribution> = attributions
+        .iter()
+        .filter(|attr| attr.start < attr.end)
+        .collect();
+    if ranges.is_empty() {
+        return false;
+    }
+
+    ranges.sort_by_key(|attr| (attr.start, attr.end));
+    let mut covered_end = 0usize;
+    for attr in ranges {
+        if attr.start > covered_end {
+            return false;
+        }
+        if attr.end > covered_end {
+            covered_end = attr.end;
+        }
+        if covered_end >= content.len() {
+            return true;
+        }
+    }
+    covered_end >= content.len()
 }
 #[cfg(test)]
 mod tests {
@@ -1945,6 +2124,16 @@ mod tests {
             "Alice",
             "unchanged prefix should stay Alice",
         );
+    }
+
+    #[test]
+    fn test_attributions_cover_content() {
+        let content = "hello\nworld\n";
+        let attrs = vec![Attribution::new(0, content.len(), "Alice".into(), TEST_TS)];
+        assert!(attributions_cover_content(content, &attrs));
+
+        let partial = vec![Attribution::new(0, 3, "Alice".into(), TEST_TS)];
+        assert!(!attributions_cover_content(content, &partial));
     }
 
     #[test]

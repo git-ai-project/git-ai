@@ -1,4 +1,8 @@
 use crate::authorship::attribution_tracker::{
+    attributions_cover_content,
+    build_line_authorship_from_ranges,
+    filter_human_line_attributions,
+    merge_consecutive_line_attributions,
     Attribution, AttributionTracker, INITIAL_ATTRIBUTION_TS, LineAttribution,
 };
 use crate::authorship::authorship_log::PromptRecord;
@@ -743,6 +747,7 @@ fn get_checkpoint_entry_for_file(
                         .get_file_version(&entry.blob_sha)
                         .unwrap_or_default(),
                     entry.attributions.clone(),
+                    entry.line_attributions.clone(),
                 )
             })
     });
@@ -754,9 +759,10 @@ fn get_checkpoint_entry_for_file(
         .unwrap_or_default();
 
     let is_from_checkpoint = from_checkpoint.is_some();
-    let (previous_content, prev_attributions) = if let Some((content, attrs)) = from_checkpoint {
+    let (previous_content, prev_attributions, prev_line_attributions) =
+        if let Some((content, attrs, line_attrs)) = from_checkpoint {
         // File exists in a previous checkpoint - use that
-        (content, attrs)
+        (content, attrs, line_attrs)
     } else {
         // File doesn't exist in any previous checkpoint - need to initialize from git + INITIAL
         // Get previous content from HEAD tree
@@ -795,8 +801,14 @@ fn get_checkpoint_entry_for_file(
             }
         }
 
-        // Start with INITIAL attributions (they win)
-        let mut prev_line_attributions = initial_attrs_for_file.clone();
+        let content_for_line_conversion = if !initial_attrs_for_file.is_empty() {
+            &current_content
+        } else {
+            &previous_content
+        };
+        let total_lines = content_for_line_conversion.lines().count() as u32;
+        let mut line_authors =
+            vec![(CheckpointKind::Human.to_str(), None); total_lines as usize];
         let mut blamed_lines: HashSet<u32> = HashSet::new();
 
         // Get blame for lines not in INITIAL
@@ -829,48 +841,50 @@ fn get_checkpoint_entry_for_file(
         // Add blame results for lines NOT covered by INITIAL
         if let Some((blames, _)) = ai_blame {
             for (line, author) in blames {
+                if line == 0 || line > total_lines {
+                    continue;
+                }
                 blamed_lines.insert(line);
                 // Skip if INITIAL already has this line
                 if initial_covered_lines.contains(&line) {
                     continue;
                 }
 
-                // Skip human-authored lines - they should remain human
-                if author == CheckpointKind::Human.to_str() {
-                    continue;
-                }
-
-                prev_line_attributions.push(LineAttribution {
-                    start_line: line,
-                    end_line: line,
-                    author_id: author.clone(),
-                    overrode: None,
-                });
+                line_authors[(line - 1) as usize] = (author.clone(), None);
             }
         }
 
         // For AI checkpoints, attribute any lines NOT in INITIAL and NOT returned by ai_blame
         if kind != CheckpointKind::Human {
-            let total_lines = current_content.lines().count() as u32;
             for line_num in 1..=total_lines {
                 if !initial_covered_lines.contains(&line_num) && !blamed_lines.contains(&line_num) {
-                    prev_line_attributions.push(LineAttribution {
-                        start_line: line_num,
-                        end_line: line_num,
-                        author_id: author_id.as_ref().clone(),
-                        overrode: None,
-                    });
+                    line_authors[(line_num - 1) as usize] =
+                        (author_id.as_ref().clone(), None);
                 }
             }
         }
 
-        // For INITIAL attributions, we need to use current_content (not previous_content)
-        // because INITIAL line numbers refer to the current state of the file
-        let content_for_line_conversion = if !initial_attrs_for_file.is_empty() {
-            &current_content
-        } else {
-            &previous_content
-        };
+        // INITIAL attributions win - overlay them last and preserve override metadata.
+        for attr in &initial_attrs_for_file {
+            let start = attr.start_line.max(1);
+            let end = attr.end_line.min(total_lines);
+            for line in start..=end {
+                let idx = (line - 1) as usize;
+                let prev_author = line_authors[idx].0.clone();
+                let overrode = attr.overrode.clone().or_else(|| {
+                    if prev_author != attr.author_id {
+                        Some(prev_author)
+                    } else {
+                        None
+                    }
+                });
+                line_authors[idx] = (attr.author_id.clone(), overrode);
+            }
+        }
+
+        let prev_line_attributions = merge_consecutive_line_attributions(
+            line_authors.into_iter().map(Some).collect(),
+        );
 
         // Convert any line attributions to character attributions
         let prev_attributions =
@@ -889,7 +903,7 @@ fn get_checkpoint_entry_for_file(
             previous_content
         };
 
-        (adjusted_previous, prev_attributions)
+        (adjusted_previous, prev_attributions, prev_line_attributions)
     };
 
     // Skip if no changes (but we already checked this earlier, accounting for INITIAL attributions)
@@ -904,6 +918,7 @@ fn get_checkpoint_entry_for_file(
         author_id.as_ref(),
         &previous_content,
         &prev_attributions,
+        Some(&prev_line_attributions),
         &current_content,
         ts,
     )?;
@@ -1072,22 +1087,89 @@ fn make_entry_for_file(
     author_id: &str,
     previous_content: &str,
     previous_attributions: &Vec<Attribution>,
+    previous_line_attributions: Option<&[LineAttribution]>,
     content: &str,
     ts: u128,
 ) -> Result<(WorkingLogEntry, FileLineStats), GitAiError> {
     let tracker = AttributionTracker::new();
+    let content_len = content.len();
+    let line_count = content.lines().count() as u32;
+
+    let line_only = should_use_line_only(content_len, line_count, previous_attributions.len());
+    if line_only {
+        debug_log(&format!(
+            "[BENCHMARK]   line-only attribution mode for {} (bytes={}, lines={}, prev_attrs={})",
+            file_path,
+            content_len,
+            line_count,
+            previous_attributions.len()
+        ));
+
+        let prev_line_attributions = match previous_line_attributions {
+            Some(line_attrs) => line_attrs.to_vec(),
+            None => crate::authorship::attribution_tracker::attributions_to_line_attributions(
+                previous_attributions,
+                previous_content,
+            ),
+        };
+
+        let line_attr_start = Instant::now();
+        let new_line_attributions = line_only_update_line_attributions(
+            &prev_line_attributions,
+            previous_content,
+            content,
+            author_id,
+        );
+        debug_log(&format!(
+            "[BENCHMARK]   line_only_update_line_attributions for {} took {:?}",
+            file_path,
+            line_attr_start.elapsed()
+        ));
+
+        let new_attributions =
+            crate::authorship::attribution_tracker::line_attributions_to_attributions(
+                &new_line_attributions,
+                content,
+                ts,
+            );
+
+        let stats_start = Instant::now();
+        let line_stats = compute_file_line_stats(previous_content, content);
+        debug_log(&format!(
+            "[BENCHMARK]   compute_file_line_stats for {} took {:?}",
+            file_path,
+            stats_start.elapsed()
+        ));
+
+        let entry = WorkingLogEntry::new(
+            file_path.to_string(),
+            blob_sha.to_string(),
+            new_attributions,
+            new_line_attributions,
+        );
+
+        return Ok((entry, line_stats));
+    }
+
+    let needs_unattributed_fill =
+        !attributions_cover_content(previous_content, previous_attributions);
 
     let fill_start = Instant::now();
-    let filled_in_prev_attributions = tracker.attribute_unattributed_ranges(
-        previous_content,
-        previous_attributions,
-        &CheckpointKind::Human.to_str(),
-        ts - 1,
-    );
+    let filled_in_prev_attributions = if needs_unattributed_fill {
+        tracker.attribute_unattributed_ranges(
+            previous_content,
+            previous_attributions,
+            &CheckpointKind::Human.to_str(),
+            ts - 1,
+        )
+    } else {
+        previous_attributions.clone()
+    };
     debug_log(&format!(
-        "[BENCHMARK]   attribute_unattributed_ranges for {} took {:?}",
+        "[BENCHMARK]   attribute_unattributed_ranges for {} took {:?} (needed={})",
         file_path,
-        fill_start.elapsed()
+        fill_start.elapsed(),
+        needs_unattributed_fill
     ));
 
     let update_start = Instant::now();
@@ -1118,6 +1200,15 @@ fn make_entry_for_file(
         file_path,
         line_attr_start.elapsed()
     ));
+    debug_log(&format!(
+        "[BENCHMARK]   attribution counts for {}: prev_chars={}, new_chars={}, line_ranges={}, bytes={}, lines={}",
+        file_path,
+        previous_attributions.len(),
+        new_attributions.len(),
+        line_attributions.len(),
+        content_len,
+        line_count
+    ));
 
     // Compute line stats while we already have both contents in memory
     let stats_start = Instant::now();
@@ -1136,6 +1227,81 @@ fn make_entry_for_file(
     );
 
     Ok((entry, line_stats))
+}
+
+fn should_use_line_only(content_len: usize, line_count: u32, prev_attr_count: usize) -> bool {
+    let threshold_bytes = env_usize("GIT_AI_ATTR_LINE_ONLY_THRESHOLD_BYTES", 1_000_000);
+    let threshold_lines = env_usize("GIT_AI_ATTR_LINE_ONLY_THRESHOLD_LINES", 20_000) as u32;
+    let guardrail_work = env_u64("GIT_AI_ATTR_GUARDRAIL_WORK", 200_000_000);
+
+    if threshold_bytes > 0 && content_len >= threshold_bytes {
+        return true;
+    }
+    if threshold_lines > 0 && line_count >= threshold_lines {
+        return true;
+    }
+    let estimated_work = (content_len as u64).saturating_mul(prev_attr_count as u64);
+    if guardrail_work > 0 && estimated_work >= guardrail_work {
+        debug_log(&format!(
+            "[Warning] Attribution guardrail triggered: content_len={} prev_attr_count={} work={}",
+            content_len, prev_attr_count, estimated_work
+        ));
+        return true;
+    }
+    false
+}
+
+fn env_usize(key: &str, default_value: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(default_value)
+}
+
+fn env_u64(key: &str, default_value: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(default_value)
+}
+
+fn line_only_update_line_attributions(
+    previous_line_attributions: &[LineAttribution],
+    previous_content: &str,
+    current_content: &str,
+    current_author: &str,
+) -> Vec<LineAttribution> {
+    let prev_line_count = previous_content.lines().count() as u32;
+    let prev_authors = build_line_authorship_from_ranges(
+        previous_line_attributions,
+        prev_line_count,
+        &CheckpointKind::Human.to_str(),
+    );
+
+    let mut new_authors: Vec<Option<(String, Option<String>)>> = Vec::new();
+    let mut old_idx: usize = 0;
+
+    for change in compute_line_changes(previous_content, current_content) {
+        match change.tag() {
+            LineChangeTag::Equal => {
+                if let Some(author) = prev_authors.get(old_idx) {
+                    new_authors.push(Some(author.clone()));
+                } else {
+                    new_authors.push(Some((CheckpointKind::Human.to_str(), None)));
+                }
+                old_idx = old_idx.saturating_add(1);
+            }
+            LineChangeTag::Delete => {
+                old_idx = old_idx.saturating_add(1);
+            }
+            LineChangeTag::Insert => {
+                new_authors.push(Some((current_author.to_string(), None)));
+            }
+        }
+    }
+
+    let merged = merge_consecutive_line_attributions(new_authors);
+    filter_human_line_attributions(merged)
 }
 
 /// Compute line statistics for a single file by diffing previous and current content
@@ -1614,6 +1780,25 @@ mod tests {
             latest_stats.deletions_sloc, 0,
             "Whitespace deletions ignored"
         );
+    }
+
+    #[test]
+    fn test_line_only_update_line_attributions_basic() {
+        let previous = "alpha\nbeta\n";
+        let current = "new\nalpha\nbeta\n";
+
+        let prev_line_attrs = vec![LineAttribution::new(1, 1, "mock_ai".to_string(), None)];
+        let updated =
+            line_only_update_line_attributions(&prev_line_attrs, previous, current, "new_ai");
+
+        // Line 1 is new_ai, line 2 preserves mock_ai. Human-only line is omitted.
+        assert_eq!(updated.len(), 2);
+        assert_eq!(updated[0].start_line, 1);
+        assert_eq!(updated[0].end_line, 1);
+        assert_eq!(updated[0].author_id, "new_ai");
+        assert_eq!(updated[1].start_line, 2);
+        assert_eq!(updated[1].end_line, 2);
+        assert_eq!(updated[1].author_id, "mock_ai");
     }
 }
 
