@@ -1,3 +1,4 @@
+#[macro_use]
 mod repos;
 
 use repos::test_file::ExpectedLineExt;
@@ -13,6 +14,14 @@ struct PullTestSetup {
     upstream: TestRepo,
     /// SHA of the second commit (upstream is ahead by this)
     upstream_sha: String,
+}
+
+worktree_test_wrappers! {
+    test_fast_forward_pull_preserves_ai_attribution,
+    test_pull_rebase_autostash_preserves_ai_attribution,
+    test_pull_rebase_autostash_with_mixed_attribution,
+    test_pull_rebase_autostash_via_git_config,
+    test_fast_forward_pull_without_local_changes,
 }
 
 /// Creates a test setup for pull scenarios:

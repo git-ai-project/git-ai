@@ -269,20 +269,11 @@ fn cleanup_old_logs(logs_dir: &PathBuf) {
 }
 
 fn find_logs_directory() -> Option<(PathBuf, PathBuf)> {
-    let mut current = std::env::current_dir().ok()?;
+    let current = std::env::current_dir().ok()?;
 
-    loop {
-        let git_dir = current.join(".git");
-        if git_dir.exists() && git_dir.is_dir() {
-            let logs_dir = git_dir.join("ai").join("logs");
-            if logs_dir.exists() && logs_dir.is_dir() {
-                return Some((current.clone(), logs_dir));
-            }
-        }
-
-        if !current.pop() {
-            break;
-        }
+    if let Ok(repo) = find_repository_in_path(&current.to_string_lossy()) {
+        let repo_root = repo.workdir().ok()?;
+        return Some((repo_root, repo.storage.logs.clone()));
     }
 
     None
