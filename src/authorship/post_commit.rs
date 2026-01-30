@@ -173,8 +173,8 @@ pub fn post_commit(
     // // Clean up old working log
     repo_storage.delete_working_log_for_base_commit(&parent_sha)?;
 
-    if !supress_output {
-        // Only print stats if we're in an interactive terminal
+    if !supress_output && !Config::get().is_quiet() {
+        // Only print stats if we're in an interactive terminal and quiet mode is disabled
         let is_interactive = std::io::stdout().is_terminal();
         write_stats_to_terminal(&stats, is_interactive);
     }
