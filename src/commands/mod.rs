@@ -4,6 +4,7 @@ pub mod checkpoint_agent;
 pub mod ci_handlers;
 pub mod config;
 pub mod diff;
+pub mod exchange_nonce;
 pub mod flush_cas;
 pub mod flush_logs;
 pub mod flush_metrics_db;

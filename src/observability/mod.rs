@@ -98,12 +98,27 @@ fn get_observability() -> &'static Mutex<ObservabilityInner> {
 
 /// Set the repository context and flush buffered events to disk
 /// Should be called once Repository is available
-pub fn set_repo_context(repo: &crate::git::repository::Repository) {
-    let log_path = repo
-        .storage
-        .logs
-        .join(format!("{}.log", std::process::id()));
+/// NOTE: All logs now go to ~/.git-ai/internal/logs (global location)
+/// to simplify log management. The repo parameter is kept for API compatibility.
+pub fn set_repo_context(_repo: &crate::git::repository::Repository) {
+    // All logs go to global location now
+    set_global_log_context();
+}
 
+/// Set a global log path (for use outside of git repos, e.g., install-hooks)
+/// Uses ~/.git-ai/internal/logs/{PID}.log
+pub fn set_global_log_context() {
+    if let Some(home) = dirs::home_dir() {
+        let logs_dir = home.join(".git-ai").join("internal").join("logs");
+        if std::fs::create_dir_all(&logs_dir).is_ok() {
+            let log_path = logs_dir.join(format!("{}.log", std::process::id()));
+            set_log_path(log_path);
+        }
+    }
+}
+
+/// Internal: Set log path and flush buffered events
+fn set_log_path(log_path: PathBuf) {
     let mut obs = get_observability().lock().unwrap();
 
     // Get buffered events

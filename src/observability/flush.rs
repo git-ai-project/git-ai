@@ -43,13 +43,11 @@ pub fn handle_flush_logs(args: &[String]) {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "https://us.i.posthog.com".to_string());
 
-    // Find the .git/ai/logs directory
-    let (repo_root, logs_dir) = match find_logs_directory() {
-        Some(result) => result,
-        None => {
-            std::process::exit(1);
-        }
-    };
+    // Find all logs directories (global + legacy per-repo)
+    let all_logs_dirs = find_all_logs_directories();
+    if all_logs_dirs.is_empty() {
+        std::process::exit(1);
+    }
 
     // Check for OSS DSN: runtime env var takes precedence over build-time value
     // Can be explicitly disabled with empty string
@@ -70,30 +68,32 @@ pub fn handle_flush_logs(args: &[String]) {
     let current_pid = std::process::id();
     let current_log_file = format!("{}.log", current_pid);
 
-    // Read all log files except current PID
-    let log_files: Vec<PathBuf> = match fs::read_dir(&logs_dir) {
-        Ok(entries) => entries
-            .filter_map(|entry| entry.ok())
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.is_file()
-                    && path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .map(|n| n != current_log_file && n.ends_with(".log"))
-                        .unwrap_or(false)
-            })
-            .collect(),
-        Err(_) => {
-            std::process::exit(1);
-        }
-    };
+    // Read all log files from all directories except current PID
+    let log_files: Vec<PathBuf> = all_logs_dirs
+        .iter()
+        .flat_map(|logs_dir| {
+            fs::read_dir(logs_dir)
+                .into_iter()
+                .flatten()
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.is_file()
+                        && path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|n| n != current_log_file && n.ends_with(".log"))
+                            .unwrap_or(false)
+                })
+        })
+        .collect();
 
     if log_files.is_empty() {
         std::process::exit(1);
     }
 
-    // Try to get repository info for metadata
+    // Try to get repository info for metadata (from current directory if in a repo)
+    let repo_root = std::env::current_dir().unwrap_or_default();
     let repo = find_repository_in_path(&repo_root.to_string_lossy()).ok();
     let remotes_info: Vec<(String, String)> = repo
         .as_ref()
@@ -202,7 +202,9 @@ pub fn handle_flush_logs(args: &[String]) {
     // Clean up old logs if no clients configured
     if !has_telemetry_clients {
         eprintln!("Cleaning up old logs (no telemetry clients configured)...");
-        cleanup_old_logs(&logs_dir);
+        for logs_dir in &all_logs_dirs {
+            cleanup_old_logs(logs_dir);
+        }
     }
 
     if events_sent > 0 {
@@ -268,24 +270,37 @@ fn cleanup_old_logs(logs_dir: &PathBuf) {
     }
 }
 
-fn find_logs_directory() -> Option<(PathBuf, PathBuf)> {
-    let mut current = std::env::current_dir().ok()?;
+/// Find all log directories (global + legacy per-repo).
+/// Used to collect log files from all possible locations.
+fn find_all_logs_directories() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
 
-    loop {
-        let git_dir = current.join(".git");
-        if git_dir.exists() && git_dir.is_dir() {
-            let logs_dir = git_dir.join("ai").join("logs");
-            if logs_dir.exists() && logs_dir.is_dir() {
-                return Some((current.clone(), logs_dir));
-            }
-        }
-
-        if !current.pop() {
-            break;
+    // Primary: global logs directory (~/.git-ai/internal/logs)
+    if let Some(home) = dirs::home_dir() {
+        let global_logs_dir = home.join(".git-ai").join("internal").join("logs");
+        if global_logs_dir.exists() && global_logs_dir.is_dir() {
+            dirs.push(global_logs_dir);
         }
     }
 
-    None
+    // Legacy: per-repo logs (.git/ai/logs) - check current repo only
+    if let Ok(mut current) = std::env::current_dir() {
+        loop {
+            let git_dir = current.join(".git");
+            if git_dir.exists() && git_dir.is_dir() {
+                let logs_dir = git_dir.join("ai").join("logs");
+                if logs_dir.exists() && logs_dir.is_dir() {
+                    dirs.push(logs_dir);
+                }
+                break; // Found repo, stop searching
+            }
+            if !current.pop() {
+                break;
+            }
+        }
+    }
+
+    dirs
 }
 
 struct SentryClient {

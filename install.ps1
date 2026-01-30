@@ -367,6 +367,17 @@ $gitOgShimContent = "@echo off$([Environment]::NewLine)`"$stdGitPath`" %*$([Envi
 Set-Content -Path $gitOgShim -Value $gitOgShimContent -Encoding ASCII -Force
 try { Unblock-File -Path $gitOgShim -ErrorAction SilentlyContinue } catch { }
 
+# Exchange install nonce for credentials if provided (auto-login from web install page)
+# The INSTALL_NONCE, API_BASE, and INSTALL_PAGE_URL env vars are injected by the server
+# Uses the Rust command which works on both Mac and Windows
+if ($env:INSTALL_NONCE -and $env:API_BASE) {
+    try {
+        & $finalExe exchange-nonce | Out-Host
+    } catch {
+        # Ignore errors - install should continue even if login fails
+    }
+}
+
 # Install hooks
 Write-Host 'Setting up IDE/agent hooks...'
 try {

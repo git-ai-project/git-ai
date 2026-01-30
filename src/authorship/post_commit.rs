@@ -412,7 +412,6 @@ fn record_commit_metrics(
 ) {
     use crate::metrics::{record, CommittedValues, EventAttributes};
 
-    // Build parallel arrays: index 0 = "all" (aggregate), index 1+ = per tool/model
     let mut tool_model_pairs: Vec<String> = vec!["all".to_string()];
     let mut mixed_additions: Vec<u32> = vec![stats.mixed_additions];
     let mut ai_additions: Vec<u32> = vec![stats.ai_additions];

@@ -148,6 +148,9 @@ pub fn handle_git_ai(args: &[String]) {
         "logout" => {
             commands::logout::handle_logout(&args[1..]);
         }
+        "exchange-nonce" => {
+            commands::exchange_nonce::handle_exchange_nonce(&args[1..]);
+        }
         "dash" | "dashboard" => {
             commands::personal_dashboard::handle_personal_dashboard(&args[1..]);
         }

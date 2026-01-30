@@ -7,26 +7,89 @@ use crate::mdm::hook_installer::HookInstallerParams;
 use crate::mdm::skills_installer;
 use crate::mdm::spinner::{print_diff, Spinner};
 use crate::mdm::utils::{get_current_binary_path, git_shim_path};
+use crate::observability::set_global_log_context;
 use std::collections::HashMap;
 
 /// Installation status for a tool
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallStatus {
-    /// Tool was not detected or failed to install
+    /// Tool was not detected on the machine
     NotFound,
     /// Hooks/extensions were successfully installed or updated
     Installed,
     /// Hooks/extensions were already up to date
     AlreadyInstalled,
+    /// Installation attempted but failed
+    Failed,
 }
 
 impl InstallStatus {
     /// Convert status to string representation
     pub fn as_str(&self) -> &'static str {
         match self {
-            InstallStatus::NotFound => "not-found",
+            InstallStatus::NotFound => "not_found",
             InstallStatus::Installed => "installed",
-            InstallStatus::AlreadyInstalled => "already-installed",
+            InstallStatus::AlreadyInstalled => "already_installed",
+            InstallStatus::Failed => "failed",
+        }
+    }
+}
+
+/// Detailed install result for metrics tracking
+#[derive(Debug, Clone)]
+pub struct InstallResult {
+    pub status: InstallStatus,
+    pub error: Option<String>,
+    pub warnings: Vec<String>,
+}
+
+impl InstallResult {
+    pub fn installed() -> Self {
+        Self {
+            status: InstallStatus::Installed,
+            error: None,
+            warnings: Vec::new(),
+        }
+    }
+
+    pub fn already_installed() -> Self {
+        Self {
+            status: InstallStatus::AlreadyInstalled,
+            error: None,
+            warnings: Vec::new(),
+        }
+    }
+
+    pub fn not_found() -> Self {
+        Self {
+            status: InstallStatus::NotFound,
+            error: None,
+            warnings: Vec::new(),
+        }
+    }
+
+    pub fn failed(msg: impl Into<String>) -> Self {
+        Self {
+            status: InstallStatus::Failed,
+            error: Some(msg.into()),
+            warnings: Vec::new(),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn with_warning(mut self, warning: impl Into<String>) -> Self {
+        self.warnings.push(warning.into());
+        self
+    }
+
+    /// Get message for ClickHouse (error if failed, else joined warnings)
+    pub fn message_for_metrics(&self) -> Option<String> {
+        if let Some(err) = &self.error {
+            Some(err.clone())
+        } else if !self.warnings.is_empty() {
+            Some(self.warnings.join("; "))
+        } else {
+            None
         }
     }
 }
@@ -41,6 +104,10 @@ pub fn to_hashmap(statuses: HashMap<String, InstallStatus>) -> HashMap<String, S
 
 /// Main entry point for install-hooks command
 pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
+    // Set up global log context (for logging outside git repos)
+    // Logs go to ~/.git-ai/internal/logs/{PID}.log
+    set_global_log_context();
+
     // Parse flags
     let mut dry_run = false;
     let mut verbose = false;
@@ -60,8 +127,15 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
     // Run async operations with smol and convert result
     let statuses = smol::block_on(async_run_install(&params, dry_run, verbose))?;
 
-    // Spawn background metrics flush
-    spawn_background_metrics_db_flush();
+    // Flush logs immediately so install metrics are captured right away (only if logged in)
+    let store = crate::auth::CredentialStore::new();
+    if let Ok(Some(creds)) = store.load() {
+        if !creds.is_refresh_token_expired() {
+            crate::observability::flush::handle_flush_logs(&[]);
+            // Also flush any queued metrics from the local database
+            spawn_background_metrics_db_flush();
+        }
+    }
 
     Ok(to_hashmap(statuses))
 }
@@ -97,6 +171,8 @@ async fn async_run_install(
     let mut any_checked = false;
     let mut has_changes = false;
     let mut statuses: HashMap<String, InstallStatus> = HashMap::new();
+    // Track detailed results for metrics (tool_id, result)
+    let mut detailed_results: Vec<(String, InstallResult)> = Vec::new();
 
     // Install skills first (these are global, not per-agent)
     // Skills are always nuked and reinstalled fresh (silently)
@@ -125,6 +201,7 @@ async fn async_run_install(
             Ok(check_result) => {
                 if !check_result.tool_installed {
                     statuses.insert(id.to_string(), InstallStatus::NotFound);
+                    detailed_results.push((id.to_string(), InstallResult::not_found()));
                     continue;
                 }
 
@@ -147,15 +224,19 @@ async fn async_run_install(
                         }
                         has_changes = true;
                         statuses.insert(id.to_string(), InstallStatus::Installed);
+                        detailed_results.push((id.to_string(), InstallResult::installed()));
                     }
                     Ok(None) => {
                         spinner.success(&format!("{}: Hooks already up to date", name));
                         statuses.insert(id.to_string(), InstallStatus::AlreadyInstalled);
+                        detailed_results.push((id.to_string(), InstallResult::already_installed()));
                     }
                     Err(e) => {
+                        let error_msg = e.to_string();
                         spinner.error(&format!("{}: Failed to update hooks", name));
-                        eprintln!("  Error: {}", e);
+                        eprintln!("  Error: {}", error_msg);
                         statuses.insert(id.to_string(), InstallStatus::NotFound);
+                        detailed_results.push((id.to_string(), InstallResult::failed(error_msg)));
                     }
                 }
 
@@ -189,21 +270,43 @@ async fn async_run_install(
                                     print_diff(&diff);
                                 }
                             }
+
+                            // Capture warning-like messages for metrics
+                            if result.message.contains("Unable")
+                                || result.message.contains("manually")
+                                || result.message.contains("Failed")
+                            {
+                                if let Some((_, detail)) = detailed_results
+                                    .iter_mut()
+                                    .find(|(tool_id, _)| tool_id == id)
+                                {
+                                    detail.warnings.push(result.message.clone());
+                                }
+                            }
                         }
                     }
                     Err(e) => {
                         eprintln!("  Error installing extras for {}: {}", name, e);
+                        // Capture extras error as a warning on the tool's result
+                        if let Some((_, detail)) = detailed_results
+                            .iter_mut()
+                            .find(|(tool_id, _)| tool_id == id)
+                        {
+                            detail.warnings.push(format!("Extras install error: {}", e));
+                        }
                     }
                 }
             }
             Err(version_error) => {
+                let error_msg = version_error.to_string();
                 any_checked = true;
                 let spinner = Spinner::new(&format!("{}: checking version", name));
                 spinner.start();
                 spinner.error(&format!("{}: Version check failed", name));
-                eprintln!("  Error: {}", version_error);
+                eprintln!("  Error: {}", error_msg);
                 eprintln!("  Please update {} to continue using git-ai hooks", name);
                 statuses.insert(id.to_string(), InstallStatus::NotFound);
+                detailed_results.push((id.to_string(), InstallResult::failed(error_msg)));
             }
         }
     }
@@ -229,6 +332,7 @@ async fn async_run_install(
                 Ok(check_result) => {
                     if !check_result.client_installed {
                         statuses.insert(id.to_string(), InstallStatus::NotFound);
+                        detailed_results.push((id.to_string(), InstallResult::not_found()));
                         continue;
                     }
 
@@ -250,25 +354,31 @@ async fn async_run_install(
                             }
                             has_changes = true;
                             statuses.insert(id.to_string(), InstallStatus::Installed);
+                            detailed_results.push((id.to_string(), InstallResult::installed()));
                         }
                         Ok(None) => {
                             spinner.success(&format!("{}: Preferences already up to date", name));
                             statuses.insert(id.to_string(), InstallStatus::AlreadyInstalled);
+                            detailed_results.push((id.to_string(), InstallResult::already_installed()));
                         }
                         Err(e) => {
+                            let error_msg = e.to_string();
                             spinner.error(&format!("{}: Failed to update preferences", name));
-                            eprintln!("  Error: {}", e);
+                            eprintln!("  Error: {}", error_msg);
                             statuses.insert(id.to_string(), InstallStatus::NotFound);
+                            detailed_results.push((id.to_string(), InstallResult::failed(error_msg)));
                         }
                     }
                 }
                 Err(e) => {
+                    let error_msg = e.to_string();
                     any_checked = true;
                     let spinner = Spinner::new(&format!("{}: checking", name));
                     spinner.start();
                     spinner.error(&format!("{}: Check failed", name));
-                    eprintln!("  Error: {}", e);
+                    eprintln!("  Error: {}", error_msg);
                     statuses.insert(id.to_string(), InstallStatus::NotFound);
+                    detailed_results.push((id.to_string(), InstallResult::failed(error_msg)));
                 }
             }
         }
@@ -282,7 +392,33 @@ async fn async_run_install(
         println!("\x1b[1m  git-ai install-hooks --dry-run=false\x1b[0m");
     }
 
+    // Emit metrics for each agent/git_client result (only if not dry-run)
+    if !dry_run {
+        emit_install_hooks_metrics(&detailed_results);
+    }
+
     Ok(statuses)
+}
+
+/// Emit metrics events for install-hooks results
+fn emit_install_hooks_metrics(results: &[(String, InstallResult)]) {
+    use crate::metrics::{EventAttributes, InstallHooksValues};
+
+    let attrs = EventAttributes::with_version(env!("CARGO_PKG_VERSION"));
+
+    for (tool_id, result) in results {
+        let mut values = InstallHooksValues::new()
+            .tool_id(tool_id.clone())
+            .status(result.status.as_str().to_string());
+
+        if let Some(msg) = result.message_for_metrics() {
+            values = values.message(msg);
+        } else {
+            values = values.message_null();
+        }
+
+        crate::metrics::record(values, attrs.clone());
+    }
 }
 
 async fn async_run_uninstall(

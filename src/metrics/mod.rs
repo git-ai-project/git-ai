@@ -13,7 +13,7 @@ pub mod types;
 
 // Re-export all public types for external crates
 pub use attrs::EventAttributes;
-pub use events::{AgentUsageValues, CommittedValues};
+pub use events::{AgentUsageValues, CommittedValues, InstallHooksValues};
 pub use pos_encoded::{PosEncoded, PosField};
 pub use types::{
     EventValues, MetricEvent, MetricEventId, MetricsBatch, SparseArray, METRICS_API_VERSION,

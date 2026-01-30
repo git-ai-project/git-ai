@@ -276,7 +276,11 @@ success "You can now run 'git-ai' from your terminal"
 INSTALLED_VERSION=$(${INSTALL_DIR}/git-ai --version 2>&1 || echo "unknown")
 echo "Installed git-ai ${INSTALLED_VERSION}"
 
-# Install hooks
+# Login user with install token if provided
+if [ -n "${INSTALL_NONCE:-}" ] && [ -n "${API_BASE:-}" ]; then
+    ${INSTALL_DIR}/git-ai exchange-nonce || true
+fi
+
 echo "Setting up IDE/agent hooks..."
 if ! ${INSTALL_DIR}/git-ai install-hooks; then
     warn "Warning: Failed to set up IDE/agent hooks. Please try running 'git-ai install-hooks' manually."
