@@ -435,7 +435,7 @@ pub fn print_range_authorship_stats(stats: &RangeAuthorshipStats) {
     println!("\n");
 
     // If there's no AI authorship in the range, show the special message
-    if !stats.authorship_stats.commits_with_authorship > stats.authorship_stats.total_commits {
+    if stats.authorship_stats.commits_with_authorship == 0 {
         println!("Committers are not using git-ai");
         return;
     }
