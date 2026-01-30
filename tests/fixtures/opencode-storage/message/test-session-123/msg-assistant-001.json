@@ -1,0 +1,11 @@
+{
+  "id": "msg-assistant-001",
+  "sessionID": "test-session-123",
+  "role": "assistant",
+  "time": {
+    "created": 1706459831000,
+    "completed": 1706459835000
+  },
+  "modelID": "claude-3-5-sonnet-20241022",
+  "providerID": "anthropic"
+}

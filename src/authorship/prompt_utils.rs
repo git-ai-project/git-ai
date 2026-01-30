@@ -5,6 +5,7 @@ use crate::commands::checkpoint_agent::agent_presets::{
     ClaudePreset, ContinueCliPreset, CursorPreset, DroidPreset, GeminiPreset,
     GithubCopilotPreset,
 };
+use crate::commands::checkpoint_agent::opencode_preset::OpenCodePreset;
 use crate::error::GitAiError;
 use crate::git::refs::{get_authorship, grep_ai_notes};
 use crate::git::repository::Repository;
@@ -173,6 +174,7 @@ pub fn update_prompt_from_tool(
         "github-copilot" => update_github_copilot_prompt(agent_metadata, current_model),
         "continue-cli" => update_continue_cli_prompt(agent_metadata, current_model),
         "droid" => update_droid_prompt(agent_metadata, current_model),
+        "opencode" => update_opencode_prompt(external_thread_id, agent_metadata, current_model),
         _ => {
             debug_log(&format!("Unknown tool: {}", tool));
             PromptUpdateResult::Unchanged
@@ -453,5 +455,50 @@ fn update_droid_prompt(
     } else {
         // No agent_metadata available
         PromptUpdateResult::Unchanged
+    }
+}
+
+/// Update OpenCode prompt by fetching latest transcript from storage
+fn update_opencode_prompt(
+    session_id: &str,
+    metadata: Option<&HashMap<String, String>>,
+    current_model: &str,
+) -> PromptUpdateResult {
+    // Check for test storage path override in metadata or env var
+    let storage_path = if let Ok(env_path) = std::env::var("GIT_AI_OPENCODE_STORAGE_PATH") {
+        Some(std::path::PathBuf::from(env_path))
+    } else if let Some(test_path) = metadata.and_then(|m| m.get("__test_storage_path")) {
+        Some(std::path::PathBuf::from(test_path))
+    } else {
+        None
+    };
+
+    let result = if let Some(path) = storage_path {
+        OpenCodePreset::transcript_and_model_from_storage(&path, session_id)
+    } else {
+        OpenCodePreset::transcript_and_model_from_session(session_id)
+    };
+
+    match result {
+        Ok((transcript, model)) => {
+            PromptUpdateResult::Updated(
+                transcript,
+                model.unwrap_or_else(|| current_model.to_string()),
+            )
+        }
+        Err(e) => {
+            debug_log(&format!(
+                "Failed to fetch OpenCode transcript for session {}: {}",
+                session_id, e
+            ));
+            log_error(
+                &e,
+                Some(serde_json::json!({
+                    "agent_tool": "opencode",
+                    "operation": "transcript_and_model_from_storage"
+                })),
+            );
+            PromptUpdateResult::Failed(e)
+        }
     }
 }

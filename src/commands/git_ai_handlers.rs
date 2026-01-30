@@ -8,6 +8,7 @@ use crate::commands::checkpoint_agent::agent_presets::{
     ContinueCliPreset, CursorPreset, DroidPreset, GeminiPreset, GithubCopilotPreset,
 };
 use crate::commands::checkpoint_agent::agent_v1_preset::AgentV1Preset;
+use crate::commands::checkpoint_agent::opencode_preset::OpenCodePreset;
 use crate::config;
 use crate::git::find_repository;
 use crate::git::find_repository_in_path;
@@ -422,6 +423,22 @@ fn handle_checkpoint(args: &[String]) {
                     }
                     Err(e) => {
                         eprintln!("Droid preset error: {}", e);
+                        std::process::exit(0);
+                    }
+                }
+            }
+            "opencode" => {
+                match OpenCodePreset.run(AgentCheckpointFlags {
+                    hook_input: hook_input.clone(),
+                }) {
+                    Ok(agent_run) => {
+                        if agent_run.repo_working_dir.is_some() {
+                            repository_working_dir = agent_run.repo_working_dir.clone().unwrap();
+                        }
+                        agent_run_result = Some(agent_run);
+                    }
+                    Err(e) => {
+                        eprintln!("OpenCode preset error: {}", e);
                         std::process::exit(0);
                     }
                 }
