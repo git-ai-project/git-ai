@@ -11,7 +11,11 @@ use crate::commands::hooks::reset_hooks;
 use crate::commands::hooks::stash_hooks;
 use crate::commands::hooks::switch_hooks;
 use crate::config;
-use crate::git::cli_parser::{ParsedGitInvocation, parse_git_cli_args};
+use crate::git::cli_parser::{
+    ParsedGitInvocation,
+    expand_alias_with_resolver,
+    parse_git_cli_args,
+};
 use crate::git::find_repository;
 use crate::git::repository::Repository;
 use crate::observability;
@@ -74,6 +78,24 @@ fn uninstall_forwarding_handlers() {
     }
 }
 
+fn resolve_git_alias(alias: &str, global_args: &[String]) -> Option<String> {
+    let mut cmd = Command::new("git");
+    cmd.args(global_args);
+    cmd.args(["config", "--get", &format!("alias.{alias}")]);
+
+    let output = cmd.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let alias_body = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if alias_body.is_empty() {
+        None
+    } else {
+        Some(alias_body)
+    }
+}
+
 pub struct CommandHooksContext {
     pub pre_commit_hook_result: Option<bool>,
     pub rebase_original_head: Option<String>,
@@ -96,6 +118,10 @@ pub fn handle_git(args: &[String]) {
     }
 
     let mut parsed_args = parse_git_cli_args(args);
+    let global_args = parsed_args.global_args.clone();
+    parsed_args = expand_alias_with_resolver(parsed_args, |alias| {
+        resolve_git_alias(alias, &global_args)
+    });
 
     let mut repository_option = find_repository(&parsed_args.global_args).ok();
 

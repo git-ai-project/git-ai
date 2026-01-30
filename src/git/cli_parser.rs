@@ -111,6 +111,42 @@ impl ParsedGitInvocation {
     }
 }
 
+/// Expand a git alias into the underlying command using a resolver.
+/// The resolver should return the configured alias string (e.g., "checkout -b")
+/// or None if no alias exists. Shell-style aliases beginning with `!` are ignored.
+pub fn expand_alias_with_resolver<F>(
+    mut parsed: ParsedGitInvocation,
+    resolve_alias: F,
+) -> ParsedGitInvocation
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let Some(alias) = parsed.command.clone() else {
+        return parsed;
+    };
+
+    // Only expand if resolver returns a value and it's not a shell command alias
+    if let Some(alias_body) = resolve_alias(&alias) {
+        if alias_body.trim_start().starts_with('!') {
+            return parsed;
+        }
+
+        if let Some(mut tokens) = shlex::split(&alias_body) {
+            if tokens.is_empty() {
+                return parsed;
+            }
+
+            let new_command = tokens.remove(0);
+            parsed.command = Some(new_command);
+            // Prepend alias arguments to existing command args
+            tokens.append(&mut parsed.command_args);
+            parsed.command_args = tokens;
+        }
+    }
+
+    parsed
+}
+
 /// Returns true if the given flag typically takes a value as the next argument.
 /// This is a heuristic for common git command flags that take values.
 pub fn is_flag_with_value(flag: &str) -> bool {
@@ -473,6 +509,51 @@ pub fn parse_git_cli_args(args: &[String]) -> ParsedGitInvocation {
         command_args,
         saw_end_of_opts,
         is_help,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ParsedGitInvocation, expand_alias_with_resolver};
+
+    fn base_invocation(command: &str, args: &[&str]) -> ParsedGitInvocation {
+        ParsedGitInvocation {
+            global_args: vec![],
+            command: Some(command.to_string()),
+            command_args: args.iter().map(|s| s.to_string()).collect(),
+            saw_end_of_opts: false,
+            is_help: false,
+        }
+    }
+
+    #[test]
+    fn expands_simple_alias() {
+        let parsed = base_invocation("co", &["main"]);
+        let resolved = expand_alias_with_resolver(parsed, |alias| {
+            (alias == "co").then(|| "checkout".to_string())
+        });
+        assert_eq!(resolved.command.as_deref(), Some("checkout"));
+        assert_eq!(resolved.command_args, vec!["main"]);
+    }
+
+    #[test]
+    fn expands_alias_with_arguments() {
+        let parsed = base_invocation("unstage", &["file.txt"]);
+        let resolved = expand_alias_with_resolver(parsed, |alias| {
+            (alias == "unstage").then(|| "reset HEAD --".to_string())
+        });
+        assert_eq!(resolved.command.as_deref(), Some("reset"));
+        assert_eq!(resolved.command_args, vec!["HEAD", "--", "file.txt"]);
+    }
+
+    #[test]
+    fn ignores_shell_aliases() {
+        let parsed = base_invocation("cleanup", &["-n"]);
+        let resolved = expand_alias_with_resolver(parsed, |_alias| {
+            Some("!f() { echo hi; }".to_string())
+        });
+        assert_eq!(resolved.command.as_deref(), Some("cleanup"));
+        assert_eq!(resolved.command_args, vec!["-n"]);
     }
 }
 
