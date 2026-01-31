@@ -1,21 +1,21 @@
 # git-ai Extension for VS Code & Cursor
 
-A VS Code and Cursor extension that tracks AI-generated code using [git-ai](https://github.com/acunniffe/git-ai?tab=readme-ov-file#quick-start).
+A VS Code and Cursor extension that tracks AI-generated code using [git-ai](https://github.com/git-ai-project/git-ai?tab=readme-ov-file#quick-start).
 
 ## Manual Install
 
-The [git-ai quickstart](https://github.com/acunniffe/git-ai?tab=readme-ov-file#quick-start) install script should automatically install both the Cursor and VS Code extensions automatically, however, if that didn't work or you'd like to install the extension manually, please follow the instructions below:
+The [git-ai quickstart](https://github.com/git-ai-project/git-ai?tab=readme-ov-file#quick-start) install script should automatically install both the Cursor and VS Code extensions automatically, however, if that didn't work or you'd like to install the extension manually, please follow the instructions below:
 
 ### Cursor
 
 1. **Install the extension** We recommend installing the Cursor extension by searching for `git-ai` in the extensions tab. To open the extensions tab, you can press `Cmd+Shift+P` and search for `>Extensions: Install Extensions`.
-2. **Install [`git-ai`](https://github.com/acunniffe/git-ai)** Follow the `git-ai` installation [instructions](https://github.com/acunniffe/git-ai?tab=readme-ov-file#quick-start) for your platform.
+2. **Install [`git-ai`](https://github.com/git-ai-project/git-ai)** Follow the `git-ai` installation [instructions](https://github.com/git-ai-project/git-ai?tab=readme-ov-file#quick-start) for your platform.
 3. **Restart VS Code**
 
 ### VS Code
 
 1. **Install the extension** We recommend installing from the [VS Code Extension marketplace](https://marketplace.visualstudio.com/items?itemName=git-ai.git-ai-vscode)
-2. **Install [`git-ai`](https://github.com/acunniffe/git-ai)** Follow the `git-ai` installation [instructions](https://github.com/acunniffe/git-ai?tab=readme-ov-file#quick-start) for your platform.
+2. **Install [`git-ai`](https://github.com/git-ai-project/git-ai)** Follow the `git-ai` installation [instructions](https://github.com/git-ai-project/git-ai?tab=readme-ov-file#quick-start) for your platform.
 3. **Restart VS Code**
 
 ### Debug logging

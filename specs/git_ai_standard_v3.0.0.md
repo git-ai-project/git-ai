@@ -6,7 +6,7 @@ The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "S
 
 ---
 
-The [Git AI project](https://github.com/acunniffe/git-ai) is a full, production-ready implementation of this standard built as a Git extension. Another project would be considered compliant with this standard if it also attached AI Authorship Logs with Git Notes, even if it was implemented in another way. 
+The [Git AI project](https://github.com/git-ai-project/git-ai) is a full, production-ready implementation of this standard built as a Git extension. Another project would be considered compliant with this standard if it also attached AI Authorship Logs with Git Notes, even if it was implemented in another way. 
 
 If you are trying to add support for your Coding Agent to Git AI format, that is best done by [integrating with published implementation](https://usegitai.com/docs/cli/add-your-agent), not implementing this spec. 
 

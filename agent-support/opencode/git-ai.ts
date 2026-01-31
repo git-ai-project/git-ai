@@ -13,7 +13,7 @@
  * Requirements:
  *   - git-ai must be installed and available in PATH
  *
- * @see https://github.com/acunniffe/git-ai
+ * @see https://github.com/git-ai-project/git-ai
  * @see https://opencode.ai/docs/plugins/
  */
 

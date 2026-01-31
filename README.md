@@ -1,6 +1,6 @@
 <div>
-<img src="https://github.com/acunniffe/git-ai/raw/main/assets/docs/git-ai.png" align="right"
-     alt="Git AI by acunniffe/git-ai" width="100" height="100" />
+<img src="https://github.com/git-ai-project/git-ai/raw/main/assets/docs/git-ai.png" align="right"
+     alt="Git AI by git-ai-project/git-ai" width="100" height="100" />
 
 </div>
 <div>
@@ -26,7 +26,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm http://usegitai.com/
 
 🎊 That's it! **No per-repo setup.** Once installed Git AI will work OOTB with any of these **Supported Agents**:
 
-<img src="https://github.com/acunniffe/git-ai/raw/main/assets/docs/supported-agents.png" width="320" />
+<img src="https://github.com/git-ai-project/git-ai/raw/main/assets/docs/supported-agents.png" width="320" />
 
 ### Documentation https://usegitai.com/docs
 - [AI Blame](https://usegitai.com/docs/cli/ai-blame)
@@ -38,7 +38,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm http://usegitai.com/
 
 Build as usual. Just prompt, edit and commit. Git AI will track every line of AI-Code and record the Coding Agent, Model, and prompt that generated it. 
 
-<img src="https://github.com/acunniffe/git-ai/raw/main/assets/docs/graph.jpg" width="400" />
+<img src="https://github.com/git-ai-project/git-ai/raw/main/assets/docs/graph.jpg" width="400" />
 
 #### How Does it work? 
 
@@ -101,5 +101,5 @@ Aggregate `git-ai` data at the PR, developer, Repository and Organization levels
 - AI-Code Halflife (how durable is the AI code)
 > [Get early access by chatting with the maintainers](https://calendly.com/acunniffe/meeting-with-git-ai-authors)
 
-![alt](https://github.com/acunniffe/git-ai/raw/main/assets/docs/dashboard.png)
+![alt](https://github.com/git-ai-project/git-ai/raw/main/assets/docs/dashboard.png)
 
