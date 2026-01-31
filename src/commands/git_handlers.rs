@@ -18,6 +18,7 @@ use crate::observability;
 
 use crate::observability::wrapper_performance_targets::log_performance_target_if_violated;
 use crate::utils::debug_log;
+use std::collections::HashSet;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 #[cfg(unix)]
@@ -95,7 +96,7 @@ pub fn handle_git(args: &[String]) {
         return;
     }
 
-    let mut parsed_args = parse_git_cli_args(args);
+    let parsed_args = parse_git_cli_args(args);
 
     let mut repository_option = find_repository(&parsed_args.global_args).ok();
 
@@ -124,43 +125,52 @@ pub fn handle_git(args: &[String]) {
 
     // run with hooks
     let exit_status = if !parsed_args.is_help && has_repo && !skip_hooks {
-        let mut command_hooks_context = CommandHooksContext {
-            pre_commit_hook_result: None,
-            rebase_original_head: None,
-            _rebase_onto: None,
-            fetch_authorship_handle: None,
-            stash_sha: None,
-            push_authorship_handle: None,
-            stashed_va: None,
-        };
-
         let repository = repository_option.as_mut().unwrap();
+        let hook_invocation = resolve_alias_invocation(&parsed_args, repository);
 
-        let pre_command_start = Instant::now();
-        run_pre_command_hooks(&mut command_hooks_context, &mut parsed_args, repository);
-        let pre_command_duration = pre_command_start.elapsed();
+        if let Some(hook_invocation) = hook_invocation {
+            if hook_invocation.is_help {
+                return exit_with_status(proxy_to_git(&parsed_args.to_invocation_vec(), false));
+            }
 
-        let git_start = Instant::now();
-        let exit_status = proxy_to_git(&parsed_args.to_invocation_vec(), false);
-        let git_duration = git_start.elapsed();
+            let mut command_hooks_context = CommandHooksContext {
+                pre_commit_hook_result: None,
+                rebase_original_head: None,
+                _rebase_onto: None,
+                fetch_authorship_handle: None,
+                stash_sha: None,
+                push_authorship_handle: None,
+                stashed_va: None,
+            };
 
-        let post_command_start = Instant::now();
-        run_post_command_hooks(
-            &mut command_hooks_context,
-            &parsed_args,
-            exit_status,
-            repository,
-        );
-        let post_command_duration = post_command_start.elapsed();
+            let pre_command_start = Instant::now();
+            run_pre_command_hooks(&mut command_hooks_context, &hook_invocation, repository);
+            let pre_command_duration = pre_command_start.elapsed();
 
-        log_performance_target_if_violated(
-            &parsed_args.command.as_deref().unwrap_or("unknown"),
-            pre_command_duration,
-            git_duration,
-            post_command_duration,
-        );
+            let git_start = Instant::now();
+            let exit_status = proxy_to_git(&parsed_args.to_invocation_vec(), false);
+            let git_duration = git_start.elapsed();
 
-        exit_status
+            let post_command_start = Instant::now();
+            run_post_command_hooks(
+                &mut command_hooks_context,
+                &hook_invocation,
+                exit_status,
+                repository,
+            );
+            let post_command_duration = post_command_start.elapsed();
+
+            log_performance_target_if_violated(
+                &hook_invocation.command.as_deref().unwrap_or("unknown"),
+                pre_command_duration,
+                git_duration,
+                post_command_duration,
+            );
+
+            exit_status
+        } else {
+            proxy_to_git(&parsed_args.to_invocation_vec(), false)
+        }
     } else {
         // run without hooks
         proxy_to_git(&parsed_args.to_invocation_vec(), false)
@@ -170,7 +180,7 @@ pub fn handle_git(args: &[String]) {
 
 fn run_pre_command_hooks(
     command_hooks_context: &mut CommandHooksContext,
-    parsed_args: &mut ParsedGitInvocation,
+    parsed_args: &ParsedGitInvocation,
     repository: &mut Repository,
 ) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -243,6 +253,123 @@ fn run_pre_command_hooks(
     }
 }
 
+/// Handle alias invocations
+fn resolve_alias_invocation(
+    parsed_args: &ParsedGitInvocation,
+    repository: &Repository,
+) -> Option<ParsedGitInvocation> {
+    let mut current = parsed_args.clone();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    loop {
+        let command = match current.command.as_deref() {
+            Some(command) => command,
+            None => return Some(current),
+        };
+
+        if !seen.insert(command.to_string()) {
+            return None;
+        }
+
+        let key = format!("alias.{}", command);
+        let alias_value = match repository.config_get_str(&key) {
+            Ok(Some(value)) => value,
+            _ => return Some(current),
+        };
+
+        let alias_tokens = parse_alias_tokens(&alias_value)?;
+
+        let mut expanded_args = Vec::new();
+        expanded_args.extend(current.global_args.iter().cloned());
+        expanded_args.extend(alias_tokens);
+
+        // Append the original command args after the alias expansion
+        expanded_args.extend(current.command_args.iter().cloned());
+
+        current = parse_git_cli_args(&expanded_args);
+    }
+}
+
+/// Parse alias value into tokens, respecting quotes and escapes
+fn parse_alias_tokens(value: &str) -> Option<Vec<String>> {
+    let trimmed = value.trim_start();
+
+    // If alias starts with '!', it's a shell command,currently proxy to git
+    if trimmed.starts_with('!') {
+        return None;
+    }
+
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+
+    for ch in trimmed.chars() {
+        // handle escaped char
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+
+        // inside single quotes
+        if in_single {
+            if ch == '\'' {
+                in_single = false;
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+
+        // inside double quotes
+        if in_double {
+            match ch {
+                '"' => in_double = false,
+                '\\' => escaped = true,
+                _ => current.push(ch),
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            '\\' => escaped = true,
+            c if c.is_whitespace() => {
+                if !current.is_empty() {
+                    tokens.push(current.clone());
+                    current.clear();
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if escaped {
+        current.push('\\');
+    }
+
+    if in_single || in_double {
+        return None;
+    }
+
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+
+    Some(tokens)
+}
+
+#[cfg(feature = "test-support")]
+pub fn resolve_alias_invocation_for_tests(
+    parsed_args: &ParsedGitInvocation,
+    repository: &Repository,
+) -> Option<ParsedGitInvocation> {
+    resolve_alias_invocation(parsed_args, repository)
+}
+
 fn run_post_command_hooks(
     command_hooks_context: &mut CommandHooksContext,
     parsed_args: &ParsedGitInvocation,
@@ -303,10 +430,20 @@ fn run_post_command_hooks(
                 }
             }
             Some("checkout") => {
-                checkout_hooks::post_checkout_hook(parsed_args, repository, exit_status, command_hooks_context);
+                checkout_hooks::post_checkout_hook(
+                    parsed_args,
+                    repository,
+                    exit_status,
+                    command_hooks_context,
+                );
             }
             Some("switch") => {
-                switch_hooks::post_switch_hook(parsed_args, repository, exit_status, command_hooks_context);
+                switch_hooks::post_switch_hook(
+                    parsed_args,
+                    repository,
+                    exit_status,
+                    command_hooks_context,
+                );
             }
             _ => {}
         }
