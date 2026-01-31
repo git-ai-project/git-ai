@@ -1,10 +1,13 @@
+use crate::authorship::diff_ai_accepted::diff_ai_accepted_stats;
 use crate::authorship::transcript::Message;
 use crate::error::GitAiError;
 use crate::git::refs::get_authorship;
 use crate::git::repository::Repository;
-use crate::{authorship::authorship_log::LineRange, utils::debug_log};
+use crate::utils::debug_log;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+const EMPTY_TREE_HASH: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ToolModelHeadlineStats {
@@ -467,12 +470,14 @@ pub fn stats_from_authorship_log(
     authorship_log: Option<&crate::authorship::authorship_log_serialization::AuthorshipLog>,
     git_diff_added_lines: u32,
     git_diff_deleted_lines: u32,
+    ai_accepted: u32,
+    ai_accepted_by_tool: &BTreeMap<String, u32>,
 ) -> CommitStats {
     let mut commit_stats = CommitStats {
         human_additions: 0,
         mixed_additions: 0,
         ai_additions: 0,
-        ai_accepted: 0,
+        ai_accepted,
         total_ai_additions: 0,
         total_ai_deletions: 0,
         time_waiting_for_ai: 0,
@@ -483,34 +488,6 @@ pub fn stats_from_authorship_log(
 
     // Process authorship log if present
     if let Some(log) = authorship_log {
-        // Count lines by author type
-        for file_attestation in &log.attestations {
-            for entry in &file_attestation.entries {
-                // Count lines in this entry
-                let lines_in_entry: u32 = entry
-                    .line_ranges
-                    .iter()
-                    .map(|range| match range {
-                        LineRange::Single(_) => 1,
-                        LineRange::Range(start, end) => end - start + 1,
-                    })
-                    .sum();
-
-                // Check if this is an AI-generated entry
-                if let Some(prompt_record) = log.metadata.prompts.get(&entry.hash) {
-                    // Count accepted lines (lines that were accepted by the user without any human edits)
-                    commit_stats.ai_accepted += lines_in_entry;
-
-                    let key = format!(
-                        "{}::{}",
-                        prompt_record.agent_id.tool, prompt_record.agent_id.model
-                    );
-                    let tool_stats = commit_stats.tool_model_breakdown.entry(key).or_default();
-                    tool_stats.ai_accepted += lines_in_entry;
-                }
-            }
-        }
-
         for prompt_record in log.metadata.prompts.values() {
             commit_stats.total_ai_additions += prompt_record.total_additions;
             commit_stats.total_ai_deletions += prompt_record.total_deletions;
@@ -534,17 +511,27 @@ pub fn stats_from_authorship_log(
             commit_stats.time_waiting_for_ai += waiting;
             tool_stats.time_waiting_for_ai += waiting;
         }
+    }
 
-        // AI additions are the sum of mixed and accepted lines, capped at the total git diff added lines
-        commit_stats.ai_additions = std::cmp::min(
-            commit_stats.mixed_additions + commit_stats.ai_accepted,
-            git_diff_added_lines,
-        );
+    // TODO: Mixed additions come from prompt overrides and can exceed the final diff when we
+    // compute ai_accepted from diff/blame. Cap to remaining added lines until we improve mixed tracking.
+    let max_mixed = git_diff_added_lines.saturating_sub(commit_stats.ai_accepted);
+    if commit_stats.mixed_additions > max_mixed {
+        commit_stats.mixed_additions = max_mixed;
+    }
 
-        // Calculate ai_additions for each tool following the same contract: ai_additions = ai_accepted + mixed_additions
-        for tool_stats in commit_stats.tool_model_breakdown.values_mut() {
-            tool_stats.ai_additions = tool_stats.ai_accepted + tool_stats.mixed_additions;
-        }
+    // Update tool-level accepted counts using diff-based attribution.
+    for (tool_model, accepted) in ai_accepted_by_tool {
+        let tool_stats = commit_stats.tool_model_breakdown.entry(tool_model.clone()).or_default();
+        tool_stats.ai_accepted = *accepted;
+    }
+
+    // AI additions are the sum of mixed and accepted lines.
+    commit_stats.ai_additions = commit_stats.mixed_additions + commit_stats.ai_accepted;
+
+    // Calculate ai_additions for each tool following the same contract: ai_additions = ai_accepted + mixed_additions
+    for tool_stats in commit_stats.tool_model_breakdown.values_mut() {
+        tool_stats.ai_additions = tool_stats.ai_accepted + tool_stats.mixed_additions;
     }
 
     // Human additions are the difference between total git diff and AI accepted lines (ensure non-negative)
@@ -568,14 +555,27 @@ pub fn stats_for_commit_stats(
     let (git_diff_added_lines, git_diff_deleted_lines) =
         get_git_diff_stats(repo, commit_sha, ignore_patterns)?;
 
-    // Step 2: get the authorship log for this commit
+    // Step 2: get parent SHA for diff-based accepted counts
+    let commit_obj = repo.revparse_single(commit_sha)?.peel_to_commit()?;
+    let parent_sha = if commit_obj.parent_count()? == 0 {
+        EMPTY_TREE_HASH.to_string()
+    } else {
+        commit_obj.parent(0)?.id()
+    };
+
+    let diff_ai_stats =
+        diff_ai_accepted_stats(repo, &parent_sha, commit_sha, Some(&parent_sha), ignore_patterns)?;
+
+    // Step 3: get the authorship log for this commit
     let authorship_log = get_authorship(repo, &commit_sha);
 
-    // Step 3: Calculate stats from authorship log
+    // Step 4: Calculate stats from authorship log with diff-based accepted counts
     Ok(stats_from_authorship_log(
         authorship_log.as_ref(),
         git_diff_added_lines,
         git_diff_deleted_lines,
+        diff_ai_stats.total_ai_accepted,
+        &diff_ai_stats.per_tool_model,
     ))
 }
 
