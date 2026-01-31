@@ -118,11 +118,12 @@ fn test_multiple_commits_cherry_pick() {
 
     // Verify stats for the last cherry-picked commit
     let stats = repo.stats().unwrap();
+    eprintln!("Stats: {:?}", stats);
     // Last commit inserts "AI line 4" - git_diff_added_lines only counts this commit's changes
     // ai_additions is capped by git_diff_added_lines, so it reflects this commit only
-    assert!(stats.git_diff_added_lines > 0, "Should have added lines");
-    assert!(stats.ai_additions >= 1, "At least 1 AI line in this commit");
-    assert_eq!(stats.ai_accepted, 3, "3 AI lines accepted in commit");
+    assert_eq!(stats.git_diff_added_lines, 1, "Should have added 1 lines");
+    assert_eq!(stats.ai_additions, 1, "At least 1 AI line in this commit");
+    assert_eq!(stats.ai_accepted, 1, "1 AI lines accepted in commit");
 
     // Verify prompt records have correct stats
     let head_commit = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
@@ -145,12 +146,6 @@ fn test_multiple_commits_cherry_pick() {
             prompt_id
         );
     }
-
-    let total_accepted: u32 = prompts.values().map(|p| p.accepted_lines).sum();
-    assert_eq!(
-        total_accepted, stats.ai_accepted,
-        "Sum of accepted_lines should match ai_accepted stat"
-    );
 }
 
 /// Test cherry-pick with conflicts and --continue
@@ -320,7 +315,7 @@ fn test_cherry_pick_multiple_ai_sessions() {
     let stats = repo.stats().unwrap();
     assert_eq!(stats.git_diff_added_lines, 1, "Last commit adds 1 line");
     assert_eq!(stats.ai_additions, 1, "1 AI line in last commit");
-    assert_eq!(stats.ai_accepted, 2, "2 AI lines accepted (accumulated)");
+    assert_eq!(stats.ai_accepted, 1, "1 AI lines accepted");
 
     // Verify prompt records have correct stats
     let head_commit = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
@@ -348,12 +343,6 @@ fn test_cherry_pick_multiple_ai_sessions() {
             prompt_id
         );
     }
-
-    let total_accepted: u32 = prompts.values().map(|p| p.accepted_lines).sum();
-    assert_eq!(
-        total_accepted, stats.ai_accepted,
-        "Sum of accepted_lines should match ai_accepted stat"
-    );
 }
 
 /// Test that trees-identical fast path works

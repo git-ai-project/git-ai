@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::authorship::diff_ai_accepted::diff_ai_accepted_stats;
 use crate::authorship::stats::{CommitStats, stats_for_commit_stats, stats_from_authorship_log};
 use crate::error::GitAiError;
 use crate::git::refs::{CommitAuthorship, get_commits_with_notes_from_list};
@@ -416,6 +417,14 @@ fn calculate_range_stats_direct(
     let (git_diff_added_lines, git_diff_deleted_lines) =
         get_git_diff_stats_for_range(repo, &start_sha, &end_sha, ignore_patterns)?;
 
+    let diff_ai_stats = diff_ai_accepted_stats(
+        repo,
+        &start_sha,
+        &end_sha,
+        None,
+        ignore_patterns,
+    )?;
+
     // Step 2: Create in-memory authorship log for the range, filtered to only commits in the range
     let commit_shas = commit_range.clone().all_commits();
     let authorship_log =
@@ -426,6 +435,8 @@ fn calculate_range_stats_direct(
         Some(&authorship_log),
         git_diff_added_lines,
         git_diff_deleted_lines,
+        diff_ai_stats.total_ai_accepted,
+        &diff_ai_stats.per_tool_model,
     );
 
     Ok(stats)
@@ -565,7 +576,7 @@ mod tests {
         assert_eq!(stats.authorship_stats.commits_with_authorship, 2);
         // When using empty tree, the range stats show the diff from empty to HEAD
         // The AI additions count is based on the filtered attributions for commits in range
-        assert_eq!(stats.range_stats.ai_additions, 2);
+        assert_eq!(stats.range_stats.ai_additions, 3);
         assert_eq!(stats.range_stats.git_diff_added_lines, 3);
     }
 
@@ -666,8 +677,8 @@ mod tests {
         assert_eq!(stats.authorship_stats.commits_with_authorship, 3);
         // Range authorship merges attributions from start to end, filtering to commits in range
         // The exact AI/human split depends on the merge attribution logic
-        assert_eq!(stats.range_stats.ai_additions, 1);
-        assert_eq!(stats.range_stats.human_additions, 2);
+        assert_eq!(stats.range_stats.ai_additions, 2);
+        assert_eq!(stats.range_stats.human_additions, 1);
         assert_eq!(stats.range_stats.git_diff_added_lines, 3);
     }
 

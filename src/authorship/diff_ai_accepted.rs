@@ -1,0 +1,103 @@
+use std::collections::{BTreeMap, HashMap};
+
+use crate::authorship::range_authorship::should_ignore_file;
+use crate::commands::blame::GitAiBlameOptions;
+use crate::error::GitAiError;
+use crate::git::repository::Repository;
+
+#[derive(Debug, Default)]
+pub struct DiffAiAcceptedStats {
+    pub total_ai_accepted: u32,
+    pub per_tool_model: BTreeMap<String, u32>,
+    pub per_prompt: BTreeMap<String, u32>,
+}
+
+pub fn diff_ai_accepted_stats(
+    repo: &Repository,
+    from_ref: &str,
+    to_ref: &str,
+    oldest_commit: Option<&str>,
+    ignore_patterns: &[String],
+) -> Result<DiffAiAcceptedStats, GitAiError> {
+    let added_lines_by_file = repo.diff_added_lines(from_ref, to_ref, None)?;
+
+    let mut stats = DiffAiAcceptedStats::default();
+
+    for (file_path, mut lines) in added_lines_by_file {
+        if should_ignore_file(&file_path, ignore_patterns) {
+            continue;
+        }
+
+        if lines.is_empty() {
+            continue;
+        }
+
+        lines.sort_unstable();
+        lines.dedup();
+        let line_ranges = lines_to_ranges(&lines);
+
+        if line_ranges.is_empty() {
+            continue;
+        }
+
+        let mut options = GitAiBlameOptions::default();
+        options.oldest_commit = oldest_commit.map(|value| value.to_string());
+        options.newest_commit = Some(to_ref.to_string());
+        options.line_ranges = line_ranges;
+        options.no_output = true;
+        options.use_prompt_hashes_as_names = true;
+
+        let blame_result = repo.blame(&file_path, &options);
+        let (line_authors, prompt_records) = match blame_result {
+            Ok(result) => result,
+            Err(_) => continue,
+        };
+
+        let mut prompt_tool_map: HashMap<String, String> = HashMap::new();
+        for (hash, record) in &prompt_records {
+            let tool_model = format!("{}::{}", record.agent_id.tool, record.agent_id.model);
+            prompt_tool_map.insert(hash.clone(), tool_model);
+        }
+
+        for line in &lines {
+            if let Some(prompt_hash) = line_authors.get(line) {
+                if prompt_records.contains_key(prompt_hash) {
+                    stats.total_ai_accepted += 1;
+                    *stats
+                        .per_prompt
+                        .entry(prompt_hash.clone())
+                        .or_insert(0) += 1;
+                    if let Some(tool_model) = prompt_tool_map.get(prompt_hash) {
+                        *stats.per_tool_model.entry(tool_model.clone()).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(stats)
+}
+
+fn lines_to_ranges(lines: &[u32]) -> Vec<(u32, u32)> {
+    if lines.is_empty() {
+        return Vec::new();
+    }
+
+    let mut ranges = Vec::new();
+    let mut start = lines[0];
+    let mut end = lines[0];
+
+    for &line in &lines[1..] {
+        if line == end + 1 {
+            end = line;
+        } else {
+            ranges.push((start, end));
+            start = line;
+            end = line;
+        }
+    }
+
+    ranges.push((start, end));
+
+    ranges
+}

@@ -710,7 +710,6 @@ EOF
 
 
 @test "squash-authorship should concatenate AI and human changes" {
-    skip "ai_accepted calculation issue - returns 5 instead of 2"
     BASE_COMMIT_SHA=$(git rev-parse HEAD)
     
     # Create initial file with 5 lines
