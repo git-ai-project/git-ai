@@ -8,9 +8,13 @@ use crate::git::refs::get_authorship;
 use crate::git::repo_storage::RepoStorage;
 use crate::git::rewrite_log::RewriteLogEvent;
 use crate::git::sync_authorship::{fetch_authorship_notes, push_authorship_notes};
+use crate::utils::{CREATE_NO_WINDOW, is_interactive_terminal};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 pub struct Object<'a> {
     repo: &'a Repository,
@@ -2062,10 +2066,17 @@ pub fn group_files_by_repository(
 /// Helper to execute a git command
 pub fn exec_git(args: &[String]) -> Result<Output, GitAiError> {
     // TODO Make sure to handle process signals, etc.
-    let output = Command::new(config::Config::get().git_cmd())
-        .args(args)
-        .output()
-        .map_err(GitAiError::IoError)?;
+    let mut cmd = Command::new(config::Config::get().git_cmd());
+    cmd.args(args);
+
+    #[cfg(windows)]
+    {
+        if !is_interactive_terminal() {
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+    }
+
+    let output = cmd.output().map_err(GitAiError::IoError)?;
 
     if !output.status.success() {
         let code = output.status.code();
@@ -2083,13 +2094,20 @@ pub fn exec_git(args: &[String]) -> Result<Output, GitAiError> {
 /// Helper to execute a git command with data provided on stdin
 pub fn exec_git_stdin(args: &[String], stdin_data: &[u8]) -> Result<Output, GitAiError> {
     // TODO Make sure to handle process signals, etc.
-    let mut child = Command::new(config::Config::get().git_cmd())
-        .args(args)
+    let mut cmd = Command::new(config::Config::get().git_cmd());
+    cmd.args(args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(GitAiError::IoError)?;
+        .stderr(std::process::Stdio::piped());
+
+    #[cfg(windows)]
+    {
+        if !is_interactive_terminal() {
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+    }
+
+    let mut child = cmd.spawn().map_err(GitAiError::IoError)?;
 
     if let Some(mut stdin) = child.stdin.take() {
         use std::io::Write;
@@ -2130,6 +2148,13 @@ pub fn exec_git_stdin_with_env(
     // Apply env overrides
     for (k, v) in env.iter() {
         cmd.env(k, v);
+    }
+
+    #[cfg(windows)]
+    {
+        if !is_interactive_terminal() {
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
     }
 
     let mut child = cmd.spawn().map_err(GitAiError::IoError)?;

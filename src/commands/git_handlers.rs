@@ -17,11 +17,13 @@ use crate::git::repository::Repository;
 use crate::observability;
 
 use crate::observability::wrapper_performance_targets::log_performance_target_if_violated;
-use crate::utils::debug_log;
+use crate::utils::{CREATE_NO_WINDOW, debug_log, is_interactive_terminal};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::process::Command;
 #[cfg(unix)]
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -303,10 +305,20 @@ fn run_post_command_hooks(
                 }
             }
             Some("checkout") => {
-                checkout_hooks::post_checkout_hook(parsed_args, repository, exit_status, command_hooks_context);
+                checkout_hooks::post_checkout_hook(
+                    parsed_args,
+                    repository,
+                    exit_status,
+                    command_hooks_context,
+                );
             }
             Some("switch") => {
-                switch_hooks::post_switch_hook(parsed_args, repository, exit_status, command_hooks_context);
+                switch_hooks::post_switch_hook(
+                    parsed_args,
+                    repository,
+                    exit_status,
+                    command_hooks_context,
+                );
             }
             _ => {}
         }
@@ -368,9 +380,17 @@ fn proxy_to_git(args: &[String], exit_on_completion: bool) -> std::process::Exit
         }
         #[cfg(not(unix))]
         {
-            Command::new(config::Config::get().git_cmd())
-                .args(args)
-                .spawn()
+            let mut cmd = Command::new(config::Config::get().git_cmd());
+            cmd.args(args);
+
+            #[cfg(windows)]
+            {
+                if !is_interactive_terminal() {
+                    cmd.creation_flags(CREATE_NO_WINDOW);
+                }
+            }
+
+            cmd.spawn()
         }
     };
 
