@@ -1,11 +1,11 @@
 use crate::api::{ApiClient, ApiContext};
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
-use crate::authorship::prompt_utils::{update_prompt_from_tool, PromptUpdateResult};
+use crate::authorship::prompt_utils::{PromptUpdateResult, update_prompt_from_tool};
 use crate::authorship::secrets::{redact_secrets_from_prompts, strip_prompt_messages};
 use crate::authorship::stats::{stats_for_commit_stats, write_stats_to_terminal};
 use crate::authorship::virtual_attribution::VirtualAttributions;
 use crate::authorship::working_log::{Checkpoint, CheckpointKind};
-use crate::config::Config;
+use crate::config::{Config, PromptStorageMode};
 use crate::error::GitAiError;
 use crate::git::refs::notes_add;
 use crate::git::repository::Repository;
@@ -88,38 +88,31 @@ pub fn post_commit(
 
     authorship_log.metadata.base_commit_sha = commit_sha.clone();
 
-    // Handle prompts based on prompt_storage setting and exclusion rules
-    let should_exclude = Config::get().should_exclude_prompts(&Some(repo.clone()));
-    let prompt_storage = Config::get().prompt_storage();
+    // Handle prompts based on effective prompt storage mode for this repository
+    // The effective mode considers include/exclude lists and fallback settings
+    let effective_storage = Config::get().effective_prompt_storage(&Some(repo.clone()));
 
-    match prompt_storage {
-        "local" => {
+    match effective_storage {
+        PromptStorageMode::Local => {
             // Local only: strip all messages from notes (they stay in sqlite only)
             strip_prompt_messages(&mut authorship_log.metadata.prompts);
         }
-        "notes" => {
+        PromptStorageMode::Notes => {
             // Store in notes: redact secrets but keep messages in notes
-            if should_exclude {
-                strip_prompt_messages(&mut authorship_log.metadata.prompts);
-            } else {
-                let count = redact_secrets_from_prompts(&mut authorship_log.metadata.prompts);
-                if count > 0 {
-                    debug_log(&format!("Redacted {} secrets from prompts", count));
-                }
+            let count = redact_secrets_from_prompts(&mut authorship_log.metadata.prompts);
+            if count > 0 {
+                debug_log(&format!("Redacted {} secrets from prompts", count));
             }
         }
-        _ => {
+        PromptStorageMode::Default => {
             // "default" - attempt CAS upload, NEVER keep messages in notes
             // Check conditions for CAS upload:
-            // - prompt_storage == "default" (implied here)
-            // - repo not in exclusion list
             // - user is logged in OR using custom API URL
             let context = ApiContext::new(None);
             let client = ApiClient::new(context);
             let using_custom_api =
                 Config::get().api_base_url() != crate::config::DEFAULT_API_BASE_URL;
-            let should_enqueue_cas =
-                !should_exclude && (client.is_logged_in() || using_custom_api);
+            let should_enqueue_cas = client.is_logged_in() || using_custom_api;
 
             if should_enqueue_cas {
                 // Redact secrets before uploading to CAS
@@ -340,7 +333,10 @@ fn batch_upsert_prompts_to_db(
 /// - Set messages_url (format: {api_base_url}/cas/{hash}) and clear messages
 fn enqueue_prompt_messages_to_cas(
     repo: &Repository,
-    prompts: &mut std::collections::BTreeMap<String, crate::authorship::authorship_log::PromptRecord>,
+    prompts: &mut std::collections::BTreeMap<
+        String,
+        crate::authorship::authorship_log::PromptRecord,
+    >,
 ) -> Result<(), GitAiError> {
     use crate::authorship::internal_db::InternalDatabase;
 
@@ -360,14 +356,12 @@ fn enqueue_prompt_messages_to_cas(
         .ok()
         .flatten()
         .and_then(|remote_name| {
-            repo.remotes_with_urls()
-                .ok()
-                .and_then(|remotes| {
-                    remotes
-                        .into_iter()
-                        .find(|(name, _)| name == &remote_name)
-                        .map(|(_, url)| url)
-                })
+            repo.remotes_with_urls().ok().and_then(|remotes| {
+                remotes
+                    .into_iter()
+                    .find(|(name, _)| name == &remote_name)
+                    .map(|(_, url)| url)
+            })
         });
 
     if let Some(url) = repo_url {
