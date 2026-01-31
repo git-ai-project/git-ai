@@ -18,7 +18,7 @@ use futures::stream::{self, StreamExt};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Per-file line statistics (in-memory only, not persisted)
 #[derive(Debug, Clone, Default)]
@@ -456,6 +456,12 @@ fn get_status_of_files(
     skip_untracked: bool,
 ) -> Result<Vec<String>, GitAiError> {
     let mut files = Vec::new();
+    let mut deleted_total = 0usize;
+    let mut deleted_fastpath = 0usize;
+    let mut deleted_head_checks = 0usize;
+    let mut head_check_time = Duration::ZERO;
+    let mut is_text_calls = 0usize;
+    let mut is_text_time = Duration::ZERO;
 
     // Use porcelain v2 format to get status
 
@@ -473,6 +479,8 @@ fn get_status_of_files(
     ));
 
     for entry in statuses {
+        let normalized_path = normalize_to_posix(&entry.path);
+
         // Skip ignored files
         if entry.kind == EntryKind::Ignored {
             continue;
@@ -494,16 +502,41 @@ fn get_status_of_files(
                 entry.staged == StatusCode::Deleted || entry.unstaged == StatusCode::Deleted;
 
             let is_text = if is_deleted {
-                is_text_file_in_head(repo, &entry.path)
+                deleted_total += 1;
+                // If the file is already known/tracked by working log, skip expensive HEAD blob checks.
+                if edited_filepaths.contains(&normalized_path) {
+                    deleted_fastpath += 1;
+                    true
+                } else {
+                    deleted_head_checks += 1;
+                    let head_start = Instant::now();
+                    let is_text = is_text_file_in_head(repo, &normalized_path);
+                    head_check_time = head_check_time.saturating_add(head_start.elapsed());
+                    is_text
+                }
             } else {
-                is_text_file(working_log, &entry.path)
+                is_text_calls += 1;
+                let text_start = Instant::now();
+                let is_text = is_text_file(working_log, &normalized_path);
+                is_text_time = is_text_time.saturating_add(text_start.elapsed());
+                is_text
             };
 
             if is_text {
-                files.push(entry.path.clone());
+                files.push(normalized_path);
             }
         }
     }
+
+    debug_log(&format!(
+        "[BENCHMARK]   get_status_of_files deleted_total={}, fastpath={}, head_checks={}, head_check_time={:?}, is_text_calls={}, is_text_time={:?}",
+        deleted_total,
+        deleted_fastpath,
+        deleted_head_checks,
+        head_check_time,
+        is_text_calls,
+        is_text_time
+    ));
 
     Ok(files)
 }
@@ -550,9 +583,9 @@ fn get_all_tracked_files(
             ));
             continue;
         }
-        if is_text_file(working_log, &normalized_path) {
-            files.insert(normalized_path);
-        }
+        // INITIAL attributions only exist for files we already tracked as text.
+        // Avoid re-checking filesystem metadata here to allow deleted files through.
+        files.insert(normalized_path);
     }
     debug_log(&format!(
         "[BENCHMARK]   Reading INITIAL attributions in get_all_tracked_files took {:?}",
@@ -574,10 +607,9 @@ fn get_all_tracked_files(
                     continue;
                 }
                 if !files.contains(&normalized_path) {
-                    // Check if it's a text file before adding
-                    if is_text_file(working_log, &normalized_path) {
-                        files.insert(normalized_path);
-                    }
+                    // Checkpoints only record text files, so skip filesystem checks.
+                    // This preserves deleted paths for fast-path handling later.
+                    files.insert(normalized_path);
                 }
             }
         }
