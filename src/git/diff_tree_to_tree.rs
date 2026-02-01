@@ -183,7 +183,7 @@ fn parse_diff_raw(data: &[u8]) -> Result<Vec<DiffDelta>, GitAiError> {
         .peekable();
 
     while let Some(raw) = parts.next() {
-        let metadata = std::str::from_utf8(raw)?;
+        let metadata = String::from_utf8_lossy(raw);
 
         // Skip if the record doesn't start with ':' or is empty
         if !metadata.starts_with(':') || metadata.is_empty() {
@@ -193,11 +193,11 @@ fn parse_diff_raw(data: &[u8]) -> Result<Vec<DiffDelta>, GitAiError> {
         // When using -z, the path is the NEXT part after the NUL separator
         let path = match parts.next() {
             Some(p) => {
-                let path_str = std::str::from_utf8(p)?;
-                if path_str.is_empty() {
+                let path_string = String::from_utf8_lossy(p);
+                if path_string.is_empty() {
                     continue; // Skip records without a path
                 }
-                path_str
+                path_string
             }
             None => continue, // No path found
         };
@@ -241,8 +241,8 @@ fn parse_diff_raw(data: &[u8]) -> Result<Vec<DiffDelta>, GitAiError> {
             let old_path_bytes = parts
                 .next()
                 .ok_or_else(|| GitAiError::Generic("Missing old path for rename/copy".into()))?;
-            let old_path_str = std::str::from_utf8(old_path_bytes)?;
-            (path.to_string(), Some(old_path_str.to_string()))
+            let old_path_str = String::from_utf8_lossy(old_path_bytes);
+            (path.to_string(), Some(old_path_str.into_owned()))
         } else {
             (path.to_string(), None)
         };

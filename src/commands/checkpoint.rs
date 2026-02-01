@@ -674,8 +674,10 @@ fn save_current_file_states(
                     } else {
                         repo_workdir.join(&file_path).to_string_lossy().to_string()
                     };
-                    // Read from filesystem
-                    std::fs::read_to_string(&abs_path).unwrap_or_default()
+                    // Read from filesystem (use read + from_utf8_lossy to handle non-UTF-8 files like GBK)
+                    std::fs::read(&abs_path)
+                        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                        .unwrap_or_default()
                 });
 
                 // Create SHA256 hash of the content

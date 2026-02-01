@@ -211,7 +211,8 @@ impl PersistedWorkingLog {
     /* blob storage */
     pub fn get_file_version(&self, sha: &str) -> Result<String, GitAiError> {
         let blob_path = self.dir.join("blobs").join(sha);
-        Ok(fs::read_to_string(blob_path)?)
+        let bytes = fs::read(blob_path)?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     pub fn persist_file_version(&self, content: &str) -> Result<String, GitAiError> {

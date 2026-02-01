@@ -1,7 +1,6 @@
 use crate::error::GitAiError;
 use crate::git::repository::{Repository, exec_git};
 use std::collections::HashSet;
-use std::str;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusCode {
@@ -70,7 +69,7 @@ impl Repository {
             )));
         }
 
-        let stdout = str::from_utf8(&output.stdout)?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
         let filenames: HashSet<String> = stdout
             .lines()
             .filter(|line| !line.is_empty())
@@ -162,7 +161,7 @@ fn parse_porcelain_v2(data: &[u8]) -> Result<Vec<StatusEntry>, GitAiError> {
         .peekable();
 
     while let Some(raw) = parts.next() {
-        let record = str::from_utf8(raw)?;
+        let record = String::from_utf8_lossy(raw);
         let mut chars = record.chars();
         let tag = chars
             .next()
@@ -236,7 +235,7 @@ fn parse_porcelain_v2(data: &[u8]) -> Result<Vec<StatusEntry>, GitAiError> {
                 let orig_path_bytes = parts.next().ok_or_else(|| {
                     GitAiError::Generic("Missing original path for rename/copy".into())
                 })?;
-                let orig_path = str::from_utf8(orig_path_bytes)?.to_string();
+                let orig_path = String::from_utf8_lossy(orig_path_bytes).into_owned();
 
                 let kind = match staged {
                     StatusCode::Renamed => EntryKind::Rename,
@@ -253,7 +252,7 @@ fn parse_porcelain_v2(data: &[u8]) -> Result<Vec<StatusEntry>, GitAiError> {
                 });
             }
             '?' => {
-                let path = record.strip_prefix("? ").unwrap_or(record).to_string();
+                let path = record.strip_prefix("? ").unwrap_or(&record).to_string();
 
                 entries.push(StatusEntry {
                     path,
@@ -264,7 +263,7 @@ fn parse_porcelain_v2(data: &[u8]) -> Result<Vec<StatusEntry>, GitAiError> {
                 });
             }
             '!' => {
-                let path = record.strip_prefix("! ").unwrap_or(record).to_string();
+                let path = record.strip_prefix("! ").unwrap_or(&record).to_string();
 
                 entries.push(StatusEntry {
                     path,
