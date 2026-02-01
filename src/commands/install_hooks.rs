@@ -122,8 +122,8 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
     // Run async operations with smol and convert result
     let statuses = smol::block_on(async_run_install(&params, dry_run, verbose))?;
 
-    // Flush logs immediately so install metrics are captured right away
-    crate::observability::flush::handle_flush_logs(&[]);
+    // Spawn background processes to flush metrics
+    crate::observability::spawn_background_flush();
     spawn_background_metrics_db_flush();
 
     Ok(to_hashmap(statuses))
