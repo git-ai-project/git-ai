@@ -80,7 +80,7 @@ REPO="prompt-security/git-ai"
 
 # Version placeholder - replaced during release builds with actual version (e.g., "v1.0.24")
 # When set to __VERSION_PLACEHOLDER__, defaults to "latest"
-PINNED_VERSION="__VERSION_PLACEHOLDER__"
+PINNED_VERSION="v2.0.0"
 
 # Embedded checksums - replaced during release builds with actual SHA256 checksums
 # Format: "hash  filename|hash  filename|..." (pipe-separated)
