@@ -76,12 +76,7 @@ if [ "$UNINSTALL_ONLY" = true ]; then
 fi
 
 # GitHub repository details
-# Replaced during release builds with the actual repository (e.g., "prompt-security/git-ai")
-# When set to __REPO_PLACEHOLDER__, defaults to "prompt-security/git-ai"
-REPO="__REPO_PLACEHOLDER__"
-if [ "$REPO" = "__REPO_PLACEHOLDER__" ]; then
-    REPO="prompt-security/git-ai"
-fi
+REPO="prompt-security/git-ai"
 
 # Version placeholder - replaced during release builds with actual version (e.g., "v1.0.24")
 # When set to __VERSION_PLACEHOLDER__, defaults to "latest"
