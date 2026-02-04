@@ -17,13 +17,15 @@ use crate::git::repository::Repository;
 use crate::observability;
 
 use crate::observability::wrapper_performance_targets::log_performance_target_if_violated;
-use crate::utils::{CREATE_NO_WINDOW, debug_log, is_interactive_terminal};
+use crate::utils::{debug_log, is_interactive_terminal};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+#[cfg(windows)]
+use crate::utils::CREATE_NO_WINDOW;
 use std::process::Command;
 #[cfg(unix)]
 use std::sync::atomic::{AtomicI32, Ordering};
