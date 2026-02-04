@@ -12,7 +12,26 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Handle the flush-logs command
+///
+/// NOTE: This command has been disabled in this fork to prevent external data uploads.
+/// Log files are cleaned up locally but no data is sent to external services.
 pub fn handle_flush_logs(args: &[String]) {
+    let force = args.contains(&"--force".to_string());
+    let _ = force; // suppress unused warning
+
+    eprintln!("External telemetry disabled in this fork. Cleaning up local logs only...");
+
+    // Just clean up old log files without sending anything
+    if let Some(logs_dir) = get_logs_directory() {
+        cleanup_old_logs(&logs_dir);
+        eprintln!("Local log cleanup complete.");
+    }
+
+    std::process::exit(0);
+}
+
+#[allow(dead_code)]
+fn handle_flush_logs_disabled(args: &[String]) {
     let force = args.contains(&"--force".to_string());
 
     // In dev builds without --force, we only send metrics envelopes (skip error/performance/message)

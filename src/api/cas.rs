@@ -12,7 +12,20 @@ impl ApiClient {
     /// # Returns
     /// * `Ok(CasUploadResponse)` - Success response
     /// * `Err(GitAiError)` - Error response
+    ///
+    /// NOTE: This function has been disabled in this fork to prevent external data uploads.
     pub fn upload_cas(&self, request: CasUploadRequest) -> Result<CasUploadResponse, GitAiError> {
+        // CAS upload disabled - return success with empty results to prevent breaking callers
+        let _ = request; // suppress unused warning
+        Ok(CasUploadResponse {
+            results: vec![],
+            success_count: 0,
+            failure_count: 0,
+        })
+    }
+
+    #[allow(dead_code)]
+    fn upload_cas_disabled(&self, request: CasUploadRequest) -> Result<CasUploadResponse, GitAiError> {
         let response = self.context().post_json("/worker/cas/upload", &request)?;
         let status_code = response.status_code;
 

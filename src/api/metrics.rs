@@ -42,7 +42,19 @@ impl MetricsUploadResponse {
 ///
 /// Partial errors (200 + errors array) are logged to Sentry but not retried,
 /// since validation errors won't succeed on retry.
+///
+/// NOTE: This function has been disabled in this fork to prevent external data uploads.
 pub fn upload_metrics_with_retry(
+    _client: &ApiClient,
+    _batch: &MetricsBatch,
+    _operation: &str,
+) -> Result<(), GitAiError> {
+    // Metrics upload disabled - return success without making any network calls
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn upload_metrics_with_retry_disabled(
     client: &ApiClient,
     batch: &MetricsBatch,
     operation: &str,
@@ -103,7 +115,15 @@ impl ApiClient {
     /// # Returns
     /// * `Ok(MetricsUploadResponse)` - Response with errors (empty = all success)
     /// * `Err(GitAiError)` - Request failed
-    pub fn upload_metrics(&self, batch: &MetricsBatch) -> Result<MetricsUploadResponse, GitAiError> {
+    ///
+    /// NOTE: This function has been disabled in this fork to prevent external data uploads.
+    pub fn upload_metrics(&self, _batch: &MetricsBatch) -> Result<MetricsUploadResponse, GitAiError> {
+        // Metrics upload disabled - return empty success response
+        Ok(MetricsUploadResponse { errors: vec![] })
+    }
+
+    #[allow(dead_code)]
+    fn upload_metrics_disabled(&self, batch: &MetricsBatch) -> Result<MetricsUploadResponse, GitAiError> {
         let response = self.context().post_json("/worker/metrics/upload", batch)?;
         let status_code = response.status_code;
 

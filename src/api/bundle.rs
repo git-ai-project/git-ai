@@ -17,7 +17,20 @@ impl ApiClient {
     /// * Returns `GitAiError::Generic` for HTTP errors
     /// * Returns `GitAiError::JsonError` for JSON parsing errors
     /// * Returns `GitAiError::Generic` with error details for API errors (400, 500, etc.)
+    ///
+    /// NOTE: This function has been disabled in this fork to prevent external data uploads.
     pub fn create_bundle(
+        &self,
+        _request: CreateBundleRequest,
+    ) -> Result<CreateBundleResponse, GitAiError> {
+        // Bundle creation disabled - return error to prevent data upload
+        Err(GitAiError::Generic(
+            "Bundle creation has been disabled in this fork to prevent external data uploads.".to_string()
+        ))
+    }
+
+    #[allow(dead_code)]
+    fn create_bundle_disabled(
         &self,
         request: CreateBundleRequest,
     ) -> Result<CreateBundleResponse, GitAiError> {

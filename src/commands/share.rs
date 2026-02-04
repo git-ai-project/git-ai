@@ -11,7 +11,17 @@ use std::collections::{BTreeMap, HashMap};
 /// Usage: git-ai share [<prompt_id>] [--title <title>]
 ///
 /// If prompt_id is provided, uses CLI mode. Otherwise, launches TUI.
-pub fn handle_share(args: &[String]) {
+///
+/// NOTE: This command has been disabled in this fork to prevent external data sharing.
+pub fn handle_share(_args: &[String]) {
+    eprintln!("Error: The 'share' command has been disabled in this fork.");
+    eprintln!("This feature uploads prompts and code diffs to external servers.");
+    eprintln!("For security reasons, it has been removed from this build.");
+    std::process::exit(1);
+}
+
+#[allow(dead_code)]
+fn handle_share_disabled(args: &[String]) {
     match parse_args(args) {
         Ok(parsed) => {
             // Has prompt_id - use CLI mode
