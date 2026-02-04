@@ -732,6 +732,12 @@ impl<'a> TestFile<'a> {
     }
 
     fn write_and_checkpoint(&self, author_type: &AuthorType) {
+        // Create parent directories if they don't exist (important for nested paths)
+        if let Some(parent) = self.file_path.parent() {
+            if !parent.exists() {
+                fs::create_dir_all(parent).expect("failed to create parent directories");
+            }
+        }
         let contents = self.contents();
         fs::write(&self.file_path, contents).unwrap();
         if author_type == &AuthorType::Ai {
@@ -742,6 +748,12 @@ impl<'a> TestFile<'a> {
     }
 
     fn write_and_checkpoint_with_contents(&self, contents: &str, author_type: &AuthorType) {
+        // Create parent directories if they don't exist (important for nested paths like src/模块/组件.ts)
+        if let Some(parent) = self.file_path.parent() {
+            if !parent.exists() {
+                fs::create_dir_all(parent).expect("failed to create parent directories");
+            }
+        }
         fs::write(&self.file_path, contents).unwrap();
 
         // Stage the file first
@@ -762,6 +774,12 @@ impl<'a> TestFile<'a> {
     }
 
     fn write_and_checkpoint_no_stage(&self, contents: &str, author_type: &AuthorType) {
+        // Create parent directories if they don't exist (important for nested paths)
+        if let Some(parent) = self.file_path.parent() {
+            if !parent.exists() {
+                fs::create_dir_all(parent).expect("failed to create parent directories");
+            }
+        }
         fs::write(&self.file_path, contents).unwrap();
 
         // Create checkpoint without staging - checkpoints work with unstaged files

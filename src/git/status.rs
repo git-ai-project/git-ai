@@ -60,6 +60,7 @@ impl Repository {
         args.push("diff".to_string());
         args.push("--cached".to_string());
         args.push("--name-only".to_string());
+        args.push("-z".to_string()); // NUL-separated output for proper UTF-8 handling
 
         let output = exec_git(&args)?;
 
@@ -70,11 +71,12 @@ impl Repository {
             )));
         }
 
-        let stdout = str::from_utf8(&output.stdout)?;
-        let filenames: HashSet<String> = stdout
-            .lines()
-            .filter(|line| !line.is_empty())
-            .map(|line| line.to_string())
+        // With -z, output is NUL-separated. The output may contain a trailing NUL.
+        let filenames: HashSet<String> = output
+            .stdout
+            .split(|&b| b == 0)
+            .filter(|bytes| !bytes.is_empty())
+            .filter_map(|bytes| String::from_utf8(bytes.to_vec()).ok())
             .collect();
 
         Ok(filenames)

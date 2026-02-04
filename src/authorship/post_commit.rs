@@ -561,4 +561,40 @@ mod tests {
             "Should have empty attestations when no checkpoints exist"
         );
     }
+
+    #[test]
+    fn test_post_commit_utf8_filename_with_ai_attribution() {
+        // Create a repo with an initial commit
+        let tmp_repo = TmpRepo::new().unwrap();
+
+        // Create initial file and commit
+        tmp_repo.write_file("README.md", "# Test\n", true).unwrap();
+        tmp_repo.trigger_checkpoint_with_author("test_user").unwrap();
+        tmp_repo.commit_with_message("Initial commit").unwrap();
+
+        // Create a file with Chinese characters in the filename
+        let chinese_filename = "中文文件.txt";
+        tmp_repo.write_file(chinese_filename, "Hello, 世界!\n", true).unwrap();
+
+        // Trigger AI checkpoint
+        tmp_repo.trigger_checkpoint_with_ai("mock_ai", None, None).unwrap();
+
+        // Commit
+        let authorship_log = tmp_repo.commit_with_message("Add Chinese file").unwrap();
+
+        // Debug output
+        println!("Authorship log attestations: {:?}", authorship_log.attestations);
+
+        // The attestation should include the Chinese filename
+        assert_eq!(
+            authorship_log.attestations.len(),
+            1,
+            "Should have 1 attestation for the Chinese-named file"
+        );
+        assert_eq!(
+            authorship_log.attestations[0].file_path,
+            chinese_filename,
+            "File path should be the UTF-8 filename"
+        );
+    }
 }

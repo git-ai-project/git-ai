@@ -255,9 +255,24 @@ fn parse_diff_hunks(diff_text: &str) -> Result<Vec<DiffHunk>, GitAiError> {
     let mut current_file = String::new();
 
     for line in diff_text.lines() {
+        // Git outputs paths in two formats:
+        // 1. Unquoted: +++ b/path/to/file.txt
+        // 2. Quoted (for non-ASCII): +++ "b/path/to/file.txt" (with octal escapes inside)
         if line.starts_with("+++ b/") {
-            // New file path
-            current_file = line[6..].to_string();
+            // Unquoted path (ASCII only)
+            // Note: Git adds trailing tab after filenames with spaces, so we trim_end
+            let raw_path = &line[6..].trim_end();
+            current_file = crate::utils::unescape_git_path(raw_path);
+        } else if line.starts_with("+++ \"b/") {
+            // Quoted path (non-ASCII chars) - extract the quoted portion and unescape
+            let quoted_path = &line[4..]; // Gets "b/\344\270\255\346\226\207.txt"
+            let unescaped = crate::utils::unescape_git_path(quoted_path);
+            // Now unescaped is "b/中文.txt", strip the "b/" prefix
+            current_file = if unescaped.starts_with("b/") {
+                unescaped[2..].to_string()
+            } else {
+                unescaped
+            };
         } else if line.starts_with("@@ ") {
             // Hunk header
             if let Some(hunk) = parse_hunk_line(line, &current_file)? {
@@ -546,7 +561,22 @@ fn get_diff_split_by_file(
             current_diff = format!("{}\n", line);
             current_file.clear();
         } else if line.starts_with("+++ b/") {
-            current_file = line[6..].to_string();
+            // Unquoted path (ASCII only)
+            // Note: Git adds trailing tab after filenames with spaces, so we trim_end
+            let raw_path = &line[6..].trim_end();
+            current_file = crate::utils::unescape_git_path(raw_path);
+            current_diff.push_str(line);
+            current_diff.push('\n');
+        } else if line.starts_with("+++ \"b/") {
+            // Quoted path (non-ASCII chars) - extract the quoted portion and unescape
+            let quoted_path = &line[4..]; // Gets "b/\344\270\255\346\226\207.txt"
+            let unescaped = crate::utils::unescape_git_path(quoted_path);
+            // Now unescaped is "b/中文.txt", strip the "b/" prefix
+            current_file = if unescaped.starts_with("b/") {
+                unescaped[2..].to_string()
+            } else {
+                unescaped
+            };
             current_diff.push_str(line);
             current_diff.push('\n');
         } else {
@@ -690,7 +720,21 @@ pub fn format_annotated_diff(
         } else if line.starts_with("--- ") {
             result.push_str(&format_line(line, LineType::DiffHeader, use_color, None));
         } else if line.starts_with("+++ b/") {
-            current_file = line[6..].to_string();
+            // Unquoted path (ASCII only)
+            // Note: Git adds trailing tab after filenames with spaces, so we trim_end
+            let raw_path = &line[6..].trim_end();
+            current_file = crate::utils::unescape_git_path(raw_path);
+            result.push_str(&format_line(line, LineType::DiffHeader, use_color, None));
+        } else if line.starts_with("+++ \"b/") {
+            // Quoted path (non-ASCII chars) - extract the quoted portion and unescape
+            let quoted_path = &line[4..]; // Gets "b/\344\270\255\346\226\207.txt"
+            let unescaped = crate::utils::unescape_git_path(quoted_path);
+            // Now unescaped is "b/中文.txt", strip the "b/" prefix
+            current_file = if unescaped.starts_with("b/") {
+                unescaped[2..].to_string()
+            } else {
+                unescaped
+            };
             result.push_str(&format_line(line, LineType::DiffHeader, use_color, None));
         } else if line.starts_with("@@ ") {
             // Hunk header - update line counters
