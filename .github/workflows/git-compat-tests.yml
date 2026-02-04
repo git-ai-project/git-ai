@@ -1,0 +1,457 @@
+name: Git Compatibility Tests
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  merge_group:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  git-compat:
+    name: Git Compatibility Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout git-ai
+        uses: actions/checkout@v4
+        with:
+          path: git-ai
+
+      - name: Checkout official git repository
+        uses: actions/checkout@v4
+        with:
+          repository: git/git
+          path: git
+          ref: v2.47.1
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            git-ai/target
+          key: ${{ runner.os }}-cargo-git-compat-${{ hashFiles('git-ai/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-git-compat-
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gettext \
+            libcurl4-openssl-dev \
+            libexpat1-dev \
+            libpcre2-dev \
+            libssl-dev \
+            libz-dev \
+            perl \
+            perl-modules \
+            libio-pty-perl
+
+      - name: Build git-ai in release mode
+        working-directory: git-ai
+        run: cargo build --release
+
+      - name: Set up gitwrap directory
+        run: |
+          mkdir -p $HOME/.git-ai-test/gitwrap/bin
+          ln -sf $GITHUB_WORKSPACE/git-ai/target/release/git-ai $HOME/.git-ai-test/gitwrap/bin/git
+          ln -sf $GITHUB_WORKSPACE/git-ai/target/release/git-ai $HOME/.git-ai-test/gitwrap/bin/git-ai
+          ls -la $HOME/.git-ai-test/gitwrap/bin/
+
+      - name: Build standard git for reference
+        working-directory: git
+        run: |
+          make -j$(nproc) prefix=/usr/local
+          sudo make install prefix=/usr/local
+          /usr/local/bin/git --version
+
+      - name: Run git tests with standard git (baseline)
+        id: standard_tests
+        working-directory: git/t
+        continue-on-error: true
+        run: |
+          GIT_TEST_INSTALLED=/usr/local/bin \
+          prove -j$(nproc) \
+            t0000-basic.sh \
+            t0001-init.sh \
+            t0002-gitfile.sh \
+            t0003-attributes.sh \
+            t0006-date.sh \
+            t0007-git-var.sh \
+            t0010-racy-git.sh \
+            t0012-help.sh \
+            t0027-auto-crlf.sh \
+            t0040-parse-options.sh \
+            t0050-filesystem.sh \
+            t0060-path-utils.sh \
+            t0061-run-command.sh \
+            t0070-fundamental.sh \
+            t0090-cache-tree.sh \
+            t1000-read-tree-m-3way.sh \
+            t1001-read-tree-m-2way.sh \
+            t1006-cat-file.sh \
+            t1007-hash-object.sh \
+            t1050-large.sh \
+            t1100-commit-tree-options.sh \
+            t1300-config.sh \
+            t1400-update-ref.sh \
+            t1401-symbolic-ref.sh \
+            t1402-check-ref-format.sh \
+            t1403-show-ref.sh \
+            t1410-reflog.sh \
+            t1450-fsck.sh \
+            t1500-rev-parse.sh \
+            t1501-work-tree.sh \
+            t1502-rev-parse-parseopt.sh \
+            t1503-rev-parse-verify.sh \
+            t1506-rev-parse-diagnosis.sh \
+            t1507-rev-parse-upstream.sh \
+            t1510-repo-setup.sh \
+            t1600-index.sh \
+            t2010-checkout-ambiguous.sh \
+            t2012-checkout-last.sh \
+            t2014-checkout-switch.sh \
+            t2018-checkout-branch.sh \
+            t2020-checkout-detach.sh \
+            t2060-switch.sh \
+            t2070-restore.sh \
+            t2107-update-index-basic.sh \
+            t2200-add-update.sh \
+            t2202-add-addremove.sh \
+            t2300-cd-to-toplevel.sh \
+            t2400-worktree-add.sh \
+            t3000-ls-files-others.sh \
+            t3003-ls-files-exclude.sh \
+            t3004-ls-files-basic.sh \
+            t3030-merge-recursive.sh \
+            t3070-wildmatch.sh \
+            t3100-ls-tree-restrict.sh \
+            t3200-branch.sh \
+            t3201-branch-contains.sh \
+            t3203-branch-output.sh \
+            t3206-range-diff.sh \
+            t3301-notes.sh \
+            t3400-rebase.sh \
+            t3402-rebase-merge.sh \
+            t3403-rebase-skip.sh \
+            t3404-rebase-interactive.sh \
+            t3406-rebase-message.sh \
+            t3407-rebase-abort.sh \
+            t3418-rebase-continue.sh \
+            t3420-rebase-autostash.sh \
+            t3501-revert-cherry-pick.sh \
+            t3502-cherry-pick-merge.sh \
+            t3507-cherry-pick-conflict.sh \
+            t3510-cherry-pick-sequence.sh \
+            t3600-rm.sh \
+            t3700-add.sh \
+            t3701-add-interactive.sh \
+            t3903-stash.sh \
+            t3904-stash-patch.sh \
+            t3905-stash-include-untracked.sh \
+            t4000-diff-format.sh \
+            t4001-diff-rename.sh \
+            t4002-diff-basic.sh \
+            t4010-diff-pathspec.sh \
+            t4012-diff-binary.sh \
+            t4013-diff-various.sh \
+            t4014-format-patch.sh \
+            t4015-diff-whitespace.sh \
+            t4017-diff-retval.sh \
+            t4020-diff-external.sh \
+            t4035-diff-quiet.sh \
+            t4045-diff-relative.sh \
+            t4053-diff-no-index.sh \
+            t4100-apply-stat.sh \
+            t4103-apply-binary.sh \
+            t4108-apply-threeway.sh \
+            t4150-am.sh \
+            t4151-am-abort.sh \
+            t4200-rerere.sh \
+            t4202-log.sh \
+            t4203-mailmap.sh \
+            t4205-log-pretty-formats.sh \
+            t5000-tar-tree.sh \
+            t5001-archive-attr.sh \
+            t5300-pack-object.sh \
+            t5302-pack-index.sh \
+            t5304-prune.sh \
+            t5310-pack-bitmaps.sh \
+            t5318-commit-graph.sh \
+            t5400-send-pack.sh \
+            t5401-update-hooks.sh \
+            t5402-post-merge-hook.sh \
+            t5403-post-checkout-hook.sh \
+            t5407-post-rewrite-hook.sh \
+            t5500-fetch-pack.sh \
+            t5501-fetch-push-hook.sh \
+            t5505-remote.sh \
+            t5510-fetch.sh \
+            t5516-fetch-push.sh \
+            t5520-pull.sh \
+            t5521-pull-options.sh \
+            t5523-push-upstream.sh \
+            t5528-push-default.sh \
+            t5571-pre-push-hook.sh \
+            t5601-clone.sh \
+            t5605-clone-local.sh \
+            t5606-clone-options.sh \
+            t6000-rev-list-misc.sh \
+            t6002-rev-list-bisect.sh \
+            t6003-rev-list-topo-order.sh \
+            t6006-rev-list-format.sh \
+            t6010-merge-base.sh \
+            t6012-rev-list-simplify.sh \
+            t6030-bisect-porcelain.sh \
+            t6050-replace.sh \
+            t6120-describe.sh \
+            t6200-fmt-merge-msg.sh \
+            t6300-for-each-ref.sh \
+            t6302-for-each-ref-filter.sh \
+            t6400-merge-df.sh \
+            t6402-merge-rename.sh \
+            t6403-merge-file.sh \
+            t6500-gc.sh \
+            t7001-mv.sh \
+            t7004-tag.sh \
+            t7005-editor.sh \
+            t7006-pager.sh \
+            t7007-show.sh \
+            t7060-wtstatus.sh \
+            t7100-reset.sh \
+            t7102-reset.sh \
+            t7104-reset-hard.sh \
+            t7201-co.sh \
+            t7300-clean.sh \
+            t7400-submodule-basic.sh \
+            t7500-commit.sh \
+            t7501-commit.sh \
+            t7502-commit-porcelain.sh \
+            t7503-pre-commit-and-pre-merge-commit-hooks.sh \
+            t7504-commit-msg-hook.sh \
+            t7505-prepare-commit-msg-hook.sh \
+            t7508-status.sh \
+            t7509-commit-authorship.sh \
+            t7512-status-help.sh \
+            t7600-merge.sh \
+            t7601-merge-pull-config.sh \
+            t7611-merge-abort.sh \
+            t7700-repack.sh \
+            t7810-grep.sh \
+            t8001-annotate.sh \
+            t8002-blame.sh \
+            t8003-blame-corner-cases.sh \
+            t9300-fast-import.sh \
+            t9350-fast-export.sh \
+            2>&1 | tee standard_test_results.txt
+          echo "standard_exit_code=$?" >> $GITHUB_OUTPUT
+
+      - name: Run git tests with git-ai enabled
+        id: gitai_tests
+        working-directory: git/t
+        continue-on-error: true
+        run: |
+          GIT_TEST_INSTALLED=$HOME/.git-ai-test/gitwrap/bin \
+          prove -j$(nproc) \
+            t0000-basic.sh \
+            t0001-init.sh \
+            t0002-gitfile.sh \
+            t0003-attributes.sh \
+            t0006-date.sh \
+            t0007-git-var.sh \
+            t0010-racy-git.sh \
+            t0012-help.sh \
+            t0027-auto-crlf.sh \
+            t0040-parse-options.sh \
+            t0050-filesystem.sh \
+            t0060-path-utils.sh \
+            t0061-run-command.sh \
+            t0070-fundamental.sh \
+            t0090-cache-tree.sh \
+            t1000-read-tree-m-3way.sh \
+            t1001-read-tree-m-2way.sh \
+            t1006-cat-file.sh \
+            t1007-hash-object.sh \
+            t1050-large.sh \
+            t1100-commit-tree-options.sh \
+            t1300-config.sh \
+            t1400-update-ref.sh \
+            t1401-symbolic-ref.sh \
+            t1402-check-ref-format.sh \
+            t1403-show-ref.sh \
+            t1410-reflog.sh \
+            t1450-fsck.sh \
+            t1500-rev-parse.sh \
+            t1501-work-tree.sh \
+            t1502-rev-parse-parseopt.sh \
+            t1503-rev-parse-verify.sh \
+            t1506-rev-parse-diagnosis.sh \
+            t1507-rev-parse-upstream.sh \
+            t1510-repo-setup.sh \
+            t1600-index.sh \
+            t2010-checkout-ambiguous.sh \
+            t2012-checkout-last.sh \
+            t2014-checkout-switch.sh \
+            t2018-checkout-branch.sh \
+            t2020-checkout-detach.sh \
+            t2060-switch.sh \
+            t2070-restore.sh \
+            t2107-update-index-basic.sh \
+            t2200-add-update.sh \
+            t2202-add-addremove.sh \
+            t2300-cd-to-toplevel.sh \
+            t2400-worktree-add.sh \
+            t3000-ls-files-others.sh \
+            t3003-ls-files-exclude.sh \
+            t3004-ls-files-basic.sh \
+            t3030-merge-recursive.sh \
+            t3070-wildmatch.sh \
+            t3100-ls-tree-restrict.sh \
+            t3200-branch.sh \
+            t3201-branch-contains.sh \
+            t3203-branch-output.sh \
+            t3206-range-diff.sh \
+            t3301-notes.sh \
+            t3400-rebase.sh \
+            t3402-rebase-merge.sh \
+            t3403-rebase-skip.sh \
+            t3404-rebase-interactive.sh \
+            t3406-rebase-message.sh \
+            t3407-rebase-abort.sh \
+            t3418-rebase-continue.sh \
+            t3420-rebase-autostash.sh \
+            t3501-revert-cherry-pick.sh \
+            t3502-cherry-pick-merge.sh \
+            t3507-cherry-pick-conflict.sh \
+            t3510-cherry-pick-sequence.sh \
+            t3600-rm.sh \
+            t3700-add.sh \
+            t3701-add-interactive.sh \
+            t3903-stash.sh \
+            t3904-stash-patch.sh \
+            t3905-stash-include-untracked.sh \
+            t4000-diff-format.sh \
+            t4001-diff-rename.sh \
+            t4002-diff-basic.sh \
+            t4010-diff-pathspec.sh \
+            t4012-diff-binary.sh \
+            t4013-diff-various.sh \
+            t4014-format-patch.sh \
+            t4015-diff-whitespace.sh \
+            t4017-diff-retval.sh \
+            t4020-diff-external.sh \
+            t4035-diff-quiet.sh \
+            t4045-diff-relative.sh \
+            t4053-diff-no-index.sh \
+            t4100-apply-stat.sh \
+            t4103-apply-binary.sh \
+            t4108-apply-threeway.sh \
+            t4150-am.sh \
+            t4151-am-abort.sh \
+            t4200-rerere.sh \
+            t4202-log.sh \
+            t4203-mailmap.sh \
+            t4205-log-pretty-formats.sh \
+            t5000-tar-tree.sh \
+            t5001-archive-attr.sh \
+            t5300-pack-object.sh \
+            t5302-pack-index.sh \
+            t5304-prune.sh \
+            t5310-pack-bitmaps.sh \
+            t5318-commit-graph.sh \
+            t5400-send-pack.sh \
+            t5401-update-hooks.sh \
+            t5402-post-merge-hook.sh \
+            t5403-post-checkout-hook.sh \
+            t5407-post-rewrite-hook.sh \
+            t5500-fetch-pack.sh \
+            t5501-fetch-push-hook.sh \
+            t5505-remote.sh \
+            t5510-fetch.sh \
+            t5516-fetch-push.sh \
+            t5520-pull.sh \
+            t5521-pull-options.sh \
+            t5523-push-upstream.sh \
+            t5528-push-default.sh \
+            t5571-pre-push-hook.sh \
+            t5601-clone.sh \
+            t5605-clone-local.sh \
+            t5606-clone-options.sh \
+            t6000-rev-list-misc.sh \
+            t6002-rev-list-bisect.sh \
+            t6003-rev-list-topo-order.sh \
+            t6006-rev-list-format.sh \
+            t6010-merge-base.sh \
+            t6012-rev-list-simplify.sh \
+            t6030-bisect-porcelain.sh \
+            t6050-replace.sh \
+            t6120-describe.sh \
+            t6200-fmt-merge-msg.sh \
+            t6300-for-each-ref.sh \
+            t6302-for-each-ref-filter.sh \
+            t6400-merge-df.sh \
+            t6402-merge-rename.sh \
+            t6403-merge-file.sh \
+            t6500-gc.sh \
+            t7001-mv.sh \
+            t7004-tag.sh \
+            t7005-editor.sh \
+            t7006-pager.sh \
+            t7007-show.sh \
+            t7060-wtstatus.sh \
+            t7100-reset.sh \
+            t7102-reset.sh \
+            t7104-reset-hard.sh \
+            t7201-co.sh \
+            t7300-clean.sh \
+            t7400-submodule-basic.sh \
+            t7500-commit.sh \
+            t7501-commit.sh \
+            t7502-commit-porcelain.sh \
+            t7503-pre-commit-and-pre-merge-commit-hooks.sh \
+            t7504-commit-msg-hook.sh \
+            t7505-prepare-commit-msg-hook.sh \
+            t7508-status.sh \
+            t7509-commit-authorship.sh \
+            t7512-status-help.sh \
+            t7600-merge.sh \
+            t7601-merge-pull-config.sh \
+            t7611-merge-abort.sh \
+            t7700-repack.sh \
+            t7810-grep.sh \
+            t8001-annotate.sh \
+            t8002-blame.sh \
+            t8003-blame-corner-cases.sh \
+            t9300-fast-import.sh \
+            t9350-fast-export.sh \
+            2>&1 | tee gitai_test_results.txt
+          echo "gitai_exit_code=$?" >> $GITHUB_OUTPUT
+
+      - name: Compare test results
+        working-directory: git/t
+        run: |
+          python3 $GITHUB_WORKSPACE/git-ai/tests/git-compat/compare_results.py \
+            standard_test_results.txt \
+            gitai_test_results.txt
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: git-compat-test-results
+          path: |
+            git/t/standard_test_results.txt
+            git/t/gitai_test_results.txt
+          retention-days: 30
