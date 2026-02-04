@@ -119,11 +119,10 @@ fn append_envelope(envelope: LogEnvelope) {
             let log_path = log_path.clone();
             drop(obs); // Release lock before file I/O
 
-            if let Some(json) = envelope.to_json() {
-                if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
-                    let _ = writeln!(file, "{}", json.to_string());
+            if let Some(json) = envelope.to_json()
+                && let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
+                    let _ = writeln!(file, "{}", json);
                 }
-            }
         }
     }
 }

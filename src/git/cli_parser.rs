@@ -234,15 +234,14 @@ pub fn parse_git_cli_args(args: &[String]) -> ParsedGitInvocation {
 
     // Consume one token that *may* have an attached value (e.g. `--opt=VAL`, `-Cpath`, `-cname=val`).
     // Returns (tokens_to_push, tokens_consumed).
-    fn take_valueish<'a>(all: &'a [String], i: usize, key: &str) -> (Vec<String>, usize) {
+    fn take_valueish(all: &[String], i: usize, key: &str) -> (Vec<String>, usize) {
         let tok = &all[i];
 
         // Long form with '=' (e.g. --git-dir=/x, --exec-path=/x, --config-env=name=ENV).
-        if let Some(eq) = tok.find('=') {
-            if eq > 0 && tok.starts_with("--") {
+        if let Some(eq) = tok.find('=')
+            && eq > 0 && tok.starts_with("--") {
                 return (vec![tok.clone()], 1);
             }
-        }
 
         // Short sticky for -Cpath / -cname=value
         if key == "-C" && tok != "-C" && tok.starts_with("-C") {
@@ -386,7 +385,7 @@ pub fn parse_git_cli_args(args: &[String]) -> ParsedGitInvocation {
             let orig_cmd = command.take().unwrap();
             let mut new_args = vec![orig_cmd];
             // Pass trailing tokens after the command to `git help` unchanged.
-            new_args.extend(command_args.drain(..));
+            new_args.append(&mut command_args);
             command = Some("help".into());
             command_args = new_args;
         }
@@ -557,11 +556,7 @@ fn derive_directory_from_url(url: &str) -> Option<String> {
     }
 
     // Strip .git suffix if present
-    let dir_name = if last_component.ends_with(".git") {
-        &last_component[..last_component.len() - 4]
-    } else {
-        last_component
-    };
+    let dir_name = last_component.strip_suffix(".git").unwrap_or(last_component);
 
     if dir_name.is_empty() {
         None

@@ -125,6 +125,7 @@ impl CredentialStore {
     }
 
     /// Check if credentials are stored
+    #[allow(dead_code)]
     pub fn has_credentials(&self) -> bool {
         self.load().map(|c| c.is_some()).unwrap_or(false)
     }

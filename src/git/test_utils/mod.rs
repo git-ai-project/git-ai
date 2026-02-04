@@ -241,7 +241,7 @@ impl TmpFile {
 
         // Add to git index using the filename directly
         let mut index = self.repo.repo_git2.index()?;
-        index.add_path(&std::path::Path::new(&self.filename))?;
+        index.add_path(std::path::Path::new(&self.filename))?;
         index.write()?;
 
         Ok(())
@@ -303,8 +303,8 @@ impl TmpRepo {
         // (No initial empty commit)
         Ok(TmpRepo {
             path: tmp_dir,
-            repo_git2: repo_git2,
-            repo_gitai: repo_gitai,
+            repo_git2,
+            repo_gitai,
         })
     }
 
@@ -336,7 +336,7 @@ impl TmpRepo {
 
         if add_to_git {
             let mut index = self.repo_git2.index()?;
-            index.add_path(&file_path.strip_prefix(&self.path).unwrap())?;
+            index.add_path(file_path.strip_prefix(&self.path).unwrap())?;
             index.write()?;
         }
 
@@ -490,7 +490,7 @@ impl TmpRepo {
         let (parent_sha, _commit_id) = if let Some(parent) = parent_commit {
             let parent_sha = Some(parent.id().to_string());
             let commit_id = self.repo_git2.commit(
-                Some(&"HEAD"),
+                Some("HEAD"),
                 &signature,
                 &signature,
                 message,
@@ -500,7 +500,7 @@ impl TmpRepo {
             (parent_sha, commit_id)
         } else {
             let commit_id = self.repo_git2.commit(
-                Some(&"HEAD"),
+                Some("HEAD"),
                 &signature,
                 &signature,
                 message,
@@ -562,7 +562,7 @@ impl TmpRepo {
     pub fn merge_branch(&self, branch_name: &str, message: &str) -> Result<(), GitAiError> {
         let output = Command::new(crate::config::Config::get().git_cmd())
             .current_dir(&self.path)
-            .args(&["merge", branch_name, "-m", message, "-X", "theirs"])
+            .args(["merge", branch_name, "-m", message, "-X", "theirs"])
             .output()
             .map_err(|e| GitAiError::Generic(format!("Failed to run git merge: {}", e)))?;
 
@@ -598,7 +598,7 @@ impl TmpRepo {
 
         let mut rebase = Command::new(crate::config::Config::get().git_cmd())
             .current_dir(&self.path)
-            .args(&["rebase", onto_branch])
+            .args(["rebase", onto_branch])
             .output()
             .map_err(|e| GitAiError::Generic(format!("Failed to run git rebase: {}", e)))?;
 
@@ -611,19 +611,19 @@ impl TmpRepo {
             // Overwrite with theirs (the branch we're rebasing onto)
             let theirs_content = Command::new(crate::config::Config::get().git_cmd())
                 .current_dir(&self.path)
-                .args(&["show", &format!("{}:lines.md", onto_branch)])
+                .args(["show", &format!("{}:lines.md", onto_branch)])
                 .output()
                 .map_err(|e| GitAiError::Generic(format!("Failed to get theirs: {}", e)))?;
             fs::write(&conflicted_file, &theirs_content.stdout)?;
             // Add and continue
             Command::new(crate::config::Config::get().git_cmd())
                 .current_dir(&self.path)
-                .args(&["add", "lines.md"])
+                .args(["add", "lines.md"])
                 .output()
                 .map_err(|e| GitAiError::Generic(format!("Failed to git add: {}", e)))?;
             rebase = Command::new(crate::config::Config::get().git_cmd())
                 .current_dir(&self.path)
-                .args(&["rebase", "--continue"])
+                .args(["rebase", "--continue"])
                 .output()
                 .map_err(|e| {
                     GitAiError::Generic(format!("Failed to git rebase --continue: {}", e))
@@ -697,7 +697,7 @@ impl TmpRepo {
     pub fn cherry_pick_with_conflicts(&self, commit: &str) -> Result<bool, GitAiError> {
         let output = Command::new(crate::config::Config::get().git_cmd())
             .current_dir(&self.path)
-            .args(&["cherry-pick", commit])
+            .args(["cherry-pick", commit])
             .output()
             .map_err(|e| GitAiError::Generic(format!("Failed to run git cherry-pick: {}", e)))?;
 
@@ -718,7 +718,7 @@ impl TmpRepo {
     pub fn cherry_pick_continue(&self) -> Result<(), GitAiError> {
         let output = Command::new(crate::config::Config::get().git_cmd())
             .current_dir(&self.path)
-            .args(&["cherry-pick", "--continue"])
+            .args(["cherry-pick", "--continue"])
             .env("GIT_EDITOR", "true") // Skip opening editor
             .output()
             .map_err(|e| {
@@ -739,7 +739,7 @@ impl TmpRepo {
     pub fn cherry_pick_abort(&self) -> Result<(), GitAiError> {
         let output = Command::new(crate::config::Config::get().git_cmd())
             .current_dir(&self.path)
-            .args(&["cherry-pick", "--abort"])
+            .args(["cherry-pick", "--abort"])
             .output()
             .map_err(|e| {
                 GitAiError::Generic(format!("Failed to run git cherry-pick --abort: {}", e))
@@ -949,7 +949,7 @@ impl TmpRepo {
         let (parent_sha, _commit_id) = if let Some(parent) = parent_commit {
             let parent_sha = Some(parent.id().to_string());
             let commit_id = self.repo_git2.commit(
-                Some(&"HEAD"),
+                Some("HEAD"),
                 &signature,
                 &signature,
                 message,
@@ -959,7 +959,7 @@ impl TmpRepo {
             (parent_sha, commit_id)
         } else {
             let commit_id = self.repo_git2.commit(
-                Some(&"HEAD"),
+                Some("HEAD"),
                 &signature,
                 &signature,
                 message,
@@ -990,12 +990,12 @@ impl TmpRepo {
         let refs = self.repo_git2.references()?;
         for reference in refs {
             let reference = reference?;
-            if let Some(name) = reference.name() {
-                if name.starts_with("refs/heads/") {
-                    let branch_name = name.strip_prefix("refs/heads/").unwrap();
-                    if branch_name != current {
-                        return Ok(branch_name.to_string());
-                    }
+            if let Some(name) = reference.name()
+                && name.starts_with("refs/heads/")
+            {
+                let branch_name = name.strip_prefix("refs/heads/").unwrap();
+                if branch_name != current {
+                    return Ok(branch_name.to_string());
                 }
             }
         }
@@ -1073,7 +1073,7 @@ impl TmpRepo {
         // Use git CLI to amend the commit (this is simpler and more reliable)
         let output = Command::new(crate::config::Config::get().git_cmd())
             .current_dir(&self.path)
-            .args(&[
+            .args([
                 "commit",
                 "--amend",
                 "-m",
@@ -1107,7 +1107,7 @@ impl TmpRepo {
     pub fn merge_squash(&self, branch_name: &str) -> Result<(), GitAiError> {
         let output = Command::new(crate::config::Config::get().git_cmd())
             .current_dir(&self.path)
-            .args(&["merge", "--squash", branch_name])
+            .args(["merge", "--squash", branch_name])
             .output()
             .map_err(|e| GitAiError::Generic(format!("Failed to run git merge --squash: {}", e)))?;
 
@@ -1126,7 +1126,7 @@ impl TmpRepo {
     pub fn merge_with_conflicts(&self, branch_name: &str) -> Result<bool, GitAiError> {
         let output = Command::new(crate::config::Config::get().git_cmd())
             .current_dir(&self.path)
-            .args(&["merge", branch_name, "--no-commit"])
+            .args(["merge", branch_name, "--no-commit"])
             .output()
             .map_err(|e| GitAiError::Generic(format!("Failed to run git merge: {}", e)))?;
 
@@ -1161,7 +1161,7 @@ impl TmpRepo {
             "ours" => {
                 let output = Command::new(crate::config::Config::get().git_cmd())
                     .current_dir(&self.path)
-                    .args(&["checkout", "--ours", filename])
+                    .args(["checkout", "--ours", filename])
                     .output()
                     .map_err(|e| {
                         GitAiError::Generic(format!("Failed to checkout --ours: {}", e))
@@ -1177,7 +1177,7 @@ impl TmpRepo {
             "theirs" => {
                 let output = Command::new(crate::config::Config::get().git_cmd())
                     .current_dir(&self.path)
-                    .args(&["checkout", "--theirs", filename])
+                    .args(["checkout", "--theirs", filename])
                     .output()
                     .map_err(|e| {
                         GitAiError::Generic(format!("Failed to checkout --theirs: {}", e))
@@ -1280,6 +1280,7 @@ impl TmpRepo {
 
 // @todo move this acunniffe
 /// Sanitized checkpoint representation for deterministic snapshots
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct SnapshotCheckpoint {
     author: String,
@@ -1288,12 +1289,14 @@ pub struct SnapshotCheckpoint {
     entries: Vec<SnapshotEntry>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct SnapshotEntry {
     file: String,
     attributions: Vec<Attribution>,
 }
 
+#[allow(dead_code)]
 pub fn snapshot_checkpoints(checkpoints: &[Checkpoint]) -> Vec<SnapshotCheckpoint> {
     let mut snapshots: Vec<SnapshotCheckpoint> = checkpoints
         .iter()

@@ -87,6 +87,7 @@ impl CommittedValues {
         self
     }
 
+    #[allow(dead_code)]
     pub fn human_additions_null(mut self) -> Self {
         self.human_additions = Some(None);
         self
@@ -97,6 +98,7 @@ impl CommittedValues {
         self
     }
 
+    #[allow(dead_code)]
     pub fn git_diff_deleted_lines_null(mut self) -> Self {
         self.git_diff_deleted_lines = Some(None);
         self
@@ -107,6 +109,7 @@ impl CommittedValues {
         self
     }
 
+    #[allow(dead_code)]
     pub fn git_diff_added_lines_null(mut self) -> Self {
         self.git_diff_added_lines = Some(None);
         self
@@ -119,6 +122,7 @@ impl CommittedValues {
         self
     }
 
+    #[allow(dead_code)]
     pub fn tool_model_pairs_null(mut self) -> Self {
         self.tool_model_pairs = Some(None);
         self
@@ -129,6 +133,7 @@ impl CommittedValues {
         self
     }
 
+    #[allow(dead_code)]
     pub fn mixed_additions_null(mut self) -> Self {
         self.mixed_additions = Some(None);
         self
@@ -139,6 +144,7 @@ impl CommittedValues {
         self
     }
 
+    #[allow(dead_code)]
     pub fn ai_additions_null(mut self) -> Self {
         self.ai_additions = Some(None);
         self
@@ -149,6 +155,7 @@ impl CommittedValues {
         self
     }
 
+    #[allow(dead_code)]
     pub fn ai_accepted_null(mut self) -> Self {
         self.ai_accepted = Some(None);
         self
@@ -159,6 +166,7 @@ impl CommittedValues {
         self
     }
 
+    #[allow(dead_code)]
     pub fn total_ai_additions_null(mut self) -> Self {
         self.total_ai_additions = Some(None);
         self
@@ -169,6 +177,7 @@ impl CommittedValues {
         self
     }
 
+    #[allow(dead_code)]
     pub fn total_ai_deletions_null(mut self) -> Self {
         self.total_ai_deletions = Some(None);
         self
@@ -179,6 +188,7 @@ impl CommittedValues {
         self
     }
 
+    #[allow(dead_code)]
     pub fn time_waiting_for_ai_null(mut self) -> Self {
         self.time_waiting_for_ai = Some(None);
         self
@@ -516,6 +526,7 @@ impl CheckpointValues {
         self
     }
 
+    #[allow(dead_code)]
     pub fn checkpoint_ts_null(mut self) -> Self {
         self.checkpoint_ts = Some(None);
         self
@@ -526,6 +537,7 @@ impl CheckpointValues {
         self
     }
 
+    #[allow(dead_code)]
     pub fn kind_null(mut self) -> Self {
         self.kind = Some(None);
         self
@@ -536,6 +548,7 @@ impl CheckpointValues {
         self
     }
 
+    #[allow(dead_code)]
     pub fn file_path_null(mut self) -> Self {
         self.file_path = Some(None);
         self
@@ -546,6 +559,7 @@ impl CheckpointValues {
         self
     }
 
+    #[allow(dead_code)]
     pub fn lines_added_null(mut self) -> Self {
         self.lines_added = Some(None);
         self
@@ -556,6 +570,7 @@ impl CheckpointValues {
         self
     }
 
+    #[allow(dead_code)]
     pub fn lines_deleted_null(mut self) -> Self {
         self.lines_deleted = Some(None);
         self
@@ -566,6 +581,7 @@ impl CheckpointValues {
         self
     }
 
+    #[allow(dead_code)]
     pub fn lines_added_sloc_null(mut self) -> Self {
         self.lines_added_sloc = Some(None);
         self
@@ -576,6 +592,7 @@ impl CheckpointValues {
         self
     }
 
+    #[allow(dead_code)]
     pub fn lines_deleted_sloc_null(mut self) -> Self {
         self.lines_deleted_sloc = Some(None);
         self

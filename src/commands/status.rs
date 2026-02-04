@@ -30,11 +30,8 @@ pub fn handle_status(args: &[String]) {
 
     let mut i = 0;
     while i < args.len() {
-        match args[i].as_str() {
-            "--json" => {
-                json_output = true;
-            }
-            _ => {}
+        if args[i].as_str() == "--json" {
+            json_output = true;
         }
         i += 1;
     }
@@ -46,7 +43,7 @@ pub fn handle_status(args: &[String]) {
 }
 
 fn run_status(json: bool) -> Result<(), GitAiError> {
-    let repo = find_repository(&vec![])?;
+    let repo = find_repository(&[])?;
 
     let default_user_name = match repo.config_get_str("user.name") {
         Ok(Some(name)) if !name.trim().is_empty() => name,
@@ -230,14 +227,13 @@ fn get_working_dir_diff_stats(
     args.push("HEAD".to_string());
 
     // Add pathspecs if provided to scope the diff to specific files
-    if let Some(paths) = pathspecs {
-        if !paths.is_empty() {
+    if let Some(paths) = pathspecs
+        && !paths.is_empty() {
             args.push("--".to_string());
             for path in paths {
                 args.push(path.clone());
             }
         }
-    }
 
     let output = crate::git::repository::exec_git(&args)?;
     let stdout = String::from_utf8(output.stdout)?;
@@ -260,11 +256,10 @@ fn get_working_dir_diff_stats(
             }
 
             // Parse deleted lines (handle "-" for binary files)
-            if parts[1] != "-" {
-                if let Ok(deleted) = parts[1].parse::<u32>() {
+            if parts[1] != "-"
+                && let Ok(deleted) = parts[1].parse::<u32>() {
                     deleted_lines += deleted;
                 }
-            }
         }
     }
 
@@ -275,7 +270,7 @@ fn get_working_dir_diff_stats(
 fn count_ai_lines_from_initial(initial: &InitialAttributions) -> u32 {
     let mut ai_lines = 0u32;
 
-    for (_file_path, line_attrs) in &initial.files {
+    for line_attrs in initial.files.values() {
         for line_attr in line_attrs {
             // Check if this author_id corresponds to an AI prompt (not human)
             if initial.prompts.contains_key(&line_attr.author_id) {

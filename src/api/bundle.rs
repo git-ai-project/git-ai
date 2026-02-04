@@ -31,7 +31,7 @@ impl ApiClient {
         match status_code {
             200 => {
                 let bundle_response: CreateBundleResponse = serde_json::from_str(body)
-                    .map_err(|e| GitAiError::JsonError(e))?;
+                    .map_err(GitAiError::JsonError)?;
                 Ok(bundle_response)
             }
             400 => {

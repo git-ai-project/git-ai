@@ -61,6 +61,7 @@ impl fmt::Display for CheckpointKind {
 
 impl CheckpointKind {
     #[allow(dead_code)]
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s {
             "human" => CheckpointKind::Human,
@@ -70,6 +71,7 @@ impl CheckpointKind {
         }
     }
 
+    #[allow(clippy::wrong_self_convention)]
     pub fn to_str(&self) -> String {
         match self {
             CheckpointKind::Human => "human".to_string(),

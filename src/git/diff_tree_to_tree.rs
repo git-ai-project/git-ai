@@ -98,6 +98,11 @@ impl Diff {
     pub fn len(&self) -> usize {
         self.deltas.len()
     }
+
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.deltas.is_empty()
+    }
 }
 
 impl Repository {
@@ -252,6 +257,7 @@ fn parse_diff_raw(data: &[u8]) -> Result<Vec<DiffDelta>, GitAiError> {
             path: old_path
                 .or_else(|| {
                     // For deletions, the old file path is the path
+                    #[allow(clippy::if_same_then_else)]
                     if matches!(status, DiffStatus::Deleted) {
                         Some(new_path.clone())
                     } else {

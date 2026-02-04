@@ -19,7 +19,7 @@ pub fn post_merge_hook(
         let base_branch = repository.head().unwrap().name().unwrap().to_string();
         let base_head = repository.head().unwrap().target().unwrap().to_string();
 
-        let commit_author = get_commit_default_author(&repository, &parsed_args.command_args);
+        let commit_author = get_commit_default_author(repository, &parsed_args.command_args);
 
         let source_branch = parsed_args.pos_command(0).unwrap();
 

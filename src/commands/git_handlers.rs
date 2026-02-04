@@ -60,7 +60,7 @@ extern "C" fn forward_signal_handler(sig: libc::c_int) {
 #[cfg(unix)]
 fn install_forwarding_handlers() {
     unsafe {
-        let handler = forward_signal_handler as usize;
+        let handler = forward_signal_handler as *const () as usize;
         let _ = libc::signal(libc::SIGTERM, handler);
         let _ = libc::signal(libc::SIGINT, handler);
         let _ = libc::signal(libc::SIGHUP, handler);
@@ -154,7 +154,7 @@ pub fn handle_git(args: &[String]) {
         let post_command_duration = post_command_start.elapsed();
 
         log_performance_target_if_violated(
-            &parsed_args.command.as_deref().unwrap_or("unknown"),
+            parsed_args.command.as_deref().unwrap_or("unknown"),
             pre_command_duration,
             git_duration,
             post_command_duration,
@@ -295,7 +295,7 @@ fn run_post_command_hooks(
 
                 if config.feature_flags().rewrite_stash {
                     stash_hooks::post_stash_hook(
-                        &command_hooks_context,
+                        command_hooks_context,
                         parsed_args,
                         repository,
                         exit_status,
@@ -417,7 +417,7 @@ fn proxy_to_git(args: &[String], exit_on_completion: bool) -> std::process::Exit
                     if exit_on_completion {
                         exit_with_status(status);
                     }
-                    return status;
+                    status
                 }
                 Err(e) => {
                     #[cfg(unix)]

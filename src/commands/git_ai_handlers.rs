@@ -175,9 +175,9 @@ pub fn handle_git_ai(args: &[String]) {
 
 fn print_help() {
     eprintln!("git-ai - git proxy with AI authorship tracking");
-    eprintln!("");
+    eprintln!();
     eprintln!("Usage: git-ai <command> [args...]");
-    eprintln!("");
+    eprintln!();
     eprintln!("Commands:");
     eprintln!("  checkpoint         Checkpoint working changes and attribute author");
     eprintln!("    Presets: claude, continue-cli, cursor, gemini, github-copilot, ai_tab, mock_ai");
@@ -240,7 +240,7 @@ fn print_help() {
     eprintln!("  logout             Clear stored credentials");
     eprintln!("  version, -v, --version     Print the git-ai version");
     eprintln!("  help, -h, --help           Show this help message");
-    eprintln!("");
+    eprintln!();
     std::process::exit(0);
 }
 
@@ -511,8 +511,8 @@ fn handle_checkpoint(args: &[String]) {
             }
         });
 
-        if let Some(files) = files_to_check {
-            if !files.is_empty() {
+        if let Some(files) = files_to_check
+            && !files.is_empty() {
                 // Convert relative paths to absolute paths based on workspace root
                 let absolute_files: Vec<String> = files
                     .iter()
@@ -656,7 +656,6 @@ fn handle_checkpoint(args: &[String]) {
                 }
                 return;
             }
-        }
 
         // No files to check, fall through to error
         eprintln!(
@@ -796,8 +795,8 @@ fn handle_ai_blame(args: &[String]) {
         && repo.git_supports_ignore_revs_file()
     {
         // First, check git config for blame.ignoreRevsFile
-        if let Ok(Some(config_path)) = repo.config_get_str("blame.ignoreRevsFile") {
-            if !config_path.is_empty() {
+        if let Ok(Some(config_path)) = repo.config_get_str("blame.ignoreRevsFile")
+            && !config_path.is_empty() {
                 // Config path could be relative to repo root or absolute
                 if let Ok(workdir) = repo.workdir() {
                     let full_path = if std::path::Path::new(&config_path).is_absolute() {
@@ -810,17 +809,15 @@ fn handle_ai_blame(args: &[String]) {
                     }
                 }
             }
-        }
 
         // If still not set, check for .git-blame-ignore-revs in the repository root
-        if options.ignore_revs_file.is_none() {
-            if let Ok(workdir) = repo.workdir() {
+        if options.ignore_revs_file.is_none()
+            && let Ok(workdir) = repo.workdir() {
                 let ignore_revs_path = workdir.join(".git-blame-ignore-revs");
                 if ignore_revs_path.exists() {
                     options.ignore_revs_file = Some(ignore_revs_path.to_string_lossy().to_string());
                 }
             }
-        }
     }
 
     // Check if this is an interactive terminal
@@ -980,7 +977,7 @@ fn handle_stats(args: &[String]) {
 
 fn get_all_files_for_mock_ai(working_dir: &str) -> Vec<String> {
     // Find the git repository
-    let repo = match find_repository_in_path(&working_dir) {
+    let repo = match find_repository_in_path(working_dir) {
         Ok(repo) => repo,
         Err(e) => {
             eprintln!("Failed to find repository: {}", e);

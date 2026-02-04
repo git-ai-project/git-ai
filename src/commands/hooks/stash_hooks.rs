@@ -95,7 +95,7 @@ pub fn post_stash_hook(
             stash_sha
         ));
 
-        let human_author = get_commit_default_author(&repository, &parsed_args.command_args);
+        let human_author = get_commit_default_author(repository, &parsed_args.command_args);
 
         if let Err(e) = restore_stash_attributions(repository, &stash_sha, &human_author) {
             debug_log(&format!("Failed to restore stash attributions: {}", e));
@@ -186,7 +186,7 @@ fn restore_stash_attributions(
     let head_sha = repo.head()?.target()?.to_string();
 
     // Try to read authorship log from git note (refs/notes/ai-stash)
-    let note_content = match read_stash_note(repo, &stash_sha) {
+    let note_content = match read_stash_note(repo, stash_sha) {
         Ok(content) => content,
         Err(_) => {
             debug_log("No authorship log found in refs/notes/ai-stash for this stash");
@@ -404,11 +404,10 @@ fn file_matches_pathspecs(file: &str, pathspecs: &[String], _repo: &Repository) 
         }
 
         // Simple glob matching - check if path starts with prefix before *
-        if let Some(prefix) = pathspec.strip_suffix('*') {
-            if file.starts_with(prefix) {
+        if let Some(prefix) = pathspec.strip_suffix('*')
+            && file.starts_with(prefix) {
                 return true;
             }
-        }
     }
 
     false

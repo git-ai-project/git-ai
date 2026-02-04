@@ -611,6 +611,7 @@ fn calculate_accepted_rate(accepted: Option<u32>, overridden: Option<u32>) -> Op
 }
 
 /// Upsert a prompt record into prompts.db
+#[allow(clippy::too_many_arguments)]
 fn upsert_prompt(
     conn: &Connection,
     id: &str,
@@ -929,7 +930,7 @@ fn get_commits_with_notes_since(repo: &Repository, since_timestamp: i64) -> Vec<
     // Step 5: Pair commit SHAs with note contents
     filtered
         .into_iter()
-        .zip(contents.into_iter())
+        .zip(contents)
         .filter(|(_, content)| content.contains('{')) // Only include notes with JSON
         .map(|((_, commit_sha), content)| (commit_sha, content))
         .collect()

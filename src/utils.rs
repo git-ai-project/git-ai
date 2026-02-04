@@ -109,8 +109,8 @@ pub fn current_git_ai_exe() -> Result<PathBuf, GitAiError> {
     };
 
     // Check if the filename matches the git executable name for this platform
-    if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-        if file_name == git_name {
+    if let Some(file_name) = path.file_name().and_then(|n| n.to_str())
+        && file_name == git_name {
             // Try replacing with git-ai executable name for this platform
             let git_ai_path = path.with_file_name(git_ai_name);
 
@@ -122,7 +122,6 @@ pub fn current_git_ai_exe() -> Result<PathBuf, GitAiError> {
             // If it doesn't exist, return the git-ai executable name as a PathBuf
             return Ok(PathBuf::from(git_ai_name));
         }
-    }
 
     Ok(path)
 }

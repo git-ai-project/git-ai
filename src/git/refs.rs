@@ -180,49 +180,6 @@ pub fn get_reference_as_authorship_log_v3(
     Ok(authorship_log)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::git::test_utils::TmpRepo;
-
-    #[test]
-    fn test_notes_add_and_show_authorship_note() {
-        // Create a temporary repository
-        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
-
-        // Create a commit first
-        tmp_repo
-            .commit_with_message("Initial commit")
-            .expect("Failed to create initial commit");
-
-        // Get the commit SHA
-        let commit_sha = tmp_repo
-            .get_head_commit_sha()
-            .expect("Failed to get head commit SHA");
-
-        // Test data - simple string content
-        let note_content = "This is a test authorship note with some random content!";
-
-        // Add the authorship note (force overwrite since commit_with_message already created one)
-        notes_add(tmp_repo.gitai_repo(), &commit_sha, note_content)
-            .expect("Failed to add authorship note");
-
-        // Read the note back
-        let retrieved_content = show_authorship_note(tmp_repo.gitai_repo(), &commit_sha)
-            .expect("Failed to retrieve authorship note");
-
-        // Assert the content matches exactly
-        assert_eq!(retrieved_content, note_content);
-
-        // Test that non-existent commit returns None
-        let non_existent_content = show_authorship_note(
-            tmp_repo.gitai_repo(),
-            "0000000000000000000000000000000000000000",
-        );
-        assert!(non_existent_content.is_none());
-    }
-}
-
 /// Sanitize a remote name to create a safe ref name
 /// Replaces special characters with underscores to ensure valid ref names
 fn sanitize_remote_name(remote: &str) -> String {
@@ -312,14 +269,13 @@ pub fn grep_ai_notes(repo: &Repository, pattern: &str) -> Result<Vec<String>, Gi
     // Extract the commit SHA from the path
     let mut shas = HashSet::new();
     for line in stdout.lines() {
-        if let Some(path_and_rest) = line.strip_prefix("refs/notes/ai:") {
-            if let Some(path_end) = path_and_rest.find(':') {
+        if let Some(path_and_rest) = line.strip_prefix("refs/notes/ai:")
+            && let Some(path_end) = path_and_rest.find(':') {
                 let path = &path_and_rest[..path_end];
                 // Path is in format "ab/cdef123..." - combine to get full SHA
                 let sha = path.replace('/', "");
                 shas.insert(sha);
             }
-        }
     }
 
     // If we have multiple results, sort by commit date (newest first)
@@ -341,5 +297,48 @@ pub fn grep_ai_notes(repo: &Repository, pattern: &str) -> Result<Vec<String>, Gi
         Ok(stdout.lines().map(|s| s.to_string()).collect())
     } else {
         Ok(shas.into_iter().collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::git::test_utils::TmpRepo;
+
+    #[test]
+    fn test_notes_add_and_show_authorship_note() {
+        // Create a temporary repository
+        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
+
+        // Create a commit first
+        tmp_repo
+            .commit_with_message("Initial commit")
+            .expect("Failed to create initial commit");
+
+        // Get the commit SHA
+        let commit_sha = tmp_repo
+            .get_head_commit_sha()
+            .expect("Failed to get head commit SHA");
+
+        // Test data - simple string content
+        let note_content = "This is a test authorship note with some random content!";
+
+        // Add the authorship note (force overwrite since commit_with_message already created one)
+        notes_add(tmp_repo.gitai_repo(), &commit_sha, note_content)
+            .expect("Failed to add authorship note");
+
+        // Read the note back
+        let retrieved_content = show_authorship_note(tmp_repo.gitai_repo(), &commit_sha)
+            .expect("Failed to retrieve authorship note");
+
+        // Assert the content matches exactly
+        assert_eq!(retrieved_content, note_content);
+
+        // Test that non-existent commit returns None
+        let non_existent_content = show_authorship_note(
+            tmp_repo.gitai_repo(),
+            "0000000000000000000000000000000000000000",
+        );
+        assert!(non_existent_content.is_none());
     }
 }

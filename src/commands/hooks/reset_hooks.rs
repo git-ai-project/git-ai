@@ -484,11 +484,10 @@ fn get_pathspec_from_file_path(parsed_args: &ParsedGitInvocation) -> Option<Stri
         }
         if arg == "--pathspec-from-file" {
             // Next arg should be the file path
-            if let Some(idx) = parsed_args.command_args.iter().position(|a| a == arg) {
-                if idx + 1 < parsed_args.command_args.len() {
+            if let Some(idx) = parsed_args.command_args.iter().position(|a| a == arg)
+                && idx + 1 < parsed_args.command_args.len() {
                     return Some(parsed_args.command_args[idx + 1].clone());
                 }
-            }
         }
     }
     None

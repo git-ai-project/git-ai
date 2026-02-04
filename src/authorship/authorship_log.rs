@@ -259,7 +259,7 @@ mod tests {
 
     #[test]
     fn test_prompt_record_sorting() {
-        let mut records = vec![
+        let mut records = [
             create_prompt_record(5, 10, 5), // newest - has messages, additions, deletions
             create_prompt_record(0, 0, 0),  // oldest - empty
             create_prompt_record(2, 5, 3),  // middle
@@ -276,7 +276,7 @@ mod tests {
 
         // Records with activity should come after
         assert!(
-            records[1].messages.len() > 0
+            !records[1].messages.is_empty()
                 || records[1].total_additions > 0
                 || records[1].total_deletions > 0
         );

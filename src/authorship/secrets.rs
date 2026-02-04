@@ -330,6 +330,7 @@ fn get_stirling_table() -> &'static [[f64; 65]; MAX_SECRET_LENGTH + 1] {
 
         // S(n, 1) = 1 for all n >= 1
         // S(n, n) = 1 for all n >= 1
+        #[allow(clippy::needless_range_loop)]
         for n in 1..=MAX_SECRET_LENGTH {
             table[n][1] = 1.0;
             if n <= 64 {
@@ -340,6 +341,7 @@ fn get_stirling_table() -> &'static [[f64; 65]; MAX_SECRET_LENGTH + 1] {
         // Fill using DP: S(n,k) = k*S(n-1,k) + S(n-1,k-1)
         for n in 2..=MAX_SECRET_LENGTH {
             let max_k = n.min(64);
+            #[allow(clippy::needless_range_loop)]
             for k in 2..max_k {
                 table[n][k] = k as f64 * table[n - 1][k] + table[n - 1][k - 1];
             }
@@ -410,7 +412,7 @@ pub fn extract_tokens(text: &str) -> Vec<(usize, usize)> {
         let len = i - start;
 
         // Only consider tokens in the right length range
-        if len >= MIN_SECRET_LENGTH && len <= MAX_SECRET_LENGTH {
+        if (MIN_SECRET_LENGTH..=MAX_SECRET_LENGTH).contains(&len) {
             tokens.push((start, i));
         }
     }
@@ -440,7 +442,7 @@ pub fn redact_secrets_in_text(text: &str) -> (String, usize) {
     // Filter to only actual secrets (start, end positions)
     let secrets: Vec<(usize, usize)> = tokens
         .into_iter()
-        .filter(|&(start, end)| is_random(text[start..end].as_bytes()))
+        .filter(|&(start, end)| is_random(&text.as_bytes()[start..end]))
         .collect();
 
     let count = secrets.len();

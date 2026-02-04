@@ -25,13 +25,19 @@ pub enum CiEvent {
 #[derive(Debug)]
 pub enum CiRunResult {
     /// Authorship was successfully rewritten for a squash/rebase merge
-    AuthorshipRewritten { authorship_log: AuthorshipLog },
+    AuthorshipRewritten {
+        #[allow(dead_code)]
+        authorship_log: AuthorshipLog,
+    },
     /// Skipped: merge commit has multiple parents (simple merge - authorship already present)
     SkippedSimpleMerge,
     /// Skipped: merge commit equals head (fast-forward - no rewrite needed)
     SkippedFastForward,
     /// Authorship already exists for this commit
-    AlreadyExists { authorship_log: AuthorshipLog },
+    AlreadyExists {
+        #[allow(dead_code)]
+        authorship_log: AuthorshipLog,
+    },
     /// No AI authorship to track (pre-git-ai commits or human-only code)
     NoAuthorshipAvailable,
 }
@@ -45,6 +51,7 @@ pub struct CiContext {
 
 impl CiContext {
     /// Create a CiContext with an existing repository (no automatic cleanup)
+    #[allow(dead_code)]
     pub fn with_repository(repo: Repository, event: CiEvent) -> Self {
         CiContext {
             repo,

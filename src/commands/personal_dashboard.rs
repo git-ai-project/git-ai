@@ -9,7 +9,7 @@ pub fn handle_personal_dashboard(_args: &[String]) {
 
     eprintln!("Opening dashboard: {}", dashboard_url);
 
-    if let Err(_) = open_browser(&dashboard_url) {
+    if open_browser(&dashboard_url).is_err() {
         eprintln!("Could not open browser automatically.");
         eprintln!("Visit this URL in your browser:");
         eprintln!("  {}", dashboard_url);

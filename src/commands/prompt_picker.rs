@@ -475,7 +475,7 @@ fn render_footer(f: &mut Frame, area: Rect, state: &PromptPickerState) {
 
 fn format_messages_for_display(
     transcript: &crate::authorship::transcript::AiTranscript,
-) -> Vec<Line> {
+) -> Vec<Line<'_>> {
     use crate::authorship::transcript::Message;
 
     let mut all_lines: Vec<Line> = Vec::new();

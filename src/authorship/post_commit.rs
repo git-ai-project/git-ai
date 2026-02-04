@@ -195,7 +195,7 @@ fn update_prompts_to_latest(checkpoints: &mut [Checkpoint]) -> Result<(), GitAiE
             let key = format!("{}:{}", agent_id.tool, agent_id.id);
             agent_checkpoint_indices
                 .entry(key)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(idx);
         }
     }
@@ -335,11 +335,10 @@ fn enqueue_prompt_messages_to_cas(
             })
         });
 
-    if let Some(url) = repo_url {
-        if let Ok(normalized) = crate::repo_url::normalize_repo_url(&url) {
+    if let Some(url) = repo_url
+        && let Ok(normalized) = crate::repo_url::normalize_repo_url(&url) {
             metadata.insert("repo_url".to_string(), normalized);
         }
-    }
 
     // Get API base URL for constructing messages_url
     let api_base_url = Config::get().api_base_url();
@@ -372,7 +371,7 @@ fn record_commit_metrics(
     commit_sha: &str,
     parent_sha: &str,
     human_author: &str,
-    authorship_log: &AuthorshipLog,
+    _authorship_log: &AuthorshipLog,
     stats: &crate::authorship::stats::CommitStats,
     checkpoints: &[Checkpoint],
 ) {
@@ -440,22 +439,18 @@ fn record_commit_metrics(
         .base_commit_sha(parent_sha);
 
     // Get repo URL from default remote
-    if let Ok(Some(remote_name)) = repo.get_default_remote() {
-        if let Ok(remotes) = repo.remotes_with_urls() {
-            if let Some((_, url)) = remotes.into_iter().find(|(n, _)| n == &remote_name) {
-                if let Ok(normalized) = crate::repo_url::normalize_repo_url(&url) {
+    if let Ok(Some(remote_name)) = repo.get_default_remote()
+        && let Ok(remotes) = repo.remotes_with_urls()
+            && let Some((_, url)) = remotes.into_iter().find(|(n, _)| n == &remote_name)
+                && let Ok(normalized) = crate::repo_url::normalize_repo_url(&url) {
                     attrs = attrs.repo_url(normalized);
                 }
-            }
-        }
-    }
 
     // Get current branch
-    if let Ok(head_ref) = repo.head() {
-        if let Ok(short_branch) = head_ref.shorthand() {
+    if let Ok(head_ref) = repo.head()
+        && let Ok(short_branch) = head_ref.shorthand() {
             attrs = attrs.branch(short_branch);
         }
-    }
 
     // Record the metric
     record(values, attrs);

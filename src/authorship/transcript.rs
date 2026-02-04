@@ -45,11 +45,13 @@ impl Message {
     }
 
     /// Create a thinking message
+    #[allow(dead_code)]
     pub fn thinking(text: String, timestamp: Option<String>) -> Self {
         Message::Thinking { text, timestamp }
     }
 
     /// Create a plan message
+    #[allow(dead_code)]
     pub fn plan(text: String, timestamp: Option<String>) -> Self {
         Message::Plan { text, timestamp }
     }

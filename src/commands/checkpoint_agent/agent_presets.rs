@@ -147,7 +147,7 @@ impl ClaudePreset {
         transcript_path: &str,
     ) -> Result<(AiTranscript, Option<String>), GitAiError> {
         let jsonl_content =
-            std::fs::read_to_string(transcript_path).map_err(|e| GitAiError::IoError(e))?;
+            std::fs::read_to_string(transcript_path).map_err(GitAiError::IoError)?;
         let mut transcript = AiTranscript::new();
         let mut model = None;
 
@@ -158,11 +158,10 @@ impl ClaudePreset {
                 let timestamp = raw_entry["timestamp"].as_str().map(|s| s.to_string());
 
                 // Extract model from assistant messages if we haven't found it yet
-                if model.is_none() && raw_entry["type"].as_str() == Some("assistant") {
-                    if let Some(model_str) = raw_entry["message"]["model"].as_str() {
+                if model.is_none() && raw_entry["type"].as_str() == Some("assistant")
+                    && let Some(model_str) = raw_entry["message"]["model"].as_str() {
                         model = Some(model_str.to_string());
                     }
-                }
 
                 // Extract messages based on the type
                 match raw_entry["type"].as_str() {
@@ -185,16 +184,14 @@ impl ClaudePreset {
                                     continue;
                                 }
                                 // Handle text content blocks from actual user input
-                                if item["type"].as_str() == Some("text") {
-                                    if let Some(text) = item["text"].as_str() {
-                                        if !text.trim().is_empty() {
+                                if item["type"].as_str() == Some("text")
+                                    && let Some(text) = item["text"].as_str()
+                                        && !text.trim().is_empty() {
                                             transcript.add_message(Message::User {
                                                 text: text.to_string(),
                                                 timestamp: timestamp.clone(),
                                             });
                                         }
-                                    }
-                                }
                             }
                         }
                     }
@@ -204,24 +201,22 @@ impl ClaudePreset {
                             for item in content_array {
                                 match item["type"].as_str() {
                                     Some("text") => {
-                                        if let Some(text) = item["text"].as_str() {
-                                            if !text.trim().is_empty() {
+                                        if let Some(text) = item["text"].as_str()
+                                            && !text.trim().is_empty() {
                                                 transcript.add_message(Message::Assistant {
                                                     text: text.to_string(),
                                                     timestamp: timestamp.clone(),
                                                 });
                                             }
-                                        }
                                     }
                                     Some("thinking") => {
-                                        if let Some(thinking) = item["thinking"].as_str() {
-                                            if !thinking.trim().is_empty() {
+                                        if let Some(thinking) = item["thinking"].as_str()
+                                            && !thinking.trim().is_empty() {
                                                 transcript.add_message(Message::Assistant {
                                                     text: thinking.to_string(),
                                                     timestamp: timestamp.clone(),
                                                 });
                                             }
-                                        }
                                     }
                                     Some("tool_use") => {
                                         if let (Some(name), Some(_input)) =
@@ -281,7 +276,7 @@ impl AgentCheckpointPreset for GeminiPreset {
 
         // Parse into transcript and extract model
         let (transcript, model) =
-            match GeminiPreset::transcript_and_model_from_gemini_json(&transcript_path) {
+            match GeminiPreset::transcript_and_model_from_gemini_json(transcript_path) {
                 Ok((transcript, model)) => (transcript, model),
                 Err(e) => {
                     eprintln!("[Warning] Failed to parse Gemini JSON: {e}");
@@ -354,9 +349,9 @@ impl GeminiPreset {
         transcript_path: &str,
     ) -> Result<(AiTranscript, Option<String>), GitAiError> {
         let json_content =
-            std::fs::read_to_string(transcript_path).map_err(|e| GitAiError::IoError(e))?;
+            std::fs::read_to_string(transcript_path).map_err(GitAiError::IoError)?;
         let conversation: serde_json::Value =
-            serde_json::from_str(&json_content).map_err(|e| GitAiError::JsonError(e))?;
+            serde_json::from_str(&json_content).map_err(GitAiError::JsonError)?;
 
         let messages = conversation
             .get("messages")
@@ -397,11 +392,10 @@ impl GeminiPreset {
                 }
                 "gemini" => {
                     // Extract model from gemini messages if we haven't found it yet
-                    if model.is_none() {
-                        if let Some(model_str) = message.get("model").and_then(|v| v.as_str()) {
+                    if model.is_none()
+                        && let Some(model_str) = message.get("model").and_then(|v| v.as_str()) {
                             model = Some(model_str.to_string());
                         }
-                    }
 
                     // Handle assistant text content - content can be a string
                     if let Some(content) = message.get("content").and_then(|v| v.as_str()) {
@@ -493,7 +487,7 @@ impl AgentCheckpointPreset for ContinueCliPreset {
         eprintln!("[Debug] Continue CLI using model: {}", model);
 
         // Parse transcript from JSON file
-        let transcript = match ContinueCliPreset::transcript_from_continue_json(&transcript_path) {
+        let transcript = match ContinueCliPreset::transcript_from_continue_json(transcript_path) {
             Ok(transcript) => transcript,
             Err(e) => {
                 eprintln!("[Warning] Failed to parse Continue CLI JSON: {e}");
@@ -563,9 +557,9 @@ impl ContinueCliPreset {
         transcript_path: &str,
     ) -> Result<AiTranscript, GitAiError> {
         let json_content =
-            std::fs::read_to_string(transcript_path).map_err(|e| GitAiError::IoError(e))?;
+            std::fs::read_to_string(transcript_path).map_err(GitAiError::IoError)?;
         let conversation: serde_json::Value =
-            serde_json::from_str(&json_content).map_err(|e| GitAiError::JsonError(e))?;
+            serde_json::from_str(&json_content).map_err(GitAiError::JsonError)?;
 
         let history = conversation
             .get("history")
@@ -694,7 +688,7 @@ impl AgentCheckpointPreset for CursorPreset {
                 GitAiError::PresetError("workspace_roots not found in hook_input".to_string())
             })?
             .iter()
-            .filter_map(|v| v.as_str().map(|s| Self::normalize_cursor_path(s)))
+            .filter_map(|v| v.as_str().map(Self::normalize_cursor_path))
             .collect::<Vec<String>>();
 
         let hook_event_name = hook_data
@@ -1012,8 +1006,8 @@ impl CursorPreset {
         let mut model = None;
 
         for header in conv.iter() {
-            if let Some(bubble_id) = header.get("bubbleId").and_then(|v| v.as_str()) {
-                if let Ok(Some(bubble_content)) =
+            if let Some(bubble_id) = header.get("bubbleId").and_then(|v| v.as_str())
+                && let Ok(Some(bubble_content)) =
                     Self::fetch_bubble_content_from_db(global_db_path, composer_id, bubble_id)
                 {
                     // Get bubble created at (ISO 8601 UTC string)
@@ -1023,15 +1017,13 @@ impl CursorPreset {
                         .map(|s| s.to_string());
 
                     // Extract model from bubble (first value wins)
-                    if model.is_none() {
-                        if let Some(model_info) = bubble_content.get("modelInfo") {
-                            if let Some(model_name) =
+                    if model.is_none()
+                        && let Some(model_info) = bubble_content.get("modelInfo")
+                            && let Some(model_name) =
                                 model_info.get("modelName").and_then(|v| v.as_str())
                             {
                                 model = Some(model_name.to_string());
                             }
-                        }
-                    }
 
                     // Extract text from bubble
                     if let Some(text) = bubble_content.get("text").and_then(|v| v.as_str()) {
@@ -1100,7 +1092,6 @@ impl CursorPreset {
                         }
                     }
                 }
-            }
         }
 
         if !transcript.messages.is_empty() {
@@ -1312,7 +1303,7 @@ impl AgentCheckpointPreset for GithubCopilotPreset {
             transcript,
             repo_working_dir: Some(repo_working_dir),
             // TODO Remove detected_edited_filepaths once edited_filepaths is required in future versions (after old extensions are updated)
-            edited_filepaths: edited_filepaths.or_else(|| detected_edited_filepaths),
+            edited_filepaths: edited_filepaths.or(detected_edited_filepaths),
             will_edit_filepaths: None,
             dirty_files,
         })
@@ -1392,8 +1383,8 @@ impl AgentCheckpointPreset for DroidPreset {
             let mut paths = Vec::new();
 
             // Try extracting from tool_input patch text
-            if let Some(ti) = tool_input {
-                if let Some(patch_text) = ti.as_str().or_else(|| ti.get("patch").and_then(|v| v.as_str())) {
+            if let Some(ti) = tool_input
+                && let Some(patch_text) = ti.as_str().or_else(|| ti.get("patch").and_then(|v| v.as_str())) {
                     for line in patch_text.lines() {
                         let trimmed = line.trim();
                         if let Some(path) = trimmed.strip_prefix("*** Update File: ")
@@ -1403,24 +1394,21 @@ impl AgentCheckpointPreset for DroidPreset {
                         }
                     }
                 }
-            }
 
             // For PostToolUse, also try parsing tool_response for file_path
-            if paths.is_empty() && hook_event_name == "PostToolUse" {
-                if let Some(tool_response) = hook_data.get("tool_response").or_else(|| hook_data.get("toolResponse")) {
+            if paths.is_empty() && hook_event_name == "PostToolUse"
+                && let Some(tool_response) = hook_data.get("tool_response").or_else(|| hook_data.get("toolResponse")) {
                     // tool_response might be a JSON string or an object
                     let response_obj = if let Some(s) = tool_response.as_str() {
                         serde_json::from_str::<serde_json::Value>(s).ok()
                     } else {
                         Some(tool_response.clone())
                     };
-                    if let Some(obj) = response_obj {
-                        if let Some(path) = obj.get("file_path").or_else(|| obj.get("filePath")).and_then(|v| v.as_str()) {
+                    if let Some(obj) = response_obj
+                        && let Some(path) = obj.get("file_path").or_else(|| obj.get("filePath")).and_then(|v| v.as_str()) {
                             paths.push(path.to_string());
                         }
-                    }
                 }
-            }
 
             if !paths.is_empty() {
                 file_path_as_vec = Some(paths);
@@ -1524,7 +1512,7 @@ impl DroidPreset {
         transcript_path: &str,
     ) -> Result<(AiTranscript, Option<String>), GitAiError> {
         let jsonl_content =
-            std::fs::read_to_string(transcript_path).map_err(|e| GitAiError::IoError(e))?;
+            std::fs::read_to_string(transcript_path).map_err(GitAiError::IoError)?;
         let mut transcript = AiTranscript::new();
 
         for line in jsonl_content.lines() {
@@ -1555,49 +1543,44 @@ impl DroidPreset {
                             if item["type"].as_str() == Some("tool_result") {
                                 continue;
                             }
-                            if item["type"].as_str() == Some("text") {
-                                if let Some(text) = item["text"].as_str() {
-                                    if !text.trim().is_empty() {
+                            if item["type"].as_str() == Some("text")
+                                && let Some(text) = item["text"].as_str()
+                                    && !text.trim().is_empty() {
                                         transcript.add_message(Message::User {
                                             text: text.to_string(),
                                             timestamp: timestamp.clone(),
                                         });
                                     }
-                                }
-                            }
                         }
-                    } else if let Some(content) = message["content"].as_str() {
-                        if !content.trim().is_empty() {
+                    } else if let Some(content) = message["content"].as_str()
+                        && !content.trim().is_empty() {
                             transcript.add_message(Message::User {
                                 text: content.to_string(),
                                 timestamp: timestamp.clone(),
                             });
                         }
-                    }
                 }
                 "assistant" => {
                     if let Some(content_array) = message["content"].as_array() {
                         for item in content_array {
                             match item["type"].as_str() {
                                 Some("text") => {
-                                    if let Some(text) = item["text"].as_str() {
-                                        if !text.trim().is_empty() {
+                                    if let Some(text) = item["text"].as_str()
+                                        && !text.trim().is_empty() {
                                             transcript.add_message(Message::Assistant {
                                                 text: text.to_string(),
                                                 timestamp: timestamp.clone(),
                                             });
                                         }
-                                    }
                                 }
                                 Some("thinking") => {
-                                    if let Some(thinking) = item["thinking"].as_str() {
-                                        if !thinking.trim().is_empty() {
+                                    if let Some(thinking) = item["thinking"].as_str()
+                                        && !thinking.trim().is_empty() {
                                             transcript.add_message(Message::Assistant {
                                                 text: thinking.to_string(),
                                                 timestamp: timestamp.clone(),
                                             });
                                         }
-                                    }
                                 }
                                 Some("tool_use") => {
                                     if let (Some(name), Some(_input)) =
@@ -1628,9 +1611,9 @@ impl DroidPreset {
         settings_path: &str,
     ) -> Result<Option<String>, GitAiError> {
         let content =
-            std::fs::read_to_string(settings_path).map_err(|e| GitAiError::IoError(e))?;
+            std::fs::read_to_string(settings_path).map_err(GitAiError::IoError)?;
         let settings: serde_json::Value =
-            serde_json::from_str(&content).map_err(|e| GitAiError::JsonError(e))?;
+            serde_json::from_str(&content).map_err(GitAiError::JsonError)?;
         Ok(settings["model"].as_str().map(|s| s.to_string()))
     }
 
@@ -1653,6 +1636,7 @@ impl DroidPreset {
 impl GithubCopilotPreset {
     /// Translate a GitHub Copilot chat session JSON file into an AiTranscript, optional model, and edited filepaths.
     /// Returns an empty transcript if running in Codespaces or Remote Containers.
+    #[allow(clippy::type_complexity)]
     pub fn transcript_and_model_from_copilot_session_json(
         session_json_path: &str,
     ) -> Result<(AiTranscript, Option<String>, Option<Vec<String>>), GitAiError> {
@@ -1666,10 +1650,10 @@ impl GithubCopilotPreset {
 
         // Read the session JSON file
         let session_json_str =
-            std::fs::read_to_string(session_json_path).map_err(|e| GitAiError::IoError(e))?;
+            std::fs::read_to_string(session_json_path).map_err(GitAiError::IoError)?;
 
         let session_json: serde_json::Value =
-            serde_json::from_str(&session_json_str).map_err(|e| GitAiError::JsonError(e))?;
+            serde_json::from_str(&session_json_str).map_err(GitAiError::JsonError)?;
 
         // Extract the requests array which represents the conversation from start to finish
         let requests = session_json
@@ -1758,11 +1742,10 @@ impl GithubCopilotPreset {
                                                 .and_then(|v| v.as_str())
                                                 .map(|s| s.to_string())
                                         });
-                                    if let Some(p) = path_opt {
-                                        if !edited_filepaths.contains(&p) {
+                                    if let Some(p) = path_opt
+                                        && !edited_filepaths.contains(&p) {
                                             edited_filepaths.push(p);
                                         }
-                                    }
                                 }
                                 transcript
                                     .add_message(Message::tool_use(kind.to_string(), item.clone()));
@@ -1875,11 +1858,10 @@ impl GithubCopilotPreset {
             }
 
             // Detect model from request metadata if not yet set (uses first modelId seen)
-            if detected_model.is_none() {
-                if let Some(model_id) = request.get("modelId").and_then(|v| v.as_str()) {
+            if detected_model.is_none()
+                && let Some(model_id) = request.get("modelId").and_then(|v| v.as_str()) {
                     detected_model = Some(model_id.to_string());
                 }
-            }
         }
 
         Ok((transcript, detected_model, Some(edited_filepaths)))

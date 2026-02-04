@@ -14,10 +14,8 @@ pub mod types;
 // Re-export all public types for external crates
 pub use attrs::EventAttributes;
 pub use events::{AgentUsageValues, CheckpointValues, CommittedValues, InstallHooksValues};
-pub use pos_encoded::{PosEncoded, PosField};
-pub use types::{
-    EventValues, MetricEvent, MetricEventId, MetricsBatch, SparseArray, METRICS_API_VERSION,
-};
+pub use pos_encoded::PosEncoded;
+pub use types::{EventValues, MetricEvent, MetricsBatch, METRICS_API_VERSION};
 
 /// Record an event with values and attributes.
 ///
@@ -54,6 +52,7 @@ pub fn record<V: EventValues>(values: V, attrs: EventAttributes) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use types::MetricEventId;
 
     #[test]
     fn test_record_creates_event() {

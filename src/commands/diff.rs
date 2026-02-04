@@ -22,6 +22,7 @@ pub enum DiffFormat {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct DiffHunk {
     pub file_path: String,
     pub old_start: u32,
@@ -258,21 +259,21 @@ fn parse_diff_hunks(diff_text: &str) -> Result<Vec<DiffHunk>, GitAiError> {
         // Git outputs paths in two formats:
         // 1. Unquoted: +++ b/path/to/file.txt
         // 2. Quoted (for non-ASCII): +++ "b/path/to/file.txt" (with octal escapes inside)
-        if line.starts_with("+++ b/") {
+        if let Some(raw_path) = line.strip_prefix("+++ b/") {
             // Unquoted path (ASCII only)
             // Note: Git adds trailing tab after filenames with spaces, so we trim_end
-            let raw_path = &line[6..].trim_end();
-            current_file = crate::utils::unescape_git_path(raw_path);
-        } else if line.starts_with("+++ \"b/") {
-            // Quoted path (non-ASCII chars) - extract the quoted portion and unescape
-            let quoted_path = &line[4..]; // Gets "b/\344\270\255\346\226\207.txt"
-            let unescaped = crate::utils::unescape_git_path(quoted_path);
-            // Now unescaped is "b/中文.txt", strip the "b/" prefix
-            current_file = if unescaped.starts_with("b/") {
-                unescaped[2..].to_string()
-            } else {
-                unescaped
-            };
+            current_file = crate::utils::unescape_git_path(raw_path.trim_end());
+        } else if line.starts_with("+++ \"") {
+            // Quoted path (non-ASCII chars) - unescape the entire quoted portion after "+++ "
+            if let Some(quoted_suffix) = line.strip_prefix("+++ ") {
+                let unescaped = crate::utils::unescape_git_path(quoted_suffix);
+                // Now unescaped is "b/中文.txt", strip the "b/" prefix
+                current_file = if let Some(stripped) = unescaped.strip_prefix("b/") {
+                    stripped.to_string()
+                } else {
+                    unescaped
+                };
+            }
         } else if line.starts_with("@@ ") {
             // Hunk header
             if let Some(hunk) = parse_hunk_line(line, &current_file)? {
@@ -298,8 +299,7 @@ fn parse_hunk_line(line: &str, file_path: &str) -> Result<Option<DiffHunk>, GitA
     let new_part = parts[2]; // e.g., "+15,5" or "+15"
 
     // Parse old part
-    let (old_start, old_count) = if old_part.starts_with('-') {
-        let old_str = &old_part[1..];
+    let (old_start, old_count) = if let Some(old_str) = old_part.strip_prefix('-') {
         if let Some((start_str, count_str)) = old_str.split_once(',') {
             let start: u32 = start_str.parse().unwrap_or(0);
             let count: u32 = count_str.parse().unwrap_or(0);
@@ -313,8 +313,7 @@ fn parse_hunk_line(line: &str, file_path: &str) -> Result<Option<DiffHunk>, GitA
     };
 
     // Parse new part
-    let (new_start, new_count) = if new_part.starts_with('+') {
-        let new_str = &new_part[1..];
+    let (new_start, new_count) = if let Some(new_str) = new_part.strip_prefix('+') {
         if let Some((start_str, count_str)) = new_str.split_once(',') {
             let start: u32 = start_str.parse().unwrap_or(0);
             let count: u32 = count_str.parse().unwrap_or(0);
@@ -369,7 +368,7 @@ pub fn overlay_diff_attributions(
         if !hunk.added_lines.is_empty() {
             lines_by_file
                 .entry(hunk.file_path.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .extend(&hunk.added_lines);
         }
     }
@@ -387,10 +386,13 @@ pub fn overlay_diff_attributions(
 
         // Build blame options
         let mut options = GitAiBlameOptions::default();
+        #[allow(clippy::field_reassign_with_default)]
+        {
         options.oldest_commit = Some(from_commit.to_string());
         options.newest_commit = Some(to_commit.to_string());
         options.line_ranges = line_ranges;
         options.no_output = true;
+        }
 
         // Call blame to get attributions
         let blame_result = repo.blame(&file_path, &options);
@@ -483,7 +485,7 @@ fn build_diff_json(
     from_commit: &str,
     to_commit: &str,
     hunks: &[DiffHunk],
-    attributions: &HashMap<DiffLineKey, Attribution>,
+    _attributions: &HashMap<DiffLineKey, Attribution>,
 ) -> Result<DiffJson, GitAiError> {
     let mut files: BTreeMap<String, FileDiffJson> = BTreeMap::new();
     let mut all_prompts: BTreeMap<String, PromptRecord> = BTreeMap::new();
@@ -560,23 +562,23 @@ fn get_diff_split_by_file(
             }
             current_diff = format!("{}\n", line);
             current_file.clear();
-        } else if line.starts_with("+++ b/") {
+        } else if let Some(raw_path) = line.strip_prefix("+++ b/") {
             // Unquoted path (ASCII only)
             // Note: Git adds trailing tab after filenames with spaces, so we trim_end
-            let raw_path = &line[6..].trim_end();
-            current_file = crate::utils::unescape_git_path(raw_path);
+            current_file = crate::utils::unescape_git_path(raw_path.trim_end());
             current_diff.push_str(line);
             current_diff.push('\n');
-        } else if line.starts_with("+++ \"b/") {
-            // Quoted path (non-ASCII chars) - extract the quoted portion and unescape
-            let quoted_path = &line[4..]; // Gets "b/\344\270\255\346\226\207.txt"
-            let unescaped = crate::utils::unescape_git_path(quoted_path);
-            // Now unescaped is "b/中文.txt", strip the "b/" prefix
-            current_file = if unescaped.starts_with("b/") {
-                unescaped[2..].to_string()
-            } else {
-                unescaped
-            };
+        } else if line.starts_with("+++ \"") {
+            // Quoted path (non-ASCII chars) - unescape the entire quoted portion after "+++ "
+            if let Some(quoted_suffix) = line.strip_prefix("+++ ") {
+                let unescaped = crate::utils::unescape_git_path(quoted_suffix);
+                // Now unescaped is "b/中文.txt", strip the "b/" prefix
+                current_file = if let Some(stripped) = unescaped.strip_prefix("b/") {
+                    stripped.to_string()
+                } else {
+                    unescaped
+                };
+            }
             current_diff.push_str(line);
             current_diff.push('\n');
         } else {
@@ -594,6 +596,7 @@ fn get_diff_split_by_file(
 }
 
 /// Collect annotations for a specific file, returning (annotations_map, prompt_records_map)
+#[allow(clippy::type_complexity)]
 fn collect_file_annotations(
     repo: &Repository,
     from_commit: &str,
@@ -632,11 +635,14 @@ fn collect_file_annotations(
 
     // Build blame options - use prompt hashes as names to get the actual hash per line
     let mut options = GitAiBlameOptions::default();
+    #[allow(clippy::field_reassign_with_default)]
+    {
     options.oldest_commit = Some(from_commit.to_string());
     options.newest_commit = Some(to_commit.to_string());
     options.line_ranges = line_ranges;
     options.no_output = true;
     options.use_prompt_hashes_as_names = true; // Key: get prompt hash instead of tool name
+    }
 
     // Call blame to get attributions
     let blame_result = repo.blame(file_path, &options);
@@ -653,7 +659,7 @@ fn collect_file_annotations(
                     if blame_prompt_records.contains_key(prompt_hash) {
                         lines_by_hash
                             .entry(prompt_hash.clone())
-                            .or_insert_with(Vec::new)
+                            .or_default()
                             .push(line);
                     }
                 }
@@ -682,6 +688,7 @@ fn collect_file_annotations(
 // Output Formatting
 // ============================================================================
 
+#[allow(clippy::if_same_then_else)]
 pub fn format_annotated_diff(
     repo: &Repository,
     from_commit: &str,
@@ -719,22 +726,22 @@ pub fn format_annotated_diff(
             result.push_str(&format_line(line, LineType::DiffHeader, use_color, None));
         } else if line.starts_with("--- ") {
             result.push_str(&format_line(line, LineType::DiffHeader, use_color, None));
-        } else if line.starts_with("+++ b/") {
+        } else if let Some(raw_path) = line.strip_prefix("+++ b/") {
             // Unquoted path (ASCII only)
             // Note: Git adds trailing tab after filenames with spaces, so we trim_end
-            let raw_path = &line[6..].trim_end();
-            current_file = crate::utils::unescape_git_path(raw_path);
+            current_file = crate::utils::unescape_git_path(raw_path.trim_end());
             result.push_str(&format_line(line, LineType::DiffHeader, use_color, None));
-        } else if line.starts_with("+++ \"b/") {
-            // Quoted path (non-ASCII chars) - extract the quoted portion and unescape
-            let quoted_path = &line[4..]; // Gets "b/\344\270\255\346\226\207.txt"
-            let unescaped = crate::utils::unescape_git_path(quoted_path);
-            // Now unescaped is "b/中文.txt", strip the "b/" prefix
-            current_file = if unescaped.starts_with("b/") {
-                unescaped[2..].to_string()
-            } else {
-                unescaped
-            };
+        } else if line.starts_with("+++ \"") {
+            // Quoted path (non-ASCII chars) - unescape the entire quoted portion after "+++ "
+            if let Some(quoted_suffix) = line.strip_prefix("+++ ") {
+                let unescaped = crate::utils::unescape_git_path(quoted_suffix);
+                // Now unescaped is "b/中文.txt", strip the "b/" prefix
+                current_file = if let Some(stripped) = unescaped.strip_prefix("b/") {
+                    stripped.to_string()
+                } else {
+                    unescaped
+                };
+            }
             result.push_str(&format_line(line, LineType::DiffHeader, use_color, None));
         } else if line.starts_with("@@ ") {
             // Hunk header - update line counters
@@ -801,8 +808,7 @@ fn parse_hunk_header_for_line_nums(line: &str) -> Option<(u32, u32)> {
     let new_part = parts[2];
 
     // Extract old_start
-    let old_start = if old_part.starts_with('-') {
-        let old_str = &old_part[1..];
+    let old_start = if let Some(old_str) = old_part.strip_prefix('-') {
         if let Some((start_str, _)) = old_str.split_once(',') {
             start_str.parse::<u32>().ok()?
         } else {
@@ -813,8 +819,7 @@ fn parse_hunk_header_for_line_nums(line: &str) -> Option<(u32, u32)> {
     };
 
     // Extract new_start
-    let new_start = if new_part.starts_with('+') {
-        let new_str = &new_part[1..];
+    let new_start = if let Some(new_str) = new_part.strip_prefix('+') {
         if let Some((start_str, _)) = new_str.split_once(',') {
             start_str.parse::<u32>().ok()?
         } else {
@@ -924,6 +929,7 @@ where
 // ============================================================================
 
 /// Options for getting a diff with optional filtering
+#[derive(Default)]
 pub struct DiffOptions {
     /// If provided, only include files with attributions from these prompts
     pub prompt_ids: Option<Vec<String>>,
@@ -931,14 +937,6 @@ pub struct DiffOptions {
     pub filter_to_attributed_files: bool,
 }
 
-impl Default for DiffOptions {
-    fn default() -> Self {
-        Self {
-            prompt_ids: None,
-            filter_to_attributed_files: false,
-        }
-    }
-}
 
 /// Get diff JSON for a single commit with optional filtering by prompt attributions
 ///
@@ -965,8 +963,8 @@ pub fn get_diff_json_filtered(
     let mut diff_json = build_diff_json(repo, &from_commit, &to_commit, &hunks, &attributions)?;
 
     // Apply filtering if requested
-    if options.filter_to_attributed_files {
-        if let Some(ref prompt_ids) = options.prompt_ids {
+    if options.filter_to_attributed_files
+        && let Some(ref prompt_ids) = options.prompt_ids {
             let prompt_id_set: std::collections::HashSet<&String> = prompt_ids.iter().collect();
 
             // Filter files to only those with attributions from the specified prompts
@@ -975,7 +973,6 @@ pub fn get_diff_json_filtered(
                 file_diff.annotations.keys().any(|key| prompt_id_set.contains(key))
             });
         }
-    }
 
     // Filter prompts to only those specified (if any)
     if let Some(ref prompt_ids) = options.prompt_ids {
@@ -992,8 +989,6 @@ pub fn get_diff_json_filtered(
 
 #[cfg(test)]
 mod tests {
-    use crate::git::find_repository_in_path;
-
     use super::*;
 
     #[test]

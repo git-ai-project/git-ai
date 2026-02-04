@@ -26,6 +26,7 @@ pub struct ToolModelHeadlineStats {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct CommitStats {
     #[serde(default)]
     pub human_additions: u32, // Number of lines committed with human attribution (full and/or mixed)
@@ -49,22 +50,6 @@ pub struct CommitStats {
     pub tool_model_breakdown: BTreeMap<String, ToolModelHeadlineStats>,
 }
 
-impl Default for CommitStats {
-    fn default() -> Self {
-        Self {
-            human_additions: 0,
-            mixed_additions: 0,
-            ai_additions: 0,
-            ai_accepted: 0,
-            total_ai_additions: 0,
-            total_ai_deletions: 0,
-            time_waiting_for_ai: 0,
-            git_diff_deleted_lines: 0,
-            git_diff_added_lines: 0,
-            tool_model_breakdown: BTreeMap::new(),
-        }
-    }
-}
 
 pub fn stats_command(
     repo: &Repository,
@@ -78,7 +63,7 @@ pub fn stats_command(
             Ok(commit_obj) => {
                 // For a specific commit, we don't have a refname, so use the commit SHA
                 let full_sha = commit_obj.id();
-                (full_sha, format!("{}", sha))
+                (full_sha, sha.to_string())
             }
             Err(GitAiError::GitCliError { .. }) => {
                 return Err(GitAiError::Generic(format!("No commit found: {}", sha)));
@@ -310,7 +295,7 @@ pub fn write_stats_to_terminal(stats: &CommitStats, print: bool) -> String {
             println!("{}", ai_acceptance_str);
         }
     }
-    return output;
+    output
 }
 
 #[allow(dead_code)]
@@ -446,8 +431,8 @@ pub fn write_stats_to_markdown(stats: &CommitStats) -> String {
     };
     output.push_str(&format!("- {} waiting for AI \n", time_str));
     // Find top model by accepted lines
-    if !stats.tool_model_breakdown.is_empty() {
-        if let Some((model_name, model_stats)) = stats
+    if !stats.tool_model_breakdown.is_empty()
+        && let Some((model_name, model_stats)) = stats
             .tool_model_breakdown
             .iter()
             .max_by_key(|(_, stats)| stats.ai_accepted)
@@ -457,11 +442,10 @@ pub fn write_stats_to_markdown(stats: &CommitStats) -> String {
                 model_name, model_stats.ai_accepted, model_stats.total_ai_additions
             ));
         }
-    }
 
     output.push_str("\n</details>");
 
-    return output;
+    output
 }
 
 /// Calculate commit stats from an authorship log
@@ -567,7 +551,7 @@ pub fn stats_for_commit_stats(
         diff_ai_accepted_stats(repo, &parent_sha, commit_sha, Some(&parent_sha), ignore_patterns)?;
 
     // Step 3: get the authorship log for this commit
-    let authorship_log = get_authorship(repo, &commit_sha);
+    let authorship_log = get_authorship(repo, commit_sha);
 
     // Step 4: Calculate stats from authorship log with diff-based accepted counts
     Ok(stats_from_authorship_log(
@@ -605,7 +589,7 @@ pub fn get_git_diff_stats(
         }
 
         // Skip the commit message lines (they don't start with numbers)
-        if !line.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+        if !line.chars().next().is_some_and(|c| c.is_ascii_digit()) {
             continue;
         }
 
@@ -624,11 +608,10 @@ pub fn get_git_diff_stats(
             }
 
             // Parse deleted lines (handle "-" for binary files)
-            if parts[1] != "-" {
-                if let Ok(deleted) = parts[1].parse::<u32>() {
+            if parts[1] != "-"
+                && let Ok(deleted) = parts[1].parse::<u32>() {
                     deleted_lines += deleted;
                 }
-            }
         }
     }
 
@@ -900,7 +883,7 @@ mod tests {
         let head_sha = tmp_repo.get_head_commit_sha().unwrap();
 
         // Test our stats function
-        let stats = stats_for_commit_stats(&tmp_repo.gitai_repo(), &head_sha, &[]).unwrap();
+        let stats = stats_for_commit_stats(tmp_repo.gitai_repo(), &head_sha, &[]).unwrap();
 
         // Verify the stats
         assert_eq!(
@@ -952,7 +935,7 @@ mod tests {
         tmp_repo.commit_with_message("Mixed commit").unwrap();
 
         let head_sha = tmp_repo.get_head_commit_sha().unwrap();
-        let stats = stats_for_commit_stats(&tmp_repo.gitai_repo(), &head_sha, &[]).unwrap();
+        let stats = stats_for_commit_stats(tmp_repo.gitai_repo(), &head_sha, &[]).unwrap();
 
         // Verify the stats
         assert_eq!(stats.human_additions, 2, "Human added 2 lines");
@@ -983,7 +966,7 @@ mod tests {
         tmp_repo.commit_with_message("Initial commit").unwrap();
 
         let head_sha = tmp_repo.get_head_commit_sha().unwrap();
-        let stats = stats_for_commit_stats(&tmp_repo.gitai_repo(), &head_sha, &[]).unwrap();
+        let stats = stats_for_commit_stats(tmp_repo.gitai_repo(), &head_sha, &[]).unwrap();
 
         // For initial commit, everything should be additions
         assert_eq!(
@@ -1031,13 +1014,13 @@ mod tests {
 
         // Test WITHOUT ignore - should count lockfile
         let stats_with_lockfile =
-            stats_for_commit_stats(&tmp_repo.gitai_repo(), &head_sha, &[]).unwrap();
+            stats_for_commit_stats(tmp_repo.gitai_repo(), &head_sha, &[]).unwrap();
         assert_eq!(stats_with_lockfile.git_diff_added_lines, 1001); // 1 source + 1000 lockfile
 
         // Test WITH ignore - should exclude lockfile
         let ignore_patterns = vec!["Cargo.lock".to_string()];
         let stats_without_lockfile =
-            stats_for_commit_stats(&tmp_repo.gitai_repo(), &head_sha, &ignore_patterns).unwrap();
+            stats_for_commit_stats(tmp_repo.gitai_repo(), &head_sha, &ignore_patterns).unwrap();
         assert_eq!(stats_without_lockfile.git_diff_added_lines, 1); // Only 1 source line
         assert_eq!(stats_without_lockfile.ai_additions, 1);
     }
@@ -1076,7 +1059,7 @@ mod tests {
         let head_sha = tmp_repo.get_head_commit_sha().unwrap();
 
         // Test WITHOUT ignore - counts all files (1501 lines)
-        let stats_all = stats_for_commit_stats(&tmp_repo.gitai_repo(), &head_sha, &[]).unwrap();
+        let stats_all = stats_for_commit_stats(tmp_repo.gitai_repo(), &head_sha, &[]).unwrap();
         assert_eq!(stats_all.git_diff_added_lines, 1501);
 
         // Test WITH ignore - only counts README (1 line)
@@ -1086,7 +1069,7 @@ mod tests {
             "yarn.lock".to_string(),
         ];
         let stats_filtered =
-            stats_for_commit_stats(&tmp_repo.gitai_repo(), &head_sha, &ignore_patterns).unwrap();
+            stats_for_commit_stats(tmp_repo.gitai_repo(), &head_sha, &ignore_patterns).unwrap();
         assert_eq!(stats_filtered.git_diff_added_lines, 1);
         assert_eq!(stats_filtered.human_additions, 1);
     }
@@ -1116,13 +1099,13 @@ mod tests {
         let head_sha = tmp_repo.get_head_commit_sha().unwrap();
 
         // Test WITHOUT ignore - shows 2000 lines
-        let stats_with = stats_for_commit_stats(&tmp_repo.gitai_repo(), &head_sha, &[]).unwrap();
+        let stats_with = stats_for_commit_stats(tmp_repo.gitai_repo(), &head_sha, &[]).unwrap();
         assert_eq!(stats_with.git_diff_added_lines, 2000);
 
         // Test WITH ignore - shows 0 lines (lockfile-only commit)
         let ignore_patterns = vec!["Cargo.lock".to_string()];
         let stats_without =
-            stats_for_commit_stats(&tmp_repo.gitai_repo(), &head_sha, &ignore_patterns).unwrap();
+            stats_for_commit_stats(tmp_repo.gitai_repo(), &head_sha, &ignore_patterns).unwrap();
         assert_eq!(stats_without.git_diff_added_lines, 0);
         assert_eq!(stats_without.ai_additions, 0);
         assert_eq!(stats_without.human_additions, 0);
@@ -1151,7 +1134,7 @@ mod tests {
         let head_sha = tmp_repo.get_head_commit_sha().unwrap();
 
         // Test with empty patterns - should behave same as no filtering
-        let stats = stats_for_commit_stats(&tmp_repo.gitai_repo(), &head_sha, &[]).unwrap();
+        let stats = stats_for_commit_stats(tmp_repo.gitai_repo(), &head_sha, &[]).unwrap();
         assert_eq!(stats.git_diff_added_lines, 2);
         assert_eq!(stats.ai_additions, 2);
     }
@@ -1201,7 +1184,7 @@ mod tests {
         let head_sha = tmp_repo.get_head_commit_sha().unwrap();
 
         // Test WITHOUT ignore - all files included (2001 lines)
-        let stats_all = stats_for_commit_stats(&tmp_repo.gitai_repo(), &head_sha, &[]).unwrap();
+        let stats_all = stats_for_commit_stats(tmp_repo.gitai_repo(), &head_sha, &[]).unwrap();
         assert_eq!(stats_all.git_diff_added_lines, 2001);
 
         // Test WITH glob patterns - only source code (1 line)
@@ -1211,7 +1194,7 @@ mod tests {
             "*.generated.*".to_string(), // Matches *.generated.ts, *.generated.js
         ];
         let stats_filtered =
-            stats_for_commit_stats(&tmp_repo.gitai_repo(), &head_sha, &glob_patterns).unwrap();
+            stats_for_commit_stats(tmp_repo.gitai_repo(), &head_sha, &glob_patterns).unwrap();
         assert_eq!(stats_filtered.git_diff_added_lines, 1);
         assert_eq!(stats_filtered.ai_additions, 1);
     }

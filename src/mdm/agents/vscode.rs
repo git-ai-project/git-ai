@@ -42,18 +42,15 @@ impl HookInstaller for VSCodeInstaller {
         }
 
         // If we have the binary, check version
-        if has_binary {
-            if let Ok(version_str) = get_binary_version("code") {
-                if let Some(version) = parse_version(&version_str) {
-                    if !version_meets_requirement(version, MIN_CODE_VERSION) {
+        if has_binary
+            && let Ok(version_str) = get_binary_version("code")
+                && let Some(version) = parse_version(&version_str)
+                    && !version_meets_requirement(version, MIN_CODE_VERSION) {
                         return Err(GitAiError::Generic(format!(
                             "VS Code version {}.{} detected, but minimum version {}.{} is required",
                             version.0, version.1, MIN_CODE_VERSION.0, MIN_CODE_VERSION.1
                         )));
                     }
-                }
-            }
-        }
 
         // VS Code hooks are installed via extension, not config files
         // Check if extension is installed

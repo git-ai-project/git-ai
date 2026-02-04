@@ -277,9 +277,9 @@ fn handle_ci_local(args: &[String]) {
 
 fn print_ci_help_and_exit() -> ! {
     eprintln!("git-ai ci - Continuous integration utilities");
-    eprintln!("");
+    eprintln!();
     eprintln!("Usage: git-ai ci <subcommand> [args...]");
-    eprintln!("");
+    eprintln!();
     eprintln!("Subcommands:");
     eprintln!("  github           GitHub CI");
     eprintln!("    run [--no-cleanup]  Run GitHub CI in current repo");
@@ -298,9 +298,9 @@ fn print_ci_help_and_exit() -> ! {
 
 fn print_ci_local_help_and_exit() -> ! {
     eprintln!("git-ai ci local - Run CI locally by event name and flags");
-    eprintln!("");
+    eprintln!();
     eprintln!("Usage: git-ai ci local <event> [flags]");
-    eprintln!("");
+    eprintln!();
     eprintln!("Events:");
     eprintln!(
         "  merge  --merge-commit-sha <sha> --base-ref <ref> --head-ref <ref> --head-sha <sha> --base-sha <sha>"
@@ -310,9 +310,9 @@ fn print_ci_local_help_and_exit() -> ! {
 
 fn print_ci_github_help_and_exit() -> ! {
     eprintln!("git-ai ci github - GitHub CI utilities");
-    eprintln!("");
+    eprintln!();
     eprintln!("Usage: git-ai ci github <subcommand> [args...]");
-    eprintln!("");
+    eprintln!();
     eprintln!("Subcommands:");
     eprintln!("  run [--no-cleanup]   Run GitHub CI in current repo");
     eprintln!("                       --no-cleanup  Skip teardown after run");
@@ -322,9 +322,9 @@ fn print_ci_github_help_and_exit() -> ! {
 
 fn print_ci_gitlab_help_and_exit() -> ! {
     eprintln!("git-ai ci gitlab - GitLab CI utilities");
-    eprintln!("");
+    eprintln!();
     eprintln!("Usage: git-ai ci gitlab <subcommand> [args...]");
-    eprintln!("");
+    eprintln!();
     eprintln!("Subcommands:");
     eprintln!("  run [--no-cleanup]   Run GitLab CI in current repo");
     eprintln!("                       --no-cleanup  Skip teardown after run");

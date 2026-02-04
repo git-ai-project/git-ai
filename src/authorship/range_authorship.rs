@@ -60,9 +60,7 @@ pub fn range_authorship(
     pre_fetch_contents: bool,
     ignore_patterns: &[String],
 ) -> Result<RangeAuthorshipStats, GitAiError> {
-    if let Err(e) = commit_range.is_valid() {
-        return Err(e);
-    }
+    commit_range.is_valid()?;
 
     // Fetch the branch if pre_fetch_contents is true
     if pre_fetch_contents {
@@ -388,11 +386,10 @@ fn get_git_diff_stats_for_range(
             }
 
             // Parse deleted lines (handle "-" for binary files)
-            if parts[1] != "-" {
-                if let Ok(deleted) = parts[1].parse::<u32>() {
+            if parts[1] != "-"
+                && let Ok(deleted) = parts[1].parse::<u32>() {
                     deleted_lines += deleted;
                 }
-            }
         }
     }
 
@@ -513,7 +510,7 @@ mod tests {
 
         // Test range authorship from first to second commit
         let commit_range = CommitRange::new(
-            &tmp_repo.gitai_repo(),
+            tmp_repo.gitai_repo(),
             first_sha.clone(),
             second_sha.clone(),
             "HEAD".to_string(),
@@ -557,7 +554,7 @@ mod tests {
 
         // Test range authorship from empty tree to HEAD
         let commit_range = CommitRange::new(
-            &tmp_repo.gitai_repo(),
+            tmp_repo.gitai_repo(),
             EMPTY_TREE_HASH.to_string(),
             head_sha.clone(),
             "HEAD".to_string(),
@@ -601,7 +598,7 @@ mod tests {
 
         // Test range authorship for single commit (start == end)
         let commit_range = CommitRange::new(
-            &tmp_repo.gitai_repo(),
+            tmp_repo.gitai_repo(),
             head_sha.clone(),
             head_sha.clone(),
             "HEAD".to_string(),
@@ -658,7 +655,7 @@ mod tests {
 
         // Test range authorship from first to head
         let commit_range = CommitRange::new(
-            &tmp_repo.gitai_repo(),
+            tmp_repo.gitai_repo(),
             first_sha.clone(),
             head_sha.clone(),
             "HEAD".to_string(),
@@ -696,7 +693,7 @@ mod tests {
 
         // Test range authorship with same start and end (already tested above but worth verifying)
         let commit_range = CommitRange::new(
-            &tmp_repo.gitai_repo(),
+            tmp_repo.gitai_repo(),
             sha.clone(),
             sha.clone(),
             "HEAD".to_string(),
@@ -735,7 +732,7 @@ mod tests {
 
         // Test range authorship from empty tree
         let commit_range = CommitRange::new(
-            &tmp_repo.gitai_repo(),
+            tmp_repo.gitai_repo(),
             EMPTY_TREE_HASH.to_string(),
             head_sha.clone(),
             "HEAD".to_string(),
@@ -795,7 +792,7 @@ mod tests {
 
         // Test range authorship
         let commit_range = CommitRange::new(
-            &tmp_repo.gitai_repo(),
+            tmp_repo.gitai_repo(),
             first_sha.clone(),
             second_sha.clone(),
             "HEAD".to_string(),
@@ -866,7 +863,7 @@ mod tests {
 
         // Test range authorship
         let commit_range = CommitRange::new(
-            &tmp_repo.gitai_repo(),
+            tmp_repo.gitai_repo(),
             first_sha.clone(),
             head_sha.clone(),
             "HEAD".to_string(),
@@ -929,7 +926,7 @@ mod tests {
 
         // Test range authorship
         let commit_range = CommitRange::new(
-            &tmp_repo.gitai_repo(),
+            tmp_repo.gitai_repo(),
             first_sha.clone(),
             second_sha.clone(),
             "HEAD".to_string(),
@@ -987,7 +984,7 @@ mod tests {
 
         // Test range authorship
         let commit_range = CommitRange::new(
-            &tmp_repo.gitai_repo(),
+            tmp_repo.gitai_repo(),
             first_sha.clone(),
             second_sha.clone(),
             "HEAD".to_string(),
@@ -1427,7 +1424,7 @@ mod tests {
         let second_sha = tmp_repo.get_head_commit_sha().unwrap();
 
         let commit_range = CommitRange::new(
-            &tmp_repo.gitai_repo(),
+            tmp_repo.gitai_repo(),
             first_sha.clone(),
             second_sha.clone(),
             "HEAD".to_string(),

@@ -190,18 +190,17 @@ impl Default for GitAiBlameOptions {
 }
 
 impl Repository {
+    #[allow(clippy::type_complexity)]
     pub fn blame(
         &self,
         file_path: &str,
         options: &GitAiBlameOptions,
     ) -> Result<(HashMap<u32, String>, HashMap<String, PromptRecord>), GitAiError> {
         // Use repo root for file system operations
-        let repo_root = self.workdir().or_else(|e| {
-            Err(GitAiError::Generic(format!(
+        let repo_root = self.workdir().map_err(|e| GitAiError::Generic(format!(
                 "Repository has no working directory: {}",
                 e
-            )))
-        })?;
+            )))?;
 
         // Normalize the file path to be relative to repo root
         // This is important for AI authorship lookup which stores paths relative to repo root
@@ -716,10 +715,7 @@ impl Repository {
             {
                 cached.clone()
             } else {
-                let authorship = match get_reference_as_authorship_log_v3(self, &hunk.commit_sha) {
-                    Ok(v3_log) => Some(v3_log),
-                    Err(_) => None, // No AI authorship data for this commit
-                };
+                let authorship = get_reference_as_authorship_log_v3(self, &hunk.commit_sha).ok();
                 commit_authorship_cache.insert(hunk.commit_sha.clone(), authorship.clone());
                 authorship
             };
@@ -801,6 +797,7 @@ impl Repository {
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn overlay_ai_authorship(
     repo: &Repository,
     blame_hunks: &[BlameHunk],
@@ -831,10 +828,7 @@ fn overlay_ai_authorship(
             cached.clone()
         } else {
             // Try to get authorship log for this commit
-            let authorship = match get_reference_as_authorship_log_v3(repo, &hunk.commit_sha) {
-                Ok(v3_log) => Some(v3_log),
-                Err(_) => None, // No AI authorship data for this commit
-            };
+            let authorship = get_reference_as_authorship_log_v3(repo, &hunk.commit_sha).ok();
             commit_authorship_cache.insert(hunk.commit_sha.clone(), authorship.clone());
             authorship
         };
@@ -860,7 +854,7 @@ fn overlay_ai_authorship(
                         // Track that this prompt hash appears in this commit
                         prompt_commits
                             .entry(prompt_hash.clone())
-                            .or_insert_with(std::collections::HashSet::new)
+                            .or_default()
                             .insert(hunk.commit_sha.clone());
                         if options.use_prompt_hashes_as_names {
                             line_authors.insert(current_line_num, prompt_hash.clone());
@@ -1762,8 +1756,7 @@ pub fn parse_blame_args(args: &[String]) -> Result<(String, GitAiBlameOptions), 
                     DateTime::parse_from_rfc3339(&args[i + 1])
                         .map_err(|e| {
                             GitAiError::Generic(format!("Invalid date format for --since: {}", e))
-                        })?
-                        .into(),
+                        })?,
                 );
                 i += 2;
             }

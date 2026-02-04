@@ -114,6 +114,7 @@ impl ApiContext {
 
     /// Create a new API context explicitly without authentication
     /// Use this when you need to ensure no auth token is sent
+    #[allow(dead_code)]
     pub fn without_auth(base_url: Option<String>) -> Self {
         let cfg = config::Config::get();
         Self {
@@ -126,6 +127,7 @@ impl ApiContext {
 
     /// Create a new API context with authentication
     /// If base_url is None, uses api_base_url from config (which can be set via config file, env var, or defaults)
+    #[allow(dead_code)]
     pub fn with_auth(base_url: Option<String>, auth_token: String) -> Self {
         let cfg = config::Config::get();
         Self {
@@ -234,6 +236,7 @@ impl ApiClient {
     }
 
     /// Get a mutable reference to the API context
+    #[allow(dead_code)]
     pub fn context_mut(&mut self) -> &mut ApiContext {
         &mut self.context
     }

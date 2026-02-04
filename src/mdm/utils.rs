@@ -128,6 +128,7 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> Result<(), GitAiError> {
 }
 
 /// Ensure parent directory exists
+#[allow(dead_code)]
 pub fn ensure_parent_dir(path: &Path) -> Result<(), GitAiError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -407,11 +408,10 @@ pub fn update_git_path_setting(
     let diff_output = generate_diff(settings_path, &original, &new_content);
 
     if !dry_run {
-        if let Some(parent) = settings_path.parent() {
-            if !parent.exists() {
+        if let Some(parent) = settings_path.parent()
+            && !parent.exists() {
                 fs::create_dir_all(parent)?;
             }
-        }
         write_atomic(settings_path, new_content.as_bytes())?;
     }
 

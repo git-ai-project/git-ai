@@ -59,7 +59,7 @@ pub fn fetch_authorship_notes(
     remote_name: &str,
 ) -> Result<NotesExistence, GitAiError> {
     // Generate tracking ref for this remote
-    let tracking_ref = tracking_ref_for_remote(&remote_name);
+    let tracking_ref = tracking_ref_for_remote(remote_name);
 
     debug_log(&format!(
         "fetching authorship notes for remote '{}' to tracking ref '{}'",
@@ -145,14 +145,14 @@ pub fn fetch_authorship_notes(
     // After successful fetch, merge the tracking ref into refs/notes/ai
     let local_notes_ref = "refs/notes/ai";
 
-    if crate::git::refs::ref_exists(&repository, &tracking_ref) {
-        if crate::git::refs::ref_exists(&repository, local_notes_ref) {
+    if crate::git::refs::ref_exists(repository, &tracking_ref) {
+        if crate::git::refs::ref_exists(repository, local_notes_ref) {
             // Both exist - merge them
             debug_log(&format!(
                 "merging authorship notes from {} into {}",
                 tracking_ref, local_notes_ref
             ));
-            if let Err(e) = merge_notes_from_ref(&repository, &tracking_ref) {
+            if let Err(e) = merge_notes_from_ref(repository, &tracking_ref) {
                 debug_log(&format!("notes merge failed: {}", e));
                 // Don't fail on merge errors, just log and continue
             }
@@ -162,7 +162,7 @@ pub fn fetch_authorship_notes(
                 "initializing {} from tracking ref {}",
                 local_notes_ref, tracking_ref
             ));
-            if let Err(e) = copy_ref(&repository, &tracking_ref, local_notes_ref) {
+            if let Err(e) = copy_ref(repository, &tracking_ref, local_notes_ref) {
                 debug_log(&format!("notes copy failed: {}", e));
                 // Don't fail on copy errors, just log and continue
             }
@@ -180,7 +180,7 @@ pub fn fetch_authorship_notes(
 pub fn push_authorship_notes(repository: &Repository, remote_name: &str) -> Result<(), GitAiError> {
     // STEP 1: Fetch remote notes into tracking ref and merge before pushing
     // This ensures we don't lose notes from other branches/clones
-    let tracking_ref = tracking_ref_for_remote(&remote_name);
+    let tracking_ref = tracking_ref_for_remote(remote_name);
     let fetch_refspec = format!("+refs/notes/ai:{}", tracking_ref);
 
     let mut fetch_before_push: Vec<String> = repository.global_args_for_exec();

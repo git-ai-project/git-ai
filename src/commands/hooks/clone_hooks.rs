@@ -41,9 +41,9 @@ pub fn post_clone_hook(parsed_args: &ParsedGitInvocation, exit_status: std::proc
     // Fetch authorship notes from origin
     if let Err(e) = fetch_authorship_notes(&repository, "origin") {
         debug_log(&format!("authorship fetch from origin failed: {}", e));
-        print!(", failed.\n");
+        println!(", failed.");
     } else {
         debug_log("successfully fetched authorship notes from origin");
-        print!(", done.\n");
+        println!(", done.");
     }
 }

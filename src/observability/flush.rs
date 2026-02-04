@@ -183,11 +183,9 @@ pub fn handle_flush_logs(args: &[String]) {
     let mut events_sent = 0;
     let mut files_to_delete = Vec::new();
 
-    for result in results {
-        if let Some((log_file, count)) = result {
-            events_sent += count;
-            files_to_delete.push(log_file);
-        }
+    for (log_file, count) in results.into_iter().flatten() {
+        events_sent += count;
+        files_to_delete.push(log_file);
     }
 
     eprintln!(
@@ -223,15 +221,12 @@ fn cleanup_old_logs(logs_dir: &PathBuf) {
 
     // Collect all log files with their metadata
     let mut log_files: Vec<(PathBuf, fs::Metadata)> = Vec::new();
-    for entry in entries {
-        if let Ok(entry) = entry {
-            let path = entry.path();
-            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("log") {
-                if let Ok(metadata) = entry.metadata() {
-                    log_files.push((path, metadata));
-                }
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("log")
+            && let Ok(metadata) = entry.metadata() {
+                log_files.push((path, metadata));
             }
-        }
     }
 
     // Only clean up if count > 100
@@ -249,18 +244,16 @@ fn cleanup_old_logs(logs_dir: &PathBuf) {
     // Delete logs older than a week
     for (path, metadata) in log_files {
         if let Ok(modified) = metadata.modified() {
-            if let Ok(modified_secs) = modified.duration_since(UNIX_EPOCH) {
-                if modified_secs.as_secs() < one_week_ago {
+            if let Ok(modified_secs) = modified.duration_since(UNIX_EPOCH)
+                && modified_secs.as_secs() < one_week_ago {
                     let _ = fs::remove_file(&path);
                 }
-            }
         } else if let Ok(created) = metadata.created() {
             // Fallback to creation time if modification time is not available
-            if let Ok(created_secs) = created.duration_since(UNIX_EPOCH) {
-                if created_secs.as_secs() < one_week_ago {
+            if let Ok(created_secs) = created.duration_since(UNIX_EPOCH)
+                && created_secs.as_secs() < one_week_ago {
                     let _ = fs::remove_file(&path);
                 }
-            }
         }
     }
 }
@@ -330,7 +323,7 @@ impl SentryClient {
             })
             .unwrap_or_else(|| "unknown".to_string());
 
-        if status >= 200 && status < 300 {
+        if (200..300).contains(&status) {
             Ok(event_id)
         } else {
             Err(format!("Sentry returned status {}", status).into())
@@ -354,7 +347,7 @@ impl PostHogClient {
 
         let status = response.status_code;
 
-        if status >= 200 && status < 300 {
+        if (200..300).contains(&status) {
             Ok(())
         } else {
             Err(format!("PostHog returned status {}", status).into())
@@ -395,6 +388,7 @@ fn initialize_sentry_clients(
     (oss_client, enterprise_client)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_log_file(
     path: &PathBuf,
     oss_client: &Option<SentryClient>,
@@ -413,47 +407,41 @@ fn process_log_file(
             continue;
         }
 
-        match serde_json::from_str::<Value>(line) {
-            Ok(envelope) => {
-                let event_type = envelope.get("type").and_then(|t| t.as_str());
-                let mut sent = false;
+        if let Ok(envelope) = serde_json::from_str::<Value>(line) {
+            let event_type = envelope.get("type").and_then(|t| t.as_str());
+            let mut sent = false;
 
-                // Handle metrics envelopes specially - send to API (always, even in dev builds)
-                if event_type == Some("metrics") {
-                    if send_metrics_envelope(&envelope, metrics_uploader) {
+            // Handle metrics envelopes specially - send to API (always, even in dev builds)
+            if event_type == Some("metrics") {
+                if send_metrics_envelope(&envelope, metrics_uploader) {
+                    sent = true;
+                }
+            } else if !skip_non_metrics {
+                // Only send error/performance/message envelopes if not in dev mode
+                // (or if --force was passed)
+
+                // Send to OSS if configured
+                if let Some(client) = oss_client
+                    && send_envelope_to_sentry(&envelope, client, remotes_info, distinct_id) {
                         sent = true;
                     }
-                } else if !skip_non_metrics {
-                    // Only send error/performance/message envelopes if not in dev mode
-                    // (or if --force was passed)
 
-                    // Send to OSS if configured
-                    if let Some(client) = oss_client {
-                        if send_envelope_to_sentry(&envelope, client, remotes_info, distinct_id) {
-                            sent = true;
-                        }
+                // Send to Enterprise if configured
+                if let Some(client) = enterprise_client
+                    && send_envelope_to_sentry(&envelope, client, remotes_info, distinct_id) {
+                        sent = true;
                     }
 
-                    // Send to Enterprise if configured
-                    if let Some(client) = enterprise_client {
-                        if send_envelope_to_sentry(&envelope, client, remotes_info, distinct_id) {
-                            sent = true;
-                        }
+                // Send to PostHog if configured
+                if let Some(client) = posthog_client
+                    && send_envelope_to_posthog(&envelope, client, remotes_info, distinct_id) {
+                        sent = true;
                     }
-
-                    // Send to PostHog if configured
-                    if let Some(client) = posthog_client {
-                        if send_envelope_to_posthog(&envelope, client, remotes_info, distinct_id) {
-                            sent = true;
-                        }
-                    }
-                }
-
-                if sent {
-                    count += 1;
-                }
             }
-            Err(_) => {}
+
+            if sent {
+                count += 1;
+            }
         }
     }
 
@@ -490,13 +478,12 @@ fn send_envelope_to_sentry(
             let context = envelope.get("context");
 
             let mut extra = BTreeMap::new();
-            if let Some(ctx) = context {
-                if let Some(obj) = ctx.as_object() {
+            if let Some(ctx) = context
+                && let Some(obj) = ctx.as_object() {
                     for (key, value) in obj {
                         extra.insert(key.clone(), value.clone());
                     }
                 }
-            }
 
             json!({
                 "message": message,
@@ -522,13 +509,12 @@ fn send_envelope_to_sentry(
             let mut extra = BTreeMap::new();
             extra.insert("operation".to_string(), json!(operation));
             extra.insert("duration_ms".to_string(), json!(duration_ms));
-            if let Some(ctx) = context {
-                if let Some(obj) = ctx.as_object() {
+            if let Some(ctx) = context
+                && let Some(obj) = ctx.as_object() {
                     for (key, value) in obj {
                         extra.insert(key.clone(), value.clone());
                     }
                 }
-            }
 
             json!({
                 "message": format!("Performance: {} ({}ms)", operation, duration_ms),
@@ -552,13 +538,12 @@ fn send_envelope_to_sentry(
             let context = envelope.get("context");
 
             let mut extra = BTreeMap::new();
-            if let Some(ctx) = context {
-                if let Some(obj) = ctx.as_object() {
+            if let Some(ctx) = context
+                && let Some(obj) = ctx.as_object() {
                     for (key, value) in obj {
                         extra.insert(key.clone(), value.clone());
                     }
                 }
-            }
 
             json!({
                 "message": message,
@@ -575,10 +560,7 @@ fn send_envelope_to_sentry(
         }
     };
 
-    match client.send_event(event) {
-        Ok(_) => true,
-        Err(_) => false,
-    }
+    client.send_event(event).is_ok()
 }
 
 fn send_envelope_to_posthog(
@@ -619,13 +601,12 @@ fn send_envelope_to_posthog(
     properties.insert("message".to_string(), json!(message));
     properties.insert("level".to_string(), json!(level));
 
-    if let Some(ctx) = context {
-        if let Some(obj) = ctx.as_object() {
+    if let Some(ctx) = context
+        && let Some(obj) = ctx.as_object() {
             for (key, value) in obj {
                 properties.insert(key.clone(), value.clone());
             }
         }
-    }
 
     let mut event = json!({
         "api_key": client.api_key,
@@ -638,10 +619,7 @@ fn send_envelope_to_posthog(
         event["timestamp"] = json!(ts);
     }
 
-    match client.send_event(event) {
-        Ok(_) => true,
-        Err(_) => false,
-    }
+    client.send_event(event).is_ok()
 }
 
 /// Sanitize git URLs by replacing passwords with asterisks
@@ -691,8 +669,8 @@ fn send_metrics_envelope(envelope: &Value, uploader: &MetricsUploader) -> bool {
     // Build batch for upload
     let batch = MetricsBatch::new(events.clone());
 
-    if uploader.should_upload {
-        if let Some(client) = &uploader.client {
+    if uploader.should_upload
+        && let Some(client) = &uploader.client {
             // Try to upload via API
             match upload_metrics_with_retry(client, &batch, "flush_logs") {
                 Ok(()) => return true,
@@ -703,7 +681,6 @@ fn send_metrics_envelope(envelope: &Value, uploader: &MetricsUploader) -> bool {
                 }
             }
         }
-    }
 
     // Conditions not met - store in DB for later
     store_metrics_in_db(&events);

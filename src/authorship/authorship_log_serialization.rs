@@ -189,7 +189,7 @@ impl AuthorshipLog {
     pub fn _serialize_to_writer<W: Write>(&self, mut writer: W) -> std::io::Result<()> {
         let content = self
             .serialize_to_string()
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "Serialization failed"))?;
+            .map_err(|_| std::io::Error::other("Serialization failed"))?;
         writer.write_all(content.as_bytes())?;
         Ok(())
     }
@@ -351,7 +351,7 @@ impl AuthorshipLog {
             for entry in &file_attestation.entries {
                 session_lines
                     .entry(entry.hash.clone())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .extend(entry.line_ranges.clone());
             }
 
@@ -569,9 +569,9 @@ fn parse_attestation_section(
             continue;
         }
 
-        if line.starts_with("  ") {
+        if let Some(entry_line) = line.strip_prefix("  ") {
             // Attestation entry line (indented)
-            let entry_line = &line[2..]; // Remove "  " prefix
+            // Remove "  " prefix
 
             // Split on first space to separate hash from line ranges
             if let Some(space_pos) = entry_line.find(' ') {
@@ -591,11 +591,10 @@ fn parse_attestation_section(
             }
         } else {
             // File path line (not indented)
-            if let Some(file_attestation) = current_file.take() {
-                if !file_attestation.entries.is_empty() {
+            if let Some(file_attestation) = current_file.take()
+                && !file_attestation.entries.is_empty() {
                     attestations.push(file_attestation);
                 }
-            }
 
             // Parse file path, handling quoted paths
             let file_path = if line.starts_with('"') && line.ends_with('"') {
@@ -611,11 +610,10 @@ fn parse_attestation_section(
     }
 
     // Don't forget the last file
-    if let Some(file_attestation) = current_file {
-        if !file_attestation.entries.is_empty() {
+    if let Some(file_attestation) = current_file
+        && !file_attestation.entries.is_empty() {
             attestations.push(file_attestation);
         }
-    }
 
     Ok(attestations)
 }
@@ -767,7 +765,7 @@ mod tests {
         log.metadata.prompts.insert(
             prompt_hash.clone(),
             crate::authorship::authorship_log::PromptRecord {
-                agent_id: agent_id,
+                agent_id,
                 human_author: None,
                 messages: vec![],
                 total_additions: 0,
@@ -834,7 +832,7 @@ mod tests {
         log.metadata.prompts.insert(
             prompt_hash.clone(),
             crate::authorship::authorship_log::PromptRecord {
-                agent_id: agent_id,
+                agent_id,
                 human_author: None,
                 messages: vec![],
                 total_additions: 0,
@@ -883,7 +881,7 @@ mod tests {
         log.metadata.prompts.insert(
             prompt_hash,
             crate::authorship::authorship_log::PromptRecord {
-                agent_id: agent_id,
+                agent_id,
                 human_author: None,
                 messages: vec![],
                 total_additions: 0,

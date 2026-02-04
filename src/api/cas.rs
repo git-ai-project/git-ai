@@ -23,7 +23,7 @@ impl ApiClient {
         match status_code {
             200 => {
                 let cas_response: CasUploadResponse =
-                    serde_json::from_str(body).map_err(|e| GitAiError::JsonError(e))?;
+                    serde_json::from_str(body).map_err(GitAiError::JsonError)?;
                 Ok(cas_response)
             }
             400 => {

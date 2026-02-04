@@ -144,7 +144,7 @@ fn semver_from_tag(tag: &str) -> String {
         .trim_start_matches("enterprise-")
         .trim_start_matches('v');
     trimmed
-        .split(|c| c == '-' || c == '+')
+        .split(['-', '+'])
         .next()
         .unwrap_or("")
         .to_string()
@@ -688,13 +688,11 @@ pub fn maybe_schedule_background_update_check() {
     let channel = config.update_channel();
     let cache = read_update_cache();
 
-    if config.auto_updates_disabled() {
-        if let Some(cache) = cache.as_ref() {
-            if cache.matches_channel(channel) && cache.update_available() {
+    if config.auto_updates_disabled()
+        && let Some(cache) = cache.as_ref()
+            && cache.matches_channel(channel) && cache.update_available() {
                 print_cached_notice(cache);
             }
-        }
-    }
 
     if !should_check_for_updates(channel, cache.as_ref()) {
         return;

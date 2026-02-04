@@ -85,14 +85,13 @@ pub fn find_prompt_in_history(
     // Iterate through commits, looking for the prompt and counting occurrences
     let mut found_count = 0;
     for sha in &shas {
-        if let Some(authorship_log) = get_authorship(repo, sha) {
-            if let Some(prompt) = authorship_log.metadata.prompts.get(prompt_id) {
+        if let Some(authorship_log) = get_authorship(repo, sha)
+            && let Some(prompt) = authorship_log.metadata.prompts.get(prompt_id) {
                 if found_count == offset {
                     return Ok((sha.clone(), prompt.clone()));
                 }
                 found_count += 1;
             }
-        }
     }
 
     // If we get here, we didn't find enough occurrences
@@ -467,10 +466,10 @@ fn update_opencode_prompt(
     // Check for test storage path override in metadata or env var
     let storage_path = if let Ok(env_path) = std::env::var("GIT_AI_OPENCODE_STORAGE_PATH") {
         Some(std::path::PathBuf::from(env_path))
-    } else if let Some(test_path) = metadata.and_then(|m| m.get("__test_storage_path")) {
-        Some(std::path::PathBuf::from(test_path))
     } else {
-        None
+        metadata
+            .and_then(|m| m.get("__test_storage_path"))
+            .map(std::path::PathBuf::from)
     };
 
     let result = if let Some(path) = storage_path {

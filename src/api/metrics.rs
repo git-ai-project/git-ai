@@ -28,6 +28,7 @@ pub struct MetricsUploadResponse {
 
 impl MetricsUploadResponse {
     /// Get indices of successfully uploaded events
+    #[allow(dead_code)]
     pub fn successful_indices(&self, batch_size: usize) -> Vec<usize> {
         let error_indices: std::collections::HashSet<_> =
             self.errors.iter().map(|e| e.index).collect();
@@ -114,7 +115,7 @@ impl ApiClient {
         match status_code {
             200 => {
                 let metrics_response: MetricsUploadResponse =
-                    serde_json::from_str(body).map_err(|e| GitAiError::JsonError(e))?;
+                    serde_json::from_str(body).map_err(GitAiError::JsonError)?;
                 Ok(metrics_response)
             }
             400 => {

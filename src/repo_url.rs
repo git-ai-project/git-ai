@@ -7,13 +7,11 @@ pub fn normalize_repo_url(url_str: &str) -> Result<String, String> {
     let url_str = url_str.trim();
 
     // Handle SSH scp-like format: user@host:path
-    if !url_str.contains("://") {
-        if let Some((user_host, path)) = url_str.split_once(':') {
-            if let Some((_, host)) = user_host.rsplit_once('@') {
+    if !url_str.contains("://")
+        && let Some((user_host, path)) = url_str.split_once(':')
+            && let Some((_, host)) = user_host.rsplit_once('@') {
                 return normalize_ssh_url(host, path);
             }
-        }
-    }
 
     // Parse as URL
     let url = Url::parse(url_str).map_err(|e| format!("Invalid URL: {}", e))?;

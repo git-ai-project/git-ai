@@ -646,7 +646,7 @@ mod tests {
             vec!["ghi789".to_string()],
         ));
 
-        let initial_jsonl = serialize_events_to_jsonl(&[event1.clone()]).unwrap();
+        let initial_jsonl = serialize_events_to_jsonl(std::slice::from_ref(&event1)).unwrap();
         // Test with temp file
         let temp_file = std::env::temp_dir().join("test_rewrite_log.jsonl");
         std::fs::write(&temp_file, &initial_jsonl).unwrap();

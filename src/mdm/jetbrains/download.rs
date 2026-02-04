@@ -82,8 +82,8 @@ pub fn install_plugin_to_directory(zip_data: &[u8], plugin_dir: &Path) -> Result
             })?;
         } else {
             // File entry
-            if let Some(parent) = outpath.parent() {
-                if !parent.exists() {
+            if let Some(parent) = outpath.parent()
+                && !parent.exists() {
                     std::fs::create_dir_all(parent).map_err(|e| {
                         GitAiError::Generic(format!(
                             "Failed to create parent directory {}: {}",
@@ -92,7 +92,6 @@ pub fn install_plugin_to_directory(zip_data: &[u8], plugin_dir: &Path) -> Result
                         ))
                     })?;
                 }
-            }
 
             let mut outfile = std::fs::File::create(&outpath).map_err(|e| {
                 GitAiError::Generic(format!("Failed to create file {}: {}", outpath.display(), e))

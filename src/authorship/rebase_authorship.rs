@@ -433,11 +433,10 @@ pub fn rewrite_authorship_after_rebase_v2(
         let mut attrs = HashMap::new();
         let mut contents = HashMap::new();
         for file in current_va.files() {
-            if let Some(char_attrs) = current_va.get_char_attributions(&file) {
-                if let Some(line_attrs) = current_va.get_line_attributions(&file) {
+            if let Some(char_attrs) = current_va.get_char_attributions(&file)
+                && let Some(line_attrs) = current_va.get_line_attributions(&file) {
                     attrs.insert(file.clone(), (char_attrs.clone(), line_attrs.clone()));
                 }
-            }
             if let Some(content) = current_va.get_file_content(&file) {
                 contents.insert(file, content.clone());
             }
@@ -628,11 +627,10 @@ pub fn rewrite_authorship_after_cherry_pick(
         let mut attrs = HashMap::new();
         let mut contents = HashMap::new();
         for file in current_va.files() {
-            if let Some(char_attrs) = current_va.get_char_attributions(&file) {
-                if let Some(line_attrs) = current_va.get_line_attributions(&file) {
+            if let Some(char_attrs) = current_va.get_char_attributions(&file)
+                && let Some(line_attrs) = current_va.get_line_attributions(&file) {
                     attrs.insert(file.clone(), (char_attrs.clone(), line_attrs.clone()));
                 }
-            }
             if let Some(content) = current_va.get_file_content(&file) {
                 contents.insert(file, content.clone());
             }
@@ -1144,15 +1142,14 @@ fn transform_attributions_to_final_state(
             if let (Some(src_attrs), Some(src_content)) = (
                 source_va.get_char_attributions(&file_path),
                 source_va.get_file_content(&file_path),
-            ) {
-                if let Some(src_line_attrs) = source_va.get_line_attributions(&file_path) {
+            )
+                && let Some(src_line_attrs) = source_va.get_line_attributions(&file_path) {
                     attributions.insert(
                         file_path.clone(),
                         (src_attrs.clone(), src_line_attrs.clone()),
                     );
                     file_contents.insert(file_path, src_content.clone());
                 }
-            }
             continue;
         }
 
@@ -1167,19 +1164,18 @@ fn transform_attributions_to_final_state(
             // Use a dummy author for new insertions
             let dummy_author = "__DUMMY__";
 
-            let transformed =
-                tracker.update_attributions(content, &final_content, attrs, dummy_author, ts)?;
+            
 
             // Keep all attributions initially (including dummy ones)
-            transformed
+            tracker.update_attributions(content, &final_content, attrs, dummy_author, ts)?
         } else {
             Vec::new()
         };
 
         // Try to restore attributions from original_head_state using line-content matching
         // This handles commit splitting where content from original_head gets re-applied
-        if let Some(original_state) = original_head_state {
-            if let Some(original_content) = original_state.get_file_content(&file_path) {
+        if let Some(original_state) = original_head_state
+            && let Some(original_content) = original_state.get_file_content(&file_path) {
                 if original_content == &final_content {
                     // The final content matches the original content exactly!
                     // Use the original attributions
@@ -1262,14 +1258,10 @@ fn transform_attributions_to_final_state(
                     }
                 }
             }
-        }
 
         // Now filter out any remaining dummy attributions
         let dummy_author = "__DUMMY__";
-        transformed_attrs = transformed_attrs
-            .into_iter()
-            .filter(|attr| attr.author_id != dummy_author)
-            .collect();
+        transformed_attrs.retain(|attr| attr.author_id != dummy_author);
 
         // Convert to line attributions
         let line_attrs = crate::authorship::attribution_tracker::attributions_to_line_attributions(

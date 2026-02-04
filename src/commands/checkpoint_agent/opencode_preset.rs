@@ -69,6 +69,7 @@ struct ToolState {
 /// Part content from part/{msg_id}/{prt_id}.json
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
+#[allow(clippy::large_enum_variant)]
 enum OpenCodePart {
     Text {
         #[serde(rename = "messageID")]
@@ -372,10 +373,10 @@ impl OpenCodePreset {
         })?;
 
         for entry in entries {
-            let entry = entry.map_err(|e| GitAiError::IoError(e))?;
+            let entry = entry.map_err(GitAiError::IoError)?;
             let path = entry.path();
 
-            if path.extension().map_or(false, |ext| ext == "json") {
+            if path.extension().is_some_and(|ext| ext == "json") {
                 match std::fs::read_to_string(&path) {
                     Ok(content) => {
                         match serde_json::from_str::<OpenCodeMessage>(&content) {
@@ -418,10 +419,10 @@ impl OpenCodePreset {
         })?;
 
         for entry in entries {
-            let entry = entry.map_err(|e| GitAiError::IoError(e))?;
+            let entry = entry.map_err(GitAiError::IoError)?;
             let path = entry.path();
 
-            if path.extension().map_or(false, |ext| ext == "json") {
+            if path.extension().is_some_and(|ext| ext == "json") {
                 match std::fs::read_to_string(&path) {
                     Ok(content) => {
                         match serde_json::from_str::<OpenCodePart>(&content) {

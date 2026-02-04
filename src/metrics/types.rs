@@ -26,6 +26,7 @@ pub enum MetricEventId {
 pub trait EventValues: Sized {
     fn event_id() -> MetricEventId;
     fn to_sparse(&self) -> SparseArray;
+    #[allow(dead_code)]
     fn from_sparse(arr: &SparseArray) -> Self;
 }
 
@@ -58,6 +59,7 @@ impl MetricEvent {
     }
 
     /// Create with explicit timestamp (for deserialization/testing).
+    #[allow(dead_code)]
     pub fn with_timestamp<V: EventValues>(timestamp: u32, values: &V, attrs: SparseArray) -> Self {
         Self {
             timestamp,

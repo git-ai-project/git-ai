@@ -18,6 +18,7 @@ pub type PosField<T> = Option<Option<T>>;
 /// Trait for types that can be position-encoded.
 pub trait PosEncoded: Sized + Default {
     fn to_sparse(&self) -> SparseArray;
+    #[allow(dead_code)]
     fn from_sparse(arr: &SparseArray) -> Self;
 }
 
@@ -50,6 +51,7 @@ pub fn u64_to_json(field: &PosField<u64>) -> Option<Value> {
 }
 
 /// Get a string field from a sparse array at a position.
+#[allow(dead_code)]
 pub fn sparse_get_string(arr: &SparseArray, pos: usize) -> PosField<String> {
     match arr.get(&pos.to_string()) {
         None => None, // not-set
@@ -60,6 +62,7 @@ pub fn sparse_get_string(arr: &SparseArray, pos: usize) -> PosField<String> {
 }
 
 /// Get a u32 field from a sparse array at a position.
+#[allow(dead_code)]
 pub fn sparse_get_u32(arr: &SparseArray, pos: usize) -> PosField<u32> {
     match arr.get(&pos.to_string()) {
         None => None,
@@ -76,11 +79,12 @@ pub fn sparse_get_u32(arr: &SparseArray, pos: usize) -> PosField<u32> {
 }
 
 /// Get a u64 field from a sparse array at a position.
+#[allow(dead_code)]
 pub fn sparse_get_u64(arr: &SparseArray, pos: usize) -> PosField<u64> {
     match arr.get(&pos.to_string()) {
         None => None,
         Some(Value::Null) => Some(None),
-        Some(Value::Number(n)) => n.as_u64().map(|v| Some(v)),
+        Some(Value::Number(n)) => n.as_u64().map(Some),
         Some(_) => None,
     }
 }
@@ -119,6 +123,7 @@ pub fn vec_u64_to_json(field: &PosField<Vec<u64>>) -> Option<Value> {
 }
 
 /// Get a Vec<String> field from a sparse array at a position.
+#[allow(dead_code)]
 pub fn sparse_get_vec_string(arr: &SparseArray, pos: usize) -> PosField<Vec<String>> {
     match arr.get(&pos.to_string()) {
         None => None,
@@ -135,6 +140,7 @@ pub fn sparse_get_vec_string(arr: &SparseArray, pos: usize) -> PosField<Vec<Stri
 }
 
 /// Get a Vec<u32> field from a sparse array at a position.
+#[allow(dead_code)]
 pub fn sparse_get_vec_u32(arr: &SparseArray, pos: usize) -> PosField<Vec<u32>> {
     match arr.get(&pos.to_string()) {
         None => None,
@@ -157,6 +163,7 @@ pub fn sparse_get_vec_u32(arr: &SparseArray, pos: usize) -> PosField<Vec<u32>> {
 }
 
 /// Get a Vec<u64> field from a sparse array at a position.
+#[allow(dead_code)]
 pub fn sparse_get_vec_u64(arr: &SparseArray, pos: usize) -> PosField<Vec<u64>> {
     match arr.get(&pos.to_string()) {
         None => None,
@@ -360,13 +367,6 @@ macro_rules! from_sparse_typed {
         $crate::metrics::pos_encoded::sparse_get_u64($arr, $pos)
     };
 }
-
-// Re-export helper macros for use by other modules
-pub use crate::from_sparse_typed;
-pub use crate::impl_builder;
-pub use crate::pos_encoded;
-pub use crate::pos_encoded_values;
-pub use crate::to_json_typed;
 
 #[cfg(test)]
 mod tests {

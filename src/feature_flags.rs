@@ -59,12 +59,14 @@ define_feature_flags!(
 
 impl FeatureFlags {
     /// Build FeatureFlags from deserializable config
+    #[allow(dead_code)]
     fn from_deserializable(flags: DeserializableFeatureFlags) -> Self {
         Self::merge_with(FeatureFlags::default(), flags)
     }
 
     /// Build FeatureFlags from file configuration
     /// Falls back to defaults for any invalid or missing values
+    #[allow(dead_code)]
     pub(crate) fn from_file_config(file_flags: Option<DeserializableFeatureFlags>) -> Self {
         match file_flags {
             Some(flags) => Self::from_deserializable(flags),
@@ -76,6 +78,7 @@ impl FeatureFlags {
     /// Reads from GIT_AI_* prefixed environment variables
     /// Example: GIT_AI_REWRITE_STASH=true, GIT_AI_CHECKPOINT_INTER_COMMIT_MOVE=false
     /// Falls back to defaults for any invalid or missing values
+    #[allow(dead_code)]
     pub fn from_env() -> Self {
         let env_flags: DeserializableFeatureFlags =
             envy::prefixed("GIT_AI_").from_env().unwrap_or_default();
@@ -87,7 +90,7 @@ impl FeatureFlags {
     /// - Starts with defaults
     /// - Applies file config overrides if present
     /// - Applies environment variable overrides if present (highest priority)
-    pub fn from_env_and_file(file_flags: Option<DeserializableFeatureFlags>) -> Self {
+    pub(crate) fn from_env_and_file(file_flags: Option<DeserializableFeatureFlags>) -> Self {
         // Start with defaults
         let mut result = FeatureFlags::default();
 

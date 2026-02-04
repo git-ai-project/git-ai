@@ -7,6 +7,7 @@ use std::fs;
 /// Embedded command files - each command has a name, description, and its .md content
 struct EmbeddedCommand {
     name: &'static str,
+    #[allow(dead_code)]
     description: &'static str,
     command_md: &'static str,
 }
@@ -107,6 +108,7 @@ pub struct SkillsInstallResult {
     /// Whether any changes were made
     pub changed: bool,
     /// Number of skills installed
+    #[allow(dead_code)]
     pub installed_count: usize,
 }
 

@@ -85,7 +85,7 @@ fn resolve_path_to_remotes(path: &str) -> Result<Vec<String>, String> {
 
 fn print_config_help() {
     eprintln!("git-ai config - View and manage git-ai configuration");
-    eprintln!("");
+    eprintln!();
     eprintln!("Usage:");
     eprintln!("  git-ai config                Show all config as formatted JSON");
     eprintln!("  git-ai config <key>          Show specific config value");
@@ -93,7 +93,7 @@ fn print_config_help() {
     eprintln!("  git-ai config set <key> <value> --add    Add to array (extends existing)");
     eprintln!("  git-ai config --add <key> <value>        Add to array or upsert into object");
     eprintln!("  git-ai config unset <key>    Remove config value (reverts to default)");
-    eprintln!("");
+    eprintln!();
     eprintln!("Configuration Keys:");
     eprintln!("  git_path                     Path to git binary");
     eprintln!("  exclude_prompts_in_repositories  Repos to exclude prompts from (array)");
@@ -110,13 +110,13 @@ fn print_config_help() {
     eprintln!("  include_prompts_in_repositories  Repos to include for prompt storage (array)");
     eprintln!("  default_prompt_storage       Fallback storage mode for non-included repos");
     eprintln!("  quiet                        Suppress chart output after commits (bool)");
-    eprintln!("");
+    eprintln!();
     eprintln!("Repository Patterns:");
     eprintln!("  For exclude/allow/exclude_prompts_in_repositories, you can provide:");
     eprintln!("    - A glob pattern: \"*\", \"https://github.com/org/*\"");
     eprintln!("    - A URL/git protocol: \"git@github.com:org/repo.git\"");
     eprintln!("    - A file path: \".\" or \"/path/to/repo\" (resolves to repo's remotes)");
-    eprintln!("");
+    eprintln!();
     eprintln!("Examples:");
     eprintln!("  git-ai config exclude_repositories");
     eprintln!("  git-ai config set disable_auto_updates true");
@@ -126,7 +126,7 @@ fn print_config_help() {
     eprintln!("  git-ai config --add allow_repositories ~/projects/my-repo");
     eprintln!("  git-ai config --add feature_flags.my_flag true");
     eprintln!("  git-ai config unset exclude_repositories");
-    eprintln!("");
+    eprintln!();
     std::process::exit(0);
 }
 
@@ -423,7 +423,7 @@ fn get_config_value(key: &str) -> Result<(), String> {
         return Ok(());
     }
 
-    Err(format!("Nested keys are only supported for feature_flags"))
+    Err("Nested keys are only supported for feature_flags".to_string())
 }
 
 fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String> {
@@ -490,9 +490,7 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
             "update_channel" => {
                 // Validate update channel
                 if value != "latest" && value != "next" {
-                    return Err(format!(
-                        "Invalid update_channel value. Expected 'latest' or 'next'"
-                    ));
+                    return Err("Invalid update_channel value. Expected 'latest' or 'next'".to_string());
                 }
                 file_config.update_channel = Some(value.to_string());
                 crate::config::save_file_config(&file_config)?;
@@ -612,7 +610,7 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
         return Ok(());
     }
 
-    Err(format!("Nested keys are only supported for feature_flags"))
+    Err("Nested keys are only supported for feature_flags".to_string())
 }
 
 fn unset_config_value(key: &str) -> Result<(), String> {
@@ -787,7 +785,7 @@ fn unset_config_value(key: &str) -> Result<(), String> {
         return Ok(());
     }
 
-    Err(format!("Nested keys are only supported for feature_flags"))
+    Err("Nested keys are only supported for feature_flags".to_string())
 }
 
 fn parse_key_path(key: &str) -> Vec<String> {
@@ -796,9 +794,10 @@ fn parse_key_path(key: &str) -> Vec<String> {
 
 /// Set array field for repository patterns (exclude_repositories, allow_repositories, exclude_prompts_in_repositories)
 /// This function handles the special logic of detecting if a value is:
-/// - A global wildcard pattern like "*"
-/// - A URL or git protocol pattern
-/// - A file path that should be resolved to repository remotes
+///  - A global wildcard pattern like "*"
+///  - A URL or git protocol pattern
+///  - A file path that should be resolved to repository remotes
+///
 /// Returns the values that were added/set for logging purposes
 fn set_repository_array_field(
     field: &mut Option<Vec<String>>,
@@ -864,6 +863,7 @@ fn resolve_repository_value(value: &str) -> Result<Vec<String>, String> {
 
 /// Log array changes with + prefix for add mode, or just list items for set mode
 fn log_array_changes(items: &[String], add_mode: bool) {
+    #[allow(clippy::if_same_then_else)]
     if add_mode {
         for item in items {
             eprintln!("+ {}", item);

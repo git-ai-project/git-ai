@@ -48,6 +48,7 @@ pub struct EventAttributes {
 }
 
 impl EventAttributes {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self::default()
     }
@@ -61,11 +62,13 @@ impl EventAttributes {
     }
 
     // Builder methods for git_ai_version
+    #[allow(dead_code)]
     pub fn git_ai_version(mut self, value: impl Into<String>) -> Self {
         self.git_ai_version = Some(Some(value.into()));
         self
     }
 
+    #[allow(dead_code)]
     pub fn git_ai_version_null(mut self) -> Self {
         self.git_ai_version = Some(None);
         self
@@ -77,6 +80,7 @@ impl EventAttributes {
         self
     }
 
+    #[allow(dead_code)]
     pub fn repo_url_null(mut self) -> Self {
         self.repo_url = Some(None);
         self
@@ -88,6 +92,7 @@ impl EventAttributes {
         self
     }
 
+    #[allow(dead_code)]
     pub fn author_null(mut self) -> Self {
         self.author = Some(None);
         self
@@ -99,6 +104,7 @@ impl EventAttributes {
         self
     }
 
+    #[allow(dead_code)]
     pub fn commit_sha_null(mut self) -> Self {
         self.commit_sha = Some(None);
         self
@@ -110,6 +116,7 @@ impl EventAttributes {
         self
     }
 
+    #[allow(dead_code)]
     pub fn base_commit_sha_null(mut self) -> Self {
         self.base_commit_sha = Some(None);
         self
@@ -121,6 +128,7 @@ impl EventAttributes {
         self
     }
 
+    #[allow(dead_code)]
     pub fn branch_null(mut self) -> Self {
         self.branch = Some(None);
         self
@@ -132,6 +140,7 @@ impl EventAttributes {
         self
     }
 
+    #[allow(dead_code)]
     pub fn tool_null(mut self) -> Self {
         self.tool = Some(None);
         self
@@ -143,6 +152,7 @@ impl EventAttributes {
         self
     }
 
+    #[allow(dead_code)]
     pub fn model_null(mut self) -> Self {
         self.model = Some(None);
         self
@@ -154,6 +164,7 @@ impl EventAttributes {
         self
     }
 
+    #[allow(dead_code)]
     pub fn prompt_id_null(mut self) -> Self {
         self.prompt_id = Some(None);
         self
@@ -165,6 +176,7 @@ impl EventAttributes {
         self
     }
 
+    #[allow(dead_code)]
     pub fn external_prompt_id_null(mut self) -> Self {
         self.external_prompt_id = Some(None);
         self

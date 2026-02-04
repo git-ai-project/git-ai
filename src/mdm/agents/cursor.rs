@@ -56,18 +56,15 @@ impl HookInstaller for CursorInstaller {
         }
 
         // If we have the binary, check version
-        if has_binary {
-            if let Ok(version_str) = get_binary_version("cursor") {
-                if let Some(version) = parse_version(&version_str) {
-                    if !version_meets_requirement(version, MIN_CURSOR_VERSION) {
+        if has_binary
+            && let Ok(version_str) = get_binary_version("cursor")
+                && let Some(version) = parse_version(&version_str)
+                    && !version_meets_requirement(version, MIN_CURSOR_VERSION) {
                         return Err(GitAiError::Generic(format!(
                             "Cursor version {}.{} detected, but minimum version {}.{} is required",
                             version.0, version.1, MIN_CURSOR_VERSION.0, MIN_CURSOR_VERSION.1
                         )));
                     }
-                }
-            }
-        }
 
         // Check if hooks are installed
         let hooks_path = Self::hooks_path();
@@ -154,11 +151,10 @@ impl HookInstaller for CursorInstaller {
         let mut merged = existing.clone();
 
         // Ensure version is set
-        if merged.get("version").is_none() {
-            if let Some(obj) = merged.as_object_mut() {
+        if merged.get("version").is_none()
+            && let Some(obj) = merged.as_object_mut() {
                 obj.insert("version".to_string(), json!(1));
             }
-        }
 
         // Merge hooks object
         let mut hooks_obj = merged.get("hooks").cloned().unwrap_or_else(|| json!({}));
@@ -192,15 +188,14 @@ impl HookInstaller for CursorInstaller {
                 let mut needs_update = false;
 
                 for (idx, existing_hook) in existing_hooks.iter().enumerate() {
-                    if let Some(existing_cmd) = existing_hook.get("command").and_then(|c| c.as_str()) {
-                        if Self::is_cursor_checkpoint_command(existing_cmd) {
+                    if let Some(existing_cmd) = existing_hook.get("command").and_then(|c| c.as_str())
+                        && Self::is_cursor_checkpoint_command(existing_cmd) {
                             found_idx = Some(idx);
                             if existing_cmd != desired_cmd {
                                 needs_update = true;
                             }
                             break;
                         }
-                    }
                 }
 
                 match found_idx {
@@ -575,11 +570,10 @@ mod tests {
                 .clone();
 
             for hook in hooks_array.iter_mut() {
-                if let Some(cmd) = hook.get("command").and_then(|c| c.as_str()) {
-                    if CursorInstaller::is_cursor_checkpoint_command(cmd) {
+                if let Some(cmd) = hook.get("command").and_then(|c| c.as_str())
+                    && CursorInstaller::is_cursor_checkpoint_command(cmd) {
                         *hook = json!({"command": git_ai_cmd.clone()});
                     }
-                }
             }
 
             hooks_obj

@@ -34,11 +34,10 @@ fn find_macos_installations() -> Vec<DetectedIde> {
 
     for ide in JETBRAINS_IDES {
         for bundle_id in ide.bundle_ids {
-            if let Some(app_path) = find_app_by_bundle_id(bundle_id) {
-                if let Some(detected_ide) = detect_macos_ide(ide, &app_path) {
+            if let Some(app_path) = find_app_by_bundle_id(bundle_id)
+                && let Some(detected_ide) = detect_macos_ide(ide, &app_path) {
                     detected.push(detected_ide);
                 }
-            }
         }
     }
 
@@ -50,25 +49,23 @@ fn find_macos_installations() -> Vec<DetectedIde> {
     ];
 
     for scan_dir in scan_dirs {
-        if scan_dir.exists() {
-            if let Ok(entries) = std::fs::read_dir(&scan_dir) {
+        if scan_dir.exists()
+            && let Ok(entries) = std::fs::read_dir(&scan_dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
                     if path.extension().is_some_and(|ext| ext == "app") {
                         for ide in JETBRAINS_IDES {
-                            if is_matching_macos_app(ide, &path) {
-                                if let Some(detected_ide) = detect_macos_ide(ide, &path) {
+                            if is_matching_macos_app(ide, &path)
+                                && let Some(detected_ide) = detect_macos_ide(ide, &path) {
                                     // Avoid duplicates
                                     if !detected.iter().any(|d| d.install_path == detected_ide.install_path) {
                                         detected.push(detected_ide);
                                     }
                                 }
-                            }
                         }
                     }
                 }
             }
-        }
     }
 
     detected
@@ -149,16 +146,13 @@ fn detect_macos_ide(ide: &'static JetBrainsIde, app_path: &Path) -> Option<Detec
 fn get_macos_build_number(app_path: &Path) -> (Option<String>, Option<u32>) {
     // Try product-info.json first (newer JetBrains IDEs)
     let product_info_path = app_path.join("Contents/Resources/product-info.json");
-    if product_info_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&product_info_path) {
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(build) = json.get("buildNumber").and_then(|v| v.as_str()) {
+    if product_info_path.exists()
+        && let Ok(content) = std::fs::read_to_string(&product_info_path)
+            && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
+                && let Some(build) = json.get("buildNumber").and_then(|v| v.as_str()) {
                     let major = parse_major_build(build);
                     return (Some(build.to_string()), major);
                 }
-            }
-        }
-    }
 
     // Fall back to Info.plist
     let output = Command::new("defaults")
@@ -170,13 +164,12 @@ fn get_macos_build_number(app_path: &Path) -> (Option<String>, Option<u32>) {
         .output()
         .ok();
 
-    if let Some(output) = output {
-        if output.status.success() {
+    if let Some(output) = output
+        && output.status.success() {
             let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
             let major = parse_major_build(&version);
             return (Some(version), major);
         }
-    }
 
     (None, None)
 }
@@ -445,7 +438,7 @@ fn parse_major_build(build: &str) -> Option<u32> {
 fn get_plugins_dir(product_code: &str, build_number: Option<&str>) -> PathBuf {
     // Extract the version year from build number (e.g., "252" -> "2025.2")
     let version_suffix = build_number
-        .and_then(|b| parse_major_build(b))
+        .and_then(parse_major_build)
         .map(|major| {
             // Build 252 = 2025.2, 251 = 2025.1, 243 = 2024.3, etc.
             let year = 2000 + (major / 10);

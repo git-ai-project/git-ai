@@ -165,11 +165,10 @@ async fn async_run_install(
 
     // Install skills first (these are global, not per-agent)
     // Skills are always nuked and reinstalled fresh (silently)
-    if let Ok(result) = skills_installer::install_skills(dry_run, verbose) {
-        if result.changed {
+    if let Ok(result) = skills_installer::install_skills(dry_run, verbose)
+        && result.changed {
             has_changes = true;
         }
-    }
 
     // Ensure git symlinks for Fork compatibility
     if let Err(e) = crate::mdm::ensure_git_symlinks() {
@@ -255,25 +254,22 @@ async fn async_run_install(
                                 extra_spinner.start();
                                 extra_spinner.pending(&result.message);
                             }
-                            if verbose {
-                                if let Some(diff) = result.diff {
+                            if verbose
+                                && let Some(diff) = result.diff {
                                     println!();
                                     print_diff(&diff);
                                 }
-                            }
 
                             // Capture warning-like messages for metrics
-                            if result.message.contains("Unable")
+                            if (result.message.contains("Unable")
                                 || result.message.contains("manually")
-                                || result.message.contains("Failed")
-                            {
-                                if let Some((_, detail)) = detailed_results
+                                || result.message.contains("Failed"))
+                                && let Some((_, detail)) = detailed_results
                                     .iter_mut()
                                     .find(|(tool_id, _)| tool_id == id)
                                 {
                                     detail.warnings.push(result.message.clone());
                                 }
-                            }
                         }
                     }
                     Err(e) => {
@@ -500,12 +496,11 @@ async fn async_run_uninstall(
                                     extra_spinner.pending(&result.message);
                                 }
                             }
-                            if verbose {
-                                if let Some(diff) = result.diff {
+                            if verbose
+                                && let Some(diff) = result.diff {
                                     println!();
                                     print_diff(&diff);
                                 }
-                            }
                         }
                     }
                     Err(e) => {

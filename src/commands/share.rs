@@ -54,13 +54,11 @@ fn handle_share_cli(parsed: ParsedArgs) {
         // Try to get snippet from database
         use crate::authorship::internal_db::InternalDatabase;
 
-        if let Ok(db) = InternalDatabase::global() {
-            if let Ok(db_guard) = db.lock() {
-                if let Ok(Some(db_record)) = db_guard.get_prompt(&parsed.prompt_id) {
+        if let Ok(db) = InternalDatabase::global()
+            && let Ok(db_guard) = db.lock()
+                && let Ok(Some(db_record)) = db_guard.get_prompt(&parsed.prompt_id) {
                     return db_record.first_message_snippet(60);
                 }
-            }
-        }
 
         // Fallback if not in database
         format!("Prompt {}", parsed.prompt_id)
@@ -139,8 +137,8 @@ pub fn create_bundle(
     let commit_sha = db_record.as_ref().and_then(|r| r.commit_sha.clone());
 
     // If include_all_in_commit, fetch all prompts with same commit_sha
-    if include_all_in_commit {
-        if let Some(ref sha) = commit_sha {
+    if include_all_in_commit
+        && let Some(ref sha) = commit_sha {
             // Get all prompts for this commit
             let commit_prompts = db_guard.get_prompts_by_commit(sha)?;
 
@@ -148,7 +146,6 @@ pub fn create_bundle(
                 prompts.insert(p.id.clone(), p.to_prompt_record());
             }
         }
-    }
 
     // Drop the db guard before we do other work
     drop(db_guard);

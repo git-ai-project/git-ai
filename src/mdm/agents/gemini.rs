@@ -151,12 +151,11 @@ impl HookInstaller for GeminiInstaller {
             // Find existing matcher block for write_file|replace
             let mut found_matcher_idx: Option<usize> = None;
             for (idx, item) in hook_type_array.iter().enumerate() {
-                if let Some(matcher) = item.get("matcher").and_then(|m| m.as_str()) {
-                    if matcher == desired_matcher {
+                if let Some(matcher) = item.get("matcher").and_then(|m| m.as_str())
+                    && matcher == desired_matcher {
                         found_matcher_idx = Some(idx);
                         break;
                     }
-                }
             }
 
             let matcher_idx = match found_matcher_idx {
@@ -182,16 +181,14 @@ impl HookInstaller for GeminiInstaller {
             let mut needs_update = false;
 
             for (idx, hook) in hooks_array.iter().enumerate() {
-                if let Some(cmd) = hook.get("command").and_then(|c| c.as_str()) {
-                    if is_git_ai_checkpoint_command(cmd) {
-                        if found_idx.is_none() {
+                if let Some(cmd) = hook.get("command").and_then(|c| c.as_str())
+                    && is_git_ai_checkpoint_command(cmd)
+                        && found_idx.is_none() {
                             found_idx = Some(idx);
                             if cmd != desired_cmd {
                                 needs_update = true;
                             }
                         }
-                    }
-                }
             }
 
             match found_idx {
@@ -206,7 +203,8 @@ impl HookInstaller for GeminiInstaller {
                     let keep_idx = idx;
                     let mut current_idx = 0;
                     hooks_array.retain(|hook| {
-                        let should_keep = if current_idx == keep_idx {
+                        
+                        if current_idx == keep_idx {
                             current_idx += 1;
                             true
                         } else if let Some(cmd) = hook.get("command").and_then(|c| c.as_str()) {
@@ -216,8 +214,7 @@ impl HookInstaller for GeminiInstaller {
                         } else {
                             current_idx += 1;
                             true
-                        };
-                        should_keep
+                        }
                     });
                 }
                 None => {
@@ -466,26 +463,23 @@ mod tests {
             let mut needs_update = false;
 
             for (idx, hook) in hooks_array.iter().enumerate() {
-                if let Some(cmd) = hook.get("command").and_then(|c| c.as_str()) {
-                    if is_git_ai_checkpoint_command(cmd) {
-                        if found_idx.is_none() {
+                if let Some(cmd) = hook.get("command").and_then(|c| c.as_str())
+                    && is_git_ai_checkpoint_command(cmd)
+                        && found_idx.is_none() {
                             found_idx = Some(idx);
                             if cmd != *desired_cmd {
                                 needs_update = true;
                             }
                         }
-                    }
-                }
             }
 
-            if let Some(idx) = found_idx {
-                if needs_update {
+            if let Some(idx) = found_idx
+                && needs_update {
                     hooks_array[idx] = json!({
                         "type": "command",
                         "command": desired_cmd
                     });
                 }
-            }
 
             let first_idx = found_idx;
             if let Some(keep_idx) = first_idx {

@@ -73,7 +73,9 @@ pub struct Config {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Default)]
 pub enum UpdateChannel {
+    #[default]
     Latest,
     Next,
     EnterpriseLatest,
@@ -101,11 +103,6 @@ impl UpdateChannel {
     }
 }
 
-impl Default for UpdateChannel {
-    fn default() -> Self {
-        UpdateChannel::Latest
-    }
-}
 #[derive(Deserialize, Serialize, Default)]
 pub struct FileConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -169,12 +166,12 @@ impl Config {
     /// Safe to call multiple times; subsequent calls are no-ops.
     #[allow(dead_code)]
     pub fn init() {
-        let _ = CONFIG.get_or_init(|| build_config());
+        let _ = CONFIG.get_or_init(build_config);
     }
 
     /// Access the global configuration. Lazily initializes if not already initialized.
     pub fn get() -> &'static Config {
-        CONFIG.get_or_init(|| build_config())
+        CONFIG.get_or_init(build_config)
     }
 
     /// Returns the command to invoke git.
@@ -194,8 +191,8 @@ impl Config {
     /// Helper that accepts pre-fetched remotes to avoid multiple git operations
     fn is_allowed_repository_with_remotes(&self, remotes: Option<&Vec<(String, String)>>) -> bool {
         // First check if repository is in exclusion list - exclusions take precedence
-        if !self.exclude_repositories.is_empty() {
-            if let Some(remotes) = remotes {
+        if !self.exclude_repositories.is_empty()
+            && let Some(remotes) = remotes {
                 // If any remote matches the exclusion patterns, deny access
                 if remotes.iter().any(|remote| {
                     self.exclude_repositories
@@ -205,7 +202,6 @@ impl Config {
                     return false;
                 }
             }
-        }
 
         // If allowlist is empty, allow everything (unless excluded above)
         if self.allow_repositories.is_empty() {
@@ -382,6 +378,7 @@ impl Config {
     /// Only available when the `test-support` feature is enabled or in test mode.
     /// Must be `pub` to work with integration tests in the `tests/` directory.
     #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)]
     pub fn set_test_feature_flags(flags: FeatureFlags) {
         let mut override_flags = TEST_FEATURE_FLAGS_OVERRIDE
             .write()
@@ -393,6 +390,7 @@ impl Config {
     /// Only available when the `test-support` feature is enabled or in test mode.
     /// This should be called in test cleanup to reset to default behavior.
     #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)]
     pub fn clear_test_feature_flags() {
         let mut override_flags = TEST_FEATURE_FLAGS_OVERRIDE
             .write()
@@ -424,7 +422,7 @@ fn build_config() -> Config {
     let exclude_prompts_in_repositories = file_cfg
         .as_ref()
         .and_then(|c| c.exclude_prompts_in_repositories.clone())
-        .unwrap_or(vec![])
+        .unwrap_or_default()
         .into_iter()
         .filter_map(|pattern_str| {
             Pattern::new(&pattern_str)
@@ -456,7 +454,7 @@ fn build_config() -> Config {
     let allow_repositories = file_cfg
         .as_ref()
         .and_then(|c| c.allow_repositories.clone())
-        .unwrap_or(vec![])
+        .unwrap_or_default()
         .into_iter()
         .filter_map(|pattern_str| {
             Pattern::new(&pattern_str)
@@ -472,7 +470,7 @@ fn build_config() -> Config {
     let exclude_repositories = file_cfg
         .as_ref()
         .and_then(|c| c.exclude_repositories.clone())
-        .unwrap_or(vec![])
+        .unwrap_or_default()
         .into_iter()
         .filter_map(|pattern_str| {
             Pattern::new(&pattern_str)
@@ -635,8 +633,8 @@ fn build_feature_flags(file_cfg: &Option<FileConfig>) -> FeatureFlags {
 
 fn resolve_git_path(file_cfg: &Option<FileConfig>) -> String {
     // 1) From config file
-    if let Some(cfg) = file_cfg {
-        if let Some(path) = cfg.git_path.as_ref() {
+    if let Some(cfg) = file_cfg
+        && let Some(path) = cfg.git_path.as_ref() {
             let trimmed = path.trim();
             if !trimmed.is_empty() {
                 let p = Path::new(trimmed);
@@ -645,7 +643,6 @@ fn resolve_git_path(file_cfg: &Option<FileConfig>) -> String {
                 }
             }
         }
-    }
 
     // 2) Probe common locations across platforms
     let candidates: &[&str] = &[
@@ -690,6 +687,7 @@ fn config_file_path() -> Option<PathBuf> {
 }
 
 /// Public accessor for config file path
+#[allow(dead_code)]
 pub fn config_file_path_public() -> Option<PathBuf> {
     config_file_path()
 }
@@ -816,8 +814,8 @@ fn is_executable(path: &Path) -> bool {
 /// Reads GIT_AI_TEST_CONFIG_PATCH env var containing JSON and applies patches to config
 #[cfg(any(test, feature = "test-support"))]
 fn apply_test_config_patch(config: &mut Config) {
-    if let Ok(patch_json) = env::var("GIT_AI_TEST_CONFIG_PATCH") {
-        if let Ok(patch) = serde_json::from_str::<ConfigPatch>(&patch_json) {
+    if let Ok(patch_json) = env::var("GIT_AI_TEST_CONFIG_PATCH")
+        && let Ok(patch) = serde_json::from_str::<ConfigPatch>(&patch_json) {
             if let Some(patterns) = patch.exclude_prompts_in_repositories {
                 config.exclude_prompts_in_repositories = patterns
                     .into_iter()
@@ -854,7 +852,6 @@ fn apply_test_config_patch(config: &mut Config) {
                 }
             }
         }
-    }
 }
 
 #[cfg(test)]

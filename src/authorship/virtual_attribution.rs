@@ -65,7 +65,7 @@ impl VirtualAttributions {
 
         // Collect all unique author_ids from attributions
         let mut all_author_ids: HashSet<String> = HashSet::new();
-        for (_file_path, (char_attrs, _line_attrs)) in &self.attributions {
+        for (char_attrs, _line_attrs) in self.attributions.values() {
             for attr in char_attrs {
                 all_author_ids.insert(attr.author_id.clone());
             }
@@ -90,7 +90,7 @@ impl VirtualAttributions {
         for (id, commit_sha, prompt) in prompts {
             self.prompts
                 .entry(id)
-                .or_insert_with(BTreeMap::new)
+                .or_default()
                 .insert(commit_sha, prompt);
         }
 
@@ -151,18 +151,15 @@ impl VirtualAttributions {
         prompt_id: &str,
     ) -> Result<(String, crate::authorship::authorship_log::PromptRecord), GitAiError> {
         // Use git grep to search for the prompt ID in authorship notes
-        let shas = crate::git::refs::grep_ai_notes(&repo, &format!("\"{}\"", prompt_id))
+        let shas = crate::git::refs::grep_ai_notes(repo, &format!("\"{}\"", prompt_id))
             .unwrap_or_default();
 
         // Check the most recent commit with this prompt ID
-        if let Some(latest_sha) = shas.first() {
-            if let Ok(log) = crate::git::refs::get_reference_as_authorship_log_v3(&repo, latest_sha)
-            {
-                if let Some(prompt) = log.metadata.prompts.get(prompt_id) {
+        if let Some(latest_sha) = shas.first()
+            && let Ok(log) = crate::git::refs::get_reference_as_authorship_log_v3(repo, latest_sha)
+                && let Some(prompt) = log.metadata.prompts.get(prompt_id) {
                     return Ok((latest_sha.clone(), prompt.clone()));
                 }
-            }
-        }
 
         Err(GitAiError::Generic(format!(
             "Prompt not found in history: {}",
@@ -334,7 +331,7 @@ impl VirtualAttributions {
                 file_contents.insert(file_path.clone(), file_content.clone());
 
                 // Convert line attributions to character attributions
-                let char_attrs = line_attributions_to_attributions(&line_attrs, &file_content, 0);
+                let char_attrs = line_attributions_to_attributions(line_attrs, &file_content, 0);
                 attributions.insert(file_path.clone(), (char_attrs, line_attrs.clone()));
             }
         }
@@ -638,6 +635,7 @@ fn collect_committed_hunks(
 /// Helper function to collect unstaged line ranges (lines in working directory but not in commit)
 /// Returns (unstaged_hunks, pure_insertion_hunks)
 /// pure_insertion_hunks contains lines that were purely inserted (old_count=0), not modifications
+#[allow(clippy::type_complexity)]
 fn collect_unstaged_hunks(
     repo: &Repository,
     commit_sha: &str,
@@ -670,8 +668,8 @@ fn collect_unstaged_hunks(
 
     // Check for untracked files in pathspecs that git diff didn't find
     // These are files that exist in the working directory but aren't tracked by git
-    if let Some(paths) = pathspecs {
-        if let Ok(workdir) = repo.workdir() {
+    if let Some(paths) = pathspecs
+        && let Ok(workdir) = repo.workdir() {
             for pathspec in paths {
                 // Skip if we already found this file in git diff
                 if unstaged_hunks.contains_key(pathspec) {
@@ -702,7 +700,6 @@ fn collect_unstaged_hunks(
                 }
             }
         }
-    }
 
     Ok((unstaged_hunks, pure_insertion_hunks))
 }
@@ -861,8 +858,7 @@ impl VirtualAttributions {
                                 .entry(line_attr.author_id.clone())
                                 .or_default()
                                 .push(commit_line_num);
-                        } else {
-                        }
+                        } 
                         // Note: Lines that are neither unstaged nor in committed_hunks are lines that
                         // already existed in the parent commit. They are discarded (not added to uncommitted).
                     }
@@ -1160,7 +1156,7 @@ impl VirtualAttributions {
 
             for source in prompt_sources {
                 if let Some(commits) = source.get(&prompt_id) {
-                    for (_commit_sha, prompt_record) in commits {
+                    for prompt_record in commits.values() {
                         all_records.push(prompt_record.clone());
                     }
                 }
@@ -1220,7 +1216,7 @@ impl VirtualAttributions {
 
         // Calculate accepted_lines: count lines in final attributions per session
         let mut session_accepted_lines: HashMap<String, u32> = HashMap::new();
-        for (_file_path, (_char_attrs, line_attrs)) in attributions {
+        for (_char_attrs, line_attrs) in attributions.values() {
             for line_attr in line_attrs {
                 // Skip human attributions - we only track AI prompt metrics
                 if line_attr.author_id == CheckpointKind::Human.to_str() {
@@ -1465,11 +1461,10 @@ pub fn restore_stashed_va(
     if let Ok(workdir) = repository.workdir() {
         for file_path in &stashed_files {
             let abs_path = workdir.join(file_path);
-            if abs_path.exists() {
-                if let Ok(content) = std::fs::read_to_string(&abs_path) {
+            if abs_path.exists()
+                && let Ok(content) = std::fs::read_to_string(&abs_path) {
                     working_files.insert(file_path.clone(), content);
                 }
-            }
         }
     }
 
@@ -1572,11 +1567,12 @@ fn merge_char_attributions(
 ) -> Vec<Attribution> {
     let content_len = content.len();
     if content_len == 0 {
-        return primary.iter().cloned().collect();
+        return primary.to_vec();
     }
 
     // Create coverage map for primary (byte-based).
     let mut covered = vec![false; content_len];
+    #[allow(clippy::needless_range_loop)]
     for attr in primary {
         for i in attr.start..attr.end.min(content_len) {
             covered[i] = true;
@@ -1603,6 +1599,7 @@ fn merge_char_attributions(
             let start = safe_start + rel_idx;
             let end = start + ch.len_utf8();
             let mut is_covered = false;
+            #[allow(clippy::needless_range_loop)]
             for i in start..end.min(content_len) {
                 if covered[i] {
                     is_covered = true;
@@ -1611,8 +1608,8 @@ fn merge_char_attributions(
             }
 
             if is_covered {
-                if let Some(range_start_idx) = range_start.take() {
-                    if range_start_idx < start {
+                if let Some(range_start_idx) = range_start.take()
+                    && range_start_idx < start {
                         result.push(Attribution::new(
                             range_start_idx,
                             start,
@@ -1620,14 +1617,13 @@ fn merge_char_attributions(
                             attr.ts,
                         ));
                     }
-                }
             } else if range_start.is_none() {
                 range_start = Some(start);
             }
         }
 
-        if let Some(range_start_idx) = range_start.take() {
-            if range_start_idx < safe_end {
+        if let Some(range_start_idx) = range_start.take()
+            && range_start_idx < safe_end {
                 result.push(Attribution::new(
                     range_start_idx,
                     safe_end,
@@ -1635,7 +1631,6 @@ fn merge_char_attributions(
                     attr.ts,
                 ));
             }
-        }
     }
 
     // Sort by start position.
@@ -1660,6 +1655,7 @@ fn ceil_char_boundary(content: &str, idx: usize) -> usize {
 }
 
 /// Compute attributions for a single file at a specific commit
+#[allow(clippy::type_complexity)]
 fn compute_attributions_for_file(
     repo: &Repository,
     base_commit: &str,
@@ -1669,12 +1665,15 @@ fn compute_attributions_for_file(
 ) -> Result<Option<(String, String, Vec<Attribution>, Vec<LineAttribution>)>, GitAiError> {
     // Set up blame options
     let mut ai_blame_opts = GitAiBlameOptions::default();
+    #[allow(clippy::field_reassign_with_default)]
+    {
     ai_blame_opts.no_output = true;
     ai_blame_opts.return_human_authors_as_human = true;
     ai_blame_opts.use_prompt_hashes_as_names = true;
     ai_blame_opts.newest_commit = Some(base_commit.to_string());
     ai_blame_opts.oldest_commit = blame_start_commit;
-    ai_blame_opts.oldest_date = Some(OLDEST_AI_BLAME_DATE.clone());
+    ai_blame_opts.oldest_date = Some(*OLDEST_AI_BLAME_DATE);
+    }
 
     // Run blame at the base commit
     let ai_blame = repo.blame(file_path, &ai_blame_opts);
