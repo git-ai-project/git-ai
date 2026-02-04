@@ -346,7 +346,8 @@ if [ ! -f "$CONFIG_JSON_PATH" ]; then
     cat >"$TMP_CFG" <<EOF
 {
   "git_path": "${STD_GIT_PATH}",
-  "prompt_storage": "notes-no-messages"
+  "prompt_storage": "notes-no-messages",
+  "disable_auto_updates": true
 }
 EOF
     mv -f "$TMP_CFG" "$CONFIG_JSON_PATH"
