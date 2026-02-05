@@ -76,7 +76,7 @@ impl RepoStorage {
         self.ensure_initialized().unwrap_or_else(|e| {
             debug_log(&format!("Warning: Failed to initialize repo storage: {}", e));
         });
-        
+
         let working_log_dir = self.working_logs.join(sha);
         fs::create_dir_all(&working_log_dir).unwrap();
         let canonical_workdir = self
@@ -658,7 +658,7 @@ mod tests {
 
         // Second call - should not overwrite existing file
         repo_storage
-            .ensure_config_directory()
+            .ensure_initialized()
             .expect("Failed to ensure config directory again");
 
         // Verify the content is preserved
