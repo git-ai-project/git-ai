@@ -946,6 +946,18 @@ fn handle_stats(args: &[String]) {
         }
     }
 
+    // Merge ignore patterns from config files and CLI
+    // Priority: global config > project file > CLI args (all additive)
+    let file_patterns = crate::authorship::ignore_patterns::load_ignore_patterns_from_files(&repo);
+    let mut all_ignore_patterns = file_patterns;
+    all_ignore_patterns.extend(ignore_patterns);
+    let ignore_patterns = all_ignore_patterns;
+
+    crate::utils::debug_log(&format!(
+        "Total ignore patterns loaded: {}",
+        ignore_patterns.len()
+    ));
+
     // Handle commit range if detected
     if let Some(range) = commit_range {
         match range_authorship::range_authorship(range, false, &ignore_patterns) {
