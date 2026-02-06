@@ -612,13 +612,21 @@ mod tests {
         // Create a temporary repository
         let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
 
-        // Create RepoStorage
-        let _repo_storage =
+        // Create RepoStorage - note: this uses lazy initialization
+        let repo_storage =
             RepoStorage::for_repo_path(tmp_repo.repo().path(), &tmp_repo.repo().workdir().unwrap());
 
-        // Verify .git/ai directory exists
+        // Directory should NOT exist yet (lazy initialization)
         let ai_dir = tmp_repo.repo().path().join("ai");
-        assert!(ai_dir.exists(), ".git/ai directory should exist");
+        assert!(!ai_dir.exists(), ".git/ai directory should not exist before ensure_initialized()");
+
+        // Now call ensure_initialized to create the directory structure
+        repo_storage
+            .ensure_initialized()
+            .expect("Failed to ensure config directory");
+
+        // Verify .git/ai directory exists after initialization
+        assert!(ai_dir.exists(), ".git/ai directory should exist after ensure_initialized()");
         assert!(ai_dir.is_dir(), ".git/ai should be a directory");
 
         // Verify working_logs directory exists
@@ -651,6 +659,11 @@ mod tests {
             &tmp_repo.repo().path(),
             &tmp_repo.repo().workdir().unwrap(),
         );
+
+        // First call to ensure_initialized to create the structure
+        repo_storage
+            .ensure_initialized()
+            .expect("Failed to ensure config directory");
 
         // Add some content to rewrite_log
         let rewrite_log_file = tmp_repo.repo().path().join("ai").join("rewrite_log");
