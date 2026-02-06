@@ -130,6 +130,29 @@ export class AIEditManager {
     }, {} as { [filePath: string]: string });
   }
 
+  /**
+   * Get the git repository root directory for a file using VS Code's Git extension API.
+   * Returns null if the Git extension is not available or the file is not in a repo.
+   * This ensures git-ai commands are executed in the correct git repository root,
+   * even when VS Code is opened with a workspace that is not a git repository.
+   */
+  private getGitRepoRoot(fileUri: vscode.Uri): string | null {
+    const git = vscode.extensions
+      .getExtension("vscode.git")
+      ?.exports.getAPI(1);
+
+    if (!git) {
+      return null;
+    }
+
+    // Find the repo that contains this file
+    const repo = git.repositories.find((r: { rootUri: vscode.Uri }) =>
+      fileUri.fsPath.startsWith(r.rootUri.fsPath)
+    );
+
+    return repo?.rootUri.fsPath ?? null;
+  }
+
   private evaluateSaveForCheckpoint(filePath: string): void {
     const saveInfo = this.pendingSaves.get(filePath);
     if (!saveInfo) {
@@ -303,14 +326,25 @@ export class AIEditManager {
       const activeEditor = vscode.window.activeTextEditor;
       if (activeEditor) {
         const documentUri = activeEditor.document.uri;
-        const workspaceFolder = vscode.workspace.getWorkspaceFolder(documentUri);
-        if (workspaceFolder) {
-          workspaceRoot = workspaceFolder.uri.fsPath;
+        // Try to get git repository root first, fallback to workspace folder
+        const gitRepoRoot = this.getGitRepoRoot(documentUri);
+        if (gitRepoRoot) {
+          workspaceRoot = gitRepoRoot;
+        } else {
+          const workspaceFolder = vscode.workspace.getWorkspaceFolder(documentUri);
+          if (workspaceFolder) {
+            workspaceRoot = workspaceFolder.uri.fsPath;
+          }
         }
       }
 
       if (!workspaceRoot) {
-        workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        // Try to get git repo root from first workspace folder
+        const firstWorkspaceFolder = vscode.workspace.workspaceFolders?.[0];
+        if (firstWorkspaceFolder) {
+          const gitRepoRoot = this.getGitRepoRoot(firstWorkspaceFolder.uri);
+          workspaceRoot = gitRepoRoot || firstWorkspaceFolder.uri.fsPath;
+        }
       }
 
       if (!workspaceRoot) {

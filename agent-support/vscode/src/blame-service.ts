@@ -67,17 +67,40 @@ export class BlameService {
     const git = vscode.extensions
       .getExtension("vscode.git")
       ?.exports.getAPI(1);
-    
+
     if (!git) {
       return null;
     }
-    
+
     // Find the repo that contains this document
-    const repo = git.repositories.find((r: { rootUri: vscode.Uri }) => 
+    const repo = git.repositories.find((r: { rootUri: vscode.Uri }) =>
       document.uri.fsPath.startsWith(r.rootUri.fsPath)
     );
-    
+
     return repo?.state.HEAD?.commit ?? null;
+  }
+
+  /**
+   * Get the git repository root directory for a document using VS Code's Git extension API.
+   * Returns null if the Git extension is not available or the file is not in a repo.
+   * This ensures git-ai commands are executed in the correct git repository root,
+   * even when VS Code is opened with a workspace that is not a git repository.
+   */
+  private getGitRepoRoot(document: vscode.TextDocument): string | null {
+    const git = vscode.extensions
+      .getExtension("vscode.git")
+      ?.exports.getAPI(1);
+
+    if (!git) {
+      return null;
+    }
+
+    // Find the repo that contains this document
+    const repo = git.repositories.find((r: { rootUri: vscode.Uri }) =>
+      document.uri.fsPath.startsWith(r.rootUri.fsPath)
+    );
+
+    return repo?.rootUri.fsPath ?? null;
   }
   
   /**
@@ -230,9 +253,11 @@ export class BlameService {
     signal: AbortSignal
   ): Promise<BlameResult> {
     const filePath = document.uri.fsPath;
+    // Use git repository root as cwd, fallback to workspace folder if git repo not found
+    const gitRepoRoot = this.getGitRepoRoot(document);
     const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
-    const cwd = workspaceFolder?.uri.fsPath;
-    
+    const cwd = gitRepoRoot || workspaceFolder?.uri.fsPath;
+
     return new Promise((resolve, reject) => {
       if (signal.aborted) {
         reject(new Error('Aborted'));
