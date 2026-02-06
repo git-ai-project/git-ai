@@ -31,6 +31,7 @@ pub struct Config {
     api_base_url: String,
     prompt_storage: String,
     api_key: Option<String>,
+    quiet: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,6 +96,8 @@ pub struct FileConfig {
     pub prompt_storage: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quiet: Option<bool>,
 }
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
@@ -263,6 +266,11 @@ impl Config {
         self.api_key.as_deref()
     }
 
+    /// Returns true if quiet mode is enabled (suppresses chart output after commits)
+    pub fn is_quiet(&self) -> bool {
+        self.quiet
+    }
+
     /// Override feature flags for testing purposes.
     /// Only available when the `test-support` feature is enabled or in test mode.
     /// Must be `pub` to work with integration tests in the `tests/` directory.
@@ -423,6 +431,12 @@ fn build_config() -> Config {
                 .filter(|s| !s.is_empty())
         });
 
+    // Get quiet setting (defaults to false)
+    let quiet = file_cfg
+        .as_ref()
+        .and_then(|c| c.quiet)
+        .unwrap_or(false);
+
     #[cfg(any(test, feature = "test-support"))]
     {
         let mut config = Config {
@@ -439,6 +453,7 @@ fn build_config() -> Config {
             api_base_url,
             prompt_storage,
             api_key,
+            quiet,
         };
         apply_test_config_patch(&mut config);
         config
@@ -459,6 +474,7 @@ fn build_config() -> Config {
         api_base_url,
         prompt_storage,
         api_key,
+        quiet,
     }
 }
 
@@ -726,6 +742,7 @@ mod tests {
             api_base_url: DEFAULT_API_BASE_URL.to_string(),
             prompt_storage: "default".to_string(),
             api_key: None,
+            quiet: false,
         }
     }
 
@@ -830,6 +847,7 @@ mod tests {
             api_base_url: DEFAULT_API_BASE_URL.to_string(),
             prompt_storage: "default".to_string(),
             api_key: None,
+            quiet: false,
         }
     }
 
@@ -937,5 +955,18 @@ mod tests {
         let channel = UpdateChannel::from_str("enterprise-next").unwrap();
         assert_eq!(channel, UpdateChannel::EnterpriseNext);
         assert_eq!(channel.as_str(), "enterprise-next");
+    }
+
+    #[test]
+    fn test_quiet_default_is_false() {
+        let config = create_test_config(vec![], vec![]);
+        assert!(!config.is_quiet());
+    }
+
+    #[test]
+    fn test_quiet_can_be_enabled() {
+        let mut config = create_test_config(vec![], vec![]);
+        config.quiet = true;
+        assert!(config.is_quiet());
     }
 }

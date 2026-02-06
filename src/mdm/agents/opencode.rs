@@ -163,8 +163,9 @@ mod tests {
         assert!(content.contains("GitAiPlugin"));
         assert!(content.contains("tool.execute.before"));
         assert!(content.contains("tool.execute.after"));
-        assert!(content.contains("agent-v1"));
-        assert!(content.contains("opencode"));
+        // Uses the opencode preset with session_id-based hook input
+        assert!(content.contains("git-ai checkpoint opencode"));
+        assert!(content.contains("session_id"));
     }
 
     #[test]
@@ -179,9 +180,12 @@ mod tests {
         assert!(content.contains("FILE_EDIT_TOOLS"));
         assert!(content.contains("edit"));
         assert!(content.contains("write"));
-        assert!(content.contains("git-ai checkpoint agent-v1"));
-        assert!(content.contains("type: \"human\""));
-        assert!(content.contains("type: \"ai_agent\""));
+        // Uses the dedicated opencode preset which reads from local storage
+        assert!(content.contains("git-ai checkpoint opencode"));
+        assert!(content.contains("hook_event_name"));
+        assert!(content.contains("session_id"));
+        assert!(content.contains("PreToolUse"));
+        assert!(content.contains("PostToolUse"));
     }
 
     #[test]

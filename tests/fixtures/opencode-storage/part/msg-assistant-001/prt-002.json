@@ -1,0 +1,25 @@
+{
+  "type": "tool",
+  "id": "prt-002",
+  "messageID": "msg-assistant-001",
+  "tool": "edit",
+  "callID": "call-001",
+  "state": {
+    "status": "completed",
+    "input": {
+      "filePath": "/Users/test/project/index.ts",
+      "content": "// Hello World\nconsole.log('test');"
+    },
+    "output": "Edit applied successfully.",
+    "title": "index.ts",
+    "metadata": {},
+    "time": {
+      "start": 1706459832000,
+      "end": 1706459833000
+    }
+  },
+  "time": {
+    "start": 1706459832000,
+    "end": 1706459833000
+  }
+}

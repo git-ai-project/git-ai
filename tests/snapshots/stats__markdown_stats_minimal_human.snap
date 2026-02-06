@@ -2,4 +2,4 @@
 source: tests/stats.rs
 expression: markdown
 ---
-"Stats powered by [Git AI](https://github.com/acunniffe/git-ai)\n\n```text\n🧠 you    █░░░░░░░░░░░░░░░░░░░  2%\n🤖 ai     ████████████████████  98%\n```\n\n<details>\n<summary>More stats</summary>\n\n- 1.0 lines generated for every 1 accepted\n- 10 seconds waiting for AI \n\n</details>"
+"Stats powered by [Git AI](https://github.com/git-ai-project/git-ai)\n\n```text\n🧠 you    █░░░░░░░░░░░░░░░░░░░  2%\n🤖 ai     ████████████████████  98%\n```\n\n<details>\n<summary>More stats</summary>\n\n- 1.0 lines generated for every 1 accepted\n- 10 seconds waiting for AI \n\n</details>"

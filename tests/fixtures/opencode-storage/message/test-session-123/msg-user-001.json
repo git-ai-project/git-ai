@@ -1,0 +1,9 @@
+{
+  "id": "msg-user-001",
+  "sessionID": "test-session-123",
+  "role": "user",
+  "time": {
+    "created": 1706459830000,
+    "completed": 1706459830100
+  }
+}

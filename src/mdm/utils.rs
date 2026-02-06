@@ -109,14 +109,21 @@ pub fn home_dir() -> PathBuf {
 }
 
 /// Write data to a file atomically (write to temp, then rename)
+/// If the path is a symlink, writes to the target file (preserving the symlink)
 pub fn write_atomic(path: &Path, data: &[u8]) -> Result<(), GitAiError> {
-    let tmp_path = path.with_extension("tmp");
+    let target_path = if path.is_symlink() {
+        fs::canonicalize(path)?
+    } else {
+        path.to_path_buf()
+    };
+
+    let tmp_path = target_path.with_extension("tmp");
     {
         let mut file = fs::File::create(&tmp_path)?;
         file.write_all(data)?;
         file.sync_all()?;
     }
-    fs::rename(&tmp_path, path)?;
+    fs::rename(&tmp_path, &target_path)?;
     Ok(())
 }
 
@@ -617,5 +624,94 @@ mod tests {
 
         let final_content = fs::read_to_string(&settings_path).unwrap();
         assert_eq!(final_content, initial);
+    }
+
+    #[test]
+    fn test_write_atomic_regular_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test.txt");
+
+        write_atomic(&file_path, b"hello world").unwrap();
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, "hello world");
+        assert!(!file_path.is_symlink());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_write_atomic_preserves_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create the actual target file in a subdirectory (simulating dotfiles)
+        let target_dir = temp_dir.path().join("dotfiles");
+        fs::create_dir_all(&target_dir).unwrap();
+        let target_file = target_dir.join("settings.json");
+        fs::write(&target_file, r#"{"original": true}"#).unwrap();
+
+        // Create a symlink pointing to the target file
+        let symlink_path = temp_dir.path().join("settings.json");
+        symlink(&target_file, &symlink_path).unwrap();
+
+        // Verify symlink is set up correctly
+        assert!(symlink_path.is_symlink());
+        assert_eq!(fs::read_link(&symlink_path).unwrap(), target_file);
+
+        // Write through the symlink using write_atomic
+        write_atomic(&symlink_path, b"updated content").unwrap();
+
+        // The symlink should still exist and point to the same target
+        assert!(symlink_path.is_symlink(), "symlink should be preserved");
+        assert_eq!(
+            fs::read_link(&symlink_path).unwrap(),
+            target_file,
+            "symlink target should be unchanged"
+        );
+
+        // The target file should have the new content
+        let target_content = fs::read_to_string(&target_file).unwrap();
+        assert_eq!(target_content, "updated content");
+
+        // Reading through the symlink should also return the new content
+        let symlink_content = fs::read_to_string(&symlink_path).unwrap();
+        assert_eq!(symlink_content, "updated content");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_write_atomic_preserves_relative_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create the actual target file in a subdirectory
+        let target_dir = temp_dir.path().join("dotfiles").join("config");
+        fs::create_dir_all(&target_dir).unwrap();
+        let target_file = target_dir.join("settings.json");
+        fs::write(&target_file, r#"{"original": true}"#).unwrap();
+
+        // Create a directory for the symlink
+        let link_dir = temp_dir.path().join(".config");
+        fs::create_dir_all(&link_dir).unwrap();
+
+        // Create a relative symlink
+        let symlink_path = link_dir.join("settings.json");
+        let relative_target = PathBuf::from("../dotfiles/config/settings.json");
+        symlink(&relative_target, &symlink_path).unwrap();
+
+        // Verify symlink is set up correctly
+        assert!(symlink_path.is_symlink());
+
+        // Write through the symlink using write_atomic
+        write_atomic(&symlink_path, b"relative symlink content").unwrap();
+
+        // The symlink should still exist
+        assert!(symlink_path.is_symlink(), "symlink should be preserved");
+
+        // The target file should have the new content
+        let target_content = fs::read_to_string(&target_file).unwrap();
+        assert_eq!(target_content, "relative symlink content");
     }
 }

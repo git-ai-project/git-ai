@@ -1,0 +1,10 @@
+{
+  "type": "text",
+  "id": "prt-001",
+  "messageID": "msg-user-001",
+  "text": "Update the comment in index.ts to say 'Hello World'",
+  "time": {
+    "start": 1706459830000,
+    "end": 1706459830050
+  }
+}

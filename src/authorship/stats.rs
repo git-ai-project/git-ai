@@ -395,7 +395,7 @@ pub fn write_stats_to_markdown(stats: &CommitStats) -> String {
         0
     };
 
-    output.push_str("Stats powered by [Git AI](https://github.com/acunniffe/git-ai)\n\n");
+    output.push_str("Stats powered by [Git AI](https://github.com/git-ai-project/git-ai)\n\n");
     // Build the fenced code block
     output.push_str("```text\n");
 

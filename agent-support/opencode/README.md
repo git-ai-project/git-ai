@@ -1,6 +1,6 @@
 # git-ai Plugin for OpenCode
 
-A plugin that integrates [git-ai](https://github.com/acunniffe/git-ai) with [OpenCode](https://opencode.ai) to automatically track AI-generated code.
+A plugin that integrates [git-ai](https://github.com/git-ai-project/git-ai) with [OpenCode](https://opencode.ai) to automatically track AI-generated code.
 
 ## Overview
 
@@ -17,7 +17,7 @@ Build `git-ai` (`cargo build`) and then run the `git-ai install-hooks` or `cargo
 
 ## Requirements
 
-- [git-ai](https://github.com/acunniffe/git-ai) must be installed and available in PATH
+- [git-ai](https://github.com/git-ai-project/git-ai) must be installed and available in PATH
 - [OpenCode](https://opencode.ai) with plugin support
 
 ## How It Works
@@ -50,6 +50,6 @@ yarn install
 
 ## See Also
 
-- [git-ai Documentation](https://github.com/acunniffe/git-ai)
+- [git-ai Documentation](https://github.com/git-ai-project/git-ai)
 - [OpenCode Plugin Documentation](https://opencode.ai/docs/plugins/)
 

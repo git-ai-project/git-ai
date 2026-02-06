@@ -48,7 +48,7 @@ impl AgentCheckpointPreset for AgentV1Preset {
 
         let agent_v1_input: AgentV1Input = serde_json::from_str(&hook_input_json).map_err(|e| {
             crate::error::GitAiError::PresetError(format!(
-                "Invalid AgentV1Input JSON. Format is documented here: https://github.com/acunniffe/git-ai/blob/main/docs/add-your-agent.mdx: \n\n Error: {}",
+                "Invalid AgentV1Input JSON. Format is documented here: https://usegitai.com/docs/cli/add-your-agent: \n\n Error: {}",
                 e
             ))
         })?;

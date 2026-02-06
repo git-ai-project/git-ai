@@ -7,7 +7,7 @@
   "publisher": "git-ai",
   "repository": {
     "type": "git",
-    "url": "https://github.com/acunniffe/git-ai"
+    "url": "https://github.com/git-ai-project/git-ai"
   },
   "engines": {
     "vscode": ">=1.99.3",

@@ -2,4 +2,4 @@
 source: src/authorship/stats.rs
 expression: human_only_output
 ---
-"Stats powered by [Git AI](https://github.com/acunniffe/git-ai)\n\n```text\n🧠 you    ████████████████████  100%\n🤖 ai     ░░░░░░░░░░░░░░░░░░░░  0%\n```\n\n<details>\n<summary>More stats</summary>\n\n- 0.0 lines generated for every 1 accepted\n- 0 seconds waiting for AI \n\n</details>"
+"Stats powered by [Git AI](https://github.com/git-ai-project/git-ai)\n\n```text\n🧠 you    ████████████████████  100%\n🤖 ai     ░░░░░░░░░░░░░░░░░░░░  0%\n```\n\n<details>\n<summary>More stats</summary>\n\n- 0.0 lines generated for every 1 accepted\n- 0 seconds waiting for AI \n\n</details>"

@@ -13,7 +13,7 @@
  * Requirements:
  *   - git-ai must be installed and available in PATH
  *
- * @see https://github.com/acunniffe/git-ai
+ * @see https://github.com/git-ai-project/git-ai
  * @see https://opencode.ai/docs/plugins/
  */
 
@@ -24,7 +24,7 @@ import { dirname } from "path"
 const FILE_EDIT_TOOLS = ["edit", "write"]
 
 export const GitAiPlugin: Plugin = async (ctx) => {
-  const { $, client } = ctx
+  const { $ } = ctx
 
   // Check if git-ai is installed
   let gitAiInstalled = false
@@ -43,46 +43,6 @@ export const GitAiPlugin: Plugin = async (ctx) => {
   // Stores { filePath, repoDir, sessionID } for each pending edit
   const pendingEdits = new Map<string, { filePath: string; repoDir: string; sessionID: string }>()
 
-  // Track the active model for each session
-  // Updated via chat.params hook
-  const sessionModels = new Map<string, string>()
-
-  // Helper to get model info from session
-  // Tries the cache first, then falls back to fetching messages
-  const getModelFromSession = async (sessionID: string): Promise<string> => {
-    // Check cache first (populated by chat.params)
-    if (sessionModels.has(sessionID)) {
-      return sessionModels.get(sessionID)!
-    }
-
-    try {
-      // Get recent messages from the session to find model info
-      const messages = await client.session.messages({ path: { id: sessionID }, query: { limit: 5 } })
-      if (messages.data) {
-        // Look for the most recent assistant message which has model info
-        for (const msg of messages.data) {
-          if (msg.info.role === "assistant") {
-            const assistantMsg = msg.info as { providerID?: string; modelID?: string }
-            if (assistantMsg.modelID) {
-              const providerID = assistantMsg.providerID || "unknown"
-              return `${providerID}/${assistantMsg.modelID}`
-            }
-          }
-          // User messages also have model info
-          if (msg.info.role === "user") {
-            const userMsg = msg.info as { model?: { providerID: string; modelID: string } }
-            if (userMsg.model?.modelID) {
-              return `${userMsg.model.providerID}/${userMsg.model.modelID}`
-            }
-          }
-        }
-      }
-    } catch {
-      // Ignore errors fetching session messages
-    }
-    return "unknown"
-  }
-
   // Helper to find git repo root from a file path
   const findGitRepo = async (filePath: string): Promise<string | null> => {
     try {
@@ -97,16 +57,6 @@ export const GitAiPlugin: Plugin = async (ctx) => {
   }
 
   return {
-    "chat.params": async (input) => {
-      // Update the active model for this session
-      const { sessionID, model } = input
-      if (model.id) {
-        const providerID = model.providerID || "unknown"
-        const modelStr = `${providerID}/${model.id}`
-        sessionModels.set(sessionID, modelStr)
-      }
-    },
-
     "tool.execute.before": async (input, output) => {
       // Only intercept file editing tools
       if (!FILE_EDIT_TOOLS.includes(input.tool)) {
@@ -133,12 +83,13 @@ export const GitAiPlugin: Plugin = async (ctx) => {
         // Create human checkpoint before AI edit
         // This marks any changes since the last checkpoint as human-authored
         const hookInput = JSON.stringify({
-          type: "human",
-          repo_working_dir: repoDir,
-          will_edit_filepaths: [filePath],
+          hook_event_name: "PreToolUse",
+          session_id: input.sessionID,
+          cwd: repoDir,
+          tool_input: { filePath },
         })
 
-        await $`echo ${hookInput} | git-ai checkpoint agent-v1 --hook-input stdin`.quiet()
+        await $`echo ${hookInput} | git-ai checkpoint opencode --hook-input stdin`.quiet()
       } catch (error) {
         // Log to stderr for debugging, but don't throw - git-ai errors shouldn't break the agent
         console.error("[git-ai] Failed to create human checkpoint:", String(error))
@@ -162,24 +113,17 @@ export const GitAiPlugin: Plugin = async (ctx) => {
       const { filePath, repoDir, sessionID } = editInfo
 
       try {
-        // Get model info from session
-        const model = await getModelFromSession(sessionID)
-
         // Create AI checkpoint after edit
         // This marks the changes made by this tool call as AI-authored
+        // Transcript is fetched from OpenCode's local storage by the preset
         const hookInput = JSON.stringify({
-          type: "ai_agent",
-          repo_working_dir: repoDir,
-          agent_name: "opencode",
-          model,
-          conversation_id: sessionID,
-          edited_filepaths: [filePath],
-          transcript: {
-            messages: [],
-          },
+          hook_event_name: "PostToolUse",
+          session_id: sessionID,
+          cwd: repoDir,
+          tool_input: { filePath },
         })
 
-        await $`echo ${hookInput} | git-ai checkpoint agent-v1 --hook-input stdin`.quiet()
+        await $`echo ${hookInput} | git-ai checkpoint opencode --hook-input stdin`.quiet()
       } catch (error) {
         // Log to stderr for debugging, but don't throw - git-ai errors shouldn't break the agent
         console.error("[git-ai] Failed to create AI checkpoint:", String(error))

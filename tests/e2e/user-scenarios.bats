@@ -955,7 +955,7 @@ EOF
 }
 
 @test "AI refactors its own code - squash-authorship should show no ai_deletions" {
-    skip "https://github.com/acunniffe/git-ai/issues/162"
+    skip "https://github.com/git-ai-project/git-ai/issues/162"
     touch fibonacci.ts
     git add fibonacci.ts
     git commit -m "Initial empty file"
@@ -1054,7 +1054,7 @@ EOF
 }
 
 @test "Two AI commits, reset last commit, then recommit" {
-    skip "https://github.com/acunniffe/git-ai/issues/169"
+    skip "https://github.com/git-ai-project/git-ai/issues/169"
     # COMMIT 1: AI creates first file
     cat > module1.py <<EOF
 def function_one():

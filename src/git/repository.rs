@@ -1666,6 +1666,7 @@ impl Repository {
         args.push("--no-commit-id".to_string());
         args.push("--name-only".to_string());
         args.push("-r".to_string());
+        args.push("-z".to_string()); // NUL-separated output for proper UTF-8 handling
 
         // Find the commit to check if it has a parent
         let commit = self.find_commit(commit_sha.to_string())?;
@@ -1692,12 +1693,13 @@ impl Repository {
         }
 
         let output = exec_git(&args)?;
-        let stdout = String::from_utf8(output.stdout)?;
 
-        let files: HashSet<String> = stdout
-            .lines()
-            .filter(|line| !line.is_empty())
-            .map(|line| line.to_string())
+        // With -z, output is NUL-separated. The output may contain a trailing NUL.
+        let files: HashSet<String> = output
+            .stdout
+            .split(|&b| b == 0)
+            .filter(|bytes| !bytes.is_empty())
+            .filter_map(|bytes| String::from_utf8(bytes.to_vec()).ok())
             .collect();
 
         Ok(files)
@@ -1751,16 +1753,18 @@ impl Repository {
         let mut args = self.global_args_for_exec();
         args.push("diff".to_string());
         args.push("--name-only".to_string());
+        args.push("-z".to_string()); // NUL-separated output for proper UTF-8 handling
         args.push(from_ref.to_string());
         args.push(to_ref.to_string());
 
         let output = exec_git(&args)?;
-        let stdout = String::from_utf8(output.stdout)?;
 
-        let files: Vec<String> = stdout
-            .lines()
-            .filter(|line| !line.is_empty())
-            .map(|line| line.to_string())
+        // With -z, output is NUL-separated. The output may contain a trailing NUL.
+        let files: Vec<String> = output
+            .stdout
+            .split(|&b| b == 0)
+            .filter(|bytes| !bytes.is_empty())
+            .filter_map(|bytes| String::from_utf8(bytes.to_vec()).ok())
             .collect();
 
         Ok(files)
@@ -1849,7 +1853,10 @@ impl Repository {
 pub fn find_repository(global_args: &Vec<String>) -> Result<Repository, GitAiError> {
     let mut args = global_args.clone();
     args.push("rev-parse".to_string());
-    args.push("--absolute-git-dir".to_string());
+    // Use --git-dir instead of --absolute-git-dir for compatibility with Git < 2.13
+    // (--absolute-git-dir was added in Git 2.13; older versions output the literal
+    // string "absolute-git-dir" instead of the resolved path).
+    args.push("--git-dir".to_string());
     args.push("--show-toplevel".to_string());
 
     let output = exec_git(&args)?;
@@ -1868,8 +1875,13 @@ pub fn find_repository(global_args: &Vec<String>) -> Result<Repository, GitAiErr
 
     let git_dir_str = lines[0];
     let workdir_str = lines[1];
-    let git_dir = PathBuf::from(git_dir_str);
     let workdir = PathBuf::from(workdir_str);
+    // --git-dir may return a relative path (e.g. ".git"); resolve it against the toplevel
+    let git_dir = if Path::new(git_dir_str).is_relative() {
+        workdir.join(git_dir_str)
+    } else {
+        PathBuf::from(git_dir_str)
+    };
     if !git_dir.is_dir() {
         return Err(GitAiError::Generic(format!(
             "Git directory does not exist: {}",
@@ -2209,14 +2221,28 @@ fn parse_diff_added_lines(diff_output: &str) -> Result<HashMap<String, Vec<u32>>
 
     for line in diff_output.lines() {
         // Track current file being diffed
-        // Git may add trailing tabs to file paths in diff output, so we trim them
-        // Git may also quote file names containing spaces: +++ "b/my file.txt"
+        // Git outputs paths in two formats:
+        // 1. Unquoted: +++ b/path/to/file.txt
+        // 2. Quoted (for non-ASCII): +++ "b/path/to/file.txt" (with octal escapes inside)
         if line.starts_with("+++ b/") {
-            current_file = Some(line[6..].trim_end().to_string());
-        } else if line.starts_with("+++ \"b/") && line.trim_end().ends_with('"') {
-            // Handle quoted path: +++ "b/my file.txt"
-            let trimmed = line.trim_end();
-            current_file = Some(trimmed[7..trimmed.len() - 1].to_string());
+            // Unquoted path (ASCII only)
+            // Note: Git adds trailing tab after filenames with spaces, so we trim_end
+            let raw_path = &line[6..].trim_end();
+            let file_path = crate::utils::unescape_git_path(raw_path);
+            current_file = Some(file_path);
+        } else if line.starts_with("+++ \"b/") {
+            // Quoted path (non-ASCII chars) - extract the quoted portion and unescape
+            // Format: +++ "b/\344\270\255\346\226\207.txt"
+            // We need to extract "b/\344\270\255\346\226\207.txt" and then strip the "b/" after unescaping
+            let quoted_path = &line[4..]; // Gets "b/\344\270\255\346\226\207.txt"
+            let unescaped = crate::utils::unescape_git_path(quoted_path);
+            // Now unescaped is "b/中文.txt", strip the "b/" prefix
+            let file_path = if unescaped.starts_with("b/") {
+                unescaped[2..].to_string()
+            } else {
+                unescaped
+            };
+            current_file = Some(file_path);
         } else if line.starts_with("+++ /dev/null") {
             // File was deleted
             current_file = None;
@@ -2255,14 +2281,28 @@ fn parse_diff_added_lines_with_insertions(
 
     for line in diff_output.lines() {
         // Track current file being diffed
-        // Git may add trailing tabs to file paths in diff output, so we trim them
-        // Git may also quote file names containing spaces: +++ "b/my file.txt"
+        // Git outputs paths in two formats:
+        // 1. Unquoted: +++ b/path/to/file.txt
+        // 2. Quoted (for non-ASCII): +++ "b/path/to/file.txt" (with octal escapes inside)
         if line.starts_with("+++ b/") {
-            current_file = Some(line[6..].trim_end().to_string());
-        } else if line.starts_with("+++ \"b/") && line.trim_end().ends_with('"') {
-            // Handle quoted path: +++ "b/my file.txt"
-            let trimmed = line.trim_end();
-            current_file = Some(trimmed[7..trimmed.len() - 1].to_string());
+            // Unquoted path (ASCII only)
+            // Note: Git adds trailing tab after filenames with spaces, so we trim_end
+            let raw_path = &line[6..].trim_end();
+            let file_path = crate::utils::unescape_git_path(raw_path);
+            current_file = Some(file_path);
+        } else if line.starts_with("+++ \"b/") {
+            // Quoted path (non-ASCII chars) - extract the quoted portion and unescape
+            // Format: +++ "b/\344\270\255\346\226\207.txt"
+            // We need to extract "b/\344\270\255\346\226\207.txt" and then strip the "b/" after unescaping
+            let quoted_path = &line[4..]; // Gets "b/\344\270\255\346\226\207.txt"
+            let unescaped = crate::utils::unescape_git_path(quoted_path);
+            // Now unescaped is "b/中文.txt", strip the "b/" prefix
+            let file_path = if unescaped.starts_with("b/") {
+                unescaped[2..].to_string()
+            } else {
+                unescaped
+            };
+            current_file = Some(file_path);
         } else if line.starts_with("+++ /dev/null") {
             // File was deleted
             current_file = None;
@@ -2411,5 +2451,40 @@ mod tests {
         assert_eq!(parse_git_version("not a version"), None);
         assert_eq!(parse_git_version("git version"), None);
         assert_eq!(parse_git_version("git version x.y.z"), None);
+    }
+
+    #[test]
+    fn test_list_commit_files_with_utf8_filename() {
+        use crate::git::test_utils::TmpRepo;
+
+        // Create a test repo with a UTF-8 filename
+        let tmp_repo = TmpRepo::new().unwrap();
+
+        // Write a file with Chinese characters in its name
+        let chinese_filename = "中文文件.txt";
+        tmp_repo.write_file(chinese_filename, "Hello, 世界!\n", false).unwrap();
+
+        // Create an initial commit (using trigger_checkpoint_with_author for human checkpoint)
+        tmp_repo.trigger_checkpoint_with_author("test_user").unwrap();
+        let _authorship_log = tmp_repo.commit_with_message("Add Chinese file").unwrap();
+
+        // Now get the commit SHA using git-ai repository methods
+        let repo = tmp_repo.gitai_repo();
+        let head = repo.head().unwrap();
+        let commit_sha = head.target().unwrap();
+
+        // Test list_commit_files
+        let files = repo.list_commit_files(&commit_sha, None).unwrap();
+
+        // Debug: print what we got
+        println!("Files in commit: {:?}", files);
+
+        // The file should be in the list with its UTF-8 name
+        assert!(
+            files.contains(chinese_filename),
+            "Should contain the Chinese filename '{}', but got: {:?}",
+            chinese_filename,
+            files
+        );
     }
 }
