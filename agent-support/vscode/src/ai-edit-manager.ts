@@ -3,6 +3,7 @@ import * as path from "path";
 import { exec, spawn } from "child_process";
 import { isVersionSatisfied } from "./utils/semver";
 import { MIN_GIT_AI_VERSION, GIT_AI_INSTALL_DOCS_URL } from "./consts";
+import { getGitRepoRoot } from "./utils/git-api";
 
 export class AIEditManager {
   private workspaceBaseStoragePath: string | null = null;
@@ -303,14 +304,25 @@ export class AIEditManager {
       const activeEditor = vscode.window.activeTextEditor;
       if (activeEditor) {
         const documentUri = activeEditor.document.uri;
-        const workspaceFolder = vscode.workspace.getWorkspaceFolder(documentUri);
-        if (workspaceFolder) {
-          workspaceRoot = workspaceFolder.uri.fsPath;
+        // Try to get git repository root first, fallback to workspace folder
+        const gitRepoRoot = getGitRepoRoot(documentUri);
+        if (gitRepoRoot) {
+          workspaceRoot = gitRepoRoot;
+        } else {
+          const workspaceFolder = vscode.workspace.getWorkspaceFolder(documentUri);
+          if (workspaceFolder) {
+            workspaceRoot = workspaceFolder.uri.fsPath;
+          }
         }
       }
 
       if (!workspaceRoot) {
-        workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        // Try to get git repo root from first workspace folder
+        const firstWorkspaceFolder = vscode.workspace.workspaceFolders?.[0];
+        if (firstWorkspaceFolder) {
+          const gitRepoRoot = getGitRepoRoot(firstWorkspaceFolder.uri);
+          workspaceRoot = gitRepoRoot || firstWorkspaceFolder.uri.fsPath;
+        }
       }
 
       if (!workspaceRoot) {
