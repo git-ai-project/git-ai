@@ -36,7 +36,8 @@ pub fn handle_git_ai(args: &[String]) {
 
     // Start DB warmup early for commands that need database access
     match args[0].as_str() {
-        "checkpoint" | "show-prompt" | "share" | "sync-prompts" | "flush-cas" => {
+        "checkpoint" | "show-prompt" | "share" | "sync-prompts" | "flush-cas" | "search"
+        | "continue" => {
             InternalDatabase::warmup();
         }
         _ => {}
@@ -162,6 +163,12 @@ pub fn handle_git_ai(args: &[String]) {
         "prompts" => {
             commands::prompts_db::handle_prompts(&args[1..]);
         }
+        "search" => {
+            commands::search::handle_search(&args[1..]);
+        }
+        "continue" => {
+            commands::continue_session::handle_continue(&args[1..]);
+        }
         #[cfg(debug_assertions)]
         "show-transcript" => {
             handle_show_transcript(&args[1..]);
@@ -236,6 +243,29 @@ fn print_help() {
     eprintln!("    list                  List prompts as TSV");
     eprintln!("    next                  Get next prompt as JSON (iterator pattern)");
     eprintln!("    reset                 Reset iteration pointer to start");
+    eprintln!("  search             Search AI prompt history");
+    eprintln!("    --commit <rev>        Search by commit (SHA, branch, tag, symbolic ref)");
+    eprintln!("    --file <path>         Search by file path");
+    eprintln!("    --lines <start-end>   Limit to line range (requires --file; repeatable)");
+    eprintln!("    --pattern <text>      Full-text search in prompt messages");
+    eprintln!("    --prompt-id <id>      Look up specific prompt");
+    eprintln!("    --tool <name>         Filter by AI tool (claude, cursor, etc.)");
+    eprintln!("    --author <name>       Filter by human author");
+    eprintln!("    --since <time>        Only prompts after this time");
+    eprintln!("    --until <time>        Only prompts before this time");
+    eprintln!("    --json                Output as JSON");
+    eprintln!("    --verbose             Include full transcripts");
+    eprintln!("    --porcelain           Stable machine-parseable format");
+    eprintln!("    --count               Just show result count");
+    eprintln!("  continue           Restore AI session context and launch agent");
+    eprintln!("    --commit <rev>        Continue from a specific commit");
+    eprintln!("    --file <path>         Continue from a specific file");
+    eprintln!("    --lines <start-end>   Limit to line range (requires --file)");
+    eprintln!("    --prompt-id <id>      Continue from a specific prompt");
+    eprintln!("    --agent <name>        Select agent (claude, cursor; default: claude)");
+    eprintln!("    --launch              Launch agent CLI with restored context");
+    eprintln!("    --clipboard           Copy context to system clipboard");
+    eprintln!("    --json                Output context as structured JSON");
     eprintln!("  login              Authenticate with Git AI");
     eprintln!("  logout             Clear stored credentials");
     eprintln!("  version, -v, --version     Print the git-ai version");

@@ -13,11 +13,18 @@ struct EmbeddedCommand {
 }
 
 /// All embedded commands - add new commands here
-const EMBEDDED_COMMANDS: &[EmbeddedCommand] = &[EmbeddedCommand {
-    name: "prompt-analysis",
-    description: "Analyze AI prompting patterns and acceptance rates",
-    command_md: include_str!("../../skills/prompt-analysis/SKILL.md"),
-}];
+const EMBEDDED_COMMANDS: &[EmbeddedCommand] = &[
+    EmbeddedCommand {
+        name: "prompt-analysis",
+        description: "Analyze AI prompting patterns and acceptance rates",
+        command_md: include_str!("../../skills/prompt-analysis/SKILL.md"),
+    },
+    EmbeddedCommand {
+        name: "git-ai-search",
+        description: "Search and restore AI conversation context from git history",
+        command_md: include_str!("../../skills/git-ai-search/SKILL.md"),
+    },
+];
 
 /// Marketplace JSON structure
 #[derive(Serialize, Deserialize)]
