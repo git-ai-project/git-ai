@@ -3,6 +3,7 @@ import * as path from "path";
 import { exec, spawn } from "child_process";
 import { isVersionSatisfied } from "./utils/semver";
 import { MIN_GIT_AI_VERSION, GIT_AI_INSTALL_DOCS_URL } from "./consts";
+import { getGitRepoRoot } from "./utils/git-api";
 
 export class AIEditManager {
   private workspaceBaseStoragePath: string | null = null;
@@ -128,29 +129,6 @@ export class AIEditManager {
       acc[doc.uri.fsPath] = doc.getText();
       return acc;
     }, {} as { [filePath: string]: string });
-  }
-
-  /**
-   * Get the git repository root directory for a file using VS Code's Git extension API.
-   * Returns null if the Git extension is not available or the file is not in a repo.
-   * This ensures git-ai commands are executed in the correct git repository root,
-   * even when VS Code is opened with a workspace that is not a git repository.
-   */
-  private getGitRepoRoot(fileUri: vscode.Uri): string | null {
-    const git = vscode.extensions
-      .getExtension("vscode.git")
-      ?.exports.getAPI(1);
-
-    if (!git) {
-      return null;
-    }
-
-    // Find the repo that contains this file
-    const repo = git.repositories.find((r: { rootUri: vscode.Uri }) =>
-      fileUri.fsPath.startsWith(r.rootUri.fsPath)
-    );
-
-    return repo?.rootUri.fsPath ?? null;
   }
 
   private evaluateSaveForCheckpoint(filePath: string): void {
@@ -327,7 +305,7 @@ export class AIEditManager {
       if (activeEditor) {
         const documentUri = activeEditor.document.uri;
         // Try to get git repository root first, fallback to workspace folder
-        const gitRepoRoot = this.getGitRepoRoot(documentUri);
+        const gitRepoRoot = getGitRepoRoot(documentUri);
         if (gitRepoRoot) {
           workspaceRoot = gitRepoRoot;
         } else {
@@ -342,7 +320,7 @@ export class AIEditManager {
         // Try to get git repo root from first workspace folder
         const firstWorkspaceFolder = vscode.workspace.workspaceFolders?.[0];
         if (firstWorkspaceFolder) {
-          const gitRepoRoot = this.getGitRepoRoot(firstWorkspaceFolder.uri);
+          const gitRepoRoot = getGitRepoRoot(firstWorkspaceFolder.uri);
           workspaceRoot = gitRepoRoot || firstWorkspaceFolder.uri.fsPath;
         }
       }
