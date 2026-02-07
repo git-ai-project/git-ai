@@ -73,6 +73,7 @@ pub struct Config {
     default_prompt_storage: Option<String>,
     api_key: Option<String>,
     quiet: bool,
+    stats_ignore_patterns: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -139,6 +140,8 @@ pub struct FileConfig {
     pub api_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quiet: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stats_ignore_patterns: Option<Vec<String>>,
 }
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
@@ -283,6 +286,10 @@ impl Config {
 
     pub fn update_channel(&self) -> UpdateChannel {
         self.update_channel
+    }
+
+    pub fn stats_ignore_patterns(&self) -> &[String] {
+        &self.stats_ignore_patterns
     }
 
     pub fn feature_flags(&self) -> &FeatureFlags {
@@ -572,6 +579,12 @@ fn build_config() -> Config {
     // Get quiet setting (defaults to false)
     let quiet = file_cfg.as_ref().and_then(|c| c.quiet).unwrap_or(false);
 
+    // Get stats ignore patterns (defaults to empty vec)
+    let stats_ignore_patterns = file_cfg
+        .as_ref()
+        .and_then(|c| c.stats_ignore_patterns.clone())
+        .unwrap_or_else(Vec::new);
+
     #[cfg(any(test, feature = "test-support"))]
     {
         let mut config = Config {
@@ -591,6 +604,7 @@ fn build_config() -> Config {
             default_prompt_storage,
             api_key,
             quiet,
+            stats_ignore_patterns,
         };
         apply_test_config_patch(&mut config);
         config
@@ -614,6 +628,7 @@ fn build_config() -> Config {
         default_prompt_storage,
         api_key,
         quiet,
+        stats_ignore_patterns,
     }
 }
 
@@ -885,6 +900,7 @@ mod tests {
             default_prompt_storage: None,
             api_key: None,
             quiet: false,
+            stats_ignore_patterns: vec![],
         }
     }
 
@@ -992,6 +1008,7 @@ mod tests {
             default_prompt_storage: None,
             api_key: None,
             quiet: false,
+            stats_ignore_patterns: vec![],
         }
     }
 
