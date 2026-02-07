@@ -58,10 +58,6 @@ pub fn post_commit(
 
     working_log.write_all_checkpoints(&parent_working_log)?;
 
-    // Filter out untracked files from the working log
-    let filtered_working_log =
-        filter_untracked_files(repo, &parent_working_log, &commit_sha, None)?;
-
     // Create VirtualAttributions from working log (fast path - no blame)
     // We don't need to run blame because we only care about the working log data
     // that was accumulated since the parent commit
@@ -71,11 +67,21 @@ pub fn post_commit(
         Some(human_author.clone()),
     )?;
 
-    // Get pathspecs for files in the working log
-    let pathspecs: HashSet<String> = filtered_working_log
+    // Get pathspecs for files in the working log - include ALL files from checkpoints,
+    // not just committed files. This ensures uncommitted files get proper INITIAL attributions.
+    // See issue #356: batch commits lose attribution for files committed later.
+    let mut pathspecs: HashSet<String> = parent_working_log
         .iter()
         .flat_map(|cp| cp.entries.iter().map(|e| e.file.clone()))
         .collect();
+
+    // Also include files from INITIAL attributions (uncommitted files from previous commits)
+    // These files may not have checkpoints but still need their attribution preserved
+    // when they are finally committed. See issue #356.
+    let initial_attributions_for_pathspecs = working_log.read_initial_attributions();
+    for file_path in initial_attributions_for_pathspecs.files.keys() {
+        pathspecs.insert(file_path.clone());
+    }
 
     // Split VirtualAttributions into committed (authorship log) and uncommitted (INITIAL)
     let (mut authorship_log, initial_attributions) = working_va
@@ -172,41 +178,6 @@ pub fn post_commit(
         write_stats_to_terminal(&stats, is_interactive);
     }
     Ok((commit_sha.to_string(), authorship_log))
-}
-
-/// Filter out working log entries for untracked files
-pub fn filter_untracked_files(
-    repo: &Repository,
-    working_log: &[Checkpoint],
-    commit_sha: &str,
-    pathspecs: Option<&HashSet<String>>,
-) -> Result<Vec<Checkpoint>, GitAiError> {
-    // Get all files changed in current commit in ONE git command (scoped to pathspecs)
-    // If a file from the working log is in this set, it was committed. Otherwise, it was untracked.
-    let committed_files = repo.list_commit_files(commit_sha, pathspecs)?;
-
-    // Filter the working log to only include files that were actually committed
-    let mut filtered_checkpoints = Vec::new();
-
-    for checkpoint in working_log {
-        let mut filtered_entries = Vec::new();
-
-        for entry in &checkpoint.entries {
-            // Keep entry only if this file was in the commit
-            if committed_files.contains(&entry.file) {
-                filtered_entries.push(entry.clone());
-            }
-        }
-
-        // Only include checkpoints that have at least one committed file entry
-        if !filtered_entries.is_empty() {
-            let mut filtered_checkpoint = checkpoint.clone();
-            filtered_checkpoint.entries = filtered_entries;
-            filtered_checkpoints.push(filtered_checkpoint);
-        }
-    }
-
-    Ok(filtered_checkpoints)
 }
 
 /// Update prompts/transcripts in working log checkpoints to their latest versions.
