@@ -97,7 +97,7 @@ impl HookInstaller for ClaudeCodeInstaller {
 
     fn install_hooks(
         &self,
-        _params: &HookInstallerParams,
+        params: &HookInstallerParams,
         dry_run: bool,
     ) -> Result<Option<String>, GitAiError> {
         let settings_path = Self::settings_path();
@@ -121,9 +121,9 @@ impl HookInstaller for ClaudeCodeInstaller {
             serde_json::from_str(&existing_content)?
         };
 
-        // Desired hooks - Claude Code doesn't need absolute paths, uses shell properly
-        let pre_tool_cmd = format!("git-ai {}", CLAUDE_PRE_TOOL_CMD);
-        let post_tool_cmd = format!("git-ai {}", CLAUDE_POST_TOOL_CMD);
+        // Build commands with absolute path
+        let pre_tool_cmd = format!("{} {}", params.binary_path.display(), CLAUDE_PRE_TOOL_CMD);
+        let post_tool_cmd = format!("{} {}", params.binary_path.display(), CLAUDE_POST_TOOL_CMD);
 
         let desired_hooks = json!({
             "PreToolUse": {
@@ -347,9 +347,14 @@ mod tests {
         (temp_dir, settings_path)
     }
 
+    fn create_test_binary_path() -> PathBuf {
+        PathBuf::from("/usr/local/bin/git-ai")
+    }
+
     #[test]
     fn test_claude_install_hooks_creates_file_from_scratch() {
         let (_temp_dir, settings_path) = setup_test_env();
+        let binary_path = create_test_binary_path();
 
         if let Some(parent) = settings_path.parent() {
             fs::create_dir_all(parent).unwrap();
@@ -363,7 +368,7 @@ mod tests {
                         "hooks": [
                             {
                                 "type": "command",
-                                "command": format!("git-ai {}", CLAUDE_PRE_TOOL_CMD)
+                                "command": format!("{} {}", binary_path.display(), CLAUDE_PRE_TOOL_CMD)
                             }
                         ]
                     }
@@ -374,7 +379,7 @@ mod tests {
                         "hooks": [
                             {
                                 "type": "command",
-                                "command": format!("git-ai {}", CLAUDE_POST_TOOL_CMD)
+                                "command": format!("{} {}", binary_path.display(), CLAUDE_POST_TOOL_CMD)
                             }
                         ]
                     }
@@ -460,8 +465,9 @@ mod tests {
         let mut content: Value =
             serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
 
-        let pre_tool_cmd = format!("git-ai {}", CLAUDE_PRE_TOOL_CMD);
-        let post_tool_cmd = format!("git-ai {}", CLAUDE_POST_TOOL_CMD);
+        let binary_path = create_test_binary_path();
+        let pre_tool_cmd = format!("{} {}", binary_path.display(), CLAUDE_PRE_TOOL_CMD);
+        let post_tool_cmd = format!("{} {}", binary_path.display(), CLAUDE_POST_TOOL_CMD);
 
         for (hook_type, desired_cmd) in
             &[("PreToolUse", pre_tool_cmd), ("PostToolUse", post_tool_cmd)]
@@ -587,6 +593,7 @@ mod tests {
 
         let mut content: Value =
             serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
+        let binary_path = create_test_binary_path();
         let hooks_obj = content.get_mut("hooks").unwrap();
 
         let pre_array = hooks_obj
@@ -601,7 +608,7 @@ mod tests {
             .unwrap()
             .push(json!({
                 "type": "command",
-                "command": format!("git-ai {}", CLAUDE_PRE_TOOL_CMD)
+                "command": format!("{} {}", binary_path.display(), CLAUDE_PRE_TOOL_CMD)
             }));
 
         let post_array = hooks_obj
@@ -616,7 +623,7 @@ mod tests {
             .unwrap()
             .push(json!({
                 "type": "command",
-                "command": format!("git-ai {}", CLAUDE_POST_TOOL_CMD)
+                "command": format!("{} {}", binary_path.display(), CLAUDE_POST_TOOL_CMD)
             }));
 
         fs::write(

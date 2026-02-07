@@ -11,7 +11,7 @@
  *   - Or to .opencode/plugin/git-ai.ts (project-local)
  *
  * Requirements:
- *   - git-ai must be installed and available in PATH
+ *   - git-ai must be installed (path is injected at install time)
  *
  * @see https://github.com/git-ai-project/git-ai
  * @see https://opencode.ai/docs/plugins/
@@ -19,6 +19,9 @@
 
 import type { Plugin } from "@opencode-ai/plugin"
 import { dirname } from "path"
+
+// Absolute path to git-ai binary, replaced at install time by `git-ai install-hooks`
+const GIT_AI_BIN = "__GIT_AI_BINARY_PATH__"
 
 // Tools that modify files and should be tracked
 const FILE_EDIT_TOOLS = ["edit", "write"]
@@ -29,7 +32,7 @@ export const GitAiPlugin: Plugin = async (ctx) => {
   // Check if git-ai is installed
   let gitAiInstalled = false
   try {
-    await $`git-ai --version`.quiet()
+    await $`${GIT_AI_BIN} --version`.quiet()
     gitAiInstalled = true
   } catch {
     // git-ai not installed, plugin will be a no-op
@@ -89,7 +92,7 @@ export const GitAiPlugin: Plugin = async (ctx) => {
           tool_input: { filePath },
         })
 
-        await $`echo ${hookInput} | git-ai checkpoint opencode --hook-input stdin`.quiet()
+        await $`echo ${hookInput} | ${GIT_AI_BIN} checkpoint opencode --hook-input stdin`.quiet()
       } catch (error) {
         // Log to stderr for debugging, but don't throw - git-ai errors shouldn't break the agent
         console.error("[git-ai] Failed to create human checkpoint:", String(error))
@@ -123,7 +126,7 @@ export const GitAiPlugin: Plugin = async (ctx) => {
           tool_input: { filePath },
         })
 
-        await $`echo ${hookInput} | git-ai checkpoint opencode --hook-input stdin`.quiet()
+        await $`echo ${hookInput} | ${GIT_AI_BIN} checkpoint opencode --hook-input stdin`.quiet()
       } catch (error) {
         // Log to stderr for debugging, but don't throw - git-ai errors shouldn't break the agent
         console.error("[git-ai] Failed to create AI checkpoint:", String(error))
