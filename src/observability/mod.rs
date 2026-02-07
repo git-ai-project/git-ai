@@ -90,6 +90,14 @@ static OBSERVABILITY: OnceLock<Mutex<ObservabilityInner>> = OnceLock::new();
 
 fn get_observability() -> &'static Mutex<ObservabilityInner> {
     OBSERVABILITY.get_or_init(|| {
+        // When running in the git test harness, use in-memory buffering
+        // to avoid creating files in $HOME that would pollute test isolation.
+        if std::env::var("GIT_TEST_INSTALLED").is_ok() {
+            return Mutex::new(ObservabilityInner {
+                mode: LogMode::Buffered(Vec::new()),
+            });
+        }
+
         // Initialize directly in Disk mode with global logs path
         // All logs go to ~/.git-ai/internal/logs/{PID}.log
         let mode = if let Some(home) = dirs::home_dir() {

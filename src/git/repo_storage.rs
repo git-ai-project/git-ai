@@ -30,28 +30,31 @@ pub struct RepoStorage {
 }
 
 impl RepoStorage {
+    /// Create a new RepoStorage without initializing directories.
+    /// Directories will be created lazily when needed via `ensure_initialized()`.
     pub fn for_repo_path(repo_path: &Path, repo_workdir: &Path) -> RepoStorage {
         let ai_dir = repo_path.join("ai");
         let working_logs_dir = ai_dir.join("working_logs");
         let rewrite_log_file = ai_dir.join("rewrite_log");
         let logs_dir = ai_dir.join("logs");
 
-        let config = RepoStorage {
+        RepoStorage {
             repo_path: repo_path.to_path_buf(),
             repo_workdir: repo_workdir.to_path_buf(),
             working_logs: working_logs_dir,
             rewrite_log: rewrite_log_file,
             logs: logs_dir,
-        };
-
-        config.ensure_config_directory().unwrap();
-        config
+        }
+        // NOTE: We no longer call ensure_config_directory() here.
+        // Directories are created lazily when write operations are performed.
     }
 
-    fn ensure_config_directory(&self) -> Result<(), GitAiError> {
+    /// Ensure the .git/ai directory structure exists.
+    /// Called lazily before write operations.
+    pub fn ensure_initialized(&self) -> Result<(), GitAiError> {
         let ai_dir = self.repo_path.join("ai");
 
-        fs::create_dir_all(ai_dir)?;
+        fs::create_dir_all(&ai_dir)?;
 
         // Create working_logs directory
         fs::create_dir_all(&self.working_logs)?;
@@ -59,7 +62,7 @@ impl RepoStorage {
         // Create logs directory for Sentry events
         fs::create_dir_all(&self.logs)?;
 
-        if !&self.rewrite_log.exists() && !&self.rewrite_log.is_file() {
+        if !self.rewrite_log.exists() && !self.rewrite_log.is_file() {
             fs::write(&self.rewrite_log, "")?;
         }
 
@@ -69,6 +72,11 @@ impl RepoStorage {
     /* Working Log Persistance */
 
     pub fn working_log_for_base_commit(&self, sha: &str) -> PersistedWorkingLog {
+        // Ensure the .git/ai directory structure exists before creating working log
+        self.ensure_initialized().unwrap_or_else(|e| {
+            debug_log(&format!("Warning: Failed to initialize repo storage: {}", e));
+        });
+
         let working_log_dir = self.working_logs.join(sha);
         fs::create_dir_all(&working_log_dir).unwrap();
         let canonical_workdir = self
@@ -131,6 +139,8 @@ impl RepoStorage {
         &self,
         event: RewriteLogEvent,
     ) -> Result<Vec<RewriteLogEvent>, GitAiError> {
+        // Ensure the .git/ai directory structure exists before writing
+        self.ensure_initialized()?;
         append_event_to_file(&self.rewrite_log, event)?;
         self.read_rewrite_events()
     }
@@ -603,13 +613,21 @@ mod tests {
         // Create a temporary repository
         let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
 
-        // Create RepoStorage
-        let _repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap());
+        // Create RepoStorage - note: this uses lazy initialization
+        let repo_storage =
+            RepoStorage::for_repo_path(tmp_repo.repo().path(), &tmp_repo.repo().workdir().unwrap());
 
-        // Verify .git/ai directory exists
+        // Directory should NOT exist yet (lazy initialization)
         let ai_dir = tmp_repo.repo().path().join("ai");
-        assert!(ai_dir.exists(), ".git/ai directory should exist");
+        assert!(!ai_dir.exists(), ".git/ai directory should not exist before ensure_initialized()");
+
+        // Now call ensure_initialized to create the directory structure
+        repo_storage
+            .ensure_initialized()
+            .expect("Failed to ensure config directory");
+
+        // Verify .git/ai directory exists after initialization
+        assert!(ai_dir.exists(), ".git/ai directory should exist after ensure_initialized()");
         assert!(ai_dir.is_dir(), ".git/ai should be a directory");
 
         // Verify working_logs directory exists
@@ -641,13 +659,18 @@ mod tests {
         let repo_storage =
             RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap());
 
+        // First call to ensure_initialized to create the structure
+        repo_storage
+            .ensure_initialized()
+            .expect("Failed to ensure config directory");
+
         // Add some content to rewrite_log
         let rewrite_log_file = tmp_repo.repo().path().join("ai").join("rewrite_log");
         fs::write(&rewrite_log_file, "existing content").expect("Failed to write to rewrite_log");
 
         // Second call - should not overwrite existing file
         repo_storage
-            .ensure_config_directory()
+            .ensure_initialized()
             .expect("Failed to ensure config directory again");
 
         // Verify the content is preserved
