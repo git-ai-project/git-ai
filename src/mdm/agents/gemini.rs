@@ -83,7 +83,7 @@ impl HookInstaller for GeminiInstaller {
 
     fn install_hooks(
         &self,
-        _params: &HookInstallerParams,
+        params: &HookInstallerParams,
         dry_run: bool,
     ) -> Result<Option<String>, GitAiError> {
         let settings_path = Self::settings_path();
@@ -107,9 +107,9 @@ impl HookInstaller for GeminiInstaller {
             serde_json::from_str(&existing_content)?
         };
 
-        // Desired hooks - Gemini doesn't need absolute paths, uses shell properly
-        let before_tool_cmd = format!("git-ai {}", GEMINI_BEFORE_TOOL_CMD);
-        let after_tool_cmd = format!("git-ai {}", GEMINI_AFTER_TOOL_CMD);
+        // Desired hooks - use absolute path to the git-ai binary
+        let before_tool_cmd = format!("{} {}", params.binary_path.display(), GEMINI_BEFORE_TOOL_CMD);
+        let after_tool_cmd = format!("{} {}", params.binary_path.display(), GEMINI_AFTER_TOOL_CMD);
 
         let desired_hooks = json!({
             "BeforeTool": {
@@ -349,6 +349,7 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
 
+        let binary_path = "/abs/path/git-ai";
         let result = json!({
             "tools": {
                 "enableHooks": true
@@ -360,7 +361,7 @@ mod tests {
                         "hooks": [
                             {
                                 "type": "command",
-                                "command": format!("git-ai {}", GEMINI_BEFORE_TOOL_CMD)
+                                "command": format!("{} {}", binary_path, GEMINI_BEFORE_TOOL_CMD)
                             }
                         ]
                     }
@@ -371,7 +372,7 @@ mod tests {
                         "hooks": [
                             {
                                 "type": "command",
-                                "command": format!("git-ai {}", GEMINI_AFTER_TOOL_CMD)
+                                "command": format!("{} {}", binary_path, GEMINI_AFTER_TOOL_CMD)
                             }
                         ]
                     }
@@ -466,8 +467,9 @@ mod tests {
         let mut content: Value =
             serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
 
-        let before_tool_cmd = format!("git-ai {}", GEMINI_BEFORE_TOOL_CMD);
-        let after_tool_cmd = format!("git-ai {}", GEMINI_AFTER_TOOL_CMD);
+        let binary_path = "/abs/path/git-ai";
+        let before_tool_cmd = format!("{} {}", binary_path, GEMINI_BEFORE_TOOL_CMD);
+        let after_tool_cmd = format!("{} {}", binary_path, GEMINI_AFTER_TOOL_CMD);
 
         for (hook_type, desired_cmd) in &[
             ("BeforeTool", before_tool_cmd),
