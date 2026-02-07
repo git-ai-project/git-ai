@@ -341,6 +341,8 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    const TEST_BINARY_PATH: &str = "/abs/path/git-ai";
+
     fn setup_test_env() -> (TempDir, PathBuf) {
         let temp_dir = TempDir::new().unwrap();
         let settings_path = temp_dir.path().join(".claude").join("settings.json");
@@ -355,7 +357,6 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
 
-        let binary_path = "/abs/path/git-ai";
         let result = json!({
             "hooks": {
                 "PreToolUse": [
@@ -364,7 +365,7 @@ mod tests {
                         "hooks": [
                             {
                                 "type": "command",
-                                "command": format!("{} {}", binary_path, CLAUDE_PRE_TOOL_CMD)
+                                "command": format!("{} {}", TEST_BINARY_PATH, CLAUDE_PRE_TOOL_CMD)
                             }
                         ]
                     }
@@ -375,7 +376,7 @@ mod tests {
                         "hooks": [
                             {
                                 "type": "command",
-                                "command": format!("{} {}", binary_path, CLAUDE_POST_TOOL_CMD)
+                                "command": format!("{} {}", TEST_BINARY_PATH, CLAUDE_POST_TOOL_CMD)
                             }
                         ]
                     }
@@ -461,9 +462,8 @@ mod tests {
         let mut content: Value =
             serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
 
-        let binary_path = "/abs/path/git-ai";
-        let pre_tool_cmd = format!("{} {}", binary_path, CLAUDE_PRE_TOOL_CMD);
-        let post_tool_cmd = format!("{} {}", binary_path, CLAUDE_POST_TOOL_CMD);
+        let pre_tool_cmd = format!("{} {}", TEST_BINARY_PATH, CLAUDE_PRE_TOOL_CMD);
+        let post_tool_cmd = format!("{} {}", TEST_BINARY_PATH, CLAUDE_POST_TOOL_CMD);
 
         for (hook_type, desired_cmd) in
             &[("PreToolUse", pre_tool_cmd), ("PostToolUse", post_tool_cmd)]
@@ -596,7 +596,6 @@ mod tests {
             .unwrap()
             .as_array_mut()
             .unwrap();
-        let binary_path = "/abs/path/git-ai";
         pre_array[0]
             .get_mut("hooks")
             .unwrap()
@@ -604,7 +603,7 @@ mod tests {
             .unwrap()
             .push(json!({
                 "type": "command",
-                "command": format!("{} {}", binary_path, CLAUDE_PRE_TOOL_CMD)
+                "command": format!("{} {}", TEST_BINARY_PATH, CLAUDE_PRE_TOOL_CMD)
             }));
 
         let post_array = hooks_obj
@@ -619,7 +618,7 @@ mod tests {
             .unwrap()
             .push(json!({
                 "type": "command",
-                "command": format!("{} {}", binary_path, CLAUDE_POST_TOOL_CMD)
+                "command": format!("{} {}", TEST_BINARY_PATH, CLAUDE_POST_TOOL_CMD)
             }));
 
         fs::write(

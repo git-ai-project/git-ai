@@ -335,6 +335,8 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    const TEST_BINARY_PATH: &str = "/abs/path/git-ai";
+
     fn setup_test_env() -> (TempDir, PathBuf) {
         let temp_dir = TempDir::new().unwrap();
         let settings_path = temp_dir.path().join(".gemini").join("settings.json");
@@ -349,7 +351,6 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
 
-        let binary_path = "/abs/path/git-ai";
         let result = json!({
             "tools": {
                 "enableHooks": true
@@ -361,7 +362,7 @@ mod tests {
                         "hooks": [
                             {
                                 "type": "command",
-                                "command": format!("{} {}", binary_path, GEMINI_BEFORE_TOOL_CMD)
+                                "command": format!("{} {}", TEST_BINARY_PATH, GEMINI_BEFORE_TOOL_CMD)
                             }
                         ]
                     }
@@ -372,7 +373,7 @@ mod tests {
                         "hooks": [
                             {
                                 "type": "command",
-                                "command": format!("{} {}", binary_path, GEMINI_AFTER_TOOL_CMD)
+                                "command": format!("{} {}", TEST_BINARY_PATH, GEMINI_AFTER_TOOL_CMD)
                             }
                         ]
                     }
@@ -467,9 +468,8 @@ mod tests {
         let mut content: Value =
             serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
 
-        let binary_path = "/abs/path/git-ai";
-        let before_tool_cmd = format!("{} {}", binary_path, GEMINI_BEFORE_TOOL_CMD);
-        let after_tool_cmd = format!("{} {}", binary_path, GEMINI_AFTER_TOOL_CMD);
+        let before_tool_cmd = format!("{} {}", TEST_BINARY_PATH, GEMINI_BEFORE_TOOL_CMD);
+        let after_tool_cmd = format!("{} {}", TEST_BINARY_PATH, GEMINI_AFTER_TOOL_CMD);
 
         for (hook_type, desired_cmd) in &[
             ("BeforeTool", before_tool_cmd),
