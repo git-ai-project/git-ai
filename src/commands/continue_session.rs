@@ -53,6 +53,8 @@ pub struct ContinueOptions {
     pub clipboard: bool,
     /// Whether to output structured JSON
     pub json: bool,
+    /// Whether to show a summary of the session on launch
+    pub summary: bool,
     /// Limit on messages to include in context per prompt
     pub max_messages: Option<usize>,
 }
@@ -204,7 +206,7 @@ fn handle_continue_tui(repo: &Repository) {
     // Execute the chosen action
     match choice {
         AgentChoice::Launch(agent) => {
-            match launch_agent(&agent, &context) {
+            match launch_agent(&agent, &context, false) {
                 Ok(()) => {}
                 Err(e) => {
                     eprintln!("Error launching agent: {}", e);
@@ -363,7 +365,7 @@ pub fn handle_continue(args: &[String]) {
         }
     } else if parsed.options.launch || std::io::stdout().is_terminal() {
         // Launch agent by default when output is a terminal
-        match launch_agent(parsed.options.agent_name(), &output) {
+        match launch_agent(parsed.options.agent_name(), &output, parsed.options.summary) {
             Ok(()) => {}
             Err(e) => {
                 eprintln!("Error launching agent: {}", e);
@@ -389,7 +391,7 @@ fn is_cli_available(cmd: &str) -> bool {
 }
 
 /// Launch an agent CLI interactively with the context as the initial prompt
-fn launch_agent(agent: &str, context: &str) -> Result<(), GitAiError> {
+fn launch_agent(agent: &str, context: &str, summary: bool) -> Result<(), GitAiError> {
     match agent {
         "claude" => {
             // Check if claude CLI is available
@@ -404,21 +406,27 @@ fn launch_agent(agent: &str, context: &str) -> Result<(), GitAiError> {
             // is the direct child of the shell, so terminal/interactive detection
             // works correctly (spawning as a subprocess causes claude to run in
             // non-interactive print mode).
+            let mut cmd = Command::new("claude");
+            cmd.arg("--append-system-prompt").arg(context);
+
+            if summary {
+                cmd.arg(
+                    "Briefly summarize the restored session context above: \
+                     what was being worked on, what was accomplished, and what \
+                     remains to be done. Then ask how you can help.",
+                );
+            }
+
             #[cfg(unix)]
             {
-                let err = Command::new("claude")
-                    .arg("--append-system-prompt")
-                    .arg(context)
-                    .exec();
+                let err = cmd.exec();
                 // exec() only returns if it failed
                 return Err(GitAiError::Generic(format!("Failed to exec claude: {}", err)));
             }
 
             #[cfg(not(unix))]
             {
-                let status = Command::new("claude")
-                    .arg("--append-system-prompt")
-                    .arg(context)
+                let status = cmd
                     .stdin(Stdio::inherit())
                     .stdout(Stdio::inherit())
                     .stderr(Stdio::inherit())
@@ -694,6 +702,9 @@ fn parse_continue_args(args: &[String]) -> Result<ParsedContinueArgs, String> {
             "--json" => {
                 options.json = true;
             }
+            "--summary" => {
+                options.summary = true;
+            }
             // Options
             "--max-messages" => {
                 i += 1;
@@ -939,6 +950,7 @@ fn print_continue_help() {
     eprintln!("    --json                  Output context as structured JSON");
     eprintln!();
     eprintln!("OPTIONS:");
+    eprintln!("    --summary               Ask the agent to summarize the session on launch");
     eprintln!("    --max-messages <n>      Max messages per prompt in output (default: 50)");
     eprintln!();
     eprintln!("EXAMPLES:");
