@@ -112,7 +112,7 @@ if [ ! -f "$CLAUDE_SETTINGS" ]; then
     exit 1
 fi
 
-if ! python - "$CLAUDE_SETTINGS" "$CLAUDE_HOOK_COMMAND" <<'PY'
+if ! python - "$CLAUDE_SETTINGS" "$CLAUDE_HOOK_COMMAND" "$INSTALL_DIR" <<'PY'
 import json
 import os
 import shlex
@@ -120,6 +120,7 @@ import sys
 
 settings_path = sys.argv[1]
 hook_command = sys.argv[2]
+install_dir = sys.argv[3]
 
 try:
     with open(settings_path, "r", encoding="utf-8") as f:
@@ -147,17 +148,20 @@ def collect(obj):
 collect(data)
 
 hook_tokens = hook_command.split()
+min_token_count = len(hook_tokens) + 1
+expected_binary = os.path.realpath(os.path.join(install_dir, "git-ai"))
 
 for cmd in commands:
     try:
         tokens = shlex.split(cmd)
     except ValueError:
         continue
-    if len(tokens) < len(hook_tokens) + 1:
+    if len(tokens) < min_token_count:
         continue
-    if os.path.basename(tokens[0]) != "git-ai":
+    if os.path.realpath(tokens[0]) != expected_binary:
         continue
-    if tokens[1:1 + len(hook_tokens)] == hook_tokens:
+    command_args = tokens[1:1 + len(hook_tokens)]
+    if command_args == hook_tokens:
         sys.exit(0)
 
 sys.exit(1)
