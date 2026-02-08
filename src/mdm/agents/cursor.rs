@@ -3,10 +3,10 @@ use crate::mdm::hook_installer::{
     HookCheckResult, HookInstaller, HookInstallerParams, InstallResult,
 };
 use crate::mdm::utils::{
-    MIN_CURSOR_VERSION, binary_exists, generate_diff, get_binary_version, home_dir,
+    MIN_CURSOR_VERSION, generate_diff, get_editor_version, home_dir,
     install_vsc_editor_extension, is_vsc_editor_extension_installed, parse_version,
-    settings_paths_for_products, should_process_settings_target, version_meets_requirement,
-    write_atomic,
+    resolve_editor_cli, settings_paths_for_products, should_process_settings_target,
+    version_meets_requirement, write_atomic,
 };
 use crate::utils::debug_log;
 use serde_json::{Value, json};
@@ -44,13 +44,14 @@ impl HookInstaller for CursorInstaller {
     }
 
     fn check_hooks(&self, _params: &HookInstallerParams) -> Result<HookCheckResult, GitAiError> {
-        let has_binary = binary_exists("cursor");
+        let resolved_cli = resolve_editor_cli("cursor");
+        let has_cli = resolved_cli.is_some();
         let has_dotfiles = home_dir().join(".cursor").exists();
         let has_settings_targets = Self::settings_targets()
             .iter()
             .any(|path| should_process_settings_target(path));
 
-        if !has_binary && !has_dotfiles && !has_settings_targets {
+        if !has_cli && !has_dotfiles && !has_settings_targets {
             return Ok(HookCheckResult {
                 tool_installed: false,
                 hooks_installed: false,
@@ -58,9 +59,9 @@ impl HookInstaller for CursorInstaller {
             });
         }
 
-        // If we have the binary, check version
-        if has_binary
-            && let Ok(version_str) = get_binary_version("cursor")
+        // If we have a CLI, check version
+        if let Some(cli) = &resolved_cli
+            && let Ok(version_str) = get_editor_version(cli)
             && let Some(version) = parse_version(&version_str)
             && !version_meets_requirement(version, MIN_CURSOR_VERSION)
         {
@@ -319,8 +320,8 @@ impl HookInstaller for CursorInstaller {
         let mut results = Vec::new();
 
         // Install VS Code extension
-        if binary_exists("cursor") {
-            match is_vsc_editor_extension_installed("cursor", "git-ai.git-ai-vscode") {
+        if let Some(cli) = resolve_editor_cli("cursor") {
+            match is_vsc_editor_extension_installed(&cli, "git-ai.git-ai-vscode") {
                 Ok(true) => {
                     results.push(InstallResult {
                         changed: false,
@@ -338,7 +339,7 @@ impl HookInstaller for CursorInstaller {
                     } else {
                         println!("Installing extensions...");
                         println!("\tInstalling extension 'git-ai.git-ai-vscode'...");
-                        match install_vsc_editor_extension("cursor", "git-ai.git-ai-vscode") {
+                        match install_vsc_editor_extension(&cli, "git-ai.git-ai-vscode") {
                             Ok(()) => {
                                 results.push(InstallResult {
                                     changed: true,

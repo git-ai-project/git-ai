@@ -3,9 +3,10 @@ use crate::mdm::hook_installer::{
     HookCheckResult, HookInstaller, HookInstallerParams, InstallResult, UninstallResult,
 };
 use crate::mdm::utils::{
-    MIN_CODE_VERSION, binary_exists, get_binary_version, home_dir, install_vsc_editor_extension,
+    MIN_CODE_VERSION, get_editor_version, home_dir, install_vsc_editor_extension,
     is_github_codespaces, is_vsc_editor_extension_installed, parse_version,
-    settings_paths_for_products, should_process_settings_target, version_meets_requirement,
+    resolve_editor_cli, settings_paths_for_products, should_process_settings_target,
+    version_meets_requirement,
 };
 use crate::utils::debug_log;
 use std::path::PathBuf;
@@ -28,13 +29,14 @@ impl HookInstaller for VSCodeInstaller {
     }
 
     fn check_hooks(&self, _params: &HookInstallerParams) -> Result<HookCheckResult, GitAiError> {
-        let has_binary = binary_exists("code");
+        let resolved_cli = resolve_editor_cli("code");
+        let has_cli = resolved_cli.is_some();
         let has_dotfiles = home_dir().join(".vscode").exists();
         let has_settings_targets = Self::settings_targets()
             .iter()
             .any(|path| should_process_settings_target(path));
 
-        if !has_binary && !has_dotfiles && !has_settings_targets {
+        if !has_cli && !has_dotfiles && !has_settings_targets {
             return Ok(HookCheckResult {
                 tool_installed: false,
                 hooks_installed: false,
@@ -42,9 +44,9 @@ impl HookInstaller for VSCodeInstaller {
             });
         }
 
-        // If we have the binary, check version
-        if has_binary
-            && let Ok(version_str) = get_binary_version("code")
+        // If we have a CLI, check version
+        if let Some(cli) = &resolved_cli
+            && let Ok(version_str) = get_editor_version(cli)
             && let Some(version) = parse_version(&version_str)
             && !version_meets_requirement(version, MIN_CODE_VERSION)
         {
@@ -56,8 +58,8 @@ impl HookInstaller for VSCodeInstaller {
 
         // VS Code hooks are installed via extension, not config files
         // Check if extension is installed
-        if binary_exists("code") {
-            match is_vsc_editor_extension_installed("code", "git-ai.git-ai-vscode") {
+        if let Some(cli) = &resolved_cli {
+            match is_vsc_editor_extension_installed(cli, "git-ai.git-ai-vscode") {
                 Ok(true) => {
                     return Ok(HookCheckResult {
                         tool_installed: true,
@@ -121,8 +123,8 @@ impl HookInstaller for VSCodeInstaller {
         }
 
         // Install VS Code extension
-        if binary_exists("code") {
-            match is_vsc_editor_extension_installed("code", "git-ai.git-ai-vscode") {
+        if let Some(cli) = resolve_editor_cli("code") {
+            match is_vsc_editor_extension_installed(&cli, "git-ai.git-ai-vscode") {
                 Ok(true) => {
                     results.push(InstallResult {
                         changed: false,
@@ -138,7 +140,7 @@ impl HookInstaller for VSCodeInstaller {
                             message: "VS Code: Pending extension install".to_string(),
                         });
                     } else {
-                        match install_vsc_editor_extension("code", "git-ai.git-ai-vscode") {
+                        match install_vsc_editor_extension(&cli, "git-ai.git-ai-vscode") {
                             Ok(()) => {
                                 results.push(InstallResult {
                                     changed: true,
