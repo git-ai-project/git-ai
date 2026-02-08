@@ -147,8 +147,8 @@ def collect(obj):
 
 collect(data)
 
-hook_tokens = hook_command.split()
-min_token_count = len(hook_tokens) + 1
+hook_args = shlex.split(hook_command)
+min_token_count = len(hook_args) + 1
 expected_binary = os.path.realpath(os.path.join(install_dir, "git-ai"))
 
 for cmd in commands:
@@ -160,8 +160,8 @@ for cmd in commands:
         continue
     if os.path.realpath(tokens[0]) != expected_binary:
         continue
-    command_args = tokens[1:1 + len(hook_tokens)]
-    if command_args == hook_tokens:
+    command_args = tokens[1:1 + len(hook_args)]
+    if command_args == hook_args:
         sys.exit(0)
 
 sys.exit(1)
