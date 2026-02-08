@@ -18,6 +18,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
+extract_version() {
+    local output="$1"
+    local match
+    match="$(echo "$output" | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+[^[:space:]]*' | head -n1)" || return 1
+    if [ -z "$match" ]; then
+        return 1
+    fi
+    printf '%s' "$match"
+}
+
 export HOME="$TEST_ROOT/home"
 mkdir -p "$HOME"
 
@@ -73,8 +83,7 @@ if [ ! -x "$INSTALL_DIR/git-ai" ]; then
 fi
 
 VERSION_OUTPUT="$("$INSTALL_DIR/git-ai" --version)"
-VERSION="$(echo "$VERSION_OUTPUT" | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+[^[:space:]]*' | head -n1 || true)"
-if [ -z "$VERSION" ]; then
+if ! VERSION="$(extract_version "$VERSION_OUTPUT")"; then
     echo "Unable to parse version from: $VERSION_OUTPUT" >&2
     exit 1
 fi
@@ -120,4 +129,13 @@ if ! echo "$OVERRIDE_OUTPUT" | grep -Fqs "release: $OVERRIDE_TAG"; then
     exit 1
 fi
 
-"$INSTALL_DIR/git-ai" --version >/dev/null
+OVERRIDE_VERSION_OUTPUT="$("$INSTALL_DIR/git-ai" --version)"
+if ! OVERRIDE_VERSION="$(extract_version "$OVERRIDE_VERSION_OUTPUT")"; then
+    echo "Unable to parse version from override install: $OVERRIDE_VERSION_OUTPUT" >&2
+    exit 1
+fi
+
+if [ "$OVERRIDE_VERSION" != "$VERSION" ]; then
+    echo "Override install version mismatch: $OVERRIDE_VERSION (expected $VERSION)" >&2
+    exit 1
+fi

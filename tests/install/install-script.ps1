@@ -63,10 +63,10 @@ try {
     if ($overrideOutput -notmatch $overridePattern) {
         throw "Override install did not report release tag $overrideTag"
     }
-    Remove-Item Env:GIT_AI_RELEASE_TAG -ErrorAction SilentlyContinue
 
     & $gitAiExe --version | Out-Null
 } finally {
+    Remove-Item Env:GIT_AI_RELEASE_TAG -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $testRoot) {
         Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
