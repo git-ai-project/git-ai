@@ -16,7 +16,7 @@ try {
     $binDir = Join-Path $testRoot 'bin'
     New-Item -ItemType Directory -Force -Path $binDir | Out-Null
     $claudeCmd = Join-Path $binDir 'claude.cmd'
-    Set-Content -Path $claudeCmd -Value "@echo off`r`necho 2.0.0 (Claude Code)`r`n" -Encoding ASCII -Force
+    Set-Content -Path $claudeCmd -Value "@echo off`r`necho 2.0.0`r`n" -Encoding ASCII -Force
     $env:PATH = "$binDir;$env:PATH"
 
     $installScript = Join-Path $repoRoot 'install.ps1'

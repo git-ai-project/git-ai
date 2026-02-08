@@ -26,7 +26,7 @@ mkdir -p "$TEST_ROOT/bin"
 cat > "$TEST_ROOT/bin/claude" <<'EOF'
 #!/usr/bin/env bash
 if [ "${1:-}" = "--version" ]; then
-  echo "2.0.0 (Claude Code)"
+  echo "2.0.0"
 else
   echo "Claude Code"
 fi
