@@ -117,8 +117,8 @@ if ! grep -Fqs "$CLAUDE_HOOK_ARGS" "$CLAUDE_SETTINGS"; then
     exit 1
 fi
 
-# Match an absolute git-ai command with Unix-style paths and flexible whitespace in Claude settings.
-CLAUDE_HOOK_ARGS_REGEX="${CLAUDE_HOOK_ARGS// /[[:space:]]+}"
+# install.sh is Unix-only, so Claude settings should contain Unix-style paths and flexible whitespace.
+CLAUDE_HOOK_ARGS_REGEX="$(printf '%s' "$CLAUDE_HOOK_ARGS" | sed 's/[[:space:]]\\+/[[:space:]]+/g')"
 CLAUDE_HOOK_REGEX="[^[:space:]]+/git-ai[[:space:]]+${CLAUDE_HOOK_ARGS_REGEX}"
 if ! grep -Eq "$CLAUDE_HOOK_REGEX" "$CLAUDE_SETTINGS"; then
     echo "git-ai command missing in Claude hooks config" >&2
