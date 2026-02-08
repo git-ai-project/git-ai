@@ -106,18 +106,20 @@ if [ "$PATH_LINE_COUNT" -ne 1 ]; then
 fi
 
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
+CLAUDE_HOOK_ARGS="checkpoint claude --hook-input stdin"
 if [ ! -f "$CLAUDE_SETTINGS" ]; then
     echo "Claude settings.json not created at $CLAUDE_SETTINGS" >&2
     exit 1
 fi
 
-if ! grep -Fqs "checkpoint claude --hook-input stdin" "$CLAUDE_SETTINGS"; then
+if ! grep -Fqs "$CLAUDE_HOOK_ARGS" "$CLAUDE_SETTINGS"; then
     echo "Claude hooks not configured in $CLAUDE_SETTINGS" >&2
     exit 1
 fi
 
 # Match an absolute git-ai command with whitespace-separated arguments in Claude settings.
-CLAUDE_HOOK_REGEX="[^[:space:]]+/git-ai[[:space:]]+checkpoint[[:space:]]+claude[[:space:]]+--hook-input[[:space:]]+stdin"
+CLAUDE_HOOK_ARGS_REGEX="checkpoint[[:space:]]+claude[[:space:]]+--hook-input[[:space:]]+stdin"
+CLAUDE_HOOK_REGEX="[^[:space:]]+/git-ai[[:space:]]+${CLAUDE_HOOK_ARGS_REGEX}"
 if ! grep -Eq "$CLAUDE_HOOK_REGEX" "$CLAUDE_SETTINGS"; then
     echo "git-ai command missing in Claude hooks config" >&2
     exit 1
