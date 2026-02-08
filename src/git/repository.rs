@@ -1215,7 +1215,28 @@ impl Repository {
         Ok(String::from_utf8(output.stdout)?.trim().to_string())
     }
 
-    // Merge two trees, producing an index that reflects the result of the merge. The index may be written as-is to the working directory or checked out. If the index is to be converted to a tree, the caller should resolve any conflicts that arose as part of the merge.
+    /// Merge two trees using git merge-tree with the "ours" strategy.
+    ///
+    /// This function performs a three-way merge of trees, favoring "our" side in case of conflicts.
+    /// It requires Git 2.41.0 or later, which introduced the --merge-base option for merge-tree.
+    ///
+    /// # Arguments
+    /// * `ancestor_tree` - The common ancestor tree for the merge
+    /// * `our_tree` - Our side of the merge
+    /// * `their_tree` - Their side of the merge
+    ///
+    /// # Returns
+    /// Returns the OID of the resulting merged tree on success.
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - Git version is older than 2.41.0 (which lacks --merge-base support)
+    /// - The merge operation fails
+    ///
+    /// # Note
+    /// This function is currently not used in the codebase (marked with #[allow(dead_code)]).
+    /// It was preserved to address potential issues with Git version compatibility reported in
+    /// issue about test failures on Debian 12 (Git 2.39.5).
     #[allow(dead_code)]
     pub fn merge_trees_favor_ours(
         &self,
@@ -1226,7 +1247,7 @@ impl Repository {
         let mut args = self.global_args_for_exec();
         args.push("merge-tree".to_string());
         args.push("--write-tree".to_string());
-        
+
         // Check if Git version supports --merge-base (added in Git 2.41.0)
         if self.git_supports_merge_tree_merge_base() {
             // Modern Git: use --merge-base with tree OIDs
@@ -1246,7 +1267,7 @@ impl Repository {
                     .unwrap_or_else(|| "unknown".to_string())
             )));
         }
-        
+
         let output = exec_git(&args)?;
         Ok(String::from_utf8(output.stdout)?.trim().to_string())
     }
@@ -2529,16 +2550,22 @@ mod tests {
     fn test_git_supports_merge_tree_merge_base() {
         // Test that we correctly detect support for --merge-base in merge-tree
         // This feature was added in Git 2.41.0
-        
+
         // Git 2.41.0 and above should support it
         assert!(Repository::version_supports_merge_tree_merge_base(2, 41, 0));
         assert!(Repository::version_supports_merge_tree_merge_base(2, 42, 0));
         assert!(Repository::version_supports_merge_tree_merge_base(3, 0, 0));
-        
+
         // Git 2.40.x and below should not support it
-        assert!(!Repository::version_supports_merge_tree_merge_base(2, 40, 1));
-        assert!(!Repository::version_supports_merge_tree_merge_base(2, 39, 5));
-        assert!(!Repository::version_supports_merge_tree_merge_base(2, 23, 0));
+        assert!(!Repository::version_supports_merge_tree_merge_base(
+            2, 40, 1
+        ));
+        assert!(!Repository::version_supports_merge_tree_merge_base(
+            2, 39, 5
+        ));
+        assert!(!Repository::version_supports_merge_tree_merge_base(
+            2, 23, 0
+        ));
         assert!(!Repository::version_supports_merge_tree_merge_base(1, 8, 5));
     }
 
