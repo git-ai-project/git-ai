@@ -1,0 +1,53 @@
+name: Install Script Tests
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  merge_group:
+    branches: [main]
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+jobs:
+  install-unix:
+    name: Install script (${{ matrix.os }} / ${{ matrix.shell }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        shell: [bash, zsh, fish]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install shells (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zsh fish
+
+      - name: Install fish (macOS)
+        if: matrix.os == 'macos-latest' && matrix.shell == 'fish'
+        run: brew install fish
+
+      - name: Run install.sh tests
+        env:
+          SHELL_NAME: ${{ matrix.shell }}
+        run: bash tests/install/install-script.sh
+
+  install-windows:
+    name: Install script (windows-latest)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run install.ps1 tests
+        shell: pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File tests/install/install-script.ps1
