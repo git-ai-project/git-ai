@@ -6,6 +6,7 @@ use crate::error::GitAiError;
 use crate::git::find_repository;
 use crate::git::repo_storage::InitialAttributions;
 use crate::git::repository::Repository;
+use crate::git::status::MAX_PATHSPEC_ARGS;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -227,14 +228,22 @@ fn get_working_dir_diff_stats(
     args.push("HEAD".to_string());
 
     // Add pathspecs if provided to scope the diff to specific files
-    if let Some(paths) = pathspecs
+    // Only pass as CLI args when under threshold to avoid E2BIG
+    let needs_post_filter = if let Some(paths) = pathspecs
         && !paths.is_empty()
     {
-        args.push("--".to_string());
-        for path in paths {
-            args.push(path.clone());
+        if paths.len() > MAX_PATHSPEC_ARGS {
+            true
+        } else {
+            args.push("--".to_string());
+            for path in paths {
+                args.push(path.clone());
+            }
+            false
         }
-    }
+    } else {
+        false
+    };
 
     let output = crate::git::repository::exec_git(&args)?;
     let stdout = String::from_utf8(output.stdout)?;
@@ -251,6 +260,15 @@ fn get_working_dir_diff_stats(
         // Parse numstat format: "added\tdeleted\tfilename"
         let parts: Vec<&str> = line.split('\t').collect();
         if parts.len() >= 3 {
+            // Post-filter by pathspec when we couldn't pass them as CLI args
+            if needs_post_filter {
+                if let Some(paths) = pathspecs {
+                    if !paths.contains(parts[2]) {
+                        continue;
+                    }
+                }
+            }
+
             // Parse added lines
             if let Ok(added) = parts[0].parse::<u32>() {
                 added_lines += added;

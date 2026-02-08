@@ -4,7 +4,7 @@ use crate::commands::git_handlers::CommandHooksContext;
 use crate::commands::hooks::commit_hooks::get_commit_default_author;
 use crate::error::GitAiError;
 use crate::git::cli_parser::ParsedGitInvocation;
-use crate::git::repository::{Repository, exec_git};
+use crate::git::repository::{Repository, exec_git, exec_git_stdin};
 use crate::utils::debug_log;
 
 pub fn pre_stash_hook(
@@ -262,19 +262,12 @@ fn save_stash_note(repo: &Repository, stash_sha: &str, content: &str) -> Result<
     args.push("--ref=ai-stash".to_string());
     args.push("add".to_string());
     args.push("-f".to_string()); // Force overwrite if exists
-    args.push("-m".to_string());
-    args.push(content.to_string());
+    args.push("-F".to_string());
+    args.push("-".to_string()); // Read note content from stdin
     args.push(stash_sha.to_string());
 
-    let output = exec_git(&args)?;
-
-    if !output.status.success() {
-        return Err(GitAiError::Generic(format!(
-            "Failed to save stash note: git notes exited with status {}",
-            output.status
-        )));
-    }
-
+    // Use stdin to provide the note content to avoid command line length limits
+    exec_git_stdin(&args, content.as_bytes())?;
     Ok(())
 }
 

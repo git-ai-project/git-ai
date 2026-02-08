@@ -3,6 +3,11 @@ use crate::git::repository::{Repository, exec_git};
 use std::collections::HashSet;
 use std::str;
 
+/// Maximum number of pathspec arguments to pass on the command line.
+/// Beyond this threshold, we run git without pathspecs and post-filter
+/// in Rust to avoid OS `ARG_MAX` / E2BIG errors.
+pub const MAX_PATHSPEC_ARGS: usize = 1000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusCode {
     Unmodified,
@@ -135,8 +140,10 @@ impl Repository {
             args.push("--untracked-files=no".to_string());
         }
 
-        // Add combined pathspecs (staged files + provided paths)
-        if !combined_pathspecs.is_empty() {
+        // Add combined pathspecs as CLI args only if under the threshold;
+        // otherwise run without pathspecs and post-filter to avoid E2BIG.
+        let needs_post_filter = combined_pathspecs.len() > MAX_PATHSPEC_ARGS;
+        if !needs_post_filter && !combined_pathspecs.is_empty() {
             args.push("--".to_string());
             for path in &combined_pathspecs {
                 args.push(path.clone());
@@ -152,7 +159,18 @@ impl Repository {
             )));
         }
 
-        parse_porcelain_v2(&output.stdout)
+        let mut entries = parse_porcelain_v2(&output.stdout)?;
+
+        if needs_post_filter {
+            entries.retain(|e| {
+                combined_pathspecs.contains(&e.path)
+                    || e.orig_path
+                        .as_ref()
+                        .is_some_and(|op| combined_pathspecs.contains(op))
+            });
+        }
+
+        Ok(entries)
     }
 }
 

@@ -6,6 +6,7 @@ use crate::config;
 use crate::error::GitAiError;
 use crate::git::refs::get_authorship;
 use crate::git::repo_storage::RepoStorage;
+use crate::git::status::MAX_PATHSPEC_ARGS;
 use crate::git::rewrite_log::RewriteLogEvent;
 use crate::git::sync_authorship::{fetch_authorship_notes, push_authorship_notes};
 #[cfg(windows)]
@@ -1684,28 +1685,41 @@ impl Repository {
 
         args.push(commit_sha.to_string());
 
-        // Add pathspecs if provided
-        if let Some(paths) = pathspecs {
+        // Add pathspecs if provided (only as CLI args when under threshold)
+        let needs_post_filter = if let Some(paths) = pathspecs {
             // for case where pathspec filter provided BUT not pathspecs.
             // otherwise it would default to full repo
             if paths.is_empty() {
                 return Ok(HashSet::new());
             }
-            args.push("--".to_string());
-            for path in paths {
-                args.push(path.clone());
+            if paths.len() > MAX_PATHSPEC_ARGS {
+                true
+            } else {
+                args.push("--".to_string());
+                for path in paths {
+                    args.push(path.clone());
+                }
+                false
             }
-        }
+        } else {
+            false
+        };
 
         let output = exec_git(&args)?;
 
         // With -z, output is NUL-separated. The output may contain a trailing NUL.
-        let files: HashSet<String> = output
+        let mut files: HashSet<String> = output
             .stdout
             .split(|&b| b == 0)
             .filter(|bytes| !bytes.is_empty())
             .filter_map(|bytes| String::from_utf8(bytes.to_vec()).ok())
             .collect();
+
+        if needs_post_filter {
+            if let Some(paths) = pathspecs {
+                files.retain(|path| paths.contains(path));
+            }
+        }
 
         Ok(files)
     }
@@ -1729,23 +1743,38 @@ impl Repository {
         args.push(from_ref.to_string());
         args.push(to_ref.to_string());
 
-        // Add pathspecs if provided
-        if let Some(paths) = pathspecs {
+        // Add pathspecs if provided (only as CLI args when under threshold)
+        let needs_post_filter = if let Some(paths) = pathspecs {
             // for case where pathspec filter provided BUT not pathspecs.
             // otherwise it would default to full repo
             if paths.is_empty() {
                 return Ok(HashMap::new());
             }
-            args.push("--".to_string());
-            for path in paths {
-                args.push(path.clone());
+            if paths.len() > MAX_PATHSPEC_ARGS {
+                true
+            } else {
+                args.push("--".to_string());
+                for path in paths {
+                    args.push(path.clone());
+                }
+                false
             }
-        }
+        } else {
+            false
+        };
 
         let output = exec_git(&args)?;
         let diff_output = String::from_utf8(output.stdout)?;
 
-        parse_diff_added_lines(&diff_output)
+        let mut result = parse_diff_added_lines(&diff_output)?;
+
+        if needs_post_filter {
+            if let Some(paths) = pathspecs {
+                result.retain(|path, _| paths.contains(path));
+            }
+        }
+
+        Ok(result)
     }
 
     /// Get list of changed files between two refs using `git diff --name-only`
@@ -1791,23 +1820,38 @@ impl Repository {
         args.push("--no-color".to_string());
         args.push(from_ref.to_string());
 
-        // Add pathspecs if provided
-        if let Some(paths) = pathspecs {
+        // Add pathspecs if provided (only as CLI args when under threshold)
+        let needs_post_filter = if let Some(paths) = pathspecs {
             // for case where pathspec filter provided BUT not pathspecs.
             // otherwise it would default to full repo
             if paths.is_empty() {
                 return Ok(HashMap::new());
             }
-            args.push("--".to_string());
-            for path in paths {
-                args.push(path.clone());
+            if paths.len() > MAX_PATHSPEC_ARGS {
+                true
+            } else {
+                args.push("--".to_string());
+                for path in paths {
+                    args.push(path.clone());
+                }
+                false
             }
-        }
+        } else {
+            false
+        };
 
         let output = exec_git(&args)?;
         let diff_output = String::from_utf8(output.stdout)?;
 
-        parse_diff_added_lines(&diff_output)
+        let mut result = parse_diff_added_lines(&diff_output)?;
+
+        if needs_post_filter {
+            if let Some(paths) = pathspecs {
+                result.retain(|path, _| paths.contains(path));
+            }
+        }
+
+        Ok(result)
     }
 
     /// Get added line ranges from git diff between a commit and the working directory,
@@ -1827,23 +1871,40 @@ impl Repository {
         args.push("--no-color".to_string());
         args.push(from_ref.to_string());
 
-        // Add pathspecs if provided
-        if let Some(paths) = pathspecs {
+        // Add pathspecs if provided (only as CLI args when under threshold)
+        let needs_post_filter = if let Some(paths) = pathspecs {
             // for case where pathspec filter provided BUT not pathspecs.
             // otherwise it would default to full repo
             if paths.is_empty() {
                 return Ok((HashMap::new(), HashMap::new()));
             }
-            args.push("--".to_string());
-            for path in paths {
-                args.push(path.clone());
+            if paths.len() > MAX_PATHSPEC_ARGS {
+                true
+            } else {
+                args.push("--".to_string());
+                for path in paths {
+                    args.push(path.clone());
+                }
+                false
             }
-        }
+        } else {
+            false
+        };
 
         let output = exec_git(&args)?;
         let diff_output = String::from_utf8(output.stdout)?;
 
-        parse_diff_added_lines_with_insertions(&diff_output)
+        let (mut all_added, mut pure_insertions) =
+            parse_diff_added_lines_with_insertions(&diff_output)?;
+
+        if needs_post_filter {
+            if let Some(paths) = pathspecs {
+                all_added.retain(|path, _| paths.contains(path));
+                pure_insertions.retain(|path, _| paths.contains(path));
+            }
+        }
+
+        Ok((all_added, pure_insertions))
     }
 
     pub fn fetch_branch(&self, branch_name: &str, remote_name: &str) -> Result<(), GitAiError> {

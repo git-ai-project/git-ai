@@ -1,5 +1,6 @@
 use crate::error::GitAiError;
 use crate::git::repository::{Repository, Tree, exec_git};
+use crate::git::status::MAX_PATHSPEC_ARGS;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -158,16 +159,35 @@ impl Repository {
         args.push(old_oid);
         args.push(new_oid);
 
-        // Add pathspecs if provided
-        if let Some(paths) = pathspecs {
-            args.push("--".to_string());
-            for path in paths {
-                args.push(path.clone());
+        // Add pathspecs if provided (only as CLI args when under threshold)
+        let needs_post_filter = if let Some(paths) = pathspecs {
+            if paths.len() > MAX_PATHSPEC_ARGS {
+                true
+            } else {
+                args.push("--".to_string());
+                for path in paths {
+                    args.push(path.clone());
+                }
+                false
             }
-        }
+        } else {
+            false
+        };
 
         let output = exec_git(&args)?;
-        let deltas = parse_diff_raw(&output.stdout)?;
+        let mut deltas = parse_diff_raw(&output.stdout)?;
+
+        if needs_post_filter {
+            if let Some(paths) = pathspecs {
+                deltas.retain(|delta| {
+                    delta
+                        .new_file
+                        .path()
+                        .and_then(|p| p.to_str())
+                        .is_some_and(|p| paths.contains(p))
+                });
+            }
+        }
 
         Ok(Diff { deltas })
     }
