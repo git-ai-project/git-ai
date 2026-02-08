@@ -148,10 +148,13 @@ def collect(obj):
 collect(data)
 
 expected_args = shlex.split(hook_args_str)
-hook_args_len = len(expected_args)
+expected_args_len = len(expected_args)
 # Minimum tokens = binary path + all hook arguments.
-min_token_count = hook_args_len + 1
+min_token_count = expected_args_len + 1
 expected_binary = os.path.realpath(os.path.join(install_dir, "git-ai"))
+if not os.path.isfile(expected_binary):
+    print(f"Expected git-ai binary missing at {expected_binary}", file=sys.stderr)
+    sys.exit(1)
 
 for cmd in commands:
     try:
@@ -162,7 +165,7 @@ for cmd in commands:
         continue
     if os.path.realpath(tokens[0]) != expected_binary:
         continue
-    candidate_args = tokens[1:min_token_count]
+    candidate_args = tokens[1:expected_args_len + 1]
     if candidate_args == expected_args:
         sys.exit(0)
 
