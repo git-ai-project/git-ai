@@ -112,7 +112,7 @@ if [ ! -f "$CLAUDE_SETTINGS" ]; then
     exit 1
 fi
 
-if ! python - "$CLAUDE_SETTINGS" "$CLAUDE_HOOK_ARGS_STR" "$INSTALL_DIR" <<'PY'
+if ! python3 - "$CLAUDE_SETTINGS" "$CLAUDE_HOOK_ARGS_STR" "$INSTALL_DIR" <<'PY'
 import json
 import os
 import shlex
@@ -135,7 +135,7 @@ except json.JSONDecodeError as exc:
 commands = []
 
 def collect(obj):
-    """Recursively collect hook command strings into the commands list."""
+    """Recursively collect hook command strings into the commands list (mutates commands)."""
     if isinstance(obj, dict):
         for key, value in obj.items():
             if key == "command" and isinstance(value, str):
