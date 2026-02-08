@@ -1,0 +1,160 @@
+name: Nightly Upgrade Validation
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+jobs:
+  upgrade-from-older:
+    name: Upgrade from older versions on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Select random older versions (non-Windows)
+        id: versions
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          import random
+          import re
+          import urllib.request
+
+          url = "https://api.github.com/repos/git-ai-project/git-ai/releases?per_page=100"
+          req = urllib.request.Request(
+              url, headers={"Accept": "application/vnd.github+json"}
+          )
+          with urllib.request.urlopen(req) as response:
+              releases = json.load(response)
+
+          pattern = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
+          versions = {}
+          for release in releases:
+              tag = release.get("tag_name", "")
+              match = pattern.match(tag)
+              if not match:
+                  continue
+              version_tuple = tuple(int(part) for part in match.groups())
+              normalized = "v" + ".".join(match.groups())
+              versions[version_tuple] = normalized
+
+          if not versions:
+              raise SystemExit("No semver releases found")
+
+          latest_tuple = max(versions)
+          latest_tag = versions[latest_tuple]
+          older = [tag for ver, tag in versions.items() if (1, 0, 0) < ver < latest_tuple]
+          if not older:
+              raise SystemExit("No older versions found")
+
+          random.shuffle(older)
+          sample = older[: min(3, len(older))]
+          output_path = os.environ["GITHUB_OUTPUT"]
+          with open(output_path, "a", encoding="utf-8") as output:
+              output.write(f"latest={latest_tag}\n")
+              output.write(f"versions={' '.join(sample)}\n")
+          print(f"Selected versions: {' '.join(sample)}")
+          print(f"Latest: {latest_tag}")
+          PY
+
+      - name: Select random older versions (Windows)
+        id: versions-windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python - <<'PY'
+          import json
+          import os
+          import random
+          import re
+          import urllib.request
+
+          url = "https://api.github.com/repos/git-ai-project/git-ai/releases?per_page=100"
+          req = urllib.request.Request(
+              url, headers={"Accept": "application/vnd.github+json"}
+          )
+          with urllib.request.urlopen(req) as response:
+              releases = json.load(response)
+
+          pattern = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
+          versions = {}
+          for release in releases:
+              tag = release.get("tag_name", "")
+              match = pattern.match(tag)
+              if not match:
+                  continue
+              version_tuple = tuple(int(part) for part in match.groups())
+              normalized = "v" + ".".join(match.groups())
+              versions[version_tuple] = normalized
+
+          if not versions:
+              raise SystemExit("No semver releases found")
+
+          latest_tuple = max(versions)
+          latest_tag = versions[latest_tuple]
+          older = [tag for ver, tag in versions.items() if (1, 0, 0) < ver < latest_tuple]
+          if not older:
+              raise SystemExit("No older versions found")
+
+          random.shuffle(older)
+          sample = older[: min(3, len(older))]
+          output_path = os.environ["GITHUB_OUTPUT"]
+          with open(output_path, "a", encoding="utf-8") as output:
+              output.write(f"latest={latest_tag}\n")
+              output.write(f"versions={' '.join(sample)}\n")
+          print(f"Selected versions: {' '.join(sample)}")
+          print(f"Latest: {latest_tag}")
+          PY
+
+      - name: Install older versions and upgrade (non-Windows)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.git-ai/bin:$PATH"
+          latest="${{ steps.versions.outputs.latest }}"
+          for version in ${{ steps.versions.outputs.versions }}; do
+            echo "Installing ${version}"
+            GIT_AI_RELEASE_TAG="$version" ./install.sh
+            git-ai --version
+            git-ai upgrade
+            installed=$(git-ai --version | awk '{print $NF}')
+            if [ "$installed" != "$latest" ]; then
+              echo "Expected ${latest}, got ${installed}"
+              exit 1
+            fi
+          done
+
+      - name: Install older versions and upgrade (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $latest = "${{ steps.versions-windows.outputs.latest }}"
+          $versions = "${{ steps.versions-windows.outputs.versions }}".Split(' ', [System.StringSplitOptions]::RemoveEmptyEntries)
+          $env:PATH = "$HOME\.git-ai\bin;$env:PATH"
+          foreach ($version in $versions) {
+            Write-Host "Installing $version"
+            $env:GIT_AI_RELEASE_TAG = $version
+            pwsh -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+            & "$HOME\.git-ai\bin\git-ai" --version | Out-Host
+            & "$HOME\.git-ai\bin\git-ai" upgrade
+            $installed = (& "$HOME\.git-ai\bin\git-ai" --version).Trim().Split()[-1]
+            if ($installed -ne $latest) {
+              throw "Expected $latest, got $installed"
+            }
+          }
