@@ -25,11 +25,7 @@ export PATH="$TEST_ROOT/bin:$PATH"
 mkdir -p "$TEST_ROOT/bin"
 cat > "$TEST_ROOT/bin/claude" <<'EOF'
 #!/usr/bin/env bash
-if [ "${1:-}" = "--version" ]; then
-  echo "2.0.0"
-else
-  echo "Claude Code"
-fi
+echo "2.0.0"
 EOF
 chmod +x "$TEST_ROOT/bin/claude"
 
@@ -76,7 +72,7 @@ if [ ! -x "$INSTALL_DIR/git-ai" ]; then
 fi
 
 VERSION_OUTPUT="$("$INSTALL_DIR/git-ai" --version)"
-VERSION="$(echo "$VERSION_OUTPUT" | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)"
+VERSION="$(echo "$VERSION_OUTPUT" | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+[^[:space:]]*' | head -n1 || true)"
 if [ -z "$VERSION" ]; then
     echo "Unable to parse version from: $VERSION_OUTPUT" >&2
     exit 1

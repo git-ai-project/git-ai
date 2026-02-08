@@ -29,7 +29,7 @@ try {
     }
 
     $versionOutput = & $gitAiExe --version | Out-String
-    $versionMatch = [regex]::Match($versionOutput, '\d+\.\d+\.\d+')
+    $versionMatch = [regex]::Match($versionOutput, '\d+\.\d+\.\d+[^\s]*')
     if (-not $versionMatch.Success) {
         throw "Unable to parse version from: $versionOutput"
     }
