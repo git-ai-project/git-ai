@@ -59,7 +59,8 @@ try {
     $overrideTag = "v$version"
     $env:GIT_AI_RELEASE_TAG = $overrideTag
     $overrideOutput = & $installScript 2>&1 | Out-String
-    if ($overrideOutput -notmatch "release: $overrideTag") {
+    $overridePattern = [regex]::Escape("release: $overrideTag")
+    if ($overrideOutput -notmatch $overridePattern) {
         throw "Override install did not report release tag $overrideTag"
     }
     Remove-Item Env:GIT_AI_RELEASE_TAG -ErrorAction SilentlyContinue

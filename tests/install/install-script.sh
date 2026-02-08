@@ -115,6 +115,9 @@ $SHELL_COMMAND "$SHELL_CHECK"
 
 OVERRIDE_TAG="v$VERSION"
 OVERRIDE_OUTPUT="$(GIT_AI_RELEASE_TAG="$OVERRIDE_TAG" "$REPO_ROOT/install.sh")"
-echo "$OVERRIDE_OUTPUT" | grep -Fqs "release: $OVERRIDE_TAG"
+if ! echo "$OVERRIDE_OUTPUT" | grep -Fqs "release: $OVERRIDE_TAG"; then
+    echo "Release tag not found in override output" >&2
+    exit 1
+fi
 
 "$INSTALL_DIR/git-ai" --version >/dev/null
