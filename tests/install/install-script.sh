@@ -167,8 +167,8 @@ for cmd in commands:
         continue
     if os.path.realpath(tokens[0]) != expected_binary:
         continue
-    args_slice_end = 1 + expected_args_len
-    candidate_args = tokens[1:args_slice_end]
+    hook_args_end_index = 1 + expected_args_len
+    candidate_args = tokens[1:hook_args_end_index]
     if candidate_args == expected_args:
         sys.exit(0)
 
