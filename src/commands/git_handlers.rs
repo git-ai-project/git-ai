@@ -105,9 +105,7 @@ pub fn handle_git(args: &[String]) {
 
     // Allow users to explicitly disable git-ai via environment variable.
     // This is useful for CI pipelines, scripts, or debugging.
-    if std::env::var("GIT_AI_DISABLED").is_ok()
-        || std::env::var("GIT_AI_PASSTHROUGH").is_ok()
-    {
+    if std::env::var("GIT_AI_DISABLED").is_ok() || std::env::var("GIT_AI_PASSTHROUGH").is_ok() {
         let orig_args: Vec<String> = std::env::args().skip(1).collect();
         proxy_to_git(&orig_args, true);
         return;

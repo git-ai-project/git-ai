@@ -74,7 +74,10 @@ impl RepoStorage {
     pub fn working_log_for_base_commit(&self, sha: &str) -> PersistedWorkingLog {
         // Ensure the .git/ai directory structure exists before creating working log
         self.ensure_initialized().unwrap_or_else(|e| {
-            debug_log(&format!("Warning: Failed to initialize repo storage: {}", e));
+            debug_log(&format!(
+                "Warning: Failed to initialize repo storage: {}",
+                e
+            ));
         });
 
         let working_log_dir = self.working_logs.join(sha);
@@ -612,7 +615,10 @@ mod tests {
 
         // Directory should NOT exist yet (lazy initialization)
         let ai_dir = tmp_repo.repo().path().join("ai");
-        assert!(!ai_dir.exists(), ".git/ai directory should not exist before ensure_initialized()");
+        assert!(
+            !ai_dir.exists(),
+            ".git/ai directory should not exist before ensure_initialized()"
+        );
 
         // Now call ensure_initialized to create the directory structure
         repo_storage
@@ -620,7 +626,10 @@ mod tests {
             .expect("Failed to ensure config directory");
 
         // Verify .git/ai directory exists after initialization
-        assert!(ai_dir.exists(), ".git/ai directory should exist after ensure_initialized()");
+        assert!(
+            ai_dir.exists(),
+            ".git/ai directory should exist after ensure_initialized()"
+        );
         assert!(ai_dir.is_dir(), ".git/ai should be a directory");
 
         // Verify working_logs directory exists
