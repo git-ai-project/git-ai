@@ -117,7 +117,7 @@ if ! grep -Fqs "$CLAUDE_HOOK_ARGS" "$CLAUDE_SETTINGS"; then
     exit 1
 fi
 
-# Match an absolute git-ai command with whitespace-separated arguments in Claude settings.
+# Match an absolute git-ai command with Unix-style paths and flexible whitespace in Claude settings.
 CLAUDE_HOOK_ARGS_REGEX="${CLAUDE_HOOK_ARGS// /[[:space:]]+}"
 CLAUDE_HOOK_REGEX="[^[:space:]]+/git-ai[[:space:]]+${CLAUDE_HOOK_ARGS_REGEX}"
 if ! grep -Eq "$CLAUDE_HOOK_REGEX" "$CLAUDE_SETTINGS"; then
