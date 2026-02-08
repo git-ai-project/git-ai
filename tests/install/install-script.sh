@@ -135,6 +135,7 @@ except json.JSONDecodeError as exc:
 commands = []
 
 def collect(obj):
+    """Recursively collect hook command strings into the commands list."""
     if isinstance(obj, dict):
         for key, value in obj.items():
             if key == "command" and isinstance(value, str):
@@ -160,6 +161,7 @@ for cmd in commands:
     try:
         tokens = shlex.split(cmd)
     except ValueError:
+        # Skip malformed command entries in settings.json.
         continue
     if len(tokens) < min_token_count:
         continue
