@@ -204,6 +204,12 @@ impl PersistedWorkingLog {
         let checkpoints_file = self.dir.join("checkpoints.jsonl");
         fs::write(&checkpoints_file, "")?;
 
+        // Clear INITIAL attributions file so stale attributions from a
+        // previous working state do not persist across resets
+        if self.initial_file.exists() {
+            fs::remove_file(&self.initial_file)?;
+        }
+
         Ok(())
     }
 

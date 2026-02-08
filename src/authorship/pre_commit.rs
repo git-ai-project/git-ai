@@ -13,7 +13,6 @@ pub fn pre_commit(repo: &Repository, default_author: String) -> Result<(), GitAi
         true,
         None,
         true, // should skip if NO AI CHECKPOINTS
-              // also there's a bug around clearing state...maybe INITAL doesn't get deleted when nuking other stuff
     );
     result.map(|_| ())
 }
