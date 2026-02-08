@@ -149,6 +149,7 @@ collect(data)
 
 hook_args = shlex.split(hook_command)
 hook_args_len = len(hook_args)
+# Minimum tokens = binary path + all hook arguments.
 min_token_count = hook_args_len + 1
 expected_binary = os.path.realpath(os.path.join(install_dir, "git-ai"))
 
@@ -161,8 +162,8 @@ for cmd in commands:
         continue
     if os.path.realpath(tokens[0]) != expected_binary:
         continue
-    command_args = tokens[1:min_token_count]
-    if command_args == hook_args:
+    candidate_args = tokens[1:min_token_count]
+    if candidate_args == hook_args:
         sys.exit(0)
 
 sys.exit(1)
