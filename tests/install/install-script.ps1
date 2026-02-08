@@ -64,6 +64,16 @@ try {
         throw "Override install did not report release tag $overrideTag"
     }
 
+    $overrideVersionOutput = & $gitAiExe --version | Out-String
+    $overrideVersionMatch = [regex]::Match($overrideVersionOutput, '\d+\.\d+\.\d+[^\s]*')
+    if (-not $overrideVersionMatch.Success) {
+        throw "Unable to parse override version from: $overrideVersionOutput"
+    }
+    $overrideVersion = $overrideVersionMatch.Value
+    if ($overrideVersion -ne $version) {
+        throw "Override install version mismatch: $overrideVersion (expected $version)"
+    }
+
     & $gitAiExe --version | Out-Null
 } finally {
     Remove-Item Env:GIT_AI_RELEASE_TAG -ErrorAction SilentlyContinue
