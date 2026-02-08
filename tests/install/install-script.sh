@@ -161,7 +161,7 @@ for cmd in commands:
         tokens = shlex.split(cmd)
     except ValueError:
         continue
-    if len(tokens) != min_token_count:
+    if len(tokens) < min_token_count:
         continue
     if os.path.realpath(tokens[0]) != expected_binary:
         continue
