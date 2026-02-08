@@ -151,7 +151,7 @@ collect(data)
 expected_args = shlex.split(hook_args_str)
 expected_args_len = len(expected_args)
 # Minimum tokens = binary path + all hook arguments.
-min_token_count = expected_args_len + 1
+min_required_tokens = expected_args_len + 1
 expected_binary = os.path.realpath(os.path.join(install_dir, "git-ai"))
 if not os.path.isfile(expected_binary):
     print(f"Expected git-ai binary missing at {expected_binary}", file=sys.stderr)
@@ -163,11 +163,12 @@ for cmd in commands:
     except ValueError:
         # Skip malformed command entries in settings.json.
         continue
-    if len(tokens) < min_token_count:
+    if len(tokens) < min_required_tokens:
         continue
     if os.path.realpath(tokens[0]) != expected_binary:
         continue
-    candidate_args = tokens[1:1 + expected_args_len]
+    args_end = 1 + expected_args_len
+    candidate_args = tokens[1:args_end]
     if candidate_args == expected_args:
         sys.exit(0)
 
