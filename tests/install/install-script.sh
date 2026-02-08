@@ -118,9 +118,9 @@ if ! grep -Fqs "$CLAUDE_HOOK_COMMAND" "$CLAUDE_SETTINGS"; then
 fi
 
 # install.sh is Unix-only; git-ai is installed under $HOME without spaces, and we allow flexible whitespace.
-CLAUDE_HOOK_ARGS_REGEX="${CLAUDE_HOOK_COMMAND// /[[:space:]]+}"
-# Match any absolute git-ai path to handle /var vs /private/var resolution differences.
-CLAUDE_HOOK_REGEX="[^[:space:]]+/git-ai[[:space:]]+${CLAUDE_HOOK_ARGS_REGEX}"
+CLAUDE_HOOK_ARGS_REGEX="$(printf '%s' "$CLAUDE_HOOK_COMMAND" | sed -e 's/[.[\\^$*+?(){}|]/\\&/g' -e 's/ /[[:space:]]+/g')"
+# Match a quoted command entry to avoid accidental matches in the JSON payload.
+CLAUDE_HOOK_REGEX="\"[^\"[:space:]]+/git-ai[[:space:]]+${CLAUDE_HOOK_ARGS_REGEX}\""
 if ! grep -Eq "$CLAUDE_HOOK_REGEX" "$CLAUDE_SETTINGS"; then
     echo "git-ai command missing in Claude hooks config" >&2
     exit 1
