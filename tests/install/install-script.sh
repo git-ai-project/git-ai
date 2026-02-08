@@ -116,7 +116,8 @@ if ! grep -Fqs "checkpoint claude --hook-input stdin" "$CLAUDE_SETTINGS"; then
     exit 1
 fi
 
-if ! grep -Eq "[^[:space:]]+/git-ai[[:space:]]+checkpoint[[:space:]]+claude[[:space:]]+--hook-input[[:space:]]+stdin" "$CLAUDE_SETTINGS"; then
+CLAUDE_HOOK_REGEX="[^[:space:]]+/git-ai[[:space:]]+checkpoint[[:space:]]+claude[[:space:]]+--hook-input[[:space:]]+stdin"
+if ! grep -Eq "$CLAUDE_HOOK_REGEX" "$CLAUDE_SETTINGS"; then
     echo "git-ai command missing in Claude hooks config" >&2
     exit 1
 fi
