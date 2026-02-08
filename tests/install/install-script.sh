@@ -161,11 +161,11 @@ for cmd in commands:
         tokens = shlex.split(cmd)
     except ValueError:
         continue
-    if len(tokens) < min_token_count:
+    if len(tokens) != min_token_count:
         continue
     if os.path.realpath(tokens[0]) != expected_binary:
         continue
-    candidate_args = tokens[1:expected_args_len + 1]
+    candidate_args = tokens[1:1 + expected_args_len]
     if candidate_args == expected_args:
         sys.exit(0)
 
