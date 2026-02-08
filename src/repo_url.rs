@@ -153,4 +153,16 @@ mod tests {
         assert!(normalize_repo_url("ftp://example.com/repo").is_err());
         assert!(normalize_repo_url("git@github.com").is_err()); // missing :path
     }
+
+    #[test]
+    fn test_normalize_repo_url_with_username_password() {
+        assert_eq!(
+            normalize_repo_url("https://username:password@bitbucketserver.com/scm/project/repo.git").unwrap(),
+            "https://bitbucketserver.com/scm/project/repo"
+        );
+        assert_eq!(
+            normalize_repo_url("https://user:MDM0MjM5NDc2MDxxx@bitbucketserver.com/scm/projectname/teamsinspace.git").unwrap(),
+            "https://bitbucketserver.com/scm/projectname/teamsinspace"
+        );
+    }
 }
