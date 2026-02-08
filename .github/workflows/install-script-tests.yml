@@ -11,6 +11,9 @@ on:
     - cron: '0 3 * * *'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   install-unix:
     name: Install script (${{ matrix.os }} / ${{ matrix.shell }})
