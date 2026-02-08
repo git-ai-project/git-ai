@@ -185,7 +185,12 @@ jobs:
             & "$HOME\.git-ai\bin\git-ai" --version | Out-Host
             & "$HOME\.git-ai\bin\git-ai" upgrade
             $installed = (& "$HOME\.git-ai\bin\git-ai" --version).Trim().Split()[-1].TrimStart('v')
+            $deadline = (Get-Date).AddMinutes(3)
+            while ($installed -ne $latest -and (Get-Date) -lt $deadline) {
+              Start-Sleep -Seconds 5
+              $installed = (& "$HOME\.git-ai\bin\git-ai" --version).Trim().Split()[-1].TrimStart('v')
+            }
             if ($installed -ne $latest) {
-              throw "Expected $latest, got $installed"
+              throw "Expected $latest after upgrade, got $installed"
             }
           }
