@@ -1,5 +1,5 @@
 use crate::git::cli_parser::{ParsedGitInvocation, extract_clone_target_directory};
-use crate::git::repository::find_repository_in_path;
+use crate::git::repository::{find_repository_in_path, exec_git};
 use crate::git::sync_authorship::fetch_authorship_notes;
 use crate::utils::debug_log;
 
@@ -45,5 +45,30 @@ pub fn post_clone_hook(parsed_args: &ParsedGitInvocation, exit_status: std::proc
     } else {
         debug_log("successfully fetched authorship notes from origin");
         println!(", done.");
+    }
+
+    // Configure automatic fetching of AI authorship notes for future fetches
+    // Add a fetch refspec so that git fetch and git pull automatically fetch notes
+    configure_notes_fetch(&repository);
+}
+
+fn configure_notes_fetch(repository: &crate::git::repository::Repository) {
+    debug_log("configuring automatic fetch of authorship notes for origin");
+    
+    // Add fetch refspec: +refs/notes/ai:refs/notes/ai
+    // This ensures git fetch and git pull automatically fetch authorship notes
+    let mut args = repository.global_args_for_exec();
+    args.push("config".to_string());
+    args.push("--add".to_string());
+    args.push("remote.origin.fetch".to_string());
+    args.push("+refs/notes/ai:refs/notes/ai".to_string());
+
+    match exec_git(&args) {
+        Ok(_) => {
+            debug_log("successfully configured automatic notes fetch");
+        }
+        Err(e) => {
+            debug_log(&format!("failed to configure automatic notes fetch: {}", e));
+        }
     }
 }
