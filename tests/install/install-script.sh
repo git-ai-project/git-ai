@@ -114,6 +114,8 @@ fi
 
 if ! python - "$CLAUDE_SETTINGS" "$CLAUDE_HOOK_COMMAND" <<'PY'
 import json
+import os
+import shlex
 import sys
 
 settings_path = sys.argv[1]
@@ -122,7 +124,11 @@ hook_command = sys.argv[2]
 try:
     with open(settings_path, "r", encoding="utf-8") as f:
         data = json.load(f)
-except Exception:
+except FileNotFoundError:
+    print(f"Claude settings not found at {settings_path}", file=sys.stderr)
+    sys.exit(1)
+except json.JSONDecodeError as exc:
+    print(f"Claude settings JSON invalid: {exc}", file=sys.stderr)
     sys.exit(1)
 
 commands = []
@@ -140,8 +146,18 @@ def collect(obj):
 
 collect(data)
 
+hook_tokens = hook_command.split()
+
 for cmd in commands:
-    if hook_command in cmd and "git-ai" in cmd:
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        continue
+    if len(tokens) < len(hook_tokens) + 1:
+        continue
+    if os.path.basename(tokens[0]) != "git-ai":
+        continue
+    if tokens[1:1 + len(hook_tokens)] == hook_tokens:
         sys.exit(0)
 
 sys.exit(1)
