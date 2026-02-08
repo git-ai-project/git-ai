@@ -106,20 +106,20 @@ if [ "$PATH_LINE_COUNT" -ne 1 ]; then
 fi
 
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
-CLAUDE_HOOK_COMMAND="checkpoint claude --hook-input stdin"
+CLAUDE_HOOK_ARGS_STR="checkpoint claude --hook-input stdin"
 if [ ! -f "$CLAUDE_SETTINGS" ]; then
     echo "Claude settings.json not created at $CLAUDE_SETTINGS" >&2
     exit 1
 fi
 
-if ! python - "$CLAUDE_SETTINGS" "$CLAUDE_HOOK_COMMAND" "$INSTALL_DIR" <<'PY'
+if ! python - "$CLAUDE_SETTINGS" "$CLAUDE_HOOK_ARGS_STR" "$INSTALL_DIR" <<'PY'
 import json
 import os
 import shlex
 import sys
 
 settings_path = sys.argv[1]
-hook_command = sys.argv[2]
+hook_args_str = sys.argv[2]
 install_dir = sys.argv[3]
 
 try:
@@ -147,8 +147,8 @@ def collect(obj):
 
 collect(data)
 
-hook_args = shlex.split(hook_command)
-hook_args_len = len(hook_args)
+expected_args = shlex.split(hook_args_str)
+hook_args_len = len(expected_args)
 # Minimum tokens = binary path + all hook arguments.
 min_token_count = hook_args_len + 1
 expected_binary = os.path.realpath(os.path.join(install_dir, "git-ai"))
@@ -163,7 +163,7 @@ for cmd in commands:
     if os.path.realpath(tokens[0]) != expected_binary:
         continue
     candidate_args = tokens[1:min_token_count]
-    if candidate_args == hook_args:
+    if candidate_args == expected_args:
         sys.exit(0)
 
 sys.exit(1)
