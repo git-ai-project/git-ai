@@ -58,10 +58,10 @@ fn configure_notes_fetch(repository: &crate::git::repository::Repository) {
     // Add fetch refspec: +refs/notes/ai:refs/notes/ai
     // This ensures git fetch and git pull automatically fetch authorship notes
     let mut args = repository.global_args_for_exec();
-    args.push("config".to_string());
-    args.push("--add".to_string());
-    args.push("remote.origin.fetch".to_string());
-    args.push("+refs/notes/ai:refs/notes/ai".to_string());
+    args.extend_from_slice(
+        &["config", "--add", "remote.origin.fetch", "+refs/notes/ai:refs/notes/ai"]
+            .map(String::from)
+    );
 
     match exec_git(&args) {
         Ok(_) => {

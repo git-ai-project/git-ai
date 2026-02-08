@@ -17,7 +17,6 @@ fn test_clone_configures_notes_fetch() {
     // Should contain the notes fetch refspec
     // Note: This test verifies that when git-ai wraps clone, it configures
     // automatic fetching of authorship notes for future git fetch/pull operations
-    
     // For now, this test is informational since TestRepo::new_with_remote()
     // uses plain git clone, not the git-ai wrapper
     println!("Fetch refspecs configured: {}", config_output);
@@ -47,12 +46,15 @@ fn test_notes_persist_across_remote_operations() {
     mirror.git(&["push", "origin", "main"]).ok();
 
     // Clone the upstream to a new location to simulate a fresh clone
-    let clone_dir = std::env::temp_dir().join(format!("clone-test-{}", rand::random::<u64>()));
+    // Use tempfile crate for automatic cleanup
+    let clone_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let clone_path = clone_dir.path();
+    
     let clone_output = std::process::Command::new("git")
         .args([
             "clone",
             upstream.path().to_str().unwrap(),
-            clone_dir.to_str().unwrap(),
+            clone_path.to_str().unwrap(),
         ])
         .output()
         .expect("Failed to clone");
@@ -66,7 +68,7 @@ fn test_notes_persist_across_remote_operations() {
 
     // Verify notes exist in the cloned repo
     let notes_check = std::process::Command::new("git")
-        .args(["-C", clone_dir.to_str().unwrap(), "notes", "--ref=ai", "list"])
+        .args(["-C", clone_path.to_str().unwrap(), "notes", "--ref=ai", "list"])
         .output()
         .expect("Failed to check notes");
 
@@ -80,9 +82,7 @@ fn test_notes_persist_across_remote_operations() {
     } else {
         println!("⚠ Notes were not fetched (expected if git-ai wrapper didn't run during clone)");
     }
-
-    // Cleanup
-    std::fs::remove_dir_all(clone_dir).ok();
+    // Tempdir is automatically cleaned up when it goes out of scope
 }
 
 #[test]
@@ -107,7 +107,8 @@ fn test_clone_with_credentials_in_url() {
     ];
 
     for (input, expected) in test_cases {
-        let result = normalize_repo_url(input).expect(&format!("Failed to normalize: {}", input));
+        let result = normalize_repo_url(input)
+            .unwrap_or_else(|_| panic!("Failed to normalize: {}", input));
         assert_eq!(
             result, expected,
             "URL normalization failed for input: {}",
