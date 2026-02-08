@@ -16,9 +16,6 @@ setup() {
     export HOME="$TEST_TEMP_DIR/home"
     mkdir -p "$HOME"
     
-    # Copy the install.sh to temp dir for testing
-    cp "$ORIGINAL_DIR/install.sh" "$TEST_TEMP_DIR/install.sh"
-    
     # Source just the detect_all_shells function from install.sh
     # We'll extract and test it in isolation
     extract_detect_all_shells_function

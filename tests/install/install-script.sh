@@ -3,7 +3,8 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-REPO_ROOT="${REPO_ROOT:-$(pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="${REPO_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 SHELL_NAME="${SHELL_NAME:-bash}"
 
 if ! command -v "$SHELL_NAME" >/dev/null 2>&1; then
