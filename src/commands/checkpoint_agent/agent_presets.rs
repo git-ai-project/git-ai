@@ -1657,12 +1657,74 @@ impl GithubCopilotPreset {
             return Ok((AiTranscript::new(), None, Some(Vec::new())));
         }
 
-        // Read the session JSON file
+        // Read the session JSON file.
+        // Supports both plain .json (pretty-printed or single-line) and .jsonl files
+        // where the session is wrapped in a JSONL envelope on the first line:
+        //   {"kind":0,"v":{...session data...}}
         let session_json_str =
             std::fs::read_to_string(session_json_path).map_err(GitAiError::IoError)?;
 
-        let session_json: serde_json::Value =
-            serde_json::from_str(&session_json_str).map_err(GitAiError::JsonError)?;
+        // Try parsing the first line as JSON first (handles JSONL and single-line JSON).
+        // Fall back to parsing the entire content (handles pretty-printed JSON).
+        let first_line = session_json_str.lines().next().unwrap_or("");
+        let parsed: serde_json::Value = serde_json::from_str(first_line)
+            .or_else(|_| serde_json::from_str(&session_json_str))
+            .map_err(GitAiError::JsonError)?;
+
+        // Auto-detect JSONL wrapper: if the parsed value has "kind" and "v" fields,
+        // unwrap to use the inner "v" object as the session data
+        let is_jsonl = parsed.get("kind").is_some() && parsed.get("v").is_some();
+        let mut session_json = if is_jsonl {
+            parsed.get("v").unwrap().clone()
+        } else {
+            parsed
+        };
+
+        // Apply incremental patches from subsequent JSONL lines (kind:1 = scalar, kind:2 = array/object)
+        if is_jsonl {
+            for line in session_json_str.lines().skip(1) {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let patch: serde_json::Value = match serde_json::from_str(line) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let kind = match patch.get("kind").and_then(|v| v.as_u64()) {
+                    Some(k) => k,
+                    None => continue,
+                };
+                if kind == 1 || kind == 2 {
+                    if let (Some(key_path), Some(value)) =
+                        (patch.get("k").and_then(|v| v.as_array()), patch.get("v"))
+                    {
+                        // Walk the key path on session_json, setting the value at the leaf
+                        let keys: Vec<String> = key_path
+                            .iter()
+                            .filter_map(|k| k.as_str().map(|s| s.to_string()))
+                            .collect();
+                        if !keys.is_empty() {
+                            // Use pointer-based indexing to find the parent, then insert at leaf
+                            let json_pointer = if keys.len() == 1 {
+                                String::new()
+                            } else {
+                                format!("/{}", keys[..keys.len() - 1].join("/"))
+                            };
+                            let leaf_key = &keys[keys.len() - 1];
+                            let parent = if json_pointer.is_empty() {
+                                Some(&mut session_json)
+                            } else {
+                                session_json.pointer_mut(&json_pointer)
+                            };
+                            if let Some(obj) = parent.and_then(|p| p.as_object_mut()) {
+                                obj.insert(leaf_key.clone(), value.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Extract the requests array which represents the conversation from start to finish
         let requests = session_json
@@ -1673,6 +1735,14 @@ impl GithubCopilotPreset {
                     "requests array not found in Copilot chat session".to_string(),
                 )
             })?;
+
+        // Extract session-level model from inputState as fallback
+        let session_level_model: Option<String> = session_json
+            .get("inputState")
+            .and_then(|is| is.get("selectedModel"))
+            .and_then(|sm| sm.get("identifier"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
         let mut transcript = AiTranscript::new();
         let mut detected_model: Option<String> = None;
@@ -1873,6 +1943,11 @@ impl GithubCopilotPreset {
             {
                 detected_model = Some(model_id.to_string());
             }
+        }
+
+        // Fall back to session-level model if no per-request modelId was found
+        if detected_model.is_none() {
+            detected_model = session_level_model;
         }
 
         Ok((transcript, detected_model, Some(edited_filepaths)))

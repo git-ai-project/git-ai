@@ -86,6 +86,13 @@ export function activate(context: vscode.ExtensionContext) {
         aiEditManager.handleCloseEvent(doc);
       })
     );
+
+    // Content change event (for stable content cache)
+    context.subscriptions.push(
+      vscode.workspace.onDidChangeTextDocument((event) => {
+        aiEditManager.handleContentChangeEvent(event);
+      })
+    );
   }
 
   // vscode.commands.getCommands(true)
