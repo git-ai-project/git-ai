@@ -116,8 +116,8 @@ if ! grep -Fqs "checkpoint claude --hook-input stdin" "$CLAUDE_SETTINGS"; then
     exit 1
 fi
 
-if ! grep -Fqs "$INSTALL_DIR/git-ai" "$CLAUDE_SETTINGS"; then
-    echo "git-ai path missing in Claude hooks config" >&2
+if ! grep -Eq "git-ai.*checkpoint claude --hook-input stdin" "$CLAUDE_SETTINGS"; then
+    echo "git-ai command missing in Claude hooks config" >&2
     exit 1
 fi
 

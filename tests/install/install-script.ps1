@@ -12,7 +12,6 @@ try {
     New-Item -ItemType Directory -Force -Path $homeDir | Out-Null
     $env:HOME = $homeDir
     $env:USERPROFILE = $homeDir
-    $HOME = $homeDir
 
     $binDir = Join-Path $testRoot 'bin'
     New-Item -ItemType Directory -Force -Path $binDir | Out-Null
@@ -23,7 +22,7 @@ try {
     $installScript = Join-Path $repoRoot 'install.ps1'
     $installOutput = & $installScript 2>&1 | Out-String
 
-    $installDir = Join-Path $HOME '.git-ai\bin'
+    $installDir = Join-Path $homeDir '.git-ai\bin'
     $gitAiExe = Join-Path $installDir 'git-ai.exe'
     if (-not (Test-Path -LiteralPath $gitAiExe)) {
         throw "git-ai binary not found at $gitAiExe"
@@ -44,7 +43,7 @@ try {
         throw "git-ai PATH points to unexpected location: $($cmd.Path)"
     }
 
-    $settingsPath = Join-Path $HOME '.claude\settings.json'
+    $settingsPath = Join-Path $homeDir '.claude\settings.json'
     if (-not (Test-Path -LiteralPath $settingsPath)) {
         throw "Claude settings.json not created at $settingsPath"
     }
