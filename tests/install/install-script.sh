@@ -112,16 +112,41 @@ if [ ! -f "$CLAUDE_SETTINGS" ]; then
     exit 1
 fi
 
-if ! grep -Fqs "$CLAUDE_HOOK_COMMAND" "$CLAUDE_SETTINGS"; then
-    echo "Claude hooks not configured in $CLAUDE_SETTINGS" >&2
-    exit 1
-fi
+if ! python - "$CLAUDE_SETTINGS" "$CLAUDE_HOOK_COMMAND" <<'PY'
+import json
+import sys
 
-# The repo install.sh is Unix-only; git-ai is installed under $HOME without spaces, and we allow flexible whitespace.
-CLAUDE_HOOK_ARGS_REGEX="$(printf '%s' "$CLAUDE_HOOK_COMMAND" | sed -e 's/[][\\.^$*+?(){}|-]/\\&/g' -e 's/ /[[:space:]]+/g')"
-# Match a quoted command entry to avoid accidental matches in the JSON payload.
-CLAUDE_HOOK_REGEX="\"[^\"[:space:]]+/git-ai[[:space:]]+${CLAUDE_HOOK_ARGS_REGEX}\""
-if ! grep -Eq "$CLAUDE_HOOK_REGEX" "$CLAUDE_SETTINGS"; then
+settings_path = sys.argv[1]
+hook_command = sys.argv[2]
+
+try:
+    with open(settings_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+except Exception:
+    sys.exit(1)
+
+commands = []
+
+def collect(obj):
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            if key == "command" and isinstance(value, str):
+                commands.append(value)
+            else:
+                collect(value)
+    elif isinstance(obj, list):
+        for item in obj:
+            collect(item)
+
+collect(data)
+
+for cmd in commands:
+    if hook_command in cmd and "git-ai" in cmd:
+        sys.exit(0)
+
+sys.exit(1)
+PY
+then
     echo "git-ai command missing in Claude hooks config" >&2
     exit 1
 fi
