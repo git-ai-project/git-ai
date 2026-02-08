@@ -12,6 +12,7 @@ if ! command -v "$SHELL_NAME" >/dev/null 2>&1; then
 fi
 
 TEST_ROOT="$(mktemp -d)"
+chmod 700 "$TEST_ROOT"
 cleanup() {
     rm -rf "$TEST_ROOT"
 }

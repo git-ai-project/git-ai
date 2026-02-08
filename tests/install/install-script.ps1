@@ -2,7 +2,8 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..\..')
-$testRoot = Join-Path $env:RUNNER_TEMP ("git-ai-install-test-{0}" -f ([guid]::NewGuid().ToString()))
+$tempBase = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } elseif ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
+$testRoot = Join-Path $tempBase ("git-ai-install-test-{0}" -f ([guid]::NewGuid().ToString()))
 
 New-Item -ItemType Directory -Force -Path $testRoot | Out-Null
 
