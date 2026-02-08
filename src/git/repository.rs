@@ -1126,8 +1126,8 @@ impl Repository {
     /// Check if the current git version supports --merge-base flag for merge-tree.
     /// This flag was added in git 2.41.0.
     pub fn git_supports_merge_tree_merge_base(&self) -> bool {
-        if let Some((major, minor, _)) = self.git_version() {
-            Self::version_supports_merge_tree_merge_base(major, minor, 0)
+        if let Some((major, minor, patch)) = self.git_version() {
+            Self::version_supports_merge_tree_merge_base(major, minor, patch)
         } else {
             // If we can't determine the version, assume it's not supported
             // to maintain compatibility with older systems
@@ -1139,6 +1139,7 @@ impl Repository {
     /// Useful for testing without needing a real git installation.
     fn version_supports_merge_tree_merge_base(major: u32, minor: u32, _patch: u32) -> bool {
         // --merge-base for merge-tree was added in git 2.41.0
+        // For version checks, we only need to check major and minor
         major > 2 || (major == 2 && minor >= 41)
     }
 
@@ -1257,8 +1258,7 @@ impl Repository {
             args.push(our_tree.oid.to_string());
             args.push(their_tree.oid.to_string());
         } else {
-            // Older Git (< 2.41.0): use --trivial-merge mode which doesn't support strategy options
-            // Note: This is a fallback with limited functionality
+            // Older Git (< 2.41.0) does not support --merge-base option
             return Err(GitAiError::Generic(format!(
                 "Git version {} does not support --merge-base option for merge-tree. \
                 Please upgrade to Git 2.41.0 or later for full merge-tree functionality.",
