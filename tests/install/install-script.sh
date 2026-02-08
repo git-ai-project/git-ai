@@ -168,8 +168,8 @@ for cmd in commands:
     if os.path.realpath(tokens[0]) != expected_binary:
         continue
     hook_args_end_index = 1 + expected_args_len
-    candidate_args = tokens[1:hook_args_end_index]
-    if candidate_args == expected_args:
+    actual_hook_args = tokens[1:hook_args_end_index]
+    if actual_hook_args == expected_args:
         sys.exit(0)
 
 sys.exit(1)
