@@ -404,18 +404,6 @@ if ($env:INSTALL_NONCE -and $env:API_BASE) {
     }
 }
 
-# Verify the binary actually runs (catches missing vcredist / DLL issues)
-Write-Host 'Verifying binary...'
-try {
-    $verOutput = & $finalExe version 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Write-ErrorAndExit "git-ai binary failed to run (exit code $LASTEXITCODE). Output: $verOutput`nThis may indicate missing system libraries. Please report this at https://github.com/git-ai-project/git-ai/issues."
-    }
-    Write-Success "Binary verified: $verOutput"
-} catch {
-    Write-ErrorAndExit "git-ai binary failed to execute: $($_.Exception.Message)`nThis may indicate missing system libraries (e.g. Visual C++ Redistributable). Please report this at https://github.com/git-ai-project/git-ai/issues."
-}
-
 # Install hooks
 Write-Host 'Setting up IDE/agent hooks...'
 try {
