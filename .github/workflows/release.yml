@@ -101,8 +101,19 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-${{ matrix.target }}-
 
-      - name: Build release binary (non-Docker, non-Windows-ARM64)
-        if: matrix.use_docker == false && matrix.os != 'windows-11-arm'
+      - name: Build release binary (Windows x64)
+        if: matrix.os == 'windows-latest'
+        run: |
+          cargo build --release --target ${{ matrix.target }}
+        env:
+          CARGO_INCREMENTAL: 0
+          SENTRY_OSS: ${{ secrets.SENTRY_OSS }}
+          POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
+          OSS_BUILD: "1"
+          RUSTFLAGS: "-C target-feature=+crt-static"
+
+      - name: Build release binary (macOS)
+        if: matrix.os == 'macos-latest'
         run: |
           cargo build --release --target ${{ matrix.target }}
         env:
@@ -135,6 +146,18 @@ jobs:
         shell: bash
         run: |
           file target/${{ matrix.target }}/release/git-ai.exe
+
+      - name: Verify static CRT linkage (Windows)
+        if: contains(matrix.os, 'windows')
+        shell: pwsh
+        run: |
+          $deps = dumpbin /dependents target/${{ matrix.target }}/release/git-ai.exe
+          Write-Host $deps
+          if ($deps -match 'vcruntime.*\.dll') {
+            Write-Error "FATAL: binary still dynamically links vcruntime. Static CRT linking failed."
+            exit 1
+          }
+          Write-Host "OK: no vcruntime DLL dependency found"
 
       - name: Strip binary (Windows x64)
         if: matrix.os == 'windows-latest'
