@@ -24,11 +24,17 @@ jobs:
           toolchain: "1.93.0"
           components: rustfmt
 
-      - run: cargo fmt -- --check
+      - uses: go-task/setup-task@v1
+
+      - run: task format:check
 
   lint:
-    name: Lint
-    runs-on: ubuntu-latest
+    name: Lint (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -47,7 +53,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-lint-
 
-      - run: make lint
+      - uses: go-task/setup-task@v1
+
+      - run: task lint
 
   doc:
     name: Doc
@@ -71,4 +79,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-doc-
 
-      - run: make doc
+      - uses: go-task/setup-task@v1
+
+      - run: task doc

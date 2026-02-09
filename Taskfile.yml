@@ -50,6 +50,46 @@ tasks:
     cmds:
       - bats tests/e2e/user-scenarios.bats
 
+  test:
+    desc: Run unit tests
+    cmds:
+      - cargo test
+
+  lint:
+    desc: Run cargo check and clippy
+    cmds:
+      - cargo check
+      - cargo clippy
+
+  bench:
+    desc: Run benchmarks
+    cmds:
+      - cargo bench
+
+  doc:
+    desc: Build documentation
+    cmds:
+      - cargo doc
+
+  format:
+    desc: Format code with rustfmt
+    cmds:
+      - cargo fmt
+
+  format:check:
+    desc: Check code formatting (CI)
+    cmds:
+      - cargo fmt -- --check
+
+  update:
+    desc: Update dependencies
+    cmds:
+      - cargo update
+
+  all:
+    desc: Build, test, lint, and generate docs
+    deps: [build, test, lint, doc]
+
   install:
     desc: Install dependencies using Cargo
     cmds:

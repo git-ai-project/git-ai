@@ -150,6 +150,7 @@ impl LockFile {
 }
 
 #[cfg(unix)]
+#[allow(clippy::suspicious_open_options)]
 fn try_lock_exclusive(path: &std::path::Path) -> Option<std::fs::File> {
     use std::os::unix::io::AsRawFd;
     let file = std::fs::OpenOptions::new()
