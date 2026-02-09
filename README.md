@@ -7,9 +7,6 @@
 <h1 align="left"><b>git-ai</b></h1>
 </div>
 <p align="left">Track the AI Code in your repositories</p>
-<p align="left">
-  <a href="https://discord.gg/XJStYvkb5U"><img alt="Discord" src="https://img.shields.io/badge/discord-join-5865F2?logo=discord&logoColor=white" /></a>
-</p>
 
 <video src="https://github.com/user-attachments/assets/68304ca6-b262-4638-9fb6-0a26f55c7986" muted loop controls autoplay></video>
 
@@ -30,6 +27,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://usegitai.com
 🎊 That's it! **No per-repo setup.** Once installed Git AI will work OOTB with any of these **Supported Agents**:
 
 <img src="https://github.com/git-ai-project/git-ai/raw/main/assets/docs/supported-agents.png" width="320" />
+
+<p align="left">
+  <a href="https://discord.gg/XJStYvkb5U"><img alt="Discord" src="https://img.shields.io/badge/discord-join-5865F2?logo=discord&logoColor=white" /></a>
+</p>
 
 ### Documentation https://usegitai.com/docs
 - [AI Blame](https://usegitai.com/docs/cli/ai-blame)
