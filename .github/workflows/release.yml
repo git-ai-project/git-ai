@@ -120,7 +120,7 @@ jobs:
           SENTRY_OSS: ${{ secrets.SENTRY_OSS }}
           POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
           OSS_BUILD: "1"
-          RUSTFLAGS: "-C strip=symbols"
+          RUSTFLAGS: "-C strip=symbols -C target-feature=+crt-static"
 
       - name: Verify binary architecture (Linux)
         if: contains(matrix.os, 'ubuntu')

@@ -1,0 +1,7 @@
+# Statically link the C runtime on Windows so binaries work without
+# the Visual C++ Redistributable (vcredist) being installed.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
