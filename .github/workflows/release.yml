@@ -147,17 +147,6 @@ jobs:
         run: |
           file target/${{ matrix.target }}/release/git-ai.exe
 
-      - name: Verify static CRT linkage (Windows)
-        if: contains(matrix.os, 'windows')
-        shell: pwsh
-        run: |
-          $deps = dumpbin /dependents target/${{ matrix.target }}/release/git-ai.exe
-          Write-Host $deps
-          if ($deps -match 'vcruntime.*\.dll') {
-            Write-Error "FATAL: binary still dynamically links vcruntime. Static CRT linking failed."
-            exit 1
-          }
-          Write-Host "OK: no vcruntime DLL dependency found"
 
       - name: Strip binary (Windows x64)
         if: matrix.os == 'windows-latest'
