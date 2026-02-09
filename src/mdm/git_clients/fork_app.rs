@@ -7,7 +7,7 @@ use crate::mdm::git_client_installer::{
 use super::mac_prefs::{Preferences, find_app_by_bundle_id};
 
 #[cfg(windows)]
-use crate::mdm::utils::{generate_diff, home_dir, write_atomic};
+use crate::mdm::utils::{home_dir, write_atomic};
 #[cfg(windows)]
 use serde_json::{Value, json};
 #[cfg(windows)]
@@ -244,10 +244,10 @@ impl GitClientInstaller for ForkAppInstaller {
             }
 
             // Ensure parent directory exists
-            if let Some(parent) = settings_path.parent() {
-                if !parent.exists() {
-                    fs::create_dir_all(parent)?;
-                }
+            if let Some(parent) = settings_path.parent()
+                && !parent.exists()
+            {
+                fs::create_dir_all(parent)?;
             }
 
             let new_content = serde_json::to_string_pretty(&settings)?;

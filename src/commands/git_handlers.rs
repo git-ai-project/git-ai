@@ -592,7 +592,7 @@ fn proxy_to_git(args: &[String], exit_on_completion: bool) -> std::process::Exit
                     if exit_on_completion {
                         exit_with_status(status);
                     }
-                    return status;
+                    status
                 }
                 Err(e) => {
                     eprintln!("Failed to wait for git process: {}", e);

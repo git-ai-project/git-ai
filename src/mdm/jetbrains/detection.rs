@@ -207,20 +207,19 @@ fn find_windows_installations() -> Vec<DetectedIde> {
 
     for program_dir in program_dirs.into_iter().flatten() {
         let jetbrains_dir = program_dir.join("JetBrains");
-        if jetbrains_dir.exists() {
-            if let Ok(entries) = std::fs::read_dir(&jetbrains_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_dir() {
-                        for ide in JETBRAINS_IDES {
-                            if let Some(detected_ide) = detect_windows_ide(ide, &path) {
-                                if !detected
-                                    .iter()
-                                    .any(|d| d.install_path == detected_ide.install_path)
-                                {
-                                    detected.push(detected_ide);
-                                }
-                            }
+        if jetbrains_dir.exists()
+            && let Ok(entries) = std::fs::read_dir(&jetbrains_dir)
+        {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    for ide in JETBRAINS_IDES {
+                        if let Some(detected_ide) = detect_windows_ide(ide, &path)
+                            && !detected
+                                .iter()
+                                .any(|d| d.install_path == detected_ide.install_path)
+                        {
+                            detected.push(detected_ide);
                         }
                     }
                 }
@@ -246,16 +245,15 @@ fn scan_windows_toolbox_dir(toolbox_apps: &Path) -> Vec<DetectedIde> {
             let dir_name = app_dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
 
             for ide in JETBRAINS_IDES {
-                if dir_name.contains(ide.toolbox_app_name) {
-                    // Toolbox uses versioned subdirectories
-                    if let Ok(versions) = std::fs::read_dir(&app_dir) {
-                        for version_entry in versions.flatten() {
-                            let version_dir = version_entry.path();
-                            if version_dir.is_dir() {
-                                if let Some(detected_ide) = detect_windows_ide(ide, &version_dir) {
-                                    detected.push(detected_ide);
-                                }
-                            }
+                if dir_name.contains(ide.toolbox_app_name)
+                    && let Ok(versions) = std::fs::read_dir(&app_dir)
+                {
+                    for version_entry in versions.flatten() {
+                        let version_dir = version_entry.path();
+                        if version_dir.is_dir()
+                            && let Some(detected_ide) = detect_windows_ide(ide, &version_dir)
+                        {
+                            detected.push(detected_ide);
                         }
                     }
                 }

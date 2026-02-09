@@ -852,15 +852,14 @@ impl CursorPreset {
         // Check for pattern like /c:/ or /C:/ at the start
         // e.g. "/c:/Users/foo" -> "C:\Users\foo"
         let mut chars = path.chars();
-        if chars.next() == Some('/') {
-            if let (Some(drive), Some(':')) = (chars.next(), chars.next()) {
-                if drive.is_ascii_alphabetic() {
-                    let rest: String = chars.collect();
-                    // Convert forward slashes to backslashes for Windows
-                    let normalized_rest = rest.replace('/', "\\");
-                    return format!("{}:{}", drive.to_ascii_uppercase(), normalized_rest);
-                }
-            }
+        if chars.next() == Some('/')
+            && let (Some(drive), Some(':')) = (chars.next(), chars.next())
+            && drive.is_ascii_alphabetic()
+        {
+            let rest: String = chars.collect();
+            // Convert forward slashes to backslashes for Windows
+            let normalized_rest = rest.replace('/', "\\");
+            return format!("{}:{}", drive.to_ascii_uppercase(), normalized_rest);
         }
         // No conversion needed
         path.to_string()

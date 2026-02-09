@@ -13,6 +13,21 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Handle the flush-logs command
 pub fn handle_flush_logs(args: &[String]) {
+    // Acquire exclusive lock — if another flush-logs is already running, exit immediately
+    let _lock = {
+        let lock_path =
+            dirs::home_dir().map(|h| h.join(".git-ai").join("internal").join("flush-logs.lock"));
+        if let Some(ref p) = lock_path
+            && let Some(parent) = p.parent()
+        {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match lock_path.and_then(|p| crate::utils::LockFile::try_acquire(&p)) {
+            Some(lock) => lock,
+            None => std::process::exit(0),
+        }
+    };
+
     let force = args.contains(&"--force".to_string());
 
     // In dev builds without --force, we only send metrics envelopes (skip error/performance/message)

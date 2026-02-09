@@ -70,15 +70,13 @@ fn create_skills_symlink(target: &PathBuf, link_path: &PathBuf) -> Result<(), Gi
 
 /// Remove a symlink if it exists
 fn remove_skills_symlink(link_path: &PathBuf) -> Result<(), GitAiError> {
-    if link_path.symlink_metadata().is_ok() {
-        // Check if it's a symlink before removing
-        if link_path
+    if link_path.symlink_metadata().is_ok()
+        && link_path
             .symlink_metadata()
             .map(|m| m.file_type().is_symlink())
             .unwrap_or(false)
-        {
-            fs::remove_file(link_path)?;
-        }
+    {
+        fs::remove_file(link_path)?;
     }
     Ok(())
 }
