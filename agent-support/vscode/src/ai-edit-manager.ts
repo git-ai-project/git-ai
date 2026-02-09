@@ -1,8 +1,10 @@
 import * as vscode from "vscode";
 import * as path from "path";
+import * as fs from "fs";
 import { exec, spawn } from "child_process";
 import { isVersionSatisfied } from "./utils/semver";
 import { MIN_GIT_AI_VERSION, GIT_AI_INSTALL_DOCS_URL } from "./consts";
+import { getGitRepoRoot } from "./utils/git-api";
 
 export class AIEditManager {
   private workspaceBaseStoragePath: string | null = null;
@@ -23,6 +25,9 @@ export class AIEditManager {
   private readonly HUMAN_CHECKPOINT_CLEANUP_INTERVAL_MS = 60000; // 1 minute
   private readonly MAX_SNAPSHOT_AGE_MS = 10_000; // 10 seconds; used to avoid triggering AI checkpoints on stale snapshots
   private cleanupTimer: NodeJS.Timeout;
+  private stableFileContent = new Map<string, string>();
+  private stableContentTimers = new Map<string, NodeJS.Timeout>();
+  private readonly STABLE_CONTENT_DEBOUNCE_MS = 2000;
 
   constructor(context: vscode.ExtensionContext) {
     if (context.storageUri?.fsPath) {
@@ -42,6 +47,10 @@ export class AIEditManager {
     if (this.cleanupTimer) {
       clearInterval(this.cleanupTimer);
     }
+    for (const timer of this.stableContentTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.stableContentTimers.clear();
   }
 
   private cleanupOldCheckpointEntries(): void {
@@ -88,8 +97,37 @@ export class AIEditManager {
     console.log('[git-ai] AIEditManager: Save event tracked for', filePath);
   }
 
+  public handleContentChangeEvent(event: vscode.TextDocumentChangeEvent): void {
+    const doc = event.document;
+    if (doc.uri.scheme !== "file") {
+      return;
+    }
+
+    const filePath = doc.uri.fsPath;
+
+    // Clear any existing debounce timer for this file
+    const existingTimer = this.stableContentTimers.get(filePath);
+    if (existingTimer) {
+      clearTimeout(existingTimer);
+    }
+
+    // After a quiet period, update the stable content cache
+    const timer = setTimeout(() => {
+      this.stableFileContent.set(filePath, doc.getText());
+      this.stableContentTimers.delete(filePath);
+    }, this.STABLE_CONTENT_DEBOUNCE_MS);
+
+    this.stableContentTimers.set(filePath, timer);
+  }
+
   public handleOpenEvent(doc: vscode.TextDocument): void {
     console.log('[git-ai] AIEditManager: Open event detected for', doc);
+
+    // Initialize stable content cache for file:// documents when first opened
+    if (doc.uri.scheme === "file" && !this.stableFileContent.has(doc.uri.fsPath)) {
+      this.stableFileContent.set(doc.uri.fsPath, doc.getText());
+    }
+
     if (doc.uri.scheme === "chat-editing-snapshot-text-model" || doc.uri.scheme === "chat-editing-text-model") {
       const filePath = doc.uri.fsPath;
       const now = Date.now();
@@ -113,6 +151,17 @@ export class AIEditManager {
   }
 
   public handleCloseEvent(doc: vscode.TextDocument): void {
+    // Clean up stable content cache for closed file:// documents
+    if (doc.uri.scheme === "file") {
+      const filePath = doc.uri.fsPath;
+      this.stableFileContent.delete(filePath);
+      const timer = this.stableContentTimers.get(filePath);
+      if (timer) {
+        clearTimeout(timer);
+        this.stableContentTimers.delete(filePath);
+      }
+    }
+
     if (doc.uri.scheme === "chat-editing-snapshot-text-model" || doc.uri.scheme === "chat-editing-text-model") {
       console.log('[git-ai] AIEditManager: Snapshot close event detected for', doc);
       // console.log('[git-ai] AIEditManager: Snapshot close event detected, triggering human checkpoint');
@@ -182,7 +231,10 @@ export class AIEditManager {
               if (!workspaceFolder) {
                 console.warn('[git-ai] AIEditManager: No workspace folder found for', filePath, '- skipping AI checkpoint');
               } else {
-              const chatSessionPath = path.join(storagePath, 'chatSessions', `${sessionId}.json`);
+              const chatSessionsDir = path.join(storagePath, 'chatSessions');
+              const jsonlPath = path.join(chatSessionsDir, `${sessionId}.jsonl`);
+              const jsonPath = path.join(chatSessionsDir, `${sessionId}.json`);
+              const chatSessionPath = fs.existsSync(jsonlPath) ? jsonlPath : jsonPath;
               console.log('[git-ai] AIEditManager: AI edit detected for', filePath, '- triggering AI checkpoint (sessionId:', sessionId, ', chatSessionPath:', chatSessionPath, ', workspaceFolder:', workspaceFolder.uri.fsPath, ')');
               
               // Get dirty files and ensure the saved file is included with its content from VS Code
@@ -260,13 +312,18 @@ export class AIEditManager {
     const dirtyFiles = this.getDirtyFiles();
 
     // Add the files we're checkpointing to dirtyFiles (even if they're not dirty)
-    // Read from VS Code to handle codespaces lag
+    // Use stable (pre-edit) content cache to avoid capturing AI edits that may already be in the buffer
     filesToCheckpoint.forEach(filePath => {
-      const fileDoc = vscode.workspace.textDocuments.find(doc =>
-        doc.uri.fsPath === filePath && doc.uri.scheme === "file"
-      );
-      if (fileDoc) {
-        dirtyFiles[filePath] = fileDoc.getText();
+      const cachedContent = this.stableFileContent.get(filePath);
+      if (cachedContent !== undefined) {
+        dirtyFiles[filePath] = cachedContent;
+      } else {
+        const fileDoc = vscode.workspace.textDocuments.find(doc =>
+          doc.uri.fsPath === filePath && doc.uri.scheme === "file"
+        );
+        if (fileDoc) {
+          dirtyFiles[filePath] = fileDoc.getText();
+        }
       }
     });
 
@@ -303,14 +360,25 @@ export class AIEditManager {
       const activeEditor = vscode.window.activeTextEditor;
       if (activeEditor) {
         const documentUri = activeEditor.document.uri;
-        const workspaceFolder = vscode.workspace.getWorkspaceFolder(documentUri);
-        if (workspaceFolder) {
-          workspaceRoot = workspaceFolder.uri.fsPath;
+        // Try to get git repository root first, fallback to workspace folder
+        const gitRepoRoot = getGitRepoRoot(documentUri);
+        if (gitRepoRoot) {
+          workspaceRoot = gitRepoRoot;
+        } else {
+          const workspaceFolder = vscode.workspace.getWorkspaceFolder(documentUri);
+          if (workspaceFolder) {
+            workspaceRoot = workspaceFolder.uri.fsPath;
+          }
         }
       }
 
       if (!workspaceRoot) {
-        workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        // Try to get git repo root from first workspace folder
+        const firstWorkspaceFolder = vscode.workspace.workspaceFolders?.[0];
+        if (firstWorkspaceFolder) {
+          const gitRepoRoot = getGitRepoRoot(firstWorkspaceFolder.uri);
+          workspaceRoot = gitRepoRoot || firstWorkspaceFolder.uri.fsPath;
+        }
       }
 
       if (!workspaceRoot) {

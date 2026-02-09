@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { spawn } from "child_process";
 import { BlameQueue } from "./blame-queue";
+import { findRepoForFile, getGitRepoRoot } from "./utils/git-api";
 
 // JSON output structure from git-ai blame --json
 export interface BlameJsonOutput {
@@ -57,27 +58,6 @@ export class BlameService {
   
   constructor() {
     this.queue = new BlameQueue<BlameResult>();
-  }
-  
-  /**
-   * Get the HEAD commit SHA using VS Code's Git extension API.
-   * Returns null if the Git extension is not available or the file is not in a repo.
-   */
-  private getHeadCommit(document: vscode.TextDocument): string | null {
-    const git = vscode.extensions
-      .getExtension("vscode.git")
-      ?.exports.getAPI(1);
-    
-    if (!git) {
-      return null;
-    }
-    
-    // Find the repo that contains this document
-    const repo = git.repositories.find((r: { rootUri: vscode.Uri }) => 
-      document.uri.fsPath.startsWith(r.rootUri.fsPath)
-    );
-    
-    return repo?.state.HEAD?.commit ?? null;
   }
   
   /**
@@ -151,32 +131,35 @@ export class BlameService {
       return null;
     }
     
-    // Get HEAD commit SHA for cache key
-    const headCommit = this.getHeadCommit(document);
+    // Look up repo once to get both HEAD commit (for cache key) and repo root (for cwd)
+    const repo = findRepoForFile(document.uri);
+    const headCommit = repo?.state.HEAD?.commit ?? null;
+    const gitRepoRoot = repo?.rootUri.fsPath ?? null;
+
     if (!headCommit) {
       // No git repo found, fall back to executing without cache
       return this.queue.enqueue(
         document.uri,
         priority,
-        (signal) => this.executeBlame(document, document.getText(), signal)
+        (signal) => this.executeBlame(document, document.getText(), signal, gitRepoRoot)
       );
     }
-    
+
     // Get current content for cache key and to pass to git-ai
     const content = document.getText();
     const cacheKey = this.getContentCacheKey(document.uri.fsPath, content, headCommit);
-    
+
     // Check LRU cache first
     const cached = this.getFromCache(cacheKey);
     if (cached) {
       return cached;
     }
-    
+
     // Enqueue the blame request
     const result = await this.queue.enqueue(
       document.uri,
       priority,
-      (signal) => this.executeBlame(document, content, signal)
+      (signal) => this.executeBlame(document, content, signal, gitRepoRoot)
     );
     
     // Cache the result
@@ -227,12 +210,15 @@ export class BlameService {
   private async executeBlame(
     document: vscode.TextDocument,
     content: string,
-    signal: AbortSignal
+    signal: AbortSignal,
+    gitRepoRoot: string | null = null
   ): Promise<BlameResult> {
     const filePath = document.uri.fsPath;
+    // Use git repository root as cwd, fallback to workspace folder if git repo not found
+    gitRepoRoot = gitRepoRoot ?? getGitRepoRoot(document.uri);
     const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
-    const cwd = workspaceFolder?.uri.fsPath;
-    
+    const cwd = gitRepoRoot || workspaceFolder?.uri.fsPath;
+
     return new Promise((resolve, reject) => {
       if (signal.aborted) {
         reject(new Error('Aborted'));

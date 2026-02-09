@@ -781,3 +781,345 @@ fn test_copilot_preset_after_edit_snake_case() {
         "console.log('hello');"
     );
 }
+
+// ============================================================================
+// Tests for JSONL format support (GitHub Copilot .jsonl session files)
+// ============================================================================
+
+#[test]
+fn copilot_session_parsing_jsonl_stub() {
+    ensure_clean_env();
+    // Minimal valid shape with empty requests, wrapped in JSONL envelope
+    let sample = r#"{"kind":0,"v":{"requests": []}}"#;
+
+    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
+    temp_file.write_all(sample.as_bytes()).unwrap();
+    let temp_path = temp_file.path().to_str().unwrap();
+
+    let result = GithubCopilotPreset::transcript_and_model_from_copilot_session_json(temp_path);
+    assert!(result.is_ok());
+    let (tx, model, edited_filepaths) = result.unwrap();
+    assert!(tx.messages.is_empty());
+    assert!(model.is_none());
+    assert!(edited_filepaths.is_some());
+    assert_eq!(edited_filepaths.unwrap().len(), 0);
+}
+
+#[test]
+fn copilot_session_parsing_jsonl_simple() {
+    ensure_clean_env();
+    // Load the JSONL test fixture
+    let fixture = fixture_path("copilot_session_simple.jsonl");
+    let fixture_str = fixture.to_str().unwrap();
+
+    let result = GithubCopilotPreset::transcript_and_model_from_copilot_session_json(fixture_str);
+    assert!(result.is_ok());
+    let (tx, model, _edited_filepaths) = result.unwrap();
+
+    // Same expected messages as copilot_session_parsing_simple (JSON format)
+    let expected_messages = vec![
+        Message::User {
+            text: "What can you help me with?".to_string(),
+            timestamp: Some("2025-10-07T13:51:13.835+00:00".to_string()),
+        },
+        Message::Assistant {
+            text: "I'm GitHub Copilot, and I can help you with a wide range of programming and development tasks! Based on your current workspace, I can see you have a TypeScript project with an @/Users/svarlamov/projects/testing-git/index.ts file that prints \"Bonjour\" and numbers 1-10.\n\nHere are some ways I can assist you:\n\n## Code Development\n- **Write, edit, and refactor code** in various languages (TypeScript, JavaScript, Python, Java, C#, Go, Rust, and many more)\n- **Debug and fix issues** in your existing code\n- **Add new features** or modify existing functionality\n- **Optimize performance** and improve code quality\n\n## Project Management\n- **Set up new projects** and workspaces from scratch\n- **Configure build systems** and development environments\n- **Manage dependencies** and package installations\n- **Create and modify configuration files**\n\n## Git and Version Control\n- **Commit changes** and manage your Git workflow\n- **Create branches** and handle merges\n- **View git history** and resolve conflicts\n- **Work with pull requests** and issues\n\n## Development Tools\n- **Run terminal commands** and scripts\n- **Install and configure VS Code extensions**\n- **Set up debugging configurations**\n- **Work with databases** (PostgreSQL support available)\n\n## Documentation and Testing\n- **Write documentation** and README files\n- **Create and run tests**\n- **Generate code comments** and API documentation\n\nFor your current TypeScript project, I could help you:\n- Add error handling and input validation\n- Convert it to a proper CLI tool with argument parsing\n- Add TypeScript configurations and build scripts\n- Set up testing frameworks\n- Add more sophisticated functionality\n\nWhat specific task would you like help with today?".to_string(),
+            timestamp: Some("2025-10-07T13:51:26.196+00:00".to_string()),
+        },
+        Message::User {
+            text: "Change Bonjour World to hello world".to_string(),
+            timestamp: Some("2025-10-07T13:51:41.282+00:00".to_string()),
+        },
+        Message::ToolUse {
+            name: "prepareToolInvocation".to_string(),
+            input: json!({
+                "kind": "prepareToolInvocation",
+                "toolName": "copilot_replaceString"
+            }),
+            timestamp: None,
+        },
+        Message::ToolUse {
+            name: "copilot_replaceString".to_string(),
+            input: serde_json::Value::String("Using \"Replace String in File\"".to_string()),
+            timestamp: None,
+        },
+        Message::ToolUse {
+            name: "textEditGroup".to_string(),
+            input: json!({
+                "done": true,
+                "edits": [[{
+                    "range": {
+                        "endColumn": 30,
+                        "endLineNumber": 10,
+                        "startColumn": 1,
+                        "startLineNumber": 5
+                    },
+                    "text": "// Print numbers 1 through 10\nfor (let i = 1; i <= 10; i++) {\n\tconsole.log(i);\n}\n\nconsole.log('hello world');"
+                }], []],
+                "kind": "textEditGroup",
+                "uri": {
+                    "$mid": 1,
+                    "external": "file:///Users/svarlamov/projects/testing-git/index.ts",
+                    "fsPath": "/Users/svarlamov/projects/testing-git/index.ts",
+                    "path": "/Users/svarlamov/projects/testing-git/index.ts",
+                    "scheme": "file"
+                }
+            }),
+            timestamp: None,
+        },
+        Message::Assistant {
+            text: "I'll change \"Bonjour World\" to \"hello world\" in your selected text. ``` @/Users/svarlamov/projects/testing-git/index.ts ``` Done! I've changed \"Bonjour World\" to \"hello world\" in line 10 of your @/Users/svarlamov/projects/testing-git/index.ts file.".to_string(),
+            timestamp: Some("2025-10-07T13:51:50.791+00:00".to_string()),
+        },
+        Message::User {
+            text: "Search for any other mentions of Bonjour".to_string(),
+            timestamp: Some("2025-10-07T15:15:50.757+00:00".to_string()),
+        },
+        Message::ToolUse {
+            name: "prepareToolInvocation".to_string(),
+            input: json!({
+                "kind": "prepareToolInvocation",
+                "toolName": "copilot_findTextInFiles"
+            }),
+            timestamp: None,
+        },
+        Message::ToolUse {
+            name: "copilot_findTextInFiles".to_string(),
+            input: serde_json::Value::String("Searching text for `Bonjour`".to_string()),
+            timestamp: None,
+        },
+        Message::Assistant {
+            text: "I'll search for any other mentions of \"Bonjour\" in your workspace. I found one more mention of \"Bonjour\" in your code! It's on line 1 of @/Users/svarlamov/projects/testing-git/index.ts :\n\n```typescript\nconsole.log('Bonjour');\n```\n\nWould you like me to change this one to \"hello\" as well to make it consistent?".to_string(),
+            timestamp: Some("2025-10-07T15:15:59.544+00:00".to_string()),
+        },
+    ];
+
+    assert_eq!(tx.messages, expected_messages);
+    assert_eq!(model, Some("copilot/claude-sonnet-4".to_string()));
+}
+
+#[test]
+fn test_copilot_extracts_edited_filepaths_jsonl() {
+    ensure_clean_env();
+    let fixture = fixture_path("copilot_session_simple.jsonl");
+    let fixture_str = fixture.to_str().unwrap();
+
+    let result = GithubCopilotPreset::transcript_and_model_from_copilot_session_json(fixture_str);
+    assert!(result.is_ok());
+    let (_tx, _model, edited_filepaths) = result.unwrap();
+
+    assert!(edited_filepaths.is_some());
+    let paths = edited_filepaths.unwrap();
+    assert_eq!(paths.len(), 1);
+    assert_eq!(paths[0], "/Users/svarlamov/projects/testing-git/index.ts");
+}
+
+#[test]
+fn test_copilot_after_edit_with_jsonl_session() {
+    use git_ai::commands::checkpoint_agent::agent_presets::{
+        AgentCheckpointFlags, AgentCheckpointPreset,
+    };
+    use std::io::Write;
+
+    ensure_clean_env();
+
+    // Create a temporary JSONL chat session file
+    let mut temp_file = tempfile::NamedTempFile::with_suffix(".jsonl").unwrap();
+    temp_file
+        .write_all(r#"{"kind":0,"v":{"requests": []}}"#.as_bytes())
+        .unwrap();
+    let temp_path = temp_file.path().to_str().unwrap().to_string();
+
+    let hook_input = json!({
+        "hook_event_name": "after_edit",
+        "workspace_folder": "/Users/test/project",
+        "chat_session_path": temp_path,
+        "session_id": "test-jsonl-session-789",
+        "edited_filepaths": ["/Users/test/project/file.ts"],
+        "dirty_files": {
+            "/Users/test/project/file.ts": "console.log('hello');"
+        }
+    });
+
+    let flags = AgentCheckpointFlags {
+        hook_input: Some(hook_input.to_string()),
+    };
+
+    let preset = GithubCopilotPreset;
+    let result = preset.run(flags);
+
+    assert!(result.is_ok());
+    let run_result = result.unwrap();
+
+    // Verify it's an AI checkpoint
+    assert_eq!(
+        run_result.checkpoint_kind,
+        git_ai::authorship::working_log::CheckpointKind::AiAgent
+    );
+
+    // Verify session ID is extracted correctly
+    assert_eq!(run_result.agent_id.id, "test-jsonl-session-789");
+    assert_eq!(run_result.agent_id.tool, "github-copilot");
+
+    // Verify edited_filepaths is set
+    assert!(run_result.edited_filepaths.is_some());
+    assert_eq!(
+        run_result.edited_filepaths.unwrap(),
+        vec!["/Users/test/project/file.ts"]
+    );
+
+    // Verify dirty files are included
+    assert!(run_result.dirty_files.is_some());
+    let dirty_files = run_result.dirty_files.unwrap();
+    assert_eq!(dirty_files.len(), 1);
+    assert_eq!(
+        dirty_files.get("/Users/test/project/file.ts").unwrap(),
+        "console.log('hello');"
+    );
+}
+
+#[test]
+fn copilot_session_parsing_multiline_jsonl() {
+    ensure_clean_env();
+    // Load a real-world multi-line JSONL fixture (line 1 = kind:0 snapshot,
+    // subsequent lines = kind:1/kind:2 incremental patches).
+    // After applying patches, the kind:2 on line 4 replaces the requests array
+    // with a single request whose user message is "follow up message".
+    let fixture = fixture_path("copilot_session_multiline.jsonl");
+    let fixture_str = fixture.to_str().unwrap();
+
+    let result = GithubCopilotPreset::transcript_and_model_from_copilot_session_json(fixture_str);
+    assert!(result.is_ok());
+    let (tx, model, edited_filepaths) = result.unwrap();
+
+    // After patch application, the requests array is replaced by the kind:2 patch.
+    // The patched request has user text "follow up message"
+    assert!(
+        tx.messages
+            .iter()
+            .any(|m| matches!(m, Message::User { text, .. } if text.contains("follow up message")))
+    );
+
+    // The assistant response text contains "7sadfh32u23gdaWF"
+    assert!(tx.messages.iter().any(
+        |m| matches!(m, Message::Assistant { text, .. } if text.contains("7sadfh32u23gdaWF"))
+    ));
+
+    // Model from patched request's modelId
+    assert_eq!(model, Some("copilot/gpt-4o".to_string()));
+
+    // No textEditGroup in the patched request, so no edited filepaths
+    assert!(edited_filepaths.is_some());
+    let paths = edited_filepaths.unwrap();
+    assert_eq!(paths.len(), 0);
+}
+
+#[test]
+fn copilot_session_jsonl_empty_snapshot_with_patch() {
+    ensure_clean_env();
+    // kind:0 has empty requests + inputState model, kind:2 patches in a request (no modelId)
+    let fixture = fixture_path("copilot_session_empty_then_patched.jsonl");
+    let fixture_str = fixture.to_str().unwrap();
+
+    let result = GithubCopilotPreset::transcript_and_model_from_copilot_session_json(fixture_str);
+    assert!(result.is_ok());
+    let (tx, model, edited_filepaths) = result.unwrap();
+
+    // After patch, there should be 1 user message and 1 assistant message
+    assert!(
+        tx.messages
+            .iter()
+            .any(|m| matches!(m, Message::User { text, .. } if text.contains("meaning of life")))
+    );
+    assert!(
+        tx.messages
+            .iter()
+            .any(|m| matches!(m, Message::Assistant { text, .. } if text.contains("42")))
+    );
+
+    // Model falls back to inputState.selectedModel.identifier since patched request has no modelId
+    assert_eq!(model, Some("copilot/gpt-4o".to_string()));
+
+    // No textEditGroup in patched request
+    assert!(edited_filepaths.is_some());
+    assert_eq!(edited_filepaths.unwrap().len(), 0);
+}
+
+#[test]
+fn copilot_session_jsonl_model_from_input_state_no_requests() {
+    ensure_clean_env();
+    // kind:0 with empty requests and inputState model, no patches
+    let sample = r#"{"kind":0,"v":{"requests":[],"inputState":{"selectedModel":{"identifier":"copilot/claude-sonnet-4"}}}}"#;
+
+    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
+    temp_file.write_all(sample.as_bytes()).unwrap();
+    let temp_path = temp_file.path().to_str().unwrap();
+
+    let result = GithubCopilotPreset::transcript_and_model_from_copilot_session_json(temp_path);
+    assert!(result.is_ok());
+    let (tx, model, _) = result.unwrap();
+
+    assert!(tx.messages.is_empty());
+    // Model detected from inputState fallback
+    assert_eq!(model, Some("copilot/claude-sonnet-4".to_string()));
+}
+
+#[test]
+fn copilot_session_jsonl_per_request_model_overrides_input_state() {
+    ensure_clean_env();
+    // kind:0 with a request that has modelId, plus inputState with a different model
+    let sample = r#"{"kind":0,"v":{"requests":[{"requestId":"r1","timestamp":1000000,"message":{"text":"hi"},"response":[{"value":"hello"}],"modelId":"copilot/gpt-4o"}],"inputState":{"selectedModel":{"identifier":"copilot/claude-sonnet-4"}}}}"#;
+
+    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
+    temp_file.write_all(sample.as_bytes()).unwrap();
+    let temp_path = temp_file.path().to_str().unwrap();
+
+    let result = GithubCopilotPreset::transcript_and_model_from_copilot_session_json(temp_path);
+    assert!(result.is_ok());
+    let (_, model, _) = result.unwrap();
+
+    // Per-request modelId takes priority over inputState
+    assert_eq!(model, Some("copilot/gpt-4o".to_string()));
+}
+
+#[test]
+fn copilot_session_jsonl_scalar_patch_applied() {
+    ensure_clean_env();
+    // kind:0 with inputState.selectedModel.identifier = "copilot/old-model"
+    // kind:1 patch updates inputState.selectedModel.identifier to "copilot/new-model"
+    // Empty requests, so model comes from inputState fallback after patch
+    let sample = concat!(
+        r#"{"kind":0,"v":{"requests":[],"inputState":{"selectedModel":{"identifier":"copilot/old-model"}}}}"#,
+        "\n",
+        r#"{"kind":1,"k":["inputState","selectedModel","identifier"],"v":"copilot/new-model"}"#,
+    );
+
+    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
+    temp_file.write_all(sample.as_bytes()).unwrap();
+    let temp_path = temp_file.path().to_str().unwrap();
+
+    let result = GithubCopilotPreset::transcript_and_model_from_copilot_session_json(temp_path);
+    assert!(result.is_ok());
+    let (_, model, _) = result.unwrap();
+
+    // After scalar patch, model should be the new value
+    assert_eq!(model, Some("copilot/new-model".to_string()));
+}
+
+#[test]
+fn copilot_session_plain_json_unaffected() {
+    ensure_clean_env();
+    // Plain .json format (no JSONL envelope) should work identically
+    let fixture = fixture_path("copilot_session_simple.json");
+    let fixture_str = fixture.to_str().unwrap();
+
+    let result = GithubCopilotPreset::transcript_and_model_from_copilot_session_json(fixture_str);
+    assert!(result.is_ok());
+    let (tx, model, edited_filepaths) = result.unwrap();
+
+    // Verify basic properties still work
+    assert!(!tx.messages.is_empty());
+    assert_eq!(model, Some("copilot/claude-sonnet-4".to_string()));
+    assert!(edited_filepaths.is_some());
+    assert_eq!(edited_filepaths.unwrap().len(), 1);
+}
