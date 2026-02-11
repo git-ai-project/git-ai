@@ -99,44 +99,40 @@ pub fn search_by_commit(repo: &Repository, commit_rev: &str) -> Result<SearchRes
 
     // If no git note found, fall back to database
     if result.prompts.is_empty() {
-        if let Ok(db) = InternalDatabase::global() {
-            if let Ok(db_guard) = db.lock() {
-                if let Ok(db_records) = db_guard.get_prompts_by_commit(&commit_sha) {
-                    for db_record in db_records {
-                        let prompt = db_record.to_prompt_record();
-                        result.prompts.insert(db_record.id.clone(), prompt);
-                        result
-                            .prompt_commits
-                            .entry(db_record.id)
-                            .or_default()
-                            .push(commit_sha.clone());
-                        // Note: DB records don't have file/line location data
-                    }
-                }
+        if let Ok(db) = InternalDatabase::global()
+            && let Ok(db_guard) = db.lock()
+            && let Ok(db_records) = db_guard.get_prompts_by_commit(&commit_sha)
+        {
+            for db_record in db_records {
+                let prompt = db_record.to_prompt_record();
+                result.prompts.insert(db_record.id.clone(), prompt);
+                result
+                    .prompt_commits
+                    .entry(db_record.id)
+                    .or_default()
+                    .push(commit_sha.clone());
+                // Note: DB records don't have file/line location data
             }
         }
-    } else {
+    } else if let Ok(db) = InternalDatabase::global()
+        && let Ok(db_guard) = db.lock()
+    {
         // Git notes were found but messages may have been stripped
         // (e.g., PromptStorageMode::Local or CAS upload). Try to
         // supplement empty messages from the internal database.
-        if let Ok(db) = InternalDatabase::global() {
-            if let Ok(db_guard) = db.lock() {
-                let ids_needing_messages: Vec<String> = result
-                    .prompts
-                    .iter()
-                    .filter(|(_, prompt)| prompt.messages.is_empty())
-                    .map(|(id, _)| id.clone())
-                    .collect();
+        let ids_needing_messages: Vec<String> = result
+            .prompts
+            .iter()
+            .filter(|(_, prompt)| prompt.messages.is_empty())
+            .map(|(id, _)| id.clone())
+            .collect();
 
-                for id in ids_needing_messages {
-                    if let Ok(Some(db_record)) = db_guard.get_prompt(&id) {
-                        if !db_record.messages.messages.is_empty() {
-                            if let Some(prompt) = result.prompts.get_mut(&id) {
-                                prompt.messages = db_record.messages.messages;
-                            }
-                        }
-                    }
-                }
+        for id in ids_needing_messages {
+            if let Ok(Some(db_record)) = db_guard.get_prompt(&id)
+                && !db_record.messages.messages.is_empty()
+                && let Some(prompt) = result.prompts.get_mut(&id)
+            {
+                prompt.messages = db_record.messages.messages;
             }
         }
     }
@@ -164,10 +160,10 @@ pub fn search_by_commit_range(
     // Search each commit and merge results
     for line in stdout.lines() {
         let commit_sha = line.trim();
-        if !commit_sha.is_empty() {
-            if let Ok(commit_result) = search_by_commit(repo, commit_sha) {
-                result.merge(commit_result);
-            }
+        if !commit_sha.is_empty()
+            && let Ok(commit_result) = search_by_commit(repo, commit_sha)
+        {
+            result.merge(commit_result);
         }
     }
 
@@ -187,15 +183,14 @@ pub fn search_by_file(
     let normalized_path = normalize_file_path(repo, file_path)?;
 
     // Configure blame options for data-only mode
-    let mut options = GitAiBlameOptions::default();
-    options.json = true; // Enable structured output mode
-    options.no_output = true; // Suppress terminal output
-    options.use_prompt_hashes_as_names = true; // Get prompt hashes instead of tool names
-    options.newest_commit = Some("HEAD".to_string());
-
-    if !line_ranges.is_empty() {
-        options.line_ranges = line_ranges.to_vec();
-    }
+    let options = GitAiBlameOptions {
+        json: true,             // Enable structured output mode
+        no_output: true,        // Suppress terminal output
+        use_prompt_hashes_as_names: true, // Get prompt hashes instead of tool names
+        newest_commit: Some("HEAD".to_string()),
+        line_ranges: line_ranges.to_vec(),
+        ..Default::default()
+    };
 
     // Call blame to get line-level authorship data
     let (line_authors, blame_prompt_records) = repo.blame(&normalized_path, &options)?;
@@ -315,31 +310,23 @@ pub fn search_by_prompt_id(
     Ok(result)
 }
 
-/// Merge multiple SearchResults into one, deduplicating by prompt hash
-pub fn merge_results(results: Vec<SearchResult>) -> SearchResult {
-    let mut merged = SearchResult::new();
-    for result in results {
-        merged.merge(result);
-    }
-    merged
-}
 
 /// Search mode determined by CLI arguments
 #[derive(Debug, Clone, PartialEq)]
 pub enum SearchMode {
     /// Search by a specific commit SHA, branch, tag, or symbolic ref
-    ByCommit { commit_rev: String },
+    Commit { commit_rev: String },
     /// Search across a range of commits
-    ByCommitRange { start: String, end: String },
+    CommitRange { start: String, end: String },
     /// Search by file path, optionally with specific line ranges
-    ByFile {
+    File {
         file_path: String,
         line_ranges: Vec<(u32, u32)>,
     },
     /// Full-text search across prompt messages
-    ByPattern { query: String },
+    Pattern { query: String },
     /// Look up a specific prompt by its ID
-    ByPromptId { prompt_id: String },
+    PromptId { prompt_id: String },
 }
 
 /// Filters applied after primary search
@@ -432,7 +419,7 @@ pub fn handle_search(args: &[String]) {
 
     // Execute the search based on mode
     let result = match &mode {
-        SearchMode::ByCommit { commit_rev } => {
+        SearchMode::Commit { commit_rev } => {
             match search_by_commit(&repo, commit_rev) {
                 Ok(r) => r,
                 Err(e) => {
@@ -441,7 +428,7 @@ pub fn handle_search(args: &[String]) {
                 }
             }
         }
-        SearchMode::ByCommitRange { start, end } => {
+        SearchMode::CommitRange { start, end } => {
             match search_by_commit_range(&repo, start, end) {
                 Ok(r) => r,
                 Err(e) => {
@@ -450,7 +437,7 @@ pub fn handle_search(args: &[String]) {
                 }
             }
         }
-        SearchMode::ByFile {
+        SearchMode::File {
             file_path,
             line_ranges,
         } => match search_by_file(&repo, file_path, line_ranges) {
@@ -460,14 +447,14 @@ pub fn handle_search(args: &[String]) {
                 std::process::exit(1);
             }
         }
-        SearchMode::ByPattern { query } => match search_by_pattern(query) {
+        SearchMode::Pattern { query } => match search_by_pattern(query) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("Error searching pattern '{}': {}", query, e);
                 std::process::exit(1);
             }
         }
-        SearchMode::ByPromptId { prompt_id } => match search_by_prompt_id(&repo, prompt_id) {
+        SearchMode::PromptId { prompt_id } => match search_by_prompt_id(&repo, prompt_id) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("Error searching prompt ID '{}': {}", prompt_id, e);
@@ -482,13 +469,13 @@ pub fn handle_search(args: &[String]) {
     // Check for empty results
     if filtered.is_empty() {
         let mode_desc = match mode {
-            SearchMode::ByCommit { commit_rev } => format!("commit '{}'", commit_rev),
-            SearchMode::ByCommitRange { start, end } => {
+            SearchMode::Commit { commit_rev } => format!("commit '{}'", commit_rev),
+            SearchMode::CommitRange { start, end } => {
                 format!("commit range '{}..{}'", start, end)
             }
-            SearchMode::ByFile { file_path, .. } => format!("file '{}'", file_path),
-            SearchMode::ByPattern { query } => format!("pattern \"{}\"", query),
-            SearchMode::ByPromptId { prompt_id } => format!("prompt ID '{}'", prompt_id),
+            SearchMode::File { file_path, .. } => format!("file '{}'", file_path),
+            SearchMode::Pattern { query } => format!("pattern \"{}\"", query),
+            SearchMode::PromptId { prompt_id } => format!("prompt ID '{}'", prompt_id),
         };
         eprintln!("No AI prompt history found for {}", mode_desc);
         std::process::exit(2);
@@ -518,10 +505,10 @@ fn apply_filters(mut result: SearchResult, filters: &SearchFilters) -> SearchRes
         .iter()
         .filter(|(_, prompt)| {
             // Filter by tool (case-insensitive)
-            if let Some(ref tool) = filters.tool {
-                if !prompt.agent_id.tool.eq_ignore_ascii_case(tool) {
-                    return true; // Remove this prompt
-                }
+            if let Some(ref tool) = filters.tool
+                && !prompt.agent_id.tool.eq_ignore_ascii_case(tool)
+            {
+                return true; // Remove this prompt
             }
 
             // Filter by author (substring, case-insensitive)
@@ -536,10 +523,8 @@ fn apply_filters(mut result: SearchResult, filters: &SearchFilters) -> SearchRes
                 }
             }
 
-            // Filter by since/until timestamps
-            // Note: We'd need timestamp information from messages or DB records
-            // For now, these filters are a no-op on git notes data
             // TODO: Implement temporal filtering when timestamp data is available
+            // For now, warn at parse time (see below) and skip filtering here
 
             false // Keep this prompt
         })
@@ -559,11 +544,11 @@ fn apply_filters(mut result: SearchResult, filters: &SearchFilters) -> SearchRes
 /// Format search results as human-readable default output
 fn format_default(result: &SearchResult, mode: &SearchMode) -> String {
     let mode_desc = match mode {
-        SearchMode::ByCommit { commit_rev } => format!("commit {}", commit_rev),
-        SearchMode::ByCommitRange { start, end } => format!("commit range {}..{}", start, end),
-        SearchMode::ByFile { file_path, .. } => format!("file {}", file_path),
-        SearchMode::ByPattern { query } => format!("pattern \"{}\"", query),
-        SearchMode::ByPromptId { prompt_id } => format!("prompt ID {}", prompt_id),
+        SearchMode::Commit { commit_rev } => format!("commit {}", commit_rev),
+        SearchMode::CommitRange { start, end } => format!("commit range {}..{}", start, end),
+        SearchMode::File { file_path, .. } => format!("file {}", file_path),
+        SearchMode::Pattern { query } => format!("pattern \"{}\"", query),
+        SearchMode::PromptId { prompt_id } => format!("prompt ID {}", prompt_id),
     };
 
     let mut output = format!(
@@ -603,12 +588,12 @@ fn format_default(result: &SearchResult, mode: &SearchMode) -> String {
         }
 
         // Show first message snippet
-        if let Some(first_msg) = prompt.messages.first() {
-            if let Some(text) = first_msg.text() {
-                let snippet: String = text.chars().take(80).collect();
-                let ellipsis = if text.len() > 80 { "..." } else { "" };
-                output.push_str(&format!("    First message: {}{}\n", snippet, ellipsis));
-            }
+        if let Some(first_msg) = prompt.messages.first()
+            && let Some(text) = first_msg.text()
+        {
+            let snippet: String = text.chars().take(80).collect();
+            let ellipsis = if text.len() > 80 { "..." } else { "" };
+            output.push_str(&format!("    First message: {}{}\n", snippet, ellipsis));
         }
 
         output.push('\n');
@@ -622,22 +607,22 @@ fn format_json(result: &SearchResult, mode: &SearchMode) -> String {
     use serde_json::json;
 
     let query = match mode {
-        SearchMode::ByCommit { commit_rev } => {
+        SearchMode::Commit { commit_rev } => {
             json!({ "mode": "commit", "commit": commit_rev })
         }
-        SearchMode::ByCommitRange { start, end } => {
+        SearchMode::CommitRange { start, end } => {
             json!({ "mode": "commit_range", "start": start, "end": end })
         }
-        SearchMode::ByFile {
+        SearchMode::File {
             file_path,
             line_ranges,
         } => {
             json!({ "mode": "file", "file": file_path, "line_ranges": line_ranges })
         }
-        SearchMode::ByPattern { query } => {
+        SearchMode::Pattern { query } => {
             json!({ "mode": "pattern", "query": query })
         }
-        SearchMode::ByPromptId { prompt_id } => {
+        SearchMode::PromptId { prompt_id } => {
             json!({ "mode": "prompt_id", "prompt_id": prompt_id })
         }
     };
@@ -700,11 +685,11 @@ fn format_verbose(result: &SearchResult, mode: &SearchMode) -> String {
     use crate::authorship::prompt_utils::format_transcript;
 
     let mode_desc = match mode {
-        SearchMode::ByCommit { commit_rev } => format!("commit {}", commit_rev),
-        SearchMode::ByCommitRange { start, end } => format!("commit range {}..{}", start, end),
-        SearchMode::ByFile { file_path, .. } => format!("file {}", file_path),
-        SearchMode::ByPattern { query } => format!("pattern \"{}\"", query),
-        SearchMode::ByPromptId { prompt_id } => format!("prompt ID {}", prompt_id),
+        SearchMode::Commit { commit_rev } => format!("commit {}", commit_rev),
+        SearchMode::CommitRange { start, end } => format!("commit range {}..{}", start, end),
+        SearchMode::File { file_path, .. } => format!("file {}", file_path),
+        SearchMode::Pattern { query } => format!("pattern \"{}\"", query),
+        SearchMode::PromptId { prompt_id } => format!("prompt ID {}", prompt_id),
     };
 
     let mut output = format!(
@@ -735,9 +720,9 @@ fn format_verbose(result: &SearchResult, mode: &SearchMode) -> String {
             output.push_str(&format!("Files: {}\n", files.join(", ")));
         }
 
-        output.push_str("\n");
+        output.push('\n');
         output.push_str(&format_transcript(prompt));
-        output.push_str("\n");
+        output.push('\n');
     }
 
     output.trim_end().to_string()
@@ -763,7 +748,7 @@ fn format_porcelain(result: &SearchResult) -> String {
             .and_then(|m| m.text())
             .map(|t| {
                 let snippet: String = t.chars().take(60).collect();
-                snippet.replace('\t', " ").replace('\n', " ")
+                snippet.replace(['\t', '\n'], " ")
             })
             .unwrap_or_default();
 
@@ -821,9 +806,9 @@ fn parse_search_args(args: &[String]) -> Result<ParsedSearchArgs, String> {
                 if let Some(pos) = commit_rev.find("..") {
                     let start = commit_rev[..pos].to_string();
                     let end = commit_rev[pos + 2..].to_string();
-                    mode = Some(SearchMode::ByCommitRange { start, end });
+                    mode = Some(SearchMode::CommitRange { start, end });
                 } else {
-                    mode = Some(SearchMode::ByCommit { commit_rev });
+                    mode = Some(SearchMode::Commit { commit_rev });
                 }
             }
             "--file" => {
@@ -835,12 +820,12 @@ fn parse_search_args(args: &[String]) -> Result<ParsedSearchArgs, String> {
                 // Initialize with any pending line ranges collected before --file
                 let line_ranges = if !pending_lines.is_empty() {
                     std::mem::take(&mut pending_lines)
-                } else if let Some(SearchMode::ByFile { line_ranges, .. }) = &mode {
+                } else if let Some(SearchMode::File { line_ranges, .. }) = &mode {
                     line_ranges.clone()
                 } else {
                     vec![]
                 };
-                mode = Some(SearchMode::ByFile {
+                mode = Some(SearchMode::File {
                     file_path,
                     line_ranges,
                 });
@@ -855,7 +840,7 @@ fn parse_search_args(args: &[String]) -> Result<ParsedSearchArgs, String> {
 
                 // Add to existing file mode, or queue for later if --file comes after
                 match &mut mode {
-                    Some(SearchMode::ByFile { line_ranges, .. }) => {
+                    Some(SearchMode::File { line_ranges, .. }) => {
                         line_ranges.push(range);
                     }
                     _ => {
@@ -869,7 +854,7 @@ fn parse_search_args(args: &[String]) -> Result<ParsedSearchArgs, String> {
                 if i >= args.len() {
                     return Err("--pattern requires a value".to_string());
                 }
-                mode = Some(SearchMode::ByPattern {
+                mode = Some(SearchMode::Pattern {
                     query: args[i].clone(),
                 });
             }
@@ -878,7 +863,7 @@ fn parse_search_args(args: &[String]) -> Result<ParsedSearchArgs, String> {
                 if i >= args.len() {
                     return Err("--prompt-id requires a value".to_string());
                 }
-                mode = Some(SearchMode::ByPromptId {
+                mode = Some(SearchMode::PromptId {
                     prompt_id: args[i].clone(),
                 });
             }
@@ -902,6 +887,7 @@ fn parse_search_args(args: &[String]) -> Result<ParsedSearchArgs, String> {
                 if i >= args.len() {
                     return Err("--since requires a value".to_string());
                 }
+                eprintln!("Warning: --since filtering is not yet implemented and will be ignored");
                 filters.since = Some(parse_time_spec(&args[i])?);
             }
             "--until" => {
@@ -909,6 +895,7 @@ fn parse_search_args(args: &[String]) -> Result<ParsedSearchArgs, String> {
                 if i >= args.len() {
                     return Err("--until requires a value".to_string());
                 }
+                eprintln!("Warning: --until filtering is not yet implemented and will be ignored");
                 filters.until = Some(parse_time_spec(&args[i])?);
             }
             "--workdir" => {
@@ -1055,7 +1042,7 @@ fn parse_time_spec(s: &str) -> Result<i64, String> {
 
 /// Calculate days since Unix epoch for a date
 fn days_since_unix_epoch(year: i32, month: u32, day: u32) -> Option<i64> {
-    if month < 1 || month > 12 || day < 1 || day > 31 {
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return None;
     }
 
@@ -1146,52 +1133,52 @@ mod tests {
 
     #[test]
     fn test_search_mode_variants() {
-        let by_commit = SearchMode::ByCommit {
+        let by_commit = SearchMode::Commit {
             commit_rev: "abc123".to_string(),
         };
-        let by_file = SearchMode::ByFile {
+        let by_file = SearchMode::File {
             file_path: "src/main.rs".to_string(),
             line_ranges: vec![(10, 50)],
         };
-        let by_pattern = SearchMode::ByPattern {
+        let by_pattern = SearchMode::Pattern {
             query: "test".to_string(),
         };
-        let by_prompt_id = SearchMode::ByPromptId {
+        let by_prompt_id = SearchMode::PromptId {
             prompt_id: "xyz789".to_string(),
         };
-        let by_range = SearchMode::ByCommitRange {
+        let by_range = SearchMode::CommitRange {
             start: "abc".to_string(),
             end: "def".to_string(),
         };
 
         assert_eq!(
             by_commit,
-            SearchMode::ByCommit {
+            SearchMode::Commit {
                 commit_rev: "abc123".to_string()
             }
         );
         assert_eq!(
             by_file,
-            SearchMode::ByFile {
+            SearchMode::File {
                 file_path: "src/main.rs".to_string(),
                 line_ranges: vec![(10, 50)]
             }
         );
         assert_eq!(
             by_pattern,
-            SearchMode::ByPattern {
+            SearchMode::Pattern {
                 query: "test".to_string()
             }
         );
         assert_eq!(
             by_prompt_id,
-            SearchMode::ByPromptId {
+            SearchMode::PromptId {
                 prompt_id: "xyz789".to_string()
             }
         );
         assert_eq!(
             by_range,
-            SearchMode::ByCommitRange {
+            SearchMode::CommitRange {
                 start: "abc".to_string(),
                 end: "def".to_string()
             }
@@ -1233,7 +1220,7 @@ mod tests {
         let parsed = parse_search_args(&args).unwrap();
         assert_eq!(
             parsed.mode,
-            Some(SearchMode::ByCommit {
+            Some(SearchMode::Commit {
                 commit_rev: "abc123".to_string()
             })
         );
@@ -1245,7 +1232,7 @@ mod tests {
         let parsed = parse_search_args(&args).unwrap();
         assert_eq!(
             parsed.mode,
-            Some(SearchMode::ByCommitRange {
+            Some(SearchMode::CommitRange {
                 start: "abc".to_string(),
                 end: "def".to_string()
             })
@@ -1265,7 +1252,7 @@ mod tests {
         let parsed = parse_search_args(&args).unwrap();
         assert_eq!(
             parsed.mode,
-            Some(SearchMode::ByFile {
+            Some(SearchMode::File {
                 file_path: "src/main.rs".to_string(),
                 line_ranges: vec![(10, 50), (80, 100)]
             })
@@ -1382,7 +1369,7 @@ mod tests {
         let parsed = parse_search_args(&args).unwrap();
         assert_eq!(
             parsed.mode,
-            Some(SearchMode::ByFile {
+            Some(SearchMode::File {
                 file_path: "src/main.rs".to_string(),
                 line_ranges: vec![(10, 50)]
             })

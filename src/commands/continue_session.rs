@@ -278,20 +278,19 @@ fn gather_session_context(
     let mut seen_shas = HashSet::new();
 
     // If we have a specific commit_info, include that diff
-    if let Some(ref info) = commit_info {
-        if seen_shas.insert(info.sha.clone()) {
-            if let Ok(diff) = get_commit_diff(repo, &info.sha) {
-                commit_diffs.insert(info.sha[..8.min(info.sha.len())].to_string(), diff);
-            }
-        }
+    if let Some(ref info) = commit_info
+        && seen_shas.insert(info.sha.clone())
+        && let Ok(diff) = get_commit_diff(repo, &info.sha)
+    {
+        commit_diffs.insert(info.sha[..8.min(info.sha.len())].to_string(), diff);
     }
 
     // Also get diffs for any commits referenced in the search results
     for sha in &prompt_commit_shas {
-        if seen_shas.insert(sha.clone()) {
-            if let Ok(diff) = get_commit_diff(repo, sha) {
-                commit_diffs.insert(sha[..8.min(sha.len())].to_string(), diff);
-            }
+        if seen_shas.insert(sha.clone())
+            && let Ok(diff) = get_commit_diff(repo, sha)
+        {
+            commit_diffs.insert(sha[..8.min(sha.len())].to_string(), diff);
         }
     }
 
@@ -611,7 +610,7 @@ fn launch_agent(agent: &str, context: &str, summary: bool) -> Result<(), GitAiEr
             {
                 let err = cmd.exec();
                 // exec() only returns if it failed
-                return Err(GitAiError::Generic(format!("Failed to exec claude: {}", err)));
+                Err(GitAiError::Generic(format!("Failed to exec claude: {}", err)))
             }
 
             #[cfg(not(unix))]
@@ -768,16 +767,12 @@ fn try_clipboard_fallback(text: &str) -> Result<(), GitAiError> {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
+            && let Some(mut stdin) = child.stdin.take()
+            && stdin.write_all(text.as_bytes()).is_ok()
+            && let Ok(status) = child.wait()
+            && status.success()
         {
-            if let Some(mut stdin) = child.stdin.take() {
-                if stdin.write_all(text.as_bytes()).is_ok() {
-                    if let Ok(status) = child.wait() {
-                        if status.success() {
-                            return Ok(());
-                        }
-                    }
-                }
-            }
+            return Ok(());
         }
     }
 
@@ -955,12 +950,12 @@ fn format_context_block(ctx: &SessionContext) -> String {
     }
 
     // Full commit message (only if it differs from the subject line)
-    if let Some(ref info) = ctx.commit_info {
-        if info.full_message != info.message {
-            output.push_str("## Commit Message\n\n");
-            output.push_str(&info.full_message);
-            output.push_str("\n\n");
-        }
+    if let Some(ref info) = ctx.commit_info
+        && info.full_message != info.message
+    {
+        output.push_str("## Commit Message\n\n");
+        output.push_str(&info.full_message);
+        output.push_str("\n\n");
     }
 
     // Commit diffs
@@ -1058,7 +1053,7 @@ fn format_context_block(ctx: &SessionContext) -> String {
     if let Some(ref git_status) = ctx.git_status {
         output.push_str("gitStatus: This is the current state of the repository.\n");
         output.push_str(git_status);
-        output.push_str("\n");
+        output.push('\n');
     }
 
     output.push_str("You can now ask follow-up questions about this work.\n");
