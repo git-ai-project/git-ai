@@ -32,6 +32,7 @@ keyring = { version = "3", features = ["sync-secret-service", "apple-native", "w
 once_cell = "1.19"
 gix-config = "0.51.0"
 regex = "1.10"
+toml = "0.8"
 
 [features]
 test-support = ["git2"]

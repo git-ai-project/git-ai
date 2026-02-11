@@ -1439,6 +1439,34 @@ mod tests {
     }
 
     #[test]
+    fn test_checkpoint_with_only_unstaged_changes_for_ai_without_pathspec() {
+        use std::fs;
+
+        // Create a repo with an initial commit
+        let (tmp_repo, file, _) = TmpRepo::new_with_base_commit().unwrap();
+
+        // Manually modify the file without staging it
+        let file_path = file.path();
+        let mut content = fs::read_to_string(&file_path).unwrap();
+        content.push_str("New unstaged AI line\n");
+        fs::write(&file_path, &content).unwrap();
+
+        // Trigger AI checkpoint without edited_filepaths (pathspec-less flow used by some agents)
+        let (entries_len, files_len, _checkpoints_len) = tmp_repo
+            .trigger_checkpoint_with_ai("Codex", Some("gpt-5-codex"), Some("codex"))
+            .unwrap();
+
+        assert_eq!(
+            files_len, 1,
+            "Should detect unstaged changes without pathspecs"
+        );
+        assert_eq!(
+            entries_len, 1,
+            "Should create an AI checkpoint entry for unstaged changes without pathspecs"
+        );
+    }
+
+    #[test]
     fn test_checkpoint_skips_conflicted_files() {
         // Create a repo with an initial commit
         let (tmp_repo, mut file, _) = TmpRepo::new_with_base_commit().unwrap();

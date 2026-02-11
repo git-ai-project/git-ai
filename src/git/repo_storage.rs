@@ -345,8 +345,8 @@ impl PersistedWorkingLog {
             // For other tools, check if they have the necessary metadata for refetching
             // cursor can always refetch from its database
             "cursor" => false,
-            // claude, gemini, continue-cli need transcript_path
-            "claude" | "gemini" | "continue-cli" => metadata
+            // claude, codex, gemini, continue-cli need transcript_path
+            "claude" | "codex" | "gemini" | "continue-cli" => metadata
                 .as_ref()
                 .and_then(|m| m.get("transcript_path"))
                 .is_none(),

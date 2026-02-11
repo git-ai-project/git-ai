@@ -127,7 +127,10 @@ impl Repository {
             staged_filenames
         };
 
-        if combined_pathspecs.is_empty() {
+        // When no explicit pathspecs are provided and nothing is staged,
+        // we still need a full status scan to capture unstaged changes.
+        let should_full_scan = pathspecs.is_none() && combined_pathspecs.is_empty();
+        if combined_pathspecs.is_empty() && !should_full_scan {
             return Ok(Vec::new());
         }
 
@@ -142,8 +145,8 @@ impl Repository {
 
         // Add combined pathspecs as CLI args only if under the threshold;
         // otherwise run without pathspecs and post-filter to avoid E2BIG.
-        let needs_post_filter = combined_pathspecs.len() > MAX_PATHSPEC_ARGS;
-        if !needs_post_filter && !combined_pathspecs.is_empty() {
+        let needs_post_filter = !should_full_scan && combined_pathspecs.len() > MAX_PATHSPEC_ARGS;
+        if !should_full_scan && !needs_post_filter && !combined_pathspecs.is_empty() {
             args.push("--".to_string());
             for path in &combined_pathspecs {
                 args.push(path.clone());

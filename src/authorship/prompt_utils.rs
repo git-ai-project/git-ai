@@ -2,7 +2,8 @@ use crate::authorship::authorship_log::PromptRecord;
 use crate::authorship::internal_db::InternalDatabase;
 use crate::authorship::transcript::AiTranscript;
 use crate::commands::checkpoint_agent::agent_presets::{
-    ClaudePreset, ContinueCliPreset, CursorPreset, DroidPreset, GeminiPreset, GithubCopilotPreset,
+    ClaudePreset, CodexPreset, ContinueCliPreset, CursorPreset, DroidPreset, GeminiPreset,
+    GithubCopilotPreset,
 };
 use crate::commands::checkpoint_agent::opencode_preset::OpenCodePreset;
 use crate::error::GitAiError;
@@ -169,6 +170,7 @@ pub fn update_prompt_from_tool(
     match tool {
         "cursor" => update_cursor_prompt(external_thread_id, agent_metadata, current_model),
         "claude" => update_claude_prompt(agent_metadata, current_model),
+        "codex" => update_codex_prompt(agent_metadata, current_model),
         "gemini" => update_gemini_prompt(agent_metadata, current_model),
         "github-copilot" => update_github_copilot_prompt(agent_metadata, current_model),
         "continue-cli" => update_continue_cli_prompt(agent_metadata, current_model),
@@ -178,6 +180,41 @@ pub fn update_prompt_from_tool(
             debug_log(&format!("Unknown tool: {}", tool));
             PromptUpdateResult::Unchanged
         }
+    }
+}
+
+/// Update Codex prompt from rollout transcript file
+fn update_codex_prompt(
+    metadata: Option<&HashMap<String, String>>,
+    current_model: &str,
+) -> PromptUpdateResult {
+    if let Some(metadata) = metadata {
+        if let Some(transcript_path) = metadata.get("transcript_path") {
+            match CodexPreset::transcript_and_model_from_codex_rollout_jsonl(transcript_path) {
+                Ok((transcript, model)) => PromptUpdateResult::Updated(
+                    transcript,
+                    model.unwrap_or_else(|| current_model.to_string()),
+                ),
+                Err(e) => {
+                    debug_log(&format!(
+                        "Failed to parse Codex rollout JSONL transcript from {}: {}",
+                        transcript_path, e
+                    ));
+                    log_error(
+                        &e,
+                        Some(serde_json::json!({
+                            "agent_tool": "codex",
+                            "operation": "transcript_and_model_from_codex_rollout_jsonl"
+                        })),
+                    );
+                    PromptUpdateResult::Failed(e)
+                }
+            }
+        } else {
+            PromptUpdateResult::Unchanged
+        }
+    } else {
+        PromptUpdateResult::Unchanged
     }
 }
 

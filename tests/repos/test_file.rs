@@ -12,6 +12,7 @@ const AI_AUTHOR_NAMES: &[&str] = &[
     "gpt",
     "copilot",
     "cursor",
+    "codex",
     "gemini",
 ];
 
