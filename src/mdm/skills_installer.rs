@@ -11,10 +11,16 @@ struct EmbeddedSkill {
 }
 
 /// All embedded skills - add new skills here
-const EMBEDDED_SKILLS: &[EmbeddedSkill] = &[EmbeddedSkill {
-    name: "prompt-analysis",
-    skill_md: include_str!("../../skills/prompt-analysis/SKILL.md"),
-}];
+const EMBEDDED_SKILLS: &[EmbeddedSkill] = &[
+    EmbeddedSkill {
+        name: "prompt-analysis",
+        skill_md: include_str!("../../skills/prompt-analysis/SKILL.md"),
+    },
+    EmbeddedSkill {
+        name: "ask",
+        skill_md: include_str!("../../skills/ask/SKILL.md"),
+    },
+];
 
 /// Result of installing skills
 pub struct SkillsInstallResult {
