@@ -883,12 +883,9 @@ impl CodexPreset {
                                         .get("type")
                                         .and_then(|v| v.as_str())
                                         .unwrap_or_default();
-                                    if ((role == "user"
-                                        && (content_type == "input_text"
-                                            || content_type == "output_text"))
-                                        || (role == "assistant"
-                                            && (content_type == "output_text"
-                                                || content_type == "input_text")))
+                                    if (role == "assistant" || role == "user")
+                                        && (content_type == "output_text"
+                                            || content_type == "input_text")
                                         && let Some(text) =
                                             item.get("text").and_then(|v| v.as_str())
                                     {
