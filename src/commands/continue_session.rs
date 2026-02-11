@@ -992,15 +992,13 @@ fn format_context_block(ctx: &SessionContext) -> String {
             .filter(|m| !matches!(m, Message::ToolUse { .. }))
             .collect();
 
-        let (messages_to_show, omitted) =
-        let (messages_to_show, omitted) =
-            if non_tool_messages.len() > max_messages {
-                let omitted = non_tool_messages.len() - max_messages;
-                let slice = &non_tool_messages[omitted..];
-                (slice.to_vec(), Some(omitted))
-            } else {
-                (non_tool_messages, None)
-            };
+        let (messages_to_show, omitted) = if non_tool_messages.len() > max_messages {
+            let omitted = non_tool_messages.len() - max_messages;
+            let slice = &non_tool_messages[omitted..];
+            (slice.to_vec(), Some(omitted))
+        } else {
+            (non_tool_messages, None)
+        };
 
         // Show truncation notice if applicable
         if let Some(n) = omitted {
@@ -1008,7 +1006,7 @@ fn format_context_block(ctx: &SessionContext) -> String {
         }
 
         // Format messages
-        for message in messages_to_show {
+        for message in &messages_to_show {
             match message {
                 Message::User { text, .. } => {
                     output.push_str("**User**:\n");
