@@ -82,7 +82,7 @@ STEP 3 — Answer:
   Format:
   - **Answer**: Direct answer in the author's voice
   - **Original context**: What the human asked for and why
-  - **Prompt ID(s)**: The prompt hash(es) you found
+  - **Date(s)**: Dates, Human Author where this feature was worked on. 
 
   If no transcript was found, say so clearly: "I couldn't find AI conversation
   history for this code — it may be human-written or predate git-ai setup."
