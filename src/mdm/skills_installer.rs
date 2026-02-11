@@ -1,118 +1,20 @@
 use crate::config::skills_dir_path;
 use crate::error::GitAiError;
 use crate::mdm::utils::write_atomic;
-use serde::{Deserialize, Serialize};
 use std::fs;
+use std::path::PathBuf;
 
-/// Embedded command files - each command has a name, description, and its .md content
-struct EmbeddedCommand {
+/// Embedded skill - each skill has a name and its SKILL.md content
+struct EmbeddedSkill {
     name: &'static str,
-    #[allow(dead_code)]
-    description: &'static str,
-    command_md: &'static str,
+    skill_md: &'static str,
 }
 
-/// All embedded commands - add new commands here
-const EMBEDDED_COMMANDS: &[EmbeddedCommand] = &[
-    EmbeddedCommand {
-        name: "prompt-analysis",
-        description: "Analyze AI prompting patterns and acceptance rates",
-        command_md: include_str!("../../skills/prompt-analysis/SKILL.md"),
-    },
-    EmbeddedCommand {
-        name: "git-ai-search",
-        description: "Search and restore AI conversation context from git history",
-        command_md: include_str!("../../skills/git-ai-search/SKILL.md"),
-    },
-];
-
-/// Marketplace JSON structure
-#[derive(Serialize, Deserialize)]
-struct Marketplace {
-    name: String,
-    owner: MarketplaceOwner,
-    metadata: MarketplaceMetadata,
-    plugins: Vec<MarketplacePlugin>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct MarketplaceOwner {
-    name: String,
-}
-
-#[derive(Serialize, Deserialize)]
-struct MarketplaceMetadata {
-    description: String,
-    version: String,
-    #[serde(rename = "pluginRoot")]
-    plugin_root: String,
-}
-
-#[derive(Serialize, Deserialize)]
-struct MarketplacePlugin {
-    name: String,
-    source: String,
-    description: String,
-    version: String,
-    category: String,
-    keywords: Vec<String>,
-}
-
-/// Plugin JSON structure (for .claude-plugin/plugin.json inside each plugin)
-#[derive(Serialize, Deserialize)]
-struct PluginJson {
-    name: String,
-    description: String,
-    author: PluginAuthor,
-}
-
-#[derive(Serialize, Deserialize)]
-struct PluginAuthor {
-    name: String,
-}
-
-/// The name of the single plugin that contains all git-ai commands
-const PLUGIN_NAME: &str = "git-ai";
-const PLUGIN_DESCRIPTION: &str = "Official Git AI commands for AI-assisted development analytics";
-
-/// Generate the marketplace.json content
-/// The marketplace contains a single "git-ai" plugin that holds all commands
-fn generate_marketplace() -> Marketplace {
-    Marketplace {
-        name: "git-ai".to_string(),
-        owner: MarketplaceOwner {
-            name: "Git AI".to_string(),
-        },
-        metadata: MarketplaceMetadata {
-            description: "Official Git AI skills for your Agents".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            plugin_root: ".".to_string(),
-        },
-        plugins: vec![MarketplacePlugin {
-            name: PLUGIN_NAME.to_string(),
-            source: format!("./{}", PLUGIN_NAME),
-            description: PLUGIN_DESCRIPTION.to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            category: "ai-tools".to_string(),
-            keywords: vec![
-                "git-ai".to_string(),
-                "prompts".to_string(),
-                "analytics".to_string(),
-            ],
-        }],
-    }
-}
-
-/// Generate plugin.json content for the git-ai plugin
-fn generate_plugin_json() -> PluginJson {
-    PluginJson {
-        name: PLUGIN_NAME.to_string(),
-        description: PLUGIN_DESCRIPTION.to_string(),
-        author: PluginAuthor {
-            name: "Git AI".to_string(),
-        },
-    }
-}
+/// All embedded skills - add new skills here
+const EMBEDDED_SKILLS: &[EmbeddedSkill] = &[EmbeddedSkill {
+    name: "prompt-analysis",
+    skill_md: include_str!("../../skills/prompt-analysis/SKILL.md"),
+}];
 
 /// Result of installing skills
 pub struct SkillsInstallResult {
@@ -123,19 +25,73 @@ pub struct SkillsInstallResult {
     pub installed_count: usize,
 }
 
-/// Install all embedded commands to ~/.git-ai/skills/
+/// Get the ~/.agents/skills directory path
+fn agents_skills_dir() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".agents").join("skills"))
+}
+
+/// Get the ~/.claude/skills directory path
+fn claude_skills_dir() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".claude").join("skills"))
+}
+
+/// Create a symlink from link_path to target, removing any existing file/symlink first
+fn create_skills_symlink(target: &PathBuf, link_path: &PathBuf) -> Result<(), GitAiError> {
+    // Create parent directory if needed
+    if let Some(parent) = link_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    // Remove existing file/symlink if present
+    if link_path.exists() || link_path.symlink_metadata().is_ok() {
+        if link_path.is_dir()
+            && !link_path
+                .symlink_metadata()
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false)
+        {
+            // It's a real directory, not a symlink - remove it
+            fs::remove_dir_all(link_path)?;
+        } else {
+            // It's a file or symlink
+            fs::remove_file(link_path)?;
+        }
+    }
+
+    // Create the symlink
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link_path)?;
+
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(target, link_path)?;
+
+    Ok(())
+}
+
+/// Remove a symlink if it exists
+fn remove_skills_symlink(link_path: &PathBuf) -> Result<(), GitAiError> {
+    if link_path.symlink_metadata().is_ok()
+        && link_path
+            .symlink_metadata()
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+    {
+        fs::remove_file(link_path)?;
+    }
+    Ok(())
+}
+
+/// Install all embedded skills to ~/.git-ai/skills/
 /// This nukes the entire skills directory and recreates it fresh each time.
 ///
-/// Creates the proper Claude Code plugin structure:
-/// ~/.git-ai/skills/           (marketplace)
-/// ├── .claude-plugin/
-/// │   └── marketplace.json
-/// └── git-ai/                 (single plugin containing all commands)
-///     ├── .claude-plugin/
-///     │   └── plugin.json
-///     └── commands/
-///         └── prompt-analysis.md
-///         └── (future commands...)
+/// Creates the standard skills structure:
+/// ~/.git-ai/skills/
+/// └── prompt-analysis/
+///     └── SKILL.md
+///
+/// Then symlinks each skill to:
+/// - ~/.agents/skills/{skill-name}
+/// - ~/.claude/skills/{skill-name}
 pub fn install_skills(dry_run: bool, _verbose: bool) -> Result<SkillsInstallResult, GitAiError> {
     let skills_base = skills_dir_path().ok_or_else(|| {
         GitAiError::Generic("Could not determine skills directory path".to_string())
@@ -144,7 +100,7 @@ pub fn install_skills(dry_run: bool, _verbose: bool) -> Result<SkillsInstallResu
     if dry_run {
         return Ok(SkillsInstallResult {
             changed: true,
-            installed_count: EMBEDDED_COMMANDS.len(),
+            installed_count: EMBEDDED_SKILLS.len(),
         });
     }
 
@@ -153,50 +109,50 @@ pub fn install_skills(dry_run: bool, _verbose: bool) -> Result<SkillsInstallResu
         fs::remove_dir_all(&skills_base)?;
     }
 
-    // Create fresh skills directory (this is the marketplace root)
+    // Create fresh skills directory
     fs::create_dir_all(&skills_base)?;
 
-    // Write .claude-plugin/marketplace.json at marketplace root
-    let marketplace_plugin_dir = skills_base.join(".claude-plugin");
-    fs::create_dir_all(&marketplace_plugin_dir)?;
+    // Install each skill
+    for skill in EMBEDDED_SKILLS {
+        // Create skill directory: ~/.git-ai/skills/{skill-name}/
+        let skill_dir = skills_base.join(skill.name);
+        fs::create_dir_all(&skill_dir)?;
 
-    let marketplace = generate_marketplace();
-    let marketplace_content = serde_json::to_string_pretty(&marketplace)
-        .map_err(|e| GitAiError::Generic(format!("Failed to serialize marketplace.json: {}", e)))?;
-    let marketplace_path = marketplace_plugin_dir.join("marketplace.json");
-    write_atomic(&marketplace_path, marketplace_content.as_bytes())?;
+        // Write SKILL.md
+        let skill_md_path = skill_dir.join("SKILL.md");
+        write_atomic(&skill_md_path, skill.skill_md.as_bytes())?;
 
-    // Create the single "git-ai" plugin directory
-    let plugin_dir = skills_base.join(PLUGIN_NAME);
-    fs::create_dir_all(&plugin_dir)?;
+        // Create symlinks for this skill
+        // ~/.agents/skills/{skill-name} -> ~/.git-ai/skills/{skill-name}
+        if let Some(agents_dir) = agents_skills_dir() {
+            let agents_link = agents_dir.join(skill.name);
+            if let Err(e) = create_skills_symlink(&skill_dir, &agents_link) {
+                eprintln!(
+                    "Warning: Failed to create symlink at {:?}: {}",
+                    agents_link, e
+                );
+            }
+        }
 
-    // Create .claude-plugin/plugin.json inside the git-ai plugin
-    let plugin_claude_dir = plugin_dir.join(".claude-plugin");
-    fs::create_dir_all(&plugin_claude_dir)?;
-
-    let plugin_json = generate_plugin_json();
-    let plugin_json_content = serde_json::to_string_pretty(&plugin_json)
-        .map_err(|e| GitAiError::Generic(format!("Failed to serialize plugin.json: {}", e)))?;
-    let plugin_json_path = plugin_claude_dir.join("plugin.json");
-    write_atomic(&plugin_json_path, plugin_json_content.as_bytes())?;
-
-    // Create commands/ directory inside the git-ai plugin
-    let commands_dir = plugin_dir.join("commands");
-    fs::create_dir_all(&commands_dir)?;
-
-    // Install all commands into the single git-ai plugin
-    for cmd in EMBEDDED_COMMANDS {
-        let command_md_path = commands_dir.join(format!("{}.md", cmd.name));
-        write_atomic(&command_md_path, cmd.command_md.as_bytes())?;
+        // ~/.claude/skills/{skill-name} -> ~/.git-ai/skills/{skill-name}
+        if let Some(claude_dir) = claude_skills_dir() {
+            let claude_link = claude_dir.join(skill.name);
+            if let Err(e) = create_skills_symlink(&skill_dir, &claude_link) {
+                eprintln!(
+                    "Warning: Failed to create symlink at {:?}: {}",
+                    claude_link, e
+                );
+            }
+        }
     }
 
     Ok(SkillsInstallResult {
         changed: true,
-        installed_count: EMBEDDED_COMMANDS.len(),
+        installed_count: EMBEDDED_SKILLS.len(),
     })
 }
 
-/// Uninstall all skills by removing ~/.git-ai/skills/
+/// Uninstall all skills by removing ~/.git-ai/skills/ and symlinks
 pub fn uninstall_skills(dry_run: bool, _verbose: bool) -> Result<SkillsInstallResult, GitAiError> {
     let skills_base = skills_dir_path().ok_or_else(|| {
         GitAiError::Generic("Could not determine skills directory path".to_string())
@@ -212,8 +168,33 @@ pub fn uninstall_skills(dry_run: bool, _verbose: bool) -> Result<SkillsInstallRe
     if dry_run {
         return Ok(SkillsInstallResult {
             changed: true,
-            installed_count: EMBEDDED_COMMANDS.len(),
+            installed_count: EMBEDDED_SKILLS.len(),
         });
+    }
+
+    // Remove symlinks for each skill first
+    for skill in EMBEDDED_SKILLS {
+        // ~/.agents/skills/{skill-name}
+        if let Some(agents_dir) = agents_skills_dir() {
+            let agents_link = agents_dir.join(skill.name);
+            if let Err(e) = remove_skills_symlink(&agents_link) {
+                eprintln!(
+                    "Warning: Failed to remove symlink at {:?}: {}",
+                    agents_link, e
+                );
+            }
+        }
+
+        // ~/.claude/skills/{skill-name}
+        if let Some(claude_dir) = claude_skills_dir() {
+            let claude_link = claude_dir.join(skill.name);
+            if let Err(e) = remove_skills_symlink(&claude_link) {
+                eprintln!(
+                    "Warning: Failed to remove symlink at {:?}: {}",
+                    claude_link, e
+                );
+            }
+        }
     }
 
     // Nuke the entire skills directory
@@ -221,7 +202,7 @@ pub fn uninstall_skills(dry_run: bool, _verbose: bool) -> Result<SkillsInstallRe
 
     Ok(SkillsInstallResult {
         changed: true,
-        installed_count: EMBEDDED_COMMANDS.len(),
+        installed_count: EMBEDDED_SKILLS.len(),
     })
 }
 
@@ -230,19 +211,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_embedded_commands_are_loaded() {
-        // Verify that the embedded commands are not empty
-        for cmd in EMBEDDED_COMMANDS {
-            assert!(!cmd.name.is_empty(), "Command name should not be empty");
+    fn test_embedded_skills_are_loaded() {
+        // Verify that the embedded skills are not empty
+        for skill in EMBEDDED_SKILLS {
+            assert!(!skill.name.is_empty(), "Skill name should not be empty");
             assert!(
-                !cmd.command_md.is_empty(),
-                "Command {} .md should not be empty",
-                cmd.name
+                !skill.skill_md.is_empty(),
+                "Skill {} SKILL.md should not be empty",
+                skill.name
             );
             assert!(
-                cmd.command_md.contains("---"),
-                "Command {} should have frontmatter",
-                cmd.name
+                skill.skill_md.contains("---"),
+                "Skill {} should have frontmatter",
+                skill.name
             );
         }
     }
