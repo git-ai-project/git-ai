@@ -71,13 +71,14 @@ The format of the notes is outlined here in the [Git AI Standard v3.0.0](https:/
 
 | Agent/IDE                                                                                  | Authorship | Prompts |
 | ------------------------------------------------------------------------------------------ | ---------- | ------- |
-| Cursor &gt;1.7                                                                             | ✅         | ✅      |
 | Claude Code                                                                                | ✅         | ✅      |
+| OpenAI Codex &gt;0.99.0 (currently alpha release)                                          | ✅         | ✅      |
+| Cursor &gt;1.7                                                                             | ✅         | ✅      |
 | GitHub Copilot in VSCode via Extension                                                     | ✅         | ✅      |
 | OpenCode                                                                                   | ✅         | ✅      |
 | Google Gemini CLI                                                                          | ✅         | ✅      |
-| Continue CLI                                                                               | ✅         | ✅      |
 | Droid CLI (Factory AI)                                                                     | ✅         | ✅      |
+| Continue CLI                                                                               | ✅         | ✅      |
 | Atlassian RovoDev CLI                                                                      | ✅         | ✅      |
 | GitHub Copilot in Jetbrains IDEs (IntelliJ, etc.)                                          | ✅         | 🔄      |
 | Jetbrains Junie                                                                            | ✅         | 🔄      |
@@ -86,7 +87,6 @@ The format of the notes is outlined here in the [Git AI Standard v3.0.0](https:/
 | Continue VS Code/IntelliJ (in-progress)                                                    | 🔄         | 🔄      |
 | Windsurf (in-review)                                                                       | 🔄         | 🔄      |
 | Augment Code                                                                               | 🔄         | 🔄      |
-| OpenAI Codex (waiting on [openai/codex #2109](https://github.com/openai/codex/issues/2109)) |            |         |
 | Ona                                                                                        |            |         |
 | Sourcegraph Cody                                                                           |            |         |
 | Google Antigravity                                                                         |            |         |
