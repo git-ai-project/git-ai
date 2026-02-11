@@ -77,6 +77,33 @@ fn append_block(path: &Path, lines: usize) {
     fs::write(path, content).expect("failed to append block");
 }
 
+fn setup_repo_with_many_changed_files(file_count: usize) -> TempDir {
+    let tmp = TempDir::new().expect("failed to create tempdir");
+    let repo = tmp.path();
+
+    run_git(repo, &["init", "-q"]);
+    run_git(repo, &["config", "user.name", "Perf User"]);
+    run_git(repo, &["config", "user.email", "perf@example.com"]);
+
+    for i in 1..=file_count {
+        fs::write(repo.join(format!("f{:05}.txt", i)), "base\n").expect("failed to write file");
+    }
+    run_git(repo, &["add", "-A"]);
+    run_git(repo, &["commit", "-q", "-m", "initial"]);
+
+    for i in 1..=file_count {
+        fs::write(
+            repo.join(format!("f{:05}.txt", i)),
+            format!("base\nchanged {}\n", i),
+        )
+        .expect("failed to write changed file");
+    }
+    run_git(repo, &["add", "-A"]);
+    run_git(repo, &["commit", "-q", "-m", "thousands-of-files-workload"]);
+
+    tmp
+}
+
 fn setup_repo_and_commit(case: &str) -> TempDir {
     let tmp = TempDir::new().expect("failed to create tempdir");
     let repo = tmp.path();
@@ -157,6 +184,16 @@ fn benchmark_stats(repo_path: &Path) -> StatsBreakdown {
         diff_ai_accepted,
         total_stats,
     }
+}
+
+fn percentile_ms(durations: &[Duration], percentile: f64) -> f64 {
+    if durations.is_empty() {
+        return 0.0;
+    }
+    let mut sorted: Vec<Duration> = durations.to_vec();
+    sorted.sort_unstable();
+    let rank = ((sorted.len() as f64 - 1.0) * percentile).round() as usize;
+    sorted[rank].as_secs_f64() * 1000.0
 }
 
 fn git_ai_bin() -> String {
@@ -312,4 +349,79 @@ fn benchmark_commit_post_command_hunk_density_hotspot() {
 
     assert!(contiguous_perf.total_ms > 0);
     assert!(scattered_perf.total_ms > 0);
+}
+
+#[test]
+#[ignore] // Run manually; this is intentionally expensive.
+fn benchmark_stats_thousands_changed_files_fast_path() {
+    const DEFAULT_FILE_COUNT: usize = 3_000;
+    const DEFAULT_RUNS: usize = 5;
+    const DEFAULT_MAX_AVG_MS: f64 = 3_000.0;
+
+    let file_count = std::env::var("GIT_AI_BENCH_FILE_COUNT")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_FILE_COUNT);
+    let runs_count = std::env::var("GIT_AI_BENCH_RUNS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_RUNS);
+
+    let max_avg_ms = std::env::var("GIT_AI_BENCH_MAX_AVG_MS")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(DEFAULT_MAX_AVG_MS);
+
+    let tmp = setup_repo_with_many_changed_files(file_count);
+    let repo = find_repository_in_path(tmp.path().to_str().expect("non-utf8 path"))
+        .expect("failed to open repository");
+    let head_sha = repo
+        .head()
+        .expect("failed to get HEAD")
+        .target()
+        .expect("failed to resolve HEAD target");
+
+    // Warm-up to avoid one-time setup noise.
+    let warmup_stats = stats_for_commit_stats(&repo, &head_sha, &[]).expect("warmup stats failed");
+    assert_eq!(
+        warmup_stats.git_diff_added_lines, file_count as u32,
+        "expected one added line per changed file"
+    );
+
+    let mut runs = Vec::with_capacity(runs_count);
+    for _ in 0..runs_count {
+        let start = Instant::now();
+        let stats = stats_for_commit_stats(&repo, &head_sha, &[]).expect("stats_for_commit_stats");
+        let elapsed = start.elapsed();
+        assert_eq!(stats.git_diff_added_lines, file_count as u32);
+        runs.push(elapsed);
+    }
+
+    let total: Duration = runs.iter().copied().sum();
+    let avg = total / runs_count as u32;
+    let avg_ms = avg.as_secs_f64() * 1000.0;
+    let p95_ms = percentile_ms(&runs, 0.95);
+    let max_ms = runs
+        .iter()
+        .max()
+        .copied()
+        .unwrap_or(Duration::ZERO)
+        .as_secs_f64()
+        * 1000.0;
+
+    println!("\n=== Stats Benchmark: Thousands of Changed Files ===");
+    println!("files_changed: {}", file_count);
+    println!("runs: {}", runs_count);
+    println!("avg_ms: {:.2}", avg_ms);
+    println!("p95_ms: {:.2}", p95_ms);
+    println!("max_ms: {:.2}", max_ms);
+    println!("max_avg_budget_ms: {:.2}", max_avg_ms);
+
+    assert!(
+        avg_ms <= max_avg_ms,
+        "stats_for_commit_stats average {:.2}ms exceeded budget {:.2}ms on {} changed files",
+        avg_ms,
+        max_avg_ms,
+        file_count
+    );
 }
