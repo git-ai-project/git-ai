@@ -1,6 +1,7 @@
+use crate::auth::CredentialStore;
 use crate::authorship::authorship_log::PromptRecord;
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
-use crate::authorship::internal_db::InternalDatabase;
+use crate::authorship::prompt_utils::enrich_prompt_messages;
 use crate::authorship::working_log::CheckpointKind;
 use crate::error::GitAiError;
 use crate::git::refs::get_reference_as_authorship_log_v3;
@@ -138,6 +139,9 @@ pub struct GitAiBlameOptions {
     // Mark lines from commits without authorship logs as "Unknown"
     pub mark_unknown: bool,
 
+    // Show prompt hashes inline and dump prompts when piped
+    pub show_prompt: bool,
+
     // Split hunks when lines have different AI human authors
     // When true, a single git blame hunk may be split into multiple hunks
     // if different lines were authored by different humans working with AI
@@ -185,6 +189,7 @@ impl Default for GitAiBlameOptions {
             ignore_whitespace: false,
             json: false,
             mark_unknown: false,
+            show_prompt: false,
             split_hunks_by_ai_author: true,
         }
     }
@@ -264,6 +269,10 @@ impl Repository {
             if opts.newest_commit.is_none() {
                 opts.newest_commit = Some("HEAD".to_string());
             }
+            opts.use_prompt_hashes_as_names = true;
+            opts
+        } else if options.show_prompt {
+            let mut opts = options.clone();
             opts.use_prompt_hashes_as_names = true;
             opts
         } else {
@@ -360,6 +369,7 @@ impl Repository {
         // Output based on format
         if options.json {
             output_json_format(
+                self,
                 &line_authors,
                 &prompt_records,
                 &authorship_logs,
@@ -388,6 +398,7 @@ impl Repository {
             output_default_format(
                 self,
                 &line_authors,
+                &prompt_records,
                 &relative_file_path,
                 &lines,
                 &line_ranges,
@@ -923,11 +934,19 @@ fn overlay_ai_authorship(
     ))
 }
 
+/// Metadata about user's auth state and git identity
+#[derive(Debug, Serialize)]
+struct BlameMetadata {
+    is_logged_in: bool,
+    current_user: Option<String>,
+}
+
 /// JSON output structure for blame
 #[derive(Debug, Serialize)]
 struct JsonBlameOutput {
     lines: std::collections::BTreeMap<String, String>,
     prompts: HashMap<String, PromptRecordWithOtherFiles>,
+    metadata: BlameMetadata,
 }
 
 /// Read model that patches PromptRecord with other_files and commits fields
@@ -972,6 +991,7 @@ fn get_files_for_prompt_hash(
 }
 
 fn output_json_format(
+    repo: &Repository,
     line_authors: &HashMap<u32, String>,
     prompt_records: &HashMap<String, PromptRecord>,
     authorship_logs: &[AuthorshipLog],
@@ -1028,37 +1048,9 @@ fn output_json_format(
     // Only include prompts that are actually referenced in lines
     let referenced_prompt_ids: std::collections::HashSet<&String> = lines_map.values().collect();
 
-    // Enrich prompts that have empty messages by falling back through storage layers:
-    // 1. Git notes (already resolved in prompt_records)
-    // 2. Local SQLite database
-    // 3. CAS via messages_url (not yet implemented)
+    // Enrich prompts that have empty messages by falling back through storage layers
     let mut enriched_prompts = prompt_records.clone();
-    let ids_needing_messages: Vec<String> = enriched_prompts
-        .iter()
-        .filter(|(k, prompt)| referenced_prompt_ids.contains(k) && prompt.messages.is_empty())
-        .map(|(id, _)| id.clone())
-        .collect();
-
-    if !ids_needing_messages.is_empty() {
-        // Fallback 2: Try local SQLite database
-        if let Ok(db) = InternalDatabase::global() {
-            if let Ok(db_guard) = db.lock() {
-                for id in &ids_needing_messages {
-                    if let Ok(Some(db_record)) = db_guard.get_prompt(id) {
-                        if !db_record.messages.messages.is_empty() {
-                            if let Some(prompt) = enriched_prompts.get_mut(id) {
-                                prompt.messages = db_record.messages.messages;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Fallback 3: CAS (Content Addressable Storage)
-        // If messages are still empty but messages_url is set, we could fetch from CAS.
-        // TODO: Implement CAS fetch when the cloud API is ready.
-    }
+    enrich_prompt_messages(&mut enriched_prompts, &referenced_prompt_ids);
 
     // Create read models with other_files and commits populated
     let filtered_prompts: HashMap<String, PromptRecordWithOtherFiles> = enriched_prompts
@@ -1078,9 +1070,32 @@ fn output_json_format(
         })
         .collect();
 
+    // Compute metadata
+    let is_logged_in = CredentialStore::new()
+        .load()
+        .ok()
+        .flatten()
+        .map(|creds| !creds.is_refresh_token_expired())
+        .unwrap_or(false);
+
+    let current_user = {
+        let name = repo.config_get_str("user.name").ok().flatten();
+        let email = repo.config_get_str("user.email").ok().flatten();
+        match (name, email) {
+            (Some(n), Some(e)) => Some(format!("{} <{}>", n, e)),
+            (Some(n), None) => Some(n),
+            (None, Some(e)) => Some(format!("<{}>", e)),
+            (None, None) => None,
+        }
+    };
+
     let output = JsonBlameOutput {
         lines: lines_map,
         prompts: filtered_prompts,
+        metadata: BlameMetadata {
+            is_logged_in,
+            current_user,
+        },
     };
 
     let json_str = serde_json::to_string_pretty(&output)
@@ -1297,6 +1312,7 @@ fn output_incremental_format(
 fn output_default_format(
     repo: &Repository,
     line_authors: &HashMap<u32, String>,
+    prompt_records: &HashMap<String, PromptRecord>,
     file_path: &str,
     lines: &[&str],
     line_ranges: &[(u32, u32)],
@@ -1333,6 +1349,10 @@ fn output_default_format(
                 .unwrap_or(&hunk.original_author);
             let author_display = if options.suppress_author {
                 "".to_string()
+            } else if options.show_prompt && prompt_records.contains_key(author) {
+                let prompt = &prompt_records[author];
+                let short_hash = &author[..7.min(author.len())];
+                format!("{} [{}]", prompt.agent_id.tool, short_hash)
             } else if options.show_email {
                 format!("{} <{}>", author, &hunk.author_email)
             } else {
@@ -1387,6 +1407,10 @@ fn output_default_format(
                 // Handle different output formats based on flags
                 let author_display = if options.suppress_author {
                     "".to_string()
+                } else if options.show_prompt && prompt_records.contains_key(author) {
+                    let prompt = &prompt_records[author];
+                    let short_hash = &author[..7.min(author.len())];
+                    format!("{} [{}]", prompt.agent_id.tool, short_hash)
                 } else if options.show_email {
                     format!("{} <{}>", author, &hunk.author_email)
                 } else {
@@ -1473,6 +1497,39 @@ fn output_default_format(
         // Append git-like stats lines to output string
         let stats = "num read blob: 1\nnum get patch: 0\nnum commits: 0\n";
         output.push_str(stats);
+    }
+
+    // Append prompt dump for --show-prompt in non-interactive (piped) mode
+    if options.show_prompt && !io::stdout().is_terminal() {
+        let mut referenced_ids: std::collections::HashSet<&String> =
+            std::collections::HashSet::new();
+        for author in line_authors.values() {
+            if prompt_records.contains_key(author) {
+                referenced_ids.insert(author);
+            }
+        }
+
+        if !referenced_ids.is_empty() {
+            let mut enriched_prompts = prompt_records.clone();
+            enrich_prompt_messages(&mut enriched_prompts, &referenced_ids);
+
+            output.push_str("---\n");
+
+            let mut sorted_ids: Vec<&String> = referenced_ids.into_iter().collect();
+            sorted_ids.sort();
+
+            for id in sorted_ids {
+                let short_hash = &id[..7.min(id.len())];
+                output.push_str(&format!("Prompt [{}]\n", short_hash));
+                if let Some(prompt) = enriched_prompts.get(id) {
+                    let json = serde_json::to_string(&prompt.messages)
+                        .unwrap_or_else(|_| "[]".to_string());
+                    output.push_str(&json);
+                    output.push('\n');
+                }
+                output.push('\n');
+            }
+        }
     }
 
     // Output handling - respect pager environment variables
@@ -1799,6 +1856,12 @@ pub fn parse_blame_args(args: &[String]) -> Result<(String, GitAiBlameOptions), 
             // Mark unknown authorship
             "--mark-unknown" => {
                 options.mark_unknown = true;
+                i += 1;
+            }
+
+            // Show prompt hashes inline
+            "--show-prompt" => {
+                options.show_prompt = true;
                 i += 1;
             }
 

@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 /// Current schema version (must match MIGRATIONS.len())
-const SCHEMA_VERSION: usize = 2;
+const SCHEMA_VERSION: usize = 3;
 
 /// Database migrations - each migration upgrades the schema by one version
 /// Migration at index N upgrades from version N to version N+1
@@ -68,6 +68,14 @@ const MIGRATIONS: &[&str] = &[
         ON cas_sync_queue(hash);
     CREATE INDEX idx_cas_sync_queue_stale_processing
         ON cas_sync_queue(processing_started_at) WHERE status = 'processing';
+    "#,
+    // Migration 2 -> 3: Add CAS cache for fetched prompts
+    r#"
+    CREATE TABLE cas_cache (
+        hash TEXT PRIMARY KEY NOT NULL,
+        messages TEXT NOT NULL,
+        cached_at INTEGER NOT NULL
+    );
     "#,
 ];
 
@@ -378,11 +386,10 @@ impl InternalDatabase {
                 return Ok(());
             }
             if current_version > SCHEMA_VERSION {
-                return Err(GitAiError::Generic(format!(
-                    "Database schema version {} is newer than supported version {}. \
-                     Please upgrade git-ai to the latest version.",
-                    current_version, SCHEMA_VERSION
-                )));
+                // Forward-compatible: an older binary can still read/write
+                // known tables even if a newer binary added extra tables.
+                // Just skip migrations and use what we have.
+                return Ok(());
             }
             // Fall through to apply missing migrations (current_version < SCHEMA_VERSION)
         }
@@ -979,6 +986,36 @@ impl InternalDatabase {
         Ok(())
     }
 
+    /// Get cached CAS messages by hash
+    pub fn get_cas_cache(&self, hash: &str) -> Result<Option<String>, GitAiError> {
+        let result = self.conn.query_row(
+            "SELECT messages FROM cas_cache WHERE hash = ?1",
+            params![hash],
+            |row| row.get::<_, String>(0),
+        );
+
+        match result {
+            Ok(messages) => Ok(Some(messages)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Cache CAS messages by hash (INSERT OR REPLACE since content is immutable)
+    pub fn set_cas_cache(&mut self, hash: &str, messages_json: &str) -> Result<(), GitAiError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        self.conn.execute(
+            "INSERT OR REPLACE INTO cas_cache (hash, messages, cached_at) VALUES (?1, ?2, ?3)",
+            params![hash, messages_json, now],
+        )?;
+
+        Ok(())
+    }
+
     /// Update CAS sync record on failure (release lock, increment attempts, set next retry)
     pub fn update_cas_sync_failure(&mut self, id: i64, error: &str) -> Result<(), GitAiError> {
         let now = std::time::SystemTime::now()
@@ -1098,7 +1135,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "2");
+        assert_eq!(version, "3");
     }
 
     #[test]
@@ -1645,6 +1682,41 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    // CAS cache tests
+
+    #[test]
+    fn test_cas_cache_get_miss() {
+        let (db, _temp_dir) = create_test_db();
+        let result = db.get_cas_cache("nonexistent_hash").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_cas_cache_set_and_get() {
+        let (mut db, _temp_dir) = create_test_db();
+        let hash = "abc123def456";
+        let messages = r#"[{"type":"user","text":"hello"}]"#;
+
+        db.set_cas_cache(hash, messages).unwrap();
+
+        let result = db.get_cas_cache(hash).unwrap();
+        assert_eq!(result, Some(messages.to_string()));
+    }
+
+    #[test]
+    fn test_cas_cache_overwrite() {
+        let (mut db, _temp_dir) = create_test_db();
+        let hash = "abc123def456";
+        let messages1 = r#"[{"type":"user","text":"v1"}]"#;
+        let messages2 = r#"[{"type":"user","text":"v2"}]"#;
+
+        db.set_cas_cache(hash, messages1).unwrap();
+        db.set_cas_cache(hash, messages2).unwrap();
+
+        let result = db.get_cas_cache(hash).unwrap();
+        assert_eq!(result, Some(messages2.to_string()));
     }
 
     #[test]

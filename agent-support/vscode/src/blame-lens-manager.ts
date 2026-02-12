@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
-import { BlameService, BlameResult, LineBlameInfo } from "./blame-service";
+import { BlameService, BlameResult, BlameMetadata, LineBlameInfo } from "./blame-service";
 import { Config, BlameMode } from "./utils/config";
+import { findRepoForFile } from "./utils/git-api";
 
 export class BlameLensManager {
   private context: vscode.ExtensionContext;
@@ -29,6 +30,9 @@ export class BlameLensManager {
   
   // After-text decoration for showing "[View $MODEL Thread]" on AI lines
   private afterTextDecoration: vscode.TextEditorDecorationType | null = null;
+
+  // Track in-flight CAS prompt fetches to avoid duplicate requests
+  private casFetchInProgress: Set<string> = new Set();
   
   // Minimum contrast ratio for WCAG AA compliance (3:1 for UI elements)
   private static readonly MIN_CONTRAST_RATIO = 3.0;
@@ -222,22 +226,23 @@ export class BlameLensManager {
     if (this.currentDocumentUri === documentUri) {
       this.currentBlameResult = null;
       this.pendingBlameRequest = null;
-      
+      this.casFetchInProgress.clear();
+
       const activeEditor = vscode.window.activeTextEditor;
       if (activeEditor && activeEditor.document.uri.toString() === documentUri) {
         // Clear existing colored borders
         this.clearColoredBorders(activeEditor);
-        
+
         // Re-fetch blame if mode is 'all'
         if (this.blameMode === 'all') {
           this.requestBlameForFullFile(activeEditor);
         }
-        
+
         // Update status bar
         this.updateStatusBar(activeEditor);
       }
     }
-    
+
     console.log('[git-ai] Document saved, invalidated blame cache for:', document.uri.fsPath);
   }
 
@@ -491,7 +496,10 @@ export class BlameLensManager {
 
       if (result) {
         this.currentBlameResult = result;
-        
+
+        // Trigger async CAS fetches for prompts with messages_url but no messages
+        this.triggerCASFetches(result, document.uri);
+
         // Check if editor is still active and mode is still 'all'
         const currentEditor = vscode.window.activeTextEditor;
         if (this.blameMode === 'all' && currentEditor && currentEditor.document.uri.toString() === documentUri) {
@@ -571,6 +579,10 @@ export class BlameLensManager {
           this.pendingBlameRequest = null;
           if (result) {
             this.currentBlameResult = result;
+
+            // Trigger async CAS fetches for prompts with messages_url but no messages
+            this.triggerCASFetches(result, document.uri);
+
             // Re-update status bar now that we have blame
             const activeEditor = vscode.window.activeTextEditor;
             if (activeEditor && activeEditor.document.uri.toString() === documentUri) {
@@ -947,7 +959,7 @@ export class BlameLensManager {
     });
 
     // Build hover content (reuse existing method)
-    const hoverContent = this.buildHoverContent(lineInfo, documentUri);
+    const hoverContent = this.buildHoverContent(lineInfo, documentUri, this.currentBlameResult ?? undefined);
 
     // Apply decoration to current line with hover
     const currentLine = editor.selection.active.line;
@@ -1112,7 +1124,19 @@ export class BlameLensManager {
    * Shows a polished chat-style conversation view with clear visual hierarchy.
    * Each message is shown individually with its own header and timestamp.
    */
-  private buildHoverContent(lineInfo: LineBlameInfo | undefined, documentUri?: vscode.Uri): vscode.MarkdownString {
+  /**
+   * Extract email from a "Name <email>" format string.
+   * Returns the email if found, or null.
+   */
+  private extractEmail(authorString: string | null | undefined): string | null {
+    if (!authorString) {
+      return null;
+    }
+    const match = authorString.match(/<([^>]+)>/);
+    return match ? match[1] : null;
+  }
+
+  private buildHoverContent(lineInfo: LineBlameInfo | undefined, documentUri?: vscode.Uri, blameResult?: BlameResult): vscode.MarkdownString {
     const md = new vscode.MarkdownString();
     md.isTrusted = true;
     md.supportHtml = true;
@@ -1154,11 +1178,39 @@ export class BlameLensManager {
     }
     md.appendMarkdown(`---\n\n`);
 
-    // Fallback if no messages saved
+    // Fallback if no messages saved - show contextual message
     if (!hasMessages) {
-      md.appendMarkdown('🔒 *Transcript not saved*\n\n');
-      md.appendMarkdown('Enable prompt saving:\n');
-      md.appendCodeblock('git-ai config set --add share_prompts_in_repositories "*"', 'bash');
+      // Common prefix: always mention /ask skill
+      md.appendMarkdown('💡 *Ask this agent about this code with `/ask`*\n\n');
+
+      const metadata = blameResult?.metadata;
+      const hasMessagesUrl = !!record?.messages_url;
+
+      if (hasMessagesUrl) {
+        // Has messages_url but messages not loaded yet - CAS fetch in progress
+        md.appendMarkdown('*Loading prompt from cloud...*\n');
+      } else if (metadata?.is_logged_in) {
+        // Logged in but no prompt/messages_url - prompt wasn't saved
+        md.appendMarkdown('*Prompt was not saved.* Prompt Storage is enabled so future prompts should be saved.\n');
+      } else if (!metadata?.is_logged_in && metadata !== undefined) {
+        // Not logged in - check if this is a teammate's code
+        const currentEmail = this.extractEmail(metadata.current_user);
+        const authorEmail = this.extractEmail(record?.human_author);
+        const isDifferentUser = currentEmail && authorEmail && currentEmail !== authorEmail;
+
+        if (isDifferentUser) {
+          md.appendMarkdown('🔒 *Login to see prompt summaries from your teammates*\n\n');
+          md.appendCodeblock('git-ai login', 'bash');
+        } else {
+          md.appendMarkdown('*No prompt saved.* Enable Cloud Prompt Storage to share prompts with your team.\n\n');
+          md.appendCodeblock('git-ai config set --add share_prompts_in_repositories "*"', 'bash');
+        }
+      } else {
+        // No metadata available (backward compat) - show generic message
+        md.appendMarkdown('🔒 *Transcript not saved*\n\n');
+        md.appendMarkdown('Enable prompt saving:\n');
+        md.appendCodeblock('git-ai config set --add share_prompts_in_repositories "*"', 'bash');
+      }
       return md;
     }
 
@@ -1436,6 +1488,69 @@ export class BlameLensManager {
     }
   }
 
+  /**
+   * Get the workspace cwd for running git-ai commands against a document.
+   */
+  private getWorkspaceCwd(documentUri: vscode.Uri): string | undefined {
+    const repo = findRepoForFile(documentUri);
+    if (repo?.rootUri) {
+      return repo.rootUri.fsPath;
+    }
+    const workspaceFolder = vscode.workspace.getWorkspaceFolder(documentUri);
+    return workspaceFolder?.uri.fsPath;
+  }
+
+  /**
+   * Trigger async CAS fetches for prompts that have messages_url but no messages.
+   * Updates blame result in-place and re-renders when fetches complete.
+   */
+  private triggerCASFetches(blameResult: BlameResult, documentUri: vscode.Uri): void {
+    const cwd = this.getWorkspaceCwd(documentUri);
+    if (!cwd) {
+      return;
+    }
+
+    // Find prompts with messages_url but empty messages
+    const promptsToFetch: Array<{ promptId: string; record: import("./blame-service").PromptRecord }> = [];
+    for (const [promptId, record] of blameResult.prompts) {
+      const hasMessages = record.messages && record.messages.length > 0 && record.messages.some(m => m.text);
+      if (!hasMessages && record.messages_url && !this.casFetchInProgress.has(promptId)) {
+        promptsToFetch.push({ promptId, record });
+      }
+    }
+
+    // Cap concurrent fetches at 3
+    const toFetch = promptsToFetch.slice(0, 3 - this.casFetchInProgress.size);
+
+    for (const { promptId, record } of toFetch) {
+      this.casFetchInProgress.add(promptId);
+
+      this.blameService.fetchPromptFromCAS(promptId, cwd).then((messages) => {
+        this.casFetchInProgress.delete(promptId);
+
+        if (messages && this.currentBlameResult === blameResult) {
+          // Update record in-place
+          record.messages = messages;
+
+          // Also update all LineBlameInfo that reference this prompt
+          for (const [, lineInfo] of blameResult.lineAuthors) {
+            if (lineInfo.commitHash === promptId && lineInfo.promptRecord) {
+              lineInfo.promptRecord.messages = messages;
+            }
+          }
+
+          // Re-render if still the active document
+          const activeEditor = vscode.window.activeTextEditor;
+          if (activeEditor && activeEditor.document.uri.toString() === this.currentDocumentUri) {
+            this.updateStatusBar(activeEditor);
+          }
+        }
+      }).catch(() => {
+        this.casFetchInProgress.delete(promptId);
+      });
+    }
+  }
+
   public dispose(): void {
     // Clear any pending document change timer
     if (this.documentChangeTimer) {
@@ -1449,6 +1564,7 @@ export class BlameLensManager {
       this.notificationTimeout = null;
     }
     
+    this.casFetchInProgress.clear();
     this.blameService.dispose();
     this.statusBarItem.dispose();
     this._onDidChangeVirtualDocument.dispose();
