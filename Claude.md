@@ -1,0 +1,1 @@
+- In plan mode, always use the /ask skill so you can read the code and the original prompts that generated it. Intent will help you write a better plan

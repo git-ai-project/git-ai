@@ -3,10 +3,16 @@ import { spawn } from "child_process";
 import { BlameQueue } from "./blame-queue";
 import { findRepoForFile, getGitRepoRoot } from "./utils/git-api";
 
+export interface BlameMetadata {
+  is_logged_in: boolean;
+  current_user: string | null;
+}
+
 // JSON output structure from git-ai blame --json
 export interface BlameJsonOutput {
   lines: Record<string, string>;  // lineRange -> promptHash (e.g., "11-114" -> "abc1234")
   prompts: Record<string, PromptRecord>;
+  metadata?: BlameMetadata;
 }
 
 export interface PromptRecord {
@@ -27,6 +33,7 @@ export interface PromptRecord {
   overriden_lines?: number;
   other_files?: string[];
   commits?: string[];
+  messages_url?: string;
 }
 
 export interface LineBlameInfo {
@@ -39,6 +46,7 @@ export interface LineBlameInfo {
 export interface BlameResult {
   lineAuthors: Map<number, LineBlameInfo>;
   prompts: Map<string, PromptRecord>;
+  metadata?: BlameMetadata;
   timestamp: number;
   totalLines: number;
 }
@@ -334,6 +342,7 @@ export class BlameService {
     return {
       lineAuthors,
       prompts,
+      metadata: output.metadata,
       timestamp: Date.now(),
       totalLines,
     };
@@ -368,6 +377,54 @@ export class BlameService {
     return result;
   }
   
+  /**
+   * Fetch prompt messages from CAS via `git-ai show-prompt`.
+   * Returns the messages array on success, or null on failure/timeout.
+   */
+  public async fetchPromptFromCAS(
+    promptId: string,
+    cwd: string
+  ): Promise<Array<{ type: string; text?: string; timestamp?: string }> | null> {
+    return new Promise((resolve) => {
+      const args = ['show-prompt', promptId];
+      const proc = spawn('git-ai', args, {
+        cwd,
+        timeout: 15000,
+      });
+
+      let stdout = '';
+
+      proc.stdout.on('data', (data) => {
+        stdout += data.toString();
+      });
+
+      proc.stderr.on('data', () => {}); // Ignore stderr
+
+      proc.on('error', () => {
+        resolve(null);
+      });
+
+      proc.on('close', (code) => {
+        if (code !== 0) {
+          resolve(null);
+          return;
+        }
+
+        try {
+          const parsed = JSON.parse(stdout);
+          const messages = parsed?.prompt?.messages;
+          if (Array.isArray(messages) && messages.length > 0) {
+            resolve(messages);
+          } else {
+            resolve(null);
+          }
+        } catch {
+          resolve(null);
+        }
+      });
+    });
+  }
+
   private showInstallMessage(): void {
     if (this.hasShownInstallMessage) {
       return;

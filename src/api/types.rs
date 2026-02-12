@@ -117,3 +117,22 @@ pub struct CasUploadResponse {
 pub struct CasMessagesObject {
     pub messages: Vec<crate::authorship::transcript::Message>,
 }
+
+/// Single result from CA prompt store batch read
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CAPromptStoreReadResult {
+    pub hash: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Response from CA prompt store batch read
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CAPromptStoreReadResponse {
+    pub results: Vec<CAPromptStoreReadResult>,
+    pub success_count: usize,
+    pub failure_count: usize,
+}

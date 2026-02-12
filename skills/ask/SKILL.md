@@ -49,6 +49,25 @@ Task tool settings:
 
 The subagent gets **only** `Bash` and `Read`. It does NOT get Glob, Grep, or Task. It runs at most 4 turns — this is a fast lookup, not a research project.
 
+## Choosing Between `blame --show-prompt` and `search`
+
+**If you want to read an entire file or range of lines AND the corresponding prompts behind them, use `git-ai blame --show-prompt`.** This is better than `search` for this use case — it gives you every line's authorship plus the full prompt JSON in one call.
+
+```
+# Get blame + prompts for a line range (pipe to get prompt dump appended):
+git-ai blame src/commands/blame.rs -L 23,54 --show-prompt | cat
+
+# Interactive (TTY) mode shows prompt hashes inline:
+# 7a4471d (cursor [abc123e] 2026-02-06 14:20:05 -0800   23)     code_here
+
+# Piped mode appends raw prompt messages after a --- separator:
+# ---
+# Prompt [abc123e]
+# [{"type":"user","text":"Write a function..."},{"type":"assistant","text":"Here is..."}]
+```
+
+Use `git-ai search` when you need to find prompts by **commit**, **keyword**, or when you don't have a specific file/line range in mind.
+
 ## Subagent Prompt Template
 
 Fill in `{question}`, `{file_path}`, and `{start}-{end}` (omit LINES if not applicable):
