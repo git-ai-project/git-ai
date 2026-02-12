@@ -1,7 +1,7 @@
 ---
 name: ask
-description: "Ask questions about AI-written code using its original prompt context"
-argument-hint: "[question about code you're looking at]"
+description: "Use this during plan mode, when you are exploring the codebase. It lets you ask the AI who wrote the code questions about how things work and why they build it this way"
+argument-hint: "[a question to the AI who authored the code you're looking at]"
 allowed-tools: ["Bash(git-ai:*)", "Read", "Glob", "Grep", "Task"]
 ---
 
