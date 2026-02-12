@@ -213,3 +213,165 @@ fn test_blame_from_subdirectory_with_line_range() {
         output
     );
 }
+
+#[test]
+fn test_blame_from_deep_subdir_dotdot_into_sibling_dir() {
+    let repo = TestRepo::new();
+
+    let dir_a = repo.path().join("a").join("b").join("c");
+    let dir_b = repo.path().join("x").join("y");
+    fs::create_dir_all(&dir_a).unwrap();
+    fs::create_dir_all(&dir_b).unwrap();
+
+    let file_path = dir_b.join("target.rs");
+    fs::write(&file_path, "pub fn target() {}\n").unwrap();
+
+    repo.git(&["add", "x/y/target.rs"]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "x/y/target.rs"])
+        .unwrap();
+    repo.stage_all_and_commit("Add target file").unwrap();
+
+    let output = repo
+        .git_ai_from_working_dir(&dir_a, &["blame", "../../../x/y/target.rs"])
+        .expect("blame with .. traversal into sibling directory should succeed");
+
+    assert!(
+        output.contains("pub fn target()"),
+        "blame output should contain file content, got: {}",
+        output
+    );
+}
+
+#[test]
+fn test_blame_from_deep_subdir_dotdot_up_one_level() {
+    let repo = TestRepo::new();
+
+    let parent_dir = repo.path().join("src");
+    let child_dir = parent_dir.join("sub");
+    fs::create_dir_all(&child_dir).unwrap();
+
+    let file_path = parent_dir.join("lib.rs");
+    fs::write(&file_path, "pub mod sub;\n").unwrap();
+
+    repo.git(&["add", "src/lib.rs"]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "src/lib.rs"])
+        .unwrap();
+    repo.stage_all_and_commit("Add lib").unwrap();
+
+    let output = repo
+        .git_ai_from_working_dir(&child_dir, &["blame", "../lib.rs"])
+        .expect("blame with ../file from child dir should succeed");
+
+    assert!(
+        output.contains("pub mod sub"),
+        "blame output should contain file content, got: {}",
+        output
+    );
+}
+
+#[test]
+fn test_blame_from_deep_subdir_dotdot_multiple_levels() {
+    let repo = TestRepo::new();
+
+    let deep_dir = repo.path().join("a").join("b").join("c").join("d");
+    fs::create_dir_all(&deep_dir).unwrap();
+
+    let file_path = repo.path().join("a").join("root_level.rs");
+    fs::write(&file_path, "fn root_level() {}\n").unwrap();
+
+    repo.git(&["add", "a/root_level.rs"]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "a/root_level.rs"])
+        .unwrap();
+    repo.stage_all_and_commit("Add root level file").unwrap();
+
+    let output = repo
+        .git_ai_from_working_dir(&deep_dir, &["blame", "../../../root_level.rs"])
+        .expect("blame with multiple ../.. from deep dir should succeed");
+
+    assert!(
+        output.contains("fn root_level()"),
+        "blame output should contain file content, got: {}",
+        output
+    );
+}
+
+#[test]
+fn test_blame_from_deep_subdir_file_in_repo_root() {
+    let repo = TestRepo::new();
+
+    let deep_dir = repo.path().join("a").join("b").join("c");
+    fs::create_dir_all(&deep_dir).unwrap();
+
+    let mut file = repo.filename("root.txt");
+    file.set_contents(lines!["root content".ai()]);
+    repo.stage_all_and_commit("Add root file").unwrap();
+
+    let output = repo
+        .git_ai_from_working_dir(&deep_dir, &["blame", "../../../root.txt"])
+        .expect("blame from deep subdir targeting repo root file should succeed");
+
+    assert!(
+        output.contains("root content"),
+        "blame output should contain file content, got: {}",
+        output
+    );
+}
+
+#[test]
+fn test_blame_from_subdir_dotdot_into_different_subtree() {
+    let repo = TestRepo::new();
+
+    let frontend_dir = repo.path().join("packages").join("frontend").join("src");
+    let backend_dir = repo.path().join("packages").join("backend").join("src");
+    fs::create_dir_all(&frontend_dir).unwrap();
+    fs::create_dir_all(&backend_dir).unwrap();
+
+    let file_path = backend_dir.join("server.rs");
+    fs::write(&file_path, "fn start_server() {}\n").unwrap();
+
+    repo.git(&["add", "packages/backend/src/server.rs"])
+        .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "packages/backend/src/server.rs"])
+        .unwrap();
+    repo.stage_all_and_commit("Add server").unwrap();
+
+    let output = repo
+        .git_ai_from_working_dir(&frontend_dir, &["blame", "../../backend/src/server.rs"])
+        .expect("blame with .. traversal from frontend into backend subtree should succeed");
+
+    assert!(
+        output.contains("fn start_server()"),
+        "blame output should contain file content, got: {}",
+        output
+    );
+}
+
+#[test]
+fn test_blame_from_deep_subdir_preserves_ai_authorship_with_dotdot() {
+    let repo = TestRepo::new();
+
+    let deep_dir = repo.path().join("src").join("modules").join("core");
+    let target_dir = repo.path().join("src").join("utils");
+    fs::create_dir_all(&deep_dir).unwrap();
+    fs::create_dir_all(&target_dir).unwrap();
+
+    let mut file = repo.filename("src/utils/helpers.rs");
+    file.set_contents(lines![
+        "fn human_helper() {}".human(),
+        "fn ai_helper() {}".ai()
+    ]);
+    repo.stage_all_and_commit("Add helpers").unwrap();
+
+    let root_output = repo
+        .git_ai(&["blame", "src/utils/helpers.rs"])
+        .expect("blame from root should work");
+
+    let subdir_output = repo
+        .git_ai_from_working_dir(&deep_dir, &["blame", "../../utils/helpers.rs"])
+        .expect("blame with .. from deep subdir should work");
+
+    assert_eq!(
+        root_output, subdir_output,
+        "blame output from root and via .. traversal should be identical"
+    );
+}
