@@ -1,5 +1,6 @@
 use crate::authorship::authorship_log::PromptRecord;
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
+use crate::authorship::internal_db::InternalDatabase;
 use crate::authorship::working_log::CheckpointKind;
 use crate::error::GitAiError;
 use crate::git::refs::get_reference_as_authorship_log_v3;
@@ -1026,8 +1027,40 @@ fn output_json_format(
     // Only include prompts that are actually referenced in lines
     let referenced_prompt_ids: std::collections::HashSet<&String> = lines_map.values().collect();
 
+    // Enrich prompts that have empty messages by falling back through storage layers:
+    // 1. Git notes (already resolved in prompt_records)
+    // 2. Local SQLite database
+    // 3. CAS via messages_url (not yet implemented)
+    let mut enriched_prompts = prompt_records.clone();
+    let ids_needing_messages: Vec<String> = enriched_prompts
+        .iter()
+        .filter(|(k, prompt)| referenced_prompt_ids.contains(k) && prompt.messages.is_empty())
+        .map(|(id, _)| id.clone())
+        .collect();
+
+    if !ids_needing_messages.is_empty() {
+        // Fallback 2: Try local SQLite database
+        if let Ok(db) = InternalDatabase::global() {
+            if let Ok(db_guard) = db.lock() {
+                for id in &ids_needing_messages {
+                    if let Ok(Some(db_record)) = db_guard.get_prompt(id) {
+                        if !db_record.messages.messages.is_empty() {
+                            if let Some(prompt) = enriched_prompts.get_mut(id) {
+                                prompt.messages = db_record.messages.messages;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback 3: CAS (Content Addressable Storage)
+        // If messages are still empty but messages_url is set, we could fetch from CAS.
+        // TODO: Implement CAS fetch when the cloud API is ready.
+    }
+
     // Create read models with other_files and commits populated
-    let filtered_prompts: HashMap<String, PromptRecordWithOtherFiles> = prompt_records
+    let filtered_prompts: HashMap<String, PromptRecordWithOtherFiles> = enriched_prompts
         .iter()
         .filter(|(k, _)| referenced_prompt_ids.contains(k))
         .map(|(k, v)| {
