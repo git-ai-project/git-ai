@@ -395,6 +395,53 @@ impl TestRepo {
         }
     }
 
+    pub fn git_ai_from_working_dir(
+        &self,
+        working_dir: &std::path::Path,
+        args: &[&str],
+    ) -> Result<String, String> {
+        let binary_path = get_binary_path();
+
+        let mut command = Command::new(binary_path);
+
+        let absolute_working_dir = working_dir.canonicalize().map_err(|e| {
+            format!(
+                "Failed to canonicalize working directory {}: {}",
+                working_dir.display(),
+                e
+            )
+        })?;
+        command.args(args).current_dir(&absolute_working_dir);
+
+        if let Some(patch) = &self.config_patch
+            && let Ok(patch_json) = serde_json::to_string(patch)
+        {
+            command.env("GIT_AI_TEST_CONFIG_PATCH", patch_json);
+        }
+
+        command.env("GIT_AI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
+
+        let output = command
+            .output()
+            .unwrap_or_else(|_| panic!("Failed to execute git-ai command: {:?}", args));
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        if output.status.success() {
+            let combined = if stdout.is_empty() {
+                stderr
+            } else if stderr.is_empty() {
+                stdout
+            } else {
+                format!("{}{}", stdout, stderr)
+            };
+            Ok(combined)
+        } else {
+            Err(stderr)
+        }
+    }
+
     pub fn git_ai_with_env(&self, args: &[&str], envs: &[(&str, &str)]) -> Result<String, String> {
         let binary_path = get_binary_path();
 

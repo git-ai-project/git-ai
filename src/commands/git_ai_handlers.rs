@@ -880,6 +880,16 @@ fn handle_ai_blame(args: &[String]) {
         std::process::exit(1);
     }
 
+    let file_path = if !std::path::Path::new(&file_path).is_absolute() {
+        let current_dir_path = std::path::PathBuf::from(&current_dir);
+        current_dir_path
+            .join(&file_path)
+            .to_string_lossy()
+            .to_string()
+    } else {
+        file_path
+    };
+
     if let Err(e) = repo.blame(&file_path, &options) {
         eprintln!("Blame failed: {}", e);
         std::process::exit(1);
