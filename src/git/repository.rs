@@ -1663,59 +1663,10 @@ impl Repository {
         }
 
         let output = exec_git_stdin(&args, stdin_data.as_bytes())?;
-        let data = output.stdout;
-        let mut pos = 0usize;
-        let mut contents = HashMap::new();
-
-        for file_path in file_paths {
-            let header_end = match data[pos..].iter().position(|&b| b == b'\n') {
-                Some(idx) => pos + idx,
-                None => break,
-            };
-            let header = std::str::from_utf8(&data[pos..header_end])?;
-            pos = header_end + 1;
-
-            if header.ends_with(" missing") {
-                continue;
-            }
-
-            let mut header_parts = header.rsplitn(3, ' ');
-            let size_str = header_parts
-                .next()
-                .ok_or_else(|| GitAiError::Generic("Malformed cat-file header".to_string()))?;
-            let object_type = header_parts
-                .next()
-                .ok_or_else(|| GitAiError::Generic("Malformed cat-file header".to_string()))?;
-
-            if object_type != "blob" {
-                continue;
-            }
-
-            let size: usize = size_str
-                .parse()
-                .map_err(|e| GitAiError::Generic(format!("Invalid cat-file blob size: {}", e)))?;
-
-            let content_end = pos + size;
-            if content_end > data.len() {
-                return Err(GitAiError::Generic(
-                    "Malformed cat-file --batch output: truncated content".to_string(),
-                ));
-            }
-
-            if let Ok(content) = String::from_utf8(data[pos..content_end].to_vec()) {
-                contents.insert(file_path.clone(), content);
-            }
-
-            pos = content_end;
-            if pos < data.len() && data[pos] == b'\n' {
-                pos += 1;
-            }
-        }
-
-        Ok(contents)
+        parse_batch_blob_content_by_path(&output.stdout, file_paths)
     }
 
-    /// Get content of all staged files concurrently
+    /// Get UTF-8 content for many staged files with one batched cat-file call.
     /// Returns a HashMap of file paths to their staged content as strings
     /// Skips files that fail to read or aren't valid UTF-8
     pub fn get_all_staged_files_content(
@@ -1725,8 +1676,6 @@ impl Repository {
         if file_paths.is_empty() {
             return Ok(HashMap::new());
         }
-
-        let mut staged_files = HashMap::new();
 
         let mut args = self.global_args_for_exec();
         args.push("cat-file".to_string());
@@ -1740,54 +1689,7 @@ impl Repository {
         }
 
         let output = exec_git_stdin(&args, stdin_data.as_bytes())?;
-        let data = output.stdout;
-
-        let mut pos = 0usize;
-        for file_path in file_paths {
-            let header_end = match data[pos..].iter().position(|&b| b == b'\n') {
-                Some(idx) => pos + idx,
-                None => break,
-            };
-            let header = std::str::from_utf8(&data[pos..header_end])?;
-            pos = header_end + 1;
-
-            if header.ends_with(" missing") {
-                continue;
-            }
-
-            let mut header_parts = header.rsplitn(3, ' ');
-            let size_str = header_parts
-                .next()
-                .ok_or_else(|| GitAiError::Generic("Malformed cat-file header".to_string()))?;
-            let object_type = header_parts
-                .next()
-                .ok_or_else(|| GitAiError::Generic("Malformed cat-file header".to_string()))?;
-
-            if object_type != "blob" {
-                continue;
-            }
-
-            let size: usize = size_str
-                .parse()
-                .map_err(|e| GitAiError::Generic(format!("Invalid cat-file blob size: {}", e)))?;
-            let content_end = pos + size;
-            if content_end > data.len() {
-                return Err(GitAiError::Generic(
-                    "Malformed cat-file --batch output: truncated content".to_string(),
-                ));
-            }
-
-            if let Ok(content) = String::from_utf8(data[pos..content_end].to_vec()) {
-                staged_files.insert(file_path.clone(), content);
-            }
-
-            pos = content_end;
-            if pos < data.len() && data[pos] == b'\n' {
-                pos += 1;
-            }
-        }
-
-        Ok(staged_files)
+        parse_batch_blob_content_by_path(&output.stdout, file_paths)
     }
 
     /// List all files changed in a commit
@@ -2214,6 +2116,67 @@ pub fn from_bare_repository(git_dir: &Path) -> Result<Repository, GitAiError> {
 pub fn find_repository_in_path(path: &str) -> Result<Repository, GitAiError> {
     let global_args = vec!["-C".to_string(), path.to_string()];
     find_repository(&global_args)
+}
+
+fn parse_batch_blob_content_by_path(
+    data: &[u8],
+    file_paths: &[String],
+) -> Result<HashMap<String, String>, GitAiError> {
+    let mut pos = 0usize;
+    let mut contents = HashMap::new();
+
+    for file_path in file_paths {
+        if pos >= data.len() {
+            break;
+        }
+
+        let header_end = match data[pos..].iter().position(|&b| b == b'\n') {
+            Some(idx) => pos + idx,
+            None => break,
+        };
+
+        let header = std::str::from_utf8(&data[pos..header_end])?;
+        pos = header_end + 1;
+
+        if header.ends_with(" missing") {
+            continue;
+        }
+
+        let mut header_parts = header.rsplitn(3, ' ');
+        let size_str = header_parts
+            .next()
+            .ok_or_else(|| GitAiError::Generic("Malformed cat-file header".to_string()))?;
+        let object_type = header_parts
+            .next()
+            .ok_or_else(|| GitAiError::Generic("Malformed cat-file header".to_string()))?;
+        let size: usize = size_str
+            .parse()
+            .map_err(|e| GitAiError::Generic(format!("Invalid cat-file blob size: {}", e)))?;
+
+        let content_end = pos.checked_add(size).ok_or_else(|| {
+            GitAiError::Generic("Malformed cat-file --batch output: content overflow".to_string())
+        })?;
+        if content_end > data.len() {
+            return Err(GitAiError::Generic(
+                "Malformed cat-file --batch output: truncated content".to_string(),
+            ));
+        }
+
+        if object_type == "blob"
+            && let Ok(content) = std::str::from_utf8(&data[pos..content_end])
+        {
+            contents.insert(file_path.clone(), content.to_string());
+        }
+
+        // cat-file --batch emits a body for all non-missing objects. Always consume it,
+        // even when we intentionally skip non-blob objects.
+        pos = content_end;
+        if pos < data.len() && data[pos] == b'\n' {
+            pos += 1;
+        }
+    }
+
+    Ok(contents)
 }
 
 /// Find the git repository that contains the given file path by walking up the directory tree.
@@ -2927,6 +2890,47 @@ index 0000000..abc1234 100644
     }
 
     #[test]
+    fn test_parse_batch_blob_content_by_path_skips_non_blob_payload() {
+        let mut batch = Vec::new();
+        batch.extend_from_slice(b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa tree 6\nab\ncd\0\n");
+        batch.extend_from_slice(b"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb blob 5\nhello\n");
+
+        let paths = vec!["dir".to_string(), "file.txt".to_string()];
+        let parsed = parse_batch_blob_content_by_path(&batch, &paths).unwrap();
+
+        assert_eq!(parsed.get("file.txt").map(String::as_str), Some("hello"));
+        assert!(
+            !parsed.contains_key("dir"),
+            "non-blob objects should be skipped"
+        );
+    }
+
+    #[test]
+    fn test_get_files_content_at_commit_skips_tree_entries_without_desync() {
+        use crate::git::test_utils::TmpRepo;
+
+        let tmp_repo = TmpRepo::new().unwrap();
+        tmp_repo
+            .write_file("dir/nested.txt", "nested\n", true)
+            .unwrap();
+        tmp_repo.write_file("root.txt", "root\n", true).unwrap();
+        tmp_repo.commit_with_message("base").unwrap();
+
+        let commit_sha = tmp_repo.head_commit_sha().unwrap();
+        let repo = tmp_repo.gitai_repo();
+        let files = vec!["dir".to_string(), "root.txt".to_string()];
+        let contents = repo
+            .get_files_content_at_commit(&commit_sha, &files)
+            .unwrap();
+
+        assert_eq!(contents.get("root.txt").map(String::as_str), Some("root\n"));
+        assert!(
+            !contents.contains_key("dir"),
+            "tree entries should be skipped without affecting subsequent files"
+        );
+    }
+
+    #[test]
     fn test_get_all_staged_files_content_reads_batched_index_state() {
         use crate::git::test_utils::TmpRepo;
 
@@ -2997,6 +3001,39 @@ index 0000000..abc1234 100644
             .expect("read attrs from HEAD");
         let content = String::from_utf8(content).expect("utf8 attrs");
         assert!(content.contains("generated/** linguist-generated=true"));
+    }
+
+    #[test]
+    fn test_get_all_staged_files_content_skips_gitlink_without_desync() {
+        use crate::git::test_utils::TmpRepo;
+        use std::process::Command;
+
+        let tmp_repo = TmpRepo::new().unwrap();
+        tmp_repo.write_file("root.txt", "root\n", true).unwrap();
+        tmp_repo.commit_with_message("base").unwrap();
+
+        let head_sha = tmp_repo.head_commit_sha().unwrap();
+        let status = Command::new(crate::config::Config::get().git_cmd())
+            .current_dir(tmp_repo.path())
+            .args([
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{},submodule", head_sha),
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success(), "failed to stage synthetic gitlink entry");
+
+        let repo = tmp_repo.gitai_repo();
+        let files = vec!["submodule".to_string(), "root.txt".to_string()];
+        let staged = repo.get_all_staged_files_content(&files).unwrap();
+
+        assert_eq!(staged.get("root.txt").map(String::as_str), Some("root\n"));
+        assert!(
+            !staged.contains_key("submodule"),
+            "gitlink entries should be skipped without affecting subsequent files"
+        );
     }
 
     #[test]
