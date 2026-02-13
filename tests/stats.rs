@@ -3,6 +3,8 @@ use git_ai::authorship::stats::CommitStats;
 use insta::assert_debug_snapshot;
 use repos::test_file::ExpectedLineExt;
 use repos::test_repo::TestRepo;
+use std::path::Path;
+use std::process::Command;
 
 /// Extract the first complete JSON object from mixed stdout/stderr output.
 fn extract_json_object(output: &str) -> String {
@@ -15,6 +17,21 @@ fn stats_from_args(repo: &TestRepo, args: &[&str]) -> CommitStats {
     let raw = repo.git_ai(args).expect("git-ai stats should succeed");
     let json = extract_json_object(&raw);
     serde_json::from_str(&json).expect("valid stats json")
+}
+
+fn run_git(cwd: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("git command should run");
+    assert!(
+        output.status.success(),
+        "git {:?} failed:\nstdout: {}\nstderr: {}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -469,6 +486,65 @@ fn test_stats_keeps_negative_linguist_patterns_counted() {
     let stats = stats_from_args(&repo, &["stats", "HEAD", "--json"]);
     assert_eq!(stats.git_diff_added_lines, 1);
     assert_eq!(stats.ai_additions, 1);
+}
+
+#[test]
+fn test_stats_in_bare_clone_uses_root_gitattributes_linguist_generated() {
+    let repo = TestRepo::new();
+    repo.filename(".gitattributes")
+        .set_contents(lines!["generated/** linguist-generated=true"]);
+    repo.filename("README.md").set_contents(lines!["# Repo"]);
+    repo.stage_all_and_commit("Initial commit with gitattributes")
+        .unwrap();
+
+    repo.filename("src/main.rs")
+        .set_contents(lines!["fn run() {}".ai()]);
+    repo.filename("generated/schema.ts")
+        .set_contents(lines!["export const schema = {};"]);
+    repo.stage_all_and_commit("Add source and linguist-generated file")
+        .unwrap();
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let bare = temp.path().join("repo.git");
+    run_git(
+        temp.path(),
+        &[
+            "clone",
+            "--bare",
+            repo.path().to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ],
+    );
+
+    let output = Command::new(repos::test_repo::get_binary_path())
+        .args(["stats", "HEAD", "--json"])
+        .current_dir(&bare)
+        .env(
+            "GIT_AI_TEST_DB_PATH",
+            temp.path().join("db").to_str().unwrap(),
+        )
+        .output()
+        .expect("git-ai stats should run in bare repo");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "git-ai stats failed in bare clone:\nstdout: {}\nstderr: {}",
+        stdout,
+        stderr
+    );
+
+    let combined = if stdout.is_empty() {
+        stderr.to_string()
+    } else if stderr.is_empty() {
+        stdout.to_string()
+    } else {
+        format!("{}{}", stdout, stderr)
+    };
+    let json = extract_json_object(&combined);
+    let stats: CommitStats = serde_json::from_str(&json).expect("valid stats json");
+    assert_eq!(stats.git_diff_added_lines, 1);
 }
 
 #[test]

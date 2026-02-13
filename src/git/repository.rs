@@ -970,6 +970,16 @@ impl Repository {
         Ok(self.workdir.clone())
     }
 
+    /// Returns true when this repository is bare.
+    pub fn is_bare_repository(&self) -> Result<bool, GitAiError> {
+        let mut args = self.global_args_for_exec();
+        args.push("rev-parse".to_string());
+        args.push("--is-bare-repository".to_string());
+        let output = exec_git(&args)?;
+        let value = String::from_utf8(output.stdout)?;
+        Ok(value.trim() == "true")
+    }
+
     /// Get the canonical (absolute, resolved) path of the working directory
     /// On Windows, this uses the \\?\ UNC prefix format for reliable path comparisons
     #[allow(dead_code)]
@@ -1914,43 +1924,69 @@ impl Repository {
 }
 
 pub fn find_repository(global_args: &[String]) -> Result<Repository, GitAiError> {
-    let mut args = global_args.to_owned();
-    args.push("rev-parse".to_string());
+    let mut rev_parse_args = global_args.to_owned();
+    rev_parse_args.push("rev-parse".to_string());
     // Use --git-dir instead of --absolute-git-dir for compatibility with Git < 2.13
     // (--absolute-git-dir was added in Git 2.13; older versions output the literal
     // string "absolute-git-dir" instead of the resolved path).
-    args.push("--git-dir".to_string());
-    args.push("--show-toplevel".to_string());
+    rev_parse_args.push("--is-bare-repository".to_string());
+    rev_parse_args.push("--git-dir".to_string());
 
-    let output = exec_git(&args)?;
-    let both_dirs = String::from_utf8(output.stdout)?;
+    let rev_parse_output = exec_git(&rev_parse_args)?;
+    let rev_parse_stdout = String::from_utf8(rev_parse_output.stdout)?;
+    let mut lines = rev_parse_stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
 
-    let both_dirs = both_dirs.trim();
-    let lines: Vec<&str> = both_dirs.split("\n").collect();
+    let is_bare = match lines.next() {
+        Some("true") => true,
+        Some("false") => false,
+        Some(other) => {
+            return Err(GitAiError::Generic(format!(
+                "Unexpected --is-bare-repository output: {}",
+                other
+            )));
+        }
+        None => {
+            return Err(GitAiError::Generic(
+                "Missing --is-bare-repository output from git rev-parse".to_string(),
+            ));
+        }
+    };
 
-    if lines.len() < 2 {
-        return Err(GitAiError::Generic(format!(
-            "Expected git rev-parse to return 2 lines (git dir and work dir), got {}:\n{}",
-            lines.len(),
-            both_dirs
-        )));
-    }
-
-    let git_dir_str = lines[0];
-    let workdir_str = lines[1];
-    let workdir = PathBuf::from(workdir_str);
-    // --git-dir may return a relative path (e.g. ".git"); resolve it against the toplevel
+    let git_dir_str = lines.next().ok_or_else(|| {
+        GitAiError::Generic("Missing --git-dir output from git rev-parse".to_string())
+    })?;
+    let command_base_dir = resolve_command_base_dir(global_args)?;
     let git_dir = if Path::new(git_dir_str).is_relative() {
-        workdir.join(git_dir_str)
+        command_base_dir.join(git_dir_str)
     } else {
         PathBuf::from(git_dir_str)
     };
+
     if !git_dir.is_dir() {
         return Err(GitAiError::Generic(format!(
             "Git directory does not exist: {}",
             git_dir.display()
         )));
     }
+
+    let workdir = if is_bare {
+        git_dir.parent().map(Path::to_path_buf).ok_or_else(|| {
+            GitAiError::Generic(format!(
+                "Git directory has no parent: {}",
+                git_dir.display()
+            ))
+        })?
+    } else {
+        let mut top_level_args = global_args.to_owned();
+        top_level_args.push("rev-parse".to_string());
+        top_level_args.push("--show-toplevel".to_string());
+        let output = exec_git(&top_level_args)?;
+        PathBuf::from(String::from_utf8(output.stdout)?.trim())
+    };
+
     if !workdir.is_dir() {
         return Err(GitAiError::Generic(format!(
             "Work directory does not exist: {}",
@@ -1958,17 +1994,21 @@ pub fn find_repository(global_args: &[String]) -> Result<Repository, GitAiError>
         )));
     }
 
-    // Ensure all internal git commands use the repository root consistently
-    // When running from a subdirectory without -C, add it to ensure hooks work correctly
-    let mut global_args = global_args.to_owned();
-    let workdir_str = workdir.display().to_string();
+    // Ensure all internal git commands use a stable repository root consistently.
+    let mut normalized_global_args = global_args.to_owned();
+    let command_root = if is_bare {
+        git_dir.display().to_string()
+    } else {
+        workdir.display().to_string()
+    };
 
-    if global_args.is_empty() {
-        // Add -C flag when not present (e.g., when running from subdirectory)
-        global_args = vec!["-C".to_string(), workdir_str];
-    } else if global_args.len() == 2 && global_args[0] == "-C" && global_args[1] != workdir_str {
-        // Rewrite existing -C to repo root if it points elsewhere
-        global_args[1] = workdir_str;
+    if normalized_global_args.is_empty() {
+        normalized_global_args = vec!["-C".to_string(), command_root];
+    } else if normalized_global_args.len() == 2
+        && normalized_global_args[0] == "-C"
+        && normalized_global_args[1] != command_root
+    {
+        normalized_global_args[1] = command_root;
     }
 
     // Canonicalize workdir for reliable path comparisons (especially on Windows)
@@ -1983,7 +2023,7 @@ pub fn find_repository(global_args: &[String]) -> Result<Repository, GitAiError>
     })?;
 
     Ok(Repository {
-        global_args,
+        global_args: normalized_global_args,
         storage: RepoStorage::for_repo_path(&git_dir, &workdir),
         git_dir,
         pre_command_base_commit: None,
@@ -1992,6 +2032,31 @@ pub fn find_repository(global_args: &[String]) -> Result<Repository, GitAiError>
         workdir,
         canonical_workdir,
     })
+}
+
+fn resolve_command_base_dir(global_args: &[String]) -> Result<PathBuf, GitAiError> {
+    let mut base = std::env::current_dir().map_err(GitAiError::IoError)?;
+    let mut idx = 0usize;
+
+    while idx < global_args.len() {
+        if global_args[idx] == "-C" {
+            let path_arg = global_args.get(idx + 1).ok_or_else(|| {
+                GitAiError::Generic("Missing path after -C in global git args".to_string())
+            })?;
+
+            let next_base = PathBuf::from(path_arg);
+            base = if next_base.is_absolute() {
+                next_base
+            } else {
+                base.join(next_base)
+            };
+            idx += 2;
+            continue;
+        }
+        idx += 1;
+    }
+
+    Ok(base)
 }
 
 #[allow(dead_code)]
@@ -2499,6 +2564,24 @@ fn parse_hunk_header(line: &str) -> Option<(Vec<u32>, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::Path;
+    use std::process::Command;
+
+    fn run_git(cwd: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git command should run");
+        assert!(
+            output.status.success(),
+            "git {:?} failed:\nstdout: {}\nstderr: {}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     #[test]
     fn test_parse_git_version_standard() {
@@ -2649,5 +2732,72 @@ index 0000000..abc1234 100644
         let (added_lines, insertion_lines) = parse_diff_added_lines_with_insertions(diff).unwrap();
         assert_eq!(added_lines.get("my file.txt"), Some(&vec![1, 2]));
         assert_eq!(insertion_lines.get("my file.txt"), Some(&vec![1, 2]));
+    }
+
+    #[test]
+    fn find_repository_in_path_supports_bare_repositories() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        let bare = temp.path().join("repo.git");
+        fs::create_dir_all(&source).expect("create source");
+
+        run_git(&source, &["init"]);
+        run_git(&source, &["config", "user.name", "Test User"]);
+        run_git(&source, &["config", "user.email", "test@example.com"]);
+        fs::write(source.join("README.md"), "# repo\n").expect("write readme");
+        run_git(&source, &["add", "."]);
+        run_git(&source, &["commit", "-m", "initial"]);
+        run_git(
+            temp.path(),
+            &[
+                "clone",
+                "--bare",
+                source.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+        );
+
+        let repo = find_repository_in_path(bare.to_str().unwrap()).expect("find bare repo");
+        assert!(repo.is_bare_repository().expect("bare check"));
+        assert_eq!(
+            repo.path().canonicalize().expect("canonical bare"),
+            bare.canonicalize().expect("canonical path")
+        );
+    }
+
+    #[test]
+    fn find_repository_in_path_bare_repo_can_read_head_gitattributes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        let bare = temp.path().join("repo.git");
+        fs::create_dir_all(&source).expect("create source");
+
+        run_git(&source, &["init"]);
+        run_git(&source, &["config", "user.name", "Test User"]);
+        run_git(&source, &["config", "user.email", "test@example.com"]);
+        fs::write(
+            source.join(".gitattributes"),
+            "generated/** linguist-generated=true\n",
+        )
+        .expect("write attrs");
+        fs::write(source.join("README.md"), "# repo\n").expect("write readme");
+        run_git(&source, &["add", "."]);
+        run_git(&source, &["commit", "-m", "initial"]);
+        run_git(
+            temp.path(),
+            &[
+                "clone",
+                "--bare",
+                source.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+        );
+
+        let repo = find_repository_in_path(bare.to_str().unwrap()).expect("find bare repo");
+        let content = repo
+            .get_file_content(".gitattributes", "HEAD")
+            .expect("read attrs from HEAD");
+        let content = String::from_utf8(content).expect("utf8 attrs");
+        assert!(content.contains("generated/** linguist-generated=true"));
     }
 }

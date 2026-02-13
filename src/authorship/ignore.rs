@@ -88,12 +88,7 @@ pub fn should_ignore_file(path: &str, patterns: &[String]) -> bool {
 }
 
 pub fn load_linguist_generated_patterns_from_root_gitattributes(repo: &Repository) -> Vec<String> {
-    let Ok(workdir) = repo.workdir() else {
-        return Vec::new();
-    };
-
-    let gitattributes_path = workdir.join(".gitattributes");
-    let Ok(contents) = fs::read_to_string(gitattributes_path) else {
+    let Some(contents) = load_root_gitattributes_contents(repo) else {
         return Vec::new();
     };
 
@@ -140,6 +135,19 @@ pub fn load_linguist_generated_patterns_from_root_gitattributes(repo: &Repositor
     }
 
     dedupe_patterns(patterns)
+}
+
+fn load_root_gitattributes_contents(repo: &Repository) -> Option<String> {
+    if repo.is_bare_repository().unwrap_or(false) {
+        return repo
+            .get_file_content(".gitattributes", "HEAD")
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok());
+    }
+
+    let workdir = repo.workdir().ok()?;
+    let gitattributes_path = workdir.join(".gitattributes");
+    fs::read_to_string(gitattributes_path).ok()
 }
 
 pub fn effective_ignore_patterns(
@@ -206,7 +214,67 @@ fn split_gitattributes_tokens(line: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::repository::from_bare_repository;
     use crate::git::test_utils::TmpRepo;
+    use std::fs;
+    use std::path::Path;
+    use std::process::Command;
+
+    fn run_git(cwd: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git command should run");
+        assert!(
+            output.status.success(),
+            "git {:?} failed:\nstdout: {}\nstderr: {}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn make_bare_repo(
+        root_gitattributes: Option<&str>,
+        parent_gitattributes: Option<&str>,
+    ) -> (tempfile::TempDir, Repository) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        let bare = temp.path().join("bare.git");
+        fs::create_dir_all(&source).expect("create source");
+
+        run_git(&source, &["init"]);
+        run_git(&source, &["config", "user.name", "Test User"]);
+        run_git(&source, &["config", "user.email", "test@example.com"]);
+
+        fs::write(source.join("README.md"), "# repo\n").expect("write readme");
+        if let Some(attrs) = root_gitattributes {
+            fs::write(source.join(".gitattributes"), attrs).expect("write attrs");
+        }
+
+        run_git(&source, &["add", "."]);
+        run_git(&source, &["commit", "-m", "initial"]);
+        run_git(
+            temp.path(),
+            &[
+                "clone",
+                "--bare",
+                source.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+        );
+
+        if let Some(parent_attrs) = parent_gitattributes {
+            fs::write(temp.path().join(".gitattributes"), parent_attrs)
+                .expect("write parent attrs");
+        }
+
+        (
+            temp,
+            from_bare_repository(&bare).expect("bare repository should load"),
+        )
+    }
 
     #[test]
     fn defaults_include_snapshot_and_lock_patterns() {
@@ -342,5 +410,25 @@ generated/** linguist-generated=true
         assert!(should_ignore_file_with_matcher("[", &matcher));
         assert!(should_ignore_file_with_matcher("docs/[bad", &matcher));
         assert!(!should_ignore_file_with_matcher("docs/good.rs", &matcher));
+    }
+
+    #[test]
+    fn loads_linguist_generated_from_bare_repo_head() {
+        let (_tmp, bare_repo) = make_bare_repo(
+            Some("generated/** linguist-generated=true\nmanual/** linguist-generated=false\n"),
+            None,
+        );
+
+        let patterns = load_linguist_generated_patterns_from_root_gitattributes(&bare_repo);
+        assert!(patterns.contains(&"generated/**".to_string()));
+        assert!(!patterns.contains(&"manual/**".to_string()));
+    }
+
+    #[test]
+    fn bare_repo_does_not_read_parent_directory_gitattributes() {
+        let (_tmp, bare_repo) = make_bare_repo(None, Some("leak/** linguist-generated=true\n"));
+
+        let patterns = load_linguist_generated_patterns_from_root_gitattributes(&bare_repo);
+        assert!(patterns.is_empty());
     }
 }
