@@ -1205,7 +1205,7 @@ export class BlameLensManager {
         md.appendMarkdown('*Loading prompt from cloud...*\n');
       } else if (metadata?.is_logged_in) {
         // Logged in but no prompt/messages_url - prompt wasn't saved
-        md.appendMarkdown('*Prompt was not saved.* Prompt Storage is enabled so future prompts should be saved.\n');
+        md.appendMarkdown('*Prompt was not saved.* Prompt Storage is enabled. Future prompts will be saved.\n');
       } else if (!metadata?.is_logged_in && metadata !== undefined) {
         // Not logged in - check if this is a teammate's code
         const currentEmail = this.extractEmail(metadata.current_user);
@@ -1216,14 +1216,11 @@ export class BlameLensManager {
           md.appendMarkdown('🔒 *Login to see prompt summaries from your teammates*\n\n');
           md.appendCodeblock('git-ai login', 'bash');
         } else {
-          md.appendMarkdown('*No prompt saved.* Enable Cloud Prompt Storage to share prompts with your team.\n\n');
-          md.appendCodeblock('git-ai config set --add share_prompts_in_repositories "*"', 'bash');
+          md.appendMarkdown('*No prompt saved.');
         }
       } else {
         // No metadata available (backward compat) - show generic message
         md.appendMarkdown('🔒 *Transcript not saved*\n\n');
-        md.appendMarkdown('Enable prompt saving:\n');
-        md.appendCodeblock('git-ai config set --add share_prompts_in_repositories "*"', 'bash');
       }
       return md;
     }
