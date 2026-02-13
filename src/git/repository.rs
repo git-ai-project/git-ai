@@ -970,6 +970,16 @@ impl Repository {
         Ok(self.workdir.clone())
     }
 
+    /// Returns true when this repository is bare.
+    pub fn is_bare_repository(&self) -> Result<bool, GitAiError> {
+        let mut args = self.global_args_for_exec();
+        args.push("rev-parse".to_string());
+        args.push("--is-bare-repository".to_string());
+        let output = exec_git(&args)?;
+        let value = String::from_utf8(output.stdout)?;
+        Ok(value.trim() == "true")
+    }
+
     /// Get the canonical (absolute, resolved) path of the working directory
     /// On Windows, this uses the \\?\ UNC prefix format for reliable path comparisons
     #[allow(dead_code)]
