@@ -210,6 +210,20 @@ export class BlameLensManager {
       })
     );
 
+    // Proactively trigger decorations for the already-open editor.
+    // VS Code does not reliably fire onDidChangeActiveTextEditor for an
+    // editor that is already active when the extension activates.
+    // We call requestBlameForFullFile / updateStatusBar directly instead
+    // of handleActiveEditorChange to avoid the border-clearing logic
+    // which would race with any VS Code activation events.
+    const initialEditor = vscode.window.activeTextEditor;
+    if (initialEditor) {
+      if (this.blameMode === 'all') {
+        this.requestBlameForFullFile(initialEditor);
+      }
+      this.updateStatusBar(initialEditor);
+    }
+
     console.log('[git-ai] BlameLensManager activated');
   }
 
@@ -326,26 +340,29 @@ export class BlameLensManager {
    * Handle active editor change - update status bar and decorations.
    */
   private handleActiveEditorChange(editor: vscode.TextEditor | undefined): void {
-    // Clear colored borders from previous editor
-    const previousEditor = vscode.window.visibleTextEditors.find(
-      e => e.document.uri.toString() === this.currentDocumentUri
-    );
-    if (previousEditor) {
-      this.clearColoredBorders(previousEditor);
-    }
-    
-    // If the new editor is a different document, reset our state
-    if (editor && editor.document.uri.toString() !== this.currentDocumentUri) {
+    const newDocumentUri = editor?.document.uri.toString() ?? null;
+
+    // Only clear borders and reset state when switching to a different document.
+    // Re-firing for the same document (e.g. VS Code activation event) must not
+    // clear decorations that were just applied.
+    if (newDocumentUri !== this.currentDocumentUri) {
+      const previousEditor = vscode.window.visibleTextEditors.find(
+        e => e.document.uri.toString() === this.currentDocumentUri
+      );
+      if (previousEditor) {
+        this.clearColoredBorders(previousEditor);
+      }
+
       this.currentBlameResult = null;
       this.currentDocumentUri = null;
       this.pendingBlameRequest = null;
     }
-    
+
     // If mode is 'all', automatically request blame for the new editor
     if (this.blameMode === 'all' && editor) {
       this.requestBlameForFullFile(editor);
     }
-    
+
     // Update status bar for the new editor
     this.updateStatusBar(editor);
   }
@@ -518,17 +535,14 @@ export class BlameLensManager {
    * Used when Toggle AI Code is enabled.
    */
   private applyFullFileDecorations(editor: vscode.TextEditor, blameResult: BlameResult): void {
-    // Clear existing decorations first
-    this.clearColoredBorders(editor);
-
     // Collect all AI-authored lines grouped by color
     const colorToRanges = new Map<number, vscode.Range[]>();
-    
+
     for (const [gitLine, lineInfo] of blameResult.lineAuthors) {
       if (lineInfo?.isAiAuthored) {
         const colorIndex = this.getColorIndexForPromptId(lineInfo.commitHash);
         const line = gitLine - 1; // Convert to 0-indexed
-        
+
         if (!colorToRanges.has(colorIndex)) {
           colorToRanges.set(colorIndex, []);
         }
@@ -536,10 +550,11 @@ export class BlameLensManager {
       }
     }
 
-    // Apply decorations grouped by color
-    colorToRanges.forEach((ranges, colorIndex) => {
-      const decoration = this.colorDecorations[colorIndex];
-      editor.setDecorations(decoration, ranges);
+    // Set all decoration types in a single pass: ranges for used colors,
+    // empty for unused. Avoids clear-then-set on the same type which
+    // VS Code can optimize away when only one decoration type changes.
+    this.colorDecorations.forEach((decoration, index) => {
+      editor.setDecorations(decoration, colorToRanges.get(index) || []);
     });
   }
 
@@ -661,9 +676,6 @@ export class BlameLensManager {
    * Used when cursor is on an AI-authored line to highlight all lines from that prompt.
    */
   private applyDecorationsForPrompt(editor: vscode.TextEditor, commitHash: string, blameResult: BlameResult): void {
-    // Clear existing decorations first
-    this.clearColoredBorders(editor);
-
     // Get the color for this prompt
     const colorIndex = this.getColorIndexForPromptId(commitHash);
     const ranges: vscode.Range[] = [];
@@ -676,9 +688,11 @@ export class BlameLensManager {
       }
     }
 
-    // Apply the decoration
-    const decoration = this.colorDecorations[colorIndex];
-    editor.setDecorations(decoration, ranges);
+    // Set all decoration types in a single pass: ranges for this prompt's
+    // color, empty for all others. Avoids clear-then-set on the same type.
+    this.colorDecorations.forEach((decoration, index) => {
+      editor.setDecorations(decoration, index === colorIndex ? ranges : []);
+    });
   }
 
   /**
