@@ -11,6 +11,7 @@ use crate::git::repository::{CommitRange, Repository, exec_git, exec_git_stdin};
 use crate::git::rewrite_log::RewriteLogEvent;
 use crate::utils::{debug_log, debug_performance_log};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::time::Instant;
 
 #[derive(Clone, Copy, Default)]
 struct PromptLineMetrics {
@@ -38,7 +39,6 @@ pub fn rewrite_authorship_if_needed(
     repo: &Repository,
     last_event: &RewriteLogEvent,
     commit_author: String,
-    _full_log: &Vec<RewriteLogEvent>,
     supress_output: bool,
 ) -> Result<(), GitAiError> {
     match last_event {
@@ -136,12 +136,29 @@ pub fn prepare_working_log_after_squash(
     target_branch_head_sha: &str,
     _human_author: &str,
 ) -> Result<(), GitAiError> {
+    const SMALL_STAGED_SOURCE_FILTER_BYPASS_MAX_FILES: usize = 64;
+
     use crate::authorship::virtual_attribution::{
         VirtualAttributions, merge_attributions_favoring_first,
     };
 
-    // Step 1: Find merge base between source and target to optimize blame
-    // We only need to look at commits after the merge base, not entire history
+    let prep_start = Instant::now();
+
+    // Step 0: Only consider files actually staged by merge --squash.
+    // Diffing source/target heads pulls in unrelated branch churn and explodes work.
+    let mut staged_files: Vec<String> = repo.get_staged_filenames()?.into_iter().collect();
+    staged_files.sort();
+    if staged_files.is_empty() {
+        return Ok(());
+    }
+    debug_log(&format!(
+        "[BENCHMARK] squash prep: staged files discovery took {:?} ({} files)",
+        prep_start.elapsed(),
+        staged_files.len()
+    ));
+
+    // Step 1: Find merge base between source and target to bound history walks.
+    let history_start = Instant::now();
     let merge_base = repo
         .merge_base(
             source_head_sha.to_string(),
@@ -149,65 +166,226 @@ pub fn prepare_working_log_after_squash(
         )
         .ok();
 
-    // Step 2: Get list of changed files between the two branches
-    let changed_files = repo.diff_changed_files(source_head_sha, target_branch_head_sha)?;
+    let source_commits =
+        commits_in_range_with_merge_base(repo, merge_base.as_ref(), source_head_sha)?;
+    let target_commits =
+        commits_in_range_with_merge_base(repo, merge_base.as_ref(), target_branch_head_sha)?;
 
-    if changed_files.is_empty() {
-        // No files changed, nothing to do
+    // Only run expensive attribution logic on staged files that were ever touched by AI
+    // on each side of the merge base.
+    //
+    // Optimization: for small staged sets, skip source-side touched-file extraction and
+    // just blame staged files directly when source has any authorship notes.
+    let source_ai_files = if staged_files.len() <= SMALL_STAGED_SOURCE_FILTER_BYPASS_MAX_FILES {
+        if commits_have_authorship_notes(repo, &source_commits)? {
+            staged_files.clone()
+        } else {
+            Vec::new()
+        }
+    } else {
+        filter_pathspecs_to_ai_touched_files(repo, &source_commits, &staged_files)?
+    };
+
+    let target_ai_files = if commits_have_authorship_notes(repo, &target_commits)? {
+        filter_pathspecs_to_ai_touched_files(repo, &target_commits, &staged_files)?
+    } else {
+        Vec::new()
+    };
+    debug_log(&format!(
+        "[BENCHMARK] squash prep: history+AI file filtering took {:?} (source_ai={}, target_ai={})",
+        history_start.elapsed(),
+        source_ai_files.len(),
+        target_ai_files.len()
+    ));
+
+    if source_ai_files.is_empty() && target_ai_files.is_empty() {
+        debug_log("merge --squash staged files contain no AI-touched paths; skipping rewrite prep");
         return Ok(());
     }
 
-    // Step 3: Create VirtualAttributions for both branches
-    // Use merge_base to limit blame range for performance
-    let repo_clone = repo.clone();
-    let merge_base_clone = merge_base.clone();
-    let source_va = smol::block_on(async {
-        VirtualAttributions::new_for_base_commit(
-            repo_clone,
-            source_head_sha.to_string(),
-            &changed_files,
-            merge_base_clone,
-        )
-        .await
-    })?;
+    let mut tracked_files_set: HashSet<String> = source_ai_files.iter().cloned().collect();
+    tracked_files_set.extend(target_ai_files.iter().cloned());
+    let mut tracked_files: Vec<String> = tracked_files_set.iter().cloned().collect();
+    tracked_files.sort();
 
-    let repo_clone = repo.clone();
-    let target_va = smol::block_on(async {
-        VirtualAttributions::new_for_base_commit(
-            repo_clone,
-            target_branch_head_sha.to_string(),
-            &changed_files,
-            merge_base,
-        )
-        .await
-    })?;
+    // Step 2: Create VirtualAttributions for each side only when needed.
+    // Skipping a side avoids N x blame calls and prompt scans.
+    let source_va_start = Instant::now();
+    let mut source_va = if source_ai_files.is_empty() {
+        VirtualAttributions::empty(repo.clone(), source_head_sha.to_string())
+    } else {
+        let repo_clone = repo.clone();
+        let merge_base_clone = merge_base.clone();
+        smol::block_on(async {
+            VirtualAttributions::new_for_base_commit_with_options(
+                repo_clone,
+                source_head_sha.to_string(),
+                &source_ai_files,
+                merge_base_clone,
+                false,
+            )
+            .await
+        })?
+    };
+    debug_log(&format!(
+        "[BENCHMARK] squash prep: source VA build took {:?}",
+        source_va_start.elapsed()
+    ));
 
-    // Step 3: Read staged files content (final state after squash)
-    let staged_files = repo.get_all_staged_files_content(&changed_files)?;
+    let target_va_start = Instant::now();
+    let mut target_va = if target_ai_files.is_empty() {
+        VirtualAttributions::empty(repo.clone(), target_branch_head_sha.to_string())
+    } else {
+        let repo_clone = repo.clone();
+        smol::block_on(async {
+            VirtualAttributions::new_for_base_commit_with_options(
+                repo_clone,
+                target_branch_head_sha.to_string(),
+                &target_ai_files,
+                merge_base,
+                false,
+            )
+            .await
+        })?
+    };
+    debug_log(&format!(
+        "[BENCHMARK] squash prep: target VA build took {:?}",
+        target_va_start.elapsed()
+    ));
+
+    // Squash rewrite does not require carrying transcript payloads through INITIAL.
+    // Dropping them here avoids expensive cloning/stripping in post-commit.
+    source_va.clear_prompt_messages();
+    target_va.clear_prompt_messages();
+
+    // Step 3: Read staged content only for files that can carry AI attribution.
+    let staged_content_start = Instant::now();
+    let staged_files = repo.get_all_staged_files_content(&tracked_files)?;
+    debug_log(&format!(
+        "[BENCHMARK] squash prep: staged content read took {:?}",
+        staged_content_start.elapsed()
+    ));
 
     // Step 4: Merge VirtualAttributions, favoring target branch (HEAD)
-    let merged_va = merge_attributions_favoring_first(target_va, source_va, staged_files)?;
+    let merge_va_start = Instant::now();
+    let can_reuse_source_directly = target_ai_files.is_empty()
+        && source_va
+            .files()
+            .iter()
+            .all(|file_path| source_va.get_file_content(file_path) == staged_files.get(file_path));
+    let merged_va = if can_reuse_source_directly {
+        source_va
+    } else {
+        merge_attributions_favoring_first(target_va, source_va, staged_files)?
+    };
+    debug_log(&format!(
+        "[BENCHMARK] squash prep: merge_attributions took {:?}",
+        merge_va_start.elapsed()
+    ));
 
     // Step 5: Convert to INITIAL (everything is uncommitted in a squash)
     // Pass same SHA for parent and commit to get empty diff (no committed hunks)
-    let (_authorship_log, initial_attributions) = merged_va
-        .to_authorship_log_and_initial_working_log(
-            repo,
-            target_branch_head_sha,
-            target_branch_head_sha,
-            None,
-        )?;
+    let to_initial_start = Instant::now();
+    let initial_attributions = if can_reuse_source_directly {
+        let files = merged_va
+            .attributions
+            .iter()
+            .filter_map(|(file_path, (_, line_attrs))| {
+                if line_attrs.is_empty() {
+                    None
+                } else {
+                    Some((file_path.clone(), compress_line_attributions(line_attrs)))
+                }
+            })
+            .collect();
+        let prompts = flatten_prompts_for_metadata(merged_va.prompts())
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        crate::git::repo_storage::InitialAttributions { files, prompts }
+    } else {
+        let (_authorship_log, initial_attributions) = merged_va
+            .to_authorship_log_and_initial_working_log(
+                repo,
+                target_branch_head_sha,
+                target_branch_head_sha,
+                Some(&tracked_files_set),
+            )?;
+        initial_attributions
+    };
+    debug_log(&format!(
+        "[BENCHMARK] squash prep: VA->INITIAL conversion took {:?}",
+        to_initial_start.elapsed()
+    ));
 
     // Step 6: Write INITIAL file
+    let write_initial_start = Instant::now();
     if !initial_attributions.files.is_empty() {
         let working_log = repo
             .storage
             .working_log_for_base_commit(target_branch_head_sha);
         working_log
             .write_initial_attributions(initial_attributions.files, initial_attributions.prompts)?;
+        if let Ok(tree_oid) = repo.index_tree_oid() {
+            let _ = working_log.write_squash_tree_oid(&tree_oid);
+        }
     }
+    debug_log(&format!(
+        "[BENCHMARK] squash prep: write INITIAL/tree marker took {:?}",
+        write_initial_start.elapsed()
+    ));
+    debug_log(&format!(
+        "[BENCHMARK] squash prep: total prepare_working_log_after_squash took {:?}",
+        prep_start.elapsed()
+    ));
 
     Ok(())
+}
+
+fn compress_line_attributions(
+    line_attrs: &[crate::authorship::attribution_tracker::LineAttribution],
+) -> Vec<crate::authorship::attribution_tracker::LineAttribution> {
+    if line_attrs.is_empty() {
+        return Vec::new();
+    }
+
+    let mut attrs = line_attrs.to_vec();
+    attrs.sort_by(|a, b| {
+        a.start_line
+            .cmp(&b.start_line)
+            .then(a.end_line.cmp(&b.end_line))
+            .then(a.author_id.cmp(&b.author_id))
+            .then(a.overrode.cmp(&b.overrode))
+    });
+
+    let mut compressed: Vec<crate::authorship::attribution_tracker::LineAttribution> =
+        Vec::with_capacity(attrs.len());
+    for attr in attrs {
+        if let Some(last) = compressed.last_mut()
+            && last.author_id == attr.author_id
+            && last.overrode == attr.overrode
+            && attr.start_line <= last.end_line.saturating_add(1)
+        {
+            last.end_line = last.end_line.max(attr.end_line);
+        } else {
+            compressed.push(attr);
+        }
+    }
+
+    compressed
+}
+
+fn commits_in_range_with_merge_base(
+    repo: &Repository,
+    merge_base: Option<&String>,
+    head_sha: &str,
+) -> Result<Vec<String>, GitAiError> {
+    if let Some(base_sha) = merge_base {
+        let range =
+            CommitRange::new_infer_refname(repo, base_sha.clone(), head_sha.to_string(), None)?;
+        Ok(range.all_commits())
+    } else {
+        Ok(vec![head_sha.to_string()])
+    }
 }
 
 /// Rewrite authorship after a squash or rebase merge performed in CI/GUI
@@ -260,13 +438,8 @@ pub fn rewrite_authorship_after_squash_or_rebase(
 
     // Get commits from source branch (from source_head back to merge_base)
     // Uses git rev-list which safely handles the range without infinite walking
-    let source_commits = if let Some(ref base) = merge_base {
-        let range =
-            CommitRange::new_infer_refname(repo, base.clone(), source_head_sha.to_string(), None)?;
-        range.all_commits()
-    } else {
-        vec![source_head_sha.to_string()]
-    };
+    let source_commits =
+        commits_in_range_with_merge_base(repo, merge_base.as_ref(), source_head_sha)?;
     let changed_files =
         filter_pathspecs_to_ai_touched_files(repo, &source_commits, &changed_files)?;
 
@@ -297,6 +470,16 @@ pub fn rewrite_authorship_after_squash_or_rebase(
         changed_files.len()
     ));
 
+    let target_commits =
+        commits_in_range_with_merge_base(repo, merge_base.as_ref(), &target_branch_head_sha)?;
+    let target_ai_files =
+        filter_pathspecs_to_ai_touched_files(repo, &target_commits, &changed_files)?;
+
+    let mut tracked_files_set: HashSet<String> = changed_files.iter().cloned().collect();
+    tracked_files_set.extend(target_ai_files.iter().cloned());
+    let mut tracked_files: Vec<String> = tracked_files_set.iter().cloned().collect();
+    tracked_files.sort();
+
     // Step 4: Create VirtualAttributions for both branches
     // Use merge_base to limit blame range for performance
     let repo_clone = repo.clone();
@@ -311,19 +494,23 @@ pub fn rewrite_authorship_after_squash_or_rebase(
         .await
     })?;
 
-    let repo_clone = repo.clone();
-    let target_va = smol::block_on(async {
-        VirtualAttributions::new_for_base_commit(
-            repo_clone,
-            target_branch_head_sha.clone(),
-            &changed_files,
-            merge_base,
-        )
-        .await
-    })?;
+    let target_va = if target_ai_files.is_empty() {
+        VirtualAttributions::empty(repo.clone(), target_branch_head_sha.clone())
+    } else {
+        let repo_clone = repo.clone();
+        smol::block_on(async {
+            VirtualAttributions::new_for_base_commit(
+                repo_clone,
+                target_branch_head_sha.clone(),
+                &target_ai_files,
+                merge_base,
+            )
+            .await
+        })?
+    };
 
     // Step 4: Read committed files from merge commit (captures final state with conflict resolutions)
-    let committed_files = get_committed_files_content(repo, merge_commit_sha, &changed_files)?;
+    let committed_files = get_committed_files_content(repo, merge_commit_sha, &tracked_files)?;
 
     debug_log(&format!(
         "Read {} committed files from merge commit",
@@ -2748,7 +2935,8 @@ fn transform_attributions_to_final_state(
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_changed_file_contents_from_diff, get_pathspecs_from_commits,
+        collect_changed_file_contents_from_diff, compress_line_attributions,
+        get_pathspecs_from_commits,
         parse_cat_file_batch_output_with_oids, transform_attributions_to_final_state,
         try_fast_path_rebase_note_remap, walk_commits_to_base,
     };
@@ -2972,6 +3160,73 @@ mod tests {
             err.to_string().contains("truncated"),
             "unexpected error: {}",
             err
+        );
+    }
+
+    #[test]
+    fn compress_line_attributions_merges_only_compatible_adjacent_ranges() {
+        let compressed = compress_line_attributions(&[
+            LineAttribution {
+                start_line: 5,
+                end_line: 5,
+                author_id: "ai-1".to_string(),
+                overrode: None,
+            },
+            LineAttribution {
+                start_line: 1,
+                end_line: 2,
+                author_id: "ai-1".to_string(),
+                overrode: None,
+            },
+            LineAttribution {
+                start_line: 3,
+                end_line: 4,
+                author_id: "ai-1".to_string(),
+                overrode: None,
+            },
+            LineAttribution {
+                start_line: 6,
+                end_line: 6,
+                author_id: "ai-1".to_string(),
+                overrode: Some("human".to_string()),
+            },
+            LineAttribution {
+                start_line: 9,
+                end_line: 9,
+                author_id: "ai-2".to_string(),
+                overrode: None,
+            },
+            LineAttribution {
+                start_line: 7,
+                end_line: 8,
+                author_id: "ai-2".to_string(),
+                overrode: None,
+            },
+        ]);
+
+        assert_eq!(
+            compressed,
+            vec![
+                LineAttribution {
+                    start_line: 1,
+                    end_line: 5,
+                    author_id: "ai-1".to_string(),
+                    overrode: None,
+                },
+                LineAttribution {
+                    start_line: 6,
+                    end_line: 6,
+                    author_id: "ai-1".to_string(),
+                    overrode: Some("human".to_string()),
+                },
+                LineAttribution {
+                    start_line: 7,
+                    end_line: 9,
+                    author_id: "ai-2".to_string(),
+                    overrode: None,
+                },
+            ],
+            "compression should merge contiguous ranges only when author/override match"
         );
     }
 

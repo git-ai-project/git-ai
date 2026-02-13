@@ -161,6 +161,22 @@ pub fn run(
             debug_log("No AI edits,in pre-commit checkpoint, skipping");
             return Ok((0, 0, 0));
         }
+
+        // Fast path for squash commits: merge --squash prep already materialized INITIAL
+        // attributions. If the staged tree is unchanged since prep, running checkpoint
+        // does not add information and only burns time.
+        if has_no_ai_edits
+            && has_initial_attributions
+            && is_squash_commit_in_progress(repo)
+            && !Config::get().get_feature_flags().inter_commit_move
+            && let (Some(prepared_tree), Ok(current_tree)) =
+                (working_log.read_squash_tree_oid(), repo.index_tree_oid())
+            && prepared_tree == current_tree
+        {
+            let _ = working_log.mark_squash_precommit_skipped();
+            debug_log("Squash commit with unchanged staged tree; skipping pre-commit checkpoint");
+            return Ok((0, 0, 0));
+        }
     }
 
     // Set dirty files if available
@@ -518,6 +534,10 @@ pub fn run(
         checkpoint_start.elapsed()
     ));
     Ok((entries.len(), files.len(), checkpoints.len()))
+}
+
+fn is_squash_commit_in_progress(repo: &Repository) -> bool {
+    repo.path().join("SQUASH_MSG").exists()
 }
 
 // Gets tracked changes AND
@@ -1890,6 +1910,124 @@ mod tests {
         assert!(
             human_only_entry.line_attributions.is_empty(),
             "Human-only file should use fast path with empty line attributions"
+        );
+    }
+
+    #[test]
+    fn test_pre_commit_squash_fast_path_skips_when_staged_tree_matches_marker() {
+        let (tmp_repo, mut file, _) = TmpRepo::new_with_base_commit().unwrap();
+        file.append("squash staged line\n").unwrap();
+
+        let repo = tmp_repo.gitai_repo();
+        let base_commit = repo
+            .head()
+            .ok()
+            .and_then(|head| head.target().ok())
+            .unwrap_or_else(|| "initial".to_string());
+        let working_log = repo.storage.working_log_for_base_commit(&base_commit);
+
+        let mut initial_files = HashMap::new();
+        initial_files.insert(
+            file.filename().to_string(),
+            vec![LineAttribution {
+                start_line: 2,
+                end_line: 2,
+                author_id: "mock_ai".to_string(),
+                overrode: None,
+            }],
+        );
+        working_log
+            .write_initial_attributions(initial_files, HashMap::new())
+            .unwrap();
+
+        let tree_oid = repo.index_tree_oid().unwrap();
+        working_log.write_squash_tree_oid(&tree_oid).unwrap();
+        std::fs::write(repo.path().join("SQUASH_MSG"), "squash in progress").unwrap();
+
+        let (entries_len, files_len, checkpoints_len) = run(
+            repo,
+            "test_user",
+            CheckpointKind::Human,
+            false,
+            false,
+            true,
+            None,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(entries_len, 0, "fast path should skip checkpoint entries");
+        assert_eq!(files_len, 0, "fast path should skip file processing");
+        assert_eq!(checkpoints_len, 0, "fast path should not append checkpoints");
+        assert!(
+            working_log.was_squash_precommit_skipped(),
+            "fast path should mark squash pre-commit as skipped"
+        );
+        assert!(
+            working_log.read_all_checkpoints().unwrap().is_empty(),
+            "no checkpoints should be written on squash fast-path skip"
+        );
+    }
+
+    #[test]
+    fn test_pre_commit_squash_fast_path_does_not_skip_when_tree_marker_mismatches() {
+        let (tmp_repo, mut file, _) = TmpRepo::new_with_base_commit().unwrap();
+        file.append("squash staged line\n").unwrap();
+
+        let repo = tmp_repo.gitai_repo();
+        let base_commit = repo
+            .head()
+            .ok()
+            .and_then(|head| head.target().ok())
+            .unwrap_or_else(|| "initial".to_string());
+        let working_log = repo.storage.working_log_for_base_commit(&base_commit);
+
+        let mut initial_files = HashMap::new();
+        initial_files.insert(
+            file.filename().to_string(),
+            vec![LineAttribution {
+                start_line: 2,
+                end_line: 2,
+                author_id: "mock_ai".to_string(),
+                overrode: None,
+            }],
+        );
+        working_log
+            .write_initial_attributions(initial_files, HashMap::new())
+            .unwrap();
+
+        working_log
+            .write_squash_tree_oid("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+            .unwrap();
+        std::fs::write(repo.path().join("SQUASH_MSG"), "squash in progress").unwrap();
+
+        let (entries_len, files_len, checkpoints_len) = run(
+            repo,
+            "test_user",
+            CheckpointKind::Human,
+            false,
+            false,
+            true,
+            None,
+            true,
+        )
+        .unwrap();
+
+        assert!(
+            files_len > 0,
+            "tree mismatch should take normal pre-commit path and process files"
+        );
+        assert!(
+            entries_len > 0,
+            "tree mismatch should produce checkpoint entries"
+        );
+        assert!(
+            checkpoints_len > 0,
+            "tree mismatch should append a new checkpoint"
+        );
+        assert!(
+            !working_log.was_squash_precommit_skipped(),
+            "tree mismatch must not mark squash pre-commit as skipped"
         );
     }
 
