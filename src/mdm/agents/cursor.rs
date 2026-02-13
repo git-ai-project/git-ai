@@ -427,6 +427,7 @@ impl HookInstaller for CursorInstaller {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mdm::utils::clean_path;
     use std::fs;
     use tempfile::TempDir;
 
@@ -641,6 +642,30 @@ mod tests {
         assert_eq!(
             after_edit[0].get("command").unwrap().as_str().unwrap(),
             git_ai_cmd
+        );
+    }
+
+    #[test]
+    fn test_cursor_hook_commands_no_windows_extended_path_prefix() {
+        let raw_path = PathBuf::from(r"\\?\C:\Users\USERNAME\.git-ai\bin\git-ai.exe");
+        let binary_path = clean_path(raw_path);
+
+        let before_submit_cmd = format!("{} {}", binary_path.display(), CURSOR_BEFORE_SUBMIT_CMD);
+        let after_edit_cmd = format!("{} {}", binary_path.display(), CURSOR_AFTER_EDIT_CMD);
+
+        assert!(
+            !before_submit_cmd.contains(r"\\?\"),
+            "beforeSubmitPrompt command should not contain \\\\?\\ prefix, got: {}",
+            before_submit_cmd
+        );
+        assert!(
+            !after_edit_cmd.contains(r"\\?\"),
+            "afterFileEdit command should not contain \\\\?\\ prefix, got: {}",
+            after_edit_cmd
+        );
+        assert!(
+            before_submit_cmd.contains("checkpoint cursor"),
+            "command should still contain checkpoint args"
         );
     }
 }

@@ -557,6 +557,18 @@ pub fn install_vsc_editor_extension(
     )))
 }
 
+/// Strip the Windows extended-length path prefix (`\\?\`) if present.
+/// On Windows, `std::fs::canonicalize` returns paths prefixed with `\\?\`
+/// (e.g. `\\?\C:\Users\...`). This prefix causes problems when the path is
+/// embedded in hook command strings for tools like Claude Code, Cursor, etc.
+pub fn clean_path(path: PathBuf) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(stripped) = s.strip_prefix(r"\\?\") {
+        return PathBuf::from(stripped);
+    }
+    path
+}
+
 /// Get the absolute path to the currently running binary
 pub fn get_current_binary_path() -> Result<PathBuf, GitAiError> {
     let path = std::env::current_exe()?;
@@ -564,7 +576,7 @@ pub fn get_current_binary_path() -> Result<PathBuf, GitAiError> {
     // Canonicalize to resolve any symlinks
     let canonical = path.canonicalize()?;
 
-    Ok(canonical)
+    Ok(clean_path(canonical))
 }
 
 /// Path to the git shim that git clients should use
@@ -1125,5 +1137,36 @@ mod tests {
         // Unknown editor should return empty
         let unknown_candidates = get_editor_cli_candidates("unknown");
         assert!(unknown_candidates.is_empty());
+    }
+
+    #[test]
+    fn test_clean_path_strips_windows_prefix() {
+        let path = PathBuf::from(r"\\?\C:\Users\test\.git-ai\bin\git-ai.exe");
+        let cleaned = clean_path(path);
+        let s = cleaned.to_string_lossy();
+        assert!(
+            !s.starts_with(r"\\?\"),
+            "clean_path should strip the \\\\?\\ prefix, got: {}",
+            s
+        );
+        assert!(
+            s.contains("git-ai"),
+            "clean_path should preserve the rest of the path, got: {}",
+            s
+        );
+    }
+
+    #[test]
+    fn test_clean_path_preserves_normal_windows_path() {
+        let path = PathBuf::from(r"C:\Users\test\.git-ai\bin\git-ai.exe");
+        let cleaned = clean_path(path.clone());
+        assert_eq!(cleaned, path);
+    }
+
+    #[test]
+    fn test_clean_path_preserves_unix_path() {
+        let path = PathBuf::from("/usr/local/bin/git-ai");
+        let cleaned = clean_path(path.clone());
+        assert_eq!(cleaned, path);
     }
 }

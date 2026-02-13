@@ -338,6 +338,7 @@ impl HookInstaller for ClaudeCodeInstaller {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mdm::utils::clean_path;
     use std::fs;
     use tempfile::TempDir;
 
@@ -657,6 +658,30 @@ mod tests {
         assert_eq!(
             post_hooks[0].get("command").unwrap().as_str().unwrap(),
             "prettier --write"
+        );
+    }
+
+    #[test]
+    fn test_claude_hook_commands_no_windows_extended_path_prefix() {
+        let raw_path = PathBuf::from(r"\\?\C:\Users\USERNAME\.git-ai\bin\git-ai.exe");
+        let binary_path = clean_path(raw_path);
+
+        let pre_tool_cmd = format!("{} {}", binary_path.display(), CLAUDE_PRE_TOOL_CMD);
+        let post_tool_cmd = format!("{} {}", binary_path.display(), CLAUDE_POST_TOOL_CMD);
+
+        assert!(
+            !pre_tool_cmd.contains(r"\\?\"),
+            "PreToolUse command should not contain \\\\?\\ prefix, got: {}",
+            pre_tool_cmd
+        );
+        assert!(
+            !post_tool_cmd.contains(r"\\?\"),
+            "PostToolUse command should not contain \\\\?\\ prefix, got: {}",
+            post_tool_cmd
+        );
+        assert!(
+            pre_tool_cmd.contains("checkpoint claude"),
+            "command should still contain checkpoint args"
         );
     }
 }
