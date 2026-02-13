@@ -1958,7 +1958,10 @@ mod tests {
 
         assert_eq!(entries_len, 0, "fast path should skip checkpoint entries");
         assert_eq!(files_len, 0, "fast path should skip file processing");
-        assert_eq!(checkpoints_len, 0, "fast path should not append checkpoints");
+        assert_eq!(
+            checkpoints_len, 0,
+            "fast path should not append checkpoints"
+        );
         assert!(
             working_log.was_squash_precommit_skipped(),
             "fast path should mark squash pre-commit as skipped"

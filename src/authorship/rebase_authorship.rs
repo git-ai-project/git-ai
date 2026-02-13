@@ -2936,9 +2936,9 @@ fn transform_attributions_to_final_state(
 mod tests {
     use super::{
         collect_changed_file_contents_from_diff, compress_line_attributions,
-        get_pathspecs_from_commits,
-        parse_cat_file_batch_output_with_oids, transform_attributions_to_final_state,
-        try_fast_path_rebase_note_remap, walk_commits_to_base,
+        get_pathspecs_from_commits, parse_cat_file_batch_output_with_oids,
+        transform_attributions_to_final_state, try_fast_path_rebase_note_remap,
+        walk_commits_to_base,
     };
     use crate::authorship::attribution_tracker::{Attribution, LineAttribution};
     use crate::authorship::authorship_log::LineRange;

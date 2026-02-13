@@ -840,12 +840,8 @@ mod tests {
             "human".to_string(),
             vec![],
         );
-        let empty_entry = WorkingLogEntry::new(
-            "file.txt".to_string(),
-            "blob".to_string(),
-            vec![],
-            vec![],
-        );
+        let empty_entry =
+            WorkingLogEntry::new("file.txt".to_string(), "blob".to_string(), vec![], vec![]);
         assert!(
             !checkpoint_entry_requires_post_processing(&empty_human_checkpoint, &empty_entry),
             "human entry with no AI attribution should be skipped"

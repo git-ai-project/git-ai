@@ -2914,7 +2914,9 @@ index 0000000..abc1234 100644
             "b.txt".to_string(),
             "missing.txt".to_string(),
         ];
-        let contents = repo.get_files_content_at_commit(&commit_sha, &files).unwrap();
+        let contents = repo
+            .get_files_content_at_commit(&commit_sha, &files)
+            .unwrap();
 
         assert_eq!(contents.get("a.txt").map(String::as_str), Some("a1\n"));
         assert_eq!(contents.get("b.txt").map(String::as_str), Some("b1\n"));
@@ -2935,7 +2937,9 @@ index 0000000..abc1234 100644
         tmp_repo
             .write_file("tracked.txt", "base\nstaged update\n", true)
             .unwrap();
-        tmp_repo.write_file("new.txt", "new staged file\n", true).unwrap();
+        tmp_repo
+            .write_file("new.txt", "new staged file\n", true)
+            .unwrap();
 
         let repo = tmp_repo.gitai_repo();
         let files = vec![
@@ -3011,7 +3015,10 @@ index 0000000..abc1234 100644
             .write_file("tracked.txt", "base\nstaged update\n", true)
             .unwrap();
         let after = repo.index_tree_oid().unwrap();
-        assert!(!after.is_empty(), "tree oid should not be empty after staging");
+        assert!(
+            !after.is_empty(),
+            "tree oid should not be empty after staging"
+        );
         assert_ne!(
             before, after,
             "staging file content changes should produce a different index tree OID"
