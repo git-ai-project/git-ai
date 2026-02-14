@@ -655,7 +655,7 @@ pub fn get_git_diff_stats(
     args.push(commit_sha.to_string());
 
     let output = crate::git::repository::exec_git(&args)?;
-    let stdout = String::from_utf8(output.stdout)?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
 
     let mut added_lines = 0u32;
     let mut deleted_lines = 0u32;

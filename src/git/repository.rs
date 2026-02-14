@@ -1776,7 +1776,7 @@ impl Repository {
         };
 
         let output = exec_git(&args)?;
-        let diff_output = String::from_utf8(output.stdout)?;
+        let diff_output = String::from_utf8_lossy(&output.stdout);
 
         let mut result = parse_diff_added_lines(&diff_output)?;
 
@@ -1851,7 +1851,7 @@ impl Repository {
         };
 
         let output = exec_git(&args)?;
-        let diff_output = String::from_utf8(output.stdout)?;
+        let diff_output = String::from_utf8_lossy(&output.stdout);
 
         let mut result = parse_diff_added_lines(&diff_output)?;
 
@@ -1900,7 +1900,7 @@ impl Repository {
         };
 
         let output = exec_git(&args)?;
-        let diff_output = String::from_utf8(output.stdout)?;
+        let diff_output = String::from_utf8_lossy(&output.stdout);
 
         let (mut all_added, mut pure_insertions) =
             parse_diff_added_lines_with_insertions(&diff_output)?;
