@@ -15,7 +15,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            test_threads: 8
+          - os: macos-latest
+            test_threads: 8
+          - os: windows-latest
+            test_threads: 1
 
     steps:
       - name: Checkout code
@@ -42,7 +48,7 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Run tests
-        run: cargo test -- --test-threads=8
+        run: cargo test -- --test-threads=${{ matrix.test_threads }}
         env:
           CARGO_INCREMENTAL: 0
 
