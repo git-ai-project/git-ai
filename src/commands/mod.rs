@@ -4,6 +4,7 @@ pub mod checkpoint_agent;
 pub mod ci_handlers;
 pub mod config;
 pub mod continue_session;
+pub mod core_hooks;
 pub mod diff;
 pub mod exchange_nonce;
 pub mod flush_cas;

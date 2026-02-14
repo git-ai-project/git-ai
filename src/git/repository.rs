@@ -9,6 +9,7 @@ use crate::git::repo_storage::RepoStorage;
 use crate::git::rewrite_log::RewriteLogEvent;
 use crate::git::status::MAX_PATHSPEC_ARGS;
 use crate::git::sync_authorship::{fetch_authorship_notes, push_authorship_notes};
+use crate::utils::GIT_AI_SKIP_CORE_HOOKS_ENV;
 #[cfg(windows)]
 use crate::utils::is_interactive_terminal;
 
@@ -1483,6 +1484,7 @@ impl Repository {
 
             let old_tip: Option<String> = match Command::new(config::Config::get().git_cmd())
                 .args(args_with_disabled_hooks_if_needed(&rp_args))
+                .env(GIT_AI_SKIP_CORE_HOOKS_ENV, "1")
                 .output()
             {
                 Ok(output) if output.status.success() => {
@@ -2288,6 +2290,7 @@ pub fn exec_git(args: &[String]) -> Result<Output, GitAiError> {
     let effective_args = args_with_disabled_hooks_if_needed(args);
     let mut cmd = Command::new(config::Config::get().git_cmd());
     cmd.args(&effective_args);
+    cmd.env(GIT_AI_SKIP_CORE_HOOKS_ENV, "1");
 
     #[cfg(windows)]
     {
@@ -2317,6 +2320,7 @@ pub fn exec_git_stdin(args: &[String], stdin_data: &[u8]) -> Result<Output, GitA
     let effective_args = args_with_disabled_hooks_if_needed(args);
     let mut cmd = Command::new(config::Config::get().git_cmd());
     cmd.args(&effective_args)
+        .env(GIT_AI_SKIP_CORE_HOOKS_ENV, "1")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -2363,6 +2367,7 @@ pub fn exec_git_stdin_with_env(
     let effective_args = args_with_disabled_hooks_if_needed(args);
     let mut cmd = Command::new(config::Config::get().git_cmd());
     cmd.args(&effective_args)
+        .env(GIT_AI_SKIP_CORE_HOOKS_ENV, "1")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());

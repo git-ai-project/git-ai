@@ -109,11 +109,21 @@ fn save_stash_authorship_log(repo: &Repository, pathspecs: &[String]) -> Result<
 
     // Get the stash SHA that was just created (stash@{0})
     let stash_sha = resolve_stash_to_sha(repo, "stash@{0}")?;
+    save_stash_authorship_log_for_sha(repo, &head_sha, &stash_sha, pathspecs)
+}
+
+/// Save stash attributions for a specific stash SHA.
+pub(crate) fn save_stash_authorship_log_for_sha(
+    repo: &Repository,
+    head_sha: &str,
+    stash_sha: &str,
+    pathspecs: &[String],
+) -> Result<(), GitAiError> {
     debug_log(&format!("Stash created with SHA: {}", stash_sha));
 
     // Build VirtualAttributions from the working log before it was cleared
     let working_log_va =
-        VirtualAttributions::from_just_working_log(repo.clone(), head_sha.clone(), None)?;
+        VirtualAttributions::from_just_working_log(repo.clone(), head_sha.to_string(), None)?;
 
     // Filter attributions to only include files that match the pathspecs
     let filtered_files: Vec<String> = if pathspecs.is_empty() {
@@ -163,7 +173,7 @@ fn save_stash_authorship_log(repo: &Repository, pathspecs: &[String]) -> Result<
     ));
 
     // Delete the working log entries for files that were stashed
-    delete_working_log_for_files(repo, &head_sha, &filtered_files)?;
+    delete_working_log_for_files(repo, head_sha, &filtered_files)?;
     debug_log(&format!(
         "Deleted working log entries for {} files",
         filtered_files.len()
@@ -177,6 +187,14 @@ fn restore_stash_attributions(
     repo: &Repository,
     stash_sha: &str,
     _human_author: &str,
+) -> Result<(), GitAiError> {
+    restore_stash_attributions_from_sha(repo, stash_sha)
+}
+
+/// Restore attributions from a specific stash SHA.
+pub(crate) fn restore_stash_attributions_from_sha(
+    repo: &Repository,
+    stash_sha: &str,
 ) -> Result<(), GitAiError> {
     debug_log(&format!(
         "Restoring stash attributions from SHA: {}",
@@ -292,6 +310,14 @@ fn read_stash_note(repo: &Repository, stash_sha: &str) -> Result<String, GitAiEr
     Ok(content.to_string())
 }
 
+/// Read a stash authorship note for a stash SHA.
+pub(crate) fn read_stash_authorship_note(
+    repo: &Repository,
+    stash_sha: &str,
+) -> Result<String, GitAiError> {
+    read_stash_note(repo, stash_sha)
+}
+
 /// Resolve a stash reference to its commit SHA
 fn resolve_stash_to_sha(repo: &Repository, stash_ref: &str) -> Result<String, GitAiError> {
     let mut args = repo.global_args_for_exec();
@@ -311,6 +337,35 @@ fn resolve_stash_to_sha(repo: &Repository, stash_ref: &str) -> Result<String, Gi
     let sha = stdout.trim().to_string();
 
     Ok(sha)
+}
+
+/// List files represented by a stash commit SHA.
+pub(crate) fn stash_files_for_sha(
+    repo: &Repository,
+    stash_sha: &str,
+) -> Result<Vec<String>, GitAiError> {
+    let mut args = repo.global_args_for_exec();
+    args.push("stash".to_string());
+    args.push("show".to_string());
+    args.push("--name-only".to_string());
+    args.push("--include-untracked".to_string());
+    args.push(stash_sha.to_string());
+
+    let output = exec_git(&args)?;
+    if !output.status.success() {
+        return Err(GitAiError::Generic(format!(
+            "Failed to list stash files for '{}': git stash show exited with status {}",
+            stash_sha, output.status
+        )));
+    }
+
+    let stdout = String::from_utf8(output.stdout)?;
+    Ok(stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect())
 }
 
 /// Extract pathspecs from stash push/save command
