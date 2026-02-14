@@ -1,9 +1,10 @@
 mod repos;
 
 use git_ai::git::repository::find_repository_in_path;
-use git_ai::git::rewrite_log::RewriteLogEvent;
+use git_ai::git::rewrite_log::{ResetKind, RewriteLogEvent};
 use repos::test_file::ExpectedLineExt;
 use repos::test_repo::TestRepo;
+use std::fs;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RewriteEventCounts {
@@ -50,6 +51,20 @@ fn rewrite_event_counts(repo: &TestRepo) -> RewriteEventCounts {
         rebase_complete: rebase_complete_events,
         cherry_pick_complete: cherry_pick_complete_events,
     }
+}
+
+fn latest_reset_kind(repo: &TestRepo) -> Option<ResetKind> {
+    let gitai_repo =
+        find_repository_in_path(repo.path().to_str().unwrap()).expect("failed to open repository");
+    let events = gitai_repo
+        .storage
+        .read_rewrite_events()
+        .expect("failed to read rewrite events");
+
+    events.into_iter().find_map(|event| match event {
+        RewriteLogEvent::Reset { reset } => Some(reset.kind),
+        _ => None,
+    })
 }
 
 #[test]
@@ -127,6 +142,45 @@ fn test_reset_rewrite_event_recorded_once() {
         after_counts.reset,
         before_counts.reset + 1,
         "expected exactly one reset rewrite event for a single reset operation",
+    );
+}
+
+#[test]
+fn test_reset_hard_with_untracked_files_records_hard_mode() {
+    let repo = TestRepo::new();
+
+    let mut file = repo.filename("tracked.txt");
+    file.set_contents(vec!["line 1".to_string()]);
+    let first_commit = repo
+        .stage_all_and_commit("first commit")
+        .expect("first commit should succeed");
+
+    file.set_contents(vec!["line 1".human(), "line 2 ai".ai()]);
+    repo.git_ai(&["checkpoint", "mock_ai"])
+        .expect("checkpoint should succeed");
+    repo.stage_all_and_commit("second commit")
+        .expect("second commit should succeed");
+
+    fs::write(repo.path().join("scratch.tmp"), "left alone\n").expect("write untracked file");
+    let before_counts = rewrite_event_counts(&repo);
+
+    repo.git(&["reset", "--hard", &first_commit.commit_sha])
+        .expect("reset --hard should succeed");
+
+    let after_counts = rewrite_event_counts(&repo);
+    assert_eq!(
+        after_counts.reset,
+        before_counts.reset + 1,
+        "expected exactly one reset rewrite event for reset --hard",
+    );
+    assert_eq!(
+        latest_reset_kind(&repo),
+        Some(ResetKind::Hard),
+        "untracked files must not cause reset --hard to be recorded as mixed",
+    );
+    assert!(
+        repo.read_file("scratch.tmp").is_some(),
+        "untracked file should remain after reset --hard",
     );
 }
 

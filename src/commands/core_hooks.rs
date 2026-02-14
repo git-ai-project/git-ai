@@ -48,6 +48,7 @@ struct CoreHookState {
     pending_pull_autostash: Option<PendingPullAutostashState>,
     pending_cherry_pick: Option<PendingCherryPickState>,
     pending_stash_apply: Option<PendingStashApplyState>,
+    pending_stash_ref_update: Option<PendingStashRefUpdateState>,
     pending_prepared_orig_head_ms: Option<u128>,
     pending_commit_base_head: Option<String>,
 }
@@ -55,6 +56,12 @@ struct CoreHookState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PendingStashApplyState {
     created_at_ms: u128,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PendingStashRefUpdateState {
+    created_at_ms: u128,
+    stash_count_before: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -503,8 +510,7 @@ fn handle_reference_transaction(
     let mut saw_orig_head_update = false;
     let mut moved_branch_ref: Option<(String, String)> = None;
     let mut moved_head_ref: Option<(String, String)> = None;
-    let mut created_stash_sha: Option<String> = None;
-    let mut deleted_stash_sha: Option<String> = None;
+    let mut stash_ref_update: Option<(String, String)> = None;
     let mut created_cherry_pick_head: Option<String> = None;
     let mut deleted_cherry_pick_head: Option<String> = None;
     let mut created_auto_merge_sha: Option<String> = None;
@@ -540,14 +546,8 @@ fn handle_reference_transaction(
             moved_head_ref = Some((old.to_string(), new.to_string()));
         }
 
-        if reference == "refs/stash" {
-            let (created, deleted) = stash_ref_transition(old, new);
-            if let Some(created) = created {
-                created_stash_sha = Some(created);
-            }
-            if let Some(deleted) = deleted {
-                deleted_stash_sha = Some(deleted);
-            }
+        if reference == "refs/stash" && old != new {
+            stash_ref_update = Some((old.to_string(), new.to_string()));
         }
 
         if reference == "CHERRY_PICK_HEAD" {
@@ -579,6 +579,15 @@ fn handle_reference_transaction(
             }
         }
 
+        if stash_ref_update.is_some()
+            && let Some(stash_count_before) = stash_entry_count(repository)
+        {
+            state.pending_stash_ref_update = Some(PendingStashRefUpdateState {
+                created_at_ms: now_ms(),
+                stash_count_before,
+            });
+        }
+
         let has_recent_orig_head = state
             .pending_prepared_orig_head_ms
             .map(|ts| now_ms().saturating_sub(ts) <= STATE_EVENT_MAX_AGE_MS)
@@ -598,6 +607,12 @@ fn handle_reference_transaction(
             state.pending_prepared_orig_head_ms = None;
         }
 
+        if let Some(pending) = state.pending_stash_ref_update.as_ref()
+            && now_ms().saturating_sub(pending.created_at_ms) > STATE_EVENT_MAX_AGE_MS
+        {
+            state.pending_stash_ref_update = None;
+        }
+
         // Drop stale pull-autostash snapshots that never got restored.
         if let Some(pending) = state.pending_pull_autostash.as_ref()
             && now_ms().saturating_sub(pending.created_at_ms) > PENDING_PULL_AUTOSTASH_MAX_AGE_MS
@@ -608,8 +623,39 @@ fn handle_reference_transaction(
         return Ok(());
     }
 
+    let mut state = load_core_hook_state(repository)?;
+    let stash_count_before = state.pending_stash_ref_update.take().and_then(|pending| {
+        if now_ms().saturating_sub(pending.created_at_ms) <= STATE_EVENT_MAX_AGE_MS {
+            Some(pending.stash_count_before)
+        } else {
+            None
+        }
+    });
+    save_core_hook_state(repository, &state)?;
+
+    let stash_count_after = stash_entry_count(repository);
+    let reflog_action = reflog_action();
+    let (created_stash_sha, deleted_stash_sha) = stash_ref_update
+        .as_ref()
+        .map(|(old, new)| {
+            resolve_stash_ref_transition(
+                old,
+                new,
+                stash_count_before,
+                stash_count_after,
+                reflog_action.as_deref(),
+            )
+        })
+        .unwrap_or((None, None));
+
+    let auto_merge_created = created_auto_merge_sha.is_some();
+
     for remote in remotes_to_sync {
         let _ = fetch_authorship_notes(repository, &remote);
+    }
+
+    if auto_merge_created {
+        mark_pending_stash_apply(repository)?;
     }
 
     if let Some(stash_sha) = created_stash_sha {
@@ -617,12 +663,15 @@ fn handle_reference_transaction(
     }
 
     if let Some(stash_sha) = deleted_stash_sha {
-        let _ = restore_stash_attributions_from_sha(repository, &stash_sha);
-        clear_pending_stash_apply(repository)?;
-    }
-
-    if created_auto_merge_sha.is_some() {
-        mark_pending_stash_apply(repository)?;
+        if should_restore_deleted_stash(auto_merge_created, reflog_action.as_deref()) {
+            let _ = restore_stash_attributions_from_sha(repository, &stash_sha);
+            clear_pending_stash_apply(repository)?;
+        } else {
+            debug_log(&format!(
+                "Skipping stash attribution restore for deleted stash {} (likely stash drop)",
+                stash_sha
+            ));
+        }
     }
 
     if let Some(source_commit) = created_cherry_pick_head {
@@ -776,18 +825,96 @@ fn is_zero_oid(oid: &str) -> bool {
     !oid.is_empty() && oid.chars().all(|c| c == '0')
 }
 
-fn stash_ref_transition(old: &str, new: &str) -> (Option<String>, Option<String>) {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StashRefTransition {
+    Created {
+        stash_sha: String,
+    },
+    Deleted {
+        stash_sha: String,
+    },
+    AmbiguousReplace {
+        old_stash_sha: String,
+        new_stash_sha: String,
+    },
+    Unchanged,
+}
+
+fn classify_stash_ref_transition(old: &str, new: &str) -> StashRefTransition {
+    if old == new {
+        return StashRefTransition::Unchanged;
+    }
+
     if is_zero_oid(old) && !is_zero_oid(new) {
-        return (Some(new.to_string()), None);
+        return StashRefTransition::Created {
+            stash_sha: new.to_string(),
+        };
     }
 
-    if !is_zero_oid(old) {
-        // `old -> zero` is stash drop/pop of last entry.
-        // `old -> non-zero` is stash pop when additional stash entries remain.
-        return (None, Some(old.to_string()));
+    if !is_zero_oid(old) && is_zero_oid(new) {
+        return StashRefTransition::Deleted {
+            stash_sha: old.to_string(),
+        };
     }
 
-    (None, None)
+    if !is_zero_oid(old) && !is_zero_oid(new) {
+        return StashRefTransition::AmbiguousReplace {
+            old_stash_sha: old.to_string(),
+            new_stash_sha: new.to_string(),
+        };
+    }
+
+    StashRefTransition::Unchanged
+}
+
+fn resolve_stash_ref_transition(
+    old: &str,
+    new: &str,
+    stash_count_before: Option<usize>,
+    stash_count_after: Option<usize>,
+    reflog_action: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    match classify_stash_ref_transition(old, new) {
+        StashRefTransition::Created { stash_sha } => (Some(stash_sha), None),
+        StashRefTransition::Deleted { stash_sha } => (None, Some(stash_sha)),
+        StashRefTransition::AmbiguousReplace {
+            old_stash_sha,
+            new_stash_sha,
+        } => match (stash_count_before, stash_count_after) {
+            (Some(before), Some(after)) if after > before => (Some(new_stash_sha), None),
+            (Some(before), Some(after)) if after < before => (None, Some(old_stash_sha)),
+            _ if reflog_action
+                .map(|action| action.starts_with("stash push") || action == "stash")
+                .unwrap_or(false) =>
+            {
+                (Some(new_stash_sha), None)
+            }
+            _ if reflog_action
+                .map(|action| action.starts_with("stash pop") || action.starts_with("stash drop"))
+                .unwrap_or(false) =>
+            {
+                (None, Some(old_stash_sha))
+            }
+            _ => (None, None),
+        },
+        StashRefTransition::Unchanged => (None, None),
+    }
+}
+
+fn should_restore_deleted_stash(auto_merge_created: bool, reflog_action: Option<&str>) -> bool {
+    if auto_merge_created {
+        return true;
+    }
+
+    reflog_action
+        .map(|action| action.starts_with("stash pop"))
+        .unwrap_or(false)
+}
+
+fn stash_entry_count(repository: &Repository) -> Option<usize> {
+    list_stash_shas(repository)
+        .ok()
+        .map(|entries| entries.len())
 }
 
 fn build_rebase_complete_event_from_start(
@@ -1101,6 +1228,7 @@ fn detect_reset_mode_from_worktree(repository: &Repository) -> ResetKind {
     let has_unstaged_changes = entries.iter().any(|entry| {
         entry.unstaged != crate::git::status::StatusCode::Unmodified
             && entry.unstaged != crate::git::status::StatusCode::Ignored
+            && entry.unstaged != crate::git::status::StatusCode::Untracked
     });
 
     if has_staged_changes {
@@ -1396,6 +1524,7 @@ if [ -f "$previous_hooks_file" ]; then
     "~") previous_hooks_dir="$HOME" ;;
     "~/"*) previous_hooks_dir="$HOME/${{previous_hooks_dir#\~/}}" ;;
   esac
+  previous_hooks_dir=$(printf '%s' "$previous_hooks_dir" | tr '\\' '/')
 fi
 
 if [ -n "$previous_hooks_dir" ]; then
@@ -1415,7 +1544,9 @@ run_chained_hook() {{
   hook_path="$1"
   shift
 
-  if [ "$hook_path" = "$0" ]; then
+  hook_path_normalized=$(printf '%s' "$hook_path" | tr '\\' '/')
+  self_path_normalized=$(printf '%s' "$0" | tr '\\' '/')
+  if [ "$hook_path_normalized" = "$self_path_normalized" ]; then
     return 0
   fi
 
@@ -1485,7 +1616,7 @@ pub(crate) fn normalize_hook_binary_path(git_ai_binary: &Path) -> String {
 mod tests {
     use super::{
         build_rebase_complete_event_from_start, find_repository_for_hook, is_zero_oid,
-        stash_ref_transition,
+        resolve_stash_ref_transition, should_restore_deleted_stash,
     };
     use crate::git::rewrite_log::{RebaseStartEvent, RewriteLogEvent};
     use crate::git::test_utils::TmpRepo;
@@ -1516,14 +1647,62 @@ mod tests {
     }
 
     #[test]
-    fn stash_ref_transition_treats_nonzero_to_nonzero_as_popped_stash() {
-        let popped_sha = "1111111111111111111111111111111111111111";
-        let next_sha = "2222222222222222222222222222222222222222";
+    fn stash_ref_transition_nonzero_to_nonzero_with_depth_growth_is_creation() {
+        let old_sha = "1111111111111111111111111111111111111111";
+        let new_sha = "2222222222222222222222222222222222222222";
 
-        let (created, deleted) = stash_ref_transition(popped_sha, next_sha);
+        let (created, deleted) =
+            resolve_stash_ref_transition(old_sha, new_sha, Some(1), Some(2), None);
 
-        assert!(created.is_none(), "stash pop should not mark created stash");
-        assert_eq!(deleted.as_deref(), Some(popped_sha));
+        assert_eq!(created.as_deref(), Some(new_sha));
+        assert!(deleted.is_none());
+    }
+
+    #[test]
+    fn stash_ref_transition_nonzero_to_nonzero_with_depth_shrink_is_deletion() {
+        let old_sha = "1111111111111111111111111111111111111111";
+        let new_sha = "2222222222222222222222222222222222222222";
+
+        let (created, deleted) =
+            resolve_stash_ref_transition(old_sha, new_sha, Some(2), Some(1), None);
+
+        assert!(created.is_none());
+        assert_eq!(deleted.as_deref(), Some(old_sha));
+    }
+
+    #[test]
+    fn stash_ref_transition_nonzero_to_nonzero_without_depth_signal_is_ignored() {
+        let old_sha = "1111111111111111111111111111111111111111";
+        let new_sha = "2222222222222222222222222222222222222222";
+
+        let (created, deleted) = resolve_stash_ref_transition(old_sha, new_sha, None, None, None);
+
+        assert!(created.is_none());
+        assert!(deleted.is_none());
+    }
+
+    #[test]
+    fn restore_deleted_stash_requires_pop_signal() {
+        assert!(should_restore_deleted_stash(true, None));
+        assert!(should_restore_deleted_stash(false, Some("stash pop")));
+        assert!(!should_restore_deleted_stash(false, Some("stash drop")));
+        assert!(!should_restore_deleted_stash(false, None));
+    }
+
+    #[test]
+    fn stash_ref_transition_nonzero_to_nonzero_uses_reflog_fallback_when_depth_missing() {
+        let old_sha = "1111111111111111111111111111111111111111";
+        let new_sha = "2222222222222222222222222222222222222222";
+
+        let (created, deleted) =
+            resolve_stash_ref_transition(old_sha, new_sha, None, None, Some("stash push"));
+        assert_eq!(created.as_deref(), Some(new_sha));
+        assert!(deleted.is_none());
+
+        let (created, deleted) =
+            resolve_stash_ref_transition(old_sha, new_sha, None, None, Some("stash pop"));
+        assert!(created.is_none());
+        assert_eq!(deleted.as_deref(), Some(old_sha));
     }
 
     #[test]
