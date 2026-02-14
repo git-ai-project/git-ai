@@ -377,8 +377,6 @@ impl TestRepo {
         }
     }
 
-||||||| parent of 1b1d0234 (Add comprehensive worktree support coverage across modes)
-=======
     pub fn add_worktree(&self, name: &str) -> WorktreeRepo {
         self.add_worktree_with_branch(name, None)
     }
@@ -566,6 +564,49 @@ impl TestRepo {
         }
 
         Err("No performance data found in output".to_string())
+    }
+
+    pub(crate) fn git_with_env_using_c_flag(
+        &self,
+        args: &[&str],
+        envs: &[(&str, &str)],
+        current_dir: &std::path::Path,
+    ) -> Result<String, String> {
+        let mut command = if self.git_mode.uses_wrapper() {
+            Command::new(get_binary_path())
+        } else {
+            Command::new("git")
+        };
+
+        let mut full_args = vec!["-C", self.path.to_str().unwrap()];
+        full_args.extend(args);
+        command.args(&full_args).current_dir(current_dir);
+
+        self.configure_command_env(&mut command);
+
+        if let Some(patch) = &self.config_patch
+            && let Ok(patch_json) = serde_json::to_string(patch)
+        {
+            command.env("GIT_AI_TEST_CONFIG_PATCH", patch_json);
+        }
+        command.env("GIT_AI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
+
+        for (key, value) in envs {
+            command.env(key, value);
+        }
+
+        let output = command
+            .output()
+            .unwrap_or_else(|_| panic!("Failed to execute git command with -C flag: {:?}", args));
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        if output.status.success() {
+            Ok(if stdout.is_empty() { stderr } else { stdout })
+        } else {
+            Err(stderr)
+        }
     }
 
     pub fn git_with_env(
