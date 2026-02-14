@@ -439,6 +439,41 @@ fn post_commit_chains_previous_global_hook() {
 }
 
 #[test]
+fn post_commit_chains_previous_global_hook_with_helper_script() {
+    let sandbox = HookConfigSandbox::new();
+    let previous_hooks_dir = sandbox.temp.path().join("previous-hooks");
+    let helper_dir = previous_hooks_dir.join("_");
+    let marker = sandbox.temp.path().join("previous-helper-postcommit-ran");
+    let marker_escaped = shell_escape(&marker);
+
+    sandbox.write_hook(
+        &helper_dir,
+        "helper.sh",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' previous-helper-ran >> \"{}\"\n",
+            marker_escaped
+        ),
+    );
+    sandbox.write_hook(
+        &previous_hooks_dir,
+        "post-commit",
+        "#!/bin/sh\n. \"$(dirname -- \"$0\")/_/helper.sh\"\nexit 0\n",
+    );
+    sandbox.set_global_hooks_path(&previous_hooks_dir);
+    sandbox.install_hooks();
+
+    sandbox.commit_file(
+        "previous-helper.txt",
+        "helper\n",
+        "run chained previous post-commit helper hook",
+    );
+    assert!(
+        marker.exists(),
+        "previous global post-commit helper hook did not run"
+    );
+}
+
+#[test]
 fn falls_back_to_repo_dot_git_hooks_when_no_previous_global_path() {
     let sandbox = HookConfigSandbox::new();
     let marker = sandbox.temp.path().join("repo-postcommit-ran");
@@ -448,6 +483,54 @@ fn falls_back_to_repo_dot_git_hooks_when_no_previous_global_path() {
 
     sandbox.commit_file("repo-hook.txt", "repo hook\n", "run repo post-commit");
     assert!(marker.exists(), "repo .git/hooks/post-commit did not run");
+}
+
+#[test]
+fn pre_push_chains_previous_global_hook_and_forwards_remote_args() {
+    let sandbox = HookConfigSandbox::new();
+    let previous_hooks_dir = sandbox.temp.path().join("previous-hooks");
+    let marker = sandbox.temp.path().join("previous-pre-push-args");
+    let marker_escaped = shell_escape(&marker);
+
+    sandbox.write_hook(
+        &previous_hooks_dir,
+        "pre-push",
+        &format!(
+            "#!/bin/sh\nprintf '%s|%s\\n' \"$1\" \"$2\" >> \"{}\"\nexit 0\n",
+            marker_escaped
+        ),
+    );
+    sandbox.set_global_hooks_path(&previous_hooks_dir);
+    sandbox.install_hooks();
+
+    let remote_path = sandbox.temp.path().join("remote.git");
+    sandbox.run_git_ok(&["init", "--bare", remote_path.to_str().expect("remote path")]);
+    sandbox.run_git_ok(&[
+        "remote",
+        "add",
+        "origin",
+        remote_path.to_str().expect("remote path"),
+    ]);
+
+    sandbox.run_git_ok(&["push", "-u", "origin", "HEAD"]);
+
+    let marker_content = fs::read_to_string(&marker).expect("read pre-push marker");
+    let line = marker_content
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .expect("pre-push hook did not capture any args");
+    let mut parts = line.splitn(2, '|');
+    let remote_name = parts.next().unwrap_or_default();
+    let remote_url = parts.next().unwrap_or_default();
+
+    assert_eq!(
+        remote_name, "origin",
+        "pre-push remote name was not forwarded"
+    );
+    assert!(
+        !remote_url.trim().is_empty(),
+        "pre-push remote URL argument was not forwarded"
+    );
 }
 
 #[test]
@@ -794,6 +877,29 @@ fn local_core_hooks_path_survives_global_install_uninstall_cycles() {
         sandbox.local_hooks_path(),
         Some(".husky".to_string()),
         "install/uninstall must not clobber repository-level core.hooksPath"
+    );
+}
+
+#[test]
+fn local_core_hooks_path_remains_functional_after_global_uninstall() {
+    let sandbox = HookConfigSandbox::new();
+    let husky_dir = sandbox.repo.join(".husky");
+    let marker = sandbox.temp.path().join("local-husky-after-uninstall-ran");
+
+    sandbox.write_hook(&husky_dir, "pre-commit", &marker_hook_script(&marker, 0));
+    sandbox.set_local_hooks_path_raw(".husky");
+
+    sandbox.install_hooks();
+    sandbox.uninstall_hooks();
+
+    sandbox.commit_file(
+        "local-after-uninstall.txt",
+        "local hook\n",
+        "local hook should still run after uninstall",
+    );
+    assert!(
+        marker.exists(),
+        "repo-local hooks must keep working after global managed hooks are uninstalled"
     );
 }
 
