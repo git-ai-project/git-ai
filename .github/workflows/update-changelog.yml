@@ -38,15 +38,19 @@ jobs:
       - name: Generate changelog with AI
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_BODY: ${{ github.event.release.body }}
         run: |
           npx @nyaomaru/changelog-bot@latest \
-            --release-tag "${{ github.event.release.tag_name }}" \
-            --release-name "${{ github.event.release.tag_name }}" \
-            --release-body "${{ github.event.release.body }}" \
+            --release-tag "$RELEASE_TAG" \
+            --release-name "$RELEASE_TAG" \
+            --release-body "$RELEASE_BODY" \
             --changelog-path CHANGELOG.md \
             --provider openai
 
       - name: Commit and push CHANGELOG.md
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -57,19 +61,20 @@ jobs:
             exit 0
           fi
 
-          git commit -m "docs: update CHANGELOG.md for ${{ github.event.release.tag_name }} [skip ci]"
+          git commit -m "docs: update CHANGELOG.md for ${RELEASE_TAG} [skip ci]"
           git push origin HEAD:main
 
       - name: Extract changelog entry for release notes
         id: extract
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          TAG="${{ github.event.release.tag_name }}"
-          VERSION="${TAG#v}"
+          VERSION="${RELEASE_TAG#v}"
 
           ENTRY=$(awk "/^## \\[${VERSION}\\]/{found=1; next} /^## \\[/{if(found) exit} found{print}" CHANGELOG.md)
 
           if [ -z "$ENTRY" ]; then
-            ENTRY=$(awk "/^## ${TAG}/{found=1; next} /^## /{if(found) exit} found{print}" CHANGELOG.md)
+            ENTRY=$(awk "/^## ${RELEASE_TAG}/{found=1; next} /^## /{if(found) exit} found{print}" CHANGELOG.md)
           fi
 
           {
@@ -82,12 +87,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CHANGELOG_ENTRY: ${{ steps.extract.outputs.entry }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          TAG="${{ github.event.release.tag_name }}"
-
-          CURRENT_BODY=$(gh release view "$TAG" --json body --jq '.body')
+          CURRENT_BODY=$(gh release view "$RELEASE_TAG" --json body --jq '.body')
 
           PLACEHOLDER='> **Detailed AI-generated changelog is being generated and will appear here shortly...**'
+
+          export CURRENT_BODY PLACEHOLDER
 
           python3 -c "
           import os, re
@@ -108,5 +114,5 @@ jobs:
               f.write(new_body)
           "
 
-          gh release edit "$TAG" --notes-file /tmp/release-body.txt
-          echo "Updated release notes for $TAG"
+          gh release edit "$RELEASE_TAG" --notes-file /tmp/release-body.txt
+          echo "Updated release notes for $RELEASE_TAG"

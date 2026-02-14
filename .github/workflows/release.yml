@@ -373,11 +373,11 @@ jobs:
             ### Release Channel
             `${{ steps.release-meta.outputs.channel_label }}`
 
-            ---
+            ${{ steps.release-meta.outputs.prerelease != 'true' && '---' || '' }}
 
-            > **Detailed AI-generated changelog is being generated and will appear here shortly...**
+            ${{ steps.release-meta.outputs.prerelease != 'true' && '> **Detailed AI-generated changelog is being generated and will appear here shortly...**' || '' }}
 
-            ---
+            ${{ steps.release-meta.outputs.prerelease != 'true' && '---' || '' }}
 
             ### Installation
             Install this specific version with checksum verification:
