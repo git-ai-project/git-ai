@@ -1,5 +1,3 @@
-#![cfg(unix)]
-
 mod repos;
 
 use git_ai::commands::core_hooks::{INSTALLED_HOOKS, PREVIOUS_HOOKS_PATH_FILE};
@@ -162,12 +160,15 @@ impl HookConfigSandbox {
         let hook_path = hooks_dir.join(hook_name);
         fs::write(&hook_path, script_body).expect("write hook script");
 
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&hook_path)
-            .expect("hook metadata")
-            .permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&hook_path, perms).expect("set hook permissions");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&hook_path)
+                .expect("hook metadata")
+                .permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&hook_path, perms).expect("set hook permissions");
+        }
     }
 
     fn write_repo_hook(&self, hook_name: &str, script_body: &str) {
@@ -184,7 +185,7 @@ fn combined_output(output: &Output) -> String {
 
 fn shell_escape(path: &Path) -> String {
     path.to_string_lossy()
-        .replace('\\', "\\\\")
+        .replace('\\', "/")
         .replace('"', "\\\"")
 }
 

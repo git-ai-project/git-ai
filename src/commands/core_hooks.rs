@@ -427,7 +427,7 @@ fn handle_post_checkout(
     let branch_checkout_flag = hook_args[2].as_str() == "1";
 
     // Initial clone checkout: old SHA is all zeros.
-    if old_head.chars().all(|c| c == '0') {
+    if is_zero_oid(&old_head) {
         let _ = fetch_authorship_notes(repository, "origin");
         return Ok(());
     }
@@ -541,10 +541,12 @@ fn handle_reference_transaction(
         }
 
         if reference == "refs/stash" {
-            if is_zero_oid(old) && !is_zero_oid(new) {
-                created_stash_sha = Some(new.to_string());
-            } else if !is_zero_oid(old) && is_zero_oid(new) {
-                deleted_stash_sha = Some(old.to_string());
+            let (created, deleted) = stash_ref_transition(old, new);
+            if let Some(created) = created {
+                created_stash_sha = Some(created);
+            }
+            if let Some(deleted) = deleted {
+                deleted_stash_sha = Some(deleted);
             }
         }
 
@@ -772,6 +774,35 @@ fn maybe_restore_pending_pull_autostash(
 
 fn is_zero_oid(oid: &str) -> bool {
     !oid.is_empty() && oid.chars().all(|c| c == '0')
+}
+
+fn stash_ref_transition(old: &str, new: &str) -> (Option<String>, Option<String>) {
+    if is_zero_oid(old) && !is_zero_oid(new) {
+        return (Some(new.to_string()), None);
+    }
+
+    if !is_zero_oid(old) {
+        // `old -> zero` is stash drop/pop of last entry.
+        // `old -> non-zero` is stash pop when additional stash entries remain.
+        return (None, Some(old.to_string()));
+    }
+
+    (None, None)
+}
+
+fn build_rebase_complete_event_from_start(
+    start_event: &crate::git::rewrite_log::RebaseStartEvent,
+    new_head: String,
+    original_commits: Vec<String>,
+    new_commits: Vec<String>,
+) -> RewriteLogEvent {
+    RewriteLogEvent::rebase_complete(RebaseCompleteEvent::new(
+        start_event.original_head.clone(),
+        new_head,
+        start_event.is_interactive,
+        original_commits,
+        new_commits,
+    ))
 }
 
 fn reflog_subject(repository: &Repository) -> Option<String> {
@@ -1047,13 +1078,12 @@ fn process_rebase_completion_from_start(
     };
 
     if !original_commits.is_empty() && !new_commits.is_empty() {
-        let event = RewriteLogEvent::rebase_complete(RebaseCompleteEvent::new(
-            start_event.original_head,
+        let event = build_rebase_complete_event_from_start(
+            &start_event,
             new_head.clone(),
-            false,
             original_commits,
             new_commits,
-        ));
+        );
         let commit_author = get_commit_default_author(repository, &[]);
         repository.handle_rewrite_log_event(event, commit_author, false, true);
     }
@@ -1319,10 +1349,7 @@ pub fn managed_core_hooks_dir() -> Result<PathBuf, GitAiError> {
 /// Writes git hook shims that dispatch to `git-ai hook <hook-name>`.
 pub fn write_core_hook_scripts(hooks_dir: &Path, git_ai_binary: &Path) -> Result<(), GitAiError> {
     fs::create_dir_all(hooks_dir)?;
-    let binary = git_ai_binary
-        .to_string_lossy()
-        .replace('\\', "/")
-        .replace('"', "\\\"");
+    let binary = normalize_hook_binary_path(git_ai_binary);
 
     for hook in INSTALLED_HOOKS {
         let script = format!(
@@ -1347,9 +1374,20 @@ pub fn write_core_hook_scripts(hooks_dir: &Path, git_ai_binary: &Path) -> Result
     Ok(())
 }
 
+pub(crate) fn normalize_hook_binary_path(git_ai_binary: &Path) -> String {
+    git_ai_binary
+        .to_string_lossy()
+        .replace('\\', "/")
+        .replace('"', "\\\"")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::find_repository_for_hook;
+    use super::{
+        build_rebase_complete_event_from_start, find_repository_for_hook, is_zero_oid,
+        stash_ref_transition,
+    };
+    use crate::git::rewrite_log::{RebaseStartEvent, RewriteLogEvent};
     use crate::git::test_utils::TmpRepo;
     use serial_test::serial;
 
@@ -1375,5 +1413,46 @@ mod tests {
         let expected_canonical = repo.path().canonicalize().expect("canonical expected");
 
         assert_eq!(resolved_canonical, expected_canonical);
+    }
+
+    #[test]
+    fn stash_ref_transition_treats_nonzero_to_nonzero_as_popped_stash() {
+        let popped_sha = "1111111111111111111111111111111111111111";
+        let next_sha = "2222222222222222222222222222222222222222";
+
+        let (created, deleted) = stash_ref_transition(popped_sha, next_sha);
+
+        assert!(created.is_none(), "stash pop should not mark created stash");
+        assert_eq!(deleted.as_deref(), Some(popped_sha));
+    }
+
+    #[test]
+    fn is_zero_oid_rejects_empty_strings() {
+        assert!(!is_zero_oid(""));
+        assert!(is_zero_oid("0000000000000000000000000000000000000000"));
+    }
+
+    #[test]
+    fn build_rebase_complete_event_from_start_uses_interactive_flag() {
+        let start_event = RebaseStartEvent::new_with_onto(
+            "old-head".to_string(),
+            true,
+            Some("onto-head".to_string()),
+        );
+        let event = build_rebase_complete_event_from_start(
+            &start_event,
+            "new-head".to_string(),
+            vec!["old-commit".to_string()],
+            vec!["new-commit".to_string()],
+        );
+
+        match event {
+            RewriteLogEvent::RebaseComplete { rebase_complete } => {
+                assert!(rebase_complete.is_interactive);
+                assert_eq!(rebase_complete.original_head, "old-head");
+                assert_eq!(rebase_complete.new_head, "new-head");
+            }
+            _ => panic!("expected RebaseComplete event"),
+        }
     }
 }
