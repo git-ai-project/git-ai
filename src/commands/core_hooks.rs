@@ -1326,10 +1326,11 @@ pub fn write_core_hook_scripts(hooks_dir: &Path, git_ai_binary: &Path) -> Result
 
     for hook in INSTALLED_HOOKS {
         let script = format!(
-            "#!/bin/sh\nif [ \"${{{env}:-}}\" = \"1\" ]; then\n  exit 0\nfi\nexec \"{bin}\" hook {hook} \"$@\"\n",
-            env = GIT_AI_SKIP_CORE_HOOKS_ENV,
+            "#!/bin/sh\nif [ \"${{{skip_env}:-}}\" = \"1\" ]; then\n  exit 0\nfi\n\n\"{bin}\" hook {hook} \"$@\"\n\nscript_dir=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\nprevious_hooks_file=\"$script_dir/{previous_hooks_file}\"\nprevious_hooks_dir=\"\"\n\nif [ -f \"$previous_hooks_file\" ]; then\n  previous_hooks_dir=$(cat \"$previous_hooks_file\")\n  case \"$previous_hooks_dir\" in\n    \"~\") previous_hooks_dir=\"$HOME\" ;;\n    \"~/\"*) previous_hooks_dir=\"$HOME/${{previous_hooks_dir#~/}}\" ;;\n  esac\nfi\n\nif [ -n \"$previous_hooks_dir\" ]; then\n  previous_hook=\"$previous_hooks_dir/{hook}\"\n  if [ -x \"$previous_hook\" ] && [ \"$previous_hook\" != \"$0\" ]; then\n    \"$previous_hook\" \"$@\"\n    previous_status=$?\n    if [ $previous_status -ne 0 ]; then\n      exit $previous_status\n    fi\n  fi\nelse\n  repo_git_dir=\"${{GIT_DIR:-.git}}\"\n  repo_hook=\"$repo_git_dir/hooks/{hook}\"\n  if [ -x \"$repo_hook\" ] && [ \"$repo_hook\" != \"$0\" ]; then\n    \"$repo_hook\" \"$@\"\n    repo_status=$?\n    if [ $repo_status -ne 0 ]; then\n      exit $repo_status\n    fi\n  fi\nfi\n\nexit 0\n",
+            skip_env = GIT_AI_SKIP_CORE_HOOKS_ENV,
             bin = binary,
             hook = hook,
+            previous_hooks_file = PREVIOUS_HOOKS_PATH_FILE,
         );
         let hook_path = hooks_dir.join(hook);
         fs::write(&hook_path, script)?;
