@@ -14,7 +14,7 @@ use crate::mdm::utils::{get_current_binary_path, git_shim_path};
 use crate::utils::GIT_AI_SKIP_CORE_HOOKS_ENV;
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 /// Installation status for a tool
@@ -702,7 +702,8 @@ fn install_git_core_hooks(
     let current_hooks_path = git_config_get_global("core.hooksPath")?;
     let scripts_up_to_date = core_hook_scripts_up_to_date(&hooks_dir, &params.binary_path);
 
-    let config_needs_update = current_hooks_path.as_deref() != Some(desired_hooks_path.as_str());
+    let config_needs_update =
+        !hooks_path_matches_desired(current_hooks_path.as_deref(), &hooks_dir);
     if !config_needs_update && scripts_up_to_date {
         return Ok(None);
     }
@@ -744,13 +745,12 @@ fn install_git_core_hooks(
 
 fn uninstall_git_core_hooks(dry_run: bool) -> Result<Option<String>, GitAiError> {
     let hooks_dir = managed_core_hooks_dir()?;
-    let managed_hooks_path = hooks_dir.to_string_lossy().to_string();
     let current_hooks_path = git_config_get_global("core.hooksPath")?;
     let previous_path_file = hooks_dir.join(PREVIOUS_HOOKS_PATH_FILE);
     let previous_hooks_path = read_previous_hooks_path(&previous_path_file)?;
 
     let config_points_to_managed =
-        current_hooks_path.as_deref() == Some(managed_hooks_path.as_str());
+        hooks_path_matches_desired(current_hooks_path.as_deref(), &hooks_dir);
     let hooks_dir_exists = hooks_dir.exists();
 
     if !config_points_to_managed && !hooks_dir_exists {
@@ -801,6 +801,63 @@ fn core_hook_scripts_up_to_date(hooks_dir: &Path, binary_path: &Path) -> bool {
             && content.contains(&format!("hook {}", hook))
             && content.contains(&binary)
     })
+}
+
+fn hooks_path_matches_desired(current_hooks_path: Option<&str>, desired_hooks_path: &Path) -> bool {
+    let Some(current_hooks_path) = current_hooks_path else {
+        return false;
+    };
+    let Some(current_path) = parse_hooks_path(current_hooks_path) else {
+        return false;
+    };
+
+    if let (Ok(current_canonical), Ok(desired_canonical)) = (
+        current_path.canonicalize(),
+        desired_hooks_path.canonicalize(),
+    ) && normalize_hooks_path_for_compare(&current_canonical)
+        == normalize_hooks_path_for_compare(&desired_canonical)
+    {
+        return true;
+    }
+
+    normalize_hooks_path_for_compare(&current_path)
+        == normalize_hooks_path_for_compare(desired_hooks_path)
+}
+
+fn parse_hooks_path(raw_path: &str) -> Option<PathBuf> {
+    let trimmed = raw_path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if trimmed == "~" {
+        return dirs::home_dir();
+    }
+    if let Some(rest) = trimmed.strip_prefix("~/") {
+        return dirs::home_dir().map(|home| home.join(rest));
+    }
+
+    Some(PathBuf::from(trimmed))
+}
+
+fn normalize_hooks_path_for_compare(path: &Path) -> String {
+    let mut normalized = path.to_string_lossy().replace('\\', "/");
+    while normalized.ends_with('/') {
+        if normalized == "/" {
+            break;
+        }
+        #[cfg(windows)]
+        if normalized.len() == 3
+            && normalized.as_bytes()[1] == b':'
+            && normalized.as_bytes()[2] == b'/'
+        {
+            break;
+        }
+        normalized.pop();
+    }
+    #[cfg(windows)]
+    normalized.make_ascii_lowercase();
+    normalized
 }
 
 fn git_config_get_global(key: &str) -> Result<Option<String>, GitAiError> {
@@ -930,6 +987,36 @@ mod tests {
         assert!(
             core_hook_scripts_up_to_date(&hooks_dir, &binary_path),
             "quoted binary path should be considered up to date"
+        );
+    }
+
+    #[test]
+    fn hooks_path_matches_managed_with_trailing_separator() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let managed = temp.path().join("managed-hooks");
+        fs::create_dir_all(&managed).expect("create managed hooks dir");
+        let with_trailing_sep = format!("{}/", managed.display());
+
+        assert!(
+            hooks_path_matches_desired(Some(with_trailing_sep.as_str()), &managed),
+            "managed path aliases with trailing separators should match"
+        );
+    }
+
+    #[test]
+    fn hooks_path_matches_managed_with_tilde_prefix() {
+        let home = dirs::home_dir().expect("home dir");
+        let temp = tempfile::tempdir_in(&home).expect("tempdir in home");
+        let leaf = temp
+            .path()
+            .file_name()
+            .expect("tempdir leaf")
+            .to_string_lossy();
+        let with_tilde = format!("~/{}", leaf);
+
+        assert!(
+            hooks_path_matches_desired(Some(with_tilde.as_str()), temp.path()),
+            "tilde-prefixed hooks path should resolve to managed home path"
         );
     }
 }

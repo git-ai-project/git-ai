@@ -1,0 +1,56 @@
+name: Hooks Mode Regression
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  merge_group:
+    branches: [main]
+
+jobs:
+  hooks-mode-regression:
+    name: Hooks regression (${{ matrix.os }}, ${{ matrix.git_mode }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        git_mode: [corehooks, "wrapper+corehooks"]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-hooks-modes-${{ matrix.git_mode }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-hooks-modes-${{ matrix.git_mode }}-
+            ${{ runner.os }}-cargo-hooks-modes-
+            ${{ runner.os }}-cargo-
+
+      - name: Run wrapper/core-hooks rewrite regression tests
+        run: cargo test --test corehooks_wrapper_regression -- --test-threads=1
+        env:
+          CARGO_INCREMENTAL: 0
+          GIT_AI_TEST_GIT_MODE: ${{ matrix.git_mode }}
+
+      - name: Run stash pop multi-entry regression in selected hook mode
+        run: cargo test --test stash_attribution test_stash_pop_with_multiple_entries_restores_top_stash_attribution -- --test-threads=1
+        env:
+          CARGO_INCREMENTAL: 0
+          GIT_AI_TEST_GIT_MODE: ${{ matrix.git_mode }}
