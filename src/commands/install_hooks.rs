@@ -1,5 +1,6 @@
 use crate::commands::core_hooks::{
-    INSTALLED_HOOKS, PREVIOUS_HOOKS_PATH_FILE, managed_core_hooks_dir, write_core_hook_scripts,
+    INSTALLED_HOOKS, PREVIOUS_HOOKS_PATH_FILE, managed_core_hooks_dir, normalize_hook_binary_path,
+    write_core_hook_scripts,
 };
 use crate::commands::flush_metrics_db::spawn_background_metrics_db_flush;
 use crate::error::GitAiError;
@@ -792,7 +793,7 @@ fn core_hook_scripts_up_to_date(hooks_dir: &Path, binary_path: &Path) -> bool {
         return false;
     }
 
-    let binary = binary_path.to_string_lossy().replace('\\', "/");
+    let binary = normalize_hook_binary_path(binary_path);
     INSTALLED_HOOKS.iter().all(|hook| {
         let hook_path = hooks_dir.join(hook);
         let content = fs::read_to_string(&hook_path).unwrap_or_default();
@@ -911,5 +912,24 @@ fn read_previous_hooks_path(path: &Path) -> Result<Option<String>, GitAiError> {
         Ok(None)
     } else {
         Ok(Some(value))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn core_hook_scripts_up_to_date_handles_escaped_quotes_in_binary_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let hooks_dir = temp.path().join("core-hooks");
+        let binary_path = PathBuf::from("/tmp/path-with-\"quote\"/git-ai");
+
+        write_core_hook_scripts(&hooks_dir, &binary_path).expect("write core hook scripts");
+        assert!(
+            core_hook_scripts_up_to_date(&hooks_dir, &binary_path),
+            "quoted binary path should be considered up to date"
+        );
     }
 }
