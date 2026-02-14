@@ -1271,3 +1271,30 @@ fn test_ai_edits_file_with_spaces_in_filename() {
         "Line 3".human(),
     ]);
 }
+
+worktree_test_wrappers! {
+    test_simple_additions_empty_repo,
+    test_simple_additions_with_base_commit,
+    test_simple_additions_on_top_of_ai_contributions,
+    test_simple_additions_new_file_not_git_added,
+    test_ai_human_interleaved_line_attribution,
+    test_simple_ai_then_human_deletion,
+    test_multiple_ai_checkpoints_with_human_deletions,
+    test_complex_mixed_additions_and_deletions,
+    test_ai_adds_lines_multiple_commits,
+    test_partial_staging_filters_unstaged_lines,
+    test_human_stages_some_ai_lines,
+    test_multiple_ai_sessions_with_partial_staging,
+    test_ai_adds_then_commits_in_batches,
+    test_ai_edits_with_partial_staging,
+    test_unstaged_changes_not_committed,
+    test_unstaged_ai_lines_saved_to_working_log,
+    test_new_file_partial_staging_two_commits,
+    test_mock_ai_with_pathspecs,
+    test_with_duplicate_lines,
+    test_ai_deletion_with_human_checkpoint_in_same_commit,
+    test_large_ai_readme_rewrite_with_no_data_bug,
+    test_deletion_within_a_single_line_attribution,
+    test_deletion_of_multiple_lines_by_ai,
+    test_ai_edits_file_with_spaces_in_filename,
+}

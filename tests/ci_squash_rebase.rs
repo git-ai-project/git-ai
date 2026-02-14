@@ -481,3 +481,11 @@ fn test_ci_rebase_merge_multiple_commits() {
         "function human() { }".human()
     ]);
 }
+
+worktree_test_wrappers! {
+    test_ci_squash_merge_basic,
+    test_ci_squash_merge_multiple_files,
+    test_ci_squash_merge_mixed_content,
+    test_ci_squash_merge_with_manual_changes,
+    test_ci_rebase_merge_multiple_commits,
+}

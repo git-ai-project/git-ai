@@ -572,3 +572,8 @@ fn test_cursor_e2e_with_resync() {
 
     // The temp directory and database will be automatically cleaned up when temp_dir goes out of scope
 }
+
+worktree_test_wrappers! {
+    test_cursor_e2e_with_attribution,
+    test_cursor_e2e_with_resync,
+}

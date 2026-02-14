@@ -613,3 +613,16 @@ fn test_thinking_transcript_saves_to_internal_db_after_commit() {
         "Should have all messages including thinking"
     );
 }
+
+worktree_test_wrappers! {
+    test_checkpoint_saves_prompt_to_internal_db,
+    test_commit_updates_prompt_with_commit_sha_and_model,
+    test_post_commit_uses_latest_transcript_messages,
+    test_multiple_checkpoints_same_session_deduplicated,
+    test_different_sessions_create_separate_prompts,
+    test_line_stats_saved_to_db_after_commit,
+    test_human_author_saved_to_db_after_commit,
+    test_workdir_saved_to_db,
+    test_mock_ai_checkpoint_saves_to_internal_db,
+    test_thinking_transcript_saves_to_internal_db_after_commit,
+}

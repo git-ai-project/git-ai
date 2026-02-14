@@ -141,6 +141,10 @@ impl Repository {
 
         if skip_untracked {
             args.push("--untracked-files=no".to_string());
+        } else {
+            // Avoid directory-collapsed untracked entries like `nested/` so downstream
+            // text-file detection can reason about concrete files.
+            args.push("--untracked-files=all".to_string());
         }
 
         // Add combined pathspecs as CLI args only if under the threshold;
