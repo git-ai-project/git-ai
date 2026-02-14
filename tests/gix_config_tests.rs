@@ -304,3 +304,18 @@ fn test_config_get_regexp_bare_repo() {
     assert_eq!(result.get("baretest.key1"), Some(&"value1".to_string()));
     assert_eq!(result.get("baretest.key2"), Some(&"value2".to_string()));
 }
+
+worktree_test_wrappers! {
+    test_config_get_str_simple_value,
+    test_config_get_str_subsection,
+    test_config_get_str_missing_key_returns_none,
+    test_config_get_str_special_chars,
+    test_config_get_regexp_subsection,
+    test_config_get_regexp_no_matches,
+    test_config_get_regexp_with_subsections,
+    test_config_get_regexp_case_insensitive_keys,
+    test_config_falls_back_to_global,
+    test_config_local_overrides_global,
+    test_config_get_str_bare_repo,
+    test_config_get_regexp_bare_repo,
+}

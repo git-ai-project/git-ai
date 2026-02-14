@@ -1,3 +1,4 @@
+#[macro_use]
 mod repos;
 use repos::test_file::ExpectedLineExt;
 use repos::test_repo::TestRepo;
@@ -793,4 +794,23 @@ fn test_diff_range_multiple_commits() {
         output.contains("🤖") || output.contains("👤"),
         "Should have attribution markers"
     );
+}
+
+worktree_test_wrappers! {
+    test_diff_single_commit,
+    test_diff_commit_range,
+    test_diff_shows_ai_attribution,
+    test_diff_shows_human_attribution,
+    test_diff_multiple_files,
+    test_diff_initial_commit,
+    test_diff_pure_additions,
+    test_diff_pure_deletions,
+    test_diff_mixed_ai_and_human,
+    test_diff_with_head_ref,
+    test_diff_output_format,
+    test_diff_error_on_no_args,
+    test_diff_json_output_with_escaped_newlines,
+    test_diff_preserves_context_lines,
+    test_diff_exact_sequence_verification,
+    test_diff_range_multiple_commits,
 }

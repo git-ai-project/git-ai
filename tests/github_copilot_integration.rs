@@ -271,3 +271,12 @@ fn test_github_copilot_human_checkpoint_with_clean_file() {
     // The new line should be human
     file.assert_lines_and_blame(lines!["const x = 1;".human(), "const y = 2;".human(),]);
 }
+
+worktree_test_wrappers! {
+    test_github_copilot_human_checkpoint_before_edit,
+    test_github_copilot_human_checkpoint_scoped_to_files,
+    test_github_copilot_human_then_ai_checkpoint,
+    test_github_copilot_multiple_files_with_dirty_files,
+    test_github_copilot_empty_will_edit_filepaths_fails,
+    test_github_copilot_human_checkpoint_with_clean_file,
+}

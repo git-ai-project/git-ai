@@ -1,3 +1,4 @@
+#[macro_use]
 mod repos;
 
 use repos::test_file::ExpectedLineExt;
@@ -568,4 +569,12 @@ fn test_failed_pull_rebase_without_autostash_does_not_leak_stale_ai_metadata() {
         final_commit.authorship_log.metadata.prompts.is_empty(),
         "stale pull-autostash attribution leaked into later human-only commit"
     );
+}
+
+worktree_test_wrappers! {
+    test_fast_forward_pull_preserves_ai_attribution,
+    test_pull_rebase_autostash_preserves_uncommitted_ai_attribution,
+    test_pull_rebase_autostash_with_mixed_attribution,
+    test_pull_rebase_autostash_via_git_config,
+    test_fast_forward_pull_without_local_changes,
 }

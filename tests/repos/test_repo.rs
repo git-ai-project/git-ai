@@ -8,11 +8,12 @@ use git_ai::git::repo_storage::PersistedWorkingLog;
 use git_ai::git::repository as GitAiRepository;
 use git_ai::observability::wrapper_performance_targets::BenchmarkResult;
 use git2::Repository;
-use insta::assert_debug_snapshot;
+use insta::{Settings, assert_debug_snapshot};
 use rand::Rng;
+use std::cell::Cell;
 use std::fs;
-use std::path::PathBuf;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -54,6 +55,8 @@ pub struct TestRepo {
     test_db_path: PathBuf,
     test_home: PathBuf,
     git_mode: GitTestMode,
+    base_path: Option<PathBuf>,
+    base_test_db_path: Option<PathBuf>,
 }
 
 #[allow(dead_code)]
@@ -71,7 +74,7 @@ impl TestRepo {
         });
     }
 
-    pub fn new() -> Self {
+    fn new_base_repo() -> Self {
         let mut rng = rand::thread_rng();
         let n: u64 = rng.gen_range(0..10000000000);
         let base = std::env::temp_dir();
@@ -96,6 +99,8 @@ impl TestRepo {
             test_db_path,
             test_home,
             git_mode,
+            base_path: None,
+            base_test_db_path: None,
         };
 
         // Ensure the default branch is named "main" for consistency across Git versions
@@ -106,6 +111,63 @@ impl TestRepo {
         repo.setup_git_hooks_mode();
 
         repo
+    }
+
+    pub fn new() -> Self {
+        if WORKTREE_MODE.with(|flag| flag.get()) {
+            return Self::new_worktree_variant();
+        }
+
+        Self::new_base_repo()
+    }
+
+    fn new_worktree_variant() -> Self {
+        let base_repo = Self::new_base_repo();
+        base_repo.ensure_head_commit();
+
+        // Keep the base worktree off the default branch so tests can freely mutate it.
+        let base_branch = base_repo.current_branch();
+        if !base_branch.is_empty() {
+            let mut rng = rand::thread_rng();
+            let n: u64 = rng.gen_range(0..10000000000);
+            let temp_branch = format!("base-worktree-{}", n);
+            base_repo
+                .git_og(&["checkout", "-b", &temp_branch])
+                .expect("failed to create base worktree branch");
+        }
+
+        let worktree = base_repo.add_worktree("auto");
+
+        let base_path = base_repo.path.clone();
+        let base_test_db_path = base_repo.test_db_path.clone();
+        let feature_flags = base_repo.feature_flags.clone();
+        let config_patch = base_repo.config_patch.clone();
+        let git_mode = base_repo.git_mode;
+        let test_home = base_repo.test_home.clone();
+
+        let worktree_path = worktree.path.clone();
+        let worktree_test_db_path = worktree.test_db_path.clone();
+
+        std::mem::forget(base_repo);
+        std::mem::forget(worktree);
+
+        Self {
+            path: worktree_path,
+            feature_flags,
+            config_patch,
+            test_db_path: worktree_test_db_path,
+            test_home,
+            git_mode,
+            base_path: Some(base_path),
+            base_test_db_path: Some(base_test_db_path),
+        }
+    }
+
+    fn ensure_head_commit(&self) {
+        if self.git_og(&["rev-parse", "--verify", "HEAD"]).is_err() {
+            self.git_og(&["commit", "--allow-empty", "-m", "initial"])
+                .expect("failed to create initial commit for worktree");
+        }
     }
 
     /// Create a standalone bare repository for testing
@@ -127,6 +189,8 @@ impl TestRepo {
             test_db_path,
             test_home,
             git_mode,
+            base_path: None,
+            base_test_db_path: None,
         };
 
         repo.setup_git_hooks_mode();
@@ -168,6 +232,8 @@ impl TestRepo {
             test_db_path: upstream_test_db_path,
             test_home: upstream_test_home,
             git_mode,
+            base_path: None,
+            base_test_db_path: None,
         };
 
         // Ensure the upstream default branch is named "main" for consistency across Git versions
@@ -215,6 +281,8 @@ impl TestRepo {
             test_db_path: mirror_test_db_path,
             test_home: mirror_test_home,
             git_mode,
+            base_path: None,
+            base_test_db_path: None,
         };
 
         // Ensure the default branch is named "main" for consistency across Git versions
@@ -250,6 +318,8 @@ impl TestRepo {
             test_db_path,
             test_home,
             git_mode,
+            base_path: None,
+            base_test_db_path: None,
         };
 
         // Ensure the default branch is named "main" for consistency across Git versions
@@ -304,6 +374,53 @@ impl TestRepo {
         if self.git_mode.uses_hooks() {
             command.env("HOME", &self.test_home);
             command.env("GIT_CONFIG_GLOBAL", self.test_home.join(".gitconfig"));
+        }
+    }
+
+||||||| parent of 1b1d0234 (Add comprehensive worktree support coverage across modes)
+=======
+    pub fn add_worktree(&self, name: &str) -> WorktreeRepo {
+        self.add_worktree_with_branch(name, None)
+    }
+
+    pub fn add_worktree_with_branch(&self, name: &str, branch: Option<&str>) -> WorktreeRepo {
+        self.ensure_head_commit();
+
+        let mut rng = rand::thread_rng();
+        let n: u64 = rng.gen_range(0..10000000000);
+        let worktree_path = std::env::temp_dir().join(format!("{}-worktree-{}", n, name));
+
+        let branch_name = branch
+            .map(|b| b.to_string())
+            .unwrap_or_else(|| format!("worktree-{}-{}", name, n));
+
+        let branch_ref = format!("refs/heads/{}", branch_name);
+        let branch_exists = self.git_og(&["show-ref", "--verify", &branch_ref]).is_ok();
+
+        let mut args = vec!["worktree", "add"];
+        if branch_exists {
+            args.push(worktree_path.to_str().expect("valid path"));
+            args.push(branch_name.as_str());
+        } else {
+            args.push("-b");
+            args.push(branch_name.as_str());
+            args.push(worktree_path.to_str().expect("valid path"));
+        }
+
+        self.git_og(&args).expect("failed to add worktree");
+
+        let db_n: u64 = rng.gen_range(0..10000000000);
+        let test_db_path = std::env::temp_dir().join(format!("{}-db", db_n));
+
+        WorktreeRepo {
+            base_path: self.path.clone(),
+            path: worktree_path,
+            worktree_name: branch_name,
+            feature_flags: self.feature_flags.clone(),
+            config_patch: self.config_patch.clone(),
+            test_db_path,
+            git_mode: self.git_mode,
+            test_home: self.test_home.clone(),
         }
     }
 
@@ -761,8 +878,358 @@ impl TestRepo {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct WorktreeRepo {
+    base_path: PathBuf,
+    path: PathBuf,
+    worktree_name: String,
+    pub feature_flags: FeatureFlags,
+    pub(crate) config_patch: Option<ConfigPatch>,
+    test_db_path: PathBuf,
+    git_mode: GitTestMode,
+    test_home: PathBuf,
+}
+
+impl WorktreeRepo {
+    pub fn path(&self) -> &PathBuf {
+        &self.path
+    }
+
+    pub fn base_path(&self) -> &PathBuf {
+        &self.base_path
+    }
+
+    pub fn worktree_name(&self) -> &str {
+        &self.worktree_name
+    }
+
+    pub fn canonical_path(&self) -> PathBuf {
+        self.path
+            .canonicalize()
+            .expect("failed to canonicalize worktree path")
+    }
+
+    pub fn test_db_path(&self) -> &PathBuf {
+        &self.test_db_path
+    }
+
+    pub fn current_branch(&self) -> String {
+        self.git(&["branch", "--show-current"])
+            .unwrap()
+            .trim()
+            .to_string()
+    }
+
+    pub fn git_ai(&self, args: &[&str]) -> Result<String, String> {
+        self.git_ai_with_env(args, &[])
+    }
+
+    pub fn git(&self, args: &[&str]) -> Result<String, String> {
+        self.git_with_env(args, &[], None)
+    }
+
+    pub fn git_from_working_dir(
+        &self,
+        working_dir: &std::path::Path,
+        args: &[&str],
+    ) -> Result<String, String> {
+        self.git_with_env(args, &[], Some(working_dir))
+    }
+
+    pub fn git_ai_from_working_dir(
+        &self,
+        working_dir: &std::path::Path,
+        args: &[&str],
+    ) -> Result<String, String> {
+        let binary_path = get_binary_path();
+
+        let mut command = Command::new(binary_path);
+
+        let absolute_working_dir = working_dir.canonicalize().map_err(|e| {
+            format!(
+                "Failed to canonicalize working directory {}: {}",
+                working_dir.display(),
+                e
+            )
+        })?;
+        command.args(args).current_dir(&absolute_working_dir);
+
+        if let Some(patch) = &self.config_patch
+            && let Ok(patch_json) = serde_json::to_string(patch)
+        {
+            command.env("GIT_AI_TEST_CONFIG_PATCH", patch_json);
+        }
+
+        command.env("GIT_AI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
+
+        let output = command
+            .output()
+            .unwrap_or_else(|_| panic!("Failed to execute git-ai command: {:?}", args));
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        if output.status.success() {
+            let combined = if stdout.is_empty() {
+                stderr
+            } else if stderr.is_empty() {
+                stdout
+            } else {
+                format!("{}{}", stdout, stderr)
+            };
+            Ok(combined)
+        } else {
+            Err(stderr)
+        }
+    }
+
+    pub fn git_og(&self, args: &[&str]) -> Result<String, String> {
+        let mut full_args: Vec<String> =
+            vec!["-C".to_string(), self.path.to_str().unwrap().to_string()];
+        full_args.extend(args.iter().map(|s| s.to_string()));
+
+        GitAiRepository::exec_git(&full_args)
+            .map(|output| {
+                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                if stdout.is_empty() {
+                    stderr
+                } else if stderr.is_empty() {
+                    stdout
+                } else {
+                    format!("{}{}", stdout, stderr)
+                }
+            })
+            .map_err(|e| e.to_string())
+    }
+
+    fn run_git_command(
+        &self,
+        args: &[&str],
+        envs: &[(&str, &str)],
+        working_dir: Option<&Path>,
+        force_c_flag: bool,
+    ) -> Result<String, String> {
+        let mut command = self.build_git_command(args, envs, working_dir, force_c_flag)?;
+        let output = command
+            .output()
+            .unwrap_or_else(|_| panic!("Failed to execute git command: {:?}", args));
+        Self::command_output_to_result(output)
+    }
+
+    fn build_git_command(
+        &self,
+        args: &[&str],
+        envs: &[(&str, &str)],
+        working_dir: Option<&Path>,
+        force_c_flag: bool,
+    ) -> Result<Command, String> {
+        let mut command = if self.git_mode.uses_wrapper() {
+            Command::new(get_binary_path())
+        } else {
+            Command::new(git_ai::config::Config::get().git_cmd())
+        };
+
+        let mut full_args: Vec<String> = Vec::new();
+
+        if force_c_flag || working_dir.is_none() {
+            full_args.push("-C".to_string());
+            full_args.push(self.path.to_str().unwrap().to_string());
+        }
+
+        full_args.extend(args.iter().map(|arg| arg.to_string()));
+        command.args(&full_args);
+
+        if let Some(working_dir_path) = working_dir {
+            let absolute_working_dir = working_dir_path.canonicalize().map_err(|e| {
+                format!(
+                    "Failed to canonicalize working directory {}: {}",
+                    working_dir_path.display(),
+                    e
+                )
+            })?;
+            command.current_dir(absolute_working_dir);
+        }
+
+        if self.git_mode.uses_hooks() {
+            command.env("HOME", &self.test_home);
+            command.env("GIT_CONFIG_GLOBAL", self.test_home.join(".gitconfig"));
+        }
+
+        if self.git_mode.uses_wrapper() {
+            command.env("GIT_AI", "git");
+        }
+
+        if let Some(patch) = &self.config_patch
+            && let Ok(patch_json) = serde_json::to_string(patch)
+        {
+            command.env("GIT_AI_TEST_CONFIG_PATCH", patch_json);
+        }
+
+        command.env("GIT_AI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
+        for (key, value) in envs {
+            command.env(key, value);
+        }
+
+        Ok(command)
+    }
+
+    fn command_output_to_result(output: Output) -> Result<String, String> {
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        if output.status.success() {
+            let combined = if stdout.is_empty() {
+                stderr
+            } else if stderr.is_empty() {
+                stdout
+            } else {
+                format!("{}{}", stdout, stderr)
+            };
+            Ok(combined)
+        } else if stderr.is_empty() {
+            Err(stdout)
+        } else {
+            Err(stderr)
+        }
+    }
+
+    pub fn git_with_env(
+        &self,
+        args: &[&str],
+        envs: &[(&str, &str)],
+        working_dir: Option<&std::path::Path>,
+    ) -> Result<String, String> {
+        self.run_git_command(args, envs, working_dir, false)
+    }
+
+    pub fn git_ai_with_env(&self, args: &[&str], envs: &[(&str, &str)]) -> Result<String, String> {
+        let binary_path = get_binary_path();
+
+        let mut command = Command::new(binary_path);
+        command.args(args).current_dir(&self.path);
+
+        if let Some(patch) = &self.config_patch
+            && let Ok(patch_json) = serde_json::to_string(patch)
+        {
+            command.env("GIT_AI_TEST_CONFIG_PATCH", patch_json);
+        }
+
+        command.env("GIT_AI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
+
+        for (key, value) in envs {
+            command.env(key, value);
+        }
+
+        let output = command
+            .output()
+            .unwrap_or_else(|_| panic!("Failed to execute git-ai command: {:?}", args));
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        if output.status.success() {
+            let combined = if stdout.is_empty() {
+                stderr
+            } else if stderr.is_empty() {
+                stdout
+            } else {
+                format!("{}{}", stdout, stderr)
+            };
+            Ok(combined)
+        } else {
+            Err(stderr)
+        }
+    }
+
+    pub fn commit(&self, message: &str) -> Result<NewCommit, String> {
+        self.commit_with_env(message, &[], None)
+    }
+
+    pub fn stage_all_and_commit(&self, message: &str) -> Result<NewCommit, String> {
+        self.git(&["add", "-A"]).expect("add --all should succeed");
+        self.commit(message)
+    }
+
+    pub fn commit_with_env(
+        &self,
+        message: &str,
+        envs: &[(&str, &str)],
+        working_dir: Option<&std::path::Path>,
+    ) -> Result<NewCommit, String> {
+        let output = self.git_with_env(&["commit", "-m", message], envs, working_dir);
+
+        match output {
+            Ok(combined) => {
+                let repo = GitAiRepository::find_repository_in_path(self.path.to_str().unwrap())
+                    .map_err(|e| format!("Failed to find repository: {}", e))?;
+
+                let head_commit = repo
+                    .head()
+                    .map_err(|e| format!("Failed to get HEAD: {}", e))?
+                    .target()
+                    .map_err(|e| format!("Failed to get HEAD target: {}", e))?;
+
+                let authorship_log =
+                    match git_ai::git::refs::show_authorship_note(&repo, &head_commit) {
+                        Some(content) => AuthorshipLog::deserialize_from_string(&content)
+                            .map_err(|e| format!("Failed to parse authorship log: {}", e))?,
+                        None => {
+                            return Err("No authorship log found for the new commit".to_string());
+                        }
+                    };
+
+                Ok(NewCommit {
+                    commit_sha: head_commit,
+                    authorship_log,
+                    stdout: combined,
+                })
+            }
+            Err(e) => Err(e),
+        }
+    }
+}
+
+impl Drop for WorktreeRepo {
+    fn drop(&mut self) {
+        let _ = Command::new(git_ai::config::Config::get().git_cmd())
+            .args([
+                "-C",
+                self.base_path.to_str().unwrap(),
+                "worktree",
+                "remove",
+                "--force",
+                self.path.to_str().unwrap(),
+            ])
+            .output();
+        let _ = fs::remove_dir_all(self.path.clone());
+        let _ = fs::remove_dir_all(self.test_db_path.clone());
+    }
+}
+
 impl Drop for TestRepo {
     fn drop(&mut self) {
+        if let Some(base_path) = &self.base_path {
+            let _ = Command::new(git_ai::config::Config::get().git_cmd())
+                .args([
+                    "-C",
+                    base_path.to_str().unwrap(),
+                    "worktree",
+                    "remove",
+                    "--force",
+                    self.path.to_str().unwrap(),
+                ])
+                .output();
+            let _ = fs::remove_dir_all(self.path.clone());
+            let _ = fs::remove_dir_all(self.test_db_path.clone());
+            let _ = fs::remove_dir_all(base_path.clone());
+            if let Some(base_test_db_path) = &self.base_test_db_path {
+                let _ = fs::remove_dir_all(base_test_db_path.clone());
+            }
+            let _ = fs::remove_dir_all(self.test_home.clone());
+            return;
+        }
+
         fs::remove_dir_all(self.path.clone()).expect("failed to remove test repo");
         // Also clean up the test database directory (may not exist if no DB operations were done)
         let _ = fs::remove_dir_all(self.test_db_path.clone());
@@ -789,6 +1256,32 @@ impl NewCommit {
 
 static COMPILED_BINARY: OnceLock<PathBuf> = OnceLock::new();
 static DEFAULT_BRANCH_NAME: OnceLock<String> = OnceLock::new();
+thread_local! {
+    static WORKTREE_MODE: Cell<bool> = const { Cell::new(false) };
+}
+
+pub fn with_worktree_mode<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    WORKTREE_MODE.with(|flag| {
+        let previous = flag.replace(true);
+        struct Reset<'a> {
+            flag: &'a Cell<bool>,
+            previous: bool,
+        }
+        impl<'a> Drop for Reset<'a> {
+            fn drop(&mut self) {
+                self.flag.set(self.previous);
+            }
+        }
+        let _reset = Reset { flag, previous };
+
+        let mut settings = Settings::clone_current();
+        settings.set_snapshot_suffix("worktree");
+        settings.bind(f)
+    })
+}
 
 fn get_default_branch_name() -> String {
     // Since TestRepo::new() explicitly sets the default branch to "main" via symbolic-ref,

@@ -1,3 +1,4 @@
+#[macro_use]
 mod repos;
 
 use repos::test_file::ExpectedLineExt;
@@ -1043,4 +1044,24 @@ fn test_stash_apply_reset_apply_again() {
         !commit.authorship_log.metadata.prompts.is_empty(),
         "Expected AI prompts in authorship log after multiple apply/reset cycles"
     );
+}
+
+worktree_test_wrappers! {
+    test_stash_pop_with_ai_attribution,
+    test_stash_apply_with_ai_attribution,
+    test_stash_apply_named_reference,
+    test_stash_multiple_files,
+    test_stash_with_existing_initial_attributions,
+    test_stash_pop_default_reference,
+    test_stash_pop_empty_repo,
+    test_stash_mixed_human_and_ai,
+    test_stash_push_with_pathspec_single_file,
+    test_stash_push_with_pathspec_directory,
+    test_stash_push_multiple_pathspecs,
+    test_stash_pop_with_conflict,
+    test_stash_mixed_staged_and_unstaged,
+    test_stash_pop_onto_head_with_ai_changes,
+    test_stash_pop_across_branches,
+    test_stash_pop_across_branches_with_conflict,
+    test_stash_apply_reset_apply_again,
 }

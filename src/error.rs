@@ -12,6 +12,7 @@ pub enum GitAiError {
         args: Vec<String>,
     },
     /// Errors from  Gix
+    #[allow(dead_code)]
     GixError(String),
     JsonError(serde_json::Error),
     Utf8Error(std::str::Utf8Error),
