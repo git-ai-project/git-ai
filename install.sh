@@ -186,19 +186,6 @@ STD_GIT_PATH=$(detect_std_git)
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
 
-# Check GLIBC version on Linux to provide a clear error before downloading
-if [ "$OS" = "linux" ]; then
-    MIN_GLIBC="2.28"
-    CURRENT_GLIBC=""
-    if command -v ldd >/dev/null 2>&1; then
-        CURRENT_GLIBC=$(ldd --version 2>&1 | head -n1 | grep -oE '[0-9]+\.[0-9]+$' || true)
-    fi
-    if [ -n "$CURRENT_GLIBC" ]; then
-        if [ "$(printf '%s\n' "$MIN_GLIBC" "$CURRENT_GLIBC" | sort -V | head -n1)" != "$MIN_GLIBC" ]; then
-            error "GLIBC $MIN_GLIBC+ is required, but found GLIBC $CURRENT_GLIBC.\nPre-built binaries are not compatible with your system.\nPlease build from source instead:\n  https://github.com/git-ai-project/git-ai#building-from-source"
-        fi
-    fi
-fi
 
 # Map architecture to binary name
 case $ARCH in
