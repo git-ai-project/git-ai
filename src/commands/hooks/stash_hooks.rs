@@ -145,7 +145,7 @@ pub(crate) fn save_stash_authorship_log_for_sha(
     // If there are no attributions, just clean up working log for filtered files
     if filtered_files.is_empty() {
         debug_log("No attributions to save for stash");
-        delete_working_log_for_files(repo, &head_sha, &filtered_files)?;
+        delete_working_log_for_files(repo, head_sha, &filtered_files)?;
         return Ok(());
     }
 
@@ -165,7 +165,7 @@ pub(crate) fn save_stash_authorship_log_for_sha(
     let json = authorship_log
         .serialize_to_string()
         .map_err(|e| GitAiError::Generic(format!("Failed to serialize authorship log: {}", e)))?;
-    save_stash_note(repo, &stash_sha, &json)?;
+    save_stash_note(repo, stash_sha, &json)?;
 
     debug_log(&format!(
         "Saved authorship log to refs/notes/ai-stash for stash {}",
