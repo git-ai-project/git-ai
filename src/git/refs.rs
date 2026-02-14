@@ -511,12 +511,51 @@ pub fn grep_ai_notes(repo: &Repository, pattern: &str) -> Result<Vec<String>, Gi
     // If we have multiple results, sort by commit date (newest first)
     if shas.len() > 1 {
         let sha_vec: Vec<String> = shas.into_iter().collect();
+        
+        eprintln!("[DEBUG] Found {} commits with pattern '{}' in git notes", sha_vec.len(), pattern);
+        for sha in &sha_vec {
+            eprintln!("[DEBUG]   - {}", sha);
+        }
+        
+        // FILTER OUT NON-EXISTENT COMMITS using git cat-file -e
+        let existing_shas: Vec<String> = sha_vec
+            .into_iter()
+            .filter(|sha| {
+                let mut args = repo.global_args_for_exec();
+                args.push("cat-file".to_string());
+                args.push("-e".to_string());
+                args.push(sha.clone());
+                
+                let exists = exec_git(&args).is_ok();
+                if !exists {
+                    eprintln!("[DEBUG] Filtering out non-existent commit: {}", sha);
+                }
+                exists
+            })
+            .collect();
+        
+        eprintln!("[DEBUG] After filtering: {} existing commits", existing_shas.len());
+        for sha in &existing_shas {
+            eprintln!("[DEBUG]   - {}", sha);
+        }
+        
+        if existing_shas.is_empty() {
+            return Err(GitAiError::Generic(
+                "No existing commits found in git notes for pattern".to_string()
+            ));
+        }
+        
+        if existing_shas.len() == 1 {
+            return Ok(existing_shas);
+        }
+        
+        // Sort only existing commits by date
         let mut args = repo.global_args_for_exec();
         args.push("log".to_string());
         args.push("--format=%H".to_string());
         args.push("--date-order".to_string());
         args.push("--no-walk".to_string());
-        for sha in &sha_vec {
+        for sha in &existing_shas {
             args.push(sha.clone());
         }
 
@@ -526,7 +565,26 @@ pub fn grep_ai_notes(repo: &Repository, pattern: &str) -> Result<Vec<String>, Gi
 
         Ok(stdout.lines().map(|s| s.to_string()).collect())
     } else {
-        Ok(shas.into_iter().collect())
+        // Single or no result - verify it exists
+        let sha_vec: Vec<String> = shas.into_iter().collect();
+        if !sha_vec.is_empty() {
+            let sha = &sha_vec[0];
+            let mut args = repo.global_args_for_exec();
+            args.push("cat-file".to_string());
+            args.push("-e".to_string());
+            args.push(sha.clone());
+            
+            if exec_git(&args).is_ok() {
+                Ok(sha_vec)
+            } else {
+                eprintln!("[DEBUG] Single commit {} does not exist", sha);
+                Err(GitAiError::Generic(
+                    "Commit referenced in git notes does not exist".to_string()
+                ))
+            }
+        } else {
+            Ok(sha_vec)
+        }
     }
 }
 
