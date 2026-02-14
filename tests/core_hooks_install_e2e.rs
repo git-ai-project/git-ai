@@ -4,7 +4,7 @@ use git_ai::commands::core_hooks::{INSTALLED_HOOKS, PREVIOUS_HOOKS_PATH_FILE};
 use repos::test_repo::get_binary_path;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, Output};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -64,29 +64,24 @@ impl HookConfigSandbox {
 
     fn run_git_raw_with_timeout(&self, args: &[&str], timeout: Duration) -> Output {
         let mut command = Command::new(git_ai::config::Config::get().git_cmd());
-        command
-            .args(args)
-            .current_dir(&self.repo)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        command.args(args).current_dir(&self.repo);
         self.apply_env(&mut command);
 
         let mut child = command.spawn().expect("spawn git");
         let start = Instant::now();
         loop {
-            if let Some(_status) = child.try_wait().expect("wait on git child") {
-                return child.wait_with_output().expect("collect git output");
+            if let Some(status) = child.try_wait().expect("wait on git child") {
+                return Output {
+                    status,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                };
             }
 
             if start.elapsed() > timeout {
                 let _ = child.kill();
-                let output = child.wait_with_output().expect("collect git output");
-                panic!(
-                    "git command timed out after {:?}: git {:?}\n{}",
-                    timeout,
-                    args,
-                    combined_output(&output)
-                );
+                let _ = child.wait();
+                panic!("git command timed out after {:?}: git {:?}", timeout, args);
             }
 
             sleep(Duration::from_millis(20));
