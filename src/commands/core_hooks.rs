@@ -1339,9 +1339,35 @@ fn core_hook_state_path(repository: &Repository) -> PathBuf {
     repository.path().join("ai").join(CORE_HOOK_STATE_FILE)
 }
 
+fn home_dir_from_env() -> Option<PathBuf> {
+    for key in ["GIT_AI_HOME", "HOME", "USERPROFILE"] {
+        if let Some(value) = std::env::var_os(key)
+            && !value.is_empty()
+        {
+            return Some(PathBuf::from(value));
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        if let (Some(home_drive), Some(home_path)) =
+            (std::env::var_os("HOMEDRIVE"), std::env::var_os("HOMEPATH"))
+            && !home_drive.is_empty()
+            && !home_path.is_empty()
+        {
+            let mut combined = PathBuf::from(home_drive);
+            combined.push(home_path);
+            return Some(combined);
+        }
+    }
+
+    None
+}
+
 /// Returns the managed global core-hooks directory.
 pub fn managed_core_hooks_dir() -> Result<PathBuf, GitAiError> {
-    let home = dirs::home_dir()
+    let home = home_dir_from_env()
+        .or_else(dirs::home_dir)
         .ok_or_else(|| GitAiError::Generic("Unable to determine home directory".to_string()))?;
     Ok(home.join(".git-ai").join("core-hooks"))
 }
@@ -1380,24 +1406,49 @@ if [ -n "$previous_hooks_dir" ]; then
   fi
 fi
 
+is_windows_shell=0
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*) is_windows_shell=1 ;;
+esac
+
+run_chained_hook() {{
+  hook_path="$1"
+  shift
+
+  if [ "$hook_path" = "$0" ]; then
+    return 0
+  fi
+
+  if [ "$is_windows_shell" = "1" ]; then
+    if [ -f "$hook_path" ]; then
+      sh "$hook_path" "$@"
+      return $?
+    fi
+    return 0
+  fi
+
+  if [ -x "$hook_path" ]; then
+    "$hook_path" "$@"
+    return $?
+  fi
+
+  return 0
+}}
+
 if [ -n "$previous_hooks_dir" ]; then
   previous_hook="$previous_hooks_dir/{hook}"
-  if [ -x "$previous_hook" ] && [ "$previous_hook" != "$0" ]; then
-    "$previous_hook" "$@"
-    previous_status=$?
-    if [ $previous_status -ne 0 ]; then
-      exit $previous_status
-    fi
+  run_chained_hook "$previous_hook" "$@"
+  previous_status=$?
+  if [ $previous_status -ne 0 ]; then
+    exit $previous_status
   fi
 else
   repo_git_dir="${{GIT_DIR:-.git}}"
   repo_hook="$repo_git_dir/hooks/{hook}"
-  if [ -x "$repo_hook" ] && [ "$repo_hook" != "$0" ]; then
-    "$repo_hook" "$@"
-    repo_status=$?
-    if [ $repo_status -ne 0 ]; then
-      exit $repo_status
-    fi
+  run_chained_hook "$repo_hook" "$@"
+  repo_status=$?
+  if [ $repo_status -ne 0 ]; then
+    exit $repo_status
   fi
 fi
 
