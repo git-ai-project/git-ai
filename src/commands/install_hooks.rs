@@ -709,12 +709,12 @@ fn install_git_core_hooks(
     if !dry_run {
         fs::create_dir_all(&hooks_dir)?;
 
-        // Preserve the user's pre-install core.hooksPath once so uninstall can restore it.
+        // Persist the active non-managed hooks path so uninstall can restore current user intent.
+        // This is intentionally updated on each transition to managed hooks in case users
+        // reconfigure `core.hooksPath` while git-ai is installed, then reinstall.
         if config_needs_update {
             let previous_path_file = hooks_dir.join(PREVIOUS_HOOKS_PATH_FILE);
-            if !previous_path_file.exists() {
-                write_previous_hooks_path(&previous_path_file, current_hooks_path.as_deref())?;
-            }
+            write_previous_hooks_path(&previous_path_file, current_hooks_path.as_deref())?;
         }
 
         write_core_hook_scripts(&hooks_dir, &params.binary_path)?;
