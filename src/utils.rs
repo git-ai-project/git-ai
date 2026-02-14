@@ -12,7 +12,10 @@ static IS_TERMINAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 /// Internal guard used to prevent git-ai core hooks from recursively re-entering themselves
 /// when git-ai invokes git subprocesses.
-pub const GIT_AI_SKIP_CORE_HOOKS_ENV: &str = "GIT_AI_SKIP_CORE_HOOKS";
+///
+/// This must not start with `GIT_`, because Git forwards `GIT_*` vars to alias scripts and
+/// core compatibility tests assert that wrappers do not leak extra `GIT_*` environment.
+pub const GIT_AI_SKIP_CORE_HOOKS_ENV: &str = "GITAI_SKIP_CORE_HOOKS";
 
 fn is_debug_enabled() -> bool {
     *DEBUG_ENABLED.get_or_init(|| {

@@ -553,6 +553,7 @@ fn test_failed_rebase_does_not_leak_stale_autostash_attribution() {
     file.set_contents(lines!["base".human()]);
     ghost.set_contents(lines!["ghost base".human()]);
     repo.stage_all_and_commit("base").unwrap();
+    let default_branch = repo.current_branch();
 
     // Upstream branch to rebase onto.
     repo.git(&["checkout", "-b", "upstream"]).unwrap();
@@ -560,8 +561,8 @@ fn test_failed_rebase_does_not_leak_stale_autostash_attribution() {
     upstream_only.set_contents(lines!["upstream".human()]);
     repo.stage_all_and_commit("upstream commit").unwrap();
 
-    // Return to main and create an AI commit that will be rebased.
-    repo.git(&["checkout", "main"]).unwrap();
+    // Return to the default branch and create an AI commit that will be rebased.
+    repo.git(&["checkout", &default_branch]).unwrap();
     file.set_contents(lines!["base".human(), "ai committed".ai()]);
     repo.git_ai(&["checkpoint", "mock_ai"]).unwrap();
     repo.stage_all_and_commit("ai commit").unwrap();
