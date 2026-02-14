@@ -60,3 +60,7 @@ fn test_change_across_commits() {
     assert_eq!(second_ai_entry.line_ranges, vec![LineRange::Single(6)]);
     assert_ne!(second_ai_entry.hash, initial_ai_entry.hash);
 }
+
+worktree_test_wrappers! {
+    test_change_across_commits,
+}
