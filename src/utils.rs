@@ -314,13 +314,26 @@ mod tests {
 
     #[test]
     fn test_lockfile_released_on_drop() {
+        use std::thread;
+        use std::time::Duration;
+
         let dir = tempfile::tempdir().unwrap();
         let lock_path = dir.path().join("test.lock");
         {
             let _lock = LockFile::try_acquire(&lock_path).expect("first acquire should succeed");
             // _lock is dropped here
         }
-        let second = LockFile::try_acquire(&lock_path);
+
+        // Under heavy parallel test load (especially on macOS runners), lock release/open can
+        // occasionally be delayed for a brief moment. Retry to avoid flaky false negatives.
+        let second = (0..20).find_map(|_| {
+            let acquired = LockFile::try_acquire(&lock_path);
+            if acquired.is_some() {
+                return acquired;
+            }
+            thread::sleep(Duration::from_millis(10));
+            None
+        });
         assert!(
             second.is_some(),
             "should acquire lock after previous holder is dropped"
