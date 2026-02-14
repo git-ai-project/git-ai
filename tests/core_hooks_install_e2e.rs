@@ -4,7 +4,9 @@ use git_ai::commands::core_hooks::{INSTALLED_HOOKS, PREVIOUS_HOOKS_PATH_FILE};
 use repos::test_repo::get_binary_path;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::thread::sleep;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 struct HookConfigSandbox {
@@ -60,6 +62,37 @@ impl HookConfigSandbox {
         command.output().expect("run git")
     }
 
+    fn run_git_raw_with_timeout(&self, args: &[&str], timeout: Duration) -> Output {
+        let mut command = Command::new(git_ai::config::Config::get().git_cmd());
+        command
+            .args(args)
+            .current_dir(&self.repo)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        self.apply_env(&mut command);
+
+        let mut child = command.spawn().expect("spawn git");
+        let start = Instant::now();
+        loop {
+            if let Some(_status) = child.try_wait().expect("wait on git child") {
+                return child.wait_with_output().expect("collect git output");
+            }
+
+            if start.elapsed() > timeout {
+                let _ = child.kill();
+                let output = child.wait_with_output().expect("collect git output");
+                panic!(
+                    "git command timed out after {:?}: git {:?}\n{}",
+                    timeout,
+                    args,
+                    combined_output(&output)
+                );
+            }
+
+            sleep(Duration::from_millis(20));
+        }
+    }
+
     fn run_git_ok(&self, args: &[&str]) -> String {
         let output = self.run_git_raw(args);
         if !output.status.success() {
@@ -110,6 +143,14 @@ impl HookConfigSandbox {
         self.run_git_ai_ok(&["uninstall-hooks", "--dry-run=false"]);
     }
 
+    fn install_hooks_dry_run(&self) {
+        self.run_git_ai_ok(&["install-hooks", "--dry-run=true"]);
+    }
+
+    fn uninstall_hooks_dry_run(&self) {
+        self.run_git_ai_ok(&["uninstall-hooks", "--dry-run=true"]);
+    }
+
     fn global_hooks_path(&self) -> Option<String> {
         let output = self.run_git_raw(&["config", "--global", "--get", "core.hooksPath"]);
         if output.status.success() {
@@ -129,12 +170,30 @@ impl HookConfigSandbox {
         ]);
     }
 
+    fn set_global_hooks_path_raw(&self, hooks_path: &str) {
+        self.run_git_ok(&["config", "--global", "core.hooksPath", hooks_path]);
+    }
+
     fn set_local_hooks_path(&self, hooks_dir: &Path) {
         self.run_git_ok(&[
             "config",
             "core.hooksPath",
             hooks_dir.to_str().expect("hooks dir path"),
         ]);
+    }
+
+    fn set_local_hooks_path_raw(&self, hooks_path: &str) {
+        self.run_git_ok(&["config", "core.hooksPath", hooks_path]);
+    }
+
+    fn local_hooks_path(&self) -> Option<String> {
+        let output = self.run_git_raw(&["config", "--get", "core.hooksPath"]);
+        if output.status.success() {
+            let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if value.is_empty() { None } else { Some(value) }
+        } else {
+            None
+        }
     }
 
     fn unset_local_hooks_path(&self) {
@@ -175,6 +234,20 @@ impl HookConfigSandbox {
         let hooks_dir = self.repo.join(".git").join("hooks");
         self.write_hook(&hooks_dir, hook_name, script_body);
     }
+
+    fn read_previous_hooks_path(&self) -> String {
+        fs::read_to_string(self.previous_hooks_file())
+            .expect("read previous hooks file")
+            .trim()
+            .to_string()
+    }
+
+    fn core_hook_state_path(&self) -> PathBuf {
+        self.repo
+            .join(".git")
+            .join("ai")
+            .join("core_hook_state.json")
+    }
 }
 
 fn combined_output(output: &Output) -> String {
@@ -194,6 +267,14 @@ fn marker_hook_script(marker: &Path, exit_code: i32) -> String {
     format!(
         "#!/bin/sh\nprintf '%s\\n' ran >> \"{}\"\nexit {}\n",
         escaped, exit_code
+    )
+}
+
+fn husky_pre_commit_script(marker: &Path) -> String {
+    let escaped = shell_escape(marker);
+    format!(
+        "#!/bin/sh\n. \"$(dirname -- \"$0\")/_/husky.sh\"\nprintf '%s\\n' husky-ran >> \"{}\"\nexit 0\n",
+        escaped
     )
 }
 
@@ -513,5 +594,268 @@ fn removing_repo_local_hooks_path_reverts_to_managed_behavior() {
     assert!(
         repo_marker.exists(),
         "repo .git/hooks hook did not run after local core.hooksPath was removed"
+    );
+}
+
+#[test]
+fn husky_relative_core_hooks_path_overrides_managed_global_hooks() {
+    let sandbox = HookConfigSandbox::new();
+    let husky_dir = sandbox.repo.join(".husky");
+    let marker = sandbox.temp.path().join("husky-precommit-ran");
+
+    sandbox.install_hooks();
+    sandbox.write_hook(&husky_dir, "pre-commit", &marker_hook_script(&marker, 0));
+    sandbox.set_local_hooks_path_raw(".husky");
+
+    sandbox.commit_file("husky.txt", "husky\n", "husky relative pre-commit");
+
+    assert!(
+        marker.exists(),
+        "relative .husky pre-commit did not run when local core.hooksPath was set"
+    );
+    assert!(
+        !sandbox.core_hook_state_path().exists(),
+        "managed core hooks should not run when local core.hooksPath overrides global hooks"
+    );
+}
+
+#[test]
+fn husky_style_hook_with_helper_script_runs() {
+    let sandbox = HookConfigSandbox::new();
+    let husky_dir = sandbox.repo.join(".husky");
+    let husky_helper_dir = husky_dir.join("_");
+    let marker = sandbox.temp.path().join("husky-helper-ran");
+
+    sandbox.install_hooks();
+    sandbox.write_hook(
+        &husky_helper_dir,
+        "husky.sh",
+        "#!/bin/sh\n# husky helper shim\n",
+    );
+    sandbox.write_hook(&husky_dir, "pre-commit", &husky_pre_commit_script(&marker));
+    sandbox.set_local_hooks_path_raw(".husky");
+
+    sandbox.commit_file("husky-helper.txt", "husky helper\n", "husky helper commit");
+
+    assert!(
+        marker.exists(),
+        "husky-like pre-commit with helper shim did not run"
+    );
+}
+
+#[test]
+fn previous_global_hooks_path_with_tilde_is_expanded_for_chaining() {
+    let sandbox = HookConfigSandbox::new();
+    let previous_hooks_dir = sandbox.home.join("legacy-hooks");
+    let marker = sandbox.temp.path().join("tilde-hooks-ran");
+
+    sandbox.write_hook(
+        &previous_hooks_dir,
+        "post-commit",
+        &marker_hook_script(&marker, 0),
+    );
+    sandbox.set_global_hooks_path_raw("~/legacy-hooks");
+    sandbox.install_hooks();
+
+    sandbox.commit_file("tilde.txt", "tilde\n", "tilde core.hooksPath commit");
+
+    assert!(
+        marker.exists(),
+        "hook from tilde-based previous core.hooksPath did not run"
+    );
+}
+
+#[test]
+fn previous_hooks_file_with_crlf_is_parsed_correctly() {
+    let sandbox = HookConfigSandbox::new();
+    let previous_hooks_dir = sandbox.temp.path().join("previous-hooks");
+    let marker = sandbox.temp.path().join("crlf-hook-ran");
+
+    sandbox.write_hook(
+        &previous_hooks_dir,
+        "post-commit",
+        &marker_hook_script(&marker, 0),
+    );
+    sandbox.set_global_hooks_path(&previous_hooks_dir);
+    sandbox.install_hooks();
+
+    fs::write(
+        sandbox.previous_hooks_file(),
+        format!("{}\r\n", previous_hooks_dir.display()),
+    )
+    .expect("rewrite previous_hooks_path with CRLF");
+
+    sandbox.commit_file("crlf.txt", "crlf\n", "crlf previous hooks path");
+    assert!(
+        marker.exists(),
+        "CRLF-terminated previous hooks path should still chain to the previous hook"
+    );
+}
+
+#[test]
+fn reinstall_with_managed_path_alias_preserves_previous_hooks_target() {
+    let sandbox = HookConfigSandbox::new();
+    let previous_hooks_dir = sandbox.temp.path().join("legacy-hooks");
+    fs::create_dir_all(&previous_hooks_dir).expect("create previous hooks dir");
+
+    sandbox.set_global_hooks_path(&previous_hooks_dir);
+    sandbox.install_hooks();
+
+    let managed_alias = format!("{}/", sandbox.managed_hooks_dir().display());
+    sandbox.set_global_hooks_path_raw(&managed_alias);
+    sandbox.install_hooks();
+
+    assert_eq!(
+        sandbox.read_previous_hooks_path(),
+        previous_hooks_dir.to_string_lossy(),
+        "reinstall must not overwrite previous hooks target with a managed path alias"
+    );
+
+    sandbox.uninstall_hooks();
+    assert_eq!(
+        sandbox.global_hooks_path(),
+        Some(previous_hooks_dir.to_string_lossy().to_string())
+    );
+}
+
+#[test]
+fn uninstall_restores_previous_hooks_path_even_when_config_uses_managed_alias() {
+    let sandbox = HookConfigSandbox::new();
+    let previous_hooks_dir = sandbox.temp.path().join("legacy-hooks");
+    fs::create_dir_all(&previous_hooks_dir).expect("create previous hooks dir");
+
+    sandbox.set_global_hooks_path(&previous_hooks_dir);
+    sandbox.install_hooks();
+
+    let managed_alias = format!("{}/", sandbox.managed_hooks_dir().display());
+    sandbox.set_global_hooks_path_raw(&managed_alias);
+    sandbox.uninstall_hooks();
+
+    assert_eq!(
+        sandbox.global_hooks_path(),
+        Some(previous_hooks_dir.to_string_lossy().to_string()),
+        "uninstall should restore original hooks path when managed path is represented as an alias"
+    );
+}
+
+#[test]
+fn install_hooks_dry_run_does_not_mutate_global_config_or_files() {
+    let sandbox = HookConfigSandbox::new();
+    let previous_hooks_dir = sandbox.temp.path().join("legacy-hooks");
+    fs::create_dir_all(&previous_hooks_dir).expect("create previous hooks dir");
+    sandbox.set_global_hooks_path(&previous_hooks_dir);
+
+    sandbox.install_hooks_dry_run();
+
+    assert_eq!(
+        sandbox.global_hooks_path(),
+        Some(previous_hooks_dir.to_string_lossy().to_string()),
+        "dry-run install must not modify global core.hooksPath"
+    );
+    assert!(
+        !sandbox.managed_hooks_dir().exists(),
+        "dry-run install must not create managed hook scripts"
+    );
+}
+
+#[test]
+fn uninstall_hooks_dry_run_does_not_mutate_global_config_or_files() {
+    let sandbox = HookConfigSandbox::new();
+    let previous_hooks_dir = sandbox.temp.path().join("legacy-hooks");
+    fs::create_dir_all(&previous_hooks_dir).expect("create previous hooks dir");
+    sandbox.set_global_hooks_path(&previous_hooks_dir);
+    sandbox.install_hooks();
+
+    let managed_path = sandbox.managed_hooks_dir().to_string_lossy().to_string();
+    assert!(sandbox.managed_hooks_dir().exists());
+
+    sandbox.uninstall_hooks_dry_run();
+
+    assert_eq!(
+        sandbox.global_hooks_path(),
+        Some(managed_path),
+        "dry-run uninstall must not modify global core.hooksPath"
+    );
+    assert!(
+        sandbox.managed_hooks_dir().exists(),
+        "dry-run uninstall must not remove managed hook scripts"
+    );
+}
+
+#[test]
+fn local_core_hooks_path_survives_global_install_uninstall_cycles() {
+    let sandbox = HookConfigSandbox::new();
+    sandbox.set_local_hooks_path_raw(".husky");
+
+    sandbox.install_hooks();
+    sandbox.uninstall_hooks();
+
+    assert_eq!(
+        sandbox.local_hooks_path(),
+        Some(".husky".to_string()),
+        "install/uninstall must not clobber repository-level core.hooksPath"
+    );
+}
+
+#[test]
+fn previous_hooks_self_reference_does_not_recurse_or_hang() {
+    let sandbox = HookConfigSandbox::new();
+    let repo_marker = sandbox.temp.path().join("repo-postcommit-ran");
+
+    sandbox.install_hooks();
+    sandbox.write_repo_hook("post-commit", &marker_hook_script(&repo_marker, 0));
+    fs::write(
+        sandbox.previous_hooks_file(),
+        format!("{}/\n", sandbox.managed_hooks_dir().display()),
+    )
+    .expect("rewrite previous hooks file as self reference");
+
+    sandbox.write_repo_file("self-ref.txt", "self\n");
+    sandbox.run_git_ok(&["add", "self-ref.txt"]);
+    let output = sandbox.run_git_raw_with_timeout(
+        &["commit", "-m", "self reference does not recurse"],
+        Duration::from_secs(10),
+    );
+    assert!(
+        output.status.success(),
+        "commit should not hang or fail when previous hooks path points to managed hooks dir:\n{}",
+        combined_output(&output)
+    );
+    assert!(
+        repo_marker.exists(),
+        "self-referenced previous hooks dir should fall back to repo .git/hooks"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn non_executable_previous_pre_commit_hook_is_skipped() {
+    let sandbox = HookConfigSandbox::new();
+    let previous_hooks_dir = sandbox.temp.path().join("legacy-hooks");
+    let marker = sandbox.temp.path().join("non-executable-hook-ran");
+
+    fs::create_dir_all(&previous_hooks_dir).expect("create legacy hooks dir");
+    let pre_commit_path = previous_hooks_dir.join("pre-commit");
+    fs::write(&pre_commit_path, marker_hook_script(&marker, 0)).expect("write legacy pre-commit");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&pre_commit_path)
+            .expect("legacy pre-commit metadata")
+            .permissions();
+        perms.set_mode(0o644);
+        fs::set_permissions(&pre_commit_path, perms).expect("set non executable permissions");
+    }
+
+    sandbox.set_global_hooks_path(&previous_hooks_dir);
+    sandbox.install_hooks();
+    sandbox.commit_file(
+        "non-exec.txt",
+        "non exec\n",
+        "non executable previous pre-commit should be ignored",
+    );
+
+    assert!(
+        !marker.exists(),
+        "non-executable previous pre-commit hook must not be executed"
     );
 }

@@ -1353,7 +1353,56 @@ pub fn write_core_hook_scripts(hooks_dir: &Path, git_ai_binary: &Path) -> Result
 
     for hook in INSTALLED_HOOKS {
         let script = format!(
-            "#!/bin/sh\nif [ \"${{{skip_env}:-}}\" = \"1\" ]; then\n  exit 0\nfi\n\n\"{bin}\" hook {hook} \"$@\"\n\nscript_dir=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\nprevious_hooks_file=\"$script_dir/{previous_hooks_file}\"\nprevious_hooks_dir=\"\"\n\nif [ -f \"$previous_hooks_file\" ]; then\n  previous_hooks_dir=$(cat \"$previous_hooks_file\")\n  case \"$previous_hooks_dir\" in\n    \"~\") previous_hooks_dir=\"$HOME\" ;;\n    \"~/\"*) previous_hooks_dir=\"$HOME/${{previous_hooks_dir#~/}}\" ;;\n  esac\nfi\n\nif [ -n \"$previous_hooks_dir\" ]; then\n  previous_hook=\"$previous_hooks_dir/{hook}\"\n  if [ -x \"$previous_hook\" ] && [ \"$previous_hook\" != \"$0\" ]; then\n    \"$previous_hook\" \"$@\"\n    previous_status=$?\n    if [ $previous_status -ne 0 ]; then\n      exit $previous_status\n    fi\n  fi\nelse\n  repo_git_dir=\"${{GIT_DIR:-.git}}\"\n  repo_hook=\"$repo_git_dir/hooks/{hook}\"\n  if [ -x \"$repo_hook\" ] && [ \"$repo_hook\" != \"$0\" ]; then\n    \"$repo_hook\" \"$@\"\n    repo_status=$?\n    if [ $repo_status -ne 0 ]; then\n      exit $repo_status\n    fi\n  fi\nfi\n\nexit 0\n",
+            r#"#!/bin/sh
+if [ "${{{skip_env}:-}}" = "1" ]; then
+  exit 0
+fi
+
+"{bin}" hook {hook} "$@"
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+previous_hooks_file="$script_dir/{previous_hooks_file}"
+previous_hooks_dir=""
+
+if [ -f "$previous_hooks_file" ]; then
+  previous_hooks_dir=$(tr -d '\r' < "$previous_hooks_file")
+  case "$previous_hooks_dir" in
+    "~") previous_hooks_dir="$HOME" ;;
+    "~/"*) previous_hooks_dir="$HOME/${{previous_hooks_dir#\~/}}" ;;
+  esac
+fi
+
+if [ -n "$previous_hooks_dir" ]; then
+  script_dir_real=$(CDPATH= cd -- "$script_dir" 2>/dev/null && pwd -P)
+  previous_hooks_dir_real=$(CDPATH= cd -- "$previous_hooks_dir" 2>/dev/null && pwd -P)
+  if [ -n "$script_dir_real" ] && [ -n "$previous_hooks_dir_real" ] && [ "$script_dir_real" = "$previous_hooks_dir_real" ]; then
+    previous_hooks_dir=""
+  fi
+fi
+
+if [ -n "$previous_hooks_dir" ]; then
+  previous_hook="$previous_hooks_dir/{hook}"
+  if [ -x "$previous_hook" ] && [ "$previous_hook" != "$0" ]; then
+    "$previous_hook" "$@"
+    previous_status=$?
+    if [ $previous_status -ne 0 ]; then
+      exit $previous_status
+    fi
+  fi
+else
+  repo_git_dir="${{GIT_DIR:-.git}}"
+  repo_hook="$repo_git_dir/hooks/{hook}"
+  if [ -x "$repo_hook" ] && [ "$repo_hook" != "$0" ]; then
+    "$repo_hook" "$@"
+    repo_status=$?
+    if [ $repo_status -ne 0 ]; then
+      exit $repo_status
+    fi
+  fi
+fi
+
+exit 0
+"#,
             skip_env = GIT_AI_SKIP_CORE_HOOKS_ENV,
             bin = binary,
             hook = hook,
