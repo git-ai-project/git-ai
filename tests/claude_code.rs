@@ -435,3 +435,7 @@ fn test_user_text_content_blocks_are_parsed_correctly() {
         "Second message should be Assistant"
     );
 }
+
+worktree_test_wrappers! {
+    test_claude_e2e_prefers_latest_checkpoint_for_prompts,
+}

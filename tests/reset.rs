@@ -603,3 +603,20 @@ fn test_reset_with_directory_pathspec() {
         "// More AI root".ai(),
     ]);
 }
+
+worktree_test_wrappers! {
+    test_reset_hard_deletes_working_log,
+    test_reset_soft_reconstructs_working_log,
+    test_reset_mixed_reconstructs_working_log,
+    test_reset_to_same_commit_is_noop,
+    test_reset_multiple_commits,
+    test_reset_preserves_uncommitted_changes,
+    test_reset_with_pathspec,
+    test_reset_forward_is_noop,
+    test_reset_mixed_ai_human_changes,
+    test_reset_merge,
+    test_reset_with_new_files,
+    test_reset_with_deleted_files,
+    test_reset_mixed_pathspec_preserves_ai_authorship,
+    test_reset_mixed_pathspec_multiple_commits,
+}

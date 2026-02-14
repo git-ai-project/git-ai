@@ -1,3 +1,4 @@
+#[macro_use]
 mod repos;
 
 use repos::test_file::ExpectedLineExt;
@@ -533,4 +534,12 @@ fn test_pull_rebase_skip_commit_does_not_map_entire_upstream_history() {
         new_head, local_ai_sha,
         "HEAD should have moved to upstream history after skipped rebase"
     );
+}
+
+worktree_test_wrappers! {
+    test_fast_forward_pull_preserves_ai_attribution,
+    test_pull_rebase_autostash_preserves_uncommitted_ai_attribution,
+    test_pull_rebase_autostash_with_mixed_attribution,
+    test_pull_rebase_autostash_via_git_config,
+    test_fast_forward_pull_without_local_changes,
 }
