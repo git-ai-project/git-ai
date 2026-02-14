@@ -1546,7 +1546,21 @@ run_chained_hook() {{
 
   hook_path_normalized=$(printf '%s' "$hook_path" | tr '\\' '/')
   self_path_normalized=$(printf '%s' "$0" | tr '\\' '/')
-  if [ "$hook_path_normalized" = "$self_path_normalized" ]; then
+  hook_path_real=""
+  self_path_real=""
+
+  hook_dir=$(dirname -- "$hook_path")
+  if hook_dir_real=$(CDPATH= cd -- "$hook_dir" 2>/dev/null && pwd -P); then
+    hook_path_real="$hook_dir_real/$(basename -- "$hook_path")"
+  fi
+
+  self_dir=$(dirname -- "$0")
+  if self_dir_real=$(CDPATH= cd -- "$self_dir" 2>/dev/null && pwd -P); then
+    self_path_real="$self_dir_real/$(basename -- "$0")"
+  fi
+
+  if [ "$hook_path_normalized" = "$self_path_normalized" ] || \
+     ([ -n "$hook_path_real" ] && [ -n "$self_path_real" ] && [ "$hook_path_real" = "$self_path_real" ]); then
     return 0
   fi
 
