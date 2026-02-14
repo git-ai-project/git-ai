@@ -9,7 +9,7 @@ use crate::commands::hooks::stash_hooks::{
 };
 use crate::error::GitAiError;
 use crate::git::cli_parser::ParsedGitInvocation;
-use crate::git::repository::{Repository, find_repository};
+use crate::git::repository::{Repository, find_repository, find_repository_in_path};
 use crate::git::rewrite_log::{
     MergeSquashEvent, RebaseCompleteEvent, ResetEvent, ResetKind, RewriteLogEvent,
 };
@@ -88,7 +88,7 @@ pub fn handle_core_hook_command(args: &[String]) {
     let hook_name = &args[0];
     let hook_args = &args[1..];
 
-    let mut repository = match find_repository(&[]) {
+    let mut repository = match find_repository_for_hook() {
         Ok(repo) => repo,
         Err(e) => {
             debug_log(&format!(
@@ -104,6 +104,37 @@ pub fn handle_core_hook_command(args: &[String]) {
         // Hooks should be best-effort to avoid breaking user git workflows.
         std::process::exit(0);
     }
+}
+
+fn find_repository_for_hook() -> Result<Repository, GitAiError> {
+    if let Ok(repo) = find_repository(&[]) {
+        return Ok(repo);
+    }
+
+    // Some Git code paths invoke hooks with cwd set to `.git`. Recover by resolving the
+    // parent worktree directory explicitly.
+    if let Ok(current_dir) = std::env::current_dir()
+        && current_dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|name| name == ".git")
+            .unwrap_or(false)
+        && let Some(parent) = current_dir.parent()
+        && let Some(parent_str) = parent.to_str()
+        && let Ok(repo) = find_repository_in_path(parent_str)
+    {
+        return Ok(repo);
+    }
+
+    // Fallback for hook environments that provide worktree explicitly.
+    if let Ok(work_tree) = std::env::var("GIT_WORK_TREE")
+        && !work_tree.trim().is_empty()
+        && let Ok(repo) = find_repository_in_path(work_tree.trim())
+    {
+        return Ok(repo);
+    }
+
+    find_repository(&[])
 }
 
 fn run_hook_impl(
@@ -258,6 +289,10 @@ fn handle_pre_rebase(repository: &mut Repository, hook_args: &[String]) -> Resul
     rebase_hooks::pre_rebase_hook(&parsed, repository, &mut context);
 
     let mut state = load_core_hook_state(repository)?;
+    // Reset stale snapshots from earlier failed rebase attempts.
+    state.pending_autostash = None;
+    state.pending_pull_autostash = None;
+
     if has_uncommitted_changes(repository)
         && let Some(old_head) = repository.head().ok().and_then(|h| h.target().ok())
         && let Ok(va) = VirtualAttributions::from_just_working_log(
@@ -271,9 +306,9 @@ fn handle_pre_rebase(repository: &mut Repository, hook_args: &[String]) -> Resul
         state.pending_autostash = Some(PendingAutostashState {
             authorship_log_json,
         });
-        save_core_hook_state(repository, &state)?;
         debug_log("Captured pending autostash attributions in core hook state");
     }
+    save_core_hook_state(repository, &state)?;
     Ok(())
 }
 
@@ -466,6 +501,7 @@ fn handle_reference_transaction(
 
     let mut remotes_to_sync: HashSet<String> = HashSet::new();
     let mut saw_orig_head_update = false;
+    let mut moved_branch_ref: Option<(String, String)> = None;
     let mut moved_head_ref: Option<(String, String)> = None;
     let mut created_stash_sha: Option<String> = None;
     let mut deleted_stash_sha: Option<String> = None;
@@ -497,6 +533,10 @@ fn handle_reference_transaction(
         }
 
         if reference.starts_with("refs/heads/") && old != new {
+            moved_branch_ref = Some((old.to_string(), new.to_string()));
+        }
+
+        if reference == "HEAD" && old != new {
             moved_head_ref = Some((old.to_string(), new.to_string()));
         }
 
@@ -521,11 +561,20 @@ fn handle_reference_transaction(
         }
     }
 
+    // Prefer concrete branch ref updates, but fall back to detached-HEAD updates.
+    let moved_main_ref = moved_branch_ref.or(moved_head_ref);
+
     if stage == "prepared" {
         let mut state = load_core_hook_state(repository)?;
         if saw_orig_head_update {
             state.pending_prepared_orig_head_ms = Some(now_ms());
-            capture_pending_pull_autostash_state(repository, &mut state);
+            if reflog_action()
+                .as_deref()
+                .map(|action| action.starts_with("pull --rebase"))
+                .unwrap_or(false)
+            {
+                capture_pending_pull_autostash_state(repository, &mut state);
+            }
         }
 
         let has_recent_orig_head = state
@@ -534,10 +583,10 @@ fn handle_reference_transaction(
             .unwrap_or(false);
 
         if has_recent_orig_head
-            && let Some((_, target_head)) = moved_head_ref
+            && let Some((_, target_head)) = moved_main_ref.as_ref()
             && !is_rebase_in_progress(repository)
         {
-            capture_pre_reset_state(repository, &target_head);
+            capture_pre_reset_state(repository, target_head);
             state.pending_prepared_orig_head_ms = None;
         }
 
@@ -590,7 +639,7 @@ fn handle_reference_transaction(
     }
 
     // Track reset operations from reflog instead of command env.
-    if let Some((old_head, new_head)) = moved_head_ref
+    if let Some((old_head, new_head)) = moved_main_ref
         && !is_rebase_in_progress(repository)
         && reflog
             .as_deref()
@@ -742,6 +791,13 @@ fn reflog_subject(repository: &Repository) -> Option<String> {
     } else {
         Some(subject)
     }
+}
+
+fn reflog_action() -> Option<String> {
+    std::env::var("GIT_REFLOG_ACTION")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn handle_stash_created(repository: &Repository, stash_sha: &str) -> Result<(), GitAiError> {
@@ -1288,4 +1344,35 @@ pub fn write_core_hook_scripts(hooks_dir: &Path, git_ai_binary: &Path) -> Result
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_repository_for_hook;
+    use crate::git::test_utils::TmpRepo;
+    use serial_test::serial;
+
+    #[test]
+    #[serial]
+    fn find_repository_for_hook_recovers_from_git_dir_cwd() {
+        struct CwdGuard(std::path::PathBuf);
+        impl Drop for CwdGuard {
+            fn drop(&mut self) {
+                let _ = std::env::set_current_dir(&self.0);
+            }
+        }
+
+        let repo = TmpRepo::new().expect("tmp repo");
+        let original_cwd = std::env::current_dir().expect("cwd");
+        let _guard = CwdGuard(original_cwd);
+        let git_dir = repo.path().join(".git");
+
+        std::env::set_current_dir(&git_dir).expect("set cwd to .git");
+        let resolved = find_repository_for_hook().expect("resolve repository from .git cwd");
+        let resolved_workdir = resolved.workdir().expect("workdir");
+        let resolved_canonical = resolved_workdir.canonicalize().expect("canonical workdir");
+        let expected_canonical = repo.path().canonicalize().expect("canonical expected");
+
+        assert_eq!(resolved_canonical, expected_canonical);
+    }
 }

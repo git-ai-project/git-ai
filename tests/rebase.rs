@@ -544,6 +544,48 @@ fn test_rebase_root_with_explicit_branch_argument_preserves_authorship() {
     feature_file.assert_lines_and_blame(lines!["// AI feature".ai(), "fn feature() {}".ai()]);
 }
 
+#[test]
+fn test_failed_rebase_does_not_leak_stale_autostash_attribution() {
+    let repo = TestRepo::new();
+
+    let mut file = repo.filename("test.txt");
+    let mut ghost = repo.filename("ghost.txt");
+    file.set_contents(lines!["base".human()]);
+    ghost.set_contents(lines!["ghost base".human()]);
+    repo.stage_all_and_commit("base").unwrap();
+
+    // Upstream branch to rebase onto.
+    repo.git(&["checkout", "-b", "upstream"]).unwrap();
+    let mut upstream_only = repo.filename("upstream.txt");
+    upstream_only.set_contents(lines!["upstream".human()]);
+    repo.stage_all_and_commit("upstream commit").unwrap();
+
+    // Return to main and create an AI commit that will be rebased.
+    repo.git(&["checkout", "main"]).unwrap();
+    file.set_contents(lines!["base".human(), "ai committed".ai()]);
+    repo.git_ai(&["checkpoint", "mock_ai"]).unwrap();
+    repo.stage_all_and_commit("ai commit").unwrap();
+
+    // Create additional uncommitted AI change, then attempt rebase without autostash.
+    ghost.set_contents(lines!["ghost base".human(), "ghost ai".ai()]);
+    repo.git_ai(&["checkpoint", "mock_ai"]).unwrap();
+    let failed_rebase = repo.git(&["rebase", "upstream"]);
+    assert!(failed_rebase.is_err(), "dirty rebase should fail");
+
+    // Drop uncommitted changes and run successful rebase.
+    repo.git(&["reset", "--hard", "HEAD"]).unwrap();
+    repo.git(&["rebase", "upstream"]).unwrap();
+
+    // Human-only commit after successful rebase should not re-introduce stale AI prompt metadata.
+    let mut human_only = repo.filename("human.txt");
+    human_only.set_contents(lines!["human only".human()]);
+    let final_commit = repo.stage_all_and_commit("human follow-up").unwrap();
+    assert!(
+        final_commit.authorship_log.metadata.prompts.is_empty(),
+        "stale autostash attribution leaked into later human-only commit"
+    );
+}
+
 /// Test interactive rebase with commit reordering - verifies interactive rebase works
 #[test]
 fn test_rebase_interactive_reorder() {

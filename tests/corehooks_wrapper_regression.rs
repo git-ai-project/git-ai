@@ -5,7 +5,7 @@ use git_ai::git::rewrite_log::RewriteLogEvent;
 use repos::test_file::ExpectedLineExt;
 use repos::test_repo::TestRepo;
 
-fn rewrite_event_counts(repo: &TestRepo) -> (usize, usize) {
+fn rewrite_event_counts(repo: &TestRepo) -> (usize, usize, usize) {
     let gitai_repo =
         find_repository_in_path(repo.path().to_str().unwrap()).expect("failed to open repository");
     let events = gitai_repo
@@ -17,11 +17,40 @@ fn rewrite_event_counts(repo: &TestRepo) -> (usize, usize) {
         .iter()
         .filter(|event| matches!(event, RewriteLogEvent::Commit { .. }))
         .count();
+    let amend_events = events
+        .iter()
+        .filter(|event| matches!(event, RewriteLogEvent::CommitAmend { .. }))
+        .count();
     let reset_events = events
         .iter()
         .filter(|event| matches!(event, RewriteLogEvent::Reset { .. }))
         .count();
-    (commit_events, reset_events)
+    (commit_events, amend_events, reset_events)
+}
+
+#[test]
+fn test_commit_dry_run_does_not_record_rewrite_event() {
+    let repo = TestRepo::new();
+
+    let mut file = repo.filename("test.txt");
+    file.set_contents(vec!["base".to_string()]);
+    repo.stage_all_and_commit("base commit")
+        .expect("base commit should succeed");
+
+    let (before_commit_events, _, _) = rewrite_event_counts(&repo);
+
+    file.set_contents(vec!["base".human(), "ai line".ai()]);
+    repo.git_ai(&["checkpoint", "mock_ai"])
+        .expect("checkpoint should succeed");
+    repo.git(&["add", "test.txt"]).expect("add should succeed");
+    repo.git(&["commit", "--dry-run"])
+        .expect("commit --dry-run should succeed");
+
+    let (after_commit_events, _, _) = rewrite_event_counts(&repo);
+    assert_eq!(
+        after_commit_events, before_commit_events,
+        "dry-run commit must not append rewrite events"
+    );
 }
 
 #[test]
@@ -33,7 +62,7 @@ fn test_commit_rewrite_event_recorded_once() {
     repo.stage_all_and_commit("base commit")
         .expect("base commit should succeed");
 
-    let (before_commit_events, _) = rewrite_event_counts(&repo);
+    let (before_commit_events, _, _) = rewrite_event_counts(&repo);
 
     file.set_contents(vec!["base".human(), "ai line".ai()]);
     repo.git_ai(&["checkpoint", "mock_ai"])
@@ -41,7 +70,7 @@ fn test_commit_rewrite_event_recorded_once() {
     repo.stage_all_and_commit("ai commit")
         .expect("ai commit should succeed");
 
-    let (after_commit_events, _) = rewrite_event_counts(&repo);
+    let (after_commit_events, _, _) = rewrite_event_counts(&repo);
     assert_eq!(
         after_commit_events,
         before_commit_events + 1,
@@ -65,14 +94,40 @@ fn test_reset_rewrite_event_recorded_once() {
     repo.stage_all_and_commit("second commit")
         .expect("second commit should succeed");
 
-    let (_, before_reset_events) = rewrite_event_counts(&repo);
+    let (_, _, before_reset_events) = rewrite_event_counts(&repo);
     repo.git(&["reset", "--mixed", &first_commit.commit_sha])
         .expect("reset should succeed");
 
-    let (_, after_reset_events) = rewrite_event_counts(&repo);
+    let (_, _, after_reset_events) = rewrite_event_counts(&repo);
     assert_eq!(
         after_reset_events,
         before_reset_events + 1,
         "expected exactly one reset rewrite event for a single reset operation",
+    );
+}
+
+#[test]
+fn test_commit_amend_rewrite_event_recorded_once() {
+    let repo = TestRepo::new();
+
+    let mut file = repo.filename("test.txt");
+    file.set_contents(vec!["base".to_string()]);
+    repo.stage_all_and_commit("base commit")
+        .expect("base commit should succeed");
+
+    let (_, before_amend_events, _) = rewrite_event_counts(&repo);
+
+    file.set_contents(vec!["base".human(), "amended ai line".ai()]);
+    repo.git_ai(&["checkpoint", "mock_ai"])
+        .expect("checkpoint should succeed");
+    repo.git(&["add", "test.txt"]).expect("add should succeed");
+    repo.git(&["commit", "--amend", "-m", "amended base commit"])
+        .expect("amend commit should succeed");
+
+    let (_, after_amend_events, _) = rewrite_event_counts(&repo);
+    assert_eq!(
+        after_amend_events,
+        before_amend_events + 1,
+        "expected exactly one amend rewrite event for commit --amend",
     );
 }
