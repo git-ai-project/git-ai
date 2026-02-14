@@ -434,6 +434,72 @@ if ($pathUpdate.MachineStatus -eq 'Updated') {
 Write-Success "Successfully installed git-ai into $installDir"
 Write-Success "You can now run 'git-ai' from your terminal"
 
+# Configure Git Bash shell profiles so git-ai takes precedence over /mingw64/bin/git
+# Git Bash (MSYS2/MinGW) prepends its own directories to PATH, which shadows
+# the Windows PATH entry we set above. Writing to ~/.bashrc ensures git-ai's
+# bin directory is prepended after Git Bash's own PATH setup.
+$gitBashConfigured = $false
+$gitBashAlreadyConfigured = $false
+try {
+    $bashrcPath = Join-Path $HOME '.bashrc'
+    $bashProfilePath = Join-Path $HOME '.bash_profile'
+    $pathCmd = 'export PATH="$HOME/.git-ai/bin:$PATH"'
+    $markerString = '.git-ai/bin'
+
+    # Detect if Git Bash is installed
+    $gitBashInstalled = $false
+    $gitForWindowsPaths = @(
+        (Join-Path $env:ProgramFiles 'Git\bin\bash.exe'),
+        (Join-Path ${env:ProgramFiles(x86)} 'Git\bin\bash.exe'),
+        (Join-Path $env:LOCALAPPDATA 'Programs\Git\bin\bash.exe')
+    )
+    foreach ($p in $gitForWindowsPaths) {
+        if ($p -and (Test-Path -LiteralPath $p)) {
+            $gitBashInstalled = $true
+            break
+        }
+    }
+
+    if ($gitBashInstalled) {
+        # Determine which config file to update (prefer .bashrc, fall back to .bash_profile)
+        $targetBashConfig = $null
+        if (Test-Path -LiteralPath $bashrcPath) {
+            $targetBashConfig = $bashrcPath
+        } elseif (Test-Path -LiteralPath $bashProfilePath) {
+            $targetBashConfig = $bashProfilePath
+        } else {
+            # No existing config; create .bashrc
+            $targetBashConfig = $bashrcPath
+        }
+
+        # Check if already configured
+        $alreadyPresent = $false
+        if (Test-Path -LiteralPath $targetBashConfig) {
+            $content = Get-Content -LiteralPath $targetBashConfig -Raw -ErrorAction SilentlyContinue
+            if ($content -and $content.Contains($markerString)) {
+                $alreadyPresent = $true
+            }
+        }
+
+        if ($alreadyPresent) {
+            $gitBashAlreadyConfigured = $true
+        } else {
+            $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+            $appendContent = "`n# Added by git-ai installer on $timestamp`n$pathCmd`n"
+            Add-Content -LiteralPath $targetBashConfig -Value $appendContent -Encoding UTF8
+            $gitBashConfigured = $true
+        }
+    }
+} catch {
+    Write-Host "Warning: Failed to configure Git Bash: $($_.Exception.Message)" -ForegroundColor Yellow
+}
+
+if ($gitBashConfigured) {
+    Write-Success "Successfully configured Git Bash ($targetBashConfig)"
+} elseif ($gitBashAlreadyConfigured) {
+    Write-Success "Git Bash already configured ($targetBashConfig)"
+}
+
 # Write JSON config at %USERPROFILE%\.git-ai\config.json (only if it doesn't exist)
 try {
     $configDir = Join-Path $HOME '.git-ai'
