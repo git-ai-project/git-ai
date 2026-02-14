@@ -23,6 +23,7 @@
           extensions = [
             "rust-src"
             "rust-analyzer"
+            "llvm-tools-preview"
           ];
         };
 
@@ -178,6 +179,7 @@
             cargo-edit      # cargo add, cargo rm, cargo upgrade
             cargo-watch     # Auto-rebuild on file changes
             cargo-expand    # Show macro expansions
+            cargo-llvm-cov  # Code coverage via LLVM instrumentation
           ] ++ lib.optionals stdenv.hostPlatform.isDarwin [
             libiconv
             apple-sdk_15
