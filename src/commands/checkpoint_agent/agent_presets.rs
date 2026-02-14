@@ -48,6 +48,15 @@ impl AgentCheckpointPreset for ClaudePreset {
         let hook_data: serde_json::Value = serde_json::from_str(&stdin_json)
             .map_err(|e| GitAiError::PresetError(format!("Invalid JSON in hook_input: {}", e)))?;
 
+        // VS Code Copilot hooks can be imported into Claude settings. In that case, the
+        // payload uses VS Code hook fields (hookEventName/toolName/sessionId), and should be
+        // handled by the github-copilot preset, not the native Claude preset.
+        if ClaudePreset::is_vscode_copilot_hook_payload(&hook_data) {
+            return GithubCopilotPreset.run(AgentCheckpointFlags {
+                hook_input: Some(stdin_json),
+            });
+        }
+
         // Extract transcript_path and cwd from the JSON
         let transcript_path = hook_data
             .get("transcript_path")
@@ -143,6 +152,59 @@ impl AgentCheckpointPreset for ClaudePreset {
 }
 
 impl ClaudePreset {
+    fn is_vscode_copilot_hook_payload(hook_data: &serde_json::Value) -> bool {
+        let has_vscode_shape = hook_data.get("hookEventName").is_some()
+            && (hook_data.get("toolName").is_some()
+                || hook_data.get("tool_name").is_some()
+                || hook_data.get("sessionId").is_some()
+                || hook_data.get("session_id").is_some());
+
+        if !has_vscode_shape {
+            return false;
+        }
+
+        let transcript_path = GithubCopilotPreset::transcript_path_from_hook_data(hook_data);
+        if let Some(path) = transcript_path {
+            if GithubCopilotPreset::looks_like_claude_transcript_path(path) {
+                return false;
+            }
+            if GithubCopilotPreset::looks_like_copilot_transcript_path(path) {
+                return true;
+            }
+        }
+
+        // Conservative fallback: only redirect if there's explicit Copilot identity data.
+        if let Some(model_hint) = hook_data
+            .get("model")
+            .and_then(|v| v.as_str())
+            .or_else(|| hook_data.get("modelId").and_then(|v| v.as_str()))
+            .or_else(|| hook_data.get("selectedModel").and_then(|v| v.as_str()))
+            && model_hint.starts_with("copilot/")
+        {
+            return true;
+        }
+
+        if let Some(agent_hint) = hook_data
+            .get("agent")
+            .and_then(|v| v.as_str())
+            .or_else(|| hook_data.get("agentId").and_then(|v| v.as_str()))
+            && agent_hint.to_ascii_lowercase().contains("copilot")
+        {
+            return true;
+        }
+
+        if let Some(tool_hint) = hook_data
+            .get("tool_name")
+            .and_then(|v| v.as_str())
+            .or_else(|| hook_data.get("toolName").and_then(|v| v.as_str()))
+            && tool_hint.to_ascii_lowercase().contains("copilot")
+        {
+            return true;
+        }
+
+        false
+    }
+
     /// Parse a Claude Code JSONL file into a transcript and extract model info
     pub fn transcript_and_model_from_claude_code_jsonl(
         transcript_path: &str,
@@ -1470,9 +1532,25 @@ impl CursorPreset {
 
 pub struct GithubCopilotPreset;
 
+#[derive(Default)]
+struct CopilotModelCandidates {
+    request_non_auto_model_id: Option<String>,
+    request_model_id: Option<String>,
+    session_non_auto_model_id: Option<String>,
+    session_model_id: Option<String>,
+}
+
+impl CopilotModelCandidates {
+    fn best(self) -> Option<String> {
+        self.request_non_auto_model_id
+            .or(self.request_model_id)
+            .or(self.session_non_auto_model_id)
+            .or(self.session_model_id)
+    }
+}
+
 impl AgentCheckpointPreset for GithubCopilotPreset {
     fn run(&self, flags: AgentCheckpointFlags) -> Result<AgentRunResult, GitAiError> {
-        // Parse hook_input JSON to extract chat session information
         let hook_input_json = flags.hook_input.ok_or_else(|| {
             GitAiError::PresetError("hook_input is required for GitHub Copilot preset".to_string())
         })?;
@@ -1480,23 +1558,32 @@ impl AgentCheckpointPreset for GithubCopilotPreset {
         let hook_data: serde_json::Value = serde_json::from_str(&hook_input_json)
             .map_err(|e| GitAiError::PresetError(format!("Invalid JSON in hook_input: {}", e)))?;
 
-        // Extract hook_event_name to determine checkpoint type
-        // Fallback to "after_edit" if not set (for older versions of the VS Code extension)
         let hook_event_name = hook_data
             .get("hook_event_name")
+            .or_else(|| hook_data.get("hookEventName"))
             .and_then(|v| v.as_str())
             .unwrap_or("after_edit");
 
-        // Validate hook_event_name
-        if hook_event_name != "before_edit" && hook_event_name != "after_edit" {
-            return Err(GitAiError::PresetError(format!(
-                "Invalid hook_event_name: {}. Expected 'before_edit' or 'after_edit'",
-                hook_event_name
-            )));
+        if hook_event_name == "before_edit" || hook_event_name == "after_edit" {
+            return Self::run_legacy_extension_hooks(&hook_data, hook_event_name);
         }
 
-        // Required working directory provided by the extension
-        // Accept snake_case (new) with fallback to camelCase (old) for backward compatibility
+        if hook_event_name == "PreToolUse" || hook_event_name == "PostToolUse" {
+            return Self::run_vscode_native_hooks(&hook_data, hook_event_name);
+        }
+
+        Err(GitAiError::PresetError(format!(
+            "Invalid hook_event_name: {}. Expected one of 'before_edit', 'after_edit', 'PreToolUse', or 'PostToolUse'",
+            hook_event_name
+        )))
+    }
+}
+
+impl GithubCopilotPreset {
+    fn run_legacy_extension_hooks(
+        hook_data: &serde_json::Value,
+        hook_event_name: &str,
+    ) -> Result<AgentRunResult, GitAiError> {
         let repo_working_dir: String = hook_data
             .get("workspace_folder")
             .and_then(|v| v.as_str())
@@ -1508,24 +1595,9 @@ impl AgentCheckpointPreset for GithubCopilotPreset {
             })?
             .to_string();
 
-        // Extract dirty_files if available (snake_case with fallback to camelCase)
-        let dirty_files = hook_data
-            .get("dirty_files")
-            .and_then(|v| v.as_object())
-            .or_else(|| hook_data.get("dirtyFiles").and_then(|v| v.as_object()))
-            .map(|obj| {
-                obj.iter()
-                    .filter_map(|(key, value)| {
-                        value
-                            .as_str()
-                            .map(|content| (key.clone(), content.to_string()))
-                    })
-                    .collect::<HashMap<String, String>>()
-            });
+        let dirty_files = Self::dirty_files_from_hook_data(hook_data);
 
-        // Handle before_edit (human checkpoint)
         if hook_event_name == "before_edit" {
-            // Extract will_edit_filepaths (required for human checkpoints)
             let will_edit_filepaths = hook_data
                 .get("will_edit_filepaths")
                 .and_then(|v| v.as_array())
@@ -1564,8 +1636,6 @@ impl AgentCheckpointPreset for GithubCopilotPreset {
             });
         }
 
-        // Handle after_edit (AI checkpoint)
-        // Accept snake_case (new) with fallback to camelCase (old) for backward compatibility
         let chat_session_path = hook_data
             .get("chat_session_path")
             .and_then(|v| v.as_str())
@@ -1582,8 +1652,6 @@ impl AgentCheckpointPreset for GithubCopilotPreset {
             chat_session_path.to_string(),
         )]);
 
-        // Accept snake_case (new) with fallback to camelCase (old) for backward compatibility
-        // Accept either chat_session_id/session_id (new) or chatSessionId/sessionId (old)
         let chat_session_id = hook_data
             .get("chat_session_id")
             .and_then(|v| v.as_str())
@@ -1594,7 +1662,6 @@ impl AgentCheckpointPreset for GithubCopilotPreset {
             .to_string();
 
         // TODO Make edited_filepaths required in future versions (after old extensions are updated)
-        // Optionally take edited_filepaths from hook_data if present (from extension)
         let edited_filepaths = hook_data
             .get("edited_filepaths")
             .and_then(|val| val.as_array())
@@ -1604,15 +1671,13 @@ impl AgentCheckpointPreset for GithubCopilotPreset {
                     .collect::<Vec<String>>()
             });
 
-        // Read the Copilot chat session JSON (ignore errors)
         let (transcript, detected_model, detected_edited_filepaths) =
             GithubCopilotPreset::transcript_and_model_from_copilot_session_json(chat_session_path)
                 .map(|(t, m, f)| (Some(t), m, f))
                 .unwrap_or_else(|e| {
                     eprintln!(
                         "[Warning] Failed to parse GitHub Copilot chat session JSON from {} (will update transcript at commit): {}",
-                        chat_session_path,
-                        e
+                        chat_session_path, e
                     );
                     log_error(
                         &e,
@@ -1642,6 +1707,625 @@ impl AgentCheckpointPreset for GithubCopilotPreset {
             will_edit_filepaths: None,
             dirty_files,
         })
+    }
+
+    fn run_vscode_native_hooks(
+        hook_data: &serde_json::Value,
+        hook_event_name: &str,
+    ) -> Result<AgentRunResult, GitAiError> {
+        let cwd = hook_data
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .or_else(|| hook_data.get("workspace_folder").and_then(|v| v.as_str()))
+            .or_else(|| hook_data.get("workspaceFolder").and_then(|v| v.as_str()))
+            .ok_or_else(|| GitAiError::PresetError("cwd not found in hook_input".to_string()))?
+            .to_string();
+
+        let dirty_files = Self::dirty_files_from_hook_data(hook_data);
+        let chat_session_id = hook_data
+            .get("chat_session_id")
+            .and_then(|v| v.as_str())
+            .or_else(|| hook_data.get("session_id").and_then(|v| v.as_str()))
+            .or_else(|| hook_data.get("chatSessionId").and_then(|v| v.as_str()))
+            .or_else(|| hook_data.get("sessionId").and_then(|v| v.as_str()))
+            .unwrap_or("unknown")
+            .to_string();
+
+        let tool_name = hook_data
+            .get("tool_name")
+            .and_then(|v| v.as_str())
+            .or_else(|| hook_data.get("toolName").and_then(|v| v.as_str()))
+            .unwrap_or("unknown");
+
+        // VS Code currently executes imported hooks even when matcher/tool filters are ignored.
+        // Enforce tool filtering in git-ai to avoid creating checkpoints for read/search tools.
+        if !Self::is_supported_vscode_edit_tool_name(tool_name) {
+            return Err(GitAiError::PresetError(format!(
+                "Skipping VS Code hook for unsupported tool_name '{}' (non-edit tool).",
+                tool_name
+            )));
+        }
+
+        let tool_input = hook_data
+            .get("tool_input")
+            .or_else(|| hook_data.get("toolInput"));
+        let tool_response = hook_data
+            .get("tool_response")
+            .or_else(|| hook_data.get("toolResponse"));
+
+        let mut extracted_paths =
+            Self::extract_filepaths_from_vscode_hook_payload(tool_input, tool_response, &cwd);
+
+        let top_level_paths = hook_data
+            .get("edited_filepaths")
+            .and_then(|v| v.as_array())
+            .or_else(|| {
+                hook_data
+                    .get("will_edit_filepaths")
+                    .and_then(|v| v.as_array())
+            })
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .filter_map(|path| Self::normalize_hook_path(path, &cwd))
+                    .collect::<Vec<String>>()
+            })
+            .unwrap_or_default();
+
+        for path in top_level_paths {
+            if !extracted_paths.contains(&path) {
+                extracted_paths.push(path);
+            }
+        }
+
+        let transcript_path = Self::transcript_path_from_hook_data(hook_data).map(str::to_string);
+
+        if let Some(path) = transcript_path.as_deref()
+            && Self::looks_like_claude_transcript_path(path)
+        {
+            return Err(GitAiError::PresetError(
+                "Skipping VS Code hook because transcript_path looks like a Claude transcript path."
+                    .to_string(),
+            ));
+        }
+
+        let (transcript, mut detected_model, detected_edited_filepaths) = if let Some(path) =
+            transcript_path.as_deref()
+        {
+            GithubCopilotPreset::transcript_and_model_from_copilot_session_json(path)
+                .map(|(t, m, f)| (Some(t), m, f))
+                .unwrap_or_else(|e| {
+                    eprintln!(
+                        "[Warning] Failed to parse GitHub Copilot chat session JSON from {} (will update transcript at commit): {}",
+                        path, e
+                    );
+                    log_error(
+                        &e,
+                        Some(serde_json::json!({
+                            "agent_tool": "github-copilot",
+                            "operation": "transcript_and_model_from_copilot_session_json",
+                            "note": "JSON exists but invalid"
+                        })),
+                    );
+                    (None, None, None)
+                })
+        } else {
+            (None, None, None)
+        };
+
+        if let Some(path) = transcript_path.as_deref()
+            && chat_session_id != "unknown"
+            && Self::should_resolve_model_from_chat_sessions(detected_model.as_deref())
+            && let Some(chat_sessions_model) =
+                Self::model_from_copilot_chat_sessions(path, &chat_session_id)
+        {
+            detected_model = Some(chat_sessions_model);
+        }
+
+        if !Self::is_likely_copilot_native_hook(
+            tool_name,
+            detected_model.as_deref(),
+            hook_data,
+            transcript_path.as_deref(),
+        ) {
+            return Err(GitAiError::PresetError(format!(
+                "Skipping VS Code hook for non-Copilot session (tool_name: {}, model: {}).",
+                tool_name,
+                detected_model.as_deref().unwrap_or("unknown")
+            )));
+        }
+
+        let detected_edited_filepaths = detected_edited_filepaths.map(|paths| {
+            paths
+                .into_iter()
+                .filter_map(|path| Self::normalize_hook_path(&path, &cwd))
+                .collect::<Vec<String>>()
+        });
+
+        for path in detected_edited_filepaths.unwrap_or_default() {
+            if !extracted_paths.contains(&path) {
+                extracted_paths.push(path);
+            }
+        }
+
+        if hook_event_name == "PreToolUse" {
+            if extracted_paths.is_empty() {
+                return Err(GitAiError::PresetError(format!(
+                    "No editable file paths found in VS Code hook input (tool_name: {}). Skipping checkpoint.",
+                    tool_name
+                )));
+            }
+
+            return Ok(AgentRunResult {
+                agent_id: AgentId {
+                    tool: "human".to_string(),
+                    id: "human".to_string(),
+                    model: "human".to_string(),
+                },
+                agent_metadata: None,
+                checkpoint_kind: CheckpointKind::Human,
+                transcript: None,
+                repo_working_dir: Some(cwd),
+                edited_filepaths: None,
+                will_edit_filepaths: Some(extracted_paths),
+                dirty_files,
+            });
+        }
+
+        let transcript_path = transcript_path.ok_or_else(|| {
+            GitAiError::PresetError(
+                "transcript_path not found in hook_input for PostToolUse".to_string(),
+            )
+        })?;
+
+        let agent_id = AgentId {
+            tool: "github-copilot".to_string(),
+            id: chat_session_id,
+            model: detected_model.unwrap_or_else(|| "unknown".to_string()),
+        };
+
+        let agent_metadata = HashMap::from([
+            ("transcript_path".to_string(), transcript_path.clone()),
+            ("chat_session_path".to_string(), transcript_path),
+        ]);
+
+        if extracted_paths.is_empty() {
+            return Err(GitAiError::PresetError(format!(
+                "No editable file paths found in VS Code PostToolUse hook input (tool_name: {}). Skipping checkpoint.",
+                tool_name
+            )));
+        }
+
+        Ok(AgentRunResult {
+            agent_id,
+            agent_metadata: Some(agent_metadata),
+            checkpoint_kind: CheckpointKind::AiAgent,
+            transcript,
+            repo_working_dir: Some(cwd),
+            edited_filepaths: Some(extracted_paths),
+            will_edit_filepaths: None,
+            dirty_files,
+        })
+    }
+
+    fn dirty_files_from_hook_data(
+        hook_data: &serde_json::Value,
+    ) -> Option<HashMap<String, String>> {
+        hook_data
+            .get("dirty_files")
+            .and_then(|v| v.as_object())
+            .or_else(|| hook_data.get("dirtyFiles").and_then(|v| v.as_object()))
+            .map(|obj| {
+                obj.iter()
+                    .filter_map(|(key, value)| {
+                        value
+                            .as_str()
+                            .map(|content| (key.clone(), content.to_string()))
+                    })
+                    .collect::<HashMap<String, String>>()
+            })
+    }
+
+    fn is_likely_copilot_native_hook(
+        tool_name: &str,
+        detected_model: Option<&str>,
+        hook_data: &serde_json::Value,
+        transcript_path: Option<&str>,
+    ) -> bool {
+        if let Some(path) = transcript_path {
+            if Self::looks_like_claude_transcript_path(path) {
+                return false;
+            }
+            if Self::looks_like_copilot_transcript_path(path) {
+                return true;
+            }
+        }
+
+        if let Some(model) = detected_model {
+            return model.starts_with("copilot/");
+        }
+
+        if let Some(model_hint) = hook_data
+            .get("model")
+            .and_then(|v| v.as_str())
+            .or_else(|| hook_data.get("modelId").and_then(|v| v.as_str()))
+            .or_else(|| hook_data.get("selectedModel").and_then(|v| v.as_str()))
+        {
+            return model_hint.starts_with("copilot/");
+        }
+
+        tool_name.to_ascii_lowercase().contains("copilot")
+    }
+
+    fn should_resolve_model_from_chat_sessions(detected_model: Option<&str>) -> bool {
+        match detected_model {
+            None => true,
+            Some(model) => {
+                let normalized = model.trim().to_ascii_lowercase();
+                normalized.is_empty() || normalized == "unknown" || normalized == "copilot/auto"
+            }
+        }
+    }
+
+    fn model_from_copilot_chat_sessions(
+        transcript_path: &str,
+        transcript_session_id: &str,
+    ) -> Option<String> {
+        let chat_sessions_dir = Self::chat_sessions_dir_from_transcript_path(transcript_path)?;
+        let entries = std::fs::read_dir(chat_sessions_dir).ok()?;
+        let mut candidates = CopilotModelCandidates::default();
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+
+            let ext = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if ext != "json" && ext != "jsonl" {
+                continue;
+            }
+
+            let content = match std::fs::read_to_string(&path) {
+                Ok(content) => content,
+                Err(_) => continue,
+            };
+
+            if !content.contains(transcript_session_id) {
+                continue;
+            }
+
+            Self::collect_model_candidates_from_chat_session_content(
+                &content,
+                transcript_session_id,
+                &mut candidates,
+            );
+
+            if candidates.request_non_auto_model_id.is_some() {
+                break;
+            }
+        }
+
+        candidates.best()
+    }
+
+    fn chat_sessions_dir_from_transcript_path(transcript_path: &str) -> Option<PathBuf> {
+        let transcript = Path::new(transcript_path);
+        let transcripts_dir = transcript.parent()?;
+        let is_transcripts_dir = transcripts_dir
+            .file_name()
+            .and_then(|v| v.to_str())
+            .map(|name| name.eq_ignore_ascii_case("transcripts"))
+            .unwrap_or(false);
+        if !is_transcripts_dir {
+            return None;
+        }
+
+        let copilot_dir = transcripts_dir.parent()?;
+        let is_copilot_dir = copilot_dir
+            .file_name()
+            .and_then(|v| v.to_str())
+            .map(|name| name.eq_ignore_ascii_case("github.copilot-chat"))
+            .unwrap_or(false);
+        if !is_copilot_dir {
+            return None;
+        }
+
+        let workspace_storage_dir = copilot_dir.parent()?;
+        let chat_sessions_dir = workspace_storage_dir.join("chatSessions");
+        if chat_sessions_dir.is_dir() {
+            Some(chat_sessions_dir)
+        } else {
+            None
+        }
+    }
+
+    fn collect_model_candidates_from_chat_session_content(
+        content: &str,
+        transcript_session_id: &str,
+        candidates: &mut CopilotModelCandidates,
+    ) {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(content) {
+            Self::collect_model_candidates_from_session_object(
+                &parsed,
+                transcript_session_id,
+                candidates,
+            );
+            return;
+        }
+
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            let parsed_line: serde_json::Value = match serde_json::from_str(trimmed) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+
+            match parsed_line.get("kind").and_then(|v| v.as_u64()) {
+                Some(0) => {
+                    if let Some(session_obj) = parsed_line.get("v") {
+                        Self::collect_model_candidates_from_session_object(
+                            session_obj,
+                            transcript_session_id,
+                            candidates,
+                        );
+                    }
+                }
+                Some(2) => {
+                    if let Some(requests) = parsed_line.get("v").and_then(|v| v.as_array()) {
+                        for request in requests {
+                            Self::collect_model_candidates_from_request(
+                                request,
+                                transcript_session_id,
+                                candidates,
+                            );
+                        }
+                    }
+                }
+                _ => {
+                    Self::collect_model_candidates_from_session_object(
+                        &parsed_line,
+                        transcript_session_id,
+                        candidates,
+                    );
+                }
+            }
+        }
+    }
+
+    fn collect_model_candidates_from_session_object(
+        session_obj: &serde_json::Value,
+        transcript_session_id: &str,
+        candidates: &mut CopilotModelCandidates,
+    ) {
+        if let Some(selected_model) = session_obj
+            .get("inputState")
+            .and_then(|v| v.get("selectedModel"))
+            .and_then(|v| v.get("identifier"))
+            .and_then(|v| v.as_str())
+        {
+            Self::record_selected_model_candidate(candidates, selected_model);
+        }
+
+        if let Some(requests) = session_obj.get("requests").and_then(|v| v.as_array()) {
+            for request in requests {
+                Self::collect_model_candidates_from_request(
+                    request,
+                    transcript_session_id,
+                    candidates,
+                );
+            }
+        }
+    }
+
+    fn collect_model_candidates_from_request(
+        request: &serde_json::Value,
+        transcript_session_id: &str,
+        candidates: &mut CopilotModelCandidates,
+    ) {
+        if !Self::request_matches_transcript_session(request, transcript_session_id) {
+            return;
+        }
+
+        if let Some(model_id) = request.get("modelId").and_then(|v| v.as_str()) {
+            Self::record_model_id_candidate(candidates, model_id);
+        }
+    }
+
+    fn request_matches_transcript_session(
+        request: &serde_json::Value,
+        transcript_session_id: &str,
+    ) -> bool {
+        request
+            .get("result")
+            .and_then(|v| v.get("metadata"))
+            .and_then(|v| v.get("sessionId"))
+            .and_then(|v| v.as_str())
+            .map(|session_id| session_id == transcript_session_id)
+            .unwrap_or(false)
+            || request
+                .get("result")
+                .and_then(|v| v.get("sessionId"))
+                .and_then(|v| v.as_str())
+                .map(|session_id| session_id == transcript_session_id)
+                .unwrap_or(false)
+            || request
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .map(|session_id| session_id == transcript_session_id)
+                .unwrap_or(false)
+    }
+
+    fn record_model_id_candidate(candidates: &mut CopilotModelCandidates, model_id: &str) {
+        let model = model_id.trim();
+        if model.is_empty() {
+            return;
+        }
+
+        if candidates.request_model_id.is_none() {
+            candidates.request_model_id = Some(model.to_string());
+        }
+
+        if !model.eq_ignore_ascii_case("copilot/auto")
+            && candidates.request_non_auto_model_id.is_none()
+        {
+            candidates.request_non_auto_model_id = Some(model.to_string());
+        }
+    }
+
+    fn record_selected_model_candidate(candidates: &mut CopilotModelCandidates, model_id: &str) {
+        let model = model_id.trim();
+        if model.is_empty() {
+            return;
+        }
+
+        if candidates.session_model_id.is_none() {
+            candidates.session_model_id = Some(model.to_string());
+        }
+
+        if !model.eq_ignore_ascii_case("copilot/auto")
+            && candidates.session_non_auto_model_id.is_none()
+        {
+            candidates.session_non_auto_model_id = Some(model.to_string());
+        }
+    }
+
+    fn transcript_path_from_hook_data(hook_data: &serde_json::Value) -> Option<&str> {
+        hook_data
+            .get("transcript_path")
+            .and_then(|v| v.as_str())
+            .or_else(|| hook_data.get("chat_session_path").and_then(|v| v.as_str()))
+            .or_else(|| hook_data.get("chatSessionPath").and_then(|v| v.as_str()))
+    }
+
+    fn looks_like_claude_transcript_path(path: &str) -> bool {
+        let normalized = path.replace('\\', "/").to_ascii_lowercase();
+        normalized.contains("/.claude/") || normalized.contains("/claude/projects/")
+    }
+
+    fn looks_like_copilot_transcript_path(path: &str) -> bool {
+        let normalized = path.replace('\\', "/").to_ascii_lowercase();
+        normalized.contains("/chatsessions/")
+            || normalized.contains("vscode-chat-session")
+            || normalized.contains("/workspacestorage/")
+            || normalized.contains("copilot_session")
+    }
+
+    fn is_supported_vscode_edit_tool_name(tool_name: &str) -> bool {
+        let lower = tool_name.to_ascii_lowercase();
+
+        let non_edit_keywords = [
+            "find", "search", "read", "grep", "glob", "list", "ls", "fetch", "web", "open", "todo",
+            "terminal", "run", "execute",
+        ];
+        if non_edit_keywords.iter().any(|kw| lower.contains(kw)) {
+            return false;
+        }
+
+        let exact_edit_tools = [
+            "write",
+            "edit",
+            "multiedit",
+            "applypatch",
+            "copilot_insertedit",
+            "copilot_replacestring",
+            "vscode_editfile_internal",
+        ];
+        if exact_edit_tools.iter().any(|name| lower == *name) {
+            return true;
+        }
+
+        lower.contains("edit") || lower.contains("write") || lower.contains("replace")
+    }
+
+    fn extract_filepaths_from_vscode_hook_payload(
+        tool_input: Option<&serde_json::Value>,
+        tool_response: Option<&serde_json::Value>,
+        cwd: &str,
+    ) -> Vec<String> {
+        let mut raw_paths = Vec::new();
+        if let Some(value) = tool_input {
+            Self::collect_tool_paths(value, &mut raw_paths);
+        }
+        if let Some(value) = tool_response {
+            Self::collect_tool_paths(value, &mut raw_paths);
+        }
+
+        let mut normalized_paths = Vec::new();
+        for raw in raw_paths {
+            if let Some(path) = Self::normalize_hook_path(&raw, cwd)
+                && !normalized_paths.contains(&path)
+            {
+                normalized_paths.push(path);
+            }
+        }
+        normalized_paths
+    }
+
+    fn collect_tool_paths(value: &serde_json::Value, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, val) in map {
+                    let key_lower = key.to_ascii_lowercase();
+                    if (key_lower == "file_path"
+                        || key_lower == "filepath"
+                        || key_lower == "path"
+                        || key_lower == "fspath")
+                        && let Some(path) = val.as_str()
+                    {
+                        out.push(path.to_string());
+                    }
+                    Self::collect_tool_paths(val, out);
+                }
+            }
+            serde_json::Value::Array(arr) => {
+                for item in arr {
+                    Self::collect_tool_paths(item, out);
+                }
+            }
+            serde_json::Value::String(s) => {
+                if s.starts_with("file://") {
+                    out.push(s.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn normalize_hook_path(raw_path: &str, cwd: &str) -> Option<String> {
+        let trimmed = raw_path.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        let path_without_scheme = trimmed
+            .strip_prefix("file://localhost")
+            .or_else(|| trimmed.strip_prefix("file://"))
+            .unwrap_or(trimmed);
+
+        let path = Path::new(path_without_scheme);
+        let joined = if path.is_absolute()
+            || path_without_scheme.starts_with("\\\\")
+            || path_without_scheme
+                .as_bytes()
+                .get(1)
+                .map(|b| *b == b':')
+                .unwrap_or(false)
+        {
+            PathBuf::from(path_without_scheme)
+        } else {
+            Path::new(cwd).join(path_without_scheme)
+        };
+
+        Some(joined.to_string_lossy().replace('\\', "/"))
     }
 }
 
@@ -2006,6 +2690,12 @@ impl GithubCopilotPreset {
             .or_else(|_| serde_json::from_str(&session_json_str))
             .map_err(GitAiError::JsonError)?;
 
+        // New VS Code Copilot transcript format (1.109.3+):
+        // JSONL event stream with lines like {"type":"session.start","data":{...}}
+        if Self::looks_like_copilot_event_stream_root(&parsed) {
+            return Self::transcript_and_model_from_copilot_event_stream_jsonl(&session_json_str);
+        }
+
         // Auto-detect JSONL wrapper: if the parsed value has "kind" and "v" fields,
         // unwrap to use the inner "v" object as the session data
         let is_jsonl = parsed.get("kind").is_some() && parsed.get("v").is_some();
@@ -2290,6 +2980,210 @@ impl GithubCopilotPreset {
         }
 
         Ok((transcript, detected_model, Some(edited_filepaths)))
+    }
+
+    fn looks_like_copilot_event_stream_root(parsed: &serde_json::Value) -> bool {
+        parsed
+            .get("type")
+            .and_then(|v| v.as_str())
+            .map(|event_type| {
+                parsed.get("data").map(|v| v.is_object()).unwrap_or(false)
+                    && parsed.get("kind").is_none()
+                    && (event_type.starts_with("session.")
+                        || event_type.starts_with("assistant.")
+                        || event_type.starts_with("user.")
+                        || event_type.starts_with("tool."))
+            })
+            .unwrap_or(false)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn transcript_and_model_from_copilot_event_stream_jsonl(
+        session_jsonl: &str,
+    ) -> Result<(AiTranscript, Option<String>, Option<Vec<String>>), GitAiError> {
+        let mut transcript = AiTranscript::new();
+        let mut edited_filepaths: Vec<String> = Vec::new();
+        let mut detected_model: Option<String> = None;
+
+        for line in session_jsonl.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+
+            let event: serde_json::Value = match serde_json::from_str(line) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+
+            let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let data = event.get("data");
+            let timestamp = event
+                .get("timestamp")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            if detected_model.is_none()
+                && let Some(d) = data
+            {
+                detected_model = Self::extract_copilot_model_hint(d);
+            }
+
+            match event_type {
+                "user.message" => {
+                    if let Some(text) = data
+                        .and_then(|d| d.get("content"))
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        transcript.add_message(Message::User {
+                            text: text.to_string(),
+                            timestamp: timestamp.clone(),
+                        });
+                    }
+                }
+                "assistant.message" => {
+                    // Prefer visible assistant content; if empty, use reasoningText as a fallback.
+                    let assistant_text = data
+                        .and_then(|d| d.get("content"))
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .or_else(|| {
+                            data.and_then(|d| d.get("reasoningText"))
+                                .and_then(|v| v.as_str())
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_string)
+                        });
+
+                    if let Some(text) = assistant_text {
+                        transcript.add_message(Message::Assistant {
+                            text,
+                            timestamp: timestamp.clone(),
+                        });
+                    }
+
+                    if let Some(tool_requests) = data
+                        .and_then(|d| d.get("toolRequests"))
+                        .and_then(|v| v.as_array())
+                    {
+                        for request in tool_requests {
+                            let name = request
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("tool")
+                                .to_string();
+
+                            let input = request
+                                .get("arguments")
+                                .map(Self::normalize_copilot_tool_arguments)
+                                .unwrap_or(serde_json::Value::Null);
+
+                            Self::collect_copilot_filepaths(&input, &mut edited_filepaths);
+                            transcript.add_message(Message::tool_use(name, input));
+                        }
+                    }
+                }
+                "tool.execution_start" => {
+                    let name = data
+                        .and_then(|d| d.get("toolName"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("tool")
+                        .to_string();
+
+                    let input = data
+                        .and_then(|d| d.get("arguments"))
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+
+                    Self::collect_copilot_filepaths(&input, &mut edited_filepaths);
+                    transcript.add_message(Message::tool_use(name, input));
+                }
+                _ => {}
+            }
+        }
+
+        Ok((transcript, detected_model, Some(edited_filepaths)))
+    }
+
+    fn normalize_copilot_tool_arguments(value: &serde_json::Value) -> serde_json::Value {
+        if let Some(as_str) = value.as_str() {
+            serde_json::from_str::<serde_json::Value>(as_str)
+                .unwrap_or_else(|_| serde_json::Value::String(as_str.to_string()))
+        } else {
+            value.clone()
+        }
+    }
+
+    fn collect_copilot_filepaths(value: &serde_json::Value, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, val) in map {
+                    let key_lower = key.to_ascii_lowercase();
+                    if (key_lower == "filepath"
+                        || key_lower == "file_path"
+                        || key_lower == "fspath"
+                        || key_lower == "path")
+                        && let Some(path) = val.as_str()
+                    {
+                        let normalized = path.replace('\\', "/");
+                        if !out.contains(&normalized) {
+                            out.push(normalized);
+                        }
+                    }
+                    Self::collect_copilot_filepaths(val, out);
+                }
+            }
+            serde_json::Value::Array(arr) => {
+                for item in arr {
+                    Self::collect_copilot_filepaths(item, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn extract_copilot_model_hint(value: &serde_json::Value) -> Option<String> {
+        match value {
+            serde_json::Value::Object(map) => {
+                if let Some(model_id) = map.get("modelId").and_then(|v| v.as_str())
+                    && model_id.starts_with("copilot/")
+                {
+                    return Some(model_id.to_string());
+                }
+                if let Some(model) = map.get("model").and_then(|v| v.as_str())
+                    && model.starts_with("copilot/")
+                {
+                    return Some(model.to_string());
+                }
+                if let Some(identifier) = map
+                    .get("selectedModel")
+                    .and_then(|v| v.get("identifier"))
+                    .and_then(|v| v.as_str())
+                    && identifier.starts_with("copilot/")
+                {
+                    return Some(identifier.to_string());
+                }
+                for val in map.values() {
+                    if let Some(found) = Self::extract_copilot_model_hint(val) {
+                        return Some(found);
+                    }
+                }
+                None
+            }
+            serde_json::Value::Array(arr) => arr.iter().find_map(Self::extract_copilot_model_hint),
+            serde_json::Value::String(s) => {
+                if s.starts_with("copilot/") {
+                    Some(s.to_string())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
     }
 }
 

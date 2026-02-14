@@ -1,0 +1,2 @@
+{"kind":0,"v":{"sessionId":"fixture-chat-session-non-auto","inputState":{"selectedModel":{"identifier":"copilot/auto"}},"requests":[]}}
+{"kind":2,"k":["requests"],"v":[{"requestId":"r1","modelId":"copilot/gpt-4o","result":{"details":"GPT-4o • 0x","metadata":{"sessionId":"fixture-session-id"}}}]}

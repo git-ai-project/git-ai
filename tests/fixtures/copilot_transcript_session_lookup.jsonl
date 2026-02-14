@@ -1,0 +1,2 @@
+{"type":"session.start","data":{"sessionId":"fixture-session-id","version":1,"producer":"copilot-agent"},"id":"evt-1","timestamp":"2026-02-14T03:02:25.825Z","parentId":null}
+{"type":"assistant.message","data":{"content":"done","toolRequests":[]},"id":"evt-2","timestamp":"2026-02-14T03:02:26.000Z","parentId":"evt-1"}

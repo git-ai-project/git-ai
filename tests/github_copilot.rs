@@ -3,8 +3,8 @@ mod test_utils;
 use git_ai::authorship::transcript::Message;
 use git_ai::commands::checkpoint_agent::agent_presets::GithubCopilotPreset;
 use serde_json::json;
-use std::io::Write;
-use test_utils::fixture_path;
+use std::{fs, io::Write};
+use test_utils::{fixture_path, load_fixture};
 
 /// Ensure CODESPACES and REMOTE_CONTAINERS are not set (they cause early return in transcript parsing)
 fn ensure_clean_env() {
@@ -1122,4 +1122,338 @@ fn copilot_session_plain_json_unaffected() {
     assert_eq!(model, Some("copilot/claude-sonnet-4".to_string()));
     assert!(edited_filepaths.is_some());
     assert_eq!(edited_filepaths.unwrap().len(), 1);
+}
+
+#[test]
+fn test_copilot_preset_vscode_pretooluse_human_checkpoint() {
+    use git_ai::commands::checkpoint_agent::agent_presets::{
+        AgentCheckpointFlags, AgentCheckpointPreset,
+    };
+
+    let hook_input = json!({
+        "hookEventName": "PreToolUse",
+        "cwd": "/Users/test/project",
+        "toolName": "copilot_replaceString",
+        "toolInput": {
+            "file_path": "src/main.ts"
+        },
+        "sessionId": "copilot-session-pre"
+    });
+
+    let flags = AgentCheckpointFlags {
+        hook_input: Some(hook_input.to_string()),
+    };
+
+    let preset = GithubCopilotPreset;
+    let result = preset.run(flags).expect("Expected human checkpoint");
+
+    assert_eq!(
+        result.checkpoint_kind,
+        git_ai::authorship::working_log::CheckpointKind::Human
+    );
+    assert_eq!(
+        result.will_edit_filepaths,
+        Some(vec!["/Users/test/project/src/main.ts".to_string()])
+    );
+}
+
+#[test]
+fn test_copilot_preset_vscode_posttooluse_ai_checkpoint() {
+    use git_ai::commands::checkpoint_agent::agent_presets::{
+        AgentCheckpointFlags, AgentCheckpointPreset,
+    };
+    use std::io::Write;
+
+    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
+    temp_file
+        .write_all(r#"{"requests": []}"#.as_bytes())
+        .unwrap();
+    let session_path = temp_file.path().to_string_lossy().to_string();
+
+    let hook_input = json!({
+        "hookEventName": "PostToolUse",
+        "cwd": "/Users/test/project",
+        "toolName": "copilot_replaceString",
+        "toolInput": {
+            "file_path": "/Users/test/project/src/main.ts"
+        },
+        "sessionId": "copilot-session-post",
+        "transcript_path": session_path
+    });
+
+    let flags = AgentCheckpointFlags {
+        hook_input: Some(hook_input.to_string()),
+    };
+
+    let preset = GithubCopilotPreset;
+    let result = preset.run(flags).expect("Expected AI checkpoint");
+
+    assert_eq!(
+        result.checkpoint_kind,
+        git_ai::authorship::working_log::CheckpointKind::AiAgent
+    );
+    assert_eq!(result.agent_id.tool, "github-copilot");
+    assert_eq!(result.agent_id.id, "copilot-session-post");
+    assert_eq!(
+        result.edited_filepaths,
+        Some(vec!["/Users/test/project/src/main.ts".to_string()])
+    );
+}
+
+#[test]
+fn test_copilot_preset_vscode_non_edit_tool_is_filtered() {
+    use git_ai::commands::checkpoint_agent::agent_presets::{
+        AgentCheckpointFlags, AgentCheckpointPreset,
+    };
+
+    let hook_input = json!({
+        "hookEventName": "PreToolUse",
+        "cwd": "/Users/test/project",
+        "toolName": "copilot_findTextInFiles",
+        "toolInput": {
+            "query": "hello"
+        },
+        "sessionId": "copilot-session-search"
+    });
+
+    let flags = AgentCheckpointFlags {
+        hook_input: Some(hook_input.to_string()),
+    };
+
+    let preset = GithubCopilotPreset;
+    let result = preset.run(flags);
+
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported tool_name")
+    );
+}
+
+#[test]
+fn test_copilot_preset_vscode_claude_transcript_path_is_rejected() {
+    use git_ai::commands::checkpoint_agent::agent_presets::{
+        AgentCheckpointFlags, AgentCheckpointPreset,
+    };
+
+    let hook_input = json!({
+        "hookEventName": "PostToolUse",
+        "cwd": "/Users/test/project",
+        "toolName": "copilot_replaceString",
+        "toolInput": {
+            "file_path": "/Users/test/project/src/main.ts"
+        },
+        "sessionId": "copilot-session-wrong",
+        "transcript_path": "/Users/test/.claude/projects/session.jsonl"
+    });
+
+    let flags = AgentCheckpointFlags {
+        hook_input: Some(hook_input.to_string()),
+    };
+
+    let preset = GithubCopilotPreset;
+    let result = preset.run(flags);
+
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Claude transcript path")
+    );
+}
+
+#[test]
+fn copilot_session_parsing_event_stream_jsonl() {
+    ensure_clean_env();
+    let fixture = fixture_path("copilot_session_event_stream.jsonl");
+    let fixture_str = fixture.to_str().unwrap();
+
+    let result = GithubCopilotPreset::transcript_and_model_from_copilot_session_json(fixture_str);
+    assert!(result.is_ok());
+    let (tx, model, edited_filepaths) = result.unwrap();
+
+    // Model is not currently present in this new transcript format fixture.
+    assert!(model.is_none());
+
+    // We should still parse user/assistant/tool messages from event-stream JSONL.
+    assert!(!tx.messages.is_empty());
+    assert!(
+        tx.messages
+            .iter()
+            .any(|m| matches!(m, Message::User { .. }))
+    );
+    assert!(
+        tx.messages
+            .iter()
+            .any(|m| matches!(m, Message::Assistant { .. }))
+    );
+    assert!(
+        tx.messages
+            .iter()
+            .any(|m| matches!(m, Message::ToolUse { .. }))
+    );
+
+    assert!(edited_filepaths.is_some());
+    assert_eq!(
+        edited_filepaths.unwrap(),
+        vec!["/Users/svarlamov/projects/testing-git-vscode-hooks/jokes.csv"]
+    );
+}
+
+#[test]
+fn copilot_session_event_stream_jsonl_model_hint_is_detected() {
+    ensure_clean_env();
+
+    let sample = r#"{"type":"session.start","data":{"sessionId":"event-session-2","modelId":"copilot/gpt-4o"},"id":"evt-1","timestamp":"2026-02-14T03:02:25.825Z","parentId":null}
+{"type":"user.message","data":{"content":"hello"},"id":"evt-2","timestamp":"2026-02-14T03:02:26.000Z","parentId":"evt-1"}
+{"type":"assistant.message","data":{"content":"hi"},"id":"evt-3","timestamp":"2026-02-14T03:02:27.000Z","parentId":"evt-2"}"#;
+
+    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
+    temp_file.write_all(sample.as_bytes()).unwrap();
+    let temp_path = temp_file.path().to_str().unwrap();
+
+    let result = GithubCopilotPreset::transcript_and_model_from_copilot_session_json(temp_path);
+    assert!(result.is_ok());
+    let (_tx, model, _edited_filepaths) = result.unwrap();
+
+    assert_eq!(model, Some("copilot/gpt-4o".to_string()));
+}
+
+const VS_CODE_LOOKUP_SESSION_ID: &str = "fixture-session-id";
+
+fn setup_vscode_model_lookup_workspace(chat_session_fixture: &str) -> (tempfile::TempDir, String) {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let workspace_storage = temp_dir
+        .path()
+        .join("workspaceStorage")
+        .join("workspace-model");
+    let transcripts_dir = workspace_storage
+        .join("GitHub.copilot-chat")
+        .join("transcripts");
+    let chat_sessions_dir = workspace_storage.join("chatSessions");
+    fs::create_dir_all(&transcripts_dir).unwrap();
+    fs::create_dir_all(&chat_sessions_dir).unwrap();
+
+    let transcript_path = transcripts_dir.join(format!("{}.jsonl", VS_CODE_LOOKUP_SESSION_ID));
+    fs::write(
+        &transcript_path,
+        load_fixture("copilot_transcript_session_lookup.jsonl"),
+    )
+    .unwrap();
+
+    let fixture_path = fixture_path(chat_session_fixture);
+    let ext = fixture_path
+        .extension()
+        .and_then(|v| v.to_str())
+        .unwrap_or("jsonl");
+    let chat_session_path = chat_sessions_dir.join(format!("session-lookup.{}", ext));
+    fs::write(chat_session_path, load_fixture(chat_session_fixture)).unwrap();
+
+    (temp_dir, transcript_path.to_string_lossy().to_string())
+}
+
+fn vscode_post_tool_use_hook_input(transcript_path: &str) -> serde_json::Value {
+    json!({
+        "hookEventName": "PostToolUse",
+        "cwd": "/Users/test/project",
+        "toolName": "copilot_replaceString",
+        "toolInput": {
+            "file_path": "/Users/test/project/src/main.ts"
+        },
+        "sessionId": VS_CODE_LOOKUP_SESSION_ID,
+        "transcript_path": transcript_path
+    })
+}
+
+#[test]
+fn test_copilot_preset_vscode_model_uses_auto_model_id_when_present() {
+    ensure_clean_env();
+    use git_ai::commands::checkpoint_agent::agent_presets::{
+        AgentCheckpointFlags, AgentCheckpointPreset,
+    };
+
+    let (_temp_dir, transcript_path) =
+        setup_vscode_model_lookup_workspace("copilot_chat_session_lookup_auto.jsonl");
+    let flags = AgentCheckpointFlags {
+        hook_input: Some(vscode_post_tool_use_hook_input(&transcript_path).to_string()),
+    };
+    let preset = GithubCopilotPreset;
+    let result = preset.run(flags).expect("Expected AI checkpoint");
+
+    assert_eq!(result.agent_id.model, "copilot/auto");
+}
+
+#[test]
+fn test_copilot_preset_vscode_model_prefers_non_auto_model_id_from_chat_sessions() {
+    ensure_clean_env();
+    use git_ai::commands::checkpoint_agent::agent_presets::{
+        AgentCheckpointFlags, AgentCheckpointPreset,
+    };
+
+    let (_temp_dir, transcript_path) =
+        setup_vscode_model_lookup_workspace("copilot_chat_session_lookup_non_auto.jsonl");
+    let flags = AgentCheckpointFlags {
+        hook_input: Some(vscode_post_tool_use_hook_input(&transcript_path).to_string()),
+    };
+    let preset = GithubCopilotPreset;
+    let result = preset.run(flags).expect("Expected AI checkpoint");
+
+    assert_eq!(result.agent_id.model, "copilot/gpt-4o");
+}
+
+#[test]
+fn test_copilot_preset_vscode_model_falls_back_to_selected_model_id() {
+    ensure_clean_env();
+    use git_ai::commands::checkpoint_agent::agent_presets::{
+        AgentCheckpointFlags, AgentCheckpointPreset,
+    };
+
+    let (_temp_dir, transcript_path) =
+        setup_vscode_model_lookup_workspace("copilot_chat_session_lookup_selected_model.jsonl");
+    let flags = AgentCheckpointFlags {
+        hook_input: Some(vscode_post_tool_use_hook_input(&transcript_path).to_string()),
+    };
+    let preset = GithubCopilotPreset;
+    let result = preset.run(flags).expect("Expected AI checkpoint");
+
+    assert_eq!(result.agent_id.model, "copilot/claude-sonnet-4");
+}
+
+#[test]
+fn test_copilot_preset_vscode_model_lookup_supports_json_chat_session_file() {
+    ensure_clean_env();
+    use git_ai::commands::checkpoint_agent::agent_presets::{
+        AgentCheckpointFlags, AgentCheckpointPreset,
+    };
+
+    let (_temp_dir, transcript_path) =
+        setup_vscode_model_lookup_workspace("copilot_chat_session_lookup_json_file.json");
+    let flags = AgentCheckpointFlags {
+        hook_input: Some(vscode_post_tool_use_hook_input(&transcript_path).to_string()),
+    };
+    let preset = GithubCopilotPreset;
+    let result = preset.run(flags).expect("Expected AI checkpoint");
+
+    assert_eq!(result.agent_id.model, "copilot/gpt-4o-mini");
+}
+
+#[test]
+fn test_copilot_preset_vscode_does_not_use_details_as_model_fallback() {
+    ensure_clean_env();
+    use git_ai::commands::checkpoint_agent::agent_presets::{
+        AgentCheckpointFlags, AgentCheckpointPreset,
+    };
+
+    let (_temp_dir, transcript_path) =
+        setup_vscode_model_lookup_workspace("copilot_chat_session_lookup_details_only.jsonl");
+    let flags = AgentCheckpointFlags {
+        hook_input: Some(vscode_post_tool_use_hook_input(&transcript_path).to_string()),
+    };
+    let preset = GithubCopilotPreset;
+    let result = preset.run(flags).expect("Expected AI checkpoint");
+
+    assert_eq!(result.agent_id.model, "unknown");
 }

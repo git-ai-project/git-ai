@@ -5,11 +5,13 @@ import { exec, spawn } from "child_process";
 import { isVersionSatisfied } from "./utils/semver";
 import { MIN_GIT_AI_VERSION, GIT_AI_INSTALL_DOCS_URL } from "./consts";
 import { getGitRepoRoot } from "./utils/git-api";
+import { shouldSkipLegacyCopilotHooks } from "./utils/vscode-hooks";
 
 export class AIEditManager {
   private workspaceBaseStoragePath: string | null = null;
   private gitAiVersion: string | null = null;
   private hasShownGitAiErrorMessage = false;
+  private readonly legacyCopilotHooksEnabled: boolean;
   private lastHumanCheckpointAt = new Map<string, number>();
   private pendingSaves = new Map<string, {
     timestamp: number;
@@ -30,6 +32,11 @@ export class AIEditManager {
   private readonly STABLE_CONTENT_DEBOUNCE_MS = 2000;
 
   constructor(context: vscode.ExtensionContext) {
+    this.legacyCopilotHooksEnabled = !shouldSkipLegacyCopilotHooks(vscode.version);
+    if (!this.legacyCopilotHooksEnabled) {
+      console.log(`[git-ai] AIEditManager: VS Code ${vscode.version} has native hooks; skipping legacy extension checkpoints`);
+    }
+
     if (context.storageUri?.fsPath) {
       this.workspaceBaseStoragePath = path.dirname(context.storageUri.fsPath);
     } else {
@@ -51,6 +58,10 @@ export class AIEditManager {
       clearTimeout(timer);
     }
     this.stableContentTimers.clear();
+  }
+
+  public areLegacyCopilotHooksEnabled(): boolean {
+    return this.legacyCopilotHooksEnabled;
   }
 
   private cleanupOldCheckpointEntries(): void {
@@ -350,6 +361,11 @@ export class AIEditManager {
   }
 
   async checkpoint(author: "human" | "ai" | "ai_tab", hookInput: string): Promise<boolean> {
+    if (author !== "ai_tab" && !this.legacyCopilotHooksEnabled) {
+      console.log("[git-ai] AIEditManager: Skipping legacy human/ai checkpoint dispatch (native VS Code hooks active)");
+      return true;
+    }
+
     if (!(await this.checkGitAi())) {
       return false;
     }

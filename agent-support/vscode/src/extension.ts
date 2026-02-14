@@ -64,35 +64,39 @@ export function activate(context: vscode.ExtensionContext) {
   }
 
   if (ideHostCfg.kind === IDEHostKindVSCode) {
-    console.log('[git-ai] Using VS Code/Copilot detection strategy');
+    if (aiEditManager.areLegacyCopilotHooksEnabled()) {
+      console.log('[git-ai] Using VS Code/Copilot legacy extension detection strategy');
 
-    // Save event
-    context.subscriptions.push(
-      vscode.workspace.onDidSaveTextDocument((doc) => {
-        aiEditManager.handleSaveEvent(doc);
-      })
-    );
+      // Save event
+      context.subscriptions.push(
+        vscode.workspace.onDidSaveTextDocument((doc) => {
+          aiEditManager.handleSaveEvent(doc);
+        })
+      );
 
-    // Open event
-    context.subscriptions.push(
-      vscode.workspace.onDidOpenTextDocument((doc) => {
-        aiEditManager.handleOpenEvent(doc);
-      })
-    );
+      // Open event
+      context.subscriptions.push(
+        vscode.workspace.onDidOpenTextDocument((doc) => {
+          aiEditManager.handleOpenEvent(doc);
+        })
+      );
 
-    // Close event
-    context.subscriptions.push(
-      vscode.workspace.onDidCloseTextDocument((doc) => {
-        aiEditManager.handleCloseEvent(doc);
-      })
-    );
+      // Close event
+      context.subscriptions.push(
+        vscode.workspace.onDidCloseTextDocument((doc) => {
+          aiEditManager.handleCloseEvent(doc);
+        })
+      );
 
-    // Content change event (for stable content cache)
-    context.subscriptions.push(
-      vscode.workspace.onDidChangeTextDocument((event) => {
-        aiEditManager.handleContentChangeEvent(event);
-      })
-    );
+      // Content change event (for stable content cache)
+      context.subscriptions.push(
+        vscode.workspace.onDidChangeTextDocument((event) => {
+          aiEditManager.handleContentChangeEvent(event);
+        })
+      );
+    } else {
+      console.log('[git-ai] VS Code has native Copilot hooks; skipping legacy extension checkpoint listeners');
+    }
   }
 
   // vscode.commands.getCommands(true)

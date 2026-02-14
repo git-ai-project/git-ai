@@ -1,0 +1,2 @@
+{"kind":0,"v":{"sessionId":"fixture-chat-session-auto","inputState":{"selectedModel":{"identifier":"copilot/auto"}},"requests":[]}}
+{"kind":2,"k":["requests"],"v":[{"requestId":"r1","modelId":"copilot/auto","result":{"details":"Claude Sonnet 4.5 • 0.9x","metadata":{"sessionId":"fixture-session-id"}}}]}
