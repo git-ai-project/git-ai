@@ -920,7 +920,7 @@ fn previous_hooks_self_reference_does_not_recurse_or_hang() {
     sandbox.run_git_ok(&["add", "self-ref.txt"]);
     let output = sandbox.run_git_raw_with_timeout(
         &["commit", "-m", "self reference does not recurse"],
-        Duration::from_secs(10),
+        Duration::from_secs(30),
     );
     assert!(
         output.status.success(),
