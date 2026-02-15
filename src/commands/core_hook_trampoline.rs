@@ -39,7 +39,7 @@ pub fn handle_hook_trampoline_command(args: &[String]) {
     } else {
         Vec::new()
     };
-    let stdin_string = if stdin_bytes.is_empty() {
+    let stdin_string = if stdin_bytes.is_empty() || !hook_uses_stdin_string(hook_name) {
         None
     } else {
         Some(String::from_utf8_lossy(&stdin_bytes).to_string())
@@ -60,6 +60,10 @@ pub fn handle_hook_trampoline_command(args: &[String]) {
 
 fn uses_streamed_stdin(hook_name: &str) -> bool {
     STREAMED_STDIN_HOOKS.contains(&hook_name)
+}
+
+fn hook_uses_stdin_string(hook_name: &str) -> bool {
+    matches!(hook_name, "reference-transaction" | "post-rewrite")
 }
 
 fn read_stdin_bytes() -> Vec<u8> {
@@ -197,7 +201,8 @@ fn run_chained_hook(
 fn previous_hook_path(hook_name: &str) -> Option<PathBuf> {
     let managed_dir = managed_core_hooks_dir().ok()?;
     let previous_file = managed_dir.join(PREVIOUS_HOOKS_PATH_FILE);
-    if !previous_file.exists() {
+    let previous_meta = fs::metadata(&previous_file).ok()?;
+    if !previous_meta.is_file() || previous_meta.len() == 0 {
         return None;
     }
 
@@ -234,27 +239,36 @@ fn run_single_chained_hook(
     hook_args: &[String],
     stdin_bytes: &[u8],
 ) -> Option<ExitStatus> {
-    if is_managed_hook_path(hook_path) {
-        return None;
-    }
-
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
         let metadata = fs::metadata(hook_path).ok()?;
-        if metadata.permissions().mode() & 0o111 == 0 {
+        if !metadata.is_file() {
+            return None;
+        }
+        if is_managed_hook_path(hook_path) {
             return None;
         }
 
-        let mut command = Command::new(hook_path);
+        let mut command = if metadata.permissions().mode() & 0o111 != 0 {
+            Command::new(hook_path)
+        } else {
+            let mut command = Command::new("sh");
+            command.arg(hook_path);
+            command
+        };
         command.args(hook_args);
         return run_command_with_stdin(command, stdin_bytes).ok();
     }
 
     #[cfg(windows)]
     {
-        if !hook_path.exists() {
+        let metadata = fs::metadata(hook_path).ok()?;
+        if !metadata.is_file() {
+            return None;
+        }
+        if is_managed_hook_path(hook_path) {
             return None;
         }
 

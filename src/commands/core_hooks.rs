@@ -639,13 +639,9 @@ fn handle_reference_transaction(
     let mut created_auto_merge_sha: Option<String> = None;
 
     for line in stdin.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 3 {
+        let Some((old, new, reference)) = parse_reference_transaction_line(line) else {
             continue;
-        }
-        let old = parts[0];
-        let new = parts[1];
-        let reference = parts[2];
+        };
 
         if reference == "ORIG_HEAD" && old != new {
             saw_orig_head_update = true;
@@ -690,6 +686,9 @@ fn handle_reference_transaction(
     let moved_main_ref = moved_branch_ref.or(moved_head_ref);
     let reflog_action_value = reflog_action();
     let action_class = classify_ref_transaction_action(reflog_action_value.as_deref());
+    let stash_transition_kind = stash_ref_update
+        .as_ref()
+        .map(|(old, new)| classify_stash_ref_transition_kind(old, new));
 
     // Fast no-op path: skip state churn and extra git commands when nothing relevant changed.
     if !saw_orig_head_update
@@ -720,8 +719,10 @@ fn handle_reference_transaction(
             }
         }
 
-        if stash_ref_update.is_some()
-            && let Some(stash_count_before) = stash_entry_count(repository)
+        if matches!(
+            stash_transition_kind,
+            Some(StashRefTransitionKind::AmbiguousReplace)
+        ) && let Some(stash_count_before) = stash_entry_count(repository)
         {
             state.pending_stash_ref_update = Some(PendingStashRefUpdateState {
                 created_at_ms: now_ms(),
@@ -765,7 +766,10 @@ fn handle_reference_transaction(
         return Ok(());
     }
 
-    let stash_count_before = if stash_ref_update.is_some() {
+    let stash_count_before = if matches!(
+        stash_transition_kind,
+        Some(StashRefTransitionKind::AmbiguousReplace)
+    ) {
         let mut state = load_core_hook_state(repository)?;
         let before = state.clone();
         let stash_count_before = state.pending_stash_ref_update.take().and_then(|pending| {
@@ -782,7 +786,10 @@ fn handle_reference_transaction(
     };
 
     let mut cache = HookInvocationCache::default();
-    let stash_count_after = if stash_ref_update.is_some() {
+    let stash_count_after = if matches!(
+        stash_transition_kind,
+        Some(StashRefTransitionKind::AmbiguousReplace)
+    ) {
         cache.stash_count(repository)
     } else {
         None
@@ -854,23 +861,17 @@ fn handle_reference_transaction(
         let _ = apply_reset_side_effects(repository, &old_head, &new_head, mode);
     }
 
-    if action_class == RefTxnActionClass::PullRebaseLike
+    let is_pull_rebase_finish = action_class == RefTxnActionClass::PullRebaseLike
         && cache
             .reflog_subject(repository)
             .as_deref()
             .map(|s| s.starts_with("pull --rebase (finish):"))
-            .unwrap_or(false)
-        && let Some(start_event) = active_rebase_start_event(repository)
-    {
+            .unwrap_or(false);
+    if is_pull_rebase_finish && let Some(start_event) = active_rebase_start_event(repository) {
         process_rebase_completion_from_start(repository, start_event);
     }
 
-    if action_class == RefTxnActionClass::PullRebaseLike
-        && cache
-            .reflog_subject(repository)
-            .as_deref()
-            .map(|s| s.starts_with("pull --rebase (finish):"))
-            .unwrap_or(false)
+    if is_pull_rebase_finish
         && let Some(new_head) = repository.head().ok().and_then(|h| h.target().ok())
     {
         let _ = maybe_restore_pending_pull_autostash(repository, &new_head);
@@ -982,6 +983,14 @@ fn is_zero_oid(oid: &str) -> bool {
     !oid.is_empty() && oid.chars().all(|c| c == '0')
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StashRefTransitionKind {
+    Created,
+    Deleted,
+    AmbiguousReplace,
+    Unchanged,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum StashRefTransition {
     Created {
@@ -997,31 +1006,48 @@ enum StashRefTransition {
     Unchanged,
 }
 
-fn classify_stash_ref_transition(old: &str, new: &str) -> StashRefTransition {
+fn parse_reference_transaction_line(line: &str) -> Option<(&str, &str, &str)> {
+    let mut parts = line.split_whitespace();
+    let old = parts.next()?;
+    let new = parts.next()?;
+    let reference = parts.next()?;
+    Some((old, new, reference))
+}
+
+fn classify_stash_ref_transition_kind(old: &str, new: &str) -> StashRefTransitionKind {
     if old == new {
-        return StashRefTransition::Unchanged;
+        return StashRefTransitionKind::Unchanged;
     }
 
     if is_zero_oid(old) && !is_zero_oid(new) {
-        return StashRefTransition::Created {
-            stash_sha: new.to_string(),
-        };
+        return StashRefTransitionKind::Created;
     }
 
     if !is_zero_oid(old) && is_zero_oid(new) {
-        return StashRefTransition::Deleted {
-            stash_sha: old.to_string(),
-        };
+        return StashRefTransitionKind::Deleted;
     }
 
     if !is_zero_oid(old) && !is_zero_oid(new) {
-        return StashRefTransition::AmbiguousReplace {
-            old_stash_sha: old.to_string(),
-            new_stash_sha: new.to_string(),
-        };
+        return StashRefTransitionKind::AmbiguousReplace;
     }
 
-    StashRefTransition::Unchanged
+    StashRefTransitionKind::Unchanged
+}
+
+fn classify_stash_ref_transition(old: &str, new: &str) -> StashRefTransition {
+    match classify_stash_ref_transition_kind(old, new) {
+        StashRefTransitionKind::Created => StashRefTransition::Created {
+            stash_sha: new.to_string(),
+        },
+        StashRefTransitionKind::Deleted => StashRefTransition::Deleted {
+            stash_sha: old.to_string(),
+        },
+        StashRefTransitionKind::AmbiguousReplace => StashRefTransition::AmbiguousReplace {
+            old_stash_sha: old.to_string(),
+            new_stash_sha: new.to_string(),
+        },
+        StashRefTransitionKind::Unchanged => StashRefTransition::Unchanged,
+    }
 }
 
 fn resolve_stash_ref_transition(
@@ -1207,6 +1233,9 @@ fn handle_stash_created(repository: &Repository, stash_sha: &str) -> Result<(), 
 
 fn mark_pending_stash_apply(repository: &Repository) -> Result<(), GitAiError> {
     let mut state = load_core_hook_state(repository)?;
+    if state.pending_stash_apply.is_some() {
+        return Ok(());
+    }
     state.pending_stash_apply = Some(PendingStashApplyState {
         created_at_ms: now_ms(),
     });
@@ -1738,7 +1767,6 @@ pub fn write_core_hook_scripts(hooks_dir: &Path, git_ai_binary: &Path) -> Result
     let binary = normalize_hook_binary_path(git_ai_binary);
 
     for hook in INSTALLED_HOOKS {
-        let is_passthrough = PASSTHROUGH_ONLY_HOOKS.contains(hook);
         let script = if *hook == "reference-transaction" {
             format!(
                 r#"#!/bin/sh
@@ -1756,7 +1784,7 @@ esac
 previous_hooks_file="$script_dir/{previous_hooks_file}"
 previous_hooks_dir=""
 
-if [ -f "$previous_hooks_file" ]; then
+if [ -s "$previous_hooks_file" ]; then
   IFS= read -r previous_hooks_dir < "$previous_hooks_file" || true
   case "$previous_hooks_dir" in
     "~") previous_hooks_dir="$HOME" ;;
@@ -1954,7 +1982,7 @@ esac
 previous_hooks_file="$script_dir/{previous_hooks_file}"
 previous_hooks_dir=""
 
-if [ -f "$previous_hooks_file" ]; then
+if [ -s "$previous_hooks_file" ]; then
   IFS= read -r previous_hooks_dir < "$previous_hooks_file" || true
   case "$previous_hooks_dir" in
     "~") previous_hooks_dir="$HOME" ;;
@@ -2029,7 +2057,7 @@ esac
 previous_hooks_file="$script_dir/{previous_hooks_file}"
 previous_hooks_dir=""
 
-if [ -f "$previous_hooks_file" ]; then
+if [ -s "$previous_hooks_file" ]; then
   IFS= read -r previous_hooks_dir < "$previous_hooks_file" || true
   case "$previous_hooks_dir" in
     "~") previous_hooks_dir="$HOME" ;;
@@ -2106,59 +2134,7 @@ case "$script_dir" in
 esac
 previous_hooks_dir=""
 previous_hooks_file="$script_dir/{previous_hooks_file}"
-if [ -f "$previous_hooks_file" ]; then
-  IFS= read -r previous_hooks_dir < "$previous_hooks_file" || true
-  case "$previous_hooks_dir" in
-    "~") previous_hooks_dir="$HOME" ;;
-    "~/"*) previous_hooks_dir="$HOME/${{previous_hooks_dir#\~/}}" ;;
-  esac
-fi
-
-if [ -n "$previous_hooks_dir" ]; then
-  case "$script_dir" in */) script_dir="${{script_dir%/}}" ;; esac
-  case "$previous_hooks_dir" in */) previous_hooks_dir="${{previous_hooks_dir%/}}" ;; esac
-  if [ "$script_dir" = "$previous_hooks_dir" ]; then
-    previous_hooks_dir=""
-  fi
-fi
-
-if [ -n "$previous_hooks_dir" ]; then
-  chain_hook="$previous_hooks_dir/{hook}"
-else
-  chain_hook="${{GIT_DIR:-.git}}/hooks/{hook}"
-fi
-
-if [ -x "$chain_hook" ]; then
-  "$chain_hook" "$@"
-  exit $?
-fi
-if [ -f "$chain_hook" ]; then
-  sh "$chain_hook" "$@"
-  exit $?
-fi
-exit 0
-"#,
-                skip_env = GIT_AI_SKIP_CORE_HOOKS_ENV,
-                previous_hooks_file = PREVIOUS_HOOKS_PATH_FILE,
-                hook = hook,
-            )
-        } else if is_passthrough {
-            format!(
-                r#"#!/bin/sh
-# git-ai-managed: mode=passthrough-shell
-if [ "${{{skip_env}:-}}" = "1" ]; then
-  exit 0
-fi
-
-script_dir="$0"
-case "$script_dir" in
-  */*) script_dir="${{script_dir%/*}}" ;;
-  *) script_dir="." ;;
-esac
-previous_hooks_file="$script_dir/{previous_hooks_file}"
-previous_hooks_dir=""
-
-if [ -f "$previous_hooks_file" ]; then
+if [ -s "$previous_hooks_file" ]; then
   IFS= read -r previous_hooks_dir < "$previous_hooks_file" || true
   case "$previous_hooks_dir" in
     "~") previous_hooks_dir="$HOME" ;;
