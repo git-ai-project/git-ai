@@ -135,6 +135,12 @@ impl RepoStorage {
         self.read_rewrite_events()
     }
 
+    /// Append a rewrite event to the rewrite log file without reading/parsing the full log.
+    /// Hot command hooks should use this to avoid O(log-size) overhead on every command.
+    pub fn append_rewrite_event_fast(&self, event: RewriteLogEvent) -> Result<(), GitAiError> {
+        append_event_to_file(&self.rewrite_log, event)
+    }
+
     /// Read all rewrite events from the rewrite log file
     pub fn read_rewrite_events(&self) -> Result<Vec<RewriteLogEvent>, GitAiError> {
         if !self.rewrite_log.exists() {
@@ -158,6 +164,8 @@ pub struct PersistedWorkingLog {
     pub canonical_workdir: PathBuf,
     pub dirty_files: Option<HashMap<String, String>>,
     pub initial_file: PathBuf,
+    pub squash_tree_file: PathBuf,
+    pub squash_skip_checkpoint_file: PathBuf,
 }
 
 impl PersistedWorkingLog {
@@ -169,6 +177,8 @@ impl PersistedWorkingLog {
         dirty_files: Option<HashMap<String, String>>,
     ) -> Self {
         let initial_file = dir.join("INITIAL");
+        let squash_tree_file = dir.join("SQUASH_TREE");
+        let squash_skip_checkpoint_file = dir.join("SQUASH_SKIP_CHECKPOINT");
         Self {
             dir,
             base_commit: base_commit.to_string(),
@@ -176,6 +186,8 @@ impl PersistedWorkingLog {
             canonical_workdir,
             dirty_files,
             initial_file,
+            squash_tree_file,
+            squash_skip_checkpoint_file,
         }
     }
 
@@ -208,6 +220,14 @@ impl PersistedWorkingLog {
         // previous working state do not persist across resets
         if self.initial_file.exists() {
             fs::remove_file(&self.initial_file)?;
+        }
+
+        // Clear squash staged-tree marker if present.
+        if self.squash_tree_file.exists() {
+            fs::remove_file(&self.squash_tree_file)?;
+        }
+        if self.squash_skip_checkpoint_file.exists() {
+            fs::remove_file(&self.squash_skip_checkpoint_file)?;
         }
 
         Ok(())
@@ -594,6 +614,35 @@ impl PersistedWorkingLog {
             }
         }
     }
+
+    /// Persist the staged index tree OID captured during squash prep.
+    pub fn write_squash_tree_oid(&self, tree_oid: &str) -> Result<(), GitAiError> {
+        fs::write(&self.squash_tree_file, tree_oid.trim())?;
+        Ok(())
+    }
+
+    /// Read the staged index tree OID captured during squash prep.
+    pub fn read_squash_tree_oid(&self) -> Option<String> {
+        if !self.squash_tree_file.exists() {
+            return None;
+        }
+
+        fs::read_to_string(&self.squash_tree_file)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Mark that pre-commit checkpoint was intentionally skipped for a squash commit.
+    pub fn mark_squash_precommit_skipped(&self) -> Result<(), GitAiError> {
+        fs::write(&self.squash_skip_checkpoint_file, "1")?;
+        Ok(())
+    }
+
+    /// Returns true when pre-commit checkpoint was intentionally skipped for squash.
+    pub fn was_squash_precommit_skipped(&self) -> bool {
+        self.squash_skip_checkpoint_file.exists()
+    }
 }
 
 #[cfg(test)]
@@ -929,6 +978,72 @@ mod tests {
         assert_eq!(
             working_log.dir, expected_path,
             "Working log directory should be in correct location"
+        );
+    }
+
+    #[test]
+    fn test_squash_marker_roundtrip_and_skip_flag() {
+        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
+        let repo_storage =
+            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap());
+        let working_log = repo_storage.working_log_for_base_commit("test-commit-sha");
+
+        assert_eq!(
+            working_log.read_squash_tree_oid(),
+            None,
+            "tree marker should be absent before write"
+        );
+        assert!(
+            !working_log.was_squash_precommit_skipped(),
+            "skip marker should be absent before write"
+        );
+
+        working_log
+            .write_squash_tree_oid("  abcdef1234567890  \n")
+            .expect("write squash tree marker");
+        assert_eq!(
+            working_log.read_squash_tree_oid().as_deref(),
+            Some("abcdef1234567890"),
+            "tree marker should be trimmed on read"
+        );
+
+        working_log
+            .mark_squash_precommit_skipped()
+            .expect("mark squash pre-commit skipped");
+        assert!(
+            working_log.was_squash_precommit_skipped(),
+            "skip marker should be persisted"
+        );
+    }
+
+    #[test]
+    fn test_reset_working_log_clears_squash_markers() {
+        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
+        let repo_storage =
+            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap());
+        let working_log = repo_storage.working_log_for_base_commit("test-commit-sha");
+
+        working_log
+            .write_squash_tree_oid("abcdef1234567890")
+            .expect("write squash tree marker");
+        working_log
+            .mark_squash_precommit_skipped()
+            .expect("mark squash pre-commit skipped");
+        assert!(working_log.squash_tree_file.exists());
+        assert!(working_log.squash_skip_checkpoint_file.exists());
+
+        working_log
+            .reset_working_log()
+            .expect("reset working log should succeed");
+
+        assert_eq!(
+            working_log.read_squash_tree_oid(),
+            None,
+            "reset should clear tree marker"
+        );
+        assert!(
+            !working_log.was_squash_precommit_skipped(),
+            "reset should clear skip marker"
         );
     }
 }

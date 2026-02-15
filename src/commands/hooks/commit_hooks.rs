@@ -4,6 +4,7 @@ use crate::git::cli_parser::{ParsedGitInvocation, is_dry_run};
 use crate::git::repository::Repository;
 use crate::git::rewrite_log::RewriteLogEvent;
 use crate::utils::debug_log;
+use std::time::Instant;
 
 pub fn commit_pre_command_hook(
     parsed_args: &ParsedGitInvocation,
@@ -40,6 +41,7 @@ pub fn commit_post_command_hook(
     repository: &mut Repository,
     command_hooks_context: &mut CommandHooksContext,
 ) {
+    let hook_start = Instant::now();
     if is_dry_run(&parsed_args.command_args) {
         return;
     }
@@ -69,6 +71,12 @@ pub fn commit_post_command_hook(
     }
 
     let commit_author = get_commit_default_author(repository, &parsed_args.command_args);
+    debug_log(&format!(
+        "[BENCHMARK] commit post-hook: setup before rewrite event took {:?}",
+        hook_start.elapsed()
+    ));
+
+    let rewrite_start = Instant::now();
     if parsed_args.has_command_flag("--amend") {
         if let (Some(orig), Some(sha)) = (original_commit.clone(), new_sha.clone()) {
             repository.handle_rewrite_log_event(
@@ -93,9 +101,22 @@ pub fn commit_post_command_hook(
             true,
         );
     }
+    debug_log(&format!(
+        "[BENCHMARK] commit post-hook: handle_rewrite_log_event took {:?}",
+        rewrite_start.elapsed()
+    ));
 
     // Flush logs and metrics after commit
+    let flush_start = Instant::now();
     crate::observability::spawn_background_flush();
+    debug_log(&format!(
+        "[BENCHMARK] commit post-hook: spawn_background_flush took {:?}",
+        flush_start.elapsed()
+    ));
+    debug_log(&format!(
+        "[BENCHMARK] commit post-hook: total hook duration {:?}",
+        hook_start.elapsed()
+    ));
 }
 
 pub fn get_commit_default_author(repo: &Repository, args: &[String]) -> String {

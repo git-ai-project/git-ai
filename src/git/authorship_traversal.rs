@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 
-use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::error::GitAiError;
 use crate::git::refs::{commits_with_authorship_notes, note_blob_oids_for_commits};
 #[cfg(test)]
@@ -164,19 +163,24 @@ fn parse_cat_file_batch_output_with_oids(
 
 /// Extract file paths from a note blob content
 fn extract_file_paths_from_note(content: &str, files: &mut HashSet<String>) {
-    // Find the divider and slice before it, then add minimal metadata to make it parseable
-    if let Some(divider_pos) = content.find("\n---\n") {
-        let attestation_section = &content[..divider_pos];
-        // Create a complete parseable format with empty metadata
-        let parseable = format!(
-            "{}\n---\n{{\"schema_version\":\"authorship/3.0.0\",\"base_commit_sha\":\"\",\"prompts\":{{}}}}",
-            attestation_section
-        );
+    // Only parse the attestation header section (before divider).
+    // File paths are unindented lines; attestation entries are indented by two spaces.
+    for line in content.lines() {
+        if line == "---" {
+            break;
+        }
+        if line.is_empty() || line.starts_with("  ") {
+            continue;
+        }
 
-        if let Ok(log) = AuthorshipLog::deserialize_from_string(&parseable) {
-            for attestation in log.attestations {
-                files.insert(attestation.file_path);
-            }
+        let file_path = if line.starts_with('"') && line.ends_with('"') && line.len() >= 2 {
+            line[1..line.len() - 1].to_string()
+        } else {
+            line.to_string()
+        };
+
+        if !file_path.is_empty() {
+            files.insert(file_path);
         }
     }
 }
@@ -185,7 +189,58 @@ fn extract_file_paths_from_note(content: &str, files: &mut HashSet<String>) {
 mod tests {
     use super::*;
     use crate::git::{find_repository_in_path, sync_authorship::fetch_authorship_notes};
+    use std::collections::HashSet;
     use std::time::Instant;
+
+    #[test]
+    fn test_extract_file_paths_from_note_handles_quotes_and_ignores_entries() {
+        let note = r#"src/main.rs
+"path with spaces.txt"
+  [1, 3] 82a0dd96f0f8d051
+  [8, 9] human
+---
+{"schema_version":"authorship/3.0.0","base_commit_sha":"abc","prompts":{}}
+"#;
+
+        let mut files = HashSet::new();
+        extract_file_paths_from_note(note, &mut files);
+
+        assert!(files.contains("src/main.rs"));
+        assert!(files.contains("path with spaces.txt"));
+        assert_eq!(
+            files.len(),
+            2,
+            "indented attestation lines and metadata should be ignored"
+        );
+    }
+
+    #[test]
+    fn test_parse_cat_file_batch_output_with_oids_handles_content_and_missing() {
+        let data = b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa blob 6\nx\ny\nz\nbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb missing\n";
+        let parsed = parse_cat_file_batch_output_with_oids(data).expect("parse batch output");
+
+        assert_eq!(
+            parsed
+                .get("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .map(String::as_str),
+            Some("x\ny\nz\n")
+        );
+        assert!(
+            !parsed.contains_key("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+            "missing objects should be skipped"
+        );
+    }
+
+    #[test]
+    fn test_parse_cat_file_batch_output_with_oids_errors_on_truncated_content() {
+        let truncated = b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa blob 8\nabc";
+        let err = parse_cat_file_batch_output_with_oids(truncated).expect_err("should fail");
+        assert!(
+            err.to_string().contains("truncated"),
+            "unexpected error: {}",
+            err
+        );
+    }
 
     #[test]
     fn test_load_ai_touched_files_for_specific_commits() {

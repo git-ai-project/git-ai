@@ -1,7 +1,7 @@
 use crate::api::{ApiClient, ApiContext};
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::ignore::{
-    build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher,
+    IgnoreMatcher, build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher,
 };
 use crate::authorship::prompt_utils::{PromptUpdateResult, update_prompt_from_tool};
 use crate::authorship::secrets::{redact_secrets_from_prompts, strip_prompt_messages};
@@ -15,6 +15,7 @@ use crate::git::repository::Repository;
 use crate::utils::debug_log;
 use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
+use std::time::Instant;
 
 /// Skip expensive post-commit stats when this threshold is exceeded.
 /// High hunk density is the strongest predictor of slow diff_ai_accepted_stats.
@@ -56,6 +57,7 @@ pub fn post_commit(
     human_author: String,
     supress_output: bool,
 ) -> Result<(String, AuthorshipLog), GitAiError> {
+    let post_commit_start = Instant::now();
     // Use base_commit parameter if provided, otherwise use "initial" for empty repos
     // This matches the convention in checkpoint.rs
     let parent_sha = base_commit.unwrap_or_else(|| "initial".to_string());
@@ -63,45 +65,67 @@ pub fn post_commit(
     // Initialize the new storage system
     let repo_storage = &repo.storage;
     let working_log = repo_storage.working_log_for_base_commit(&parent_sha);
+    let squash_precommit_skipped = working_log.was_squash_precommit_skipped();
+    let initial_read_start = Instant::now();
+    let initial_attributions_for_pathspecs = working_log.read_initial_attributions();
+    debug_log(&format!(
+        "[BENCHMARK] post-commit: read initial attributions took {:?}",
+        initial_read_start.elapsed()
+    ));
 
-    // Pull all working log entries from the parent commit
+    // Pull all working log entries from the parent commit.
+    // For squash commits where pre-commit checkpoint was intentionally skipped,
+    // only INITIAL data is relevant and we can avoid checkpoint I/O entirely.
+    let mut parent_working_log = if squash_precommit_skipped {
+        Vec::new()
+    } else {
+        working_log.read_all_checkpoints()?
+    };
 
-    let mut parent_working_log = working_log.read_all_checkpoints()?;
+    if !squash_precommit_skipped {
+        // Update prompts/transcripts to their latest versions and persist to disk
+        // Do this BEFORE filtering so that all checkpoints (including untracked files) are updated
+        update_prompts_to_latest(&mut parent_working_log)?;
 
-    // debug_log(&format!(
-    //     "edited files: {:?}",
-    //     parent_working_log.edited_files
-    // ));
+        // Batch upsert all prompts to database after refreshing (non-fatal if it fails)
+        if let Err(e) = batch_upsert_prompts_to_db(&parent_working_log, &working_log, &commit_sha) {
+            debug_log(&format!(
+                "[Warning] Failed to batch upsert prompts to database: {}",
+                e
+            ));
+            crate::observability::log_error(
+                &e,
+                Some(serde_json::json!({
+                    "operation": "post_commit_batch_upsert",
+                    "commit_sha": commit_sha
+                })),
+            );
+        }
 
-    // Update prompts/transcripts to their latest versions and persist to disk
-    // Do this BEFORE filtering so that all checkpoints (including untracked files) are updated
-    update_prompts_to_latest(&mut parent_working_log)?;
-
-    // Batch upsert all prompts to database after refreshing (non-fatal if it fails)
-    if let Err(e) = batch_upsert_prompts_to_db(&parent_working_log, &working_log, &commit_sha) {
-        debug_log(&format!(
-            "[Warning] Failed to batch upsert prompts to database: {}",
-            e
-        ));
-        crate::observability::log_error(
-            &e,
-            Some(serde_json::json!({
-                "operation": "post_commit_batch_upsert",
-                "commit_sha": commit_sha
-            })),
-        );
+        working_log.write_all_checkpoints(&parent_working_log)?;
     }
 
-    working_log.write_all_checkpoints(&parent_working_log)?;
-
-    // Create VirtualAttributions from working log (fast path - no blame)
-    // We don't need to run blame because we only care about the working log data
-    // that was accumulated since the parent commit
-    let working_va = VirtualAttributions::from_just_working_log(
-        repo.clone(),
-        parent_sha.clone(),
-        Some(human_author.clone()),
-    )?;
+    // Create VirtualAttributions from working log (fast path - no blame).
+    // Post-commit conversion only needs line-level attributions, so use the
+    // lightweight loader to avoid eagerly reading full file contents.
+    let va_start = Instant::now();
+    let working_va = if squash_precommit_skipped {
+        VirtualAttributions::from_initial_only_line_only(
+            repo.clone(),
+            parent_sha.clone(),
+            Some(human_author.clone()),
+        )?
+    } else {
+        VirtualAttributions::from_just_working_log_line_only(
+            repo.clone(),
+            parent_sha.clone(),
+            Some(human_author.clone()),
+        )?
+    };
+    debug_log(&format!(
+        "[BENCHMARK] post-commit: load working VA took {:?}",
+        va_start.elapsed()
+    ));
 
     // Build pathspecs from AI-relevant checkpoint entries only.
     // Human-only entries with no AI attribution do not affect authorship output and should not
@@ -118,83 +142,142 @@ pub fn post_commit(
     // Also include files from INITIAL attributions (uncommitted files from previous commits)
     // These files may not have checkpoints but still need their attribution preserved
     // when they are finally committed. See issue #356.
-    let initial_attributions_for_pathspecs = working_log.read_initial_attributions();
     for file_path in initial_attributions_for_pathspecs.files.keys() {
         pathspecs.insert(file_path.clone());
     }
 
     // Split VirtualAttributions into committed (authorship log) and uncommitted (INITIAL)
-    let (mut authorship_log, initial_attributions) = working_va
-        .to_authorship_log_and_initial_working_log(
+    // Fast path: if there are no relevant worktree changes after commit, we can skip
+    // expensive unstaged diff processing and convert directly from committed hunks.
+    let status_start = Instant::now();
+    let has_relevant_worktree_changes =
+        !pathspecs.is_empty() && !repo.status(Some(&pathspecs), false)?.is_empty();
+    debug_log(&format!(
+        "[BENCHMARK] post-commit: status scan took {:?} (has_changes={})",
+        status_start.elapsed(),
+        has_relevant_worktree_changes
+    ));
+
+    let conversion_start = Instant::now();
+    let (mut authorship_log, initial_attributions) = if has_relevant_worktree_changes {
+        working_va.to_authorship_log_and_initial_working_log(
+            repo,
+            &parent_sha,
+            &commit_sha,
+            Some(&pathspecs),
+        )?
+    } else {
+        let authorship_log = working_va.to_authorship_log_index_only(
             repo,
             &parent_sha,
             &commit_sha,
             Some(&pathspecs),
         )?;
+        let initial_attributions = crate::git::repo_storage::InitialAttributions {
+            files: HashMap::new(),
+            prompts: HashMap::new(),
+        };
+        (authorship_log, initial_attributions)
+    };
+    debug_log(&format!(
+        "[BENCHMARK] post-commit: attribution conversion took {:?}",
+        conversion_start.elapsed()
+    ));
 
     authorship_log.metadata.base_commit_sha = commit_sha.clone();
 
+    let prompt_policy_start = Instant::now();
     // Handle prompts based on effective prompt storage mode for this repository
     // The effective mode considers include/exclude lists and fallback settings
     let effective_storage = Config::get().effective_prompt_storage(&Some(repo.clone()));
+    let has_prompt_messages = authorship_log
+        .metadata
+        .prompts
+        .values()
+        .any(|prompt| !prompt.messages.is_empty());
 
     match effective_storage {
         PromptStorageMode::Local => {
             // Local only: strip all messages from notes (they stay in sqlite only)
-            strip_prompt_messages(&mut authorship_log.metadata.prompts);
+            if has_prompt_messages {
+                strip_prompt_messages(&mut authorship_log.metadata.prompts);
+            }
         }
         PromptStorageMode::Notes => {
             // Store in notes: redact secrets but keep messages in notes
-            let count = redact_secrets_from_prompts(&mut authorship_log.metadata.prompts);
-            if count > 0 {
-                debug_log(&format!("Redacted {} secrets from prompts", count));
+            if has_prompt_messages {
+                let count = redact_secrets_from_prompts(&mut authorship_log.metadata.prompts);
+                if count > 0 {
+                    debug_log(&format!("Redacted {} secrets from prompts", count));
+                }
             }
         }
         PromptStorageMode::Default => {
             // "default" - attempt CAS upload, NEVER keep messages in notes
-            // Check conditions for CAS upload:
-            // - user is logged in OR using custom API URL
-            let context = ApiContext::new(None);
-            let client = ApiClient::new(context);
-            let using_custom_api =
-                Config::get().api_base_url() != crate::config::DEFAULT_API_BASE_URL;
-            let should_enqueue_cas = client.is_logged_in() || using_custom_api;
+            if has_prompt_messages {
+                // Check conditions for CAS upload:
+                // - user is logged in OR using custom API URL
+                // - squash fast-path is always false (prompts are inherited)
+                let should_enqueue_cas = if squash_precommit_skipped {
+                    false
+                } else {
+                    let context = ApiContext::new(None);
+                    let client = ApiClient::new(context);
+                    let using_custom_api =
+                        Config::get().api_base_url() != crate::config::DEFAULT_API_BASE_URL;
+                    client.is_logged_in() || using_custom_api
+                };
 
-            if should_enqueue_cas {
-                // Redact secrets before uploading to CAS
-                let redaction_count =
-                    redact_secrets_from_prompts(&mut authorship_log.metadata.prompts);
-                if redaction_count > 0 {
-                    debug_log(&format!(
-                        "Redacted {} secrets from prompts before CAS upload",
-                        redaction_count
-                    ));
-                }
+                if should_enqueue_cas {
+                    // Redact secrets before uploading to CAS
+                    let redaction_count =
+                        redact_secrets_from_prompts(&mut authorship_log.metadata.prompts);
+                    if redaction_count > 0 {
+                        debug_log(&format!(
+                            "Redacted {} secrets from prompts before CAS upload",
+                            redaction_count
+                        ));
+                    }
 
-                if let Err(e) =
-                    enqueue_prompt_messages_to_cas(repo, &mut authorship_log.metadata.prompts)
-                {
-                    debug_log(&format!(
-                        "[Warning] Failed to enqueue prompt messages to CAS: {}",
-                        e
-                    ));
-                    // Enqueue failed - still strip messages (never keep in notes for "default")
+                    if let Err(e) =
+                        enqueue_prompt_messages_to_cas(repo, &mut authorship_log.metadata.prompts)
+                    {
+                        debug_log(&format!(
+                            "[Warning] Failed to enqueue prompt messages to CAS: {}",
+                            e
+                        ));
+                        // Enqueue failed - still strip messages (never keep in notes for "default")
+                        strip_prompt_messages(&mut authorship_log.metadata.prompts);
+                    }
+                    // Success: enqueue function already cleared messages
+                } else {
+                    // Not enqueueing - strip messages (never keep in notes for "default")
                     strip_prompt_messages(&mut authorship_log.metadata.prompts);
                 }
-                // Success: enqueue function already cleared messages
-            } else {
-                // Not enqueueing - strip messages (never keep in notes for "default")
-                strip_prompt_messages(&mut authorship_log.metadata.prompts);
             }
         }
     }
+    debug_log(&format!(
+        "[BENCHMARK] post-commit: prompt policy handling took {:?}",
+        prompt_policy_start.elapsed()
+    ));
 
     // Serialize the authorship log
+    let serialize_start = Instant::now();
     let authorship_json = authorship_log
         .serialize_to_string()
         .map_err(|_| GitAiError::Generic("Failed to serialize authorship log".to_string()))?;
+    debug_log(&format!(
+        "[BENCHMARK] post-commit: serialize authorship took {:?}",
+        serialize_start.elapsed()
+    ));
 
+    let notes_start = Instant::now();
     notes_add(repo, &commit_sha, &authorship_json)?;
+    debug_log(&format!(
+        "[BENCHMARK] post-commit: notes_add took {:?}",
+        notes_start.elapsed()
+    ));
 
     // Compute stats once (needed for both metrics and terminal output), unless preflight
     // estimate predicts this would be too expensive for the commit hook path.
@@ -204,6 +287,7 @@ pub fn post_commit(
         .map(|commit| commit.parent_count().unwrap_or(0) > 1)
         .unwrap_or(false);
     let ignore_patterns = effective_ignore_patterns(repo, &[], &[]);
+    let stats_preflight_start = Instant::now();
     let skip_reason = if is_merge_commit {
         Some(StatsSkipReason::MergeCommit)
     } else {
@@ -217,6 +301,10 @@ pub fn post_commit(
                 }
             })
     };
+    debug_log(&format!(
+        "[BENCHMARK] post-commit: stats preflight took {:?}",
+        stats_preflight_start.elapsed()
+    ));
 
     if skip_reason.is_none() {
         let computed = stats_for_commit_stats(repo, &commit_sha, &ignore_patterns)?;
@@ -260,7 +348,16 @@ pub fn post_commit(
     }
 
     // // Clean up old working log
+    let cleanup_start = Instant::now();
     repo_storage.delete_working_log_for_base_commit(&parent_sha)?;
+    debug_log(&format!(
+        "[BENCHMARK] post-commit: cleanup old working log took {:?}",
+        cleanup_start.elapsed()
+    ));
+    debug_log(&format!(
+        "[BENCHMARK] post-commit: total post_commit duration {:?}",
+        post_commit_start.elapsed()
+    ));
 
     if !supress_output && !Config::get().is_quiet() {
         // Only print stats if we're in an interactive terminal and quiet mode is disabled
@@ -309,26 +406,36 @@ fn estimate_stats_cost(
     commit_sha: &str,
     ignore_patterns: &[String],
 ) -> Result<StatsCostEstimate, GitAiError> {
-    let mut added_lines_by_file = repo.diff_added_lines(parent_sha, commit_sha, None)?;
     let ignore_matcher = build_ignore_matcher(ignore_patterns);
+    // Use a cheap --numstat preflight first. On large commits this avoids parsing full
+    // patch hunks just to decide we should skip expensive stats.
+    let (files_with_additions, added_lines) =
+        get_numstat_added_lines(repo, parent_sha, commit_sha, &ignore_matcher)?;
+
+    if files_with_additions >= STATS_SKIP_MAX_FILES_WITH_ADDITIONS
+        || added_lines >= STATS_SKIP_MAX_ADDED_LINES
+    {
+        return Ok(StatsCostEstimate {
+            files_with_additions,
+            added_lines,
+            hunk_ranges: 0,
+        });
+    }
+
+    // Only compute hunk density when needed (smaller commits near threshold).
+    let mut added_lines_by_file = repo.diff_added_lines(parent_sha, commit_sha, None)?;
     added_lines_by_file
         .retain(|file_path, _| !should_ignore_file_with_matcher(file_path, &ignore_matcher));
-
     let files_with_additions = added_lines_by_file
         .values()
         .filter(|lines| !lines.is_empty())
         .count();
-
-    let mut added_lines = 0usize;
-    let mut hunk_ranges = 0usize;
-
-    for (_file, lines) in added_lines_by_file {
-        if lines.is_empty() {
-            continue;
-        }
-        added_lines += lines.len();
-        hunk_ranges += count_line_ranges(&lines);
-    }
+    let added_lines = added_lines_by_file.values().map(std::vec::Vec::len).sum();
+    let hunk_ranges = added_lines_by_file
+        .values()
+        .filter(|lines| !lines.is_empty())
+        .map(|lines| count_line_ranges(lines))
+        .sum();
 
     Ok(StatsCostEstimate {
         files_with_additions,
@@ -355,6 +462,46 @@ fn count_line_ranges(lines: &[u32]) -> usize {
         prev = line;
     }
     ranges
+}
+
+fn get_numstat_added_lines(
+    repo: &Repository,
+    parent_sha: &str,
+    commit_sha: &str,
+    ignore_matcher: &IgnoreMatcher,
+) -> Result<(usize, usize), GitAiError> {
+    let mut args = repo.global_args_for_exec();
+    args.push("diff".to_string());
+    args.push("--numstat".to_string());
+    args.push(parent_sha.to_string());
+    args.push(commit_sha.to_string());
+
+    let output = crate::git::repository::exec_git(&args)?;
+    let stdout = String::from_utf8(output.stdout)?;
+
+    let mut files_with_additions = 0usize;
+    let mut added_lines = 0usize;
+
+    for line in stdout.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        if should_ignore_file_with_matcher(parts[2], ignore_matcher) {
+            continue;
+        }
+        if let Ok(added) = parts[0].parse::<usize>()
+            && added > 0
+        {
+            files_with_additions += 1;
+            added_lines += added;
+        }
+    }
+
+    Ok((files_with_additions, added_lines))
 }
 
 /// Update prompts/transcripts in working log checkpoints to their latest versions.
@@ -638,8 +785,10 @@ fn record_commit_metrics(
 mod tests {
     use super::{
         STATS_SKIP_MAX_ADDED_LINES, STATS_SKIP_MAX_FILES_WITH_ADDITIONS, STATS_SKIP_MAX_HUNKS,
-        StatsCostEstimate, count_line_ranges, should_skip_expensive_post_commit_stats,
+        StatsCostEstimate, checkpoint_entry_requires_post_processing, count_line_ranges,
+        should_skip_expensive_post_commit_stats,
     };
+    use crate::authorship::working_log::{Checkpoint, CheckpointKind, WorkingLogEntry};
     use crate::git::test_utils::TmpRepo;
 
     #[test]
@@ -681,6 +830,65 @@ mod tests {
             hunk_ranges: 1,
         };
         assert!(should_skip_expensive_post_commit_stats(&by_files));
+    }
+
+    #[test]
+    fn test_checkpoint_entry_requires_post_processing_handles_human_and_ai_paths() {
+        let empty_human_checkpoint = Checkpoint::new(
+            CheckpointKind::Human,
+            String::new(),
+            "human".to_string(),
+            vec![],
+        );
+        let empty_entry =
+            WorkingLogEntry::new("file.txt".to_string(), "blob".to_string(), vec![], vec![]);
+        assert!(
+            !checkpoint_entry_requires_post_processing(&empty_human_checkpoint, &empty_entry),
+            "human entry with no AI attribution should be skipped"
+        );
+
+        let ai_line_entry = WorkingLogEntry::new(
+            "file.txt".to_string(),
+            "blob".to_string(),
+            vec![],
+            vec![crate::authorship::attribution_tracker::LineAttribution {
+                start_line: 1,
+                end_line: 1,
+                author_id: "mock_ai".to_string(),
+                overrode: None,
+            }],
+        );
+        assert!(
+            checkpoint_entry_requires_post_processing(&empty_human_checkpoint, &ai_line_entry),
+            "human entry with AI line attribution should be processed"
+        );
+
+        let overridden_entry = WorkingLogEntry::new(
+            "file.txt".to_string(),
+            "blob".to_string(),
+            vec![],
+            vec![crate::authorship::attribution_tracker::LineAttribution {
+                start_line: 1,
+                end_line: 1,
+                author_id: CheckpointKind::Human.to_str(),
+                overrode: Some("mock_ai".to_string()),
+            }],
+        );
+        assert!(
+            checkpoint_entry_requires_post_processing(&empty_human_checkpoint, &overridden_entry),
+            "human overrides must be processed"
+        );
+
+        let ai_checkpoint = Checkpoint::new(
+            CheckpointKind::AiAgent,
+            String::new(),
+            "ai".to_string(),
+            vec![],
+        );
+        assert!(
+            checkpoint_entry_requires_post_processing(&ai_checkpoint, &empty_entry),
+            "all AI checkpoints should be processed"
+        );
     }
 
     #[test]

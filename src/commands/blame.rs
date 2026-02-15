@@ -1,8 +1,8 @@
 use crate::authorship::authorship_log::PromptRecord;
-use crate::authorship::authorship_log_serialization::AuthorshipLog;
+use crate::authorship::authorship_log_serialization::{AUTHORSHIP_LOG_VERSION, AuthorshipLog};
 use crate::authorship::working_log::CheckpointKind;
 use crate::error::GitAiError;
-use crate::git::refs::get_reference_as_authorship_log_v3;
+use crate::git::refs::{get_reference_as_authorship_log_v3, note_blob_oids_for_commits};
 use crate::git::repository::Repository;
 use crate::git::repository::{exec_git, exec_git_stdin};
 #[cfg(windows)]
@@ -141,6 +141,9 @@ pub struct GitAiBlameOptions {
     // When true, a single git blame hunk may be split into multiple hunks
     // if different lines were authored by different humans working with AI
     pub split_hunks_by_ai_author: bool,
+    // Populate per-hunk `ai_human_author` metadata in `blame_hunks`.
+    // This is only needed for human-facing blame outputs.
+    pub populate_ai_human_authors: bool,
 }
 
 impl Default for GitAiBlameOptions {
@@ -185,6 +188,7 @@ impl Default for GitAiBlameOptions {
             json: false,
             mark_unknown: false,
             split_hunks_by_ai_author: true,
+            populate_ai_human_authors: true,
         }
     }
 }
@@ -269,83 +273,92 @@ impl Repository {
             options.clone()
         };
 
-        // Read file content from one of:
-        // 1. Provided contents_data (from --contents flag)
-        // 2. A specific commit
-        // 3. The working directory
-        let (file_content, total_lines) = if let Some(ref data) = options.contents_data {
-            // Use pre-read contents data (from --contents stdin or file)
-            let content = String::from_utf8_lossy(data).to_string();
-            let lines_count = content.lines().count() as u32;
-            (content, lines_count)
-        } else if let Some(ref commit) = options.newest_commit {
-            // Read file content from the specified commit
-            // This ensures blame is independent of which branch is checked out
-            let commit_obj = self.find_commit(commit.clone())?;
-            let tree = commit_obj.tree()?;
+        let fast_full_file_no_output = options.no_output && options.line_ranges.is_empty();
+        let mut file_content = String::new();
+        let mut line_ranges: Vec<(u32, u32)> = Vec::new();
 
-            match tree.get_path(std::path::Path::new(&relative_file_path)) {
-                Ok(entry) => {
-                    if let Ok(blob) = self.find_blob(entry.id()) {
-                        let blob_content = blob.content().unwrap_or_default();
-                        let content = String::from_utf8_lossy(&blob_content).to_string();
-                        let lines_count = content.lines().count() as u32;
-                        (content, lines_count)
-                    } else {
+        // Step 1: Get Git's native blame hunks.
+        // Fast path for machine-only callers: skip file content hydration and range validation.
+        let all_blame_hunks = if fast_full_file_no_output {
+            self.blame_hunks_full(&relative_file_path, &options)?
+        } else {
+            // Read file content from one of:
+            // 1. Provided contents_data (from --contents flag)
+            // 2. A specific commit
+            // 3. The working directory
+            let total_lines = if let Some(ref data) = options.contents_data {
+                // Use pre-read contents data (from --contents stdin or file)
+                file_content = String::from_utf8_lossy(data).to_string();
+                file_content.lines().count() as u32
+            } else if let Some(ref commit) = options.newest_commit {
+                // Read file content from the specified commit
+                // This ensures blame is independent of which branch is checked out
+                let commit_obj = self.find_commit(commit.clone())?;
+                let tree = commit_obj.tree()?;
+
+                match tree.get_path(std::path::Path::new(&relative_file_path)) {
+                    Ok(entry) => {
+                        if let Ok(blob) = self.find_blob(entry.id()) {
+                            let blob_content = blob.content().unwrap_or_default();
+                            file_content = String::from_utf8_lossy(&blob_content).to_string();
+                            file_content.lines().count() as u32
+                        } else {
+                            return Err(GitAiError::Generic(format!(
+                                "File '{}' is not a blob in commit {}",
+                                relative_file_path, commit
+                            )));
+                        }
+                    }
+                    Err(_) => {
                         return Err(GitAiError::Generic(format!(
-                            "File '{}' is not a blob in commit {}",
+                            "File '{}' not found in commit {}",
                             relative_file_path, commit
                         )));
                     }
                 }
-                Err(_) => {
+            } else {
+                // Read from working directory (existing behavior)
+                let abs_file_path = repo_root.join(&relative_file_path);
+
+                if !abs_file_path.exists() {
                     return Err(GitAiError::Generic(format!(
-                        "File '{}' not found in commit {}",
-                        relative_file_path, commit
+                        "File not found: {}",
+                        abs_file_path.display()
+                    )));
+                }
+
+                file_content = fs::read_to_string(&abs_file_path)?;
+                file_content.lines().count() as u32
+            };
+
+            // Determine the line ranges to process
+            line_ranges = if options.line_ranges.is_empty() {
+                vec![(1, total_lines)]
+            } else {
+                options.line_ranges.clone()
+            };
+
+            // Validate line ranges
+            for (start, end) in &line_ranges {
+                if *start == 0 || *end == 0 || start > end || *end > total_lines {
+                    return Err(GitAiError::Generic(format!(
+                        "Invalid line range: {}:{}. File has {} lines",
+                        start, end, total_lines
                     )));
                 }
             }
-        } else {
-            // Read from working directory (existing behavior)
-            let abs_file_path = repo_root.join(&relative_file_path);
 
-            if !abs_file_path.exists() {
-                return Err(GitAiError::Generic(format!(
-                    "File not found: {}",
-                    abs_file_path.display()
-                )));
+            let mut hunks = Vec::new();
+            for (start_line, end_line) in &line_ranges {
+                hunks.extend(self.blame_hunks(
+                    &relative_file_path,
+                    *start_line,
+                    *end_line,
+                    &options,
+                )?);
             }
-
-            let content = fs::read_to_string(&abs_file_path)?;
-            let lines_count = content.lines().count() as u32;
-            (content, lines_count)
+            hunks
         };
-
-        let lines: Vec<&str> = file_content.lines().collect();
-
-        // Determine the line ranges to process
-        let line_ranges = if options.line_ranges.is_empty() {
-            vec![(1, total_lines)]
-        } else {
-            options.line_ranges.clone()
-        };
-
-        // Validate line ranges
-        for (start, end) in &line_ranges {
-            if *start == 0 || *end == 0 || start > end || *end > total_lines {
-                return Err(GitAiError::Generic(format!(
-                    "Invalid line range: {}:{}. File has {} lines",
-                    start, end, total_lines
-                )));
-            }
-        }
-
-        // Step 1: Get Git's native blame for all ranges
-        let mut all_blame_hunks = Vec::new();
-        for (start_line, end_line) in &line_ranges {
-            let hunks = self.blame_hunks(&relative_file_path, *start_line, *end_line, &options)?;
-            all_blame_hunks.extend(hunks);
-        }
 
         // Step 2: Overlay AI authorship information
         let (line_authors, prompt_records, authorship_logs, prompt_commits) =
@@ -354,6 +367,8 @@ impl Repository {
         if options.no_output {
             return Ok((line_authors, prompt_records));
         }
+
+        let lines: Vec<&str> = file_content.lines().collect();
 
         // Output based on format
         if options.json {
@@ -403,6 +418,23 @@ impl Repository {
         end_line: u32,
         options: &GitAiBlameOptions,
     ) -> Result<Vec<BlameHunk>, GitAiError> {
+        self.blame_hunks_internal(file_path, Some((start_line, end_line)), options)
+    }
+
+    fn blame_hunks_full(
+        &self,
+        file_path: &str,
+        options: &GitAiBlameOptions,
+    ) -> Result<Vec<BlameHunk>, GitAiError> {
+        self.blame_hunks_internal(file_path, None, options)
+    }
+
+    fn blame_hunks_internal(
+        &self,
+        file_path: &str,
+        line_range: Option<(u32, u32)>,
+        options: &GitAiBlameOptions,
+    ) -> Result<Vec<BlameHunk>, GitAiError> {
         // Build git blame --line-porcelain command
         let mut args = self.global_args_for_exec();
         args.push("blame".to_string());
@@ -423,9 +455,11 @@ impl Repository {
             args.push(file.clone());
         }
 
-        // Limit to specified range
-        args.push("-L".to_string());
-        args.push(format!("{},{}", start_line, end_line));
+        // Limit to specified range (or blame entire file when no range is provided)
+        if let Some((start_line, end_line)) = line_range {
+            args.push("-L".to_string());
+            args.push(format!("{},{}", start_line, end_line));
+        }
 
         // Add --since flag if oldest_date is specified
         // This controls the absolute lower bound of how far back to look
@@ -684,10 +718,12 @@ impl Repository {
             });
         }
 
-        // Post-process hunks to populate ai_human_author from authorship logs
-        let hunks = self.populate_ai_human_authors(hunks, file_path, options)?;
-
-        Ok(hunks)
+        if options.populate_ai_human_authors {
+            // Post-process hunks to populate ai_human_author from authorship logs
+            self.populate_ai_human_authors(hunks, file_path, options)
+        } else {
+            Ok(hunks)
+        }
     }
 
     /// Post-process blame hunks to populate ai_human_author from authorship logs.
@@ -815,8 +851,17 @@ fn overlay_ai_authorship(
     // Track which commits contain each prompt hash
     let mut prompt_commits: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
 
-    // Group hunks by commit SHA to avoid repeated lookups
-    let mut commit_authorship_cache: HashMap<String, Option<AuthorshipLog>> = HashMap::new();
+    // Group hunks by commit SHA to avoid repeated lookups.
+    // Preload in batch to avoid N git notes lookups per file.
+    let mut unique_commit_shas: Vec<String> = blame_hunks
+        .iter()
+        .map(|h| h.commit_sha.clone())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    unique_commit_shas.sort();
+    let mut commit_authorship_cache: HashMap<String, Option<AuthorshipLog>> =
+        preload_authorship_logs_for_commits(repo, &unique_commit_shas).unwrap_or_default();
     // Cache for foreign prompts to avoid repeated grepping
     let mut foreign_prompts_cache: HashMap<String, Option<PromptRecord>> = HashMap::new();
 
@@ -919,6 +964,126 @@ fn overlay_ai_authorship(
         authorship_logs,
         prompt_commits_vec,
     ))
+}
+
+fn preload_authorship_logs_for_commits(
+    repo: &Repository,
+    commit_shas: &[String],
+) -> Result<HashMap<String, Option<AuthorshipLog>>, GitAiError> {
+    let mut out: HashMap<String, Option<AuthorshipLog>> = HashMap::new();
+    if commit_shas.is_empty() {
+        return Ok(out);
+    }
+
+    let note_blob_map = note_blob_oids_for_commits(repo, commit_shas)?;
+    if note_blob_map.is_empty() {
+        for sha in commit_shas {
+            out.insert(sha.clone(), None);
+        }
+        return Ok(out);
+    }
+
+    let mut unique_blob_oids: Vec<String> = note_blob_map
+        .values()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    unique_blob_oids.sort();
+
+    let blob_contents = batch_read_blobs_with_oids(repo, &unique_blob_oids)?;
+
+    for commit_sha in commit_shas {
+        let authorship_log = note_blob_map
+            .get(commit_sha)
+            .and_then(|blob_oid| blob_contents.get(blob_oid))
+            .and_then(|content| {
+                AuthorshipLog::deserialize_from_string(content)
+                    .ok()
+                    .and_then(|mut log| {
+                        if log.metadata.schema_version != AUTHORSHIP_LOG_VERSION {
+                            return None;
+                        }
+                        log.metadata.base_commit_sha = commit_sha.clone();
+                        Some(log)
+                    })
+            });
+        out.insert(commit_sha.clone(), authorship_log);
+    }
+
+    Ok(out)
+}
+
+fn batch_read_blobs_with_oids(
+    repo: &Repository,
+    blob_oids: &[String],
+) -> Result<HashMap<String, String>, GitAiError> {
+    if blob_oids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut args = repo.global_args_for_exec();
+    args.push("cat-file".to_string());
+    args.push("--batch".to_string());
+
+    let stdin_data = blob_oids.join("\n") + "\n";
+    let output = exec_git_stdin(&args, stdin_data.as_bytes())?;
+
+    parse_cat_file_batch_output_with_oids(&output.stdout)
+}
+
+fn parse_cat_file_batch_output_with_oids(
+    data: &[u8],
+) -> Result<HashMap<String, String>, GitAiError> {
+    let mut results = HashMap::new();
+    let mut pos = 0usize;
+
+    while pos < data.len() {
+        let header_end = match data[pos..].iter().position(|&b| b == b'\n') {
+            Some(idx) => pos + idx,
+            None => break,
+        };
+
+        let header = std::str::from_utf8(&data[pos..header_end])?;
+        let parts: Vec<&str> = header.split_whitespace().collect();
+        if parts.len() < 2 {
+            pos = header_end + 1;
+            continue;
+        }
+
+        let oid = parts[0].to_string();
+        if parts[1] == "missing" {
+            pos = header_end + 1;
+            continue;
+        }
+
+        if parts.len() < 3 {
+            pos = header_end + 1;
+            continue;
+        }
+
+        let size: usize = parts[2]
+            .parse()
+            .map_err(|e| GitAiError::Generic(format!("Invalid size in cat-file output: {}", e)))?;
+
+        let content_start = header_end + 1;
+        let content_end = content_start + size;
+        if content_end > data.len() {
+            return Err(GitAiError::Generic(
+                "Malformed cat-file --batch output: truncated content".to_string(),
+            ));
+        }
+
+        let content = String::from_utf8_lossy(&data[content_start..content_end]).to_string();
+        results.insert(oid, content);
+
+        pos = content_end;
+        if pos < data.len() && data[pos] == b'\n' {
+            pos += 1;
+        }
+    }
+
+    Ok(results)
 }
 
 /// JSON output structure for blame

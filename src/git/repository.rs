@@ -10,12 +10,14 @@ use crate::git::rewrite_log::RewriteLogEvent;
 use crate::git::status::MAX_PATHSPEC_ARGS;
 use crate::git::sync_authorship::{fetch_authorship_notes, push_authorship_notes};
 use crate::utils::GIT_AI_SKIP_CORE_HOOKS_ENV;
+use crate::utils::debug_log;
 #[cfg(windows)]
 use crate::utils::is_interactive_terminal;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::Instant;
 
 #[cfg(windows)]
 use crate::utils::CREATE_NO_WINDOW;
@@ -906,20 +908,28 @@ impl Repository {
         supress_output: bool,
         apply_side_effects: bool,
     ) {
-        let log = self
-            .storage
-            .append_rewrite_event(rewrite_log_event.clone())
+        let append_start = Instant::now();
+        self.storage
+            .append_rewrite_event_fast(rewrite_log_event.clone())
             .expect("Error writing .git/ai/rewrite_log");
+        debug_log(&format!(
+            "[BENCHMARK] rewrite_log: append event took {:?}",
+            append_start.elapsed()
+        ));
 
-        if apply_side_effects
-            && let Ok(_) = rewrite_authorship_if_needed(
+        if apply_side_effects {
+            let rewrite_start = Instant::now();
+            let _ = rewrite_authorship_if_needed(
                 self,
                 &rewrite_log_event,
                 commit_author,
-                &log,
                 supress_output,
-            )
-        {}
+            );
+            debug_log(&format!(
+                "[BENCHMARK] rewrite_log: apply side effects took {:?}",
+                rewrite_start.elapsed()
+            ));
+        }
     }
 
     // Internal util to get the git object type for a given OID
@@ -1629,51 +1639,57 @@ impl Repository {
         Ok(output.stdout)
     }
 
-    /// Get content of all staged files concurrently
+    /// Get UTF-8 content for many files at a specific commit using one batched cat-file call.
+    /// Files that are missing at the commit or are not valid UTF-8 are skipped.
+    pub fn get_files_content_at_commit(
+        &self,
+        commit_sha: &str,
+        file_paths: &[String],
+    ) -> Result<HashMap<String, String>, GitAiError> {
+        if file_paths.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut args = self.global_args_for_exec();
+        args.push("cat-file".to_string());
+        args.push("--batch".to_string());
+
+        let mut stdin_data = String::new();
+        for file_path in file_paths {
+            stdin_data.push_str(commit_sha);
+            stdin_data.push(':');
+            stdin_data.push_str(file_path);
+            stdin_data.push('\n');
+        }
+
+        let output = exec_git_stdin(&args, stdin_data.as_bytes())?;
+        parse_batch_blob_content_by_path(&output.stdout, file_paths)
+    }
+
+    /// Get UTF-8 content for many staged files with one batched cat-file call.
     /// Returns a HashMap of file paths to their staged content as strings
     /// Skips files that fail to read or aren't valid UTF-8
     pub fn get_all_staged_files_content(
         &self,
         file_paths: &[String],
     ) -> Result<HashMap<String, String>, GitAiError> {
-        use futures::future::join_all;
-        use std::sync::Arc;
-
-        const MAX_CONCURRENT: usize = 30;
-
-        let repo_global_args = self.global_args_for_exec();
-        let semaphore = Arc::new(smol::lock::Semaphore::new(MAX_CONCURRENT));
-
-        let futures: Vec<_> = file_paths
-            .iter()
-            .map(|file_path| {
-                let mut args = repo_global_args.clone();
-                args.push("show".to_string());
-                args.push(format!(":{}", file_path));
-                let file_path = file_path.clone();
-                let semaphore = semaphore.clone();
-
-                async move {
-                    let _permit = semaphore.acquire().await;
-                    let result = exec_git(&args).and_then(|output| {
-                        String::from_utf8(output.stdout)
-                            .map_err(|e| GitAiError::Utf8Error(e.utf8_error()))
-                    });
-                    (file_path, result)
-                }
-            })
-            .collect();
-
-        let results = smol::block_on(async { join_all(futures).await });
-
-        let mut staged_files = HashMap::new();
-        for (file_path, result) in results {
-            if let Ok(content) = result {
-                staged_files.insert(file_path, content);
-            }
+        if file_paths.is_empty() {
+            return Ok(HashMap::new());
         }
 
-        Ok(staged_files)
+        let mut args = self.global_args_for_exec();
+        args.push("cat-file".to_string());
+        args.push("--batch".to_string());
+
+        let mut stdin_data = String::new();
+        for file_path in file_paths {
+            stdin_data.push(':');
+            stdin_data.push_str(file_path);
+            stdin_data.push('\n');
+        }
+
+        let output = exec_git_stdin(&args, stdin_data.as_bytes())?;
+        parse_batch_blob_content_by_path(&output.stdout, file_paths)
     }
 
     /// List all files changed in a commit
@@ -1736,6 +1752,15 @@ impl Repository {
         }
 
         Ok(files)
+    }
+
+    /// Materialize the current index as a tree object and return its OID.
+    /// Useful for detecting whether staged content changed between hook phases.
+    pub fn index_tree_oid(&self) -> Result<String, GitAiError> {
+        let mut args = self.global_args_for_exec();
+        args.push("write-tree".to_string());
+        let output = exec_git(&args)?;
+        Ok(String::from_utf8(output.stdout)?.trim().to_string())
     }
 
     /// Get added line ranges from git diff between two commits
@@ -2091,6 +2116,67 @@ pub fn from_bare_repository(git_dir: &Path) -> Result<Repository, GitAiError> {
 pub fn find_repository_in_path(path: &str) -> Result<Repository, GitAiError> {
     let global_args = vec!["-C".to_string(), path.to_string()];
     find_repository(&global_args)
+}
+
+fn parse_batch_blob_content_by_path(
+    data: &[u8],
+    file_paths: &[String],
+) -> Result<HashMap<String, String>, GitAiError> {
+    let mut pos = 0usize;
+    let mut contents = HashMap::new();
+
+    for file_path in file_paths {
+        if pos >= data.len() {
+            break;
+        }
+
+        let header_end = match data[pos..].iter().position(|&b| b == b'\n') {
+            Some(idx) => pos + idx,
+            None => break,
+        };
+
+        let header = std::str::from_utf8(&data[pos..header_end])?;
+        pos = header_end + 1;
+
+        if header.ends_with(" missing") {
+            continue;
+        }
+
+        let mut header_parts = header.rsplitn(3, ' ');
+        let size_str = header_parts
+            .next()
+            .ok_or_else(|| GitAiError::Generic("Malformed cat-file header".to_string()))?;
+        let object_type = header_parts
+            .next()
+            .ok_or_else(|| GitAiError::Generic("Malformed cat-file header".to_string()))?;
+        let size: usize = size_str
+            .parse()
+            .map_err(|e| GitAiError::Generic(format!("Invalid cat-file blob size: {}", e)))?;
+
+        let content_end = pos.checked_add(size).ok_or_else(|| {
+            GitAiError::Generic("Malformed cat-file --batch output: content overflow".to_string())
+        })?;
+        if content_end > data.len() {
+            return Err(GitAiError::Generic(
+                "Malformed cat-file --batch output: truncated content".to_string(),
+            ));
+        }
+
+        if object_type == "blob"
+            && let Ok(content) = std::str::from_utf8(&data[pos..content_end])
+        {
+            contents.insert(file_path.clone(), content.to_string());
+        }
+
+        // cat-file --batch emits a body for all non-missing objects. Always consume it,
+        // even when we intentionally skip non-blob objects.
+        pos = content_end;
+        if pos < data.len() && data[pos] == b'\n' {
+            pos += 1;
+        }
+    }
+
+    Ok(contents)
 }
 
 /// Find the git repository that contains the given file path by walking up the directory tree.
@@ -2776,6 +2862,112 @@ index 0000000..abc1234 100644
     }
 
     #[test]
+    fn test_get_files_content_at_commit_reads_multiple_files_and_skips_missing() {
+        use crate::git::test_utils::TmpRepo;
+
+        let tmp_repo = TmpRepo::new().unwrap();
+        tmp_repo.write_file("a.txt", "a1\n", true).unwrap();
+        tmp_repo.write_file("b.txt", "b1\n", true).unwrap();
+        tmp_repo.commit_with_message("base").unwrap();
+
+        let commit_sha = tmp_repo.head_commit_sha().unwrap();
+        let repo = tmp_repo.gitai_repo();
+        let files = vec![
+            "a.txt".to_string(),
+            "b.txt".to_string(),
+            "missing.txt".to_string(),
+        ];
+        let contents = repo
+            .get_files_content_at_commit(&commit_sha, &files)
+            .unwrap();
+
+        assert_eq!(contents.get("a.txt").map(String::as_str), Some("a1\n"));
+        assert_eq!(contents.get("b.txt").map(String::as_str), Some("b1\n"));
+        assert!(
+            !contents.contains_key("missing.txt"),
+            "missing paths should be skipped"
+        );
+    }
+
+    #[test]
+    fn test_parse_batch_blob_content_by_path_skips_non_blob_payload() {
+        let mut batch = Vec::new();
+        batch.extend_from_slice(b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa tree 6\nab\ncd\0\n");
+        batch.extend_from_slice(b"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb blob 5\nhello\n");
+
+        let paths = vec!["dir".to_string(), "file.txt".to_string()];
+        let parsed = parse_batch_blob_content_by_path(&batch, &paths).unwrap();
+
+        assert_eq!(parsed.get("file.txt").map(String::as_str), Some("hello"));
+        assert!(
+            !parsed.contains_key("dir"),
+            "non-blob objects should be skipped"
+        );
+    }
+
+    #[test]
+    fn test_get_files_content_at_commit_skips_tree_entries_without_desync() {
+        use crate::git::test_utils::TmpRepo;
+
+        let tmp_repo = TmpRepo::new().unwrap();
+        tmp_repo
+            .write_file("dir/nested.txt", "nested\n", true)
+            .unwrap();
+        tmp_repo.write_file("root.txt", "root\n", true).unwrap();
+        tmp_repo.commit_with_message("base").unwrap();
+
+        let commit_sha = tmp_repo.head_commit_sha().unwrap();
+        let repo = tmp_repo.gitai_repo();
+        let files = vec!["dir".to_string(), "root.txt".to_string()];
+        let contents = repo
+            .get_files_content_at_commit(&commit_sha, &files)
+            .unwrap();
+
+        assert_eq!(contents.get("root.txt").map(String::as_str), Some("root\n"));
+        assert!(
+            !contents.contains_key("dir"),
+            "tree entries should be skipped without affecting subsequent files"
+        );
+    }
+
+    #[test]
+    fn test_get_all_staged_files_content_reads_batched_index_state() {
+        use crate::git::test_utils::TmpRepo;
+
+        let tmp_repo = TmpRepo::new().unwrap();
+        tmp_repo.write_file("tracked.txt", "base\n", true).unwrap();
+        tmp_repo.commit_with_message("base").unwrap();
+
+        tmp_repo
+            .write_file("tracked.txt", "base\nstaged update\n", true)
+            .unwrap();
+        tmp_repo
+            .write_file("new.txt", "new staged file\n", true)
+            .unwrap();
+
+        let repo = tmp_repo.gitai_repo();
+        let files = vec![
+            "tracked.txt".to_string(),
+            "new.txt".to_string(),
+            "missing.txt".to_string(),
+        ];
+        let staged = repo.get_all_staged_files_content(&files).unwrap();
+
+        assert_eq!(
+            staged.get("tracked.txt").map(String::as_str),
+            Some("base\nstaged update\n")
+        );
+        assert_eq!(
+            staged.get("new.txt").map(String::as_str),
+            Some("new staged file\n")
+        );
+        assert!(
+            !staged.contains_key("missing.txt"),
+            "missing staged paths should be skipped"
+        );
+    }
+
+    #[test]
     fn find_repository_in_path_bare_repo_can_read_head_gitattributes() {
         let temp = tempfile::tempdir().expect("tempdir");
         let source = temp.path().join("source");
@@ -2809,5 +3001,64 @@ index 0000000..abc1234 100644
             .expect("read attrs from HEAD");
         let content = String::from_utf8(content).expect("utf8 attrs");
         assert!(content.contains("generated/** linguist-generated=true"));
+    }
+
+    #[test]
+    fn test_get_all_staged_files_content_skips_gitlink_without_desync() {
+        use crate::git::test_utils::TmpRepo;
+        use std::process::Command;
+
+        let tmp_repo = TmpRepo::new().unwrap();
+        tmp_repo.write_file("root.txt", "root\n", true).unwrap();
+        tmp_repo.commit_with_message("base").unwrap();
+
+        let head_sha = tmp_repo.head_commit_sha().unwrap();
+        let status = Command::new(crate::config::Config::get().git_cmd())
+            .current_dir(tmp_repo.path())
+            .args([
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{},submodule", head_sha),
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success(), "failed to stage synthetic gitlink entry");
+
+        let repo = tmp_repo.gitai_repo();
+        let files = vec!["submodule".to_string(), "root.txt".to_string()];
+        let staged = repo.get_all_staged_files_content(&files).unwrap();
+
+        assert_eq!(staged.get("root.txt").map(String::as_str), Some("root\n"));
+        assert!(
+            !staged.contains_key("submodule"),
+            "gitlink entries should be skipped without affecting subsequent files"
+        );
+    }
+
+    #[test]
+    fn test_index_tree_oid_changes_with_staged_content() {
+        use crate::git::test_utils::TmpRepo;
+
+        let tmp_repo = TmpRepo::new().unwrap();
+        tmp_repo.write_file("tracked.txt", "base\n", true).unwrap();
+        tmp_repo.commit_with_message("base").unwrap();
+
+        let repo = tmp_repo.gitai_repo();
+        let before = repo.index_tree_oid().unwrap();
+        assert!(!before.is_empty(), "tree oid should not be empty");
+
+        tmp_repo
+            .write_file("tracked.txt", "base\nstaged update\n", true)
+            .unwrap();
+        let after = repo.index_tree_oid().unwrap();
+        assert!(
+            !after.is_empty(),
+            "tree oid should not be empty after staging"
+        );
+        assert_ne!(
+            before, after,
+            "staging file content changes should produce a different index tree OID"
+        );
     }
 }
