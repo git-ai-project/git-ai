@@ -17,6 +17,9 @@
 
 #### Mac, Linux, Windows (WSL)
 
+
+
+
 ```bash
 curl -sSL https://usegitai.com/install.sh | bash
 ```
@@ -65,34 +68,11 @@ The format of the notes is outlined here in the [Git AI Standard v3.0.0](https:/
 
 🚀 **Git-native + Fast** - `git-ai` is built on git plumbing commands. Negligible impact even in large repos (&lt;100ms). Tested in [Chromium](https://github.com/chromium/chromium).
 
-## Agent Support
-
-`git-ai` automatically sets up all supported agent hooks using the `git-ai install-hooks` command
-
-| Agent/IDE                                                                                  | Authorship | Prompts |
-| ------------------------------------------------------------------------------------------ | ---------- | ------- |
-| Claude Code                                                                                | ✅         | ✅      |
-| OpenAI Codex                                                                               | ✅         | ✅      |
-| Cursor                                                                                     | ✅         | ✅      |
-| GitHub Copilot in VSCode via Extension                                                     | ✅         | ✅      |
-| OpenCode                                                                                   | ✅         | ✅      |
-| Google Gemini CLI                                                                          | ✅         | ✅      |
-| Droid CLI (Factory AI)                                                                     | ✅         | ✅      |
-| Continue CLI                                                                               | ✅         | ✅      |
-| Atlassian RovoDev CLI                                                                      | ✅         | ✅      |
-| GitHub Copilot in Jetbrains IDEs (IntelliJ, etc.)                                          | ✅         | 🔄      |
-| Jetbrains Junie                                                                            | ✅         | 🔄      |
-| Amp (in-progress)                                                                          | 🔄         | 🔄      |
-| AWS Kiro (in-progress)                                                                     | 🔄         | 🔄      |
-| Continue VS Code/IntelliJ (in-progress)                                                    | 🔄         | 🔄      |
-| Windsurf (in-review)                                                                       | 🔄         | 🔄      |
-| Augment Code                                                                               | 🔄         | 🔄      |
-| Ona                                                                                        |            |         |
-| Sourcegraph Cody                                                                           |            |         |
-| Google Antigravity                                                                         |            |         |
 
 
-> **Building a Coding Agent?** [Add support for Git AI by following this guide](https://usegitai.com/docs/cli/add-your-agent)
+
+
+
 
 ## Installing the Stats Bot (early access)
 
