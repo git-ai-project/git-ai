@@ -37,8 +37,6 @@ toml = "0.8"
 [features]
 test-support = ["git2"]
 keyring = ["dep:keyring"]
-core-hooks-e2e = []
-core-hooks-regression = []
 
 [dev-dependencies]
 git-ai = { path = ".", features = ["test-support"] }
@@ -52,13 +50,3 @@ filetime = "0.2"
 serial_test = "3.2"
 rstest = "0.23"
 paste = "1.0"
-
-[[test]]
-name = "core_hooks_install_e2e"
-path = "tests/core_hooks_install_e2e.rs"
-required-features = ["core-hooks-e2e"]
-
-[[test]]
-name = "corehooks_wrapper_regression"
-path = "tests/corehooks_wrapper_regression.rs"
-required-features = ["core-hooks-regression"]

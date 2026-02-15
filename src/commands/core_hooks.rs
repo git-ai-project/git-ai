@@ -1529,7 +1529,22 @@ if [ "${{{skip_env}:-}}" = "1" ]; then
   exit 0
 fi
 
-"{bin}" hook {hook} "$@"
+stdin_file=""
+if [ "{hook}" = "pre-push" ] || [ "{hook}" = "reference-transaction" ]; then
+  if command -v mktemp >/dev/null 2>&1; then
+    stdin_file=$(mktemp "${{TMPDIR:-/tmp}}/git-ai-hook-stdin.XXXXXX")
+  else
+    stdin_file="${{TMPDIR:-/tmp}}/git-ai-hook-stdin-$$"
+    : > "$stdin_file"
+  fi
+  cat > "$stdin_file"
+fi
+
+if [ -n "$stdin_file" ]; then
+  "{bin}" hook {hook} "$@" < "$stdin_file"
+else
+  "{bin}" hook {hook} "$@"
+fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 previous_hooks_file="$script_dir/{previous_hooks_file}"
@@ -1583,18 +1598,32 @@ run_chained_hook() {{
 
   if [ "$is_windows_shell" = "1" ]; then
     if [ -f "$hook_path" ]; then
-      sh "$hook_path" "$@"
+      if [ -n "$stdin_file" ]; then
+        sh "$hook_path" "$@" < "$stdin_file"
+      else
+        sh "$hook_path" "$@"
+      fi
       return $?
     fi
     return 0
   fi
 
   if [ -x "$hook_path" ]; then
-    "$hook_path" "$@"
+    if [ -n "$stdin_file" ]; then
+      "$hook_path" "$@" < "$stdin_file"
+    else
+      "$hook_path" "$@"
+    fi
     return $?
   fi
 
   return 0
+}}
+
+cleanup_stdin_file() {{
+  if [ -n "$stdin_file" ]; then
+    rm -f "$stdin_file"
+  fi
 }}
 
 if [ -n "$previous_hooks_dir" ]; then
@@ -1602,6 +1631,7 @@ if [ -n "$previous_hooks_dir" ]; then
   run_chained_hook "$previous_hook" "$@"
   previous_status=$?
   if [ $previous_status -ne 0 ]; then
+    cleanup_stdin_file
     exit $previous_status
   fi
 else
@@ -1610,10 +1640,12 @@ else
   run_chained_hook "$repo_hook" "$@"
   repo_status=$?
   if [ $repo_status -ne 0 ]; then
+    cleanup_stdin_file
     exit $repo_status
   fi
 fi
 
+cleanup_stdin_file
 exit 0
 "#,
             skip_env = GIT_AI_SKIP_CORE_HOOKS_ENV,

@@ -1,0 +1,218 @@
+name: Hook Ecosystem Compatibility
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  merge_group:
+    branches: [main]
+  schedule:
+    - cron: "0 7 * * *"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  hook-ecosystem-compat:
+    if: ${{ github.event_name != 'schedule' }}
+    name: Hook ecosystem (${{ matrix.os }}, ${{ matrix.suite }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            suite: hook-contract-all
+            profile: full
+            test_command: cargo test --test hook_contract_all_hooks -- --test-threads=1
+          - os: ubuntu-latest
+            suite: husky-full
+            profile: full
+            test_command: cargo test --test hook_ecosystem_husky -- --test-threads=1
+          - os: ubuntu-latest
+            suite: pre-commit-full
+            profile: full
+            test_command: cargo test --test hook_ecosystem_pre_commit -- --test-threads=1
+          - os: ubuntu-latest
+            suite: lefthook-full
+            profile: full
+            test_command: cargo test --test hook_ecosystem_lefthook -- --test-threads=1
+          - os: ubuntu-latest
+            suite: pre-commit-ci-style
+            profile: full
+            test_command: cargo test --test hook_ecosystem_pre_commit_ci_style -- --test-threads=1
+          - os: macos-latest
+            suite: hook-contract-smoke
+            profile: smoke
+            test_command: cargo test --test hook_contract_all_hooks -- --test-threads=1
+          - os: macos-latest
+            suite: ecosystem-smoke
+            profile: smoke
+            test_command: |
+              cargo test --test hook_ecosystem_husky -- --test-threads=1
+              cargo test --test hook_ecosystem_pre_commit -- --test-threads=1
+              cargo test --test hook_ecosystem_lefthook -- --test-threads=1
+          - os: windows-latest
+            suite: hook-contract-smoke
+            profile: smoke
+            test_command: cargo test --test hook_contract_all_hooks -- --test-threads=1
+          - os: windows-latest
+            suite: ecosystem-smoke
+            profile: smoke
+            test_command: |
+              cargo test --test hook_ecosystem_husky -- --test-threads=1
+              cargo test --test hook_ecosystem_pre_commit -- --test-threads=1
+              cargo test --test hook_ecosystem_lefthook -- --test-threads=1
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93.0"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install pre-commit
+        run: python -m pip install --upgrade pip pre-commit
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-hook-ecosystem-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-hook-ecosystem-
+            ${{ runner.os }}-cargo-
+
+      - name: Cache ecosystem tooling
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+            ~/.pnpm-store
+            ~/.cache/yarn
+            ~/.cache/pip
+          key: ${{ runner.os }}-ecosystem-tools-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-ecosystem-tools-
+
+      - name: Run ecosystem suite
+        env:
+          CARGO_INCREMENTAL: 0
+          GIT_AI_REQUIRE_ECOSYSTEM_TOOLS: "1"
+          GIT_AI_ECOSYSTEM_PROFILE: ${{ matrix.profile }}
+          GIT_AI_ECOSYSTEM_ARTIFACT_DIR: ${{ github.workspace }}/.ecosystem-artifacts
+        run: ${{ matrix.test_command }}
+
+      - name: Upload ecosystem logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ecosystem-${{ matrix.os }}-${{ matrix.suite }}
+          path: .ecosystem-artifacts
+          if-no-files-found: ignore
+
+  hook-ecosystem-nightly-extended:
+    if: ${{ github.event_name == 'schedule' }}
+    name: Hook ecosystem nightly (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93.0"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install pre-commit
+        run: python -m pip install --upgrade pip pre-commit
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-hook-ecosystem-nightly-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-hook-ecosystem-nightly-
+            ${{ runner.os }}-cargo-
+
+      - name: Cache ecosystem tooling
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+            ~/.pnpm-store
+            ~/.cache/yarn
+            ~/.cache/pip
+          key: ${{ runner.os }}-ecosystem-tools-nightly-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-ecosystem-tools-nightly-
+            ${{ runner.os }}-ecosystem-tools-
+
+      - name: Run nightly extended ecosystem matrix
+        env:
+          CARGO_INCREMENTAL: 0
+          GIT_AI_REQUIRE_ECOSYSTEM_TOOLS: "1"
+          GIT_AI_ECOSYSTEM_PROFILE: full
+          GIT_AI_ECOSYSTEM_ARTIFACT_DIR: ${{ github.workspace }}/.ecosystem-artifacts
+        run: |
+          cargo test --test hook_contract_all_hooks -- --test-threads=1
+          cargo test --test hook_ecosystem_husky -- --test-threads=1
+          cargo test --test hook_ecosystem_pre_commit -- --test-threads=1
+          cargo test --test hook_ecosystem_lefthook -- --test-threads=1
+          cargo test --test hook_ecosystem_pre_commit_ci_style -- --test-threads=1
+
+      - name: Upload ecosystem logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ecosystem-nightly-${{ matrix.os }}
+          path: .ecosystem-artifacts
+          if-no-files-found: ignore
