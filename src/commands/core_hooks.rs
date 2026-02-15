@@ -62,6 +62,7 @@ pub const PASSTHROUGH_ONLY_HOOKS: &[&str] = &[
 
 /// Internal file name used to preserve a user's previous global `core.hooksPath`.
 pub const PREVIOUS_HOOKS_PATH_FILE: &str = "previous_hooks_path";
+pub const PENDING_STASH_APPLY_MARKER_FILE: &str = "pending_stash_apply";
 
 const CORE_HOOK_STATE_FILE: &str = "core_hook_state.json";
 const STATE_EVENT_MAX_AGE_MS: u128 = 3_000;
@@ -349,6 +350,10 @@ fn handle_post_commit(repository: &mut Repository) -> Result<(), GitAiError> {
         return Ok(());
     }
 
+    if !has_non_empty_working_logs(repository) && !has_ai_notes_ref(repository) {
+        return Ok(());
+    }
+
     // `git commit --amend` triggers both post-commit and post-rewrite (amend).
     // Skip post-commit rewrite handling here so post-rewrite remains the single source of truth.
     let first_parent = first_parent_of_commit(repository, &head_sha);
@@ -439,14 +444,14 @@ fn handle_post_rewrite(
         .unwrap_or_default()
         .to_string();
 
-    let stdin = match stdin_override {
-        Some(stdin) => stdin.to_string(),
-        None => {
-            let mut stdin = String::new();
-            let _ = std::io::stdin().read_to_string(&mut stdin);
-            stdin
-        }
+    let stdin_storage = if stdin_override.is_none() {
+        let mut stdin = String::new();
+        let _ = std::io::stdin().read_to_string(&mut stdin);
+        Some(stdin)
+    } else {
+        None
     };
+    let stdin = stdin_override.unwrap_or_else(|| stdin_storage.as_deref().unwrap_or_default());
 
     let mappings: Vec<(String, String)> = stdin
         .lines()
@@ -617,14 +622,14 @@ fn handle_reference_transaction(
         return Ok(());
     }
 
-    let stdin = match stdin_override {
-        Some(stdin) => stdin.to_string(),
-        None => {
-            let mut stdin = String::new();
-            let _ = std::io::stdin().read_to_string(&mut stdin);
-            stdin
-        }
+    let stdin_storage = if stdin_override.is_none() {
+        let mut stdin = String::new();
+        let _ = std::io::stdin().read_to_string(&mut stdin);
+        Some(stdin)
+    } else {
+        None
     };
+    let stdin = stdin_override.unwrap_or_else(|| stdin_storage.as_deref().unwrap_or_default());
     if stdin.trim().is_empty() {
         return Ok(());
     }
@@ -1231,33 +1236,64 @@ fn handle_stash_created(repository: &Repository, stash_sha: &str) -> Result<(), 
     save_stash_authorship_log_for_sha(repository, &head_sha, stash_sha, &stash_files)
 }
 
-fn mark_pending_stash_apply(repository: &Repository) -> Result<(), GitAiError> {
-    let mut state = load_core_hook_state(repository)?;
-    if state.pending_stash_apply.is_some() {
+fn pending_stash_apply_marker_path(repository: &Repository) -> PathBuf {
+    repository
+        .path()
+        .join("ai")
+        .join(PENDING_STASH_APPLY_MARKER_FILE)
+}
+
+fn ensure_pending_stash_apply_marker(repository: &Repository) -> Result<(), GitAiError> {
+    let marker_path = pending_stash_apply_marker_path(repository);
+    if marker_path.exists() {
         return Ok(());
     }
-    state.pending_stash_apply = Some(PendingStashApplyState {
-        created_at_ms: now_ms(),
-    });
-    save_core_hook_state(repository, &state)
+    if let Some(parent) = marker_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(marker_path, b"")?;
+    Ok(())
+}
+
+fn remove_pending_stash_apply_marker(repository: &Repository) -> Result<(), GitAiError> {
+    let marker_path = pending_stash_apply_marker_path(repository);
+    if marker_path.exists() {
+        fs::remove_file(marker_path)?;
+    }
+    Ok(())
+}
+
+fn mark_pending_stash_apply(repository: &Repository) -> Result<(), GitAiError> {
+    let mut state = load_core_hook_state(repository)?;
+    let before = state.clone();
+    if state.pending_stash_apply.is_none() {
+        state.pending_stash_apply = Some(PendingStashApplyState {
+            created_at_ms: now_ms(),
+        });
+    }
+    save_core_hook_state_if_changed(repository, &before, &state)?;
+    ensure_pending_stash_apply_marker(repository)
 }
 
 fn clear_pending_stash_apply(repository: &Repository) -> Result<(), GitAiError> {
     let mut state = load_core_hook_state(repository)?;
     let before = state.clone();
     state.pending_stash_apply = None;
-    save_core_hook_state_if_changed(repository, &before, &state)
+    save_core_hook_state_if_changed(repository, &before, &state)?;
+    remove_pending_stash_apply_marker(repository)
 }
 
 fn maybe_restore_stash_apply_without_pop(repository: &Repository) -> Result<(), GitAiError> {
     let mut state = load_core_hook_state(repository)?;
     let Some(pending) = state.pending_stash_apply.clone() else {
+        let _ = remove_pending_stash_apply_marker(repository);
         return Ok(());
     };
 
     if now_ms().saturating_sub(pending.created_at_ms) > STATE_EVENT_MAX_AGE_MS {
         state.pending_stash_apply = None;
         save_core_hook_state(repository, &state)?;
+        remove_pending_stash_apply_marker(repository)?;
         return Ok(());
     }
 
@@ -1267,7 +1303,8 @@ fn maybe_restore_stash_apply_without_pop(repository: &Repository) -> Result<(), 
 
     let _ = restore_stash_attributions_from_sha(repository, &candidate);
     state.pending_stash_apply = None;
-    save_core_hook_state(repository, &state)
+    save_core_hook_state(repository, &state)?;
+    remove_pending_stash_apply_marker(repository)
 }
 
 fn find_best_matching_stash_with_note(
@@ -1653,6 +1690,53 @@ fn has_uncommitted_changes(repository: &Repository) -> bool {
         .unwrap_or(false)
 }
 
+fn has_non_empty_working_logs(repository: &Repository) -> bool {
+    let working_logs_dir = repository.path().join("ai").join("working_logs");
+    let Ok(entries) = fs::read_dir(working_logs_dir) else {
+        return false;
+    };
+
+    for entry in entries.flatten() {
+        let entry_path = entry.path();
+        if entry_path.join("checkpoints.jsonl").is_file()
+            && entry_path
+                .join("checkpoints.jsonl")
+                .metadata()
+                .map(|meta| meta.len() > 0)
+                .unwrap_or(false)
+        {
+            return true;
+        }
+
+        let blobs_dir = entry_path.join("blobs");
+        if blobs_dir.is_dir()
+            && fs::read_dir(blobs_dir)
+                .map(|mut dir| dir.next().is_some())
+                .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn has_ai_notes_ref(repository: &Repository) -> bool {
+    let git_dir = repository.path();
+    if git_dir.join("refs").join("notes").join("ai").is_file() {
+        return true;
+    }
+
+    let packed_refs = git_dir.join("packed-refs");
+    let Ok(content) = fs::read_to_string(packed_refs) else {
+        return false;
+    };
+
+    content
+        .lines()
+        .any(|line| line.trim_end().ends_with(" refs/notes/ai"))
+}
+
 fn is_rebase_in_progress(repository: &Repository) -> bool {
     repository.path().join("rebase-merge").exists()
         || repository.path().join("rebase-apply").exists()
@@ -2003,11 +2087,132 @@ working_logs_dir="$repo_git_dir/ai/working_logs"
 dispatch=0
 if [ -d "$working_logs_dir" ]; then
   for entry in "$working_logs_dir"/*; do
-    if [ -e "$entry" ]; then
+    if [ -s "$entry/checkpoints.jsonl" ]; then
       dispatch=1
       break
     fi
+    if [ -d "$entry/blobs" ]; then
+      for blob_entry in "$entry/blobs"/*; do
+        if [ -e "$blob_entry" ]; then
+          dispatch=1
+          break 2
+        fi
+      done
+    fi
   done
+fi
+
+if [ $dispatch -eq 1 ]; then
+  {skip_chain_env}=1 "{bin}" hook-trampoline "{hook}" "$@"
+  dispatch_status=$?
+  if [ $dispatch_status -ne 0 ]; then
+    exit $dispatch_status
+  fi
+fi
+
+if [ -n "$previous_hooks_dir" ]; then
+  chain_hook="$previous_hooks_dir/{hook}"
+else
+  chain_hook="$repo_git_dir/hooks/{hook}"
+fi
+if [ -x "$chain_hook" ]; then
+  "$chain_hook" "$@"
+  exit $?
+fi
+if [ -f "$chain_hook" ]; then
+  sh "$chain_hook" "$@"
+  exit $?
+fi
+exit 0
+"#,
+                skip_env = GIT_AI_SKIP_CORE_HOOKS_ENV,
+                git_cmd_env = GIT_AI_GIT_CMD_ENV,
+                skip_chain_env = GIT_AI_TRAMPOLINE_SKIP_CHAIN_ENV,
+                previous_hooks_file = PREVIOUS_HOOKS_PATH_FILE,
+                bin = binary,
+                hook = hook,
+            )
+        } else if *hook == "post-commit" {
+            format!(
+                r#"#!/bin/sh
+# git-ai-managed: mode=trampoline;type=post-commit-prefilter
+if [ "${{{skip_env}:-}}" = "1" ]; then
+  exit 0
+fi
+export {git_cmd_env}="${{{git_cmd_env}:-git}}"
+
+script_dir="$0"
+case "$script_dir" in
+  */*) script_dir="${{script_dir%/*}}" ;;
+  *) script_dir="." ;;
+esac
+previous_hooks_file="$script_dir/{previous_hooks_file}"
+previous_hooks_dir=""
+
+if [ -s "$previous_hooks_file" ]; then
+  IFS= read -r previous_hooks_dir < "$previous_hooks_file" || true
+  case "$previous_hooks_dir" in
+    "~") previous_hooks_dir="$HOME" ;;
+    "~/"*) previous_hooks_dir="$HOME/${{previous_hooks_dir#\~/}}" ;;
+  esac
+fi
+
+if [ -n "$previous_hooks_dir" ]; then
+  case "$script_dir" in */) script_dir="${{script_dir%/}}" ;; esac
+  case "$previous_hooks_dir" in */) previous_hooks_dir="${{previous_hooks_dir%/}}" ;; esac
+  if [ "$script_dir" = "$previous_hooks_dir" ]; then
+    previous_hooks_dir=""
+  fi
+fi
+
+repo_git_dir="${{GIT_DIR:-.git}}"
+dispatch=0
+state_file="$repo_git_dir/ai/core_hook_state.json"
+working_logs_dir="$repo_git_dir/ai/working_logs"
+
+if [ -f "$repo_git_dir/CHERRY_PICK_HEAD" ]; then
+  dispatch=1
+fi
+
+if [ $dispatch -eq 0 ] && [ -f "$state_file" ]; then
+  IFS= read -r state_line < "$state_file" || true
+  case "$state_line" in
+    *'"pending_cherry_pick":{{'*)
+      dispatch=1
+      ;;
+  esac
+fi
+
+if [ $dispatch -eq 0 ] && [ -d "$working_logs_dir" ]; then
+  for entry in "$working_logs_dir"/*; do
+    if [ -s "$entry/checkpoints.jsonl" ]; then
+      dispatch=1
+      break
+    fi
+    if [ -d "$entry/blobs" ]; then
+      for blob_entry in "$entry/blobs"/*; do
+        if [ -e "$blob_entry" ]; then
+          dispatch=1
+          break 2
+        fi
+      done
+    fi
+  done
+fi
+
+if [ $dispatch -eq 0 ]; then
+  if [ -f "$repo_git_dir/refs/notes/ai" ]; then
+    dispatch=1
+  elif [ -f "$repo_git_dir/packed-refs" ]; then
+    while IFS= read -r ref_line; do
+      case "$ref_line" in
+        *" refs/notes/ai")
+          dispatch=1
+          break
+          ;;
+      esac
+    done < "$repo_git_dir/packed-refs"
+  fi
 fi
 
 if [ $dispatch -eq 1 ]; then
@@ -2074,17 +2279,10 @@ if [ -n "$previous_hooks_dir" ]; then
 fi
 
 repo_git_dir="${{GIT_DIR:-.git}}"
-state_file="$repo_git_dir/ai/core_hook_state.json"
+marker_file="$repo_git_dir/ai/{pending_stash_marker_file}"
 dispatch=0
-if [ -f "$state_file" ]; then
-  while IFS= read -r state_line; do
-    case "$state_line" in
-      *'"pending_stash_apply":{{'*)
-        dispatch=1
-        break
-        ;;
-    esac
-  done < "$state_file"
+if [ -f "$marker_file" ]; then
+  dispatch=1
 fi
 
 if [ $dispatch -eq 1 ]; then
@@ -2116,6 +2314,7 @@ exit 0
                 git_cmd_env = GIT_AI_GIT_CMD_ENV,
                 skip_chain_env = GIT_AI_TRAMPOLINE_SKIP_CHAIN_ENV,
                 previous_hooks_file = PREVIOUS_HOOKS_PATH_FILE,
+                pending_stash_marker_file = PENDING_STASH_APPLY_MARKER_FILE,
                 bin = binary,
                 hook = hook,
             )

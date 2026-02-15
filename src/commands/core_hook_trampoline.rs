@@ -1,6 +1,6 @@
 use crate::commands::core_hooks::{
-    PASSTHROUGH_ONLY_HOOKS, PREVIOUS_HOOKS_PATH_FILE, managed_core_hooks_dir,
-    run_core_hook_best_effort,
+    PASSTHROUGH_ONLY_HOOKS, PENDING_STASH_APPLY_MARKER_FILE, PREVIOUS_HOOKS_PATH_FILE,
+    managed_core_hooks_dir, run_core_hook_best_effort,
 };
 use crate::utils::{
     GIT_AI_GIT_CMD_ENV, GIT_AI_SKIP_CORE_HOOKS_ENV, GIT_AI_TRAMPOLINE_SKIP_CHAIN_ENV, debug_log,
@@ -156,11 +156,10 @@ fn has_pending_stash_apply_marker() -> bool {
         git_dir
     };
 
-    let state_path = git_dir.join("ai").join("core_hook_state.json");
-    let Ok(content) = fs::read_to_string(state_path) else {
-        return false;
-    };
-    content.contains("\"pending_stash_apply\":{")
+    git_dir
+        .join("ai")
+        .join(PENDING_STASH_APPLY_MARKER_FILE)
+        .exists()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

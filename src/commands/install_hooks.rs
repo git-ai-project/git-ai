@@ -1,6 +1,6 @@
 use crate::commands::core_hooks::{
-    INSTALLED_HOOKS, PREVIOUS_HOOKS_PATH_FILE, managed_core_hooks_dir, normalize_hook_binary_path,
-    write_core_hook_scripts,
+    INSTALLED_HOOKS, PENDING_STASH_APPLY_MARKER_FILE, PREVIOUS_HOOKS_PATH_FILE,
+    managed_core_hooks_dir, normalize_hook_binary_path, write_core_hook_scripts,
 };
 use crate::commands::flush_metrics_db::spawn_background_metrics_db_flush;
 use crate::error::GitAiError;
@@ -819,6 +819,21 @@ fn core_hook_scripts_up_to_date(hooks_dir: &Path, binary_path: &Path) -> bool {
                 ))
                 && content.contains(&format!("export {}=", GIT_AI_GIT_CMD_ENV))
                 && content.contains(previous_hooks_nonempty_check)
+                && content.contains("checkpoints.jsonl")
+                && content.contains("blobs")
+                && script_contains_binary(&content, &binary)
+        } else if *hook == "post-commit" {
+            hook_path.exists()
+                && content.contains("# git-ai-managed: mode=trampoline;type=post-commit-prefilter")
+                && content.contains(&format!("hook-trampoline \"{}\"", hook))
+                && content.contains(&format!(
+                    "{}=1",
+                    crate::utils::GIT_AI_TRAMPOLINE_SKIP_CHAIN_ENV
+                ))
+                && content.contains(&format!("export {}=", GIT_AI_GIT_CMD_ENV))
+                && content.contains(previous_hooks_nonempty_check)
+                && content.contains("pending_cherry_pick")
+                && content.contains("refs/notes/ai")
                 && script_contains_binary(&content, &binary)
         } else if *hook == "post-index-change" {
             hook_path.exists()
@@ -830,6 +845,7 @@ fn core_hook_scripts_up_to_date(hooks_dir: &Path, binary_path: &Path) -> bool {
                 ))
                 && content.contains(&format!("export {}=", GIT_AI_GIT_CMD_ENV))
                 && content.contains(previous_hooks_nonempty_check)
+                && content.contains(PENDING_STASH_APPLY_MARKER_FILE)
                 && script_contains_binary(&content, &binary)
         } else if *hook == "commit-msg" || *hook == "prepare-commit-msg" {
             hook_path.exists()
