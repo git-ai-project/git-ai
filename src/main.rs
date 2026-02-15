@@ -26,10 +26,12 @@ struct Cli {
 }
 
 fn main() {
+    let raw_args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+
     // Get the binary name that was called
-    let binary_name = std::env::args_os()
-        .next()
-        .and_then(|arg| arg.into_string().ok())
+    let binary_name = raw_args
+        .first()
+        .and_then(|arg| arg.to_str().map(|s| s.to_string()))
         .and_then(|path| {
             std::path::Path::new(&path)
                 .file_name()
@@ -37,6 +39,18 @@ fn main() {
                 .map(|s| s.to_string())
         })
         .unwrap_or("git-ai".to_string());
+
+    // Fast path for managed hook launchers. This avoids clap parsing and command
+    // router setup on the hook hot path.
+    if raw_args.get(1).and_then(|arg| arg.to_str()) == Some("hook-trampoline") {
+        let hook_args = raw_args
+            .iter()
+            .skip(2)
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        commands::core_hook_trampoline::handle_hook_trampoline_command(&hook_args);
+        return;
+    }
 
     let cli = Cli::parse();
 

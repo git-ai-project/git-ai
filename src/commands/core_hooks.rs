@@ -103,18 +103,63 @@ struct PendingCherryPickState {
     created_at_ms: u128,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefTxnActionClass {
+    Unknown,
+    CommitLike,
+    ResetLike,
+    RebaseLike,
+    PullRebaseLike,
+    StashLike,
+    CherryPickLike,
+}
+
+#[derive(Debug, Default)]
+struct HookInvocationCache {
+    reflog_subject: Option<Option<String>>,
+    head_sha: Option<Option<String>>,
+    stash_count: Option<Option<usize>>,
+}
+
+impl HookInvocationCache {
+    fn reflog_subject(&mut self, repository: &Repository) -> Option<String> {
+        self.reflog_subject
+            .get_or_insert_with(|| reflog_subject(repository))
+            .clone()
+    }
+
+    fn head_sha(&mut self, repository: &Repository) -> Option<String> {
+        self.head_sha
+            .get_or_insert_with(|| repository.head().ok().and_then(|h| h.target().ok()))
+            .clone()
+    }
+
+    fn stash_count(&mut self, repository: &Repository) -> Option<usize> {
+        self.stash_count
+            .get_or_insert_with(|| stash_entry_count(repository))
+            .clone()
+    }
+}
+
 pub fn handle_core_hook_command(args: &[String]) {
     if args.is_empty() {
         eprintln!("Usage: git-ai hook <hook-name> [hook-args...]");
         std::process::exit(1);
     }
 
-    if std::env::var(GIT_AI_SKIP_CORE_HOOKS_ENV).as_deref() == Ok("1") {
-        std::process::exit(0);
-    }
-
     let hook_name = &args[0];
     let hook_args = &args[1..];
+    run_core_hook_best_effort(hook_name, hook_args, None);
+}
+
+pub fn run_core_hook_best_effort(
+    hook_name: &str,
+    hook_args: &[String],
+    stdin_override: Option<&str>,
+) {
+    if std::env::var(GIT_AI_SKIP_CORE_HOOKS_ENV).as_deref() == Ok("1") {
+        return;
+    }
 
     let mut repository = match find_repository_for_hook() {
         Ok(repo) => repo,
@@ -123,14 +168,13 @@ pub fn handle_core_hook_command(args: &[String]) {
                 "core hook '{}' could not find repository: {}",
                 hook_name, e
             ));
-            std::process::exit(0);
+            return;
         }
     };
 
-    if let Err(e) = run_hook_impl(&mut repository, hook_name, hook_args) {
+    if let Err(e) = run_hook_impl(&mut repository, hook_name, hook_args, stdin_override) {
         debug_log(&format!("core hook '{}' failed: {}", hook_name, e));
         // Hooks should be best-effort to avoid breaking user git workflows.
-        std::process::exit(0);
     }
 }
 
@@ -169,6 +213,7 @@ fn run_hook_impl(
     repository: &mut Repository,
     hook_name: &str,
     hook_args: &[String],
+    stdin_override: Option<&str>,
 ) -> Result<(), GitAiError> {
     if PASSTHROUGH_ONLY_HOOKS.contains(&hook_name) {
         return Ok(());
@@ -178,11 +223,13 @@ fn run_hook_impl(
         "pre-commit" => handle_pre_commit(repository)?,
         "post-commit" => handle_post_commit(repository)?,
         "pre-rebase" => handle_pre_rebase(repository, hook_args)?,
-        "post-rewrite" => handle_post_rewrite(repository, hook_args)?,
+        "post-rewrite" => handle_post_rewrite(repository, hook_args, stdin_override)?,
         "post-checkout" => handle_post_checkout(repository, hook_args)?,
         "post-merge" => handle_post_merge(repository, hook_args)?,
         "pre-push" => handle_pre_push(repository, hook_args)?,
-        "reference-transaction" => handle_reference_transaction(repository, hook_args)?,
+        "reference-transaction" => {
+            handle_reference_transaction(repository, hook_args, stdin_override)?
+        }
         "post-index-change" => handle_post_index_change(repository, hook_args)?,
         _ => {
             debug_log(&format!("unknown core hook '{}', ignoring", hook_name));
@@ -211,7 +258,8 @@ fn handle_pre_commit(repository: &mut Repository) -> Result<(), GitAiError> {
 }
 
 fn handle_post_commit(repository: &mut Repository) -> Result<(), GitAiError> {
-    let head_sha = match repository.head().ok().and_then(|h| h.target().ok()) {
+    let mut cache = HookInvocationCache::default();
+    let head_sha = match cache.head_sha(repository) {
         Some(sha) => sha,
         None => return Ok(()),
     };
@@ -255,7 +303,8 @@ fn handle_post_commit(repository: &mut Repository) -> Result<(), GitAiError> {
         }
     }
 
-    if reflog_subject(repository)
+    let reflog = cache.reflog_subject(repository);
+    if reflog
         .as_deref()
         .map(|s| s.contains("cherry-pick"))
         .unwrap_or(false)
@@ -281,7 +330,7 @@ fn handle_post_commit(repository: &mut Repository) -> Result<(), GitAiError> {
         .as_ref()
         .map(|orig| !new_commit_has_parent(repository, &head_sha, orig))
         .unwrap_or(false)
-        || reflog_subject(repository)
+        || reflog
             .as_deref()
             .map(|s| s.starts_with("commit (amend):"))
             .unwrap_or(false);
@@ -354,6 +403,7 @@ fn handle_pre_rebase(repository: &mut Repository, hook_args: &[String]) -> Resul
 fn handle_post_rewrite(
     repository: &mut Repository,
     hook_args: &[String],
+    stdin_override: Option<&str>,
 ) -> Result<(), GitAiError> {
     let mode = hook_args
         .first()
@@ -361,8 +411,14 @@ fn handle_post_rewrite(
         .unwrap_or_default()
         .to_string();
 
-    let mut stdin = String::new();
-    let _ = std::io::stdin().read_to_string(&mut stdin);
+    let stdin = match stdin_override {
+        Some(stdin) => stdin.to_string(),
+        None => {
+            let mut stdin = String::new();
+            let _ = std::io::stdin().read_to_string(&mut stdin);
+            stdin
+        }
+    };
 
     let mappings: Vec<(String, String)> = stdin
         .lines()
@@ -526,14 +582,21 @@ fn handle_pre_push(repository: &Repository, hook_args: &[String]) -> Result<(), 
 fn handle_reference_transaction(
     repository: &mut Repository,
     hook_args: &[String],
+    stdin_override: Option<&str>,
 ) -> Result<(), GitAiError> {
     let stage = hook_args.first().map(|s| s.as_str()).unwrap_or_default();
     if stage != "prepared" && stage != "committed" {
         return Ok(());
     }
 
-    let mut stdin = String::new();
-    let _ = std::io::stdin().read_to_string(&mut stdin);
+    let stdin = match stdin_override {
+        Some(stdin) => stdin.to_string(),
+        None => {
+            let mut stdin = String::new();
+            let _ = std::io::stdin().read_to_string(&mut stdin);
+            stdin
+        }
+    };
     if stdin.trim().is_empty() {
         return Ok(());
     }
@@ -597,6 +660,8 @@ fn handle_reference_transaction(
 
     // Prefer concrete branch ref updates, but fall back to detached-HEAD updates.
     let moved_main_ref = moved_branch_ref.or(moved_head_ref);
+    let reflog_action_value = reflog_action();
+    let action_class = classify_ref_transaction_action(reflog_action_value.as_deref());
 
     // Fast no-op path: skip state churn and extra git commands when nothing relevant changed.
     if !saw_orig_head_update
@@ -610,16 +675,19 @@ fn handle_reference_transaction(
         return Ok(());
     }
 
+    let may_prepare_reset = !matches!(
+        action_class,
+        RefTxnActionClass::CommitLike
+            | RefTxnActionClass::StashLike
+            | RefTxnActionClass::CherryPickLike
+    );
+
     if stage == "prepared" {
         let mut state = load_core_hook_state(repository)?;
         let before = state.clone();
         if saw_orig_head_update {
             state.pending_prepared_orig_head_ms = Some(now_ms());
-            if reflog_action()
-                .as_deref()
-                .map(|action| action.starts_with("pull --rebase"))
-                .unwrap_or(false)
-            {
+            if action_class == RefTxnActionClass::PullRebaseLike {
                 capture_pending_pull_autostash_state(repository, &mut state);
             }
         }
@@ -641,6 +709,7 @@ fn handle_reference_transaction(
         if has_recent_orig_head
             && let Some((_, target_head)) = moved_main_ref.as_ref()
             && !is_rebase_in_progress(repository)
+            && may_prepare_reset
         {
             capture_pre_reset_state(repository, target_head);
             state.pending_prepared_orig_head_ms = None;
@@ -668,19 +737,28 @@ fn handle_reference_transaction(
         return Ok(());
     }
 
-    let mut state = load_core_hook_state(repository)?;
-    let before = state.clone();
-    let stash_count_before = state.pending_stash_ref_update.take().and_then(|pending| {
-        if now_ms().saturating_sub(pending.created_at_ms) <= STATE_EVENT_MAX_AGE_MS {
-            Some(pending.stash_count_before)
-        } else {
-            None
-        }
-    });
-    save_core_hook_state_if_changed(repository, &before, &state)?;
+    let stash_count_before = if stash_ref_update.is_some() {
+        let mut state = load_core_hook_state(repository)?;
+        let before = state.clone();
+        let stash_count_before = state.pending_stash_ref_update.take().and_then(|pending| {
+            if now_ms().saturating_sub(pending.created_at_ms) <= STATE_EVENT_MAX_AGE_MS {
+                Some(pending.stash_count_before)
+            } else {
+                None
+            }
+        });
+        save_core_hook_state_if_changed(repository, &before, &state)?;
+        stash_count_before
+    } else {
+        None
+    };
 
-    let stash_count_after = stash_entry_count(repository);
-    let reflog_action = reflog_action();
+    let mut cache = HookInvocationCache::default();
+    let stash_count_after = if stash_ref_update.is_some() {
+        cache.stash_count(repository)
+    } else {
+        None
+    };
     let (created_stash_sha, deleted_stash_sha) = stash_ref_update
         .as_ref()
         .map(|(old, new)| {
@@ -689,7 +767,7 @@ fn handle_reference_transaction(
                 new,
                 stash_count_before,
                 stash_count_after,
-                reflog_action.as_deref(),
+                reflog_action_value.as_deref(),
             )
         })
         .unwrap_or((None, None));
@@ -709,7 +787,7 @@ fn handle_reference_transaction(
     }
 
     if let Some(stash_sha) = deleted_stash_sha {
-        if should_restore_deleted_stash(auto_merge_created, reflog_action.as_deref()) {
+        if should_restore_deleted_stash(auto_merge_created, reflog_action_value.as_deref()) {
             let _ = restore_stash_attributions_from_sha(repository, &stash_sha);
             clear_pending_stash_apply(repository)?;
         } else {
@@ -724,10 +802,9 @@ fn handle_reference_transaction(
         let _ = set_pending_cherry_pick_state(repository, &source_commit);
     }
 
-    let reflog = reflog_subject(repository);
-
     if deleted_cherry_pick_head.is_some()
-        && reflog
+        && cache
+            .reflog_subject(repository)
             .as_deref()
             .map(|s| s.contains("cherry-pick") && s.contains("abort"))
             .unwrap_or(false)
@@ -738,7 +815,9 @@ fn handle_reference_transaction(
     // Track reset operations from reflog instead of command env.
     if let Some((old_head, new_head)) = moved_main_ref
         && !is_rebase_in_progress(repository)
-        && reflog
+        && may_prepare_reset
+        && cache
+            .reflog_subject(repository)
             .as_deref()
             .map(|s| s.starts_with("reset:"))
             .unwrap_or(false)
@@ -747,19 +826,23 @@ fn handle_reference_transaction(
         let _ = apply_reset_side_effects(repository, &old_head, &new_head, mode);
     }
 
-    if reflog
-        .as_deref()
-        .map(|s| s.starts_with("pull --rebase (finish):"))
-        .unwrap_or(false)
+    if action_class == RefTxnActionClass::PullRebaseLike
+        && cache
+            .reflog_subject(repository)
+            .as_deref()
+            .map(|s| s.starts_with("pull --rebase (finish):"))
+            .unwrap_or(false)
         && let Some(start_event) = active_rebase_start_event(repository)
     {
         process_rebase_completion_from_start(repository, start_event);
     }
 
-    if reflog
-        .as_deref()
-        .map(|s| s.starts_with("pull --rebase (finish):"))
-        .unwrap_or(false)
+    if action_class == RefTxnActionClass::PullRebaseLike
+        && cache
+            .reflog_subject(repository)
+            .as_deref()
+            .map(|s| s.starts_with("pull --rebase (finish):"))
+            .unwrap_or(false)
         && let Some(new_head) = repository.head().ok().and_then(|h| h.target().ok())
     {
         let _ = maybe_restore_pending_pull_autostash(repository, &new_head);
@@ -1002,6 +1085,33 @@ fn reflog_action() -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn classify_ref_transaction_action(action: Option<&str>) -> RefTxnActionClass {
+    let Some(action) = action.map(str::trim).filter(|action| !action.is_empty()) else {
+        return RefTxnActionClass::Unknown;
+    };
+
+    if action.starts_with("pull --rebase") {
+        return RefTxnActionClass::PullRebaseLike;
+    }
+    if action.starts_with("reset") {
+        return RefTxnActionClass::ResetLike;
+    }
+    if action.starts_with("rebase") {
+        return RefTxnActionClass::RebaseLike;
+    }
+    if action.starts_with("stash") {
+        return RefTxnActionClass::StashLike;
+    }
+    if action.starts_with("cherry-pick") {
+        return RefTxnActionClass::CherryPickLike;
+    }
+    if action.starts_with("commit") {
+        return RefTxnActionClass::CommitLike;
+    }
+
+    RefTxnActionClass::Unknown
 }
 
 fn handle_stash_created(repository: &Repository, stash_sha: &str) -> Result<(), GitAiError> {
@@ -1547,132 +1657,68 @@ pub fn managed_core_hooks_dir() -> Result<PathBuf, GitAiError> {
     Ok(home.join(".git-ai").join("core-hooks"))
 }
 
-/// Writes git hook shims that dispatch to `git-ai hook <hook-name>`.
+/// Writes git hook shims that dispatch to `git-ai hook-trampoline <hook-name>`.
 pub fn write_core_hook_scripts(hooks_dir: &Path, git_ai_binary: &Path) -> Result<(), GitAiError> {
     fs::create_dir_all(hooks_dir)?;
     let binary = normalize_hook_binary_path(git_ai_binary);
 
     for hook in INSTALLED_HOOKS {
         let is_passthrough = PASSTHROUGH_ONLY_HOOKS.contains(hook);
-        let mode_marker = if is_passthrough {
-            "passthrough"
-        } else {
-            "dispatch"
-        };
-        let ai_dispatch = if is_passthrough {
-            String::new()
-        } else {
+        let script = if is_passthrough {
             format!(
-                r#"
-if [ -n "$stdin_file" ]; then
-  "{bin}" hook {hook} "$@" < "$stdin_file"
-else
-  "{bin}" hook {hook} "$@"
-fi
-"#,
-                bin = binary,
-                hook = hook,
-            )
-        };
-
-        let script = format!(
-            r#"#!/bin/sh
-# git-ai-managed: mode={mode_marker}
+                r#"#!/bin/sh
+# git-ai-managed: mode=passthrough-shell
 if [ "${{{skip_env}:-}}" = "1" ]; then
   exit 0
 fi
 
-stdin_file=""
-if [ "{hook}" = "pre-push" ] || [ "{hook}" = "reference-transaction" ] || [ "{hook}" = "post-rewrite" ]; then
-  if command -v mktemp >/dev/null 2>&1; then
-    stdin_file=$(mktemp "${{TMPDIR:-/tmp}}/git-ai-hook-stdin.XXXXXX")
-  else
-    stdin_file="${{TMPDIR:-/tmp}}/git-ai-hook-stdin-$$"
-    : > "$stdin_file"
-  fi
-  cat > "$stdin_file"
-fi
-
-{ai_dispatch}
-
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+script_dir="$0"
+case "$script_dir" in
+  */*) script_dir="${{script_dir%/*}}" ;;
+  *) script_dir="." ;;
+esac
 previous_hooks_file="$script_dir/{previous_hooks_file}"
 previous_hooks_dir=""
 
 if [ -f "$previous_hooks_file" ]; then
-  previous_hooks_dir=$(tr -d '\r' < "$previous_hooks_file")
+  IFS= read -r previous_hooks_dir < "$previous_hooks_file" || true
   case "$previous_hooks_dir" in
     "~") previous_hooks_dir="$HOME" ;;
     "~/"*) previous_hooks_dir="$HOME/${{previous_hooks_dir#\~/}}" ;;
   esac
-  previous_hooks_dir=$(printf '%s' "$previous_hooks_dir" | tr '\\' '/')
 fi
 
+normalize_no_trailing_slash() {{
+  path="$1"
+  while [ "${{path%/}}" != "$path" ] && [ "$path" != "/" ]; do
+    path="${{path%/}}"
+  done
+  printf '%s' "$path"
+}}
+
 if [ -n "$previous_hooks_dir" ]; then
-  script_dir_real=$(CDPATH= cd -- "$script_dir" 2>/dev/null && pwd -P)
-  previous_hooks_dir_real=$(CDPATH= cd -- "$previous_hooks_dir" 2>/dev/null && pwd -P)
-  if [ -n "$script_dir_real" ] && [ -n "$previous_hooks_dir_real" ] && [ "$script_dir_real" = "$previous_hooks_dir_real" ]; then
+  script_dir_norm=$(normalize_no_trailing_slash "$script_dir")
+  previous_hooks_dir_norm=$(normalize_no_trailing_slash "$previous_hooks_dir")
+  if [ "$script_dir_norm" = "$previous_hooks_dir_norm" ]; then
     previous_hooks_dir=""
   fi
 fi
-
-is_windows_shell=0
-case "$(uname -s 2>/dev/null)" in
-  MINGW*|MSYS*|CYGWIN*) is_windows_shell=1 ;;
-esac
 
 run_chained_hook() {{
   hook_path="$1"
   shift
 
-  hook_path_normalized=$(printf '%s' "$hook_path" | tr '\\' '/')
-  self_path_normalized=$(printf '%s' "$0" | tr '\\' '/')
-  hook_path_real=""
-  self_path_real=""
-
-  hook_dir=$(dirname -- "$hook_path")
-  if hook_dir_real=$(CDPATH= cd -- "$hook_dir" 2>/dev/null && pwd -P); then
-    hook_path_real="$hook_dir_real/$(basename -- "$hook_path")"
-  fi
-
-  self_dir=$(dirname -- "$0")
-  if self_dir_real=$(CDPATH= cd -- "$self_dir" 2>/dev/null && pwd -P); then
-    self_path_real="$self_dir_real/$(basename -- "$0")"
-  fi
-
-  if [ "$hook_path_normalized" = "$self_path_normalized" ] || \
-     ([ -n "$hook_path_real" ] && [ -n "$self_path_real" ] && [ "$hook_path_real" = "$self_path_real" ]); then
-    return 0
-  fi
-
-  if [ "$is_windows_shell" = "1" ]; then
-    if [ -f "$hook_path" ]; then
-      if [ -n "$stdin_file" ]; then
-        sh "$hook_path" "$@" < "$stdin_file"
-      else
-        sh "$hook_path" "$@"
-      fi
-      return $?
-    fi
-    return 0
-  fi
-
   if [ -x "$hook_path" ]; then
-    if [ -n "$stdin_file" ]; then
-      "$hook_path" "$@" < "$stdin_file"
-    else
-      "$hook_path" "$@"
-    fi
+    "$hook_path" "$@"
+    return $?
+  fi
+
+  if [ -f "$hook_path" ]; then
+    sh "$hook_path" "$@"
     return $?
   fi
 
   return 0
-}}
-
-cleanup_stdin_file() {{
-  if [ -n "$stdin_file" ]; then
-    rm -f "$stdin_file"
-  fi
 }}
 
 if [ -n "$previous_hooks_dir" ]; then
@@ -1680,7 +1726,6 @@ if [ -n "$previous_hooks_dir" ]; then
   run_chained_hook "$previous_hook" "$@"
   previous_status=$?
   if [ $previous_status -ne 0 ]; then
-    cleanup_stdin_file
     exit $previous_status
   fi
 else
@@ -1689,20 +1734,30 @@ else
   run_chained_hook "$repo_hook" "$@"
   repo_status=$?
   if [ $repo_status -ne 0 ]; then
-    cleanup_stdin_file
     exit $repo_status
   fi
 fi
 
-cleanup_stdin_file
 exit 0
 "#,
-            mode_marker = mode_marker,
-            skip_env = GIT_AI_SKIP_CORE_HOOKS_ENV,
-            ai_dispatch = ai_dispatch,
-            hook = hook,
-            previous_hooks_file = PREVIOUS_HOOKS_PATH_FILE,
-        );
+                skip_env = GIT_AI_SKIP_CORE_HOOKS_ENV,
+                previous_hooks_file = PREVIOUS_HOOKS_PATH_FILE,
+                hook = hook,
+            )
+        } else {
+            format!(
+                r#"#!/bin/sh
+# git-ai-managed: mode=trampoline;type=dispatch
+if [ "${{{skip_env}:-}}" = "1" ]; then
+  exit 0
+fi
+exec "{bin}" hook-trampoline "{hook}" "$@"
+"#,
+                skip_env = GIT_AI_SKIP_CORE_HOOKS_ENV,
+                bin = binary,
+                hook = hook,
+            )
+        };
         let hook_path = hooks_dir.join(hook);
         fs::write(&hook_path, script)?;
 
@@ -1728,9 +1783,9 @@ pub(crate) fn normalize_hook_binary_path(git_ai_binary: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        active_rebase_start_event, build_rebase_complete_event_from_start,
-        find_repository_for_hook, is_zero_oid, resolve_stash_ref_transition,
-        should_restore_deleted_stash,
+        RefTxnActionClass, active_rebase_start_event, build_rebase_complete_event_from_start,
+        classify_ref_transaction_action, find_repository_for_hook, is_zero_oid,
+        resolve_stash_ref_transition, should_restore_deleted_stash,
     };
     use crate::git::rewrite_log::{
         RebaseAbortEvent, RebaseCompleteEvent, RebaseStartEvent, RewriteLogEvent,
@@ -1760,6 +1815,28 @@ mod tests {
         let expected_canonical = repo.path().canonicalize().expect("canonical expected");
 
         assert_eq!(resolved_canonical, expected_canonical);
+    }
+
+    #[test]
+    fn classify_ref_transaction_action_handles_known_actions() {
+        assert_eq!(
+            classify_ref_transaction_action(Some("commit (amend): msg")),
+            RefTxnActionClass::CommitLike
+        );
+        assert_eq!(
+            classify_ref_transaction_action(Some("reset: moving to HEAD~1")),
+            RefTxnActionClass::ResetLike
+        );
+        assert_eq!(
+            classify_ref_transaction_action(Some(
+                "pull --rebase (finish): returning to refs/heads/main"
+            )),
+            RefTxnActionClass::PullRebaseLike
+        );
+        assert_eq!(
+            classify_ref_transaction_action(Some("stash pop")),
+            RefTxnActionClass::StashLike
+        );
     }
 
     #[test]
