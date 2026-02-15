@@ -26,12 +26,46 @@ pub struct VirtualAttributions {
 }
 
 impl VirtualAttributions {
+    pub fn empty(repo: Repository, base_commit: String) -> Self {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+
+        Self {
+            repo,
+            base_commit,
+            attributions: HashMap::new(),
+            file_contents: HashMap::new(),
+            prompts: BTreeMap::new(),
+            ts,
+            blame_start_commit: None,
+        }
+    }
+
     /// Create a new VirtualAttributions for the given base commit with initial pathspecs
     pub async fn new_for_base_commit(
         repo: Repository,
         base_commit: String,
         pathspecs: &[String],
         blame_start_commit: Option<String>,
+    ) -> Result<Self, GitAiError> {
+        Self::new_for_base_commit_with_options(
+            repo,
+            base_commit,
+            pathspecs,
+            blame_start_commit,
+            true,
+        )
+        .await
+    }
+
+    pub async fn new_for_base_commit_with_options(
+        repo: Repository,
+        base_commit: String,
+        pathspecs: &[String],
+        blame_start_commit: Option<String>,
+        discover_foreign_prompts: bool,
     ) -> Result<Self, GitAiError> {
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -53,8 +87,11 @@ impl VirtualAttributions {
             virtual_attrs.add_pathspecs_concurrent(pathspecs).await?;
         }
 
-        // After running blame, discover and load any missing prompts from blamed commits
-        virtual_attrs.discover_and_load_foreign_prompts().await?;
+        if discover_foreign_prompts {
+            // After running blame, discover and load any missing prompts from blamed commits.
+            // Some flows (like squash preparation) can skip this and rely on existing metadata.
+            virtual_attrs.discover_and_load_foreign_prompts().await?;
+        }
 
         Ok(virtual_attrs)
     }
@@ -213,17 +250,48 @@ impl VirtualAttributions {
         let results = futures::future::join_all(tasks).await;
 
         // Process results and store in HashMap
+        let mut pending_line_attrs: Vec<(
+            String,
+            Vec<LineAttribution>,
+            HashMap<String, PromptRecord>,
+        )> = Vec::new();
         for result in results {
             match result {
-                Ok(Some((file_path, content, char_attrs, line_attrs))) => {
-                    self.attributions
-                        .insert(file_path.clone(), (char_attrs, line_attrs));
-                    self.file_contents.insert(file_path, content);
+                Ok(Some((file_path, line_attrs, prompt_records))) => {
+                    pending_line_attrs.push((file_path, line_attrs, prompt_records))
                 }
                 Ok(None) => {
                     // File had no changes or couldn't be processed, skip
                 }
                 Err(e) => return Err(e),
+            }
+        }
+
+        if pending_line_attrs.is_empty() {
+            return Ok(());
+        }
+
+        let files_to_hydrate: Vec<String> = pending_line_attrs
+            .iter()
+            .map(|(file_path, _, _)| file_path.clone())
+            .collect();
+        let file_contents = self
+            .repo
+            .get_files_content_at_commit(&self.base_commit, &files_to_hydrate)?;
+
+        for (file_path, line_attrs, prompt_records) in pending_line_attrs {
+            let file_content = file_contents.get(&file_path).cloned().unwrap_or_default();
+            let char_attrs = line_attributions_to_attributions(&line_attrs, &file_content, self.ts);
+
+            self.attributions
+                .insert(file_path.clone(), (char_attrs, line_attrs));
+            self.file_contents.insert(file_path, file_content);
+
+            for (prompt_id, prompt_record) in prompt_records {
+                self.prompts
+                    .entry(prompt_id)
+                    .or_default()
+                    .insert(self.base_commit.clone(), prompt_record);
             }
         }
 
@@ -297,9 +365,45 @@ impl VirtualAttributions {
         base_commit: String,
         human_author: Option<String>,
     ) -> Result<Self, GitAiError> {
+        Self::from_just_working_log_internal(repo, base_commit, human_author, true, true)
+    }
+
+    /// Lightweight variant of `from_just_working_log` that preserves line-level attribution
+    /// and prompt metadata without eagerly hydrating file contents / char-level ranges.
+    /// This is enough for post-commit conversion and avoids large file reads on wide commits.
+    pub fn from_just_working_log_line_only(
+        repo: Repository,
+        base_commit: String,
+        human_author: Option<String>,
+    ) -> Result<Self, GitAiError> {
+        Self::from_just_working_log_internal(repo, base_commit, human_author, false, true)
+    }
+
+    /// Build VirtualAttributions from INITIAL data only (skip checkpoints).
+    /// Useful when squash pre-commit was intentionally skipped and only INITIAL
+    /// should participate in post-commit conversion.
+    pub fn from_initial_only_line_only(
+        repo: Repository,
+        base_commit: String,
+        human_author: Option<String>,
+    ) -> Result<Self, GitAiError> {
+        Self::from_just_working_log_internal(repo, base_commit, human_author, false, false)
+    }
+
+    fn from_just_working_log_internal(
+        repo: Repository,
+        base_commit: String,
+        human_author: Option<String>,
+        hydrate_file_contents: bool,
+        include_checkpoints: bool,
+    ) -> Result<Self, GitAiError> {
         let working_log = repo.storage.working_log_for_base_commit(&base_commit);
         let initial_attributions = working_log.read_initial_attributions();
-        let checkpoints = working_log.read_all_checkpoints().unwrap_or_default();
+        let checkpoints = if include_checkpoints {
+            working_log.read_all_checkpoints().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
 
         let mut attributions: HashMap<String, (Vec<Attribution>, Vec<LineAttribution>)> =
             HashMap::new();
@@ -321,19 +425,24 @@ impl VirtualAttributions {
 
         // Process INITIAL attributions
         for (file_path, line_attrs) in &initial_attributions.files {
-            // Get the latest file content from working directory
-            if let Ok(workdir) = repo.workdir() {
-                let abs_path = workdir.join(file_path);
-                let file_content = if abs_path.exists() {
-                    std::fs::read_to_string(&abs_path).unwrap_or_default()
-                } else {
-                    String::new()
-                };
-                file_contents.insert(file_path.clone(), file_content.clone());
+            if hydrate_file_contents {
+                // Get the latest file content from working directory
+                if let Ok(workdir) = repo.workdir() {
+                    let abs_path = workdir.join(file_path);
+                    let file_content = if abs_path.exists() {
+                        std::fs::read_to_string(&abs_path).unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    file_contents.insert(file_path.clone(), file_content.clone());
 
-                // Convert line attributions to character attributions
-                let char_attrs = line_attributions_to_attributions(line_attrs, &file_content, 0);
-                attributions.insert(file_path.clone(), (char_attrs, line_attrs.clone()));
+                    // Convert line attributions to character attributions
+                    let char_attrs =
+                        line_attributions_to_attributions(line_attrs, &file_content, 0);
+                    attributions.insert(file_path.clone(), (char_attrs, line_attrs.clone()));
+                }
+            } else {
+                attributions.insert(file_path.clone(), (Vec::new(), line_attrs.clone()));
             }
         }
 
@@ -384,8 +493,10 @@ impl VirtualAttributions {
                     continue;
                 }
 
-                // Get the latest file content from working directory
-                if let Ok(workdir) = repo.workdir() {
+                // Get the latest file content from working directory when needed.
+                if (hydrate_file_contents || entry.line_attributions.is_empty())
+                    && let Ok(workdir) = repo.workdir()
+                {
                     let abs_path = workdir.join(&entry.file);
                     let file_content = if abs_path.exists() {
                         std::fs::read_to_string(&abs_path).unwrap_or_default()
@@ -411,7 +522,11 @@ impl VirtualAttributions {
                     continue;
                 }
 
-                let char_attrs = line_attributions_to_attributions(&line_attrs, &file_content, 0);
+                let char_attrs = if hydrate_file_contents {
+                    line_attributions_to_attributions(&line_attrs, &file_content, 0)
+                } else {
+                    Vec::new()
+                };
 
                 attributions.insert(entry.file.clone(), (char_attrs, line_attrs));
             }
@@ -1051,82 +1166,56 @@ impl VirtualAttributions {
                 None => continue, // No committed hunks for this file, skip
             };
 
-            // Map author_id -> line numbers (in commit coordinates)
-            let mut committed_lines_map: StdHashMap<String, Vec<u32>> = StdHashMap::new();
+            // Map author_id -> committed ranges (in commit coordinates).
+            // This avoids expanding ranges to individual lines for large commits.
+            let mut committed_ranges_map: StdHashMap<String, Vec<(u32, u32)>> = StdHashMap::new();
 
             for line_attr in line_attrs {
-                // Since we're not dealing with unstaged hunks, the line numbers in VirtualAttributions
-                // are already in the right coordinates (working log coordinates = commit coordinates)
-                for line_num in line_attr.start_line..=line_attr.end_line {
-                    // Check if this line is in any committed hunk
-                    let is_committed = file_committed_hunks
-                        .iter()
-                        .any(|hunk| hunk.contains(line_num));
+                // Skip human attributions - we only track AI attributions in the output
+                if line_attr.author_id == CheckpointKind::Human.to_str() {
+                    continue;
+                }
 
-                    if is_committed {
-                        committed_lines_map
+                let attr_start = line_attr.start_line;
+                let attr_end = line_attr.end_line;
+
+                for hunk in file_committed_hunks {
+                    let (hunk_start, hunk_end) = line_range_to_bounds(hunk);
+                    let intersection_start = attr_start.max(hunk_start);
+                    let intersection_end = attr_end.min(hunk_end);
+
+                    if intersection_start <= intersection_end {
+                        committed_ranges_map
                             .entry(line_attr.author_id.clone())
                             .or_default()
-                            .push(line_num);
+                            .push((intersection_start, intersection_end));
                     }
                 }
             }
 
             // Add committed attributions to authorship log
-            if !committed_lines_map.is_empty() {
-                // Create attestation entries from committed lines
-                for (author_id, mut lines) in committed_lines_map {
-                    // Skip human attributions - we only track AI attributions in the output
-                    if author_id == CheckpointKind::Human.to_str() {
+            if !committed_ranges_map.is_empty() {
+                for (author_id, ranges) in committed_ranges_map {
+                    let merged_ranges = merge_u32_ranges(ranges);
+                    if merged_ranges.is_empty() {
                         continue;
                     }
 
-                    lines.sort();
-                    lines.dedup();
-
-                    if lines.is_empty() {
-                        continue;
-                    }
-
-                    // Create line ranges
-                    let mut ranges = Vec::new();
-                    let mut range_start = lines[0];
-                    let mut range_end = lines[0];
-
-                    for &line in &lines[1..] {
-                        if line == range_end + 1 {
-                            range_end = line;
-                        } else {
-                            if range_start == range_end {
-                                ranges.push(crate::authorship::authorship_log::LineRange::Single(
-                                    range_start,
-                                ));
+                    let line_ranges = merged_ranges
+                        .into_iter()
+                        .map(|(start, end)| {
+                            if start == end {
+                                crate::authorship::authorship_log::LineRange::Single(start)
                             } else {
-                                ranges.push(crate::authorship::authorship_log::LineRange::Range(
-                                    range_start,
-                                    range_end,
-                                ));
+                                crate::authorship::authorship_log::LineRange::Range(start, end)
                             }
-                            range_start = line;
-                            range_end = line;
-                        }
-                    }
-
-                    // Add the last range
-                    if range_start == range_end {
-                        ranges.push(crate::authorship::authorship_log::LineRange::Single(
-                            range_start,
-                        ));
-                    } else {
-                        ranges.push(crate::authorship::authorship_log::LineRange::Range(
-                            range_start,
-                            range_end,
-                        ));
-                    }
+                        })
+                        .collect();
 
                     let entry =
                         crate::authorship::authorship_log_serialization::AttestationEntry::new(
-                            author_id, ranges,
+                            author_id,
+                            line_ranges,
                         );
 
                     let file_attestation = authorship_log.get_or_create_file(file_path);
@@ -1311,6 +1400,15 @@ impl VirtualAttributions {
                 char_attrs,
                 &file_content,
             );
+        }
+    }
+
+    /// Drop inline prompt messages while preserving prompt IDs and metrics.
+    pub fn clear_prompt_messages(&mut self) {
+        for commits in self.prompts.values_mut() {
+            for prompt_record in commits.values_mut() {
+                prompt_record.messages.clear();
+            }
         }
     }
 }
@@ -1664,9 +1762,9 @@ fn compute_attributions_for_file(
     repo: &Repository,
     base_commit: &str,
     file_path: &str,
-    ts: u128,
+    _ts: u128,
     blame_start_commit: Option<String>,
-) -> Result<Option<(String, String, Vec<Attribution>, Vec<LineAttribution>)>, GitAiError> {
+) -> Result<Option<(String, Vec<LineAttribution>, HashMap<String, PromptRecord>)>, GitAiError> {
     // Set up blame options
     let mut ai_blame_opts = GitAiBlameOptions::default();
     #[allow(clippy::field_reassign_with_default)]
@@ -1674,6 +1772,9 @@ fn compute_attributions_for_file(
         ai_blame_opts.no_output = true;
         ai_blame_opts.return_human_authors_as_human = true;
         ai_blame_opts.use_prompt_hashes_as_names = true;
+        // This path only needs line->prompt attribution, not per-hunk human-author metadata.
+        // Skipping this avoids an extra full authorship lookup pass in blame_hunks.
+        ai_blame_opts.populate_ai_human_authors = false;
         ai_blame_opts.newest_commit = Some(base_commit.to_string());
         ai_blame_opts.oldest_commit = blame_start_commit;
         ai_blame_opts.oldest_date = Some(*OLDEST_AI_BLAME_DATE);
@@ -1683,7 +1784,7 @@ fn compute_attributions_for_file(
     let ai_blame = repo.blame(file_path, &ai_blame_opts);
 
     match ai_blame {
-        Ok((blames, _)) => {
+        Ok((blames, prompt_records)) => {
             // Convert blame results to line attributions
             let mut line_attributions = Vec::new();
             for (line, author) in blames {
@@ -1699,19 +1800,10 @@ fn compute_attributions_for_file(
                 });
             }
 
-            // Get the file content at this commit to convert to character attributions
-            // We need to read the file content that blame operated on
-            let file_content = get_file_content_at_commit(repo, base_commit, file_path)?;
-
-            // Convert line attributions to character attributions
-            let char_attributions =
-                line_attributions_to_attributions(&line_attributions, &file_content, ts);
-
             Ok(Some((
                 file_path.to_string(),
-                file_content,
-                char_attributions,
                 line_attributions,
+                prompt_records,
             )))
         }
         Err(_) => {
@@ -1721,25 +1813,31 @@ fn compute_attributions_for_file(
     }
 }
 
-fn get_file_content_at_commit(
-    repo: &Repository,
-    commit_sha: &str,
-    file_path: &str,
-) -> Result<String, GitAiError> {
-    let commit = repo.find_commit(commit_sha.to_string())?;
-    let tree = commit.tree()?;
-
-    match tree.get_path(std::path::Path::new(file_path)) {
-        Ok(entry) => {
-            if let Ok(blob) = repo.find_blob(entry.id()) {
-                let blob_content = blob.content().unwrap_or_default();
-                Ok(String::from_utf8_lossy(&blob_content).to_string())
-            } else {
-                Ok(String::new())
-            }
-        }
-        Err(_) => Ok(String::new()),
+fn line_range_to_bounds(range: &LineRange) -> (u32, u32) {
+    match range {
+        LineRange::Single(line) => (*line, *line),
+        LineRange::Range(start, end) => (*start, *end),
     }
+}
+
+fn merge_u32_ranges(mut ranges: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
+    if ranges.is_empty() {
+        return ranges;
+    }
+
+    ranges.sort_by_key(|(start, end)| (*start, *end));
+
+    let mut merged: Vec<(u32, u32)> = Vec::with_capacity(ranges.len());
+    for (start, end) in ranges {
+        match merged.last_mut() {
+            Some((_, last_end)) if start <= last_end.saturating_add(1) => {
+                *last_end = (*last_end).max(end);
+            }
+            _ => merged.push((start, end)),
+        }
+    }
+
+    merged
 }
 
 /// Check if a file exists in a commit's tree
@@ -1757,6 +1855,8 @@ fn file_exists_in_commit(
 mod tests {
 
     use super::*;
+    use crate::authorship::authorship_log::PromptRecord;
+    use crate::authorship::working_log::AgentId;
     use crate::git::test_utils::TmpRepo;
 
     #[test]
@@ -1810,5 +1910,310 @@ mod tests {
         }
 
         assert!(!virtual_attributions.files().is_empty());
+    }
+
+    #[test]
+    fn test_line_only_working_log_loader_matches_full_loader_output() {
+        let repo = TmpRepo::new().unwrap();
+
+        // Seed base commit.
+        repo.write_file("sample.txt", "base\n", true).unwrap();
+        repo.trigger_checkpoint_with_ai("seed_ai", None, None)
+            .unwrap();
+        repo.commit_with_message("seed commit").unwrap();
+        let base_commit = repo.head_commit_sha().unwrap();
+
+        // Create pending AI-attributed changes on top of base.
+        repo.write_file("sample.txt", "base\nai line 1\nai line 2\n", true)
+            .unwrap();
+        repo.trigger_checkpoint_with_ai("delta_ai", None, None)
+            .unwrap();
+
+        let full_va = VirtualAttributions::from_just_working_log(
+            repo.gitai_repo().clone(),
+            base_commit.clone(),
+            Some("Test User <test@example.com>".to_string()),
+        )
+        .unwrap();
+        let line_only_va = VirtualAttributions::from_just_working_log_line_only(
+            repo.gitai_repo().clone(),
+            base_commit.clone(),
+            Some("Test User <test@example.com>".to_string()),
+        )
+        .unwrap();
+
+        let mut full_files = full_va.files();
+        let mut line_only_files = line_only_va.files();
+        full_files.sort();
+        line_only_files.sort();
+        assert_eq!(full_files, line_only_files);
+        assert_eq!(full_va.prompts(), line_only_va.prompts());
+
+        for file in &full_files {
+            let (full_char, full_line) = full_va.get_attributions(file).unwrap();
+            let (line_only_char, line_only_line) = line_only_va.get_attributions(file).unwrap();
+
+            assert!(
+                !full_char.is_empty(),
+                "full loader should hydrate char ranges"
+            );
+            assert!(
+                line_only_char.is_empty(),
+                "line-only loader should skip char range hydration"
+            );
+            assert_eq!(
+                full_line, line_only_line,
+                "line-level attributions must match between loaders"
+            );
+        }
+
+        let (full_log, full_initial) = full_va
+            .to_authorship_log_and_initial_working_log(
+                repo.gitai_repo(),
+                &base_commit,
+                &base_commit,
+                None,
+            )
+            .unwrap();
+        let (line_only_log, line_only_initial) = line_only_va
+            .to_authorship_log_and_initial_working_log(
+                repo.gitai_repo(),
+                &base_commit,
+                &base_commit,
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(full_initial.files, line_only_initial.files);
+        assert_eq!(full_initial.prompts, line_only_initial.prompts);
+        assert_eq!(
+            full_log.serialize_to_string().unwrap(),
+            line_only_log.serialize_to_string().unwrap(),
+            "Authorship output must be identical between full and line-only loaders"
+        );
+    }
+
+    #[test]
+    fn test_initial_only_line_loader_ignores_checkpoints_and_keeps_initial_prompts() {
+        let repo = TmpRepo::new().unwrap();
+
+        repo.write_file("base.txt", "base\n", true).unwrap();
+        repo.trigger_checkpoint_with_author("seed").unwrap();
+        repo.commit_with_message("seed commit").unwrap();
+        let base_commit = repo.head_commit_sha().unwrap();
+
+        // Create AI checkpoint data that should be ignored by from_initial_only_line_only.
+        repo.write_file("checkpoint_only.txt", "cp\nai cp line\n", true)
+            .unwrap();
+        repo.trigger_checkpoint_with_ai("checkpoint_ai", None, None)
+            .unwrap();
+
+        // Write INITIAL attribution + prompt that must be preserved.
+        let working_log = repo
+            .gitai_repo()
+            .storage
+            .working_log_for_base_commit(&base_commit);
+
+        let mut initial_files = HashMap::new();
+        initial_files.insert(
+            "initial_only.txt".to_string(),
+            vec![LineAttribution {
+                start_line: 1,
+                end_line: 1,
+                author_id: "initial_ai".to_string(),
+                overrode: None,
+            }],
+        );
+
+        let mut initial_prompts = HashMap::new();
+        initial_prompts.insert(
+            "initial_ai".to_string(),
+            PromptRecord {
+                agent_id: AgentId {
+                    tool: "mock_tool".to_string(),
+                    id: "initial-session".to_string(),
+                    model: "mock-model".to_string(),
+                },
+                human_author: Some("Test User <test@example.com>".to_string()),
+                messages: vec![],
+                total_additions: 5,
+                total_deletions: 2,
+                accepted_lines: 0,
+                overriden_lines: 0,
+                messages_url: None,
+            },
+        );
+        working_log
+            .write_initial_attributions(initial_files, initial_prompts)
+            .unwrap();
+
+        let va = VirtualAttributions::from_initial_only_line_only(
+            repo.gitai_repo().clone(),
+            base_commit.clone(),
+            Some("Test User <test@example.com>".to_string()),
+        )
+        .unwrap();
+
+        let mut files = va.files();
+        files.sort();
+        assert_eq!(
+            files,
+            vec!["initial_only.txt".to_string()],
+            "initial-only loader must ignore checkpoint files"
+        );
+        assert!(
+            va.get_line_attributions("initial_only.txt")
+                .is_some_and(|attrs| !attrs.is_empty()),
+            "initial attributions should be preserved"
+        );
+        assert!(
+            va.prompts().contains_key("initial_ai"),
+            "initial prompts should be preserved"
+        );
+        assert!(
+            !va.prompts().contains_key("checkpoint_ai"),
+            "checkpoint prompts should be ignored by initial-only loader"
+        );
+    }
+
+    #[test]
+    fn test_clear_prompt_messages_keeps_prompt_keys_and_metrics() {
+        let repo = TmpRepo::new().unwrap();
+        let mut prompts = BTreeMap::new();
+        let mut commits = BTreeMap::new();
+        commits.insert(
+            "base".to_string(),
+            PromptRecord {
+                agent_id: AgentId {
+                    tool: "mock_tool".to_string(),
+                    id: "session".to_string(),
+                    model: "mock-model".to_string(),
+                },
+                human_author: Some("Test User <test@example.com>".to_string()),
+                messages: vec![
+                    crate::authorship::transcript::Message::user("hello".to_string(), None),
+                    crate::authorship::transcript::Message::assistant("world".to_string(), None),
+                ],
+                total_additions: 10,
+                total_deletions: 3,
+                accepted_lines: 7,
+                overriden_lines: 1,
+                messages_url: None,
+            },
+        );
+        prompts.insert("mock_prompt".to_string(), commits);
+
+        let mut va = VirtualAttributions::new_with_prompts(
+            repo.gitai_repo().clone(),
+            "base".to_string(),
+            HashMap::new(),
+            HashMap::new(),
+            prompts,
+            0,
+        );
+
+        va.clear_prompt_messages();
+
+        let prompt = va
+            .prompts()
+            .get("mock_prompt")
+            .and_then(|commit_map| commit_map.get("base"))
+            .expect("prompt should still exist");
+        assert!(
+            prompt.messages.is_empty(),
+            "messages should be cleared in-place"
+        );
+        assert_eq!(prompt.total_additions, 10);
+        assert_eq!(prompt.total_deletions, 3);
+        assert_eq!(prompt.accepted_lines, 7);
+        assert_eq!(prompt.overriden_lines, 1);
+    }
+
+    #[test]
+    fn test_index_only_matches_added_lines_for_full_file_ai_attr() {
+        let repo = TmpRepo::new().unwrap();
+
+        repo.write_file(
+            "range.txt",
+            "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\n",
+            true,
+        )
+        .unwrap();
+        repo.trigger_checkpoint_with_author("seed").unwrap();
+        repo.commit_with_message("seed").unwrap();
+        let parent_sha = repo.head_commit_sha().unwrap();
+
+        let updated_content = "\
+line 1
+line 2 edited
+line 3
+line 4
+line 4.5 inserted
+line 5
+line 6
+line 7 inserted
+";
+        repo.write_file("range.txt", updated_content, true).unwrap();
+        repo.trigger_checkpoint_with_author("editor").unwrap();
+        repo.commit_with_message("update").unwrap();
+        let commit_sha = repo.head_commit_sha().unwrap();
+
+        let total_lines = updated_content.lines().count() as u32;
+        let mut attributions = HashMap::new();
+        attributions.insert(
+            "range.txt".to_string(),
+            (
+                Vec::new(),
+                vec![LineAttribution {
+                    start_line: 1,
+                    end_line: total_lines,
+                    author_id: "mock_ai".to_string(),
+                    overrode: None,
+                }],
+            ),
+        );
+
+        let va = VirtualAttributions::new(
+            repo.gitai_repo().clone(),
+            commit_sha.clone(),
+            attributions,
+            HashMap::new(),
+            0,
+        );
+
+        let authorship_log = va
+            .to_authorship_log_index_only(repo.gitai_repo(), &parent_sha, &commit_sha, None)
+            .unwrap();
+
+        let expected_added_lines = repo
+            .gitai_repo()
+            .diff_added_lines(&parent_sha, &commit_sha, None)
+            .unwrap()
+            .get("range.txt")
+            .cloned()
+            .unwrap_or_default();
+
+        let mut actual_added_lines: Vec<u32> = authorship_log
+            .attestations
+            .iter()
+            .find(|entry| entry.file_path == "range.txt")
+            .map(|file_attestation| {
+                file_attestation
+                    .entries
+                    .iter()
+                    .flat_map(|entry| entry.line_ranges.iter())
+                    .flat_map(|range| match range {
+                        crate::authorship::authorship_log::LineRange::Single(line) => vec![*line],
+                        crate::authorship::authorship_log::LineRange::Range(start, end) => {
+                            (*start..=*end).collect()
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        actual_added_lines.sort_unstable();
+        actual_added_lines.dedup();
+
+        assert_eq!(actual_added_lines, expected_added_lines);
     }
 }

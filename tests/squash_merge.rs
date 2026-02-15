@@ -293,3 +293,129 @@ fn test_prepare_working_log_squash_with_mixed_additions() {
         "Sum of accepted_lines across prompts should match ai_accepted stat"
     );
 }
+
+/// Human-only squash merges should not synthesize AI attestations/prompts.
+#[test]
+fn test_prepare_working_log_squash_human_only_fast_path() {
+    let repo = TestRepo::new();
+    let mut file = repo.filename("human_only.txt");
+
+    file.set_contents(lines!["base line"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    let default_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    file.insert_at(1, lines!["human feature line"]);
+    repo.stage_all_and_commit("Human-only feature change")
+        .unwrap();
+
+    repo.git(&["checkout", &default_branch]).unwrap();
+    repo.git(&["merge", "--squash", "feature"]).unwrap();
+    let squash_commit = repo.commit("Squash human-only feature").unwrap();
+
+    file.assert_lines_and_blame(lines!["base line".human(), "human feature line".human()]);
+    assert!(
+        squash_commit.authorship_log.attestations.is_empty(),
+        "No AI attestations expected for human-only squash"
+    );
+    assert!(
+        squash_commit.authorship_log.metadata.prompts.is_empty(),
+        "No AI prompts expected for human-only squash"
+    );
+}
+
+/// Unrelated AI churn on the target branch should not pollute squash metadata.
+#[test]
+fn test_prepare_working_log_squash_ignores_unrelated_target_ai_files() {
+    let repo = TestRepo::new();
+    let mut feature_file = repo.filename("feature.txt");
+    let mut target_file = repo.filename("target.txt");
+
+    feature_file.set_contents(lines!["feature base"]);
+    target_file.set_contents(lines!["target base"]);
+    repo.stage_all_and_commit("Initial base").unwrap();
+    let default_branch = repo.current_branch();
+
+    // Feature branch adds AI content in feature.txt
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    feature_file.insert_at(1, lines!["feature ai line".ai()]);
+    repo.stage_all_and_commit("Feature AI change").unwrap();
+
+    // Target branch adds unrelated AI content in target.txt
+    repo.git(&["checkout", &default_branch]).unwrap();
+    target_file.insert_at(1, lines!["target ai line".ai()]);
+    repo.stage_all_and_commit("Target AI churn").unwrap();
+
+    // Squash only feature branch changes into target
+    repo.git(&["merge", "--squash", "feature"]).unwrap();
+    let squash_commit = repo.commit("Squash feature into target").unwrap();
+
+    feature_file.assert_lines_and_blame(lines!["feature base".human(), "feature ai line".ai()]);
+    target_file.assert_lines_and_blame(lines!["target base".human(), "target ai line".ai()]);
+
+    // Squash commit should only carry new AI attestation for feature.txt.
+    assert_eq!(
+        squash_commit.authorship_log.attestations.len(),
+        1,
+        "Only feature.txt should be attested in squash commit"
+    );
+    assert_eq!(
+        squash_commit.authorship_log.attestations[0].file_path, "feature.txt",
+        "Unrelated target AI file should not be included in squash attestations"
+    );
+    assert_eq!(
+        squash_commit.authorship_log.metadata.prompts.len(),
+        1,
+        "Only feature prompt should be carried into squash commit metadata"
+    );
+
+    let stats = repo.stats().unwrap();
+    assert_eq!(
+        stats.ai_additions, 1,
+        "Only one new AI line should be counted"
+    );
+    assert_eq!(
+        stats.ai_accepted, 1,
+        "Only the feature branch AI line should be accepted in squash commit"
+    );
+}
+
+/// Small staged-set fast path should not introduce AI attestations for human-only files.
+#[test]
+fn test_prepare_working_log_squash_small_staged_bypass_keeps_human_files_clean() {
+    let repo = TestRepo::new();
+    let mut ai_file = repo.filename("ai_file.txt");
+    let mut human_file = repo.filename("human_file.txt");
+
+    ai_file.set_contents(lines!["ai base"]);
+    human_file.set_contents(lines!["human base"]);
+    repo.stage_all_and_commit("Initial base").unwrap();
+    let default_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    ai_file.insert_at(1, lines!["ai feature line".ai()]);
+    human_file.insert_at(1, lines!["human feature line"]);
+    repo.stage_all_and_commit("Mixed feature commit").unwrap();
+
+    repo.git(&["checkout", &default_branch]).unwrap();
+    repo.git(&["merge", "--squash", "feature"]).unwrap();
+    let squash_commit = repo.commit("Squash mixed feature").unwrap();
+
+    ai_file.assert_lines_and_blame(lines!["ai base".human(), "ai feature line".ai()]);
+    human_file.assert_lines_and_blame(lines!["human base".human(), "human feature line".human()]);
+
+    assert_eq!(
+        squash_commit.authorship_log.attestations.len(),
+        1,
+        "Human-only file should not receive AI attestations"
+    );
+    assert_eq!(
+        squash_commit.authorship_log.attestations[0].file_path,
+        "ai_file.txt"
+    );
+    assert_eq!(
+        squash_commit.authorship_log.metadata.prompts.len(),
+        1,
+        "Only AI prompt metadata should be carried into squash commit"
+    );
+}
