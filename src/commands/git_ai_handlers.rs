@@ -28,6 +28,14 @@ pub fn handle_git_ai(args: &[String]) {
         return;
     }
 
+    // Hook invocations are performance-sensitive and should bypass normal command preamble
+    // (repository lookup, allowlist checks, DB warmup) because core hook handlers do their own
+    // repository resolution and must run even in unusual hook CWD/env contexts.
+    if args[0] == "hook" {
+        commands::core_hooks::handle_core_hook_command(&args[1..]);
+        return;
+    }
+
     let current_dir = env::current_dir().unwrap().to_string_lossy().to_string();
     let repository_option = find_repository_in_path(&current_dir).ok();
 
@@ -61,9 +69,6 @@ pub fn handle_git_ai(args: &[String]) {
             if is_interactive_terminal() {
                 log_message("config", "info", None)
             }
-        }
-        "hook" => {
-            commands::core_hooks::handle_core_hook_command(&args[1..]);
         }
         "stats" => {
             if is_interactive_terminal() {

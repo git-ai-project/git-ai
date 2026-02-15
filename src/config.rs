@@ -183,6 +183,12 @@ impl Config {
     }
 
     pub fn is_allowed_repository(&self, repository: &Option<Repository>) -> bool {
+        // Fast path: default configuration allows all repositories and doesn't need
+        // expensive `git remote -v` subprocesses on hot paths (wrapper/hooks).
+        if self.exclude_repositories.is_empty() && self.allow_repositories.is_empty() {
+            return true;
+        }
+
         // Fetch remotes once and reuse for both exclude and allow checks
         let remotes = repository
             .as_ref()

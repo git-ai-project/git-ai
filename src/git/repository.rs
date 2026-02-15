@@ -1926,6 +1926,55 @@ impl Repository {
 }
 
 pub fn find_repository(global_args: &[String]) -> Result<Repository, GitAiError> {
+    // Fast path for normal (non-bare) repos: one rev-parse call.
+    // Bare repos fail this path because --show-toplevel is unavailable, and then
+    // we fall back to the bare-aware resolution path below.
+    if let Ok(repository) = try_find_repository_non_bare_fast(global_args) {
+        return Ok(repository);
+    }
+
+    find_repository_bare_aware(global_args)
+}
+
+fn try_find_repository_non_bare_fast(global_args: &[String]) -> Result<Repository, GitAiError> {
+    let mut args = global_args.to_owned();
+    args.push("rev-parse".to_string());
+    // Use --git-dir instead of --absolute-git-dir for compatibility with Git < 2.13
+    // (--absolute-git-dir was added in Git 2.13; older versions output the literal
+    // string "absolute-git-dir" instead of the resolved path).
+    args.push("--git-dir".to_string());
+    args.push("--show-toplevel".to_string());
+
+    let output = exec_git(&args)?;
+    let stdout = String::from_utf8(output.stdout)?;
+    let mut lines = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+
+    let git_dir_str = lines.next().ok_or_else(|| {
+        GitAiError::Generic("Missing --git-dir output from git rev-parse".to_string())
+    })?;
+    let workdir_str = lines.next().ok_or_else(|| {
+        GitAiError::Generic("Missing --show-toplevel output from git rev-parse".to_string())
+    })?;
+
+    let command_base_dir = resolve_command_base_dir(global_args)?;
+    let workdir = if Path::new(workdir_str).is_relative() {
+        command_base_dir.join(workdir_str)
+    } else {
+        PathBuf::from(workdir_str)
+    };
+    let git_dir = if Path::new(git_dir_str).is_relative() {
+        workdir.join(git_dir_str)
+    } else {
+        PathBuf::from(git_dir_str)
+    };
+
+    build_repository_from_paths(global_args, git_dir, workdir, false)
+}
+
+fn find_repository_bare_aware(global_args: &[String]) -> Result<Repository, GitAiError> {
     let mut rev_parse_args = global_args.to_owned();
     rev_parse_args.push("rev-parse".to_string());
     // Use --git-dir instead of --absolute-git-dir for compatibility with Git < 2.13
@@ -1988,6 +2037,22 @@ pub fn find_repository(global_args: &[String]) -> Result<Repository, GitAiError>
         let output = exec_git(&top_level_args)?;
         PathBuf::from(String::from_utf8(output.stdout)?.trim())
     };
+
+    build_repository_from_paths(global_args, git_dir, workdir, is_bare)
+}
+
+fn build_repository_from_paths(
+    global_args: &[String],
+    git_dir: PathBuf,
+    workdir: PathBuf,
+    is_bare: bool,
+) -> Result<Repository, GitAiError> {
+    if !git_dir.is_dir() {
+        return Err(GitAiError::Generic(format!(
+            "Git directory does not exist: {}",
+            git_dir.display()
+        )));
+    }
 
     if !workdir.is_dir() {
         return Err(GitAiError::Generic(format!(

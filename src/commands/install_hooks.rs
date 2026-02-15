@@ -1,6 +1,6 @@
 use crate::commands::core_hooks::{
-    INSTALLED_HOOKS, PREVIOUS_HOOKS_PATH_FILE, managed_core_hooks_dir, normalize_hook_binary_path,
-    write_core_hook_scripts,
+    INSTALLED_HOOKS, PASSTHROUGH_ONLY_HOOKS, PREVIOUS_HOOKS_PATH_FILE, managed_core_hooks_dir,
+    normalize_hook_binary_path, write_core_hook_scripts,
 };
 use crate::commands::flush_metrics_db::spawn_background_metrics_db_flush;
 use crate::error::GitAiError;
@@ -797,9 +797,21 @@ fn core_hook_scripts_up_to_date(hooks_dir: &Path, binary_path: &Path) -> bool {
     INSTALLED_HOOKS.iter().all(|hook| {
         let hook_path = hooks_dir.join(hook);
         let content = fs::read_to_string(&hook_path).unwrap_or_default();
-        hook_path.exists()
-            && content.contains(&format!("hook {}", hook))
-            && content.contains(&binary)
+        let is_passthrough = PASSTHROUGH_ONLY_HOOKS.contains(hook);
+        let mode_marker = if is_passthrough {
+            "# git-ai-managed: mode=passthrough"
+        } else {
+            "# git-ai-managed: mode=dispatch"
+        };
+
+        if is_passthrough {
+            hook_path.exists() && content.contains(mode_marker)
+        } else {
+            hook_path.exists()
+                && content.contains(mode_marker)
+                && content.contains(&format!("hook {}", hook))
+                && content.contains(&binary)
+        }
     })
 }
 

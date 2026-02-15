@@ -45,6 +45,17 @@ pub const INSTALLED_HOOKS: &[&str] = &[
     "post-index-change",
 ];
 
+/// Hooks that only need shell-level chaining and no internal git-ai handler.
+pub const PASSTHROUGH_ONLY_HOOKS: &[&str] = &[
+    "applypatch-msg",
+    "pre-applypatch",
+    "post-applypatch",
+    "pre-merge-commit",
+    "prepare-commit-msg",
+    "commit-msg",
+    "pre-auto-gc",
+];
+
 /// Internal file name used to preserve a user's previous global `core.hooksPath`.
 pub const PREVIOUS_HOOKS_PATH_FILE: &str = "previous_hooks_path";
 
@@ -52,7 +63,7 @@ const CORE_HOOK_STATE_FILE: &str = "core_hook_state.json";
 const STATE_EVENT_MAX_AGE_MS: u128 = 3_000;
 const PENDING_PULL_AUTOSTASH_MAX_AGE_MS: u128 = 5 * 60_000;
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct CoreHookState {
     pending_autostash: Option<PendingAutostashState>,
     pending_pull_autostash: Option<PendingPullAutostashState>,
@@ -63,29 +74,29 @@ struct CoreHookState {
     pending_commit_base_head: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct PendingStashApplyState {
     created_at_ms: u128,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct PendingStashRefUpdateState {
     created_at_ms: u128,
     stash_count_before: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct PendingAutostashState {
     authorship_log_json: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct PendingPullAutostashState {
     authorship_log_json: String,
     created_at_ms: u128,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct PendingCherryPickState {
     original_head: String,
     source_commit: String,
@@ -159,6 +170,10 @@ fn run_hook_impl(
     hook_name: &str,
     hook_args: &[String],
 ) -> Result<(), GitAiError> {
+    if PASSTHROUGH_ONLY_HOOKS.contains(&hook_name) {
+        return Ok(());
+    }
+
     match hook_name {
         "pre-commit" => handle_pre_commit(repository)?,
         "post-commit" => handle_post_commit(repository)?,
@@ -169,9 +184,6 @@ fn run_hook_impl(
         "pre-push" => handle_pre_push(repository, hook_args)?,
         "reference-transaction" => handle_reference_transaction(repository, hook_args)?,
         "post-index-change" => handle_post_index_change(repository, hook_args)?,
-        // Passthrough-only hooks: the shell shim still chains previous/repo hooks.
-        "applypatch-msg" | "pre-applypatch" | "post-applypatch" | "pre-merge-commit"
-        | "prepare-commit-msg" | "commit-msg" | "pre-auto-gc" => {}
         _ => {
             debug_log(&format!("unknown core hook '{}', ignoring", hook_name));
         }
@@ -192,8 +204,9 @@ fn handle_pre_commit(repository: &mut Repository) -> Result<(), GitAiError> {
     let _ = crate::commands::hooks::commit_hooks::commit_pre_command_hook(&parsed, repository);
 
     let mut state = load_core_hook_state(repository)?;
+    let before = state.clone();
     state.pending_commit_base_head = repository.head().ok().and_then(|h| h.target().ok());
-    save_core_hook_state(repository, &state)?;
+    save_core_hook_state_if_changed(repository, &before, &state)?;
     Ok(())
 }
 
@@ -204,8 +217,9 @@ fn handle_post_commit(repository: &mut Repository) -> Result<(), GitAiError> {
     };
 
     let mut state = load_core_hook_state(repository)?;
+    let before = state.clone();
     let original_commit = state.pending_commit_base_head.take();
-    save_core_hook_state(repository, &state)?;
+    save_core_hook_state_if_changed(repository, &before, &state)?;
 
     let rebase_in_progress = repository.path().join("rebase-merge").exists()
         || repository.path().join("rebase-apply").exists();
@@ -309,6 +323,7 @@ fn handle_pre_rebase(repository: &mut Repository, hook_args: &[String]) -> Resul
     rebase_hooks::pre_rebase_hook(&parsed, repository, &mut context);
 
     let mut state = load_core_hook_state(repository)?;
+    let before = state.clone();
     // Reset stale snapshots from earlier failed rebase attempts.
     state.pending_autostash = None;
     if let Some(pending) = state.pending_pull_autostash.as_ref()
@@ -332,7 +347,7 @@ fn handle_pre_rebase(repository: &mut Repository, hook_args: &[String]) -> Resul
         });
         debug_log("Captured pending autostash attributions in core hook state");
     }
-    save_core_hook_state(repository, &state)?;
+    save_core_hook_state_if_changed(repository, &before, &state)?;
     Ok(())
 }
 
@@ -583,8 +598,21 @@ fn handle_reference_transaction(
     // Prefer concrete branch ref updates, but fall back to detached-HEAD updates.
     let moved_main_ref = moved_branch_ref.or(moved_head_ref);
 
+    // Fast no-op path: skip state churn and extra git commands when nothing relevant changed.
+    if !saw_orig_head_update
+        && remotes_to_sync.is_empty()
+        && moved_main_ref.is_none()
+        && stash_ref_update.is_none()
+        && created_cherry_pick_head.is_none()
+        && deleted_cherry_pick_head.is_none()
+        && created_auto_merge_sha.is_none()
+    {
+        return Ok(());
+    }
+
     if stage == "prepared" {
         let mut state = load_core_hook_state(repository)?;
+        let before = state.clone();
         if saw_orig_head_update {
             state.pending_prepared_orig_head_ms = Some(now_ms());
             if reflog_action()
@@ -636,11 +664,12 @@ fn handle_reference_transaction(
         {
             state.pending_pull_autostash = None;
         }
-        save_core_hook_state(repository, &state)?;
+        save_core_hook_state_if_changed(repository, &before, &state)?;
         return Ok(());
     }
 
     let mut state = load_core_hook_state(repository)?;
+    let before = state.clone();
     let stash_count_before = state.pending_stash_ref_update.take().and_then(|pending| {
         if now_ms().saturating_sub(pending.created_at_ms) <= STATE_EVENT_MAX_AGE_MS {
             Some(pending.stash_count_before)
@@ -648,7 +677,7 @@ fn handle_reference_transaction(
             None
         }
     });
-    save_core_hook_state(repository, &state)?;
+    save_core_hook_state_if_changed(repository, &before, &state)?;
 
     let stash_count_after = stash_entry_count(repository);
     let reflog_action = reflog_action();
@@ -997,8 +1026,9 @@ fn mark_pending_stash_apply(repository: &Repository) -> Result<(), GitAiError> {
 
 fn clear_pending_stash_apply(repository: &Repository) -> Result<(), GitAiError> {
     let mut state = load_core_hook_state(repository)?;
+    let before = state.clone();
     state.pending_stash_apply = None;
-    save_core_hook_state(repository, &state)
+    save_core_hook_state_if_changed(repository, &before, &state)
 }
 
 fn maybe_restore_stash_apply_without_pop(repository: &Repository) -> Result<(), GitAiError> {
@@ -1134,8 +1164,9 @@ fn get_pending_cherry_pick_state(
 
 fn clear_pending_cherry_pick_state(repository: &Repository) -> Result<(), GitAiError> {
     let mut state = load_core_hook_state(repository)?;
+    let before = state.clone();
     state.pending_cherry_pick = None;
-    save_core_hook_state(repository, &state)
+    save_core_hook_state_if_changed(repository, &before, &state)
 }
 
 fn trim_working_log_to_current_changes(
@@ -1468,6 +1499,17 @@ fn save_core_hook_state(repository: &Repository, state: &CoreHookState) -> Resul
     Ok(())
 }
 
+fn save_core_hook_state_if_changed(
+    repository: &Repository,
+    before: &CoreHookState,
+    after: &CoreHookState,
+) -> Result<(), GitAiError> {
+    if before == after {
+        return Ok(());
+    }
+    save_core_hook_state(repository, after)
+}
+
 fn core_hook_state_path(repository: &Repository) -> PathBuf {
     repository.path().join("ai").join(CORE_HOOK_STATE_FILE)
 }
@@ -1511,8 +1553,31 @@ pub fn write_core_hook_scripts(hooks_dir: &Path, git_ai_binary: &Path) -> Result
     let binary = normalize_hook_binary_path(git_ai_binary);
 
     for hook in INSTALLED_HOOKS {
+        let is_passthrough = PASSTHROUGH_ONLY_HOOKS.contains(hook);
+        let mode_marker = if is_passthrough {
+            "passthrough"
+        } else {
+            "dispatch"
+        };
+        let ai_dispatch = if is_passthrough {
+            String::new()
+        } else {
+            format!(
+                r#"
+if [ -n "$stdin_file" ]; then
+  "{bin}" hook {hook} "$@" < "$stdin_file"
+else
+  "{bin}" hook {hook} "$@"
+fi
+"#,
+                bin = binary,
+                hook = hook,
+            )
+        };
+
         let script = format!(
             r#"#!/bin/sh
+# git-ai-managed: mode={mode_marker}
 if [ "${{{skip_env}:-}}" = "1" ]; then
   exit 0
 fi
@@ -1528,11 +1593,7 @@ if [ "{hook}" = "pre-push" ] || [ "{hook}" = "reference-transaction" ] || [ "{ho
   cat > "$stdin_file"
 fi
 
-if [ -n "$stdin_file" ]; then
-  "{bin}" hook {hook} "$@" < "$stdin_file"
-else
-  "{bin}" hook {hook} "$@"
-fi
+{ai_dispatch}
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 previous_hooks_file="$script_dir/{previous_hooks_file}"
@@ -1636,8 +1697,9 @@ fi
 cleanup_stdin_file
 exit 0
 "#,
+            mode_marker = mode_marker,
             skip_env = GIT_AI_SKIP_CORE_HOOKS_ENV,
-            bin = binary,
+            ai_dispatch = ai_dispatch,
             hook = hook,
             previous_hooks_file = PREVIOUS_HOOKS_PATH_FILE,
         );
