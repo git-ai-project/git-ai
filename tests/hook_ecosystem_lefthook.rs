@@ -90,8 +90,8 @@ fn setup_lefthook(testbed: &EcosystemTestbed) {
     );
 
     testbed.run_cmd_ok(
-        "npx",
-        &["lefthook", "install"],
+        "npm",
+        &["exec", "--", "lefthook", "install"],
         Some(&testbed.repo),
         &[],
         "lefthook install hooks",

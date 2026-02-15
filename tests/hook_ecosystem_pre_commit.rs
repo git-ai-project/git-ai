@@ -7,14 +7,14 @@ use std::fs;
 fn pre_commit_real_tooling_flows_are_compatible_with_git_ai_hooks() {
     let testbed = EcosystemTestbed::new("pre-commit-real-tool-flows");
 
-    if !testbed.require_tool("python3") {
+    let Some(python) = resolve_python(&testbed) else {
         return;
-    }
+    };
     if !testbed.require_tool("pre-commit") {
         return;
     }
 
-    write_pre_commit_scripts_and_config(&testbed);
+    write_pre_commit_scripts_and_config(&testbed, python);
 
     testbed.run_cmd_ok(
         "pre-commit",
@@ -32,6 +32,12 @@ fn pre_commit_real_tooling_flows_are_compatible_with_git_ai_hooks() {
         Some(&testbed.repo),
         &[],
         "pre-commit install",
+    );
+    let pre_rebase_hook = testbed.repo.join(".git").join("hooks").join("pre-rebase");
+    assert!(
+        pre_rebase_hook.exists(),
+        "expected pre-commit to install pre-rebase hook at '{}'",
+        pre_rebase_hook.display()
     );
     testbed.install_hooks();
 
@@ -100,27 +106,30 @@ fn pre_commit_real_tooling_flows_are_compatible_with_git_ai_hooks() {
     assert_contains_prefix(&log_lines, "pre-push|");
 }
 
-fn write_pre_commit_scripts_and_config(testbed: &EcosystemTestbed) {
+fn write_pre_commit_scripts_and_config(testbed: &EcosystemTestbed, python: &str) {
     testbed.write_file(
-        "scripts/log-hook.sh",
-        "#!/bin/sh\nset -eu\nstage=\"$1\"\nshift || true\nif [ \"$stage\" = \"pre-commit\" ] && [ -f .block-precommit ]; then\n  printf '%s\\n' pre-commit-blocked >> .hook-log\n  exit 19\nfi\nif [ \"$stage\" = \"pre-push\" ]; then\n  remote_name=\"${1:-}\"\n  IFS= read -r line || true\n  printf '%s|%s|%s\\n' pre-push \"$remote_name\" \"$line\" >> .hook-log\n  exit 0\nfi\nif [ \"$stage\" = \"commit-msg\" ]; then\n  msg_file=\"${1:-}\"\n  printf '%s|%s\\n' commit-msg \"$msg_file\" >> .hook-log\n  exit 0\nfi\nif [ \"$stage\" = \"pre-rebase\" ]; then\n  upstream=\"${1:-}\"\n  printf '%s|%s\\n' pre-rebase \"$upstream\" >> .hook-log\n  exit 0\nfi\nprintf '%s\\n' \"$stage\" >> .hook-log\n",
+        "scripts/log_hook.py",
+        "import os\nimport sys\n\nstage = sys.argv[1]\nargs = sys.argv[2:]\n\nif stage == \"pre-commit\" and os.path.exists(\".block-precommit\"):\n    with open(\".hook-log\", \"a\", encoding=\"utf-8\") as f:\n        f.write(\"pre-commit-blocked\\n\")\n    raise SystemExit(19)\n\nif stage == \"pre-push\":\n    remote_name = args[0] if args else \"\"\n    line = sys.stdin.readline().rstrip(\"\\r\\n\")\n    with open(\".hook-log\", \"a\", encoding=\"utf-8\") as f:\n        f.write(f\"pre-push|{remote_name}|{line}\\\\n\")\n    raise SystemExit(0)\n\nif stage == \"commit-msg\":\n    msg_file = args[0] if args else \"\"\n    with open(\".hook-log\", \"a\", encoding=\"utf-8\") as f:\n        f.write(f\"commit-msg|{msg_file}\\\\n\")\n    raise SystemExit(0)\n\nif stage == \"pre-rebase\":\n    upstream = args[0] if args else \"\"\n    with open(\".hook-log\", \"a\", encoding=\"utf-8\") as f:\n        f.write(f\"pre-rebase|{upstream}\\\\n\")\n    raise SystemExit(0)\n\nwith open(\".hook-log\", \"a\", encoding=\"utf-8\") as f:\n    f.write(f\"{stage}\\\\n\")\n",
     );
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let path = testbed.repo.join("scripts/log-hook.sh");
-        let mut perms = fs::metadata(&path)
-            .expect("metadata for log hook")
-            .permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(path, perms).expect("set log hook executable");
+    let config = format!(
+        "repos:\n  - repo: local\n    hooks:\n      - id: precommit-marker\n        name: precommit-marker\n        entry: {} scripts/log_hook.py pre-commit\n        language: system\n        pass_filenames: false\n        stages: [pre-commit]\n      - id: commitmsg-marker\n        name: commitmsg-marker\n        entry: {} scripts/log_hook.py commit-msg\n        language: system\n        stages: [commit-msg]\n      - id: prepush-marker\n        name: prepush-marker\n        entry: {} scripts/log_hook.py pre-push\n        language: system\n        pass_filenames: false\n        stages: [pre-push]\n      - id: prerebase-marker\n        name: prerebase-marker\n        entry: {} scripts/log_hook.py pre-rebase\n        language: system\n        pass_filenames: false\n        always_run: true\n        stages: [pre-rebase]\n",
+        python, python, python, python
+    );
+    testbed.write_file(".pre-commit-config.yaml", &config);
+}
+
+fn resolve_python(testbed: &EcosystemTestbed) -> Option<&'static str> {
+    if testbed.has_command("python3") {
+        return Some("python3");
     }
-
-    testbed.write_file(
-        ".pre-commit-config.yaml",
-        "repos:\n  - repo: local\n    hooks:\n      - id: precommit-marker\n        name: precommit-marker\n        entry: scripts/log-hook.sh pre-commit\n        language: system\n        pass_filenames: false\n        stages: [pre-commit]\n      - id: commitmsg-marker\n        name: commitmsg-marker\n        entry: scripts/log-hook.sh commit-msg\n        language: system\n        stages: [commit-msg]\n      - id: prepush-marker\n        name: prepush-marker\n        entry: scripts/log-hook.sh pre-push\n        language: system\n        pass_filenames: false\n        stages: [pre-push]\n      - id: prerebase-marker\n        name: prerebase-marker\n        entry: scripts/log-hook.sh pre-rebase\n        language: system\n        pass_filenames: false\n        stages: [pre-rebase]\n",
-    );
+    if testbed.has_command("python") {
+        return Some("python");
+    }
+    if testbed.require_tool("python3") {
+        return Some("python3");
+    }
+    None
 }
 
 fn assert_contains_prefix(lines: &[String], prefix: &str) {

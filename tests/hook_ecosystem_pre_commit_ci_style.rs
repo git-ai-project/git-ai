@@ -7,32 +7,23 @@ use repos::ecosystem::EcosystemTestbed;
 fn pre_commit_ci_style_environment_is_compatible_with_git_ai_hooks() {
     let testbed = EcosystemTestbed::new("pre-commit-ci-style");
 
-    if !testbed.require_tool("python3") {
+    let Some(python) = resolve_python(&testbed) else {
         return;
-    }
+    };
     if !testbed.require_tool("pre-commit") {
         return;
     }
 
     testbed.write_file(
-        "scripts/ci-hook.sh",
-        "#!/bin/sh\nset -eu\nstage=\"$1\"\nshift || true\nprintf '%s|CI=%s\\n' \"$stage\" \"${CI:-unset}\" >> .hook-log\n",
+        "scripts/ci_hook.py",
+        "import os\nimport sys\n\nstage = sys.argv[1]\nci = os.environ.get(\"CI\", \"unset\")\nwith open(\".hook-log\", \"a\", encoding=\"utf-8\") as f:\n    f.write(f\"{stage}|CI={ci}\\\\n\")\n",
     );
 
-    #[cfg(unix)]
-    {
-        use std::fs;
-        use std::os::unix::fs::PermissionsExt;
-        let path = testbed.repo.join("scripts/ci-hook.sh");
-        let mut perms = fs::metadata(&path).expect("ci hook metadata").permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(path, perms).expect("set ci hook executable");
-    }
-
-    testbed.write_file(
-        ".pre-commit-config.yaml",
-        "repos:\n  - repo: local\n    hooks:\n      - id: ci-pre-commit\n        name: ci-pre-commit\n        entry: scripts/ci-hook.sh pre-commit\n        language: system\n        pass_filenames: false\n        stages: [pre-commit]\n      - id: ci-commit-msg\n        name: ci-commit-msg\n        entry: scripts/ci-hook.sh commit-msg\n        language: system\n        stages: [commit-msg]\n",
+    let config = format!(
+        "repos:\n  - repo: local\n    hooks:\n      - id: ci-pre-commit\n        name: ci-pre-commit\n        entry: {} scripts/ci_hook.py pre-commit\n        language: system\n        pass_filenames: false\n        stages: [pre-commit]\n      - id: ci-commit-msg\n        name: ci-commit-msg\n        entry: {} scripts/ci_hook.py commit-msg\n        language: system\n        stages: [commit-msg]\n",
+        python, python
     );
+    testbed.write_file(".pre-commit-config.yaml", &config);
 
     let pre_commit_home = testbed.root.join("ci-pre-commit-home");
     let xdg_cache_home = testbed.root.join("ci-xdg-cache");
@@ -104,4 +95,17 @@ fn pre_commit_ci_style_environment_is_compatible_with_git_ai_hooks() {
         "expected commit-msg hook log in CI mode, got {:?}",
         lines
     );
+}
+
+fn resolve_python(testbed: &EcosystemTestbed) -> Option<&'static str> {
+    if testbed.has_command("python3") {
+        return Some("python3");
+    }
+    if testbed.has_command("python") {
+        return Some("python");
+    }
+    if testbed.require_tool("python3") {
+        return Some("python3");
+    }
+    None
 }

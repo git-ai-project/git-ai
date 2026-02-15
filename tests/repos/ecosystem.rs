@@ -2,7 +2,7 @@
 
 use git_ai::commands::core_hooks::{INSTALLED_HOOKS, PREVIOUS_HOOKS_PATH_FILE};
 use git_ai::config::Config;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -54,6 +54,7 @@ impl EcosystemTestbed {
             git_ai_bin: get_binary_path().clone(),
         };
 
+        testbed.init_logs();
         testbed.init_repo();
         testbed
     }
@@ -110,6 +111,11 @@ impl EcosystemTestbed {
     }
 
     pub fn has_command(&self, tool: &str) -> bool {
+        #[cfg(windows)]
+        if let Some(_resolved) = self.resolve_windows_command(tool) {
+            return true;
+        }
+
         if let Some(path) = std::env::var_os("PATH") {
             for dir in std::env::split_paths(&path) {
                 let candidate = dir.join(tool);
@@ -469,7 +475,9 @@ impl EcosystemTestbed {
         timeout: Option<Duration>,
         label: &str,
     ) -> Output {
-        let mut cmd = Command::new(program);
+        let requested_program = program.as_ref().to_os_string();
+        let resolved_program = self.resolve_program_for_spawn(&requested_program);
+        let mut cmd = Command::new(&resolved_program);
         cmd.args(args);
         if let Some(cwd) = cwd {
             cmd.current_dir(cwd);
@@ -485,7 +493,29 @@ impl EcosystemTestbed {
         cmd.stderr(Stdio::piped());
 
         let timeout = timeout.unwrap_or(Duration::from_secs(120));
-        let mut child = cmd.spawn().expect("spawn command");
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(err) => {
+                self.append_spawn_failure_log(
+                    label,
+                    &requested_program,
+                    &resolved_program,
+                    args,
+                    cwd,
+                    &err,
+                );
+                panic!(
+                    "failed to spawn command ({}): requested={:?}, resolved={:?}, args={:?}, cwd={:?}, path_entries={:?}, error={}",
+                    label,
+                    requested_program,
+                    resolved_program,
+                    args,
+                    cwd.map(|p| p.display().to_string()),
+                    self.path_preview(),
+                    err
+                );
+            }
+        };
 
         if let Some(stdin) = stdin_data
             && let Some(mut child_stdin) = child.stdin.take()
@@ -511,14 +541,26 @@ impl EcosystemTestbed {
                     stdout,
                     stderr,
                 };
-                self.append_command_log(label, args, &output);
+                self.append_command_log(
+                    label,
+                    &requested_program,
+                    &resolved_program,
+                    args,
+                    &output,
+                );
                 return output;
             }
 
             if start.elapsed() > timeout {
                 let _ = child.kill();
                 let output = child.wait_with_output().expect("collect timed out output");
-                self.append_command_log(label, args, &output);
+                self.append_command_log(
+                    label,
+                    &requested_program,
+                    &resolved_program,
+                    args,
+                    &output,
+                );
                 panic!(
                     "command timed out after {:?} ({}): {:?}\n{}",
                     timeout,
@@ -543,7 +585,14 @@ impl EcosystemTestbed {
         cmd.env_remove("GIT_WORK_TREE");
     }
 
-    fn append_command_log(&self, label: &str, args: &[&str], output: &Output) {
+    fn append_command_log(
+        &self,
+        label: &str,
+        requested_program: &OsStr,
+        resolved_program: &OsStr,
+        args: &[&str],
+        output: &Output,
+    ) {
         let log_path = self.logs_dir.join("commands.log");
         let mut log = OpenOptions::new()
             .create(true)
@@ -552,6 +601,8 @@ impl EcosystemTestbed {
             .expect("open command log");
 
         let _ = writeln!(log, "== {} ==", label);
+        let _ = writeln!(log, "program: {:?}", requested_program);
+        let _ = writeln!(log, "resolved_program: {:?}", resolved_program);
         let _ = writeln!(log, "args: {:?}", args);
         let _ = writeln!(log, "status: {}", output.status);
         let _ = writeln!(log, "stdout:\n{}", String::from_utf8_lossy(&output.stdout));
@@ -579,6 +630,93 @@ impl EcosystemTestbed {
             format!("{}{}", stdout, stderr)
         }
     }
+
+    fn append_spawn_failure_log(
+        &self,
+        label: &str,
+        requested_program: &OsStr,
+        resolved_program: &OsStr,
+        args: &[&str],
+        cwd: Option<&Path>,
+        err: &std::io::Error,
+    ) {
+        let log_path = self.logs_dir.join("commands.log");
+        if let Ok(mut log) = OpenOptions::new().create(true).append(true).open(log_path) {
+            let _ = writeln!(log, "== {} (spawn failure) ==", label);
+            let _ = writeln!(log, "program: {:?}", requested_program);
+            let _ = writeln!(log, "resolved_program: {:?}", resolved_program);
+            let _ = writeln!(log, "args: {:?}", args);
+            let _ = writeln!(log, "cwd: {:?}", cwd.map(|path| path.display().to_string()));
+            let _ = writeln!(log, "path_entries: {:?}", self.path_preview());
+            let _ = writeln!(log, "error: {}", err);
+            let _ = writeln!(log);
+        }
+    }
+
+    fn path_preview(&self) -> Vec<String> {
+        if let Some(path) = std::env::var_os("PATH") {
+            return std::env::split_paths(&path)
+                .take(12)
+                .map(|entry| entry.display().to_string())
+                .collect();
+        }
+        Vec::new()
+    }
+
+    fn resolve_program_for_spawn(&self, program: &OsStr) -> OsString {
+        let path = Path::new(program);
+        if path.components().count() > 1 || path.is_absolute() {
+            return program.to_os_string();
+        }
+
+        #[cfg(windows)]
+        {
+            if let Some(program_str) = program.to_str()
+                && let Some(resolved) = self.resolve_windows_command(program_str)
+            {
+                return resolved.into_os_string();
+            }
+        }
+
+        program.to_os_string()
+    }
+
+    #[cfg(windows)]
+    fn resolve_windows_command(&self, command: &str) -> Option<PathBuf> {
+        let command_path = Path::new(command);
+        if command_path.components().count() > 1 || command_path.is_absolute() {
+            return command_path.exists().then(|| command_path.to_path_buf());
+        }
+
+        let path = std::env::var_os("PATH")?;
+        let has_extension = command_path.extension().is_some();
+        for dir in std::env::split_paths(&path) {
+            if has_extension {
+                let candidate = dir.join(command);
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+                continue;
+            }
+
+            for ext in ["exe", "cmd", "bat", "com"] {
+                let candidate = dir.join(format!("{}.{}", command, ext));
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
+        }
+        None
+    }
+
+    fn init_logs(&self) {
+        let log_path = self.logs_dir.join("commands.log");
+        if let Ok(mut log) = OpenOptions::new().create(true).append(true).open(log_path) {
+            let _ = writeln!(log, "scenario: {}", self.scenario);
+            let _ = writeln!(log, "root: {}", self.root.display());
+            let _ = writeln!(log);
+        }
+    }
 }
 
 impl Drop for EcosystemTestbed {
@@ -592,6 +730,15 @@ impl Drop for EcosystemTestbed {
         if fs::create_dir_all(&destination).is_err() {
             return;
         }
+        let _ = fs::write(
+            destination.join("scenario.txt"),
+            format!(
+                "scenario={}\nroot={}\nrepo={}\n",
+                self.scenario,
+                self.root.display(),
+                self.repo.display()
+            ),
+        );
 
         let _ = fs::copy(
             self.logs_dir.join("commands.log"),
