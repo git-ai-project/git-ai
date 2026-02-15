@@ -164,9 +164,9 @@ impl HookInvocationCache {
     }
 
     fn stash_count(&mut self, repository: &Repository) -> Option<usize> {
-        self.stash_count
+        *self
+            .stash_count
             .get_or_insert_with(|| stash_entry_count(repository))
-            .clone()
     }
 }
 

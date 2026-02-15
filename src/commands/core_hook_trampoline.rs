@@ -300,10 +300,10 @@ fn is_managed_hook_path(hook_path: &Path) -> bool {
 }
 
 fn expand_tilde_path(raw: &str) -> PathBuf {
-    if raw == "~" {
-        if let Some(home) = home_dir() {
-            return home;
-        }
+    if raw == "~"
+        && let Some(home) = home_dir()
+    {
+        return home;
     }
 
     if let Some(rest) = raw.strip_prefix("~/")
