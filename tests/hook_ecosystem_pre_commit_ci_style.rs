@@ -14,8 +14,6 @@ fn pre_commit_ci_style_environment_is_compatible_with_git_ai_hooks() {
         return;
     }
 
-    testbed.install_hooks();
-
     testbed.write_file(
         "scripts/ci-hook.sh",
         "#!/bin/sh\nset -eu\nstage=\"$1\"\nshift || true\nprintf '%s|CI=%s\\n' \"$stage\" \"${CI:-unset}\" >> .hook-log\n",
@@ -61,6 +59,7 @@ fn pre_commit_ci_style_environment_is_compatible_with_git_ai_hooks() {
         &ci_env,
         "pre-commit install ci-style",
     );
+    testbed.install_hooks();
 
     testbed.write_file("ci-style.txt", "ci style\n");
     testbed.run_cmd_ok(

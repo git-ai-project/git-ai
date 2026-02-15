@@ -14,7 +14,6 @@ fn pre_commit_real_tooling_flows_are_compatible_with_git_ai_hooks() {
         return;
     }
 
-    testbed.install_hooks();
     write_pre_commit_scripts_and_config(&testbed);
 
     testbed.run_cmd_ok(
@@ -34,6 +33,7 @@ fn pre_commit_real_tooling_flows_are_compatible_with_git_ai_hooks() {
         &[],
         "pre-commit install",
     );
+    testbed.install_hooks();
 
     // Commit from repo root.
     testbed.write_file("pc-root.txt", "root\n");

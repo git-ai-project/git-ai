@@ -210,12 +210,11 @@ fn setup_husky(testbed: &EcosystemTestbed, manager: PackageManager) {
             );
         }
         PackageManager::Pnpm => {
-            testbed.run_cmd_ok(
-                "pnpm",
-                &["init", "--yes"],
-                Some(&testbed.repo),
-                &[],
-                "pnpm init",
+            // pnpm v10 removed `--yes`; write a deterministic package manifest
+            // and continue with real pnpm husky install/init commands.
+            testbed.write_file(
+                "package.json",
+                "{\n  \"name\": \"husky-pnpm-test\",\n  \"version\": \"1.0.0\",\n  \"private\": true\n}\n",
             );
             testbed.run_cmd_ok(
                 "pnpm",
