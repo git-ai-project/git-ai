@@ -9,8 +9,8 @@ on:
     branches: [main]
 
 jobs:
-  test-lib-bins:
-    name: Test lib+bins on ${{ matrix.os }}
+  test:
+    name: Test on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -48,132 +48,7 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Run tests
-        run: cargo test --lib --bins -- --test-threads=${{ matrix.test_threads }}
-        env:
-          CARGO_INCREMENTAL: 0
-
-  test-integration-sharded:
-    name: Test integration shard ${{ matrix.shard_index }} on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            test_threads: 8
-            shard_index: 0
-            shard_count: 4
-          - os: ubuntu-latest
-            test_threads: 8
-            shard_index: 1
-            shard_count: 4
-          - os: ubuntu-latest
-            test_threads: 8
-            shard_index: 2
-            shard_count: 4
-          - os: ubuntu-latest
-            test_threads: 8
-            shard_index: 3
-            shard_count: 4
-          - os: macos-latest
-            test_threads: 8
-            shard_index: 0
-            shard_count: 4
-          - os: macos-latest
-            test_threads: 8
-            shard_index: 1
-            shard_count: 4
-          - os: macos-latest
-            test_threads: 8
-            shard_index: 2
-            shard_count: 4
-          - os: macos-latest
-            test_threads: 8
-            shard_index: 3
-            shard_count: 4
-          - os: windows-latest
-            test_threads: 1
-            shard_index: 0
-            shard_count: 4
-          - os: windows-latest
-            test_threads: 1
-            shard_index: 1
-            shard_count: 4
-          - os: windows-latest
-            test_threads: 1
-            shard_index: 2
-            shard_count: 4
-          - os: windows-latest
-            test_threads: 1
-            shard_index: 3
-            shard_count: 4
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          # submodules: true
-          fetch-depth: 0
-
-      - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
-
-      - name: Cache dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            ${{ runner.os != 'Windows' && 'target' || '' }}
-          key: ${{ runner.os }}-cargo-integration-shard-${{ matrix.shard_index }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-integration-shard-
-            ${{ runner.os }}-cargo-
-
-      - name: Run integration shard
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          shard_index=${{ matrix.shard_index }}
-          shard_count=${{ matrix.shard_count }}
-          test_threads=${{ matrix.test_threads }}
-
-          tests=()
-          while IFS= read -r test_bin; do
-            tests+=("$test_bin")
-          done < <(
-            find tests -maxdepth 1 -type f -name '*.rs' \
-              -print \
-              | awk -F'/' '{print $NF}' \
-              | sed -E 's@\.rs$@@' \
-              | sort
-          )
-
-          selected=()
-          for i in "${!tests[@]}"; do
-            if (( i % shard_count == shard_index )); then
-              selected+=("${tests[$i]}")
-            fi
-          done
-
-          if [ "${#selected[@]}" -eq 0 ]; then
-            echo "No integration tests selected for shard ${shard_index}/${shard_count}"
-            exit 0
-          fi
-
-          echo "Running shard ${shard_index}/${shard_count} with ${#selected[@]} test binaries:"
-          printf '  - %s\n' "${selected[@]}"
-
-          args=()
-          for test_bin in "${selected[@]}"; do
-            args+=(--test "$test_bin")
-          done
-
-          cargo test "${args[@]}" -- --test-threads="${test_threads}"
+        run: cargo test -- --test-threads=${{ matrix.test_threads }}
         env:
           CARGO_INCREMENTAL: 0
 
