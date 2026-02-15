@@ -73,11 +73,12 @@ fn hook_contract_all_installed_hooks_propagate_failures() {
 }
 
 #[test]
-fn hook_contract_forwards_args_and_stdin_for_pre_push_and_reference_transaction() {
+fn hook_contract_forwards_args_and_stdin_for_streamed_hooks() {
     let testbed = EcosystemTestbed::new("hook-contract-stdin-forwarding");
     let previous_hooks_dir = testbed.root.join("previous-hooks");
     let pre_push_marker = testbed.root.join("pre-push-forward.log");
     let reference_marker = testbed.root.join("reference-forward.log");
+    let post_rewrite_marker = testbed.root.join("post-rewrite-forward.log");
 
     testbed.write_hook_script(
         &previous_hooks_dir,
@@ -97,8 +98,17 @@ fn hook_contract_forwards_args_and_stdin_for_pre_push_and_reference_transaction(
         ),
     );
 
+    testbed.write_hook_script(
+        &previous_hooks_dir,
+        "post-rewrite",
+        &format!(
+            "#!/bin/sh\nIFS= read -r line\nprintf '%s|%s\\n' \"$1\" \"$line\" >> \"{}\"\nexit 0\n",
+            shell_escape(&post_rewrite_marker)
+        ),
+    );
+
     for hook in INSTALLED_HOOKS {
-        if *hook != "pre-push" && *hook != "reference-transaction" {
+        if *hook != "pre-push" && *hook != "reference-transaction" && *hook != "post-rewrite" {
             testbed.write_hook_script(&previous_hooks_dir, hook, "#!/bin/sh\nexit 0\n");
         }
     }
@@ -127,6 +137,18 @@ fn hook_contract_forwards_args_and_stdin_for_pre_push_and_reference_transaction(
 
     let reference_line = fs::read_to_string(&reference_marker).expect("read reference marker");
     assert!(reference_line.contains("prepared|000 111 refs/heads/main"));
+
+    testbed.run_hook_script(
+        "post-rewrite",
+        &["amend"],
+        Some("oldsha newsha\n"),
+        true,
+        "post-rewrite-forwarding",
+    );
+
+    let post_rewrite_line =
+        fs::read_to_string(&post_rewrite_marker).expect("read post-rewrite marker");
+    assert!(post_rewrite_line.contains("amend|oldsha newsha"));
 }
 
 #[test]

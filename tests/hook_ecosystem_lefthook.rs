@@ -6,6 +6,9 @@ use std::fs;
 #[test]
 fn lefthook_real_tooling_flows_are_compatible_with_git_ai_hooks() {
     let testbed = EcosystemTestbed::new("lefthook-real-tool-flows");
+    let Some(python) = resolve_python(&testbed) else {
+        return;
+    };
 
     if !testbed.require_tool("node") {
         return;
@@ -15,7 +18,7 @@ fn lefthook_real_tooling_flows_are_compatible_with_git_ai_hooks() {
     }
 
     testbed.install_hooks();
-    setup_lefthook(&testbed);
+    setup_lefthook(&testbed, python);
 
     // Root commit.
     testbed.write_file("lefthook-root.txt", "root\n");
@@ -68,7 +71,7 @@ fn lefthook_real_tooling_flows_are_compatible_with_git_ai_hooks() {
     assert_contains_prefix(&lines, "lefthook-pre-push");
 }
 
-fn setup_lefthook(testbed: &EcosystemTestbed) {
+fn setup_lefthook(testbed: &EcosystemTestbed, python: &str) {
     testbed.run_cmd_ok(
         "npm",
         &["init", "-y"],
@@ -85,9 +88,15 @@ fn setup_lefthook(testbed: &EcosystemTestbed) {
     );
 
     testbed.write_file(
-        "lefthook.yml",
-        "pre-commit:\n  commands:\n    marker:\n      run: sh -c \"if [ -f .block-lefthook ]; then printf '%s\\n' lefthook-pre-commit-blocked >> .hook-log; exit 17; fi; printf '%s\\n' lefthook-pre-commit >> .hook-log\"\ncommit-msg:\n  commands:\n    marker:\n      run: sh -c \"printf '%s\\n' lefthook-commit-msg >> .hook-log\"\npre-push:\n  commands:\n    marker:\n      run: sh -c \"printf '%s\\n' lefthook-pre-push >> .hook-log\"\n",
+        "scripts/lefthook_marker.py",
+        "import os\nimport sys\n\nstage = sys.argv[1]\nif stage == \"pre-commit\" and os.path.exists(\".block-lefthook\"):\n    with open(\".hook-log\", \"a\", encoding=\"utf-8\") as f:\n        f.write(\"lefthook-pre-commit-blocked\\n\")\n    raise SystemExit(17)\n\nwith open(\".hook-log\", \"a\", encoding=\"utf-8\") as f:\n    f.write(f\"lefthook-{stage}\\n\")\n",
     );
+
+    let config = format!(
+        "pre-commit:\n  commands:\n    marker:\n      run: {} scripts/lefthook_marker.py pre-commit\ncommit-msg:\n  commands:\n    marker:\n      run: {} scripts/lefthook_marker.py commit-msg\npre-push:\n  commands:\n    marker:\n      run: {} scripts/lefthook_marker.py pre-push\n",
+        python, python, python
+    );
+    testbed.write_file("lefthook.yml", &config);
 
     testbed.run_cmd_ok(
         "npm",
@@ -105,4 +114,17 @@ fn assert_contains_prefix(lines: &[String], prefix: &str) {
         prefix,
         lines
     );
+}
+
+fn resolve_python(testbed: &EcosystemTestbed) -> Option<&'static str> {
+    if testbed.has_command("python3") {
+        return Some("python3");
+    }
+    if testbed.has_command("python") {
+        return Some("python");
+    }
+    if testbed.require_tool("python3") {
+        return Some("python3");
+    }
+    None
 }

@@ -1530,7 +1530,7 @@ if [ "${{{skip_env}:-}}" = "1" ]; then
 fi
 
 stdin_file=""
-if [ "{hook}" = "pre-push" ] || [ "{hook}" = "reference-transaction" ]; then
+if [ "{hook}" = "pre-push" ] || [ "{hook}" = "reference-transaction" ] || [ "{hook}" = "post-rewrite" ]; then
   if command -v mktemp >/dev/null 2>&1; then
     stdin_file=$(mktemp "${{TMPDIR:-/tmp}}/git-ai-hook-stdin.XXXXXX")
   else
