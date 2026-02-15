@@ -62,6 +62,9 @@ pub fn handle_git_ai(args: &[String]) {
                 log_message("config", "info", None)
             }
         }
+        "hook" => {
+            commands::core_hooks::handle_core_hook_command(&args[1..]);
+        }
         "stats" => {
             if is_interactive_terminal() {
                 log_message("stats", "info", None)

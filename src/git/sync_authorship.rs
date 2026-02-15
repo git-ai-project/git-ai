@@ -119,8 +119,6 @@ pub fn fetch_authorship_notes(
     // Build the internal authorship fetch with explicit flags and disabled hooks
     // IMPORTANT: use repository.global_args_for_exec() to ensure -C flag is present for bare repos
     let mut fetch_authorship: Vec<String> = repository.global_args_for_exec();
-    fetch_authorship.push("-c".to_string());
-    fetch_authorship.push("core.hooksPath=/dev/null".to_string());
     fetch_authorship.push("fetch".to_string());
     fetch_authorship.push("--no-tags".to_string());
     fetch_authorship.push("--recurse-submodules=no".to_string());
@@ -191,8 +189,6 @@ pub fn push_authorship_notes(repository: &Repository, remote_name: &str) -> Resu
     let fetch_refspec = format!("+refs/notes/ai:{}", tracking_ref);
 
     let mut fetch_before_push: Vec<String> = repository.global_args_for_exec();
-    fetch_before_push.push("-c".to_string());
-    fetch_before_push.push("core.hooksPath=/dev/null".to_string());
     fetch_before_push.push("fetch".to_string());
     fetch_before_push.push("--no-tags".to_string());
     fetch_before_push.push("--recurse-submodules=no".to_string());
@@ -237,8 +233,6 @@ pub fn push_authorship_notes(repository: &Repository, remote_name: &str) -> Resu
 
     // STEP 2: Push notes without force (requires fast-forward)
     let mut push_authorship: Vec<String> = repository.global_args_for_exec();
-    push_authorship.push("-c".to_string());
-    push_authorship.push("core.hooksPath=/dev/null".to_string());
     push_authorship.push("push".to_string());
     push_authorship.push("--quiet".to_string());
     push_authorship.push("--no-recurse-submodules".to_string());

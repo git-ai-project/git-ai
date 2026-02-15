@@ -9,6 +9,7 @@ use crate::git::repo_storage::RepoStorage;
 use crate::git::rewrite_log::RewriteLogEvent;
 use crate::git::status::MAX_PATHSPEC_ARGS;
 use crate::git::sync_authorship::{fetch_authorship_notes, push_authorship_notes};
+use crate::utils::GIT_AI_SKIP_CORE_HOOKS_ENV;
 #[cfg(windows)]
 use crate::utils::is_interactive_terminal;
 
@@ -1416,6 +1417,7 @@ impl Repository {
 
             let old_tip: Option<String> = match Command::new(config::Config::get().git_cmd())
                 .args(&rp_args)
+                .env(GIT_AI_SKIP_CORE_HOOKS_ENV, "1")
                 .output()
             {
                 Ok(output) if output.status.success() => {
@@ -2002,13 +2004,18 @@ pub fn find_repository(global_args: &[String]) -> Result<Repository, GitAiError>
         workdir.display().to_string()
     };
 
-    if normalized_global_args.is_empty() {
-        normalized_global_args = vec!["-C".to_string(), command_root];
-    } else if normalized_global_args.len() == 2
-        && normalized_global_args[0] == "-C"
-        && normalized_global_args[1] != command_root
-    {
-        normalized_global_args[1] = command_root;
+    // Preserve all original global flags (`-c`, etc.) but force the effective command root.
+    if let Some(c_index) = normalized_global_args.iter().rposition(|arg| arg == "-C") {
+        let path_index = c_index + 1;
+        if path_index < normalized_global_args.len() {
+            normalized_global_args[path_index] = command_root;
+        } else {
+            // Malformed global args with trailing `-C`; recover by appending repo root.
+            normalized_global_args.push(command_root);
+        }
+    } else {
+        normalized_global_args.push("-C".to_string());
+        normalized_global_args.push(command_root);
     }
 
     // Canonicalize workdir for reliable path comparisons (especially on Windows)
@@ -2220,6 +2227,7 @@ pub fn exec_git(args: &[String]) -> Result<Output, GitAiError> {
     // TODO Make sure to handle process signals, etc.
     let mut cmd = Command::new(config::Config::get().git_cmd());
     cmd.args(args);
+    cmd.env(GIT_AI_SKIP_CORE_HOOKS_ENV, "1");
 
     #[cfg(windows)]
     {
@@ -2248,6 +2256,7 @@ pub fn exec_git_stdin(args: &[String], stdin_data: &[u8]) -> Result<Output, GitA
     // TODO Make sure to handle process signals, etc.
     let mut cmd = Command::new(config::Config::get().git_cmd());
     cmd.args(args)
+        .env(GIT_AI_SKIP_CORE_HOOKS_ENV, "1")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -2293,6 +2302,7 @@ pub fn exec_git_stdin_with_env(
     // TODO Make sure to handle process signals, etc.
     let mut cmd = Command::new(config::Config::get().git_cmd());
     cmd.args(args)
+        .env(GIT_AI_SKIP_CORE_HOOKS_ENV, "1")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());

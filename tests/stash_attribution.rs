@@ -136,6 +136,53 @@ fn test_stash_apply_named_reference() {
 }
 
 #[test]
+fn test_stash_pop_with_multiple_entries_restores_top_stash_attribution() {
+    let repo = TestRepo::new();
+
+    // Create initial commit.
+    let mut readme = repo.filename("README.md");
+    readme.set_contents(vec!["# Test Repo".to_string()]);
+    repo.stage_all_and_commit("initial commit")
+        .expect("commit should succeed");
+
+    // Stash 1 (older): file1 attribution.
+    let mut file1 = repo.filename("file1.txt");
+    file1.set_contents(vec!["older stash line".ai()]);
+    repo.git_ai(&["checkpoint", "mock_ai"])
+        .expect("checkpoint should succeed");
+    repo.git(&["stash", "push", "-m", "older"])
+        .expect("first stash should succeed");
+
+    // Stash 2 (top): file2 attribution.
+    let mut file2 = repo.filename("file2.txt");
+    file2.set_contents(vec!["top stash line".ai()]);
+    repo.git_ai(&["checkpoint", "mock_ai"])
+        .expect("checkpoint should succeed");
+    repo.git(&["stash", "push", "-m", "top"])
+        .expect("second stash should succeed");
+
+    // The top stash should have an ai-stash note even when another stash entry exists.
+    repo.git(&["notes", "--ref=ai-stash", "show", "stash@{0}"])
+        .expect("top stash should have ai-stash note");
+
+    // Pop default stash@{0} (top). Another stash entry still remains.
+    repo.git(&["stash", "pop"])
+        .expect("stash pop should succeed");
+
+    // Commit only the popped file and verify attribution comes from the top stash.
+    repo.git(&["add", "file2.txt"]).expect("add should succeed");
+    let commit = repo
+        .git(&["commit", "-m", "apply top stash"])
+        .expect("commit should succeed");
+    assert!(
+        !commit.is_empty(),
+        "commit command output should not be unexpectedly empty"
+    );
+
+    file2.assert_lines_and_blame(vec!["top stash line".ai()]);
+}
+
+#[test]
 fn test_stash_multiple_files() {
     let repo = TestRepo::new();
 

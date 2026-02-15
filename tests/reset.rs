@@ -542,3 +542,26 @@ fn test_reset_mixed_pathspec_multiple_commits() {
         "// More lib".ai(),
     ]);
 }
+
+#[test]
+fn test_reset_soft_detached_head_preserves_ai_authorship() {
+    let repo = TestRepo::new();
+
+    let mut file = repo.filename("detached.txt");
+    file.set_contents(vec!["base line".human()]);
+    repo.stage_all_and_commit("base").unwrap();
+
+    file.set_contents(vec!["base line".human(), "ai line".ai()]);
+    repo.git_ai(&["checkpoint", "mock_ai"])
+        .expect("checkpoint should succeed");
+    repo.stage_all_and_commit("ai commit").unwrap();
+
+    repo.git(&["checkout", "--detach", "HEAD"])
+        .expect("detach should succeed");
+    repo.git(&["reset", "--soft", "HEAD~1"])
+        .expect("reset --soft should succeed in detached HEAD");
+
+    repo.stage_all_and_commit("recommit from detached reset")
+        .unwrap();
+    file.assert_lines_and_blame(vec!["base line".human(), "ai line".ai()]);
+}

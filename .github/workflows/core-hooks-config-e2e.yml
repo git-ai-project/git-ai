@@ -1,4 +1,4 @@
-name: Git Core Compatibility
+name: Core Hooks Config E2E
 
 on:
   pull_request:
@@ -13,9 +13,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  git-core-tests:
-    name: Run core Git tests with git-ai
-    runs-on: ubuntu-latest
+  core-hooks-config-e2e:
+    name: Core hooks config e2e (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
       - name: Checkout code
@@ -36,12 +40,12 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ubuntu-cargo-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-core-hooks-config-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ubuntu-cargo-
+            ${{ runner.os }}-cargo-core-hooks-config-
+            ${{ runner.os }}-cargo-
 
-      - name: Build git-ai
-        run: cargo build --release --bin git-ai
-
-      - name: Run core Git compatibility tests
-        run: python3 tests/git-compat/run-core-tests.py
+      - name: Run core hooks config e2e suite
+        run: cargo test --test core_hooks_install_e2e -- --test-threads=1
+        env:
+          CARGO_INCREMENTAL: 0

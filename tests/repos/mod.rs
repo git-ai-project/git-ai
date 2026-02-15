@@ -32,41 +32,8 @@ macro_rules! subdir_test_variants {
                     ) -> Result<String, String> {
                         // Prepend -C <repo_root> to args and run from arbitrary directory
                         let arbitrary_dir = std::env::temp_dir();
-
-                        let mut full_args = vec!["-C", self.inner.path().to_str().unwrap()];
-                        full_args.extend(args);
-
-                        use std::process::Command;
-                        use $crate::repos::test_repo::get_binary_path;
-
-                        let binary_path = get_binary_path();
-                        let mut command = Command::new(binary_path);
-                        command.current_dir(&arbitrary_dir);
-                        command.args(&full_args);
-                        command.env("GIT_AI", "git");
-
-                        // Add config patch if present
-                        if let Some(patch) = &self.inner.config_patch {
-                            if let Ok(patch_json) = serde_json::to_string(patch) {
-                                command.env("GIT_AI_TEST_CONFIG_PATCH", patch_json);
-                            }
-                        }
-
-                        // Add test database path for isolation
-                        command.env("GIT_AI_TEST_DB_PATH", self.inner.test_db_path().to_str().unwrap());
-
-                        let output = command.output().expect(&format!(
-                            "Failed to execute git command with -C flag: {:?}", args
-                        ));
-
-                        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-                        if output.status.success() {
-                            Ok(if stdout.is_empty() { stderr } else { stdout })
-                        } else {
-                            Err(stderr)
-                        }
+                        self.inner
+                            .git_with_env_using_c_flag(args, &[], &arbitrary_dir)
                     }
 
                     fn git_with_env(
@@ -78,45 +45,8 @@ macro_rules! subdir_test_variants {
                         if working_dir.is_some() {
                             // If working_dir is specified, prepend -C and run from arbitrary dir
                             let arbitrary_dir = std::env::temp_dir();
-
-                            let mut full_args = vec!["-C", self.inner.path().to_str().unwrap()];
-                            full_args.extend(args);
-
-                            use std::process::Command;
-                            use $crate::repos::test_repo::get_binary_path;
-
-                            let binary_path = get_binary_path();
-                            let mut command = Command::new(binary_path);
-                            command.current_dir(&arbitrary_dir);
-                            command.args(&full_args);
-                            command.env("GIT_AI", "git");
-
-                            if let Some(patch) = &self.inner.config_patch {
-                                if let Ok(patch_json) = serde_json::to_string(patch) {
-                                    command.env("GIT_AI_TEST_CONFIG_PATCH", patch_json);
-                                }
-                            }
-
-                            // Add test database path for isolation
-                            command.env("GIT_AI_TEST_DB_PATH", self.inner.test_db_path().to_str().unwrap());
-
-                            // Apply custom env vars
-                            for (key, value) in envs {
-                                command.env(key, value);
-                            }
-
-                            let output = command.output().expect(&format!(
-                                "Failed to execute git command with -C flag and env: {:?}", args
-                            ));
-
-                            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-                            if output.status.success() {
-                                Ok(if stdout.is_empty() { stderr } else { stdout })
-                            } else {
-                                Err(stderr)
-                            }
+                            self.inner
+                                .git_with_env_using_c_flag(args, envs, &arbitrary_dir)
                         } else {
                             // No working_dir, use normal behavior
                             self.inner.git_with_env(args, envs, None)

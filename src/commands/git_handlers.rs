@@ -21,9 +21,9 @@ use crate::observability;
 use crate::observability::wrapper_performance_targets::log_performance_target_if_violated;
 #[cfg(windows)]
 use crate::utils::CREATE_NO_WINDOW;
-use crate::utils::debug_log;
 #[cfg(windows)]
 use crate::utils::is_interactive_terminal;
+use crate::utils::{GIT_AI_SKIP_CORE_HOOKS_ENV, debug_log};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 #[cfg(unix)]
@@ -505,6 +505,7 @@ fn proxy_to_git(args: &[String], exit_on_completion: bool) -> std::process::Exit
 
             let mut cmd = Command::new(config::Config::get().git_cmd());
             cmd.args(args);
+            cmd.env(GIT_AI_SKIP_CORE_HOOKS_ENV, "1");
             unsafe {
                 let setpgid_flag = should_setpgid;
                 cmd.pre_exec(move || {
@@ -525,6 +526,7 @@ fn proxy_to_git(args: &[String], exit_on_completion: bool) -> std::process::Exit
         {
             let mut cmd = Command::new(config::Config::get().git_cmd());
             cmd.args(args);
+            cmd.env(GIT_AI_SKIP_CORE_HOOKS_ENV, "1");
 
             #[cfg(windows)]
             {

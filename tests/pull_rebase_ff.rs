@@ -522,3 +522,38 @@ fn test_pull_rebase_skip_commit_does_not_map_entire_upstream_history() {
         "HEAD should have moved to upstream history after skipped rebase"
     );
 }
+
+#[test]
+fn test_failed_pull_rebase_without_autostash_does_not_leak_stale_ai_metadata() {
+    let setup = setup_divergent_pull_test();
+    let local = setup.local;
+
+    // Create uncommitted AI changes, then run pull --rebase without autostash.
+    let mut dirty = local.filename("dirty.txt");
+    dirty.set_contents(vec!["stale ai line".ai()]);
+    local
+        .git_ai(&["checkpoint", "mock_ai"])
+        .expect("checkpoint should succeed");
+
+    let failed_pull = local.git(&["pull", "--rebase"]);
+    assert!(failed_pull.is_err(), "dirty pull --rebase should fail");
+
+    // Drop uncommitted changes and complete a clean pull --rebase.
+    local
+        .git(&["reset", "--hard", "HEAD"])
+        .expect("hard reset should succeed");
+    local
+        .git(&["pull", "--rebase"])
+        .expect("clean pull --rebase should succeed");
+
+    // A later human-only commit must not inherit stale AI prompt metadata.
+    let mut human_only = local.filename("human.txt");
+    human_only.set_contents(vec!["human only".human()]);
+    let final_commit = local
+        .stage_all_and_commit("human follow-up")
+        .expect("human follow-up commit should succeed");
+    assert!(
+        final_commit.authorship_log.metadata.prompts.is_empty(),
+        "stale pull-autostash attribution leaked into later human-only commit"
+    );
+}
