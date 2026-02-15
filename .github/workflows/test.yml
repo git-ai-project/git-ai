@@ -18,16 +18,10 @@ jobs:
         include:
           - os: ubuntu-latest
             test_threads: 8
-            test_scope: ""
-            test_skip: ""
           - os: macos-latest
             test_threads: 8
-            test_scope: ""
-            test_skip: ""
           - os: windows-latest
             test_threads: 1
-            test_scope: "--lib --bins"
-            test_skip: "--skip previous_hooks_self_reference_does_not_recurse_or_hang"
 
     steps:
       - name: Checkout code
@@ -54,7 +48,7 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Run tests
-        run: cargo test ${{ matrix.test_scope }} -- --test-threads=${{ matrix.test_threads }} ${{ matrix.test_skip }}
+        run: cargo test -- --test-threads=${{ matrix.test_threads }}
         env:
           CARGO_INCREMENTAL: 0
 
