@@ -366,11 +366,18 @@ jobs:
         with:
           tag_name: ${{ steps.release-meta.outputs.tag_name }}
           name: ${{ steps.release-meta.outputs.release_name }}
+          generate_release_notes: true
           body: |
             ## git-ai ${{ steps.release-meta.outputs.tag_name }}
 
             ### Release Channel
             `${{ steps.release-meta.outputs.channel_label }}`
+
+            ${{ steps.release-meta.outputs.prerelease != 'true' && '---' || '' }}
+
+            ${{ steps.release-meta.outputs.prerelease != 'true' && '> **Detailed AI-generated changelog is being generated and will appear here shortly...**' || '' }}
+
+            ${{ steps.release-meta.outputs.prerelease != 'true' && '---' || '' }}
 
             ### Installation
             Install this specific version with checksum verification:

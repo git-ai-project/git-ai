@@ -1,0 +1,177 @@
+name: Update Changelog
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag to generate changelog for (e.g. v1.0.0). Must be an existing release.'
+        required: true
+        type: string
+      dry_run:
+        description: 'Dry run - generate changelog but skip commit and release update'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  update-changelog:
+    name: Generate AI Changelog
+    runs-on: ubuntu-latest
+    if: >-
+      (github.event_name == 'workflow_dispatch') ||
+      (github.event.release.draft == false && github.event.release.prerelease == false)
+
+    steps:
+      - name: Set release tag
+        id: config
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          EVENT_RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "release_tag=$INPUT_RELEASE_TAG" >> "$GITHUB_OUTPUT"
+            echo "dry_run=$INPUT_DRY_RUN" >> "$GITHUB_OUTPUT"
+          else
+            echo "release_tag=$EVENT_RELEASE_TAG" >> "$GITHUB_OUTPUT"
+            echo "dry_run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate API key
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "::error::OPENAI_API_KEY secret is not configured. This is required for changelog generation."
+            exit 1
+          fi
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Get release body
+        id: release-body
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.config.outputs.release_tag }}
+        run: |
+          BODY=$(gh release view "$RELEASE_TAG" --json body --jq '.body')
+          DELIMITER="BODY_EOF_$(openssl rand -hex 8)"
+          {
+            echo "body<<$DELIMITER"
+            echo "$BODY"
+            echo "$DELIMITER"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Generate changelog with AI
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          RELEASE_TAG: ${{ steps.config.outputs.release_tag }}
+          RELEASE_BODY: ${{ github.event_name == 'workflow_dispatch' && steps.release-body.outputs.body || github.event.release.body }}
+        run: |
+          npx @nyaomaru/changelog-bot@latest \
+            --release-tag "$RELEASE_TAG" \
+            --release-name "$RELEASE_TAG" \
+            --release-body "$RELEASE_BODY" \
+            --changelog-path CHANGELOG.md \
+            --provider openai
+
+      - name: Show generated changelog (dry run)
+        if: steps.config.outputs.dry_run == 'true'
+        run: |
+          echo "=== Generated CHANGELOG.md ==="
+          cat CHANGELOG.md
+          echo ""
+          echo "=== Dry run complete - no commits or release updates made ==="
+
+      - name: Commit and push CHANGELOG.md
+        id: commit-changelog
+        if: steps.config.outputs.dry_run == 'false'
+        env:
+          RELEASE_TAG: ${{ steps.config.outputs.release_tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add CHANGELOG.md
+          if git diff --cached --quiet; then
+            echo "No changes to CHANGELOG.md"
+            echo "committed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git commit -m "docs: update CHANGELOG.md for ${RELEASE_TAG} [skip ci]"
+          git push origin HEAD:main
+          echo "committed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Extract changelog entry for release notes
+        if: steps.config.outputs.dry_run == 'false' && steps.commit-changelog.outputs.committed == 'true'
+        id: extract
+        env:
+          RELEASE_TAG: ${{ steps.config.outputs.release_tag }}
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          ESCAPED_VERSION=$(echo "$VERSION" | sed 's/\./\\./g')
+          ESCAPED_TAG=$(echo "$RELEASE_TAG" | sed 's/\./\\./g')
+
+          ENTRY=$(awk "/^## \\[${ESCAPED_VERSION}\\]/{found=1; next} /^## \\[/{if(found) exit} found{print}" CHANGELOG.md)
+
+          if [ -z "$ENTRY" ]; then
+            ENTRY=$(awk "/^## ${ESCAPED_TAG}/{found=1; next} /^## /{if(found) exit} found{print}" CHANGELOG.md)
+          fi
+
+          DELIMITER="ENTRY_EOF_$(openssl rand -hex 8)"
+          {
+            echo "entry<<$DELIMITER"
+            echo "$ENTRY"
+            echo "$DELIMITER"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Update release notes
+        if: steps.config.outputs.dry_run == 'false' && steps.commit-changelog.outputs.committed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHANGELOG_ENTRY: ${{ steps.extract.outputs.entry }}
+          RELEASE_TAG: ${{ steps.config.outputs.release_tag }}
+        run: |
+          CURRENT_BODY=$(gh release view "$RELEASE_TAG" --json body --jq '.body')
+          PLACEHOLDER='> **Detailed AI-generated changelog is being generated and will appear here shortly...**'
+
+          export CURRENT_BODY PLACEHOLDER
+
+          python3 << 'PYTHON_SCRIPT'
+          import os, re
+
+          body = os.environ['CURRENT_BODY']
+          entry = os.environ['CHANGELOG_ENTRY']
+          placeholder = os.environ['PLACEHOLDER']
+
+          section = "### What's Changed\n\n" + entry
+
+          pattern = r'---\s*\n\s*' + re.escape(placeholder) + r'\s*\n\s*---'
+          new_body, count = re.subn(pattern, section, body)
+
+          if count == 0:
+              new_body = body + '\n\n' + section
+
+          with open('/tmp/release-body.txt', 'w') as f:
+              f.write(new_body)
+          PYTHON_SCRIPT
+
+          gh release edit "$RELEASE_TAG" --notes-file /tmp/release-body.txt
+          echo "Updated release notes for $RELEASE_TAG"
