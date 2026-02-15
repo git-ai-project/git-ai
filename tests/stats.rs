@@ -1,3 +1,4 @@
+#[macro_use]
 mod repos;
 use git_ai::authorship::stats::CommitStats;
 use insta::assert_debug_snapshot;
@@ -190,6 +191,11 @@ fn test_stats_cli_range() {
 #[test]
 fn test_stats_cli_empty_tree_range() {
     let repo = TestRepo::new();
+    let base_commit_count = repo
+        .git(&["rev-list", "--count", "HEAD"])
+        .ok()
+        .and_then(|count| count.trim().parse::<usize>().ok())
+        .unwrap_or(0);
 
     // First commit: AI line
     let mut file = repo.filename("history.txt");
@@ -218,9 +224,9 @@ fn test_stats_cli_empty_tree_range() {
         serde_json::from_str(&output).unwrap();
 
     // Entire history from empty tree to HEAD:
-    // - 2 commits in range
+    // - base commits (e.g., worktree bootstrap) + 2 new commits in range
     // - 1 AI-added line, 1 human-added line in final diff
-    assert_eq!(stats.authorship_stats.total_commits, 2);
+    assert_eq!(stats.authorship_stats.total_commits, base_commit_count + 2);
     assert_eq!(stats.range_stats.git_diff_added_lines, 2);
     assert_eq!(stats.range_stats.ai_additions, 1);
     // human_additions is computed as git_diff_added_lines - ai_accepted
@@ -619,4 +625,17 @@ fn test_post_commit_large_ignored_files_do_not_trigger_skip_warning() {
     assert_eq!(stats.git_diff_added_lines, 0);
     assert_eq!(stats.ai_additions, 0);
     assert_eq!(stats.human_additions, 0);
+}
+
+worktree_test_wrappers! {
+    test_authorship_log_stats,
+    test_stats_cli_range,
+    test_stats_cli_empty_tree_range,
+    test_markdown_stats_deletion_only,
+    test_markdown_stats_all_human,
+    test_markdown_stats_all_ai,
+    test_markdown_stats_mixed,
+    test_markdown_stats_no_mixed,
+    test_markdown_stats_minimal_human,
+    test_markdown_stats_formatting,
 }
