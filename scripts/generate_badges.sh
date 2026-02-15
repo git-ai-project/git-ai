@@ -56,8 +56,8 @@ with open('$png','rb') as f:
       <stop offset="100%" stop-color="#16A34A"/>
     </linearGradient>
     <linearGradient id="gray-${icon}" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#E5E7EB"/>
-      <stop offset="100%" stop-color="#D1D5DB"/>
+      <stop offset="0%" stop-color="#F3F4F6"/>
+      <stop offset="100%" stop-color="#E5E7EB"/>
     </linearGradient>
     <filter id="shadow-${icon}" x="-2%" y="-2%" width="104%" height="104%">
       <feDropShadow dx="0" dy="1" stdDeviation="1" flood-color="#000000" flood-opacity="0.1"/>
