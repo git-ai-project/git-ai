@@ -48,7 +48,7 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Run wrapper/core-hooks rewrite regression tests
-        run: cargo test --test corehooks_wrapper_regression -- --test-threads=1
+        run: cargo test --features core-hooks-regression --test corehooks_wrapper_regression -- --test-threads=1
         env:
           CARGO_INCREMENTAL: 0
           GIT_AI_TEST_GIT_MODE: ${{ matrix.git_mode }}

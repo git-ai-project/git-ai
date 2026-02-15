@@ -1,3 +1,5 @@
+#![cfg(feature = "core-hooks-regression")]
+
 mod repos;
 
 use git_ai::git::repository::find_repository_in_path;
