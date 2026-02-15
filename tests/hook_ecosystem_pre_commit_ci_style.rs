@@ -16,7 +16,7 @@ fn pre_commit_ci_style_environment_is_compatible_with_git_ai_hooks() {
 
     testbed.write_file(
         "scripts/ci_hook.py",
-        "import os\nimport sys\n\nstage = sys.argv[1]\nci = os.environ.get(\"CI\", \"unset\")\nwith open(\".hook-log\", \"a\", encoding=\"utf-8\") as f:\n    f.write(f\"{stage}|CI={ci}\\\\n\")\n",
+        "import os\nimport sys\n\nstage = sys.argv[1]\nci = os.environ.get(\"CI\", \"unset\")\nwith open(\".hook-log\", \"a\", encoding=\"utf-8\") as f:\n    f.write(f\"{stage}|CI={ci}\\n\")\n",
     );
 
     let config = format!(
