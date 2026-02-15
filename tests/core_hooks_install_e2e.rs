@@ -1,3 +1,5 @@
+#![cfg(feature = "core-hooks-e2e")]
+
 mod repos;
 
 use git_ai::commands::core_hooks::{INSTALLED_HOOKS, PREVIOUS_HOOKS_PATH_FILE};

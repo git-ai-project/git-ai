@@ -46,6 +46,6 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Run core hooks config e2e suite
-        run: cargo test --test core_hooks_install_e2e -- --test-threads=1
+        run: cargo test --features core-hooks-e2e --test core_hooks_install_e2e -- --test-threads=1
         env:
           CARGO_INCREMENTAL: 0

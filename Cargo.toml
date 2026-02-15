@@ -37,6 +37,7 @@ toml = "0.8"
 [features]
 test-support = ["git2"]
 keyring = ["dep:keyring"]
+core-hooks-e2e = []
 
 [dev-dependencies]
 git-ai = { path = ".", features = ["test-support"] }
