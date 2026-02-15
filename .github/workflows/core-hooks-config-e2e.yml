@@ -8,6 +8,10 @@ on:
   merge_group:
     branches: [main]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   core-hooks-config-e2e:
     name: Core hooks config e2e (${{ matrix.os }})
