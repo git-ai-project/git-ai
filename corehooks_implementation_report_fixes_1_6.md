@@ -117,3 +117,66 @@ Largest remaining costs in corehooks path are high per-invocation hook runtime o
 - one expensive `reference-transaction` callback (~84ms)
 
 These dominate the remaining gap after fixes 1-6.
+
+## Follow-up optimization round (post fixes 1-6)
+
+Date: 2026-02-15
+
+Implemented additional high-impact optimizations focused on process fan-out and hook no-op callbacks:
+
+- Hook repository resolution fast path from hook env (`GIT_DIR` / `GIT_WORK_TREE`) before `rev-parse`.
+- Hook cache improvements:
+  - reflog subject from `.git/logs/HEAD` (fallback to git command),
+  - faster `HEAD` resolution (`rev-parse HEAD`),
+  - post-commit parent/reflog reuse.
+- Removed pre/post-commit state-file churn for `pending_commit_base_head`.
+- Internal git subprocess hardening:
+  - force `-c core.hooksPath=/dev/null` for internal `exec_git*` calls to prevent hook fan-out from git-ai’s own git commands.
+- Added trampoline chain-skip mode (`GITAI_TRAMPOLINE_SKIP_CHAIN`) and script-level prefilters for hot hooks:
+  - `reference-transaction` no-op fast paths,
+  - `post-index-change` fast path.
+- Added `pre-commit` launcher prefilter:
+  - skip internal pre-commit dispatch when `.git/ai/working_logs` is absent/empty (still chains user hooks).
+- Reduced shell shim overhead in passthrough/prefilter scripts while preserving chaining and failure propagation semantics.
+
+### Follow-up performance validation (release build)
+
+#### Realistic no-AI loop (20x `add+commit`, 5 runs)
+
+- Wrapper runs (ms): `2577.47`, `2446.97`, `2416.86`, `2446.39`, `2553.55`
+- Corehooks runs (ms): `2713.99`, `2686.92`, `2541.70`, `2507.14`, `2509.81`
+- Medians:
+  - Wrapper: `2446.97 ms`
+  - Corehooks: `2541.70 ms`
+- Ratio:
+  - `2541.70 / 2446.97 = 1.039x`
+
+#### AI-active loop (10x `checkpoint mock_ai` + `add+commit`, 3 runs)
+
+- Wrapper runs (ms): `2271.50`, `2251.68`, `2373.54`
+- Corehooks runs (ms): `2523.11`, `2430.59`, `2540.18`
+- Medians:
+  - Wrapper: `2271.50 ms`
+  - Corehooks: `2523.11 ms`
+- Ratio:
+  - `2523.11 / 2271.50 = 1.111x`
+
+### Per-hook no-op callback targets (steady-state microbench, warm tail)
+
+- `reference-transaction` irrelevant callback:
+  - average: `3.382 ms`
+  - median: `3.345 ms`
+- `post-index-change` callback:
+  - average: `3.047 ms`
+  - median: `2.961 ms`
+
+### Updated target status
+
+Target from plan: corehooks should be <= `1.15x` wrapper.
+
+Measured after follow-up round:
+
+- no-AI commit workload: `1.039x`
+- AI-active commit workload: `1.111x`
+
+Result: target met while preserving hook contract and rewrite/authorship test suites.

@@ -9,9 +9,9 @@ use crate::git::repo_storage::RepoStorage;
 use crate::git::rewrite_log::RewriteLogEvent;
 use crate::git::status::MAX_PATHSPEC_ARGS;
 use crate::git::sync_authorship::{fetch_authorship_notes, push_authorship_notes};
-use crate::utils::GIT_AI_SKIP_CORE_HOOKS_ENV;
 #[cfg(windows)]
 use crate::utils::is_interactive_terminal;
+use crate::utils::{GIT_AI_GIT_CMD_ENV, GIT_AI_SKIP_CORE_HOOKS_ENV};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1415,7 +1415,9 @@ impl Repository {
             rp_args.push("--verify".to_string());
             rp_args.push(target_ref.clone());
 
-            let old_tip: Option<String> = match Command::new(config::Config::get().git_cmd())
+            let old_tip: Option<String> = match Command::new(resolved_git_cmd())
+                .arg("-c")
+                .arg(format!("core.hooksPath={}", DISABLED_HOOKS_PATH))
                 .args(&rp_args)
                 .env(GIT_AI_SKIP_CORE_HOOKS_ENV, "1")
                 .output()
@@ -1936,6 +1938,61 @@ pub fn find_repository(global_args: &[String]) -> Result<Repository, GitAiError>
     find_repository_bare_aware(global_args)
 }
 
+/// Resolve repository paths directly from hook environment variables when available.
+///
+/// This avoids extra `git rev-parse` subprocesses on hot hook paths where Git already
+/// provides `GIT_DIR`/`GIT_WORK_TREE`.
+pub fn find_repository_from_hook_env() -> Result<Repository, GitAiError> {
+    let git_dir_raw = std::env::var_os("GIT_DIR")
+        .ok_or_else(|| GitAiError::Generic("GIT_DIR is not set".to_string()))?;
+
+    let cwd = std::env::current_dir().map_err(GitAiError::IoError)?;
+    let git_dir = absolutize_path_from_base(&cwd, Path::new(&git_dir_raw));
+
+    let work_tree_env = std::env::var_os("GIT_WORK_TREE")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .map(|path| absolutize_path_from_base(&cwd, &path));
+
+    let (workdir, is_bare) = if let Some(work_tree) = work_tree_env {
+        (work_tree, false)
+    } else if git_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name == ".git")
+        .unwrap_or(false)
+    {
+        let parent = git_dir.parent().ok_or_else(|| {
+            GitAiError::Generic(format!("Hook GIT_DIR has no parent: {}", git_dir.display()))
+        })?;
+        (parent.to_path_buf(), false)
+    } else if cwd.join(".git").exists() {
+        (cwd.clone(), false)
+    } else {
+        let parent = git_dir.parent().ok_or_else(|| {
+            GitAiError::Generic(format!("Hook GIT_DIR has no parent: {}", git_dir.display()))
+        })?;
+        (parent.to_path_buf(), true)
+    };
+
+    let command_root = if is_bare {
+        git_dir.display().to_string()
+    } else {
+        workdir.display().to_string()
+    };
+    let global_args = vec!["-C".to_string(), command_root];
+
+    build_repository_from_paths(&global_args, git_dir, workdir, is_bare)
+}
+
+fn absolutize_path_from_base(base: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    }
+}
+
 fn try_find_repository_non_bare_fast(global_args: &[String]) -> Result<Repository, GitAiError> {
     let mut args = global_args.to_owned();
     args.push("rev-parse".to_string());
@@ -2288,10 +2345,27 @@ pub fn group_files_by_repository(
 }
 
 /// Helper to execute a git command
+fn resolved_git_cmd() -> String {
+    if let Ok(cmd) = std::env::var(GIT_AI_GIT_CMD_ENV)
+        && !cmd.trim().is_empty()
+    {
+        return cmd;
+    }
+    config::Config::get().git_cmd().to_string()
+}
+
+#[cfg(windows)]
+const DISABLED_HOOKS_PATH: &str = "NUL";
+#[cfg(not(windows))]
+const DISABLED_HOOKS_PATH: &str = "/dev/null";
+
+/// Helper to execute a git command
 pub fn exec_git(args: &[String]) -> Result<Output, GitAiError> {
     // TODO Make sure to handle process signals, etc.
-    let mut cmd = Command::new(config::Config::get().git_cmd());
-    cmd.args(args);
+    let mut cmd = Command::new(resolved_git_cmd());
+    cmd.arg("-c")
+        .arg(format!("core.hooksPath={}", DISABLED_HOOKS_PATH))
+        .args(args);
     cmd.env(GIT_AI_SKIP_CORE_HOOKS_ENV, "1");
 
     #[cfg(windows)]
@@ -2319,8 +2393,10 @@ pub fn exec_git(args: &[String]) -> Result<Output, GitAiError> {
 /// Helper to execute a git command with data provided on stdin
 pub fn exec_git_stdin(args: &[String], stdin_data: &[u8]) -> Result<Output, GitAiError> {
     // TODO Make sure to handle process signals, etc.
-    let mut cmd = Command::new(config::Config::get().git_cmd());
-    cmd.args(args)
+    let mut cmd = Command::new(resolved_git_cmd());
+    cmd.arg("-c")
+        .arg(format!("core.hooksPath={}", DISABLED_HOOKS_PATH))
+        .args(args)
         .env(GIT_AI_SKIP_CORE_HOOKS_ENV, "1")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -2365,8 +2441,10 @@ pub fn exec_git_stdin_with_env(
     stdin_data: &[u8],
 ) -> Result<Output, GitAiError> {
     // TODO Make sure to handle process signals, etc.
-    let mut cmd = Command::new(config::Config::get().git_cmd());
-    cmd.args(args)
+    let mut cmd = Command::new(resolved_git_cmd());
+    cmd.arg("-c")
+        .arg(format!("core.hooksPath={}", DISABLED_HOOKS_PATH))
+        .args(args)
         .env(GIT_AI_SKIP_CORE_HOOKS_ENV, "1")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())

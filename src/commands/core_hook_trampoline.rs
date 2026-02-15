@@ -2,7 +2,9 @@ use crate::commands::core_hooks::{
     PASSTHROUGH_ONLY_HOOKS, PREVIOUS_HOOKS_PATH_FILE, managed_core_hooks_dir,
     run_core_hook_best_effort,
 };
-use crate::utils::{GIT_AI_SKIP_CORE_HOOKS_ENV, debug_log};
+use crate::utils::{
+    GIT_AI_GIT_CMD_ENV, GIT_AI_SKIP_CORE_HOOKS_ENV, GIT_AI_TRAMPOLINE_SKIP_CHAIN_ENV, debug_log,
+};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Write};
@@ -19,6 +21,14 @@ pub fn handle_hook_trampoline_command(args: &[String]) {
 
     if std::env::var(GIT_AI_SKIP_CORE_HOOKS_ENV).as_deref() == Ok("1") {
         return;
+    }
+
+    if std::env::var_os(GIT_AI_GIT_CMD_ENV).is_none() {
+        // Hook paths are hot; keep git command resolution local and avoid loading full config.
+        // SAFETY: set once per process for this hook subprocess.
+        unsafe {
+            std::env::set_var(GIT_AI_GIT_CMD_ENV, "git");
+        }
     }
 
     let hook_name = args[0].as_str();
@@ -39,10 +49,12 @@ pub fn handle_hook_trampoline_command(args: &[String]) {
         run_core_hook_best_effort(hook_name, hook_args, stdin_string.as_deref());
     }
 
-    if let Some(status) = run_chained_hook(hook_name, hook_args, stdin_bytes.as_slice()) {
-        if !status.success() {
-            exit_with_status(status);
-        }
+    let skip_chain = std::env::var(GIT_AI_TRAMPOLINE_SKIP_CHAIN_ENV).as_deref() == Ok("1");
+    if !skip_chain
+        && let Some(status) = run_chained_hook(hook_name, hook_args, stdin_bytes.as_slice())
+        && !status.success()
+    {
+        exit_with_status(status);
     }
 }
 
@@ -94,24 +106,38 @@ fn should_dispatch_to_core_hook(
 fn reference_transaction_has_relevant_refs(stdin: &str) -> bool {
     for line in stdin.lines() {
         let mut parts = line.split_whitespace();
-        let _old = parts.next();
-        let _new = parts.next();
+        let old = match parts.next() {
+            Some(old) => old,
+            None => continue,
+        };
+        let new = match parts.next() {
+            Some(new) => new,
+            None => continue,
+        };
         let reference = match parts.next() {
             Some(reference) => reference,
             None => continue,
         };
 
+        if old == new {
+            continue;
+        }
+
         if reference == "ORIG_HEAD"
             || reference == "refs/stash"
             || reference == "CHERRY_PICK_HEAD"
-            || reference == "AUTO_MERGE"
             || reference.starts_with("refs/remotes/")
+            || (reference == "AUTO_MERGE" && is_zero_oid(old) && !is_zero_oid(new))
         {
             return true;
         }
     }
 
     false
+}
+
+fn is_zero_oid(oid: &str) -> bool {
+    !oid.is_empty() && oid.chars().all(|c| c == '0')
 }
 
 fn has_pending_stash_apply_marker() -> bool {

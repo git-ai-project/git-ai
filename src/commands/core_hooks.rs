@@ -9,12 +9,16 @@ use crate::commands::hooks::stash_hooks::{
 };
 use crate::error::GitAiError;
 use crate::git::cli_parser::ParsedGitInvocation;
-use crate::git::repository::{Repository, find_repository, find_repository_in_path};
+use crate::git::repository::{
+    Repository, find_repository, find_repository_from_hook_env, find_repository_in_path,
+};
 use crate::git::rewrite_log::{
     MergeSquashEvent, RebaseCompleteEvent, ResetEvent, ResetKind, RewriteLogEvent,
 };
 use crate::git::sync_authorship::{fetch_authorship_notes, push_authorship_notes};
-use crate::utils::{GIT_AI_SKIP_CORE_HOOKS_ENV, debug_log};
+use crate::utils::{
+    GIT_AI_GIT_CMD_ENV, GIT_AI_SKIP_CORE_HOOKS_ENV, GIT_AI_TRAMPOLINE_SKIP_CHAIN_ENV, debug_log,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -116,22 +120,47 @@ enum RefTxnActionClass {
 
 #[derive(Debug, Default)]
 struct HookInvocationCache {
+    head_reflog_entry: Option<Option<HeadReflogEntry>>,
     reflog_subject: Option<Option<String>>,
     head_sha: Option<Option<String>>,
     stash_count: Option<Option<usize>>,
 }
 
+#[derive(Debug, Clone)]
+struct HeadReflogEntry {
+    old_sha: String,
+    new_sha: String,
+    subject: String,
+}
+
 impl HookInvocationCache {
+    fn head_reflog_entry(&mut self, repository: &Repository) -> Option<HeadReflogEntry> {
+        if self.head_reflog_entry.is_none() {
+            self.head_reflog_entry = Some(read_last_head_reflog_entry(repository));
+        }
+        self.head_reflog_entry.clone().flatten()
+    }
+
     fn reflog_subject(&mut self, repository: &Repository) -> Option<String> {
-        self.reflog_subject
-            .get_or_insert_with(|| reflog_subject(repository))
-            .clone()
+        if self.reflog_subject.is_none() {
+            let subject = self
+                .head_reflog_entry(repository)
+                .map(|entry| entry.subject)
+                .or_else(|| reflog_subject(repository));
+            self.reflog_subject = Some(subject);
+        }
+        self.reflog_subject.clone().flatten()
     }
 
     fn head_sha(&mut self, repository: &Repository) -> Option<String> {
-        self.head_sha
-            .get_or_insert_with(|| repository.head().ok().and_then(|h| h.target().ok()))
-            .clone()
+        if self.head_sha.is_none() {
+            let head_sha = self
+                .head_reflog_entry(repository)
+                .map(|entry| entry.new_sha)
+                .or_else(|| rev_parse(repository, "HEAD"));
+            self.head_sha = Some(head_sha);
+        }
+        self.head_sha.clone().flatten()
     }
 
     fn stash_count(&mut self, repository: &Repository) -> Option<usize> {
@@ -179,6 +208,10 @@ pub fn run_core_hook_best_effort(
 }
 
 fn find_repository_for_hook() -> Result<Repository, GitAiError> {
+    if let Ok(repo) = find_repository_from_hook_env() {
+        return Ok(repo);
+    }
+
     if let Ok(repo) = find_repository(&[]) {
         return Ok(repo);
     }
@@ -249,25 +282,19 @@ fn handle_pre_commit(repository: &mut Repository) -> Result<(), GitAiError> {
 
     // Mirrors wrapper pre-commit behavior.
     let _ = crate::commands::hooks::commit_hooks::commit_pre_command_hook(&parsed, repository);
-
-    let mut state = load_core_hook_state(repository)?;
-    let before = state.clone();
-    state.pending_commit_base_head = repository.head().ok().and_then(|h| h.target().ok());
-    save_core_hook_state_if_changed(repository, &before, &state)?;
     Ok(())
 }
 
 fn handle_post_commit(repository: &mut Repository) -> Result<(), GitAiError> {
     let mut cache = HookInvocationCache::default();
+    let reflog_entry = cache.head_reflog_entry(repository);
+    let previous_head_from_reflog = reflog_entry
+        .as_ref()
+        .and_then(|entry| non_zero_oid(entry.old_sha.as_str()));
     let head_sha = match cache.head_sha(repository) {
         Some(sha) => sha,
         None => return Ok(()),
     };
-
-    let mut state = load_core_hook_state(repository)?;
-    let before = state.clone();
-    let original_commit = state.pending_commit_base_head.take();
-    save_core_hook_state_if_changed(repository, &before, &state)?;
 
     let rebase_in_progress = repository.path().join("rebase-merge").exists()
         || repository.path().join("rebase-apply").exists();
@@ -282,11 +309,9 @@ fn handle_post_commit(repository: &mut Repository) -> Result<(), GitAiError> {
             .and_then(|obj| obj.peel_to_commit())
             .map(|commit| commit.id())
             .ok();
-        let original_head = repository
-            .find_commit(head_sha.clone())
-            .ok()
-            .and_then(|c| c.parent(0).ok())
-            .map(|p| p.id());
+        let original_head = previous_head_from_reflog
+            .clone()
+            .or_else(|| first_parent_of_commit(repository, &head_sha));
 
         if let (Some(source_sha), Some(original_head)) = (source_sha, original_head) {
             let commit_author = get_commit_default_author(repository, &[]);
@@ -326,9 +351,11 @@ fn handle_post_commit(repository: &mut Repository) -> Result<(), GitAiError> {
 
     // `git commit --amend` triggers both post-commit and post-rewrite (amend).
     // Skip post-commit rewrite handling here so post-rewrite remains the single source of truth.
-    let is_amend_rewrite = original_commit
+    let first_parent = first_parent_of_commit(repository, &head_sha);
+    let is_amend_rewrite = previous_head_from_reflog
         .as_ref()
-        .map(|orig| !new_commit_has_parent(repository, &head_sha, orig))
+        .zip(first_parent.as_ref())
+        .map(|(old_head, parent)| old_head != parent)
         .unwrap_or(false)
         || reflog
             .as_deref()
@@ -340,6 +367,7 @@ fn handle_post_commit(repository: &mut Repository) -> Result<(), GitAiError> {
     }
 
     // Regular commit path.
+    let original_commit = previous_head_from_reflog.or(first_parent);
     let commit_author = get_commit_default_author(repository, &[]);
     repository.handle_rewrite_log_event(
         RewriteLogEvent::commit(original_commit, head_sha),
@@ -1061,6 +1089,48 @@ fn build_rebase_complete_event_from_start(
     ))
 }
 
+fn rev_parse(repository: &Repository, revision: &str) -> Option<String> {
+    let mut args = repository.global_args_for_exec();
+    args.push("rev-parse".to_string());
+    args.push(revision.to_string());
+
+    let output = crate::git::repository::exec_git(&args).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let resolved = String::from_utf8(output.stdout).ok()?;
+    let resolved = resolved.trim();
+    if resolved.is_empty() {
+        None
+    } else {
+        Some(resolved.to_string())
+    }
+}
+
+fn read_last_head_reflog_entry(repository: &Repository) -> Option<HeadReflogEntry> {
+    let head_log_path = repository.path().join("logs").join("HEAD");
+    let content = fs::read_to_string(head_log_path).ok()?;
+    let line = content.lines().next_back()?.trim();
+    if line.is_empty() {
+        return None;
+    }
+
+    let (meta, subject) = line.split_once('\t')?;
+    let mut parts = meta.split_whitespace();
+    let old_sha = parts.next()?.to_string();
+    let new_sha = parts.next()?.to_string();
+    if old_sha.is_empty() || new_sha.is_empty() {
+        return None;
+    }
+
+    Some(HeadReflogEntry {
+        old_sha,
+        new_sha,
+        subject: subject.trim().to_string(),
+    })
+}
+
 fn reflog_subject(repository: &Repository) -> Option<String> {
     let mut args = repository.global_args_for_exec();
     args.push("reflog".to_string());
@@ -1077,6 +1147,15 @@ fn reflog_subject(repository: &Repository) -> Option<String> {
         None
     } else {
         Some(subject)
+    }
+}
+
+fn non_zero_oid(oid: &str) -> Option<String> {
+    let oid = oid.trim();
+    if oid.is_empty() || is_zero_oid(oid) {
+        None
+    } else {
+        Some(oid.to_string())
     }
 }
 
@@ -1575,13 +1654,9 @@ fn is_ancestor(repository: &Repository, ancestor: &str, descendant: &str) -> boo
     crate::git::repository::exec_git(&args).is_ok()
 }
 
-fn new_commit_has_parent(repository: &Repository, new_commit: &str, expected_parent: &str) -> bool {
-    repository
-        .find_commit(new_commit.to_string())
-        .ok()
-        .and_then(|commit| commit.parent(0).ok())
-        .map(|parent| parent.id() == expected_parent)
-        .unwrap_or(false)
+fn first_parent_of_commit(repository: &Repository, commit_sha: &str) -> Option<String> {
+    let revision = format!("{}^1", commit_sha);
+    rev_parse(repository, &revision)
 }
 
 fn now_ms() -> u128 {
@@ -1664,7 +1739,410 @@ pub fn write_core_hook_scripts(hooks_dir: &Path, git_ai_binary: &Path) -> Result
 
     for hook in INSTALLED_HOOKS {
         let is_passthrough = PASSTHROUGH_ONLY_HOOKS.contains(hook);
-        let script = if is_passthrough {
+        let script = if *hook == "reference-transaction" {
+            format!(
+                r#"#!/bin/sh
+# git-ai-managed: mode=trampoline;type=ref-prefilter
+if [ "${{{skip_env}:-}}" = "1" ]; then
+  exit 0
+fi
+export {git_cmd_env}="${{{git_cmd_env}:-git}}"
+
+script_dir="$0"
+case "$script_dir" in
+  */*) script_dir="${{script_dir%/*}}" ;;
+  *) script_dir="." ;;
+esac
+previous_hooks_file="$script_dir/{previous_hooks_file}"
+previous_hooks_dir=""
+
+if [ -f "$previous_hooks_file" ]; then
+  IFS= read -r previous_hooks_dir < "$previous_hooks_file" || true
+  case "$previous_hooks_dir" in
+    "~") previous_hooks_dir="$HOME" ;;
+    "~/"*) previous_hooks_dir="$HOME/${{previous_hooks_dir#\~/}}" ;;
+  esac
+fi
+
+if [ -n "$previous_hooks_dir" ]; then
+  case "$script_dir" in */) script_dir="${{script_dir%/}}" ;; esac
+  case "$previous_hooks_dir" in */) previous_hooks_dir="${{previous_hooks_dir%/}}" ;; esac
+  if [ "$script_dir" = "$previous_hooks_dir" ]; then
+    previous_hooks_dir=""
+  fi
+fi
+
+repo_git_dir="${{GIT_DIR:-.git}}"
+if [ -n "$previous_hooks_dir" ]; then
+  chain_hook="$previous_hooks_dir/{hook}"
+else
+  chain_hook="$repo_git_dir/hooks/{hook}"
+fi
+chain_kind="none"
+if [ -x "$chain_hook" ]; then
+  chain_kind="exec"
+elif [ -f "$chain_hook" ]; then
+  chain_kind="sh"
+fi
+
+dispatch=0
+stage="$1"
+action="${{GIT_REFLOG_ACTION:-}}"
+
+is_zero_oid() {{
+  case "$1" in
+    ''|*[!0]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}}
+
+# Fast path for default repos with no chained hooks: avoid stdin spooling and process startup.
+if [ "$chain_kind" = "none" ]; then
+  if [ "$stage" != "prepared" ] && [ "$stage" != "committed" ]; then
+    exit 0
+  fi
+  case "$action" in
+    commit*) exit 0 ;;
+  esac
+
+  IFS= read -r first_line || exit 0
+  old_sha=""
+  new_sha=""
+  reference=""
+  IFS=' ' read -r old_sha new_sha reference _rest <<EOF
+$first_line
+EOF
+
+  first_line_relevant=0
+  if [ -n "$old_sha" ] && [ -n "$new_sha" ] && [ -n "$reference" ] && [ "$old_sha" != "$new_sha" ]; then
+    case "$reference" in
+      ORIG_HEAD|refs/stash|CHERRY_PICK_HEAD|refs/remotes/*)
+        first_line_relevant=1
+        ;;
+      AUTO_MERGE)
+        if is_zero_oid "$old_sha" && ! is_zero_oid "$new_sha"; then
+          first_line_relevant=1
+        fi
+        ;;
+    esac
+  fi
+
+  if [ $first_line_relevant -eq 1 ]; then
+    rest_payload=$(cat)
+    if [ -n "$rest_payload" ]; then
+      stdin_payload="$first_line
+$rest_payload"
+      printf '%s\n' "$stdin_payload" | {skip_chain_env}=1 "{bin}" hook-trampoline "{hook}" "$@"
+    else
+      printf '%s\n' "$first_line" | {skip_chain_env}=1 "{bin}" hook-trampoline "{hook}" "$@"
+    fi
+    exit $?
+  fi
+
+  # Most callbacks are single-line and irrelevant; avoid extra parsing in that common case.
+  IFS= read -r second_line || exit 0
+  stdin_payload="$first_line
+$second_line"
+  rest_payload=$(cat)
+  if [ -n "$rest_payload" ]; then
+    stdin_payload="$stdin_payload
+$rest_payload"
+  fi
+
+  zero_oid="0000000000000000000000000000000000000000"
+  case "$stdin_payload" in
+    *ORIG_HEAD*|*refs/stash*|*CHERRY_PICK_HEAD*|*refs/remotes/*)
+      dispatch=1
+      ;;
+    *AUTO_MERGE*)
+      case "$stdin_payload" in
+        *"$zero_oid $zero_oid AUTO_MERGE"*)
+          dispatch=0
+          ;;
+        *)
+          dispatch=1
+          ;;
+      esac
+      ;;
+  esac
+
+  if [ $dispatch -eq 1 ]; then
+    printf '%s\n' "$stdin_payload" | {skip_chain_env}=1 "{bin}" hook-trampoline "{hook}" "$@"
+    exit $?
+  fi
+  exit 0
+fi
+
+# Chained-hook path: preserve stdin for both dispatch and chained execution.
+stdin_file=$(mktemp "${{TMPDIR:-/tmp}}/git-ai-ref-txn.XXXXXX") || exit 1
+cleanup() {{
+  rm -f "$stdin_file"
+}}
+trap cleanup EXIT
+cat > "$stdin_file"
+
+if [ "$stage" = "prepared" ] || [ "$stage" = "committed" ]; then
+  case "$action" in
+    commit*) dispatch=0 ;;
+    *)
+      while IFS=' ' read -r old_sha new_sha reference rest; do
+        if [ "$old_sha" = "$new_sha" ]; then
+          continue
+        fi
+        case "$reference" in
+          ORIG_HEAD|refs/stash|CHERRY_PICK_HEAD|refs/remotes/*)
+            dispatch=1
+            break
+            ;;
+          AUTO_MERGE)
+            if is_zero_oid "$old_sha" && ! is_zero_oid "$new_sha"; then
+              dispatch=1
+              break
+            fi
+            ;;
+        esac
+      done < "$stdin_file"
+      ;;
+  esac
+fi
+
+if [ $dispatch -eq 1 ]; then
+  {skip_chain_env}=1 "{bin}" hook-trampoline "{hook}" "$@" < "$stdin_file"
+  dispatch_status=$?
+  if [ $dispatch_status -ne 0 ]; then
+    exit $dispatch_status
+  fi
+fi
+
+if [ "$chain_kind" = "exec" ]; then
+  "$chain_hook" "$@" < "$stdin_file"
+  chain_status=$?
+  if [ $chain_status -ne 0 ]; then
+    exit $chain_status
+  fi
+elif [ "$chain_kind" = "sh" ]; then
+  sh "$chain_hook" "$@" < "$stdin_file"
+  chain_status=$?
+  if [ $chain_status -ne 0 ]; then
+    exit $chain_status
+  fi
+fi
+
+exit 0
+"#,
+                skip_env = GIT_AI_SKIP_CORE_HOOKS_ENV,
+                git_cmd_env = GIT_AI_GIT_CMD_ENV,
+                skip_chain_env = GIT_AI_TRAMPOLINE_SKIP_CHAIN_ENV,
+                previous_hooks_file = PREVIOUS_HOOKS_PATH_FILE,
+                bin = binary,
+                hook = hook,
+            )
+        } else if *hook == "pre-commit" {
+            format!(
+                r#"#!/bin/sh
+# git-ai-managed: mode=trampoline;type=pre-commit-prefilter
+if [ "${{{skip_env}:-}}" = "1" ]; then
+  exit 0
+fi
+export {git_cmd_env}="${{{git_cmd_env}:-git}}"
+
+script_dir="$0"
+case "$script_dir" in
+  */*) script_dir="${{script_dir%/*}}" ;;
+  *) script_dir="." ;;
+esac
+previous_hooks_file="$script_dir/{previous_hooks_file}"
+previous_hooks_dir=""
+
+if [ -f "$previous_hooks_file" ]; then
+  IFS= read -r previous_hooks_dir < "$previous_hooks_file" || true
+  case "$previous_hooks_dir" in
+    "~") previous_hooks_dir="$HOME" ;;
+    "~/"*) previous_hooks_dir="$HOME/${{previous_hooks_dir#\~/}}" ;;
+  esac
+fi
+
+if [ -n "$previous_hooks_dir" ]; then
+  case "$script_dir" in */) script_dir="${{script_dir%/}}" ;; esac
+  case "$previous_hooks_dir" in */) previous_hooks_dir="${{previous_hooks_dir%/}}" ;; esac
+  if [ "$script_dir" = "$previous_hooks_dir" ]; then
+    previous_hooks_dir=""
+  fi
+fi
+
+repo_git_dir="${{GIT_DIR:-.git}}"
+working_logs_dir="$repo_git_dir/ai/working_logs"
+dispatch=0
+if [ -d "$working_logs_dir" ]; then
+  for entry in "$working_logs_dir"/*; do
+    if [ -e "$entry" ]; then
+      dispatch=1
+      break
+    fi
+  done
+fi
+
+if [ $dispatch -eq 1 ]; then
+  {skip_chain_env}=1 "{bin}" hook-trampoline "{hook}" "$@"
+  dispatch_status=$?
+  if [ $dispatch_status -ne 0 ]; then
+    exit $dispatch_status
+  fi
+fi
+
+if [ -n "$previous_hooks_dir" ]; then
+  chain_hook="$previous_hooks_dir/{hook}"
+else
+  chain_hook="$repo_git_dir/hooks/{hook}"
+fi
+if [ -x "$chain_hook" ]; then
+  "$chain_hook" "$@"
+  exit $?
+fi
+if [ -f "$chain_hook" ]; then
+  sh "$chain_hook" "$@"
+  exit $?
+fi
+exit 0
+"#,
+                skip_env = GIT_AI_SKIP_CORE_HOOKS_ENV,
+                git_cmd_env = GIT_AI_GIT_CMD_ENV,
+                skip_chain_env = GIT_AI_TRAMPOLINE_SKIP_CHAIN_ENV,
+                previous_hooks_file = PREVIOUS_HOOKS_PATH_FILE,
+                bin = binary,
+                hook = hook,
+            )
+        } else if *hook == "post-index-change" {
+            format!(
+                r#"#!/bin/sh
+# git-ai-managed: mode=trampoline;type=post-index-prefilter
+if [ "${{{skip_env}:-}}" = "1" ]; then
+  exit 0
+fi
+export {git_cmd_env}="${{{git_cmd_env}:-git}}"
+
+script_dir="$0"
+case "$script_dir" in
+  */*) script_dir="${{script_dir%/*}}" ;;
+  *) script_dir="." ;;
+esac
+previous_hooks_file="$script_dir/{previous_hooks_file}"
+previous_hooks_dir=""
+
+if [ -f "$previous_hooks_file" ]; then
+  IFS= read -r previous_hooks_dir < "$previous_hooks_file" || true
+  case "$previous_hooks_dir" in
+    "~") previous_hooks_dir="$HOME" ;;
+    "~/"*) previous_hooks_dir="$HOME/${{previous_hooks_dir#\~/}}" ;;
+  esac
+fi
+
+if [ -n "$previous_hooks_dir" ]; then
+  case "$script_dir" in */) script_dir="${{script_dir%/}}" ;; esac
+  case "$previous_hooks_dir" in */) previous_hooks_dir="${{previous_hooks_dir%/}}" ;; esac
+  if [ "$script_dir" = "$previous_hooks_dir" ]; then
+    previous_hooks_dir=""
+  fi
+fi
+
+repo_git_dir="${{GIT_DIR:-.git}}"
+state_file="$repo_git_dir/ai/core_hook_state.json"
+dispatch=0
+if [ -f "$state_file" ]; then
+  while IFS= read -r state_line; do
+    case "$state_line" in
+      *'"pending_stash_apply":{{'*)
+        dispatch=1
+        break
+        ;;
+    esac
+  done < "$state_file"
+fi
+
+if [ $dispatch -eq 1 ]; then
+  {skip_chain_env}=1 "{bin}" hook-trampoline "{hook}" "$@"
+  dispatch_status=$?
+  if [ $dispatch_status -ne 0 ]; then
+    exit $dispatch_status
+  fi
+fi
+
+if [ -n "$previous_hooks_dir" ]; then
+  chain_hook="$previous_hooks_dir/{hook}"
+else
+  chain_hook="$repo_git_dir/hooks/{hook}"
+fi
+
+if [ -x "$chain_hook" ]; then
+  "$chain_hook" "$@"
+  exit $?
+fi
+if [ -f "$chain_hook" ]; then
+  sh "$chain_hook" "$@"
+  exit $?
+fi
+
+exit 0
+"#,
+                skip_env = GIT_AI_SKIP_CORE_HOOKS_ENV,
+                git_cmd_env = GIT_AI_GIT_CMD_ENV,
+                skip_chain_env = GIT_AI_TRAMPOLINE_SKIP_CHAIN_ENV,
+                previous_hooks_file = PREVIOUS_HOOKS_PATH_FILE,
+                bin = binary,
+                hook = hook,
+            )
+        } else if *hook == "commit-msg" || *hook == "prepare-commit-msg" {
+            format!(
+                r#"#!/bin/sh
+# git-ai-managed: mode=passthrough-shell
+if [ "${{{skip_env}:-}}" = "1" ]; then
+  exit 0
+fi
+
+script_dir="$0"
+case "$script_dir" in
+  */*) script_dir="${{script_dir%/*}}" ;;
+  *) script_dir="." ;;
+esac
+previous_hooks_dir=""
+previous_hooks_file="$script_dir/{previous_hooks_file}"
+if [ -f "$previous_hooks_file" ]; then
+  IFS= read -r previous_hooks_dir < "$previous_hooks_file" || true
+  case "$previous_hooks_dir" in
+    "~") previous_hooks_dir="$HOME" ;;
+    "~/"*) previous_hooks_dir="$HOME/${{previous_hooks_dir#\~/}}" ;;
+  esac
+fi
+
+if [ -n "$previous_hooks_dir" ]; then
+  case "$script_dir" in */) script_dir="${{script_dir%/}}" ;; esac
+  case "$previous_hooks_dir" in */) previous_hooks_dir="${{previous_hooks_dir%/}}" ;; esac
+  if [ "$script_dir" = "$previous_hooks_dir" ]; then
+    previous_hooks_dir=""
+  fi
+fi
+
+if [ -n "$previous_hooks_dir" ]; then
+  chain_hook="$previous_hooks_dir/{hook}"
+else
+  chain_hook="${{GIT_DIR:-.git}}/hooks/{hook}"
+fi
+
+if [ -x "$chain_hook" ]; then
+  "$chain_hook" "$@"
+  exit $?
+fi
+if [ -f "$chain_hook" ]; then
+  sh "$chain_hook" "$@"
+  exit $?
+fi
+exit 0
+"#,
+                skip_env = GIT_AI_SKIP_CORE_HOOKS_ENV,
+                previous_hooks_file = PREVIOUS_HOOKS_PATH_FILE,
+                hook = hook,
+            )
+        } else if is_passthrough {
             format!(
                 r#"#!/bin/sh
 # git-ai-managed: mode=passthrough-shell
@@ -1688,54 +2166,26 @@ if [ -f "$previous_hooks_file" ]; then
   esac
 fi
 
-normalize_no_trailing_slash() {{
-  path="$1"
-  while [ "${{path%/}}" != "$path" ] && [ "$path" != "/" ]; do
-    path="${{path%/}}"
-  done
-  printf '%s' "$path"
-}}
-
 if [ -n "$previous_hooks_dir" ]; then
-  script_dir_norm=$(normalize_no_trailing_slash "$script_dir")
-  previous_hooks_dir_norm=$(normalize_no_trailing_slash "$previous_hooks_dir")
-  if [ "$script_dir_norm" = "$previous_hooks_dir_norm" ]; then
+  case "$script_dir" in */) script_dir="${{script_dir%/}}" ;; esac
+  case "$previous_hooks_dir" in */) previous_hooks_dir="${{previous_hooks_dir%/}}" ;; esac
+  if [ "$script_dir" = "$previous_hooks_dir" ]; then
     previous_hooks_dir=""
   fi
 fi
 
-run_chained_hook() {{
-  hook_path="$1"
-  shift
-
-  if [ -x "$hook_path" ]; then
-    "$hook_path" "$@"
-    return $?
-  fi
-
-  if [ -f "$hook_path" ]; then
-    sh "$hook_path" "$@"
-    return $?
-  fi
-
-  return 0
-}}
-
 if [ -n "$previous_hooks_dir" ]; then
-  previous_hook="$previous_hooks_dir/{hook}"
-  run_chained_hook "$previous_hook" "$@"
-  previous_status=$?
-  if [ $previous_status -ne 0 ]; then
-    exit $previous_status
-  fi
+  chain_hook="$previous_hooks_dir/{hook}"
 else
-  repo_git_dir="${{GIT_DIR:-.git}}"
-  repo_hook="$repo_git_dir/hooks/{hook}"
-  run_chained_hook "$repo_hook" "$@"
-  repo_status=$?
-  if [ $repo_status -ne 0 ]; then
-    exit $repo_status
-  fi
+  chain_hook="${{GIT_DIR:-.git}}/hooks/{hook}"
+fi
+if [ -x "$chain_hook" ]; then
+  "$chain_hook" "$@"
+  exit $?
+fi
+if [ -f "$chain_hook" ]; then
+  sh "$chain_hook" "$@"
+  exit $?
 fi
 
 exit 0
@@ -1751,9 +2201,11 @@ exit 0
 if [ "${{{skip_env}:-}}" = "1" ]; then
   exit 0
 fi
+export {git_cmd_env}="${{{git_cmd_env}:-git}}"
 exec "{bin}" hook-trampoline "{hook}" "$@"
 "#,
                 skip_env = GIT_AI_SKIP_CORE_HOOKS_ENV,
+                git_cmd_env = GIT_AI_GIT_CMD_ENV,
                 bin = binary,
                 hook = hook,
             )

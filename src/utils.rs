@@ -16,6 +16,8 @@ static IS_TERMINAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 /// This must not start with `GIT_`, because Git forwards `GIT_*` vars to alias scripts and
 /// core compatibility tests assert that wrappers do not leak extra `GIT_*` environment.
 pub const GIT_AI_SKIP_CORE_HOOKS_ENV: &str = "GITAI_SKIP_CORE_HOOKS";
+pub const GIT_AI_GIT_CMD_ENV: &str = "GITAI_GIT_CMD";
+pub const GIT_AI_TRAMPOLINE_SKIP_CHAIN_ENV: &str = "GITAI_TRAMPOLINE_SKIP_CHAIN";
 
 fn is_debug_enabled() -> bool {
     *DEBUG_ENABLED.get_or_init(|| {

@@ -11,7 +11,7 @@ use crate::mdm::hook_installer::HookInstallerParams;
 use crate::mdm::skills_installer;
 use crate::mdm::spinner::{Spinner, print_diff};
 use crate::mdm::utils::{get_current_binary_path, git_shim_path};
-use crate::utils::GIT_AI_SKIP_CORE_HOOKS_ENV;
+use crate::utils::{GIT_AI_GIT_CMD_ENV, GIT_AI_SKIP_CORE_HOOKS_ENV};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -798,7 +798,37 @@ fn core_hook_scripts_up_to_date(hooks_dir: &Path, binary_path: &Path) -> bool {
         let hook_path = hooks_dir.join(hook);
         let content = fs::read_to_string(&hook_path).unwrap_or_default();
         let is_passthrough = PASSTHROUGH_ONLY_HOOKS.contains(hook);
-        if is_passthrough {
+        if *hook == "reference-transaction" {
+            hook_path.exists()
+                && content.contains("# git-ai-managed: mode=trampoline;type=ref-prefilter")
+                && content.contains(&format!("hook-trampoline \"{}\"", hook))
+                && content.contains(&format!(
+                    "{}=1",
+                    crate::utils::GIT_AI_TRAMPOLINE_SKIP_CHAIN_ENV
+                ))
+                && content.contains(&format!("export {}=", GIT_AI_GIT_CMD_ENV))
+                && content.contains(&binary)
+        } else if *hook == "pre-commit" {
+            hook_path.exists()
+                && content.contains("# git-ai-managed: mode=trampoline;type=pre-commit-prefilter")
+                && content.contains(&format!("hook-trampoline \"{}\"", hook))
+                && content.contains(&format!(
+                    "{}=1",
+                    crate::utils::GIT_AI_TRAMPOLINE_SKIP_CHAIN_ENV
+                ))
+                && content.contains(&format!("export {}=", GIT_AI_GIT_CMD_ENV))
+                && content.contains(&binary)
+        } else if *hook == "post-index-change" {
+            hook_path.exists()
+                && content.contains("# git-ai-managed: mode=trampoline;type=post-index-prefilter")
+                && content.contains(&format!("hook-trampoline \"{}\"", hook))
+                && content.contains(&format!(
+                    "{}=1",
+                    crate::utils::GIT_AI_TRAMPOLINE_SKIP_CHAIN_ENV
+                ))
+                && content.contains(&format!("export {}=", GIT_AI_GIT_CMD_ENV))
+                && content.contains(&binary)
+        } else if is_passthrough {
             hook_path.exists()
                 && content.contains("# git-ai-managed: mode=passthrough-shell")
                 && content.contains(PREVIOUS_HOOKS_PATH_FILE)
@@ -806,6 +836,7 @@ fn core_hook_scripts_up_to_date(hooks_dir: &Path, binary_path: &Path) -> bool {
             hook_path.exists()
                 && content.contains("# git-ai-managed: mode=trampoline;type=dispatch")
                 && content.contains(&format!("hook-trampoline \"{}\"", hook))
+                && content.contains(&format!("export {}=", GIT_AI_GIT_CMD_ENV))
                 && content.contains(&binary)
         }
     })
