@@ -20,6 +20,20 @@
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 ```bash
 curl -sSL https://usegitai.com/install.sh | bash
 ```

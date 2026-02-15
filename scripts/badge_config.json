@@ -1,0 +1,12 @@
+[
+  { "icon": "claude_code", "name": "Claude Code", "color": "#D97757" },
+  { "icon": "codex-black", "name": "Codex", "color": "#1A1A1A" },
+  { "icon": "continue", "name": "Continue", "color": "#2563EB" },
+  { "icon": "copilot", "name": "GitHub Copilot", "color": "#24292F" },
+  { "icon": "cursor", "name": "Cursor", "color": "#000000" },
+  { "icon": "droid", "name": "Droid", "color": "#F97316" },
+  { "icon": "gemini", "name": "Gemini", "color": "#4285F4" },
+  { "icon": "junie_white", "name": "Junie", "color": "#6B21A8", "dark_left": true },
+  { "icon": "opencode", "name": "OpenCode", "color": "#059669" },
+  { "icon": "rovodev", "name": "Rovo Dev", "color": "#0052CC" }
+]
