@@ -62,6 +62,13 @@ impl HookConfigSandbox {
         command.output().expect("run git")
     }
 
+    fn run_git_in_dir_raw(&self, dir: &Path, args: &[&str]) -> Output {
+        let mut command = Command::new(git_ai::config::Config::get().git_cmd());
+        command.args(args).current_dir(dir);
+        self.apply_env(&mut command);
+        command.output().expect("run git in custom dir")
+    }
+
     fn run_git_raw_with_timeout(&self, args: &[&str], timeout: Duration) -> Output {
         let mut command = Command::new(git_ai::config::Config::get().git_cmd());
         command.args(args).current_dir(&self.repo);
@@ -98,6 +105,31 @@ impl HookConfigSandbox {
             );
         }
         combined_output(&output)
+    }
+
+    fn run_git_in_dir_ok(&self, dir: &Path, args: &[&str]) -> String {
+        let output = self.run_git_in_dir_raw(dir, args);
+        if !output.status.success() {
+            panic!(
+                "git command failed in {}: git {:?}\n{}",
+                dir.display(),
+                args,
+                combined_output(&output)
+            );
+        }
+        combined_output(&output)
+    }
+
+    fn run_git_stdout_ok(&self, args: &[&str]) -> String {
+        let output = self.run_git_raw(args);
+        if !output.status.success() {
+            panic!(
+                "git command failed: git {:?}\n{}",
+                args,
+                combined_output(&output)
+            );
+        }
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
     fn run_git_ai_raw(&self, args: &[&str]) -> Output {
@@ -228,6 +260,10 @@ impl HookConfigSandbox {
     fn write_repo_hook(&self, hook_name: &str, script_body: &str) {
         let hooks_dir = self.repo.join(".git").join("hooks");
         self.write_hook(&hooks_dir, hook_name, script_body);
+    }
+
+    fn last_commit_subject(&self) -> String {
+        self.run_git_stdout_ok(&["log", "-1", "--pretty=%s"])
     }
 
     fn read_previous_hooks_path(&self) -> String {
@@ -529,6 +565,201 @@ fn pre_push_chains_previous_global_hook_and_forwards_remote_args() {
 }
 
 #[test]
+fn pre_push_chains_previous_global_hook_and_forwards_stdin_updates() {
+    let sandbox = HookConfigSandbox::new();
+    let previous_hooks_dir = sandbox.temp.path().join("previous-hooks");
+    let marker = sandbox.temp.path().join("previous-pre-push-stdin");
+    let marker_escaped = shell_escape(&marker);
+
+    sandbox.write_hook(
+        &previous_hooks_dir,
+        "pre-push",
+        &format!(
+            "#!/bin/sh\nIFS= read -r update\nprintf '%s\\n' \"$update\" >> \"{}\"\nexit 0\n",
+            marker_escaped
+        ),
+    );
+    sandbox.set_global_hooks_path(&previous_hooks_dir);
+    sandbox.install_hooks();
+
+    let remote_path = sandbox.temp.path().join("remote.git");
+    sandbox.run_git_ok(&["init", "--bare", remote_path.to_str().expect("remote path")]);
+    sandbox.run_git_ok(&[
+        "remote",
+        "add",
+        "origin",
+        remote_path.to_str().expect("remote path"),
+    ]);
+
+    sandbox.run_git_ok(&["push", "-u", "origin", "HEAD"]);
+
+    let stdin_line = fs::read_to_string(&marker)
+        .expect("read pre-push stdin marker")
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .expect("pre-push hook did not capture stdin update line")
+        .to_string();
+    assert!(
+        stdin_line.contains("refs/heads/"),
+        "pre-push stdin update line should contain local/remote refs"
+    );
+}
+
+#[test]
+fn prepare_commit_msg_chains_previous_global_hook_and_can_mutate_subject() {
+    let sandbox = HookConfigSandbox::new();
+    let previous_hooks_dir = sandbox.temp.path().join("previous-hooks");
+
+    sandbox.write_hook(
+        &previous_hooks_dir,
+        "prepare-commit-msg",
+        "#!/bin/sh\nmsg_file=\"$1\"\nsubject=$(sed -n '1p' \"$msg_file\")\nprintf '%s\\n' \"$subject [prepared]\" > \"$msg_file\"\nexit 0\n",
+    );
+    sandbox.set_global_hooks_path(&previous_hooks_dir);
+    sandbox.install_hooks();
+
+    sandbox.commit_file("prepared-message.txt", "prepared\n", "original subject");
+    assert_eq!(sandbox.last_commit_subject(), "original subject [prepared]");
+}
+
+#[test]
+fn commit_msg_chains_previous_global_hook_and_preserves_failure() {
+    let sandbox = HookConfigSandbox::new();
+    let previous_hooks_dir = sandbox.temp.path().join("previous-hooks");
+    let marker = sandbox.temp.path().join("commit-msg-blocked");
+    let marker_escaped = shell_escape(&marker);
+
+    sandbox.write_hook(
+        &previous_hooks_dir,
+        "commit-msg",
+        &format!(
+            "#!/bin/sh\nmsg_file=\"$1\"\nif grep -q \"forbidden\" \"$msg_file\"; then\n  printf '%s\\n' blocked >> \"{}\"\n  exit 47\nfi\nexit 0\n",
+            marker_escaped
+        ),
+    );
+    sandbox.set_global_hooks_path(&previous_hooks_dir);
+    sandbox.install_hooks();
+
+    sandbox.write_repo_file("blocked-msg.txt", "blocked\n");
+    sandbox.run_git_ok(&["add", "blocked-msg.txt"]);
+
+    let output = sandbox.run_git_raw(&["commit", "-m", "forbidden subject"]);
+    assert!(
+        !output.status.success(),
+        "commit unexpectedly succeeded despite commit-msg failure:\n{}",
+        combined_output(&output)
+    );
+    assert!(marker.exists(), "previous commit-msg hook did not run");
+
+    let count = sandbox.run_git_stdout_ok(&["rev-list", "--count", "HEAD"]);
+    assert_eq!(
+        count, "1",
+        "failed commit-msg hook should not create a new commit"
+    );
+}
+
+#[test]
+fn global_husky_style_pre_commit_hook_with_helper_is_chained() {
+    let sandbox = HookConfigSandbox::new();
+    let previous_hooks_dir = sandbox.temp.path().join("previous-husky-hooks");
+    let helper_dir = previous_hooks_dir.join("_");
+    let marker = sandbox.temp.path().join("global-husky-precommit-ran");
+
+    sandbox.write_hook(
+        &helper_dir,
+        "husky.sh",
+        "#!/bin/sh\n# global husky helper shim\n",
+    );
+    sandbox.write_hook(
+        &previous_hooks_dir,
+        "pre-commit",
+        &husky_pre_commit_script(&marker),
+    );
+    sandbox.set_global_hooks_path(&previous_hooks_dir);
+    sandbox.install_hooks();
+
+    sandbox.commit_file(
+        "global-husky.txt",
+        "global husky\n",
+        "global husky pre-commit",
+    );
+    assert!(
+        marker.exists(),
+        "global husky-style pre-commit hook with helper did not run"
+    );
+}
+
+#[test]
+fn pre_applypatch_chains_previous_global_hook_during_git_am() {
+    let sandbox = HookConfigSandbox::new();
+    let previous_hooks_dir = sandbox.temp.path().join("previous-hooks");
+    let marker = sandbox.temp.path().join("pre-applypatch-ran");
+
+    sandbox.write_hook(
+        &previous_hooks_dir,
+        "pre-applypatch",
+        &marker_hook_script(&marker, 0),
+    );
+    sandbox.set_global_hooks_path(&previous_hooks_dir);
+    sandbox.install_hooks();
+
+    let donor = sandbox.temp.path().join("donor-repo");
+    fs::create_dir_all(&donor).expect("create donor repo");
+    sandbox.run_git_in_dir_ok(&donor, &["init"]);
+    sandbox.run_git_in_dir_ok(&donor, &["config", "user.name", "Patch Author"]);
+    sandbox.run_git_in_dir_ok(&donor, &["config", "user.email", "patch@example.com"]);
+    fs::write(donor.join("patch-email.txt"), "from patch\n").expect("write donor file");
+    sandbox.run_git_in_dir_ok(&donor, &["add", "patch-email.txt"]);
+    sandbox.run_git_in_dir_ok(&donor, &["commit", "-m", "patch commit"]);
+
+    let patch_output =
+        sandbox.run_git_in_dir_raw(&donor, &["format-patch", "-1", "HEAD", "--stdout"]);
+    assert!(
+        patch_output.status.success(),
+        "failed to create patch:\n{}",
+        combined_output(&patch_output)
+    );
+    let patch_path = sandbox.temp.path().join("change.patch");
+    fs::write(&patch_path, &patch_output.stdout).expect("write generated patch");
+
+    sandbox.run_git_ok(&["am", patch_path.to_str().expect("patch path")]);
+
+    assert!(marker.exists(), "previous pre-applypatch hook did not run");
+    assert!(
+        sandbox.repo.join("patch-email.txt").exists(),
+        "patch content was not applied"
+    );
+}
+
+#[test]
+fn pre_merge_commit_chains_previous_global_hook_when_creating_merge_commit() {
+    let sandbox = HookConfigSandbox::new();
+    let previous_hooks_dir = sandbox.temp.path().join("previous-hooks");
+    let marker = sandbox.temp.path().join("pre-merge-commit-ran");
+
+    sandbox.write_hook(
+        &previous_hooks_dir,
+        "pre-merge-commit",
+        &marker_hook_script(&marker, 0),
+    );
+    sandbox.set_global_hooks_path(&previous_hooks_dir);
+    sandbox.install_hooks();
+
+    let default_branch = sandbox.run_git_stdout_ok(&["branch", "--show-current"]);
+    sandbox.run_git_ok(&["checkout", "-b", "feature"]);
+    sandbox.commit_file("feature.txt", "feature\n", "feature commit");
+
+    sandbox.run_git_ok(&["checkout", &default_branch]);
+    sandbox.commit_file("main.txt", "main\n", "main commit");
+    sandbox.run_git_ok(&["merge", "--no-ff", "feature", "-m", "merge feature"]);
+
+    assert!(
+        marker.exists(),
+        "previous pre-merge-commit hook did not run"
+    );
+}
+
+#[test]
 fn does_not_run_repo_dot_git_hook_when_previous_global_path_exists() {
     let sandbox = HookConfigSandbox::new();
     let previous_hooks_dir = sandbox.temp.path().join("previous-hooks");
@@ -813,6 +1044,29 @@ fn uninstall_restores_previous_hooks_path_even_when_config_uses_managed_alias() 
         sandbox.global_hooks_path(),
         Some(previous_hooks_dir.to_string_lossy().to_string()),
         "uninstall should restore original hooks path when managed path is represented as an alias"
+    );
+}
+
+#[test]
+fn uninstall_self_heals_when_previous_hooks_metadata_is_missing() {
+    let sandbox = HookConfigSandbox::new();
+    let previous_hooks_dir = sandbox.temp.path().join("legacy-hooks");
+    fs::create_dir_all(&previous_hooks_dir).expect("create previous hooks dir");
+
+    sandbox.set_global_hooks_path(&previous_hooks_dir);
+    sandbox.install_hooks();
+
+    fs::remove_file(sandbox.previous_hooks_file()).expect("remove previous hooks metadata");
+    sandbox.uninstall_hooks();
+
+    assert_eq!(
+        sandbox.global_hooks_path(),
+        None,
+        "when previous hooks metadata is missing, uninstall should unset core.hooksPath"
+    );
+    assert!(
+        !sandbox.managed_hooks_dir().exists(),
+        "uninstall should remove managed hook scripts even if metadata is missing"
     );
 }
 

@@ -23,14 +23,24 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Hook names that git-ai installs into `core.hooksPath`.
+///
+/// We install passthrough shims for standard client hooks (even when git-ai has no
+/// custom behavior) so existing user hook ecosystems like Husky continue to run.
 pub const INSTALLED_HOOKS: &[&str] = &[
+    "applypatch-msg",
+    "pre-applypatch",
+    "post-applypatch",
     "pre-commit",
+    "pre-merge-commit",
+    "prepare-commit-msg",
+    "commit-msg",
     "post-commit",
     "pre-rebase",
     "post-rewrite",
     "post-checkout",
     "post-merge",
     "pre-push",
+    "pre-auto-gc",
     "reference-transaction",
     "post-index-change",
 ];
@@ -159,6 +169,9 @@ fn run_hook_impl(
         "pre-push" => handle_pre_push(repository, hook_args)?,
         "reference-transaction" => handle_reference_transaction(repository, hook_args)?,
         "post-index-change" => handle_post_index_change(repository, hook_args)?,
+        // Passthrough-only hooks: the shell shim still chains previous/repo hooks.
+        "applypatch-msg" | "pre-applypatch" | "post-applypatch" | "pre-merge-commit"
+        | "prepare-commit-msg" | "commit-msg" | "pre-auto-gc" => {}
         _ => {
             debug_log(&format!("unknown core hook '{}', ignoring", hook_name));
         }
@@ -298,7 +311,11 @@ fn handle_pre_rebase(repository: &mut Repository, hook_args: &[String]) -> Resul
     let mut state = load_core_hook_state(repository)?;
     // Reset stale snapshots from earlier failed rebase attempts.
     state.pending_autostash = None;
-    state.pending_pull_autostash = None;
+    if let Some(pending) = state.pending_pull_autostash.as_ref()
+        && now_ms().saturating_sub(pending.created_at_ms) > PENDING_PULL_AUTOSTASH_MAX_AGE_MS
+    {
+        state.pending_pull_autostash = None;
+    }
 
     if has_uncommitted_changes(repository)
         && let Some(old_head) = repository.head().ok().and_then(|h| h.target().ok())
@@ -1629,10 +1646,13 @@ pub(crate) fn normalize_hook_binary_path(git_ai_binary: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_rebase_complete_event_from_start, find_repository_for_hook, is_zero_oid,
+        active_rebase_start_event, build_rebase_complete_event_from_start,
+        find_repository_for_hook, is_zero_oid, latest_rebase_start_event,
         resolve_stash_ref_transition, should_restore_deleted_stash,
     };
-    use crate::git::rewrite_log::{RebaseStartEvent, RewriteLogEvent};
+    use crate::git::rewrite_log::{
+        RebaseAbortEvent, RebaseCompleteEvent, RebaseStartEvent, RewriteLogEvent,
+    };
     use crate::git::test_utils::TmpRepo;
     use serial_test::serial;
 
@@ -1747,5 +1767,91 @@ mod tests {
             }
             _ => panic!("expected RebaseComplete event"),
         }
+    }
+
+    #[test]
+    fn latest_rebase_start_event_returns_most_recent_start() {
+        let repo = TmpRepo::new().expect("tmp repo");
+        let storage = &repo.gitai_repo().storage;
+
+        let first = RebaseStartEvent::new_with_onto(
+            "1111111111111111111111111111111111111111".to_string(),
+            false,
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
+        );
+        let second = RebaseStartEvent::new_with_onto(
+            "2222222222222222222222222222222222222222".to_string(),
+            true,
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string()),
+        );
+
+        storage
+            .append_rewrite_event(RewriteLogEvent::rebase_start(first))
+            .expect("append first rebase start");
+        storage
+            .append_rewrite_event(RewriteLogEvent::rebase_start(second.clone()))
+            .expect("append second rebase start");
+
+        let latest = latest_rebase_start_event(repo.gitai_repo()).expect("latest rebase start");
+        assert_eq!(latest, second);
+    }
+
+    #[test]
+    fn active_rebase_start_event_returns_latest_unfinished_start() {
+        let repo = TmpRepo::new().expect("tmp repo");
+        let storage = &repo.gitai_repo().storage;
+
+        let completed_start = RebaseStartEvent::new_with_onto(
+            "1111111111111111111111111111111111111111".to_string(),
+            false,
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
+        );
+        storage
+            .append_rewrite_event(RewriteLogEvent::rebase_start(completed_start))
+            .expect("append completed start");
+        storage
+            .append_rewrite_event(RewriteLogEvent::rebase_complete(RebaseCompleteEvent::new(
+                "1111111111111111111111111111111111111111".to_string(),
+                "3333333333333333333333333333333333333333".to_string(),
+                false,
+                vec![],
+                vec![],
+            )))
+            .expect("append rebase complete");
+
+        let active_start = RebaseStartEvent::new_with_onto(
+            "4444444444444444444444444444444444444444".to_string(),
+            true,
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string()),
+        );
+        storage
+            .append_rewrite_event(RewriteLogEvent::rebase_start(active_start.clone()))
+            .expect("append active start");
+
+        let active = active_rebase_start_event(repo.gitai_repo()).expect("active rebase start");
+        assert_eq!(active, active_start);
+    }
+
+    #[test]
+    fn active_rebase_start_event_returns_none_when_latest_rebase_is_closed() {
+        let repo = TmpRepo::new().expect("tmp repo");
+        let storage = &repo.gitai_repo().storage;
+
+        storage
+            .append_rewrite_event(RewriteLogEvent::rebase_start(RebaseStartEvent::new(
+                "1111111111111111111111111111111111111111".to_string(),
+                false,
+            )))
+            .expect("append rebase start");
+        storage
+            .append_rewrite_event(RewriteLogEvent::rebase_abort(RebaseAbortEvent::new(
+                "1111111111111111111111111111111111111111".to_string(),
+            )))
+            .expect("append rebase abort");
+
+        assert!(
+            active_rebase_start_event(repo.gitai_repo()).is_none(),
+            "latest closed rebase should not be treated as active"
+        );
     }
 }

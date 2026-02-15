@@ -67,6 +67,60 @@ fn latest_reset_kind(repo: &TestRepo) -> Option<ResetKind> {
     })
 }
 
+struct DivergentPullRepo {
+    local: TestRepo,
+    #[allow(dead_code)]
+    upstream: TestRepo,
+}
+
+fn setup_divergent_pull_repo() -> DivergentPullRepo {
+    let (local, upstream) = TestRepo::new_with_remote();
+
+    let mut readme = local.filename("README.md");
+    readme.set_contents(vec!["# Test Repo".to_string()]);
+    let initial = local
+        .stage_all_and_commit("initial commit")
+        .expect("initial commit should succeed");
+
+    local
+        .git(&["push", "-u", "origin", "HEAD"])
+        .expect("push initial commit should succeed");
+
+    let mut local_file = local.filename("local.txt");
+    local_file.set_contents(vec!["local base".human(), "local committed ai".ai()]);
+    local
+        .git_ai(&["checkpoint", "mock_ai"])
+        .expect("checkpoint should succeed");
+    local
+        .stage_all_and_commit("local committed change")
+        .expect("local committed change should succeed");
+    let local_commit_sha = local
+        .git(&["rev-parse", "HEAD"])
+        .expect("rev-parse should succeed")
+        .trim()
+        .to_string();
+
+    let branch = local.current_branch();
+
+    local
+        .git(&["reset", "--hard", &initial.commit_sha])
+        .expect("reset to initial should succeed");
+    let mut upstream_file = local.filename("upstream.txt");
+    upstream_file.set_contents(vec!["upstream change".to_string()]);
+    local
+        .stage_all_and_commit("upstream commit")
+        .expect("upstream commit should succeed");
+    local
+        .git(&["push", "--force", "origin", &format!("HEAD:{}", branch)])
+        .expect("force push divergent upstream state should succeed");
+
+    local
+        .git(&["reset", "--hard", &local_commit_sha])
+        .expect("restore local divergent commit should succeed");
+
+    DivergentPullRepo { local, upstream }
+}
+
 #[test]
 fn test_commit_dry_run_does_not_record_rewrite_event() {
     let repo = TestRepo::new();
@@ -284,4 +338,36 @@ fn test_cherry_pick_complete_rewrite_event_recorded_once() {
         "expected exactly one cherry-pick completion event for a single cherry-pick",
     );
     file.assert_lines_and_blame(vec!["base".human(), "source ai line".ai()]);
+}
+
+#[test]
+fn test_pull_rebase_autostash_preserves_uncommitted_ai_and_records_single_rebase_completion() {
+    let setup = setup_divergent_pull_repo();
+    let repo = setup.local;
+
+    let mut uncommitted = repo.filename("uncommitted-ai.txt");
+    uncommitted.set_contents(vec![
+        "uncommitted ai line 1".ai(),
+        "uncommitted ai line 2".ai(),
+    ]);
+    repo.git_ai(&["checkpoint", "mock_ai"])
+        .expect("checkpoint should succeed");
+
+    let before_counts = rewrite_event_counts(&repo);
+    repo.git(&["pull", "--rebase", "--autostash"])
+        .expect("pull --rebase --autostash should succeed");
+    let after_counts = rewrite_event_counts(&repo);
+
+    assert_eq!(
+        after_counts.rebase_complete,
+        before_counts.rebase_complete + 1,
+        "pull --rebase --autostash should produce exactly one rebase completion event",
+    );
+
+    repo.stage_all_and_commit("post pull commit")
+        .expect("post-pull commit should succeed");
+    uncommitted.assert_lines_and_blame(vec![
+        "uncommitted ai line 1".ai(),
+        "uncommitted ai line 2".ai(),
+    ]);
 }
