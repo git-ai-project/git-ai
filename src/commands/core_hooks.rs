@@ -379,7 +379,7 @@ fn handle_post_rewrite(
             let mut new_head = repository.head().ok().and_then(|h| h.target().ok());
             let mut is_interactive = false;
 
-            if let Some(start_event) = latest_rebase_start_event(repository)
+            if let Some(start_event) = active_rebase_start_event(repository)
                 && let Some(head) = new_head.clone()
             {
                 let onto_for_mapping = start_event
@@ -1172,18 +1172,6 @@ fn trim_working_log_to_current_changes(
     Ok(())
 }
 
-fn latest_rebase_start_event(
-    repository: &Repository,
-) -> Option<crate::git::rewrite_log::RebaseStartEvent> {
-    let events = repository.storage.read_rewrite_events().ok()?;
-    for event in events {
-        if let RewriteLogEvent::RebaseStart { rebase_start } = event {
-            return Some(rebase_start);
-        }
-    }
-    None
-}
-
 fn active_rebase_start_event(
     repository: &Repository,
 ) -> Option<crate::git::rewrite_log::RebaseStartEvent> {
@@ -1679,8 +1667,8 @@ pub(crate) fn normalize_hook_binary_path(git_ai_binary: &Path) -> String {
 mod tests {
     use super::{
         active_rebase_start_event, build_rebase_complete_event_from_start,
-        find_repository_for_hook, is_zero_oid, latest_rebase_start_event,
-        resolve_stash_ref_transition, should_restore_deleted_stash,
+        find_repository_for_hook, is_zero_oid, resolve_stash_ref_transition,
+        should_restore_deleted_stash,
     };
     use crate::git::rewrite_log::{
         RebaseAbortEvent, RebaseCompleteEvent, RebaseStartEvent, RewriteLogEvent,
@@ -1799,33 +1787,6 @@ mod tests {
             }
             _ => panic!("expected RebaseComplete event"),
         }
-    }
-
-    #[test]
-    fn latest_rebase_start_event_returns_most_recent_start() {
-        let repo = TmpRepo::new().expect("tmp repo");
-        let storage = &repo.gitai_repo().storage;
-
-        let first = RebaseStartEvent::new_with_onto(
-            "1111111111111111111111111111111111111111".to_string(),
-            false,
-            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
-        );
-        let second = RebaseStartEvent::new_with_onto(
-            "2222222222222222222222222222222222222222".to_string(),
-            true,
-            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string()),
-        );
-
-        storage
-            .append_rewrite_event(RewriteLogEvent::rebase_start(first))
-            .expect("append first rebase start");
-        storage
-            .append_rewrite_event(RewriteLogEvent::rebase_start(second.clone()))
-            .expect("append second rebase start");
-
-        let latest = latest_rebase_start_event(repo.gitai_repo()).expect("latest rebase start");
-        assert_eq!(latest, second);
     }
 
     #[test]
