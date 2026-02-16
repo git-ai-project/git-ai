@@ -180,5 +180,9 @@ fn remove_attributions_for_pathspecs(repository: &Repository, head: &str, pathsp
 }
 
 fn matches_any_pathspec(file: &str, pathspecs: &[String]) -> bool {
-    pathspecs.iter().any(|p| file == p || file.starts_with(p))
+    pathspecs.iter().any(|p| {
+        file == p
+            || (p.ends_with('/') && file.starts_with(p))
+            || file.starts_with(&format!("{}/", p))
+    })
 }

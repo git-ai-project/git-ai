@@ -1548,7 +1548,13 @@ pub fn reconstruct_working_log_after_reset(
     let pathspecs: Vec<String> = if let Some(user_paths) = user_pathspecs {
         all_changed_files
             .into_iter()
-            .filter(|f| user_paths.iter().any(|p| f == p || f.starts_with(p)))
+            .filter(|f| {
+                user_paths.iter().any(|p| {
+                    f == p
+                        || (p.ends_with('/') && f.starts_with(p))
+                        || f.starts_with(&format!("{}/", p))
+                })
+            })
             .collect()
     } else {
         all_changed_files
