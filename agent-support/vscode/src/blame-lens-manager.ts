@@ -1216,7 +1216,7 @@ export class BlameLensManager {
           md.appendMarkdown('🔒 *Login to see prompt summaries from your teammates*\n\n');
           md.appendCodeblock('git-ai login', 'bash');
         } else {
-          md.appendMarkdown('*No prompt saved.');
+          md.appendMarkdown('*No prompt saved.*');
         }
       } else {
         // No metadata available (backward compat) - show generic message
