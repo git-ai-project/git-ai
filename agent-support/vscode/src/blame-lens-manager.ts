@@ -1531,7 +1531,6 @@ export class BlameLensManager {
     }
 
     // Cap concurrent fetches at 3
-    const toFetch = promptsToFetch.slice(0, 3 - this.casFetchInProgress.size);
 
     for (const { promptId, record } of toFetch) {
       this.casFetchInProgress.add(promptId);
