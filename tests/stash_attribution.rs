@@ -136,6 +136,56 @@ fn test_stash_apply_named_reference() {
 }
 
 #[test]
+fn test_stash_pop_with_existing_stack_entries() {
+    let repo = TestRepo::new();
+
+    let mut readme = repo.filename("README.md");
+    readme.set_contents(vec!["# Test Repo".to_string()]);
+    repo.stage_all_and_commit("initial commit")
+        .expect("commit should succeed");
+
+    let mut first = repo.filename("first.txt");
+    first.set_contents(vec!["first stash line".ai()]);
+    repo.git_ai(&["checkpoint", "mock_ai"])
+        .expect("checkpoint should succeed");
+    repo.git(&["stash", "push", "-m", "first"])
+        .expect("first stash should succeed");
+
+    let mut second = repo.filename("second.txt");
+    second.set_contents(vec!["second stash line".ai()]);
+    repo.git_ai(&["checkpoint", "mock_ai"])
+        .expect("checkpoint should succeed");
+    repo.git(&["stash", "push", "-m", "second"])
+        .expect("second stash should succeed");
+
+    // Pop when stash stack still has another entry (non-empty -> non-empty on some Git versions).
+    repo.git(&["stash", "pop"])
+        .expect("first pop should succeed");
+    let first_pop_commit = repo
+        .stage_all_and_commit("apply top stash entry")
+        .expect("commit after first pop should succeed");
+
+    second.assert_lines_and_blame(vec!["second stash line".ai()]);
+    assert!(
+        !first_pop_commit.authorship_log.metadata.prompts.is_empty(),
+        "expected AI prompts for first pop commit"
+    );
+
+    // Pop remaining stash entry and verify attribution still restores correctly.
+    repo.git(&["stash", "pop"])
+        .expect("second pop should succeed");
+    let second_pop_commit = repo
+        .stage_all_and_commit("apply remaining stash entry")
+        .expect("commit after second pop should succeed");
+
+    first.assert_lines_and_blame(vec!["first stash line".ai()]);
+    assert!(
+        !second_pop_commit.authorship_log.metadata.prompts.is_empty(),
+        "expected AI prompts for second pop commit"
+    );
+}
+
+#[test]
 fn test_stash_multiple_files() {
     let repo = TestRepo::new();
 
