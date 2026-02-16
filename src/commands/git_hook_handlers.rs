@@ -1902,6 +1902,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     #[serial]
     fn rebase_hook_suppression_roundtrip_restores_hooks() {
@@ -1915,11 +1916,7 @@ mod tests {
                 .expect("failed to seed hook file");
         }
 
-        let fake_git_dir = tmp.path().join("gitdir");
-        fs::create_dir_all(&fake_git_dir).expect("failed to create fake git dir");
-
         let _home_guard = EnvVarGuard::set("HOME", home.to_string_lossy().as_ref());
-        let _git_dir_guard = EnvVarGuard::set("GIT_DIR", fake_git_dir.to_string_lossy().as_ref());
 
         maybe_suppress_rebase_hooks(None);
 
