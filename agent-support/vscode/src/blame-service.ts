@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import { spawn } from "child_process";
 import { BlameQueue } from "./blame-queue";
 import { findRepoForFile, getGitRepoRoot } from "./utils/git-api";
+import { getGitAiBinary, resolveGitAiBinary } from "./utils/binary-path";
 
 export interface BlameMetadata {
   is_logged_in: boolean;
@@ -227,16 +228,21 @@ export class BlameService {
     const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
     const cwd = gitRepoRoot || workspaceFolder?.uri.fsPath;
 
+    // Ensure binary path is resolved before spawning
+    await resolveGitAiBinary();
+
     return new Promise((resolve, reject) => {
       if (signal.aborted) {
         reject(new Error('Aborted'));
         return;
       }
-      
+
       // Use --contents - to read file contents from stdin
       // This allows git-ai to properly shift AI attributions for dirty files
       const args = ['blame', '--json', '--contents', '-', filePath];
-      const proc = spawn('git-ai', args, { 
+      const binary = getGitAiBinary();
+      console.log('[git-ai] Spawning blame:', { binary, args, cwd });
+      const proc = spawn(binary, args, {
         cwd,
         timeout: BlameService.TIMEOUT_MS,
       });
@@ -301,6 +307,8 @@ export class BlameService {
         this.gitAiAvailable = true;
         
         try {
+          console.log('[git-ai] Raw blame stdout (first 500 chars):', stdout.substring(0, 500));
+          console.log('[git-ai] Raw blame stderr:', stderr);
           const jsonOutput = JSON.parse(stdout) as BlameJsonOutput;
           const result = this.parseBlameOutput(jsonOutput, document.lineCount);
           resolve(result);
@@ -321,6 +329,8 @@ export class BlameService {
     
     // Copy prompts to our map
     for (const [hash, record] of Object.entries(output.prompts || {})) {
+      const msgs = record.messages || [];
+      console.log(`[git-ai] parseBlameOutput prompt ${hash}: messages=${msgs.length}, hasText=${msgs.some(m => m.text)}, messages_url=${record.messages_url || 'none'}`);
       prompts.set(hash, record);
     }
     
@@ -385,9 +395,10 @@ export class BlameService {
     promptId: string,
     cwd: string
   ): Promise<Array<{ type: string; text?: string; timestamp?: string }> | null> {
+    await resolveGitAiBinary();
     return new Promise((resolve) => {
       const args = ['show-prompt', promptId];
-      const proc = spawn('git-ai', args, {
+      const proc = spawn(getGitAiBinary(), args, {
         cwd,
         timeout: 15000,
       });

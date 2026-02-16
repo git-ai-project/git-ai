@@ -8,6 +8,7 @@ import { detectIDEHost, IDEHostKindVSCode } from "./utils/host-kind";
 import { AITabEditManager } from "./ai-tab-edit-manager";
 import { Config } from "./utils/config";
 import { BlameLensManager, registerBlameLensCommands } from "./blame-lens-manager";
+import { initBinaryResolver } from "./utils/binary-path";
 
 function getDistinctId(): string {
   try {
@@ -19,6 +20,9 @@ function getDistinctId(): string {
 }
 
 export function activate(context: vscode.ExtensionContext) {
+
+  // In dev mode, resolve git-ai binary via login shell (debug host has stripped PATH)
+  initBinaryResolver(context.extensionMode);
 
   const ideHostCfg = detectIDEHost();
 

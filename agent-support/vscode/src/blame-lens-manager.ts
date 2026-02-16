@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import { BlameService, BlameResult, BlameMetadata, LineBlameInfo } from "./blame-service";
 import { Config, BlameMode } from "./utils/config";
 import { findRepoForFile } from "./utils/git-api";
+import { resolveGitAiBinary } from "./utils/binary-path";
 
 export class BlameLensManager {
   private context: vscode.ExtensionContext;
@@ -225,6 +226,18 @@ export class BlameLensManager {
     }
 
     console.log('[git-ai] BlameLensManager activated');
+
+    // Resolve git-ai binary path early (uses login shell to get full user PATH)
+    resolveGitAiBinary().then((path) => {
+      if (path) {
+        const { execFile } = require('child_process');
+        execFile(path, ['--version'], (err: Error | null, stdout: string) => {
+          if (!err) {
+            console.log('[git-ai] Version:', stdout.trim());
+          }
+        });
+      }
+    });
   }
 
   /**
