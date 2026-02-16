@@ -12,6 +12,7 @@ use crate::git::sync_authorship::{fetch_authorship_notes, push_authorship_notes}
 #[cfg(windows)]
 use crate::utils::is_interactive_terminal;
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -20,6 +21,68 @@ use std::process::{Command, Output};
 use crate::utils::CREATE_NO_WINDOW;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+
+thread_local! {
+    static INTERNAL_GIT_HOOKS_DISABLED_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+pub struct InternalGitHooksGuard;
+
+impl Drop for InternalGitHooksGuard {
+    fn drop(&mut self) {
+        INTERNAL_GIT_HOOKS_DISABLED_DEPTH.with(|depth| {
+            let current = depth.get();
+            if current > 0 {
+                depth.set(current - 1);
+            }
+        });
+    }
+}
+
+/// Disable managed git hooks for internal `git` subprocesses executed through `exec_git*`.
+/// Use this guard around higher-level operations that already execute hook logic explicitly.
+pub fn disable_internal_git_hooks() -> InternalGitHooksGuard {
+    INTERNAL_GIT_HOOKS_DISABLED_DEPTH.with(|depth| depth.set(depth.get() + 1));
+    InternalGitHooksGuard
+}
+
+fn should_disable_internal_git_hooks() -> bool {
+    INTERNAL_GIT_HOOKS_DISABLED_DEPTH.with(|depth| depth.get() > 0)
+}
+
+#[cfg(windows)]
+fn null_hooks_path() -> &'static str {
+    "NUL"
+}
+
+#[cfg(not(windows))]
+fn null_hooks_path() -> &'static str {
+    "/dev/null"
+}
+
+fn args_with_disabled_hooks_if_needed(args: &[String]) -> Vec<String> {
+    if !should_disable_internal_git_hooks() {
+        return args.to_vec();
+    }
+
+    // Respect explicit hook-path overrides if a caller already set one.
+    let already_overrides_hooks = args
+        .windows(2)
+        .any(|pair| pair[0] == "-c" && pair[1].starts_with("core.hooksPath="))
+        || args.iter().any(|arg| {
+            arg.starts_with("-ccore.hooksPath=") || arg.starts_with("--config=core.hooksPath=")
+        });
+
+    if already_overrides_hooks {
+        return args.to_vec();
+    }
+
+    let mut out = Vec::with_capacity(args.len() + 2);
+    out.push("-c".to_string());
+    out.push(format!("core.hooksPath={}", null_hooks_path()));
+    out.extend(args.iter().cloned());
+    out
+}
 
 pub struct Object<'a> {
     repo: &'a Repository,
@@ -1415,7 +1478,7 @@ impl Repository {
             rp_args.push(target_ref.clone());
 
             let old_tip: Option<String> = match Command::new(config::Config::get().git_cmd())
-                .args(&rp_args)
+                .args(args_with_disabled_hooks_if_needed(&rp_args))
                 .output()
             {
                 Ok(output) if output.status.success() => {
@@ -2218,8 +2281,9 @@ pub fn group_files_by_repository(
 /// Helper to execute a git command
 pub fn exec_git(args: &[String]) -> Result<Output, GitAiError> {
     // TODO Make sure to handle process signals, etc.
+    let effective_args = args_with_disabled_hooks_if_needed(args);
     let mut cmd = Command::new(config::Config::get().git_cmd());
-    cmd.args(args);
+    cmd.args(&effective_args);
 
     #[cfg(windows)]
     {
@@ -2236,7 +2300,7 @@ pub fn exec_git(args: &[String]) -> Result<Output, GitAiError> {
         return Err(GitAiError::GitCliError {
             code,
             stderr,
-            args: args.to_vec(),
+            args: effective_args,
         });
     }
 
@@ -2246,8 +2310,9 @@ pub fn exec_git(args: &[String]) -> Result<Output, GitAiError> {
 /// Helper to execute a git command with data provided on stdin
 pub fn exec_git_stdin(args: &[String], stdin_data: &[u8]) -> Result<Output, GitAiError> {
     // TODO Make sure to handle process signals, etc.
+    let effective_args = args_with_disabled_hooks_if_needed(args);
     let mut cmd = Command::new(config::Config::get().git_cmd());
-    cmd.args(args)
+    cmd.args(&effective_args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -2276,7 +2341,7 @@ pub fn exec_git_stdin(args: &[String], stdin_data: &[u8]) -> Result<Output, GitA
         return Err(GitAiError::GitCliError {
             code,
             stderr,
-            args: args.to_vec(),
+            args: effective_args,
         });
     }
 
@@ -2291,8 +2356,9 @@ pub fn exec_git_stdin_with_env(
     stdin_data: &[u8],
 ) -> Result<Output, GitAiError> {
     // TODO Make sure to handle process signals, etc.
+    let effective_args = args_with_disabled_hooks_if_needed(args);
     let mut cmd = Command::new(config::Config::get().git_cmd());
-    cmd.args(args)
+    cmd.args(&effective_args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -2326,7 +2392,7 @@ pub fn exec_git_stdin_with_env(
         return Err(GitAiError::GitCliError {
             code,
             stderr,
-            args: args.to_vec(),
+            args: effective_args,
         });
     }
 

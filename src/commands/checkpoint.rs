@@ -132,6 +132,8 @@ pub fn run(
         ));
     }
 
+    crate::commands::git_hook_handlers::ensure_repo_level_hooks_for_checkpoint(repo);
+
     // Initialize the new storage system
     let storage_start = Instant::now();
     let repo_storage = RepoStorage::for_repo_path(repo.path(), &repo.workdir()?);

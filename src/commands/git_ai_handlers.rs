@@ -660,6 +660,7 @@ fn handle_checkpoint(args: &[String]) {
                     modified
                 });
 
+                commands::git_hook_handlers::ensure_repo_level_hooks_for_checkpoint(&repo);
                 let checkpoint_result = commands::checkpoint::run(
                     &repo,
                     &default_user_name,
@@ -773,6 +774,7 @@ fn handle_checkpoint(args: &[String]) {
 
     let checkpoint_start = std::time::Instant::now();
     let agent_tool = agent_run_result.as_ref().map(|r| r.agent_id.tool.clone());
+    commands::git_hook_handlers::ensure_repo_level_hooks_for_checkpoint(&repo);
     let checkpoint_result = commands::checkpoint::run(
         &repo,
         &default_user_name,

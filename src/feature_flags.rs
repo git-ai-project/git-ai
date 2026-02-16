@@ -55,6 +55,7 @@ define_feature_flags!(
     rewrite_stash: rewrite_stash, debug = true, release = false,
     inter_commit_move: checkpoint_inter_commit_move, debug = false, release = false,
     auth_keyring: auth_keyring, debug = false, release = false,
+    global_git_hooks: global_git_hooks, debug = false, release = false,
 );
 
 impl FeatureFlags {
