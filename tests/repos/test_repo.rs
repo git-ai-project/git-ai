@@ -386,8 +386,15 @@ impl TestRepo {
     }
 
     pub fn git_og(&self, args: &[&str]) -> Result<String, String> {
+        #[cfg(windows)]
+        let null_hooks = "NUL";
+        #[cfg(not(windows))]
+        let null_hooks = "/dev/null";
+
         let mut full_args: Vec<String> =
             vec!["-C".to_string(), self.path.to_str().unwrap().to_string()];
+        full_args.push("-c".to_string());
+        full_args.push(format!("core.hooksPath={}", null_hooks));
         full_args.extend(args.iter().map(|s| s.to_string()));
 
         GitAiRepository::exec_git(&full_args)
