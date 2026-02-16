@@ -53,32 +53,41 @@ fe2c4c8 (claude-4.5-opus [prompt_id]   2025-12-02 19:25:13 -0500  142)          
 <tr>
 <td>
 
-```json
+```
+hooks/post_clone_hook.rs
+  a1b2c3d4e5f6a7b8 6-8
+  c9d0e1f2a3b4c5d6 16,21,25
+---
 {
-  "files": {
-    "hooks/post_clone_hook.rs": {
-      "promptid1": "6-8",
-      "promptid2": "16,21,25"
-    }
-  },
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "0.1.4",
+  "base_commit_sha": "f4a8b2c...",
   "prompts": {
-    "promptid1": {
+    "a1b2c3d4e5f6a7b8": {
       "agent_id": {
         "tool": "copilot",
-        "model": "Codex 5.2"
+        "model": "codex-5.2"
       },
-      "human_author": "Alice Person",
-      "messages_url": "https://your-git-ai-prompt-store.dev/cas/promptid1_content_hash",
-      "summary": "GitHub #821: Guard note fetching on successful clone."
+      "human_author": "Alice Person <alice@example.com>",
+      "messages": [],
+      "total_additions": 8,
+      "total_deletions": 0,
+      "accepted_lines": 3,
+      "overriden_lines": 0,
+      "messages_url": "https://your-prompt-store.dev/cas/a1b2c3d4..."
     },
-    "promptid2": {
+    "c9d0e1f2a3b4c5d6": {
       "agent_id": {
         "tool": "cursor",
-        "model": "Sonnet 4.5"
+        "model": "sonnet-4.5"
       },
-      "human_author": "Jeff Coder",
-      "messages_url": "https://your-git-ai-prompt-store.dev/cas/promptid2_content_hash",
-      "summary": "Match Git Clone output style for notes fetch status."
+      "human_author": "Jeff Coder <jeff@example.com>",
+      "messages": [],
+      "total_additions": 5,
+      "total_deletions": 2,
+      "accepted_lines": 3,
+      "overriden_lines": 0,
+      "messages_url": "https://your-prompt-store.dev/cas/c9d0e1f2..."
     }
   }
 }
