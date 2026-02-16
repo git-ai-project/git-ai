@@ -10,7 +10,7 @@ use crate::error::GitAiError;
 use crate::git::cli_parser::ParsedGitInvocation;
 use crate::git::repository::{Repository, disable_internal_git_hooks};
 use crate::git::sync_authorship::fetch_authorship_notes;
-use crate::utils::debug_log;
+use crate::utils::{debug_log, debug_performance_log_structured};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
@@ -18,11 +18,13 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 const CONFIG_KEY_CORE_HOOKS_PATH: &str = "core.hooksPath";
 const GLOBAL_HOOK_STATE_FILE: &str = "global_git_hooks_state.json";
 const REPO_HOOK_STATE_FILE: &str = "git_hooks_state.json";
 const PULL_HOOK_STATE_FILE: &str = "pull_hook_state.json";
+const REBASE_HOOK_SUPPRESSION_STATE_FILE: &str = "rebase_hook_suppression_state.json";
 const GIT_HOOKS_DIR_NAME: &str = "git-hooks";
 
 pub const ENV_SKIP_ALL_HOOKS: &str = "GIT_AI_SKIP_ALL_HOOKS";
@@ -65,6 +67,17 @@ const CORE_GIT_HOOK_NAMES: &[&str] = &[
     "pre-solve-refs",
 ];
 
+// During rebases, these hooks are extremely chatty and no-op in managed behavior.
+// We can temporarily suppress them when there is no forwarding target for them.
+const REBASE_SUPPRESSIBLE_HOOKS: &[&str] = &[
+    "reference-transaction",
+    "post-index-change",
+    "pre-commit",
+    "prepare-commit-msg",
+    "commit-msg",
+    "post-commit",
+];
+
 #[allow(dead_code)]
 pub fn core_git_hook_names() -> &'static [&'static str] {
     CORE_GIT_HOOK_NAMES
@@ -78,6 +91,11 @@ struct HooksPathState {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct PullHookState {
     old_head: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct HookSuppressionState {
+    hooks: Vec<String>,
 }
 
 #[cfg(unix)]
@@ -142,6 +160,10 @@ fn global_state_path() -> Option<PathBuf> {
     config::internal_dir_path().map(|dir| dir.join(GLOBAL_HOOK_STATE_FILE))
 }
 
+fn rebase_hook_suppression_state_path() -> Option<PathBuf> {
+    config::internal_dir_path().map(|dir| dir.join(REBASE_HOOK_SUPPRESSION_STATE_FILE))
+}
+
 fn repo_state_path(repo: &Repository) -> PathBuf {
     repo.path().join("ai").join(REPO_HOOK_STATE_FILE)
 }
@@ -162,6 +184,14 @@ fn is_managed_hooks_path_str(path: &str) -> bool {
     }
 
     as_path == managed_git_hooks_dir()
+}
+
+fn hook_perf_json_logging_enabled() -> bool {
+    std::env::var("GIT_AI_DEBUG_PERFORMANCE")
+        .ok()
+        .and_then(|value| value.trim().parse::<u8>().ok())
+        .map(|level| level >= 2)
+        .unwrap_or(false)
 }
 
 fn global_git_config_path() -> PathBuf {
@@ -620,6 +650,131 @@ fn execute_forwarded_hook(
     output.status.code().unwrap_or(1)
 }
 
+fn forwarded_hook_path_for_name(repo: Option<&Repository>, hook_name: &str) -> Option<PathBuf> {
+    let forward_hooks_dir = should_forward_repo_state_first(repo)?;
+
+    #[cfg(windows)]
+    {
+        let hook_path = forward_hooks_dir.join(hook_name);
+        if hook_path.exists() && is_executable(&hook_path) {
+            return Some(hook_path);
+        }
+
+        let exe_candidate = forward_hooks_dir.join(format!("{}.exe", hook_name));
+        if exe_candidate.exists() && is_executable(&exe_candidate) {
+            return Some(exe_candidate);
+        }
+        None
+    }
+
+    #[cfg(not(windows))]
+    {
+        let hook_path = forward_hooks_dir.join(hook_name);
+        if hook_path.exists() && is_executable(&hook_path) {
+            Some(hook_path)
+        } else {
+            None
+        }
+    }
+}
+
+fn suppressed_hook_path(hooks_dir: &Path, hook_name: &str) -> PathBuf {
+    hooks_dir.join(format!(".git-ai-disabled-{}", hook_name))
+}
+
+fn save_rebase_hook_suppression_state(state: &HookSuppressionState) {
+    let Some(path) = rebase_hook_suppression_state_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(data) = serde_json::to_vec(state) {
+        let _ = fs::write(path, data);
+    }
+}
+
+fn load_rebase_hook_suppression_state() -> Option<HookSuppressionState> {
+    let path = rebase_hook_suppression_state_path()?;
+    let data = fs::read(path).ok()?;
+    serde_json::from_slice(&data).ok()
+}
+
+fn clear_rebase_hook_suppression_state() {
+    if let Some(path) = rebase_hook_suppression_state_path() {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn maybe_suppress_rebase_hooks(repo: Option<&Repository>) {
+    if load_rebase_hook_suppression_state().is_some() {
+        return;
+    }
+
+    let hooks_dir = managed_git_hooks_dir();
+    if !hooks_dir.exists() {
+        return;
+    }
+
+    let mut suppressed_hooks = Vec::new();
+
+    for hook_name in REBASE_SUPPRESSIBLE_HOOKS {
+        if forwarded_hook_path_for_name(repo, hook_name).is_some() {
+            continue;
+        }
+
+        let active_hook = hooks_dir.join(hook_name);
+        if !active_hook.exists() {
+            continue;
+        }
+
+        let disabled_hook = suppressed_hook_path(&hooks_dir, hook_name);
+        if fs::rename(&active_hook, &disabled_hook).is_ok() {
+            suppressed_hooks.push((*hook_name).to_string());
+        }
+    }
+
+    if !suppressed_hooks.is_empty() {
+        save_rebase_hook_suppression_state(&HookSuppressionState {
+            hooks: suppressed_hooks,
+        });
+    }
+}
+
+fn maybe_restore_rebase_hooks() {
+    if is_rebase_in_progress_from_context() {
+        return;
+    }
+
+    let Some(state) = load_rebase_hook_suppression_state() else {
+        return;
+    };
+
+    let hooks_dir = managed_git_hooks_dir();
+    let mut restored_all = true;
+
+    for hook_name in &state.hooks {
+        let active_hook = hooks_dir.join(hook_name);
+        let disabled_hook = suppressed_hook_path(&hooks_dir, hook_name);
+
+        if active_hook.exists() {
+            continue;
+        }
+
+        if !disabled_hook.exists() {
+            continue;
+        }
+
+        if fs::rename(&disabled_hook, &active_hook).is_err() {
+            restored_all = false;
+        }
+    }
+
+    if restored_all {
+        clear_rebase_hook_suppression_state();
+    }
+}
+
 fn parse_hook_stdin(stdin: &[u8]) -> Vec<(String, String)> {
     String::from_utf8_lossy(stdin)
         .lines()
@@ -783,17 +938,23 @@ fn latest_head_reflog_subject(repository: &Repository) -> Option<String> {
 fn maybe_handle_reset_reference_transaction(
     repo: &mut Repository,
     hook_args: &[String],
-    stdin: &[u8],
+    updates: &[(String, String, String)],
 ) {
     if hook_args.first().map(String::as_str) != Some("committed") {
         return;
     }
 
-    let Some(subject) = latest_head_reflog_subject(repo) else {
-        return;
-    };
-    if !subject.starts_with("reset:") {
-        return;
+    if let Ok(action) = std::env::var("GIT_REFLOG_ACTION") {
+        if !action.starts_with("reset:") {
+            return;
+        }
+    } else {
+        let Some(subject) = latest_head_reflog_subject(repo) else {
+            return;
+        };
+        if !subject.starts_with("reset:") {
+            return;
+        }
     }
 
     let head_ref = repo
@@ -801,7 +962,6 @@ fn maybe_handle_reset_reference_transaction(
         .ok()
         .and_then(|head| head.name().map(|name| name.to_string()))
         .unwrap_or_else(|| "HEAD".to_string());
-    let updates = parse_reference_transaction_stdin(stdin);
     let head_update = updates
         .iter()
         .find(|(_, _, reference)| reference == &head_ref || reference == "HEAD")
@@ -848,13 +1008,13 @@ fn maybe_handle_reset_reference_transaction(
 fn maybe_handle_stash_reference_transaction(
     repo: &mut Repository,
     hook_args: &[String],
-    stdin: &[u8],
+    updates: &[(String, String, String)],
 ) {
     if hook_args.first().map(String::as_str) != Some("committed") {
         return;
     }
 
-    for (old, new, reference) in parse_reference_transaction_stdin(stdin) {
+    for (old, new, reference) in updates {
         if reference != "refs/stash" {
             continue;
         }
@@ -871,7 +1031,7 @@ fn maybe_handle_stash_reference_transaction(
             // Stash pop removed stash@{0}. Restore attributions using captured stash SHA.
             let parsed = parsed_invocation("stash", vec!["pop".to_string()]);
             let mut context = default_context();
-            context.stash_sha = Some(old);
+            context.stash_sha = Some(old.clone());
             stash_hooks::post_stash_hook(&context, &parsed, repo, success_exit_status());
         }
     }
@@ -1206,10 +1366,10 @@ fn run_managed_hook(
 
     match hook_name {
         "pre-commit" => {
-            maybe_capture_cherry_pick_pre_commit_state(&repo);
             if is_rebase_in_progress(&repo) {
                 return 0;
             }
+            maybe_capture_cherry_pick_pre_commit_state(&repo);
             let parsed = parsed_invocation("commit", vec![]);
             let _ = commit_hooks::commit_pre_command_hook(&parsed, &mut repo);
             0
@@ -1237,6 +1397,7 @@ fn run_managed_hook(
             0
         }
         "pre-rebase" => {
+            maybe_suppress_rebase_hooks(Some(&repo));
             if is_pull_reflog_action() {
                 maybe_capture_pull_pre_rebase_state(&repo);
             } else {
@@ -1339,11 +1500,18 @@ fn run_managed_hook(
             0
         }
         "reference-transaction" => {
-            maybe_handle_stash_reference_transaction(&mut repo, hook_args, stdin);
-            maybe_handle_reset_reference_transaction(&mut repo, hook_args, stdin);
+            let updates = parse_reference_transaction_stdin(stdin);
+            if updates.is_empty() {
+                return 0;
+            }
+            maybe_handle_stash_reference_transaction(&mut repo, hook_args, &updates);
+            maybe_handle_reset_reference_transaction(&mut repo, hook_args, &updates);
             0
         }
         "prepare-commit-msg" => {
+            if is_rebase_in_progress(&repo) {
+                return 0;
+            }
             maybe_capture_cherry_pick_pre_commit_state(&repo);
             0
         }
@@ -1384,8 +1552,22 @@ fn needs_prepare_commit_msg_handling() -> bool {
     git_dir.join("CHERRY_PICK_HEAD").is_file()
 }
 
-fn hook_requires_managed_repo_lookup(hook_name: &str) -> bool {
+fn is_rebase_in_progress_from_context() -> bool {
+    let Some(git_dir) = git_dir_from_context() else {
+        return false;
+    };
+    git_dir.join("rebase-merge").is_dir() || git_dir.join("rebase-apply").is_dir()
+}
+
+fn hook_requires_managed_repo_lookup(
+    hook_name: &str,
+    hook_args: &[String],
+    stdin_data: &[u8],
+) -> bool {
     match hook_name {
+        // During rebases these hooks are frequent and intentionally no-op in managed logic.
+        // Skip repository lookup up front.
+        "pre-commit" | "post-commit" => !is_rebase_in_progress_from_context(),
         // Managed hook logic is a no-op for these hooks.
         "commit-msg"
         | "pre-merge-commit"
@@ -1408,14 +1590,46 @@ fn hook_requires_managed_repo_lookup(hook_name: &str) -> bool {
         | "p4-post-changelist"
         | "p4-pre-submit" => false,
         // Only needed for cherry-pick path capture.
-        "prepare-commit-msg" => needs_prepare_commit_msg_handling(),
+        "prepare-commit-msg" => {
+            if is_rebase_in_progress_from_context() {
+                return false;
+            }
+            needs_prepare_commit_msg_handling()
+        }
+        // Needed only for stash/reset handling; in all other flows this hook is a no-op.
+        "reference-transaction" => {
+            if hook_args.first().map(String::as_str) != Some("committed") {
+                return false;
+            }
+
+            let updates = parse_reference_transaction_stdin(stdin_data);
+
+            if updates
+                .iter()
+                .any(|(_, _, reference)| reference == "refs/stash")
+            {
+                return true;
+            }
+
+            if let Ok(action) = std::env::var("GIT_REFLOG_ACTION") {
+                return action.starts_with("reset:");
+            }
+
+            updates.iter().any(|(_, _, reference)| {
+                reference == "HEAD" || reference.starts_with("refs/heads/")
+            })
+        }
         _ => true,
     }
 }
 
 pub fn handle_git_hook_invocation(hook_name: &str, hook_args: &[String]) -> i32 {
+    let perf_enabled = hook_perf_json_logging_enabled();
+    let hook_start = perf_enabled.then(Instant::now);
     let mut stdin_data = Vec::new();
     let _ = std::io::stdin().read_to_end(&mut stdin_data);
+
+    maybe_restore_rebase_hooks();
 
     if std::env::var(ENV_SKIP_ALL_HOOKS).as_deref() == Ok("1") {
         return 0;
@@ -1424,24 +1638,60 @@ pub fn handle_git_hook_invocation(hook_name: &str, hook_args: &[String]) -> i32 
     let skip_managed_hooks = std::env::var(ENV_SKIP_MANAGED_HOOKS).as_deref() == Ok("1")
         || std::env::var(ENV_SKIP_MANAGED_HOOKS_LEGACY).as_deref() == Ok("1");
     let mut repo = None;
+    let mut lookup_ms = 0u128;
+    let mut managed_ms = 0u128;
 
-    if !skip_managed_hooks && hook_requires_managed_repo_lookup(hook_name) {
+    if !skip_managed_hooks && hook_requires_managed_repo_lookup(hook_name, hook_args, &stdin_data) {
+        let lookup_start = Instant::now();
         let current_dir = match std::env::current_dir() {
             Ok(path) => path,
             Err(_) => PathBuf::from("."),
         };
         repo = crate::git::find_repository_in_path(&current_dir.to_string_lossy()).ok();
+        lookup_ms = lookup_start.elapsed().as_millis();
 
         {
             let _guard = disable_internal_git_hooks();
+            let managed_start = Instant::now();
             let managed_status = run_managed_hook(hook_name, hook_args, &stdin_data, repo.as_ref());
+            managed_ms = managed_start.elapsed().as_millis();
             if managed_status != 0 {
+                if perf_enabled {
+                    debug_performance_log_structured(serde_json::json!({
+                        "kind": "hook_invocation",
+                        "hook": hook_name,
+                        "managed_status": managed_status,
+                        "repo_lookup_ms": lookup_ms,
+                        "managed_ms": managed_ms,
+                        "forward_ms": 0u128,
+                        "total_ms": hook_start
+                            .map(|start| start.elapsed().as_millis())
+                            .unwrap_or(0),
+                    }));
+                }
                 return managed_status;
             }
         }
     }
 
-    execute_forwarded_hook(hook_name, hook_args, &stdin_data, repo.as_ref())
+    let forward_start = Instant::now();
+    let status = execute_forwarded_hook(hook_name, hook_args, &stdin_data, repo.as_ref());
+    let forward_ms = forward_start.elapsed().as_millis();
+    if perf_enabled {
+        debug_performance_log_structured(serde_json::json!({
+            "kind": "hook_invocation",
+            "hook": hook_name,
+            "managed_status": 0,
+            "forward_status": status,
+            "repo_lookup_ms": lookup_ms,
+            "managed_ms": managed_ms,
+            "forward_ms": forward_ms,
+            "total_ms": hook_start
+                .map(|start| start.elapsed().as_millis())
+                .unwrap_or(0),
+        }));
+    }
+    status
 }
 
 pub fn ensure_repo_level_hooks_for_checkpoint(repo: &Repository) {
@@ -1649,6 +1899,65 @@ mod tests {
         assert!(
             should_forward_repo_state_first(Some(&repo)).is_none(),
             "repo state presence should suppress global fallback"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn rebase_hook_suppression_roundtrip_restores_hooks() {
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let home = tmp.path().join("home");
+        let hooks_dir = home.join(".git-ai").join("git-hooks");
+        fs::create_dir_all(&hooks_dir).expect("failed to create hooks dir");
+
+        for hook in REBASE_SUPPRESSIBLE_HOOKS {
+            fs::write(hooks_dir.join(hook), "#!/bin/sh\nexit 0\n")
+                .expect("failed to seed hook file");
+        }
+
+        let fake_git_dir = tmp.path().join("gitdir");
+        fs::create_dir_all(&fake_git_dir).expect("failed to create fake git dir");
+
+        let _home_guard = EnvVarGuard::set("HOME", home.to_string_lossy().as_ref());
+        let _git_dir_guard = EnvVarGuard::set("GIT_DIR", fake_git_dir.to_string_lossy().as_ref());
+
+        maybe_suppress_rebase_hooks(None);
+
+        for hook in REBASE_SUPPRESSIBLE_HOOKS {
+            assert!(
+                !hooks_dir.join(hook).exists(),
+                "expected hook to be suppressed: {}",
+                hook
+            );
+            assert!(
+                suppressed_hook_path(&hooks_dir, hook).exists(),
+                "expected suppressed hook file for {}",
+                hook
+            );
+        }
+
+        let state_path =
+            rebase_hook_suppression_state_path().expect("expected suppression state path");
+        assert!(state_path.exists(), "expected suppression state file");
+
+        maybe_restore_rebase_hooks();
+
+        for hook in REBASE_SUPPRESSIBLE_HOOKS {
+            assert!(
+                hooks_dir.join(hook).exists(),
+                "expected hook to be restored: {}",
+                hook
+            );
+            assert!(
+                !suppressed_hook_path(&hooks_dir, hook).exists(),
+                "expected suppressed file to be removed: {}",
+                hook
+            );
+        }
+
+        assert!(
+            !state_path.exists(),
+            "expected suppression state file to be removed after restore"
         );
     }
 

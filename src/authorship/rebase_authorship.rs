@@ -816,6 +816,10 @@ pub fn rewrite_authorship_after_cherry_pick(
         }
         return Ok(());
     }
+
+    if try_fast_path_cherry_pick_note_remap(repo, &commit_pairs, &pathspecs)? {
+        return Ok(());
+    }
     let pathspecs_lookup: HashSet<&str> = pathspecs.iter().map(String::as_str).collect();
     let mut source_note_content_by_new_commit: HashMap<String, String> = HashMap::new();
     let mut source_note_content_loaded = false;
@@ -2081,6 +2085,95 @@ fn try_fast_path_rebase_note_remap(
     ));
     debug_performance_log(&format!(
         "Fast-path rebase note remap complete in {}ms",
+        fast_path_start.elapsed().as_millis()
+    ));
+    Ok(true)
+}
+
+fn try_fast_path_cherry_pick_note_remap(
+    repo: &Repository,
+    commit_pairs: &[(String, String)],
+    tracked_paths: &[String],
+) -> Result<bool, GitAiError> {
+    let fast_path_start = std::time::Instant::now();
+    if commit_pairs.is_empty() || tracked_paths.is_empty() {
+        return Ok(false);
+    }
+
+    let compare_start = std::time::Instant::now();
+    if !tracked_paths_match_for_commit_pairs(repo, commit_pairs, tracked_paths)? {
+        return Ok(false);
+    }
+    debug_performance_log(&format!(
+        "Fast-path cherry-pick note remap: compared tracked blobs for {} commit pairs in {}ms",
+        commit_pairs.len(),
+        compare_start.elapsed().as_millis()
+    ));
+
+    let source_commits: Vec<String> = commit_pairs
+        .iter()
+        .map(|(source_commit, _new_commit)| source_commit.clone())
+        .collect();
+    let note_oid_lookup_start = std::time::Instant::now();
+    let source_note_blob_oids = note_blob_oids_for_commits(repo, &source_commits)?;
+    debug_performance_log(&format!(
+        "Fast-path cherry-pick note remap: resolved {} note blob oids in {}ms",
+        source_note_blob_oids.len(),
+        note_oid_lookup_start.elapsed().as_millis()
+    ));
+    if source_note_blob_oids.len() != source_commits.len() {
+        return Ok(false);
+    }
+
+    let mut remapped_blob_entries: Vec<(String, String)> = Vec::with_capacity(commit_pairs.len());
+    for (source_commit, new_commit) in commit_pairs {
+        let blob_oid = match source_note_blob_oids.get(source_commit) {
+            Some(oid) => oid.clone(),
+            None => return Ok(false),
+        };
+        remapped_blob_entries.push((new_commit.clone(), blob_oid));
+    }
+
+    if remapped_blob_entries.is_empty() {
+        return Ok(false);
+    }
+
+    let mut blob_oids: Vec<String> = remapped_blob_entries
+        .iter()
+        .map(|(_new_commit, blob_oid)| blob_oid.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    blob_oids.sort();
+    let blob_contents = batch_read_blob_contents(repo, &blob_oids)?;
+
+    let mut remapped_note_entries: Vec<(String, String)> =
+        Vec::with_capacity(remapped_blob_entries.len());
+    for (new_commit, blob_oid) in remapped_blob_entries {
+        let Some(raw_note) = blob_contents.get(&blob_oid) else {
+            return Ok(false);
+        };
+        remapped_note_entries.push((
+            new_commit.clone(),
+            remap_note_content_for_target_commit(raw_note, &new_commit),
+        ));
+    }
+
+    let remapped_count = remapped_note_entries.len();
+    let write_start = std::time::Instant::now();
+    crate::git::refs::notes_add_batch(repo, &remapped_note_entries)?;
+    debug_performance_log(&format!(
+        "Fast-path cherry-pick note remap: wrote {} remapped notes in {}ms",
+        remapped_count,
+        write_start.elapsed().as_millis()
+    ));
+
+    debug_log(&format!(
+        "Fast-path remapped authorship logs for {} cherry-picked commits (blob-equivalent tracked files)",
+        remapped_count
+    ));
+    debug_performance_log(&format!(
+        "Fast-path cherry-pick note remap complete in {}ms",
         fast_path_start.elapsed().as_millis()
     ));
     Ok(true)
