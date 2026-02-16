@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use crate::authorship::virtual_attribution::VirtualAttributions;
+use crate::commands::git_hook_handlers::ENV_SKIP_MANAGED_HOOKS;
 use crate::commands::hooks::checkout_hooks;
 use crate::commands::hooks::cherry_pick_hooks;
 use crate::commands::hooks::clone_hooks;
@@ -15,7 +16,7 @@ use crate::commands::hooks::switch_hooks;
 use crate::config;
 use crate::git::cli_parser::{ParsedGitInvocation, parse_git_cli_args};
 use crate::git::find_repository;
-use crate::git::repository::Repository;
+use crate::git::repository::{Repository, disable_internal_git_hooks};
 use crate::observability;
 
 use crate::observability::wrapper_performance_targets::log_performance_target_if_violated;
@@ -318,6 +319,7 @@ fn run_pre_command_hooks(
     parsed_args: &mut ParsedGitInvocation,
     repository: &mut Repository,
 ) {
+    let _disable_hooks_guard = disable_internal_git_hooks();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // Pre-command hooks
         match parsed_args.command.as_deref() {
@@ -394,6 +396,7 @@ fn run_post_command_hooks(
     exit_status: std::process::ExitStatus,
     repository: &mut Repository,
 ) {
+    let _disable_hooks_guard = disable_internal_git_hooks();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // Post-command hooks
         match parsed_args.command.as_deref() {
@@ -505,6 +508,7 @@ fn proxy_to_git(args: &[String], exit_on_completion: bool) -> std::process::Exit
 
             let mut cmd = Command::new(config::Config::get().git_cmd());
             cmd.args(args);
+            cmd.env(ENV_SKIP_MANAGED_HOOKS, "1");
             unsafe {
                 let setpgid_flag = should_setpgid;
                 cmd.pre_exec(move || {
@@ -525,6 +529,7 @@ fn proxy_to_git(args: &[String], exit_on_completion: bool) -> std::process::Exit
         {
             let mut cmd = Command::new(config::Config::get().git_cmd());
             cmd.args(args);
+            cmd.env(ENV_SKIP_MANAGED_HOOKS, "1");
 
             #[cfg(windows)]
             {

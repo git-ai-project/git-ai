@@ -40,10 +40,33 @@ macro_rules! subdir_test_variants {
                         use $crate::repos::test_repo::get_binary_path;
 
                         let binary_path = get_binary_path();
-                        let mut command = Command::new(binary_path);
+                        let mode = std::env::var("GIT_AI_TEST_GIT_MODE")
+                            .unwrap_or_else(|_| "wrapper".to_string())
+                            .to_lowercase();
+                        let uses_wrapper = mode != "hooks";
+                        let uses_hooks = mode == "hooks"
+                            || mode == "both"
+                            || mode == "wrapper+hooks"
+                            || mode == "hooks+wrapper";
+
+                        let mut command = if uses_wrapper {
+                            Command::new(binary_path)
+                        } else {
+                            Command::new("git")
+                        };
                         command.current_dir(&arbitrary_dir);
                         command.args(&full_args);
-                        command.env("GIT_AI", "git");
+                        if uses_wrapper {
+                            command.env("GIT_AI", "git");
+                        }
+                        if uses_hooks {
+                            command.env("HOME", self.inner.test_home_path());
+                            command.env(
+                                "GIT_CONFIG_GLOBAL",
+                                self.inner.test_home_path().join(".gitconfig"),
+                            );
+                            command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
+                        }
 
                         // Add config patch if present
                         if let Some(patch) = &self.inner.config_patch {
@@ -86,10 +109,33 @@ macro_rules! subdir_test_variants {
                             use $crate::repos::test_repo::get_binary_path;
 
                             let binary_path = get_binary_path();
-                            let mut command = Command::new(binary_path);
+                            let mode = std::env::var("GIT_AI_TEST_GIT_MODE")
+                                .unwrap_or_else(|_| "wrapper".to_string())
+                                .to_lowercase();
+                            let uses_wrapper = mode != "hooks";
+                            let uses_hooks = mode == "hooks"
+                                || mode == "both"
+                                || mode == "wrapper+hooks"
+                                || mode == "hooks+wrapper";
+
+                            let mut command = if uses_wrapper {
+                                Command::new(binary_path)
+                            } else {
+                                Command::new("git")
+                            };
                             command.current_dir(&arbitrary_dir);
                             command.args(&full_args);
-                            command.env("GIT_AI", "git");
+                            if uses_wrapper {
+                                command.env("GIT_AI", "git");
+                            }
+                            if uses_hooks {
+                                command.env("HOME", self.inner.test_home_path());
+                                command.env(
+                                    "GIT_CONFIG_GLOBAL",
+                                    self.inner.test_home_path().join(".gitconfig"),
+                                );
+                                command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
+                            }
 
                             if let Some(patch) = &self.inner.config_patch {
                                 if let Ok(patch_json) = serde_json::to_string(patch) {
