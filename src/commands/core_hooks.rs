@@ -1862,6 +1862,7 @@ pub fn write_core_hook_scripts(hooks_dir: &Path, git_ai_binary: &Path) -> Result
     let binary = normalize_hook_binary_path(git_ai_binary);
 
     for hook in INSTALLED_HOOKS {
+        let is_passthrough = PASSTHROUGH_ONLY_HOOKS.contains(hook);
         let script = if *hook == "reference-transaction" {
             format!(
                 r#"#!/bin/sh
@@ -2176,6 +2177,7 @@ if [ -s "$previous_hooks_file" ]; then
     "~/"*) previous_hooks_dir="$HOME/${{previous_hooks_dir#\~/}}" ;;
   esac
 fi
+previous_hooks_dir=$(printf '%s' "$previous_hooks_dir" | tr '\\' '/')
 
 if [ -n "$previous_hooks_dir" ]; then
   case "$script_dir" in */) script_dir="${{script_dir%/}}" ;; esac
@@ -2186,6 +2188,7 @@ if [ -n "$previous_hooks_dir" ]; then
 fi
 
 repo_git_dir="${{GIT_DIR:-.git}}"
+repo_git_dir=$(printf '%s' "$repo_git_dir" | tr '\\' '/')
 dispatch=0
 state_file="$repo_git_dir/ai/core_hook_state.json"
 working_logs_dir="$repo_git_dir/ai/working_logs"
