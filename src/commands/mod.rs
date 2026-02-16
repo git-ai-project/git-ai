@@ -11,6 +11,7 @@ pub mod flush_logs;
 pub mod flush_metrics_db;
 pub mod git_ai_handlers;
 pub mod git_handlers;
+pub mod git_hook_handlers;
 pub mod hooks;
 pub mod install_hooks;
 pub mod login;

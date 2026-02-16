@@ -1,4 +1,5 @@
 use crate::commands::flush_metrics_db::spawn_background_metrics_db_flush;
+use crate::commands::git_hook_handlers::{install_global_git_hooks, uninstall_global_git_hooks};
 use crate::error::GitAiError;
 use crate::mdm::agents::get_all_installers;
 use crate::mdm::git_client_installer::GitClientInstallerParams;
@@ -174,6 +175,49 @@ async fn async_run_install(
     // Ensure git symlinks for Fork compatibility
     if let Err(e) = crate::mdm::ensure_git_symlinks() {
         eprintln!("Warning: Failed to create git symlinks: {}", e);
+    }
+
+    // Optionally install global Git hooks that point directly at git-ai.
+    if crate::config::Config::get()
+        .feature_flags()
+        .global_git_hooks
+    {
+        let spinner = Spinner::new("Git hooks: configuring global core.hooksPath");
+        spinner.start();
+        match install_global_git_hooks(&params.binary_path, dry_run) {
+            Ok(changed) => {
+                if changed {
+                    has_changes = true;
+                    if dry_run {
+                        spinner.pending("Git hooks: pending updates");
+                    } else {
+                        spinner.success("Git hooks: installed");
+                    }
+                    statuses.insert("global-git-hooks".to_string(), InstallStatus::Installed);
+                    detailed_results
+                        .push(("global-git-hooks".to_string(), InstallResult::installed()));
+                } else {
+                    spinner.success("Git hooks: already configured");
+                    statuses.insert(
+                        "global-git-hooks".to_string(),
+                        InstallStatus::AlreadyInstalled,
+                    );
+                    detailed_results.push((
+                        "global-git-hooks".to_string(),
+                        InstallResult::already_installed(),
+                    ));
+                }
+            }
+            Err(e) => {
+                spinner.error("Git hooks: failed to configure");
+                eprintln!("  Error: {}", e);
+                statuses.insert("global-git-hooks".to_string(), InstallStatus::Failed);
+                detailed_results.push((
+                    "global-git-hooks".to_string(),
+                    InstallResult::failed(e.to_string()),
+                ));
+            }
+        }
     }
 
     // === Coding Agents ===
@@ -422,6 +466,37 @@ async fn async_run_uninstall(
     let mut any_checked = false;
     let mut has_changes = false;
     let mut statuses: HashMap<String, InstallStatus> = HashMap::new();
+
+    // Attempt to remove global core.hooksPath integration first. This is safe to run
+    // even when the feature flag is disabled, as it only acts if git-ai previously configured it.
+    {
+        let spinner = Spinner::new("Git hooks: removing global core.hooksPath");
+        spinner.start();
+        match uninstall_global_git_hooks(dry_run) {
+            Ok(changed) => {
+                if changed {
+                    has_changes = true;
+                    if dry_run {
+                        spinner.pending("Git hooks: pending removal");
+                    } else {
+                        spinner.success("Git hooks: removed");
+                    }
+                    statuses.insert("global-git-hooks".to_string(), InstallStatus::Installed);
+                } else {
+                    spinner.success("Git hooks: no global changes needed");
+                    statuses.insert(
+                        "global-git-hooks".to_string(),
+                        InstallStatus::AlreadyInstalled,
+                    );
+                }
+            }
+            Err(e) => {
+                spinner.error("Git hooks: failed to remove");
+                eprintln!("  Error: {}", e);
+                statuses.insert("global-git-hooks".to_string(), InstallStatus::Failed);
+            }
+        }
+    }
 
     // Uninstall skills first (these are global, not per-agent, silently)
     if let Ok(result) = skills_installer::uninstall_skills(dry_run, verbose) {
