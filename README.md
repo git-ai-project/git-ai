@@ -88,36 +88,36 @@ fe2c4c8 (claude-4.5-opus [prompt_id]   2025-12-02 19:25:13 -0500  142)          
 <td>
 
 ```rust
-pub fn post_clone_hook(
-    parsed_args: &ParsedGitInvocation,
-    exit_status: std::process::ExitStatus,
-) -> Option<()> {
-
-    if !exit_status.success() {
-        return None;
-    }
-
-    let target_dir =
-        extract_clone_target_directory(&parsed_args.command_args)?;
-
-    let repository =
-        find_repository_in_path(&target_dir).ok()?;
-
-    print!("Fetching authorship notes from origin");
-
-    match fetch_authorship_notes(&repository, "origin") {
-        Ok(()) => {
-            debug_log("successfully fetched");
-            print!(", done.\n");
-        }
-        Err(e) => {
-            debug_log(&format!("fetch failed: {}", e));
-            print!(", failed.\n");
-        }
-    }
-
-    Some(())
-}
+ 1  pub fn post_clone_hook(
+ 2      parsed_args: &ParsedGitInvocation,
+ 3      exit_status: std::process::ExitStatus,
+ 4  ) -> Option<()> {
+ 5
+ 6      if !exit_status.success() {
+ 7          return None;
+ 8      }
+ 9
+10      let target_dir =
+11          extract_clone_target_directory(&parsed_args.command_args)?;
+12
+13      let repository =
+14          find_repository_in_path(&target_dir).ok()?;
+15
+16      print!("Fetching authorship notes from origin");
+17
+18      match fetch_authorship_notes(&repository, "origin") {
+19          Ok(()) => {
+20              debug_log("successfully fetched");
+21              print!(", done.\n");
+22          }
+23          Err(e) => {
+24              debug_log(&format!("fetch failed: {}", e));
+25              print!(", failed.\n");
+26          }
+27      }
+28
+29      Some(())
+30  }
 ```
 
 </td>
