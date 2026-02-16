@@ -985,14 +985,31 @@ fn is_pull_reflog_action() -> bool {
 }
 
 fn is_post_commit_amend(repo: &Repository) -> bool {
+    if let Ok(action) = std::env::var("GIT_REFLOG_ACTION")
+        && action.to_ascii_lowercase().contains("amend")
+    {
+        return true;
+    }
+
     let Ok(previous_head) = repo.revparse_single("HEAD@{1}") else {
         return false;
     };
-    let Ok(new_first_parent) = repo.revparse_single("HEAD^") else {
+    let Ok(new_head) = repo.head().and_then(|head| head.target()) else {
+        return false;
+    };
+    let Ok(new_commit) = repo.find_commit(new_head) else {
         return false;
     };
 
-    previous_head.id() != new_first_parent.id()
+    if let Ok(new_first_parent) = new_commit.parent(0) {
+        return previous_head.id() != new_first_parent.id();
+    }
+
+    // Root-commit amend has no parent; detect it by observing the previous HEAD was also a root.
+    repo.find_commit(previous_head.id())
+        .and_then(|commit| commit.parent_count())
+        .map(|parent_count| parent_count == 0)
+        .unwrap_or(false)
 }
 
 fn pull_hook_state_path(repo: &Repository) -> PathBuf {
