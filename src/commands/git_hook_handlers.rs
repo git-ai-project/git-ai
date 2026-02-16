@@ -495,12 +495,46 @@ fn ensure_repo_level_hooks_for_repo(repo: &Repository) -> Result<(), GitAiError>
     Ok(())
 }
 
+fn repo_state_path_from_env() -> Option<PathBuf> {
+    git_dir_from_context().map(|git_dir| git_dir.join("ai").join(REPO_HOOK_STATE_FILE))
+}
+
+fn git_dir_from_env() -> Option<PathBuf> {
+    let git_dir = std::env::var("GIT_DIR").ok()?;
+    let git_dir = git_dir.trim();
+    if git_dir.is_empty() {
+        return None;
+    }
+
+    let git_dir = PathBuf::from(git_dir);
+    if git_dir.is_absolute() {
+        Some(git_dir)
+    } else {
+        std::env::current_dir().ok().map(|cwd| cwd.join(git_dir))
+    }
+}
+
+fn git_dir_from_context() -> Option<PathBuf> {
+    if let Some(from_env) = git_dir_from_env() {
+        return Some(from_env);
+    }
+
+    // In some wrapper-internal invocations Git may not export GIT_DIR to hooks.
+    // For normal non-bare hooks, the working directory is the repo root.
+    let cwd = std::env::current_dir().ok()?;
+    let candidate = cwd.join(".git");
+    if candidate.is_dir() {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
 fn should_forward_repo_state_first(repo: Option<&Repository>) -> Option<PathBuf> {
     // Repo-level forwarding takes precedence over global forwarding exactly like
     // git's config precedence: if a repo has persisted hook state, never fall
     // back to global hook state for forwarding.
-    if let Some(repo) = repo {
-        let repo_state = repo_state_path(repo);
+    if let Some(repo_state) = repo.map(repo_state_path).or_else(repo_state_path_from_env) {
         if repo_state.exists() {
             if let Ok(Some(state)) = read_hook_state(&repo_state) {
                 let candidate = PathBuf::from(state.previous_hooks_path);
@@ -1332,16 +1366,47 @@ pub fn is_git_hook_binary_name(binary_name: &str) -> bool {
     CORE_GIT_HOOK_NAMES.contains(&binary_name)
 }
 
+fn needs_prepare_commit_msg_handling() -> bool {
+    let Some(git_dir) = git_dir_from_context() else {
+        // Keep existing behavior if git did not provide GIT_DIR in env.
+        return true;
+    };
+
+    git_dir.join("CHERRY_PICK_HEAD").is_file()
+}
+
+fn hook_requires_managed_repo_lookup(hook_name: &str) -> bool {
+    match hook_name {
+        // Managed hook logic is a no-op for these hooks.
+        "commit-msg"
+        | "pre-merge-commit"
+        | "pre-auto-gc"
+        | "sendemail-validate"
+        | "post-index-change"
+        | "applypatch-msg"
+        | "pre-applypatch"
+        | "post-applypatch"
+        | "pre-receive"
+        | "update"
+        | "proc-receive"
+        | "post-receive"
+        | "post-update"
+        | "push-to-checkout"
+        | "pre-solve-refs"
+        | "fsmonitor-watchman"
+        | "p4-changelist"
+        | "p4-prepare-changelist"
+        | "p4-post-changelist"
+        | "p4-pre-submit" => false,
+        // Only needed for cherry-pick path capture.
+        "prepare-commit-msg" => needs_prepare_commit_msg_handling(),
+        _ => true,
+    }
+}
+
 pub fn handle_git_hook_invocation(hook_name: &str, hook_args: &[String]) -> i32 {
     let mut stdin_data = Vec::new();
     let _ = std::io::stdin().read_to_end(&mut stdin_data);
-
-    let current_dir = match std::env::current_dir() {
-        Ok(path) => path,
-        Err(_) => PathBuf::from("."),
-    };
-
-    let repo = crate::git::find_repository_in_path(&current_dir.to_string_lossy()).ok();
 
     if std::env::var(ENV_SKIP_ALL_HOOKS).as_deref() == Ok("1") {
         return 0;
@@ -1349,11 +1414,21 @@ pub fn handle_git_hook_invocation(hook_name: &str, hook_args: &[String]) -> i32 
 
     let skip_managed_hooks = std::env::var(ENV_SKIP_MANAGED_HOOKS).as_deref() == Ok("1")
         || std::env::var(ENV_SKIP_MANAGED_HOOKS_LEGACY).as_deref() == Ok("1");
-    if !skip_managed_hooks {
-        let _guard = disable_internal_git_hooks();
-        let managed_status = run_managed_hook(hook_name, hook_args, &stdin_data, repo.as_ref());
-        if managed_status != 0 {
-            return managed_status;
+    let mut repo = None;
+
+    if !skip_managed_hooks && hook_requires_managed_repo_lookup(hook_name) {
+        let current_dir = match std::env::current_dir() {
+            Ok(path) => path,
+            Err(_) => PathBuf::from("."),
+        };
+        repo = crate::git::find_repository_in_path(&current_dir.to_string_lossy()).ok();
+
+        {
+            let _guard = disable_internal_git_hooks();
+            let managed_status = run_managed_hook(hook_name, hook_args, &stdin_data, repo.as_ref());
+            if managed_status != 0 {
+                return managed_status;
+            }
         }
     }
 
