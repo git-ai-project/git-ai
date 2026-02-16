@@ -513,9 +513,6 @@ impl TestRepo {
         }
         command.env("GIT_AI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
 
-        // Add test database path for isolation
-        command.env("GIT_AI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
-
         // Add custom environment variables
         for (key, value) in envs {
             command.env(key, value);
