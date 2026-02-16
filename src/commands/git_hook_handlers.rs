@@ -534,16 +534,16 @@ fn should_forward_repo_state_first(repo: Option<&Repository>) -> Option<PathBuf>
     // Repo-level forwarding takes precedence over global forwarding exactly like
     // git's config precedence: if a repo has persisted hook state, never fall
     // back to global hook state for forwarding.
-    if let Some(repo_state) = repo.map(repo_state_path).or_else(repo_state_path_from_env) {
-        if repo_state.exists() {
-            if let Ok(Some(state)) = read_hook_state(&repo_state) {
-                let candidate = PathBuf::from(state.previous_hooks_path);
-                if !is_managed_hooks_path(&candidate) {
-                    return Some(candidate);
-                }
+    if let Some(repo_state) = repo.map(repo_state_path).or_else(repo_state_path_from_env)
+        && repo_state.exists()
+    {
+        if let Ok(Some(state)) = read_hook_state(&repo_state) {
+            let candidate = PathBuf::from(state.previous_hooks_path);
+            if !is_managed_hooks_path(&candidate) {
+                return Some(candidate);
             }
-            return None;
         }
+        return None;
     }
 
     if let Some(global_path) = global_state_path()
