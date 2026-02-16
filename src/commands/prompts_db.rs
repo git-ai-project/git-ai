@@ -279,7 +279,6 @@ fn handle_exec(args: &[String]) {
                 let rows = stmt.query_map([], |row| {
                     let values: Vec<String> = (0..column_names.len())
                         .map(|i| {
-                            
                             row.get::<_, rusqlite::types::Value>(i)
                                 .map(|v| format_value(&v))
                                 .unwrap_or_else(|_| "NULL".to_string())

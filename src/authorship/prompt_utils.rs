@@ -545,7 +545,6 @@ pub fn enrich_prompt_messages(
     prompts: &mut HashMap<String, PromptRecord>,
     referenced_ids: &HashSet<&String>,
 ) {
-
     let ids_needing_messages: Vec<String> = prompts
         .iter()
         .filter(|(k, prompt)| referenced_ids.contains(k) && prompt.messages.is_empty())
