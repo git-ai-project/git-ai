@@ -619,21 +619,12 @@ fn build_config() -> Config {
 }
 
 fn build_feature_flags(file_cfg: &Option<FileConfig>) -> FeatureFlags {
-    let mut file_flags_value = file_cfg
+    // Try to deserialize the feature flags from the JSON value
+    let file_flags = file_cfg
         .as_ref()
         .and_then(|c| c.feature_flags.as_ref())
-        .cloned();
-
-    // Backward-compatible alias: accept `feature_flags.globalGitHooks` from config files.
-    if let Some(serde_json::Value::Object(ref mut flags)) = file_flags_value
-        && let Some(value) = flags.get("globalGitHooks").cloned()
-        && !flags.contains_key("global_git_hooks")
-    {
-        flags.insert("global_git_hooks".to_string(), value);
-    }
-
-    // Try to deserialize the feature flags from the JSON value
-    let file_flags = file_flags_value.and_then(|value| {
+        .cloned()
+        .and_then(|value| {
         // Use from_value to deserialize, but ignore any errors and fall back to defaults
         serde_json::from_value(value).ok()
     });
