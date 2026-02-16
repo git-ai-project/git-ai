@@ -22,6 +22,10 @@ use crate::utils::CREATE_NO_WINDOW;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
+// This is intentionally thread-local so top-level wrapper operations can suppress managed
+// hooks for their own internal `exec_git*` calls without affecting unrelated threads.
+// Background threads that run authorship sync remain safe because those commands also pass
+// explicit `-c core.hooksPath=...` overrides in sync_authorship.rs.
 thread_local! {
     static INTERNAL_GIT_HOOKS_DISABLED_DEPTH: Cell<usize> = const { Cell::new(0) };
 }
