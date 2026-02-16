@@ -10,12 +10,13 @@ on:
 
 jobs:
   test:
-    name: Test on ${{ matrix.os }}
+    name: Test on ${{ matrix.os }} (${{ matrix.test_mode }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        test_mode: [wrapper, hooks, both]
 
     steps:
       - name: Checkout code
@@ -45,6 +46,7 @@ jobs:
         run: cargo test -- --test-threads=8
         env:
           CARGO_INCREMENTAL: 0
+          GIT_AI_TEST_GIT_MODE: ${{ matrix.test_mode }}
 
   test-ignored:
     name: Test SCM e2e tests on just Ubuntu
