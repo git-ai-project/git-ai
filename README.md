@@ -34,6 +34,14 @@ fe2c4c8 (claude-4.5-opus [session_id]  2025-12-02 19:25:13 -0500  141)          
 fe2c4c8 (claude-4.5-opus [session_id]  2025-12-02 19:25:13 -0500  142)             let from = resolve_commit(repo, &start)?;...
 ```
 
+
+### Supported Agents
+
+> <img src="assets/docs/badges/claude_code.svg" alt="Claude Code" height="25" /> <img src="assets/docs/badges/codex-black.svg" alt="Codex" height="25" /> <img src="assets/docs/badges/cursor.svg" alt="Cursor" height="25" /> <img src="assets/docs/badges/opencode.svg" alt="OpenCode" height="25" /> <img src="assets/docs/badges/gemini.svg" alt="Gemini" height="25" /> <img src="assets/docs/badges/copilot.svg" alt="GitHub Copilot" height="25" /> <img src="assets/docs/badges/continue.svg" alt="Continue" height="25" /> <img src="assets/docs/badges/droid.svg" alt="Droid" height="25" /> <img src="assets/docs/badges/junie_white.svg" alt="Junie" height="25" /> <img src="assets/docs/badges/rovodev.svg" alt="Rovo Dev" height="25" />
+>
+> [+ Add support for another agent](https://usegitai.com/docs/cli/add-your-agent)
+
+
 ## Install
 
 Mac, Linux, Windows (WSL)
@@ -51,14 +59,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://usegitai.com
 That's it — **no per-repo setup required.** Prompt and commit as normal. Git AI tracks attribution automatically.
 
 
-### Supported Agents
-
-> <img src="assets/docs/badges/claude_code.svg" alt="Claude Code" height="25" /> <img src="assets/docs/badges/codex-black.svg" alt="Codex" height="25" /> <img src="assets/docs/badges/cursor.svg" alt="Cursor" height="25" /> <img src="assets/docs/badges/opencode.svg" alt="OpenCode" height="25" /> <img src="assets/docs/badges/gemini.svg" alt="Gemini" height="25" /> <img src="assets/docs/badges/copilot.svg" alt="GitHub Copilot" height="25" /> <img src="assets/docs/badges/continue.svg" alt="Continue" height="25" /> <img src="assets/docs/badges/droid.svg" alt="Droid" height="25" /> <img src="assets/docs/badges/junie_white.svg" alt="Junie" height="25" /> <img src="assets/docs/badges/rovodev.svg" alt="Rovo Dev" height="25" />
->
-> [+ Add support for another agent](https://usegitai.com/docs/cli/add-your-agent)
-
-
-### Our Choices
+## Our Choices
 - **No workflow changes** — Just prompt and commit. Git AI tracks AI code accurately without cluttering your git history.
 - **"Detecting" AI code is an anti-pattern** — Git AI does not guess whether a hunk is AI-generated. Supported agents report exactly which lines they wrote, giving you the most accurate attribution possible.
 - **Local-first** — Works offline with no OpenAI or Anthropic key required.
