@@ -625,9 +625,9 @@ fn build_feature_flags(file_cfg: &Option<FileConfig>) -> FeatureFlags {
         .and_then(|c| c.feature_flags.as_ref())
         .cloned()
         .and_then(|value| {
-        // Use from_value to deserialize, but ignore any errors and fall back to defaults
-        serde_json::from_value(value).ok()
-    });
+            // Use from_value to deserialize, but ignore any errors and fall back to defaults
+            serde_json::from_value(value).ok()
+        });
 
     FeatureFlags::from_env_and_file(file_flags)
 }
