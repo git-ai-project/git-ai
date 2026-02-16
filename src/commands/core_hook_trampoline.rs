@@ -1,6 +1,6 @@
 use crate::commands::core_hooks::{
-    PASSTHROUGH_ONLY_HOOKS, PREVIOUS_HOOKS_PATH_FILE, managed_core_hooks_dir,
-    run_core_hook_best_effort,
+    PASSTHROUGH_ONLY_HOOKS, PENDING_STASH_APPLY_MARKER_FILE, PREVIOUS_HOOKS_PATH_FILE,
+    managed_core_hooks_dir, run_core_hook_best_effort,
 };
 use crate::utils::{
     GIT_AI_GIT_CMD_ENV, GIT_AI_SKIP_CORE_HOOKS_ENV, GIT_AI_TRAMPOLINE_SKIP_CHAIN_ENV, debug_log,
@@ -39,7 +39,7 @@ pub fn handle_hook_trampoline_command(args: &[String]) {
     } else {
         Vec::new()
     };
-    let stdin_string = if stdin_bytes.is_empty() {
+    let stdin_string = if stdin_bytes.is_empty() || !hook_uses_stdin_string(hook_name) {
         None
     } else {
         Some(String::from_utf8_lossy(&stdin_bytes).to_string())
@@ -60,6 +60,10 @@ pub fn handle_hook_trampoline_command(args: &[String]) {
 
 fn uses_streamed_stdin(hook_name: &str) -> bool {
     STREAMED_STDIN_HOOKS.contains(&hook_name)
+}
+
+fn hook_uses_stdin_string(hook_name: &str) -> bool {
+    matches!(hook_name, "reference-transaction" | "post-rewrite")
 }
 
 fn read_stdin_bytes() -> Vec<u8> {
@@ -124,6 +128,8 @@ fn reference_transaction_has_relevant_refs(stdin: &str) -> bool {
         }
 
         if reference == "ORIG_HEAD"
+            || reference == "HEAD"
+            || reference.starts_with("refs/heads/")
             || reference == "refs/stash"
             || reference == "CHERRY_PICK_HEAD"
             || reference.starts_with("refs/remotes/")
@@ -152,11 +158,10 @@ fn has_pending_stash_apply_marker() -> bool {
         git_dir
     };
 
-    let state_path = git_dir.join("ai").join("core_hook_state.json");
-    let Ok(content) = fs::read_to_string(state_path) else {
-        return false;
-    };
-    content.contains("\"pending_stash_apply\":{")
+    git_dir
+        .join("ai")
+        .join(PENDING_STASH_APPLY_MARKER_FILE)
+        .exists()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -197,7 +202,8 @@ fn run_chained_hook(
 fn previous_hook_path(hook_name: &str) -> Option<PathBuf> {
     let managed_dir = managed_core_hooks_dir().ok()?;
     let previous_file = managed_dir.join(PREVIOUS_HOOKS_PATH_FILE);
-    if !previous_file.exists() {
+    let previous_meta = fs::metadata(&previous_file).ok()?;
+    if !previous_meta.is_file() || previous_meta.len() == 0 {
         return None;
     }
 
@@ -234,27 +240,36 @@ fn run_single_chained_hook(
     hook_args: &[String],
     stdin_bytes: &[u8],
 ) -> Option<ExitStatus> {
-    if is_managed_hook_path(hook_path) {
-        return None;
-    }
-
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
         let metadata = fs::metadata(hook_path).ok()?;
-        if metadata.permissions().mode() & 0o111 == 0 {
+        if !metadata.is_file() {
+            return None;
+        }
+        if is_managed_hook_path(hook_path) {
             return None;
         }
 
-        let mut command = Command::new(hook_path);
+        let mut command = if metadata.permissions().mode() & 0o111 != 0 {
+            Command::new(hook_path)
+        } else {
+            let mut command = Command::new("sh");
+            command.arg(hook_path);
+            command
+        };
         command.args(hook_args);
         return run_command_with_stdin(command, stdin_bytes).ok();
     }
 
     #[cfg(windows)]
     {
-        if !hook_path.exists() {
+        let metadata = fs::metadata(hook_path).ok()?;
+        if !metadata.is_file() {
+            return None;
+        }
+        if is_managed_hook_path(hook_path) {
             return None;
         }
 
@@ -379,6 +394,10 @@ mod tests {
     fn reference_transaction_prefilter_detects_relevant_refs() {
         assert!(reference_transaction_has_relevant_refs(
             "000 111 ORIG_HEAD\n"
+        ));
+        assert!(reference_transaction_has_relevant_refs("000 111 HEAD\n"));
+        assert!(reference_transaction_has_relevant_refs(
+            "000 111 refs/heads/main\n"
         ));
         assert!(reference_transaction_has_relevant_refs(
             "000 111 refs/remotes/origin/main\n"

@@ -1,6 +1,7 @@
 use crate::commands::core_hooks::{
-    INSTALLED_HOOKS, PASSTHROUGH_ONLY_HOOKS, PREVIOUS_HOOKS_PATH_FILE, managed_core_hooks_dir,
-    normalize_hook_binary_path, write_core_hook_scripts,
+    INSTALLED_HOOKS, PENDING_STASH_APPLY_MARKER_FILE, PREVIOUS_HOOKS_PATH_FILE,
+    WORKING_LOG_INITIAL_FILE, managed_core_hooks_dir, normalize_hook_binary_path,
+    write_core_hook_scripts,
 };
 use crate::commands::flush_metrics_db::spawn_background_metrics_db_flush;
 use crate::error::GitAiError;
@@ -794,10 +795,10 @@ fn core_hook_scripts_up_to_date(hooks_dir: &Path, binary_path: &Path) -> bool {
     }
 
     let binary = normalize_hook_binary_path(binary_path);
+    let previous_hooks_nonempty_check = "if [ -s \"$previous_hooks_file\" ]; then";
     INSTALLED_HOOKS.iter().all(|hook| {
         let hook_path = hooks_dir.join(hook);
         let content = fs::read_to_string(&hook_path).unwrap_or_default();
-        let is_passthrough = PASSTHROUGH_ONLY_HOOKS.contains(hook);
         if *hook == "reference-transaction" {
             hook_path.exists()
                 && content.contains("# git-ai-managed: mode=trampoline;type=ref-prefilter")
@@ -807,7 +808,9 @@ fn core_hook_scripts_up_to_date(hooks_dir: &Path, binary_path: &Path) -> bool {
                     crate::utils::GIT_AI_TRAMPOLINE_SKIP_CHAIN_ENV
                 ))
                 && content.contains(&format!("export {}=", GIT_AI_GIT_CMD_ENV))
-                && content.contains(&binary)
+                && content.contains(previous_hooks_nonempty_check)
+                && content.contains("refs/heads/")
+                && script_contains_binary(&content, &binary)
         } else if *hook == "pre-commit" {
             hook_path.exists()
                 && content.contains("# git-ai-managed: mode=trampoline;type=pre-commit-prefilter")
@@ -817,7 +820,25 @@ fn core_hook_scripts_up_to_date(hooks_dir: &Path, binary_path: &Path) -> bool {
                     crate::utils::GIT_AI_TRAMPOLINE_SKIP_CHAIN_ENV
                 ))
                 && content.contains(&format!("export {}=", GIT_AI_GIT_CMD_ENV))
-                && content.contains(&binary)
+                && content.contains(previous_hooks_nonempty_check)
+                && content.contains("checkpoints.jsonl")
+                && content.contains("blobs")
+                && content.contains(WORKING_LOG_INITIAL_FILE)
+                && script_contains_binary(&content, &binary)
+        } else if *hook == "post-commit" {
+            hook_path.exists()
+                && content.contains("# git-ai-managed: mode=trampoline;type=post-commit-prefilter")
+                && content.contains(&format!("hook-trampoline \"{}\"", hook))
+                && content.contains(&format!(
+                    "{}=1",
+                    crate::utils::GIT_AI_TRAMPOLINE_SKIP_CHAIN_ENV
+                ))
+                && content.contains(&format!("export {}=", GIT_AI_GIT_CMD_ENV))
+                && content.contains(previous_hooks_nonempty_check)
+                && content.contains("pending_cherry_pick")
+                && content.contains("refs/notes/ai")
+                && content.contains(WORKING_LOG_INITIAL_FILE)
+                && script_contains_binary(&content, &binary)
         } else if *hook == "post-index-change" {
             hook_path.exists()
                 && content.contains("# git-ai-managed: mode=trampoline;type=post-index-prefilter")
@@ -827,19 +848,40 @@ fn core_hook_scripts_up_to_date(hooks_dir: &Path, binary_path: &Path) -> bool {
                     crate::utils::GIT_AI_TRAMPOLINE_SKIP_CHAIN_ENV
                 ))
                 && content.contains(&format!("export {}=", GIT_AI_GIT_CMD_ENV))
-                && content.contains(&binary)
-        } else if is_passthrough {
+                && content.contains(previous_hooks_nonempty_check)
+                && content.contains(PENDING_STASH_APPLY_MARKER_FILE)
+                && script_contains_binary(&content, &binary)
+        } else if *hook == "commit-msg" || *hook == "prepare-commit-msg" {
             hook_path.exists()
                 && content.contains("# git-ai-managed: mode=passthrough-shell")
                 && content.contains(PREVIOUS_HOOKS_PATH_FILE)
+                && content.contains(previous_hooks_nonempty_check)
         } else {
             hook_path.exists()
                 && content.contains("# git-ai-managed: mode=trampoline;type=dispatch")
                 && content.contains(&format!("hook-trampoline \"{}\"", hook))
                 && content.contains(&format!("export {}=", GIT_AI_GIT_CMD_ENV))
-                && content.contains(&binary)
+                && script_contains_binary(&content, &binary)
         }
     })
+}
+
+fn script_contains_binary(content: &str, binary: &str) -> bool {
+    if content.contains(binary) {
+        return true;
+    }
+
+    let unescaped = binary.replace("\\\"", "\"");
+    if unescaped != binary && content.contains(&unescaped) {
+        return true;
+    }
+
+    let double_escaped = binary.replace("\\\"", "\\\\\"");
+    if double_escaped != binary && content.contains(&double_escaped) {
+        return true;
+    }
+
+    false
 }
 
 fn hooks_path_matches_desired(current_hooks_path: Option<&str>, desired_hooks_path: &Path) -> bool {
