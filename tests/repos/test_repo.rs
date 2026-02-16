@@ -54,6 +54,7 @@ fn create_file_symlink(target: &PathBuf, link: &PathBuf) -> std::io::Result<()> 
 #[cfg(windows)]
 fn create_file_symlink(target: &PathBuf, link: &PathBuf) -> std::io::Result<()> {
     std::os::windows::fs::symlink_file(target, link)
+        .or_else(|_| std::fs::copy(target, link).map(|_| ()))
 }
 
 
