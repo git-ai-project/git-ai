@@ -1873,6 +1873,7 @@ fi
 export {git_cmd_env}="${{{git_cmd_env}:-git}}"
 
 script_dir="$0"
+script_dir=$(printf '%s' "$script_dir" | tr '\\' '/')
 case "$script_dir" in
   */*) script_dir="${{script_dir%/*}}" ;;
   *) script_dir="." ;;
@@ -2073,6 +2074,7 @@ fi
 export {git_cmd_env}="${{{git_cmd_env}:-git}}"
 
 script_dir="$0"
+script_dir=$(printf '%s' "$script_dir" | tr '\\' '/')
 case "$script_dir" in
   */*) script_dir="${{script_dir%/*}}" ;;
   *) script_dir="." ;;
@@ -2163,6 +2165,7 @@ fi
 export {git_cmd_env}="${{{git_cmd_env}:-git}}"
 
 script_dir="$0"
+script_dir=$(printf '%s' "$script_dir" | tr '\\' '/')
 case "$script_dir" in
   */*) script_dir="${{script_dir%/*}}" ;;
   *) script_dir="." ;;
@@ -2283,6 +2286,7 @@ fi
 export {git_cmd_env}="${{{git_cmd_env}:-git}}"
 
 script_dir="$0"
+script_dir=$(printf '%s' "$script_dir" | tr '\\' '/')
 case "$script_dir" in
   */*) script_dir="${{script_dir%/*}}" ;;
   *) script_dir="." ;;
@@ -2357,6 +2361,7 @@ if [ "${{{skip_env}:-}}" = "1" ]; then
 fi
 
 script_dir="$0"
+script_dir=$(printf '%s' "$script_dir" | tr '\\' '/')
 case "$script_dir" in
   */*) script_dir="${{script_dir%/*}}" ;;
   *) script_dir="." ;;
@@ -2411,6 +2416,7 @@ if [ "${{{skip_env}:-}}" = "1" ]; then
 fi
 
 script_dir="$0"
+script_dir=$(printf '%s' "$script_dir" | tr '\\' '/')
 case "$script_dir" in
   */*) script_dir="${{script_dir%/*}}" ;;
   *) script_dir="." ;;

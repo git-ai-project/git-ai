@@ -797,6 +797,7 @@ fn core_hook_scripts_up_to_date(hooks_dir: &Path, binary_path: &Path) -> bool {
     let binary = normalize_hook_binary_path(binary_path);
     let previous_hooks_nonempty_check = "if [ -s \"$previous_hooks_file\" ]; then";
     let windows_path_norm_check = "tr '\\\\' '/'";
+    let script_dir_norm_check = "script_dir=$(printf '%s' \"$script_dir\" | tr '\\\\' '/')";
     INSTALLED_HOOKS.iter().all(|hook| {
         let is_passthrough = PASSTHROUGH_ONLY_HOOKS.contains(hook);
         let hook_path = hooks_dir.join(hook);
@@ -814,6 +815,7 @@ fn core_hook_scripts_up_to_date(hooks_dir: &Path, binary_path: &Path) -> bool {
                 && content.contains("refs/heads/")
                 && script_contains_binary(&content, &binary)
                 && content.contains(windows_path_norm_check)
+                && content.contains(script_dir_norm_check)
         } else if *hook == "pre-commit" {
             hook_path.exists()
                 && content.contains("# git-ai-managed: mode=trampoline;type=pre-commit-prefilter")
@@ -828,6 +830,8 @@ fn core_hook_scripts_up_to_date(hooks_dir: &Path, binary_path: &Path) -> bool {
                 && content.contains("blobs")
                 && content.contains(WORKING_LOG_INITIAL_FILE)
                 && script_contains_binary(&content, &binary)
+                && content.contains(windows_path_norm_check)
+                && content.contains(script_dir_norm_check)
         } else if *hook == "post-commit" {
             hook_path.exists()
                 && content.contains("# git-ai-managed: mode=trampoline;type=post-commit-prefilter")
@@ -843,6 +847,7 @@ fn core_hook_scripts_up_to_date(hooks_dir: &Path, binary_path: &Path) -> bool {
                 && content.contains(WORKING_LOG_INITIAL_FILE)
                 && script_contains_binary(&content, &binary)
                 && content.contains(windows_path_norm_check)
+                && content.contains(script_dir_norm_check)
         } else if *hook == "post-index-change" {
             hook_path.exists()
                 && content.contains("# git-ai-managed: mode=trampoline;type=post-index-prefilter")
@@ -856,12 +861,14 @@ fn core_hook_scripts_up_to_date(hooks_dir: &Path, binary_path: &Path) -> bool {
                 && content.contains(PENDING_STASH_APPLY_MARKER_FILE)
                 && script_contains_binary(&content, &binary)
                 && content.contains(windows_path_norm_check)
+                && content.contains(script_dir_norm_check)
         } else if is_passthrough {
             hook_path.exists()
                 && content.contains("# git-ai-managed: mode=passthrough-shell")
                 && content.contains(PREVIOUS_HOOKS_PATH_FILE)
                 && content.contains(previous_hooks_nonempty_check)
                 && content.contains(windows_path_norm_check)
+                && content.contains(script_dir_norm_check)
         } else {
             hook_path.exists()
                 && content.contains("# git-ai-managed: mode=trampoline;type=dispatch")
