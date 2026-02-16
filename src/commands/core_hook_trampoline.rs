@@ -128,6 +128,8 @@ fn reference_transaction_has_relevant_refs(stdin: &str) -> bool {
         }
 
         if reference == "ORIG_HEAD"
+            || reference == "HEAD"
+            || reference.starts_with("refs/heads/")
             || reference == "refs/stash"
             || reference == "CHERRY_PICK_HEAD"
             || reference.starts_with("refs/remotes/")
@@ -392,6 +394,10 @@ mod tests {
     fn reference_transaction_prefilter_detects_relevant_refs() {
         assert!(reference_transaction_has_relevant_refs(
             "000 111 ORIG_HEAD\n"
+        ));
+        assert!(reference_transaction_has_relevant_refs("000 111 HEAD\n"));
+        assert!(reference_transaction_has_relevant_refs(
+            "000 111 refs/heads/main\n"
         ));
         assert!(reference_transaction_has_relevant_refs(
             "000 111 refs/remotes/origin/main\n"

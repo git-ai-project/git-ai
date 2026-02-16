@@ -63,6 +63,7 @@ pub const PASSTHROUGH_ONLY_HOOKS: &[&str] = &[
 /// Internal file name used to preserve a user's previous global `core.hooksPath`.
 pub const PREVIOUS_HOOKS_PATH_FILE: &str = "previous_hooks_path";
 pub const PENDING_STASH_APPLY_MARKER_FILE: &str = "pending_stash_apply";
+pub const WORKING_LOG_INITIAL_FILE: &str = "INITIAL";
 
 const CORE_HOOK_STATE_FILE: &str = "core_hook_state.json";
 const STATE_EVENT_MAX_AGE_MS: u128 = 3_000;
@@ -1708,6 +1709,16 @@ fn has_non_empty_working_logs(repository: &Repository) -> bool {
             return true;
         }
 
+        if entry_path.join(WORKING_LOG_INITIAL_FILE).is_file()
+            && entry_path
+                .join(WORKING_LOG_INITIAL_FILE)
+                .metadata()
+                .map(|meta| meta.len() > 0)
+                .unwrap_or(false)
+        {
+            return true;
+        }
+
         let blobs_dir = entry_path.join("blobs");
         if blobs_dir.is_dir()
             && fs::read_dir(blobs_dir)
@@ -1928,7 +1939,7 @@ EOF
   first_line_relevant=0
   if [ -n "$old_sha" ] && [ -n "$new_sha" ] && [ -n "$reference" ] && [ "$old_sha" != "$new_sha" ]; then
     case "$reference" in
-      ORIG_HEAD|refs/stash|CHERRY_PICK_HEAD|refs/remotes/*)
+      ORIG_HEAD|HEAD|refs/heads/*|refs/stash|CHERRY_PICK_HEAD|refs/remotes/*)
         first_line_relevant=1
         ;;
       AUTO_MERGE)
@@ -1963,7 +1974,7 @@ $rest_payload"
 
   zero_oid="0000000000000000000000000000000000000000"
   case "$stdin_payload" in
-    *ORIG_HEAD*|*refs/stash*|*CHERRY_PICK_HEAD*|*refs/remotes/*)
+    *" ORIG_HEAD"*|*" HEAD"*|*" refs/heads/"*|*" refs/stash"*|*" CHERRY_PICK_HEAD"*|*" refs/remotes/"*)
       dispatch=1
       ;;
     *AUTO_MERGE*)
@@ -2002,7 +2013,7 @@ if [ "$stage" = "prepared" ] || [ "$stage" = "committed" ]; then
           continue
         fi
         case "$reference" in
-          ORIG_HEAD|refs/stash|CHERRY_PICK_HEAD|refs/remotes/*)
+          ORIG_HEAD|HEAD|refs/heads/*|refs/stash|CHERRY_PICK_HEAD|refs/remotes/*)
             dispatch=1
             break
             ;;
@@ -2091,6 +2102,10 @@ if [ -d "$working_logs_dir" ]; then
       dispatch=1
       break
     fi
+    if [ -s "$entry/{initial_file}" ]; then
+      dispatch=1
+      break
+    fi
     if [ -d "$entry/blobs" ]; then
       for blob_entry in "$entry/blobs"/*; do
         if [ -e "$blob_entry" ]; then
@@ -2129,6 +2144,7 @@ exit 0
                 git_cmd_env = GIT_AI_GIT_CMD_ENV,
                 skip_chain_env = GIT_AI_TRAMPOLINE_SKIP_CHAIN_ENV,
                 previous_hooks_file = PREVIOUS_HOOKS_PATH_FILE,
+                initial_file = WORKING_LOG_INITIAL_FILE,
                 bin = binary,
                 hook = hook,
             )
@@ -2189,6 +2205,10 @@ if [ $dispatch -eq 0 ] && [ -d "$working_logs_dir" ]; then
       dispatch=1
       break
     fi
+    if [ -s "$entry/{initial_file}" ]; then
+      dispatch=1
+      break
+    fi
     if [ -d "$entry/blobs" ]; then
       for blob_entry in "$entry/blobs"/*; do
         if [ -e "$blob_entry" ]; then
@@ -2242,6 +2262,7 @@ exit 0
                 git_cmd_env = GIT_AI_GIT_CMD_ENV,
                 skip_chain_env = GIT_AI_TRAMPOLINE_SKIP_CHAIN_ENV,
                 previous_hooks_file = PREVIOUS_HOOKS_PATH_FILE,
+                initial_file = WORKING_LOG_INITIAL_FILE,
                 bin = binary,
                 hook = hook,
             )
@@ -2410,8 +2431,9 @@ pub(crate) fn normalize_hook_binary_path(git_ai_binary: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        RefTxnActionClass, active_rebase_start_event, build_rebase_complete_event_from_start,
-        classify_ref_transaction_action, find_repository_for_hook, is_zero_oid,
+        RefTxnActionClass, WORKING_LOG_INITIAL_FILE, active_rebase_start_event,
+        build_rebase_complete_event_from_start, classify_ref_transaction_action,
+        find_repository_for_hook, has_non_empty_working_logs, is_zero_oid,
         resolve_stash_ref_transition, should_restore_deleted_stash,
     };
     use crate::git::rewrite_log::{
@@ -2612,5 +2634,19 @@ mod tests {
             active_rebase_start_event(repo.gitai_repo()).is_none(),
             "latest closed rebase should not be treated as active"
         );
+    }
+
+    #[test]
+    fn has_non_empty_working_logs_detects_initial_only_entries() {
+        let repo = TmpRepo::new().expect("tmp repo");
+        let repository = repo.gitai_repo();
+        let working_log = repository.storage.working_log_for_base_commit("base-sha");
+        std::fs::write(
+            working_log.dir.join(WORKING_LOG_INITIAL_FILE),
+            "{\"files\":{}}",
+        )
+        .expect("write INITIAL");
+
+        assert!(has_non_empty_working_logs(repository));
     }
 }

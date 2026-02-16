@@ -552,7 +552,10 @@ impl PersistedWorkingLog {
             .collect();
 
         if filtered.is_empty() {
-            // Don't create an INITIAL file if there are no attributions
+            // Remove stale INITIAL state so callers can clear existing attributions.
+            if self.initial_file.exists() {
+                fs::remove_file(&self.initial_file)?;
+            }
             return Ok(());
         }
 
@@ -929,6 +932,37 @@ mod tests {
         assert_eq!(
             working_log.dir, expected_path,
             "Working log directory should be in correct location"
+        );
+    }
+
+    #[test]
+    fn test_write_initial_attributions_removes_stale_initial_when_empty() {
+        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
+        let repo_storage =
+            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap());
+        let working_log = repo_storage.working_log_for_base_commit("initial-clear-test");
+
+        let mut attrs = HashMap::new();
+        attrs.insert(
+            "file.txt".to_string(),
+            vec![LineAttribution {
+                start_line: 1,
+                end_line: 1,
+                author_id: "ai".to_string(),
+                overrode: None,
+            }],
+        );
+        working_log
+            .write_initial_attributions(attrs, HashMap::new())
+            .expect("write initial attributions");
+        assert!(working_log.initial_file.exists());
+
+        working_log
+            .write_initial_attributions(HashMap::new(), HashMap::new())
+            .expect("clear initial attributions");
+        assert!(
+            !working_log.initial_file.exists(),
+            "INITIAL file should be removed when no attributions remain"
         );
     }
 }

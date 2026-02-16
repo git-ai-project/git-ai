@@ -1,6 +1,7 @@
 use crate::commands::core_hooks::{
     INSTALLED_HOOKS, PENDING_STASH_APPLY_MARKER_FILE, PREVIOUS_HOOKS_PATH_FILE,
-    managed_core_hooks_dir, normalize_hook_binary_path, write_core_hook_scripts,
+    WORKING_LOG_INITIAL_FILE, managed_core_hooks_dir, normalize_hook_binary_path,
+    write_core_hook_scripts,
 };
 use crate::commands::flush_metrics_db::spawn_background_metrics_db_flush;
 use crate::error::GitAiError;
@@ -808,6 +809,7 @@ fn core_hook_scripts_up_to_date(hooks_dir: &Path, binary_path: &Path) -> bool {
                 ))
                 && content.contains(&format!("export {}=", GIT_AI_GIT_CMD_ENV))
                 && content.contains(previous_hooks_nonempty_check)
+                && content.contains("refs/heads/")
                 && script_contains_binary(&content, &binary)
         } else if *hook == "pre-commit" {
             hook_path.exists()
@@ -821,6 +823,7 @@ fn core_hook_scripts_up_to_date(hooks_dir: &Path, binary_path: &Path) -> bool {
                 && content.contains(previous_hooks_nonempty_check)
                 && content.contains("checkpoints.jsonl")
                 && content.contains("blobs")
+                && content.contains(WORKING_LOG_INITIAL_FILE)
                 && script_contains_binary(&content, &binary)
         } else if *hook == "post-commit" {
             hook_path.exists()
@@ -834,6 +837,7 @@ fn core_hook_scripts_up_to_date(hooks_dir: &Path, binary_path: &Path) -> bool {
                 && content.contains(previous_hooks_nonempty_check)
                 && content.contains("pending_cherry_pick")
                 && content.contains("refs/notes/ai")
+                && content.contains(WORKING_LOG_INITIAL_FILE)
                 && script_contains_binary(&content, &binary)
         } else if *hook == "post-index-change" {
             hook_path.exists()
