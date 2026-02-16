@@ -663,17 +663,23 @@ static COMPILED_BINARY: OnceLock<PathBuf> = OnceLock::new();
 static DEFAULT_BRANCH_NAME: OnceLock<String> = OnceLock::new();
 
 fn get_default_branch_name() -> String {
-    let output = Command::new("git")
-        .args(["config", "--global", "init.defaultBranch"])
-        .output()
-        .expect("Failed to execute git config command");
+    // Use git2 to read the config directly, just like Repository::init() does
+    // This ensures consistency between what default_branchname() returns and what
+    // branch name git2::Repository::init() actually creates
+    use git2::Config;
 
-    if output.status.success() {
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    } else {
-        // Fallback to "master" if not configured
-        "master".to_string()
+    // Open the global git config
+    if let Ok(config) = Config::open_default() {
+        if let Ok(branch_name) = config.get_string("init.defaultBranch") {
+            if !branch_name.is_empty() {
+                return branch_name;
+            }
+        }
     }
+
+    // Fallback to "master" if not configured
+    // This matches libgit2's default behavior
+    "master".to_string()
 }
 
 pub fn default_branchname() -> &'static str {
