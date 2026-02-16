@@ -54,6 +54,7 @@ fn create_file_symlink(target: &PathBuf, link: &PathBuf) -> std::io::Result<()> 
 #[cfg(windows)]
 fn create_file_symlink(target: &PathBuf, link: &PathBuf) -> std::io::Result<()> {
     std::os::windows::fs::symlink_file(target, link)
+        .or_else(|_| std::fs::copy(target, link).map(|_| ()))
 }
 
 #[derive(Clone, Debug)]
@@ -849,7 +850,15 @@ fn compile_binary() -> PathBuf {
             .to_string_lossy()
             .into_owned()
     });
-    PathBuf::from(target_dir).join("debug/git-ai")
+    #[cfg(windows)]
+    {
+        PathBuf::from(target_dir).join("debug/git-ai.exe")
+    }
+
+    #[cfg(not(windows))]
+    {
+        PathBuf::from(target_dir).join("debug/git-ai")
+    }
 }
 
 pub(crate) fn get_binary_path() -> &'static PathBuf {
