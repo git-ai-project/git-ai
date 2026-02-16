@@ -597,7 +597,10 @@ fn resolve_squash_source_head(repo: &Repository) -> Option<String> {
     // Some Git versions keep MERGE_HEAD for --squash, others do not.
     let merge_head_path = repo.path().join("MERGE_HEAD");
     if let Ok(contents) = fs::read_to_string(merge_head_path)
-        && let Some(candidate) = contents.lines().map(str::trim).find(|line| !line.is_empty())
+        && let Some(candidate) = contents
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
         && is_valid_git_oid(candidate)
     {
         return Some(candidate.to_string());
