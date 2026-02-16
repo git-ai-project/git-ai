@@ -14,8 +14,12 @@ concurrency:
 
 jobs:
   git-core-tests:
-    name: Run core Git tests with git-ai
+    name: Core Git tests (${{ matrix.mode }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [wrapper, corehooks, both]
 
     steps:
       - name: Checkout code
@@ -44,4 +48,4 @@ jobs:
         run: cargo build --release --bin git-ai
 
       - name: Run core Git compatibility tests
-        run: python3 tests/git-compat/run-core-tests.py
+        run: python3 tests/git-compat/run-core-tests.py --mode ${{ matrix.mode }}

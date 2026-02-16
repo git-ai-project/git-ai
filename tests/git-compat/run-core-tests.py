@@ -3,8 +3,8 @@
 Run a curated subset of the Git test suite against git-ai.
 
 This harness clones the Git repository (or reuses a local clone), runs the
-selected tests with GIT_TEST_INSTALLED pointing at a git-ai wrapper, and
-fails if any new test failures appear outside the whitelist.
+selected tests with mode-specific GIT_TEST_INSTALLED wiring, and fails if any
+new test failures appear outside the whitelist.
 """
 
 from __future__ import annotations
@@ -14,17 +14,19 @@ import csv
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_TESTS_FILE = REPO_ROOT / "tests" / "git-compat" / "core-tests.txt"
 DEFAULT_WHITELIST = REPO_ROOT / "tests" / "git-compat" / "whitelist.csv"
 DEFAULT_GIT_URL = "https://github.com/git/git.git"
 DEFAULT_CLONE_DIR = Path("/tmp/git-core-tests")
+MODE_CHOICES = ("wrapper", "corehooks", "both")
 
 
 def read_tests_list(path: Path) -> List[str]:
@@ -66,8 +68,16 @@ def ensure_git_build(clone_dir: Path, jobs: int) -> None:
     )
 
 
-def run_prove(git_tests_dir: Path, tests: List[str], git_installed: Path, jobs: int) -> Tuple[int, str]:
+def run_prove(
+    git_tests_dir: Path,
+    tests: List[str],
+    git_installed: Path,
+    jobs: int,
+    extra_env: Optional[Dict[str, str]] = None,
+) -> Tuple[int, str]:
     env = os.environ.copy()
+    if extra_env:
+        env.update(extra_env)
     env["GIT_TEST_INSTALLED"] = str(git_installed)
     env.setdefault("GIT_TEST_DEFAULT_HASH", "sha1")
 
@@ -234,6 +244,75 @@ def format_summary_issues(issues: Dict[str, List[str]]) -> str:
     return "\n".join(lines)
 
 
+def ensure_symlink(link: Path, target: Path) -> None:
+    if link.exists() or link.is_symlink():
+        link.unlink()
+    link.symlink_to(target)
+
+
+def resolve_git_binary(explicit_git_bin: Optional[Path]) -> Path:
+    if explicit_git_bin:
+        if not explicit_git_bin.exists():
+            raise FileNotFoundError(f"git binary not found at {explicit_git_bin}")
+        return explicit_git_bin.resolve()
+
+    git_from_path = shutil.which("git")
+    if git_from_path is None:
+        raise FileNotFoundError("Unable to locate `git` in PATH")
+    return Path(git_from_path).resolve()
+
+
+def install_core_hooks(git_ai_bin: Path, env: Dict[str, str]) -> None:
+    cmd = [str(git_ai_bin), "install-hooks", "--dry-run=false", "--corehooks-beta"]
+    proc = subprocess.run(
+        cmd,
+        cwd=REPO_ROOT,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "Failed to install core hooks for git-core-compat mode.\n"
+            f"Command: {' '.join(shlex.quote(arg) for arg in cmd)}\n"
+            f"Output:\n{proc.stdout}"
+        )
+
+
+def setup_mode_environment(
+    mode: str,
+    git_ai_bin: Path,
+    git_bin: Optional[Path],
+    tmpdir: Path,
+) -> Tuple[Path, Dict[str, str]]:
+    if mode not in MODE_CHOICES:
+        raise ValueError(f"Unsupported mode '{mode}'. Expected one of: {', '.join(MODE_CHOICES)}")
+
+    installed_dir = tmpdir / "installed"
+    installed_dir.mkdir(parents=True, exist_ok=True)
+
+    mode_env: Dict[str, str] = {}
+    home_dir = tmpdir / "home"
+    xdg_dir = home_dir / ".config"
+    home_dir.mkdir(parents=True, exist_ok=True)
+    xdg_dir.mkdir(parents=True, exist_ok=True)
+    mode_env["HOME"] = str(home_dir)
+    mode_env["XDG_CONFIG_HOME"] = str(xdg_dir)
+
+    if mode in ("wrapper", "both"):
+        git_target = git_ai_bin
+    else:
+        git_target = resolve_git_binary(git_bin)
+    ensure_symlink(installed_dir / "git", git_target)
+    ensure_symlink(installed_dir / "git-ai", git_ai_bin)
+
+    if mode in ("corehooks", "both"):
+        install_core_hooks(git_ai_bin, {**os.environ, **mode_env})
+
+    return installed_dir, mode_env
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run core Git tests against git-ai.")
     parser.add_argument("--tests-file", type=Path, default=DEFAULT_TESTS_FILE)
@@ -242,6 +321,8 @@ def main() -> int:
     parser.add_argument("--clone-dir", type=Path, default=DEFAULT_CLONE_DIR)
     parser.add_argument("--jobs", type=int, default=4)
     parser.add_argument("--git-ai-bin", type=Path, default=REPO_ROOT / "target" / "release" / "git-ai")
+    parser.add_argument("--git-bin", type=Path, default=None, help="Path to the real git binary")
+    parser.add_argument("--mode", choices=MODE_CHOICES, default="wrapper")
     args = parser.parse_args()
 
     tests = read_tests_list(args.tests_file)
@@ -250,6 +331,7 @@ def main() -> int:
         raise FileNotFoundError(
             f"git-ai binary not found at {args.git_ai_bin}. Build it with `cargo build --release`."
         )
+    args.git_ai_bin = args.git_ai_bin.resolve()
 
     ensure_git_clone(args.clone_dir, args.git_url)
     ensure_git_build(args.clone_dir, args.jobs)
@@ -261,15 +343,28 @@ def main() -> int:
     whitelist = load_whitelist(args.whitelist)
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        wrapper_dir = Path(tmpdir)
-        (wrapper_dir / "git").symlink_to(args.git_ai_bin)
-        (wrapper_dir / "git-ai").symlink_to(args.git_ai_bin)
+        mode = args.mode
+        mode_dir = Path(tmpdir)
+        git_installed, mode_env = setup_mode_environment(
+            mode=mode,
+            git_ai_bin=args.git_ai_bin,
+            git_bin=args.git_bin,
+            tmpdir=mode_dir,
+        )
 
         cmd_preview = " ".join(shlex.quote(t) for t in tests)
+        print(f"[+] Mode: {mode}")
         print(f"[+] Running core Git tests with: prove -j{args.jobs} {cmd_preview}")
-        print(f"[+] GIT_TEST_INSTALLED={wrapper_dir}")
+        print(f"[+] GIT_TEST_INSTALLED={git_installed}")
+        print(f"[+] HOME={mode_env['HOME']}")
 
-        exit_code, output = run_prove(git_tests_dir, tests, wrapper_dir, args.jobs)
+        exit_code, output = run_prove(
+            git_tests_dir,
+            tests,
+            git_installed,
+            args.jobs,
+            extra_env=mode_env,
+        )
 
     summary = extract_summary_section(output)
     failures = parse_failures(summary) if summary else {}
@@ -287,7 +382,7 @@ def main() -> int:
     if unexpected:
         print("\n[!] Unexpected failures detected (not in whitelist):")
         print(format_failures(unexpected))
-        print("\nUpdate tests/git-compat/whitelist.csv to acknowledge known failures.")
+        print(f"\nUpdate {args.whitelist} to acknowledge known failures.")
         return 1
 
     if exit_code != 0 and not failures:
