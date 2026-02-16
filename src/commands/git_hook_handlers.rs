@@ -24,7 +24,10 @@ const REPO_HOOK_STATE_FILE: &str = "git_hooks_state.json";
 const GIT_HOOKS_DIR_NAME: &str = "git-hooks";
 
 pub const ENV_SKIP_ALL_HOOKS: &str = "GIT_AI_SKIP_ALL_HOOKS";
-pub const ENV_SKIP_MANAGED_HOOKS: &str = "GIT_AI_SKIP_MANAGED_HOOKS";
+// Intentionally avoid a GIT_* prefix so git alias shell-command tests don't
+// observe extra GIT_* variables in the environment.
+pub const ENV_SKIP_MANAGED_HOOKS: &str = "GITAI_SKIP_MANAGED_HOOKS";
+const ENV_SKIP_MANAGED_HOOKS_LEGACY: &str = "GIT_AI_SKIP_MANAGED_HOOKS";
 
 // All core hooks we proxy/forward. We install every known hook name so global forwarding works
 // even when git-ai doesn't have managed behavior for that hook.
@@ -621,11 +624,8 @@ fn run_managed_hook(
     match hook_name {
         "pre-commit" => {
             let parsed = parsed_invocation("commit", vec![]);
-            if commit_hooks::commit_pre_command_hook(&parsed, &mut repo) {
-                0
-            } else {
-                0
-            }
+            let _ = commit_hooks::commit_pre_command_hook(&parsed, &mut repo);
+            0
         }
         "post-commit" => {
             if let Ok(parent) = repo.revparse_single("HEAD^") {
@@ -766,7 +766,9 @@ pub fn handle_git_hook_invocation(hook_name: &str, hook_args: &[String]) -> i32 
         return 0;
     }
 
-    if std::env::var(ENV_SKIP_MANAGED_HOOKS).as_deref() != Ok("1") {
+    let skip_managed_hooks = std::env::var(ENV_SKIP_MANAGED_HOOKS).as_deref() == Ok("1")
+        || std::env::var(ENV_SKIP_MANAGED_HOOKS_LEGACY).as_deref() == Ok("1");
+    if !skip_managed_hooks {
         let _guard = disable_internal_git_hooks();
         let managed_status = run_managed_hook(hook_name, hook_args, &stdin_data, repo.as_ref());
         if managed_status != 0 {
