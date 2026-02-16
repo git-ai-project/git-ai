@@ -406,6 +406,14 @@ pub fn uninstall_global_git_hooks(dry_run: bool) -> Result<bool, GitAiError> {
 
 static REPO_SELF_HEAL_GUARD: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
+fn repo_lookup_path_for_self_heal(repo: &Repository) -> PathBuf {
+    let repo_git_dir = repo.path().to_path_buf();
+    match repo.is_bare_repository() {
+        Ok(true) => repo_git_dir,
+        Ok(false) | Err(_) => repo.workdir().unwrap_or(repo_git_dir),
+    }
+}
+
 pub fn maybe_spawn_repo_hook_self_heal(repo: &Repository) {
     if !config::Config::get().get_feature_flags().global_git_hooks {
         return;
@@ -417,6 +425,7 @@ pub fn maybe_spawn_repo_hook_self_heal(repo: &Repository) {
     }
 
     let repo_git_dir = repo.path().to_path_buf();
+    let repo_lookup_path = repo_lookup_path_for_self_heal(repo);
     let guard = REPO_SELF_HEAL_GUARD.get_or_init(|| Mutex::new(HashSet::new()));
 
     {
@@ -430,7 +439,7 @@ pub fn maybe_spawn_repo_hook_self_heal(repo: &Repository) {
 
     std::thread::spawn(move || {
         let result = (|| -> Result<(), GitAiError> {
-            let repo = crate::git::find_repository_in_path(&repo_git_dir.to_string_lossy())?;
+            let repo = crate::git::find_repository_in_path(&repo_lookup_path.to_string_lossy())?;
             ensure_repo_level_hooks_for_repo(&repo)
         })();
 
@@ -1640,6 +1649,48 @@ mod tests {
         assert!(
             should_forward_repo_state_first(Some(&repo)).is_none(),
             "repo state presence should suppress global fallback"
+        );
+    }
+
+    #[test]
+    fn repo_self_heal_lookup_uses_workdir_for_non_bare_repo() {
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let repo_dir = tmp.path().join("repo");
+        fs::create_dir_all(&repo_dir).expect("failed to create repo dir");
+        let init = Command::new("git")
+            .args(["init", "."])
+            .current_dir(&repo_dir)
+            .output()
+            .expect("failed to run git init");
+        assert!(init.status.success(), "git init should succeed");
+
+        let repo = crate::git::find_repository_in_path(&repo_dir.to_string_lossy())
+            .expect("failed to open initialized repo");
+        let lookup_path = repo_lookup_path_for_self_heal(&repo);
+        assert_eq!(
+            normalize_path(&lookup_path),
+            normalize_path(&repo_dir),
+            "non-bare repos should self-heal using workdir path"
+        );
+    }
+
+    #[test]
+    fn repo_self_heal_lookup_uses_git_dir_for_bare_repo() {
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let bare_dir = tmp.path().join("repo.git");
+        let init = Command::new("git")
+            .args(["init", "--bare", bare_dir.to_string_lossy().as_ref()])
+            .output()
+            .expect("failed to run git init --bare");
+        assert!(init.status.success(), "git init --bare should succeed");
+
+        let repo = crate::git::find_repository_in_path(&bare_dir.to_string_lossy())
+            .expect("failed to open initialized bare repo");
+        let lookup_path = repo_lookup_path_for_self_heal(&repo);
+        assert_eq!(
+            normalize_path(&lookup_path),
+            normalize_path(repo.path()),
+            "bare repos should self-heal using git dir path"
         );
     }
 }
