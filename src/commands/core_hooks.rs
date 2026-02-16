@@ -1886,6 +1886,7 @@ if [ -s "$previous_hooks_file" ]; then
     "~/"*) previous_hooks_dir="$HOME/${{previous_hooks_dir#\~/}}" ;;
   esac
 fi
+previous_hooks_dir=$(printf '%s' "$previous_hooks_dir" | tr '\\' '/')
 
 if [ -n "$previous_hooks_dir" ]; then
   case "$script_dir" in */) script_dir="${{script_dir%/}}" ;; esac
@@ -1896,6 +1897,7 @@ if [ -n "$previous_hooks_dir" ]; then
 fi
 
 repo_git_dir="${{GIT_DIR:-.git}}"
+repo_git_dir=$(printf '%s' "$repo_git_dir" | tr '\\' '/')
 if [ -n "$previous_hooks_dir" ]; then
   chain_hook="$previous_hooks_dir/{hook}"
 else
@@ -2084,6 +2086,7 @@ if [ -s "$previous_hooks_file" ]; then
     "~/"*) previous_hooks_dir="$HOME/${{previous_hooks_dir#\~/}}" ;;
   esac
 fi
+previous_hooks_dir=$(printf '%s' "$previous_hooks_dir" | tr '\\' '/')
 
 if [ -n "$previous_hooks_dir" ]; then
   case "$script_dir" in */) script_dir="${{script_dir%/}}" ;; esac
@@ -2094,6 +2097,7 @@ if [ -n "$previous_hooks_dir" ]; then
 fi
 
 repo_git_dir="${{GIT_DIR:-.git}}"
+repo_git_dir=$(printf '%s' "$repo_git_dir" | tr '\\' '/')
 working_logs_dir="$repo_git_dir/ai/working_logs"
 dispatch=0
 if [ -d "$working_logs_dir" ]; then
@@ -2290,6 +2294,7 @@ if [ -s "$previous_hooks_file" ]; then
     "~/"*) previous_hooks_dir="$HOME/${{previous_hooks_dir#\~/}}" ;;
   esac
 fi
+previous_hooks_dir=$(printf '%s' "$previous_hooks_dir" | tr '\\' '/')
 
 if [ -n "$previous_hooks_dir" ]; then
   case "$script_dir" in */) script_dir="${{script_dir%/}}" ;; esac
@@ -2300,6 +2305,7 @@ if [ -n "$previous_hooks_dir" ]; then
 fi
 
 repo_git_dir="${{GIT_DIR:-.git}}"
+repo_git_dir=$(printf '%s' "$repo_git_dir" | tr '\\' '/')
 marker_file="$repo_git_dir/ai/{pending_stash_marker_file}"
 dispatch=0
 if [ -f "$marker_file" ]; then
@@ -2361,6 +2367,7 @@ if [ -s "$previous_hooks_file" ]; then
     "~/"*) previous_hooks_dir="$HOME/${{previous_hooks_dir#\~/}}" ;;
   esac
 fi
+previous_hooks_dir=$(printf '%s' "$previous_hooks_dir" | tr '\\' '/')
 
 if [ -n "$previous_hooks_dir" ]; then
   case "$script_dir" in */) script_dir="${{script_dir%/}}" ;; esac
@@ -2370,10 +2377,67 @@ if [ -n "$previous_hooks_dir" ]; then
   fi
 fi
 
+repo_git_dir="${{GIT_DIR:-.git}}"
+repo_git_dir=$(printf '%s' "$repo_git_dir" | tr '\\' '/')
 if [ -n "$previous_hooks_dir" ]; then
   chain_hook="$previous_hooks_dir/{hook}"
 else
-  chain_hook="${{GIT_DIR:-.git}}/hooks/{hook}"
+  chain_hook="$repo_git_dir/hooks/{hook}"
+fi
+
+if [ -x "$chain_hook" ]; then
+  "$chain_hook" "$@"
+  exit $?
+fi
+if [ -f "$chain_hook" ]; then
+  sh "$chain_hook" "$@"
+  exit $?
+fi
+exit 0
+"#,
+                skip_env = GIT_AI_SKIP_CORE_HOOKS_ENV,
+                previous_hooks_file = PREVIOUS_HOOKS_PATH_FILE,
+                hook = hook,
+            )
+        } else if is_passthrough {
+            format!(
+                r#"#!/bin/sh
+# git-ai-managed: mode=passthrough-shell
+if [ "${{{skip_env}:-}}" = "1" ]; then
+  exit 0
+fi
+
+script_dir="$0"
+case "$script_dir" in
+  */*) script_dir="${{script_dir%/*}}" ;;
+  *) script_dir="." ;;
+esac
+previous_hooks_file="$script_dir/{previous_hooks_file}"
+previous_hooks_dir=""
+
+if [ -s "$previous_hooks_file" ]; then
+  IFS= read -r previous_hooks_dir < "$previous_hooks_file" || true
+  case "$previous_hooks_dir" in
+    "~") previous_hooks_dir="$HOME" ;;
+    "~/"*) previous_hooks_dir="$HOME/${{previous_hooks_dir#\~/}}" ;;
+  esac
+fi
+previous_hooks_dir=$(printf '%s' "$previous_hooks_dir" | tr '\\' '/')
+
+if [ -n "$previous_hooks_dir" ]; then
+  case "$script_dir" in */) script_dir="${{script_dir%/}}" ;; esac
+  case "$previous_hooks_dir" in */) previous_hooks_dir="${{previous_hooks_dir%/}}" ;; esac
+  if [ "$script_dir" = "$previous_hooks_dir" ]; then
+    previous_hooks_dir=""
+  fi
+fi
+
+repo_git_dir="${{GIT_DIR:-.git}}"
+repo_git_dir=$(printf '%s' "$repo_git_dir" | tr '\\' '/')
+if [ -n "$previous_hooks_dir" ]; then
+  chain_hook="$previous_hooks_dir/{hook}"
+else
+  chain_hook="$repo_git_dir/hooks/{hook}"
 fi
 if [ -x "$chain_hook" ]; then
   "$chain_hook" "$@"

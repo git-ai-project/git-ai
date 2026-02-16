@@ -245,3 +245,63 @@ fn hook_contract_path_edge_cases_and_local_override_behavior() {
         "global managed hook chain should not run when local core.hooksPath is active"
     );
 }
+
+#[test]
+fn hook_contract_backslash_previous_hooks_path_chains_on_shell_hooks() {
+    let testbed = EcosystemTestbed::new("hook-contract-backslash-previous-hooks-path");
+    let previous_hooks_dir = testbed.root.join("previous-hooks");
+    let applypatch_marker = testbed.root.join("applypatch-backslash.log");
+    let reference_marker = testbed.root.join("reference-backslash.log");
+
+    testbed.write_hook_script(
+        &previous_hooks_dir,
+        "applypatch-msg",
+        &testbed.marker_hook_script(&applypatch_marker, 0),
+    );
+    testbed.write_hook_script(
+        &previous_hooks_dir,
+        "reference-transaction",
+        &format!(
+            "#!/bin/sh\nIFS= read -r line\nprintf '%s|%s\\n' \"$1\" \"$line\" >> \"{}\"\nexit 0\n",
+            shell_escape(&reference_marker)
+        ),
+    );
+
+    for hook in INSTALLED_HOOKS {
+        if *hook != "applypatch-msg" && *hook != "reference-transaction" {
+            testbed.write_hook_script(&previous_hooks_dir, hook, "#!/bin/sh\nexit 0\n");
+        }
+    }
+
+    testbed.set_global_hooks_path_raw(previous_hooks_dir.to_string_lossy().as_ref());
+    testbed.install_hooks();
+
+    let backslash_previous_hooks = previous_hooks_dir.to_string_lossy().replace('/', "\\");
+    fs::write(testbed.previous_hooks_file(), backslash_previous_hooks)
+        .expect("write backslash previous_hooks_path");
+
+    testbed.run_hook_script(
+        "applypatch-msg",
+        &["foo"],
+        None,
+        true,
+        "applypatch-backslash",
+    );
+    testbed.run_hook_script(
+        "reference-transaction",
+        &["prepared"],
+        Some("000 111 refs/heads/main\n"),
+        true,
+        "reference-backslash",
+    );
+
+    assert!(
+        applypatch_marker.exists(),
+        "applypatch previous hook should run"
+    );
+    let reference_line = fs::read_to_string(reference_marker).expect("read reference marker");
+    assert!(
+        reference_line.contains("prepared|000 111 refs/heads/main"),
+        "reference-transaction previous hook should receive args and stdin"
+    );
+}

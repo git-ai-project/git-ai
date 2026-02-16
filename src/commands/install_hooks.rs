@@ -1,7 +1,7 @@
 use crate::commands::core_hooks::{
-    INSTALLED_HOOKS, PENDING_STASH_APPLY_MARKER_FILE, PREVIOUS_HOOKS_PATH_FILE,
-    WORKING_LOG_INITIAL_FILE, managed_core_hooks_dir, normalize_hook_binary_path,
-    write_core_hook_scripts,
+    INSTALLED_HOOKS, PASSTHROUGH_ONLY_HOOKS, PENDING_STASH_APPLY_MARKER_FILE,
+    PREVIOUS_HOOKS_PATH_FILE, WORKING_LOG_INITIAL_FILE, managed_core_hooks_dir,
+    normalize_hook_binary_path, write_core_hook_scripts,
 };
 use crate::commands::flush_metrics_db::spawn_background_metrics_db_flush;
 use crate::error::GitAiError;
@@ -796,7 +796,9 @@ fn core_hook_scripts_up_to_date(hooks_dir: &Path, binary_path: &Path) -> bool {
 
     let binary = normalize_hook_binary_path(binary_path);
     let previous_hooks_nonempty_check = "if [ -s \"$previous_hooks_file\" ]; then";
+    let windows_path_norm_check = "tr '\\\\' '/'";
     INSTALLED_HOOKS.iter().all(|hook| {
+        let is_passthrough = PASSTHROUGH_ONLY_HOOKS.contains(hook);
         let hook_path = hooks_dir.join(hook);
         let content = fs::read_to_string(&hook_path).unwrap_or_default();
         if *hook == "reference-transaction" {
@@ -811,6 +813,7 @@ fn core_hook_scripts_up_to_date(hooks_dir: &Path, binary_path: &Path) -> bool {
                 && content.contains(previous_hooks_nonempty_check)
                 && content.contains("refs/heads/")
                 && script_contains_binary(&content, &binary)
+                && content.contains(windows_path_norm_check)
         } else if *hook == "pre-commit" {
             hook_path.exists()
                 && content.contains("# git-ai-managed: mode=trampoline;type=pre-commit-prefilter")
@@ -839,6 +842,7 @@ fn core_hook_scripts_up_to_date(hooks_dir: &Path, binary_path: &Path) -> bool {
                 && content.contains("refs/notes/ai")
                 && content.contains(WORKING_LOG_INITIAL_FILE)
                 && script_contains_binary(&content, &binary)
+                && content.contains(windows_path_norm_check)
         } else if *hook == "post-index-change" {
             hook_path.exists()
                 && content.contains("# git-ai-managed: mode=trampoline;type=post-index-prefilter")
@@ -851,11 +855,13 @@ fn core_hook_scripts_up_to_date(hooks_dir: &Path, binary_path: &Path) -> bool {
                 && content.contains(previous_hooks_nonempty_check)
                 && content.contains(PENDING_STASH_APPLY_MARKER_FILE)
                 && script_contains_binary(&content, &binary)
-        } else if *hook == "commit-msg" || *hook == "prepare-commit-msg" {
+                && content.contains(windows_path_norm_check)
+        } else if is_passthrough {
             hook_path.exists()
                 && content.contains("# git-ai-managed: mode=passthrough-shell")
                 && content.contains(PREVIOUS_HOOKS_PATH_FILE)
                 && content.contains(previous_hooks_nonempty_check)
+                && content.contains(windows_path_norm_check)
         } else {
             hook_path.exists()
                 && content.contains("# git-ai-managed: mode=trampoline;type=dispatch")
@@ -1036,7 +1042,10 @@ fn write_previous_hooks_path(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(path, previous_hooks_path.unwrap_or_default())?;
+    let normalized_previous_hooks_path = previous_hooks_path
+        .map(|value| value.replace('\\', "/"))
+        .unwrap_or_default();
+    fs::write(path, normalized_previous_hooks_path)?;
     Ok(())
 }
 
@@ -1099,5 +1108,16 @@ mod tests {
             hooks_path_matches_desired(Some(with_tilde.as_str()), temp.path()),
             "tilde-prefixed hooks path should resolve to managed home path"
         );
+    }
+
+    #[test]
+    fn write_previous_hooks_path_normalizes_windows_separators() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let previous_path_file = temp.path().join("previous_hooks_path");
+        write_previous_hooks_path(&previous_path_file, Some(r"C:\Users\test\hooks"))
+            .expect("write previous hooks path");
+
+        let content = fs::read_to_string(previous_path_file).expect("read previous hooks path");
+        assert_eq!(content, "C:/Users/test/hooks");
     }
 }
