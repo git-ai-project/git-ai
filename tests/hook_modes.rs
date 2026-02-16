@@ -33,6 +33,31 @@ impl Drop for EnvVarGuard {
     }
 }
 
+fn assert_blame_line_author_contains(
+    blame_output: &str,
+    content_snippet: &str,
+    author_snippet: &str,
+) {
+    let Some(line) = blame_output
+        .lines()
+        .find(|line| line.contains(content_snippet))
+    else {
+        panic!(
+            "expected blame output to contain line snippet {:?}\nblame output:\n{}",
+            content_snippet, blame_output
+        );
+    };
+
+    assert!(
+        line.to_ascii_lowercase()
+            .contains(&author_snippet.to_ascii_lowercase()),
+        "expected blame line for {:?} to include author snippet {:?}\nline: {}",
+        content_snippet,
+        author_snippet,
+        line
+    );
+}
+
 #[test]
 #[serial]
 fn hook_mode_runs_without_wrapper() {
@@ -184,4 +209,97 @@ fn hooks_mode_amend_uses_single_amend_rewrite_event() {
         plain_commit_events, 1,
         "hooks mode amend should not emit an extra plain commit event"
     );
+}
+
+#[test]
+#[serial]
+fn hooks_mode_non_root_amend_preserves_ai_authorship() {
+    let _mode = EnvVarGuard::set("GIT_AI_TEST_GIT_MODE", "hooks");
+
+    let repo = TestRepo::new();
+    let path = repo.path().join("amend-authorship.txt");
+
+    fs::write(&path, "base line\n").expect("failed to write base line");
+    repo.git(&["add", "amend-authorship.txt"])
+        .expect("staging base line should succeed");
+    repo.commit("base commit")
+        .expect("base commit should succeed");
+
+    fs::write(&path, "base line\nsecond line\n").expect("failed to write second line");
+    repo.git(&["add", "amend-authorship.txt"])
+        .expect("staging second line should succeed");
+    repo.commit("second commit")
+        .expect("second commit should succeed");
+
+    fs::write(&path, "base line\nsecond line\nai amended line\n")
+        .expect("failed to write amended content");
+    repo.git_ai(&["checkpoint", "mock_ai", "amend-authorship.txt"])
+        .expect("checkpoint should succeed");
+    repo.git(&["add", "amend-authorship.txt"])
+        .expect("staging amended content should succeed");
+    repo.git(&["commit", "--amend", "-m", "second commit amended"])
+        .expect("amend should succeed");
+
+    let blame = repo
+        .git_ai(&["blame", "amend-authorship.txt"])
+        .expect("blame should succeed");
+    assert_blame_line_author_contains(&blame, "ai amended line", "mock_ai");
+}
+
+#[test]
+#[serial]
+fn hooks_mode_root_amend_preserves_ai_authorship() {
+    let _mode = EnvVarGuard::set("GIT_AI_TEST_GIT_MODE", "hooks");
+
+    let repo = TestRepo::new();
+    let path = repo.path().join("root-amend-authorship.txt");
+
+    fs::write(&path, "root line\n").expect("failed to write root line");
+    repo.git(&["add", "root-amend-authorship.txt"])
+        .expect("staging root line should succeed");
+    repo.commit("root commit")
+        .expect("root commit should succeed");
+
+    fs::write(&path, "root line\nroot ai amended line\n")
+        .expect("failed to write root amended content");
+    repo.git_ai(&["checkpoint", "mock_ai", "root-amend-authorship.txt"])
+        .expect("checkpoint should succeed");
+    repo.git(&["add", "root-amend-authorship.txt"])
+        .expect("staging root amended content should succeed");
+    repo.git(&["commit", "--amend", "-m", "root commit amended"])
+        .expect("root amend should succeed");
+
+    let blame = repo
+        .git_ai(&["blame", "root-amend-authorship.txt"])
+        .expect("blame should succeed");
+    assert_blame_line_author_contains(&blame, "root ai amended line", "mock_ai");
+}
+
+#[test]
+#[serial]
+fn both_mode_amend_preserves_ai_authorship_parity() {
+    let _mode = EnvVarGuard::set("GIT_AI_TEST_GIT_MODE", "both");
+
+    let repo = TestRepo::new();
+    let path = repo.path().join("both-amend-authorship.txt");
+
+    fs::write(&path, "line one\n").expect("failed to write initial content");
+    repo.git(&["add", "both-amend-authorship.txt"])
+        .expect("staging initial content should succeed");
+    repo.commit("initial commit")
+        .expect("initial commit should succeed");
+
+    fs::write(&path, "line one\nboth mode ai line\n")
+        .expect("failed to write both-mode amend content");
+    repo.git_ai(&["checkpoint", "mock_ai", "both-amend-authorship.txt"])
+        .expect("checkpoint should succeed");
+    repo.git(&["add", "both-amend-authorship.txt"])
+        .expect("staging both-mode amend content should succeed");
+    repo.git(&["commit", "--amend", "-m", "initial commit amended"])
+        .expect("both-mode amend should succeed");
+
+    let blame = repo
+        .git_ai(&["blame", "both-amend-authorship.txt"])
+        .expect("blame should succeed");
+    assert_blame_line_author_contains(&blame, "both mode ai line", "mock_ai");
 }

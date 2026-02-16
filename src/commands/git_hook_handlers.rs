@@ -695,8 +695,8 @@ fn execute_forwarded_hook(
     let mut cmd = Command::new(&hook_path);
     cmd.args(hook_args)
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
         .env(ENV_SKIP_ALL_HOOKS, "1");
 
     let Ok(mut child) = cmd.spawn() else {
@@ -707,14 +707,10 @@ fn execute_forwarded_hook(
         let _ = stdin.write_all(stdin_bytes);
     }
 
-    let Ok(output) = child.wait_with_output() else {
+    let Ok(status) = child.wait() else {
         return 1;
     };
-
-    let _ = std::io::stdout().write_all(&output.stdout);
-    let _ = std::io::stderr().write_all(&output.stderr);
-
-    output.status.code().unwrap_or(1)
+    status.code().unwrap_or(1)
 }
 
 fn forwarded_hook_path_for_name(repo: Option<&Repository>, hook_name: &str) -> Option<PathBuf> {
@@ -1656,6 +1652,9 @@ fn run_managed_hook(
             }
             if is_post_commit_amend(&repo) {
                 // For --amend, post-rewrite (amend) owns rewrite mapping.
+                // This avoids duplicate rewrite-log events while still preserving
+                // authorship: commit_amend handling reads working logs and rewrites
+                // notes for the amended commit.
                 return 0;
             }
             if let Ok(parent) = repo.revparse_single("HEAD^") {
@@ -1768,17 +1767,7 @@ fn run_managed_hook(
         }
         "pre-push" => {
             let parsed = parsed_invocation("push", hook_args.to_vec());
-            let mut context = default_context();
-            context.push_authorship_handle = push_hooks::push_pre_command_hook(&parsed, &repo);
-            push_hooks::push_post_command_hook(&repo, &parsed, success_exit_status(), &mut context);
-            0
-        }
-        "post-fetch" => {
-            if let Ok(remotes) = repo.remotes() {
-                for remote in remotes {
-                    let _ = fetch_authorship_notes(&repo, &remote);
-                }
-            }
+            push_hooks::run_pre_push_hook_managed(&parsed, &repo);
             0
         }
         "reference-transaction" => {

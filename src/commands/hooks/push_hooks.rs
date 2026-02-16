@@ -12,40 +12,10 @@ pub fn push_pre_command_hook(
     upgrade::maybe_schedule_background_update_check();
 
     // Early returns for cases where we shouldn't push authorship notes
-    if is_dry_run(&parsed_args.command_args)
-        || parsed_args
-            .command_args
-            .iter()
-            .any(|a| a == "-d" || a == "--delete")
-        || parsed_args.command_args.iter().any(|a| a == "--mirror")
-    {
+    if should_skip_authorship_push(&parsed_args.command_args) {
         return None;
     }
-
-    let remotes = repository.remotes().ok();
-    let remote_names: Vec<String> = remotes
-        .as_ref()
-        .map(|r| {
-            (0..r.len())
-                .filter_map(|i| r.get(i).map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    // Push authorship refs to the appropriate remote
-    let positional_remote = extract_remote_from_push_args(&parsed_args.command_args, &remote_names);
-
-    let specified_remote = positional_remote.or_else(|| {
-        parsed_args
-            .command_args
-            .iter()
-            .find(|a| remote_names.iter().any(|r| r == *a))
-            .cloned()
-    });
-
-    let remote = specified_remote
-        .or_else(|| repository.upstream_remote().ok().flatten())
-        .or_else(|| repository.get_default_remote().ok().flatten());
+    let remote = resolve_push_remote(parsed_args, repository);
 
     if let Some(remote) = remote {
         debug_log(&format!(
@@ -80,6 +50,35 @@ pub fn push_pre_command_hook(
     }
 }
 
+pub fn run_pre_push_hook_managed(parsed_args: &ParsedGitInvocation, repository: &Repository) {
+    upgrade::maybe_schedule_background_update_check();
+
+    if should_skip_authorship_push(&parsed_args.command_args) {
+        return;
+    }
+
+    let Some(remote) = resolve_push_remote(parsed_args, repository) else {
+        debug_log("no remotes found for authorship push; skipping");
+        return;
+    };
+
+    debug_log(&format!(
+        "started pushing authorship notes to remote: {}",
+        remote
+    ));
+
+    crate::observability::spawn_background_flush();
+
+    // Spawn CAS flush if prompt_storage is "default" (CAS upload mode)
+    if crate::config::Config::get().prompt_storage() == "default" {
+        crate::commands::flush_cas::spawn_background_cas_flush();
+    }
+
+    if let Err(e) = push_authorship_notes(repository, &remote) {
+        debug_log(&format!("authorship push failed: {}", e));
+    }
+}
+
 pub fn push_post_command_hook(
     _repository: &Repository,
     _parsed_args: &ParsedGitInvocation,
@@ -92,6 +91,54 @@ pub fn push_post_command_hook(
     if let Some(handle) = command_hooks_context.push_authorship_handle.take() {
         let _ = handle.join();
     }
+}
+
+fn should_skip_authorship_push(command_args: &[String]) -> bool {
+    is_dry_run(command_args)
+        || command_args.iter().any(|a| a == "-d" || a == "--delete")
+        || command_args.iter().any(|a| a == "--mirror")
+}
+
+fn resolve_push_remote(
+    parsed_args: &ParsedGitInvocation,
+    repository: &Repository,
+) -> Option<String> {
+    let remotes = repository.remotes().ok();
+    let remote_names: Vec<String> = remotes
+        .as_ref()
+        .map(|r| {
+            (0..r.len())
+                .filter_map(|i| r.get(i).map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let upstream_remote = repository.upstream_remote().ok().flatten();
+    let default_remote = repository.get_default_remote().ok().flatten();
+
+    resolve_push_remote_from_parts(
+        &parsed_args.command_args,
+        &remote_names,
+        upstream_remote,
+        default_remote,
+    )
+}
+
+fn resolve_push_remote_from_parts(
+    command_args: &[String],
+    known_remotes: &[String],
+    upstream_remote: Option<String>,
+    default_remote: Option<String>,
+) -> Option<String> {
+    let positional_remote = extract_remote_from_push_args(command_args, known_remotes);
+
+    let specified_remote = positional_remote.or_else(|| {
+        command_args
+            .iter()
+            .find(|arg| known_remotes.iter().any(|remote| remote == *arg))
+            .cloned()
+    });
+
+    specified_remote.or(upstream_remote).or(default_remote)
 }
 
 fn extract_remote_from_push_args(args: &[String], known_remotes: &[String]) -> Option<String> {
@@ -148,4 +195,73 @@ fn option_consumes_separate_value(arg: &str) -> bool {
         arg,
         "--repo" | "--receive-pack" | "--exec" | "-o" | "--push-option" | "-c" | "-C"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| (*arg).to_string()).collect()
+    }
+
+    #[test]
+    fn skip_authorship_push_when_dry_run() {
+        assert!(should_skip_authorship_push(&strings(&["--dry-run"])));
+    }
+
+    #[test]
+    fn skip_authorship_push_when_delete() {
+        assert!(should_skip_authorship_push(&strings(&["--delete"])));
+        assert!(should_skip_authorship_push(&strings(&["-d"])));
+    }
+
+    #[test]
+    fn skip_authorship_push_when_mirror() {
+        assert!(should_skip_authorship_push(&strings(&["--mirror"])));
+    }
+
+    #[test]
+    fn resolve_push_remote_prefers_positional_remote() {
+        let args = strings(&["origin", "main"]);
+        let remote = resolve_push_remote_from_parts(
+            &args,
+            &strings(&["origin", "upstream"]),
+            Some("upstream".to_string()),
+            Some("origin".to_string()),
+        );
+        assert_eq!(remote.as_deref(), Some("origin"));
+    }
+
+    #[test]
+    fn resolve_push_remote_prefers_repo_flag() {
+        let args = strings(&["--repo", "upstream", "HEAD"]);
+        let remote = resolve_push_remote_from_parts(
+            &args,
+            &strings(&["origin", "upstream"]),
+            Some("origin".to_string()),
+            None,
+        );
+        assert_eq!(remote.as_deref(), Some("upstream"));
+    }
+
+    #[test]
+    fn resolve_push_remote_falls_back_to_upstream_then_default() {
+        let args = Vec::<String>::new();
+        let with_upstream = resolve_push_remote_from_parts(
+            &args,
+            &strings(&["origin"]),
+            Some("upstream".to_string()),
+            Some("origin".to_string()),
+        );
+        assert_eq!(with_upstream.as_deref(), Some("upstream"));
+
+        let with_default = resolve_push_remote_from_parts(
+            &args,
+            &strings(&["origin"]),
+            None,
+            Some("origin".to_string()),
+        );
+        assert_eq!(with_default.as_deref(), Some("origin"));
+    }
 }
