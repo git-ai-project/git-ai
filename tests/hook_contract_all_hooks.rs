@@ -305,3 +305,33 @@ fn hook_contract_backslash_previous_hooks_path_chains_on_shell_hooks() {
         "reference-transaction previous hook should receive args and stdin"
     );
 }
+
+#[test]
+fn hook_contract_streamed_pre_push_propagates_chained_failure_with_large_stdin() {
+    let testbed = EcosystemTestbed::new("hook-contract-streamed-pre-push-failure");
+    let previous_hooks_dir = testbed.root.join("previous-hooks");
+
+    testbed.write_hook_script(&previous_hooks_dir, "pre-push", "#!/bin/sh\nexit 23\n");
+    for hook in INSTALLED_HOOKS {
+        if *hook != "pre-push" {
+            testbed.write_hook_script(&previous_hooks_dir, hook, "#!/bin/sh\nexit 0\n");
+        }
+    }
+
+    testbed.set_global_hooks_path_raw(previous_hooks_dir.to_string_lossy().as_ref());
+    testbed.install_hooks();
+
+    let large_stdin = "refs/heads/main 123 refs/heads/main 000\n".repeat(20_000);
+    let output = testbed.run_hook_script(
+        "pre-push",
+        &["origin", "https://example.invalid/repo.git"],
+        Some(&large_stdin),
+        false,
+        "pre-push-large-stdin-failure",
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(23),
+        "pre-push should propagate chained hook failure even with large streamed stdin"
+    );
+}

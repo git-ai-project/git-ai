@@ -50,11 +50,18 @@ pub fn handle_hook_trampoline_command(args: &[String]) {
     }
 
     let skip_chain = std::env::var(GIT_AI_TRAMPOLINE_SKIP_CHAIN_ENV).as_deref() == Ok("1");
-    if !skip_chain
-        && let Some(status) = run_chained_hook(hook_name, hook_args, stdin_bytes.as_slice())
-        && !status.success()
-    {
-        exit_with_status(status);
+    if !skip_chain {
+        match run_chained_hook(hook_name, hook_args, stdin_bytes.as_slice()) {
+            Ok(Some(status)) if !status.success() => exit_with_status(status),
+            Ok(_) => {}
+            Err(error) => {
+                debug_log(&format!(
+                    "hook trampoline failed running chained hook '{}': {}",
+                    hook_name, error
+                ));
+                std::process::exit(1);
+            }
+        }
     }
 }
 
@@ -190,7 +197,7 @@ fn run_chained_hook(
     hook_name: &str,
     hook_args: &[String],
     stdin_bytes: &[u8],
-) -> Option<ExitStatus> {
+) -> std::io::Result<Option<ExitStatus>> {
     if let Some(previous_hook) = previous_hook_path(hook_name) {
         return run_single_chained_hook(&previous_hook, hook_args, stdin_bytes);
     }
@@ -239,17 +246,21 @@ fn run_single_chained_hook(
     hook_path: &Path,
     hook_args: &[String],
     stdin_bytes: &[u8],
-) -> Option<ExitStatus> {
+) -> std::io::Result<Option<ExitStatus>> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
-        let metadata = fs::metadata(hook_path).ok()?;
+        let metadata = match fs::metadata(hook_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
         if !metadata.is_file() {
-            return None;
+            return Ok(None);
         }
         if is_managed_hook_path(hook_path) {
-            return None;
+            return Ok(None);
         }
 
         let mut command = if metadata.permissions().mode() & 0o111 != 0 {
@@ -260,27 +271,31 @@ fn run_single_chained_hook(
             command
         };
         command.args(hook_args);
-        return run_command_with_stdin(command, stdin_bytes).ok();
+        return run_command_with_stdin(command, stdin_bytes).map(Some);
     }
 
     #[cfg(windows)]
     {
-        let metadata = fs::metadata(hook_path).ok()?;
+        let metadata = match fs::metadata(hook_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
         if !metadata.is_file() {
-            return None;
+            return Ok(None);
         }
         if is_managed_hook_path(hook_path) {
-            return None;
+            return Ok(None);
         }
 
         let mut command = Command::new("sh");
         command.arg(hook_path);
         command.args(hook_args);
-        return run_command_with_stdin(command, stdin_bytes).ok();
+        return run_command_with_stdin(command, stdin_bytes).map(Some);
     }
 
     #[allow(unreachable_code)]
-    None
+    Ok(None)
 }
 
 fn run_command_with_stdin(mut command: Command, stdin_bytes: &[u8]) -> std::io::Result<ExitStatus> {
@@ -290,8 +305,11 @@ fn run_command_with_stdin(mut command: Command, stdin_bytes: &[u8]) -> std::io::
 
     command.stdin(Stdio::piped());
     let mut child = command.spawn()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(stdin_bytes)?;
+    if let Some(mut stdin) = child.stdin.take()
+        && let Err(error) = stdin.write_all(stdin_bytes)
+        && error.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        return Err(error);
     }
     child.wait()
 }
@@ -386,9 +404,11 @@ fn exit_with_status(status: ExitStatus) -> ! {
 mod tests {
     use super::{
         RefTxnActionClass, classify_ref_transaction_action_from_env,
-        reference_transaction_has_relevant_refs, should_dispatch_to_core_hook,
+        reference_transaction_has_relevant_refs, run_command_with_stdin,
+        should_dispatch_to_core_hook,
     };
     use serial_test::serial;
+    use std::process::Command;
 
     #[test]
     fn reference_transaction_prefilter_detects_relevant_refs() {
@@ -460,5 +480,32 @@ mod tests {
         unsafe {
             std::env::remove_var("GIT_REFLOG_ACTION");
         }
+    }
+
+    #[test]
+    fn run_command_with_large_stdin_preserves_child_exit_status() {
+        #[cfg(unix)]
+        let command = {
+            let mut command = Command::new("sh");
+            command.args(["-c", "exec 0<&-; sleep 0.05; exit 23"]);
+            command
+        };
+
+        #[cfg(windows)]
+        let command = {
+            let mut command = Command::new("powershell");
+            command.args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Milliseconds 50; exit 23",
+            ]);
+            command
+        };
+
+        let stdin_payload = vec![b'x'; 1_000_000];
+        let status =
+            run_command_with_stdin(command, &stdin_payload).expect("command should execute");
+        assert_eq!(status.code(), Some(23));
     }
 }
