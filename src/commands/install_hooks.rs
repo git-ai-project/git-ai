@@ -111,27 +111,46 @@ pub fn to_hashmap(statuses: HashMap<String, InstallStatus>) -> HashMap<String, S
 }
 
 const GIT_CORE_HOOKS_STATUS_ID: &str = "git-core-hooks";
+const COREHOOKS_BETA_FLAG: &str = "--corehooks-beta";
+
+#[derive(Debug, Clone, Copy, Default)]
+struct InstallFlags {
+    dry_run: bool,
+    verbose: bool,
+    enable_corehooks_beta: bool,
+}
+
+fn parse_install_flags(args: &[String]) -> InstallFlags {
+    let mut flags = InstallFlags::default();
+    for arg in args {
+        if arg == "--dry-run" || arg == "--dry-run=true" {
+            flags.dry_run = true;
+        }
+        if arg == "--verbose" || arg == "-v" {
+            flags.verbose = true;
+        }
+        if arg == COREHOOKS_BETA_FLAG || arg == "--corehooks-beta=true" {
+            flags.enable_corehooks_beta = true;
+        }
+    }
+    flags
+}
 
 /// Main entry point for install-hooks command
 pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
-    // Parse flags
-    let mut dry_run = false;
-    let mut verbose = false;
-    for arg in args {
-        if arg == "--dry-run" || arg == "--dry-run=true" {
-            dry_run = true;
-        }
-        if arg == "--verbose" || arg == "-v" {
-            verbose = true;
-        }
-    }
+    let flags = parse_install_flags(args);
 
     // Get absolute path to the current binary
     let binary_path = get_current_binary_path()?;
     let params = HookInstallerParams { binary_path };
 
     // Run async operations with smol and convert result
-    let statuses = smol::block_on(async_run_install(&params, dry_run, verbose))?;
+    let statuses = smol::block_on(async_run_install(
+        &params,
+        flags.dry_run,
+        flags.verbose,
+        flags.enable_corehooks_beta,
+    ))?;
 
     // Spawn background processes to flush metrics
     crate::observability::spawn_background_flush();
@@ -167,6 +186,7 @@ async fn async_run_install(
     params: &HookInstallerParams,
     dry_run: bool,
     verbose: bool,
+    enable_corehooks_beta: bool,
 ) -> Result<HashMap<String, InstallStatus>, GitAiError> {
     let mut any_checked = true;
     let mut has_changes = false;
@@ -189,50 +209,57 @@ async fn async_run_install(
 
     // === Git Core Hooks ===
     println!("\n\x1b[1mGit Core Hooks\x1b[0m");
-    let core_spinner = Spinner::new("Git: checking core.hooksPath");
-    core_spinner.start();
-    match install_git_core_hooks(params, dry_run) {
-        Ok(Some(diff)) => {
-            if dry_run {
-                core_spinner.pending("Git: Pending core hook updates");
-            } else {
-                core_spinner.success("Git: Core hooks configured");
+    if enable_corehooks_beta {
+        let core_spinner = Spinner::new("Git: checking core.hooksPath");
+        core_spinner.start();
+        match install_git_core_hooks(params, dry_run) {
+            Ok(Some(diff)) => {
+                if dry_run {
+                    core_spinner.pending("Git: Pending core hook updates");
+                } else {
+                    core_spinner.success("Git: Core hooks configured");
+                }
+                if verbose {
+                    println!();
+                    print_diff(&diff);
+                }
+                has_changes = true;
+                statuses.insert(
+                    GIT_CORE_HOOKS_STATUS_ID.to_string(),
+                    InstallStatus::Installed,
+                );
+                detailed_results.push((
+                    GIT_CORE_HOOKS_STATUS_ID.to_string(),
+                    InstallResult::installed(),
+                ));
             }
-            if verbose {
-                println!();
-                print_diff(&diff);
+            Ok(None) => {
+                core_spinner.success("Git: Core hooks already up to date");
+                statuses.insert(
+                    GIT_CORE_HOOKS_STATUS_ID.to_string(),
+                    InstallStatus::AlreadyInstalled,
+                );
+                detailed_results.push((
+                    GIT_CORE_HOOKS_STATUS_ID.to_string(),
+                    InstallResult::already_installed(),
+                ));
             }
-            has_changes = true;
-            statuses.insert(
-                GIT_CORE_HOOKS_STATUS_ID.to_string(),
-                InstallStatus::Installed,
-            );
-            detailed_results.push((
-                GIT_CORE_HOOKS_STATUS_ID.to_string(),
-                InstallResult::installed(),
-            ));
+            Err(e) => {
+                core_spinner.error("Git: Failed to configure core hooks");
+                let error_msg = e.to_string();
+                eprintln!("  Error: {}", error_msg);
+                statuses.insert(GIT_CORE_HOOKS_STATUS_ID.to_string(), InstallStatus::Failed);
+                detailed_results.push((
+                    GIT_CORE_HOOKS_STATUS_ID.to_string(),
+                    InstallResult::failed(error_msg),
+                ));
+            }
         }
-        Ok(None) => {
-            core_spinner.success("Git: Core hooks already up to date");
-            statuses.insert(
-                GIT_CORE_HOOKS_STATUS_ID.to_string(),
-                InstallStatus::AlreadyInstalled,
-            );
-            detailed_results.push((
-                GIT_CORE_HOOKS_STATUS_ID.to_string(),
-                InstallResult::already_installed(),
-            ));
-        }
-        Err(e) => {
-            core_spinner.error("Git: Failed to configure core hooks");
-            let error_msg = e.to_string();
-            eprintln!("  Error: {}", error_msg);
-            statuses.insert(GIT_CORE_HOOKS_STATUS_ID.to_string(), InstallStatus::Failed);
-            detailed_results.push((
-                GIT_CORE_HOOKS_STATUS_ID.to_string(),
-                InstallResult::failed(error_msg),
-            ));
-        }
+    } else {
+        println!(
+            "  Skipping global core hooks install. Pass `{}` to enable.",
+            COREHOOKS_BETA_FLAG
+        );
     }
 
     // === Coding Agents ===
@@ -1126,5 +1153,19 @@ mod tests {
 
         let content = fs::read_to_string(previous_path_file).expect("read previous hooks path");
         assert_eq!(content, "C:/Users/test/hooks");
+    }
+
+    #[test]
+    fn parse_install_flags_requires_corehooks_beta_opt_in() {
+        let args = vec!["--dry-run=false".to_string()];
+        let flags = parse_install_flags(&args);
+        assert!(!flags.enable_corehooks_beta);
+    }
+
+    #[test]
+    fn parse_install_flags_enables_corehooks_beta_with_explicit_flag() {
+        let args = vec![COREHOOKS_BETA_FLAG.to_string()];
+        let flags = parse_install_flags(&args);
+        assert!(flags.enable_corehooks_beta);
     }
 }

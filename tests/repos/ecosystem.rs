@@ -138,7 +138,10 @@ impl EcosystemTestbed {
     }
 
     pub fn install_hooks(&self) {
-        self.run_git_ai_ok(&["install-hooks", "--dry-run=false"], "install-hooks");
+        self.run_git_ai_ok(
+            &["install-hooks", "--dry-run=false", "--corehooks-beta"],
+            "install-hooks",
+        );
     }
 
     pub fn uninstall_hooks(&self) {

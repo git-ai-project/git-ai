@@ -240,6 +240,7 @@ fn print_help() {
     eprintln!("    --add <key> <value>   Add to array or upsert into object");
     eprintln!("    unset <key>           Remove config value (reverts to default)");
     eprintln!("  install-hooks      Install git hooks for AI authorship tracking");
+    eprintln!("    --corehooks-beta      Opt in to global core.hooksPath management (beta)");
     eprintln!("  uninstall-hooks    Remove git-ai hooks from all detected tools");
     eprintln!("  ci                 Continuous integration utilities");
     eprintln!("    github                 GitHub CI helpers");

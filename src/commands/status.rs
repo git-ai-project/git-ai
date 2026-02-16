@@ -87,7 +87,7 @@ fn run_status(json: bool) -> Result<(), GitAiError> {
                 "If you've made AI edits recently and don't see them here, you might need to install hooks:"
             );
             eprintln!();
-            eprintln!("  git-ai install-hooks");
+            eprintln!("  git-ai install-hooks --corehooks-beta");
             eprintln!();
         }
         return Ok(());
