@@ -4,6 +4,7 @@ use crate::commands::hooks::commit_hooks;
 use crate::commands::hooks::merge_hooks;
 use crate::commands::hooks::push_hooks;
 use crate::commands::hooks::rebase_hooks;
+use crate::commands::hooks::stash_hooks;
 use crate::config;
 use crate::error::GitAiError;
 use crate::git::cli_parser::ParsedGitInvocation;
@@ -21,6 +22,7 @@ use std::sync::{Mutex, OnceLock};
 const CONFIG_KEY_CORE_HOOKS_PATH: &str = "core.hooksPath";
 const GLOBAL_HOOK_STATE_FILE: &str = "global_git_hooks_state.json";
 const REPO_HOOK_STATE_FILE: &str = "git_hooks_state.json";
+const PULL_HOOK_STATE_FILE: &str = "pull_hook_state.json";
 const GIT_HOOKS_DIR_NAME: &str = "git-hooks";
 
 pub const ENV_SKIP_ALL_HOOKS: &str = "GIT_AI_SKIP_ALL_HOOKS";
@@ -71,6 +73,11 @@ pub fn core_git_hook_names() -> &'static [&'static str] {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct HooksPathState {
     previous_hooks_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct PullHookState {
+    old_head: String,
 }
 
 #[cfg(unix)]
@@ -582,6 +589,37 @@ fn parse_hook_stdin(stdin: &[u8]) -> Vec<(String, String)> {
         .collect()
 }
 
+fn is_valid_git_oid(value: &str) -> bool {
+    (value.len() == 40 || value.len() == 64) && value.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn resolve_squash_source_head(repo: &Repository) -> Option<String> {
+    // Some Git versions keep MERGE_HEAD for --squash, others do not.
+    let merge_head_path = repo.path().join("MERGE_HEAD");
+    if let Ok(contents) = fs::read_to_string(merge_head_path)
+        && let Some(candidate) = contents.lines().map(str::trim).find(|line| !line.is_empty())
+        && is_valid_git_oid(candidate)
+    {
+        return Some(candidate.to_string());
+    }
+
+    // SQUASH_MSG is created by `git merge --squash` and includes the squashed tip commit(s).
+    // We use the first commit entry, which corresponds to the source head.
+    let squash_msg_path = repo.path().join("SQUASH_MSG");
+    if let Ok(contents) = fs::read_to_string(squash_msg_path) {
+        for line in contents.lines() {
+            if let Some(rest) = line.trim_start().strip_prefix("commit ")
+                && let Some(candidate) = rest.split_whitespace().next()
+                && is_valid_git_oid(candidate)
+            {
+                return Some(candidate.to_string());
+            }
+        }
+    }
+
+    None
+}
+
 fn parsed_invocation(command: &str, command_args: Vec<String>) -> ParsedGitInvocation {
     ParsedGitInvocation {
         global_args: Vec::new(),
@@ -604,6 +642,505 @@ fn default_context() -> CommandHooksContext {
     }
 }
 
+fn is_pull_reflog_action() -> bool {
+    std::env::var("GIT_REFLOG_ACTION")
+        .map(|action| action.starts_with("pull"))
+        .unwrap_or(false)
+}
+
+fn pull_hook_state_path(repo: &Repository) -> PathBuf {
+    repo.path().join("ai").join(PULL_HOOK_STATE_FILE)
+}
+
+fn clear_pull_hook_state(repo: &Repository) {
+    let _ = fs::remove_file(pull_hook_state_path(repo));
+}
+
+fn save_pull_hook_state(repo: &Repository, state: &PullHookState) {
+    let path = pull_hook_state_path(repo);
+    if let Some(parent) = path.parent()
+        && fs::create_dir_all(parent).is_err()
+    {
+        return;
+    }
+    if let Ok(data) = serde_json::to_vec(state) {
+        let _ = fs::write(path, data);
+    }
+}
+
+fn load_pull_hook_state(repo: &Repository) -> Option<PullHookState> {
+    let path = pull_hook_state_path(repo);
+    let data = fs::read(path).ok()?;
+    serde_json::from_slice(&data).ok()
+}
+
+fn fetch_notes_from_all_remotes(repo: &Repository) {
+    if let Ok(remotes) = repo.remotes() {
+        for remote in remotes {
+            let _ = fetch_authorship_notes(repo, &remote);
+        }
+    }
+}
+
+fn was_fast_forward_pull(repository: &Repository, expected_new_head: &str) -> bool {
+    let mut args = repository.global_args_for_exec();
+    args.extend(
+        ["reflog", "-1", "--format=%H %gs"]
+            .iter()
+            .map(|s| s.to_string()),
+    );
+
+    match crate::git::repository::exec_git(&args) {
+        Ok(output) => {
+            let output_str = String::from_utf8_lossy(&output.stdout);
+            let output_str = output_str.trim();
+
+            let Some((sha, subject)) = output_str.split_once(' ') else {
+                return false;
+            };
+
+            if sha != expected_new_head {
+                return false;
+            }
+
+            subject.starts_with("pull") && subject.ends_with(": Fast-forward")
+        }
+        Err(_) => false,
+    }
+}
+
+fn parse_reference_transaction_stdin(stdin: &[u8]) -> Vec<(String, String, String)> {
+    String::from_utf8_lossy(stdin)
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let old = parts.next()?;
+            let new = parts.next()?;
+            let reference = parts.next()?;
+            Some((old.to_string(), new.to_string(), reference.to_string()))
+        })
+        .collect()
+}
+
+fn latest_head_reflog_subject(repository: &Repository) -> Option<String> {
+    let mut args = repository.global_args_for_exec();
+    args.extend(
+        ["reflog", "-1", "--format=%gs"]
+            .iter()
+            .map(|s| s.to_string()),
+    );
+    let output = crate::git::repository::exec_git(&args).ok()?;
+    let subject = String::from_utf8(output.stdout).ok()?;
+    Some(subject.trim().to_string())
+}
+
+fn maybe_handle_reset_reference_transaction(
+    repo: &mut Repository,
+    hook_args: &[String],
+    stdin: &[u8],
+) {
+    if hook_args.first().map(String::as_str) != Some("committed") {
+        return;
+    }
+
+    let Some(subject) = latest_head_reflog_subject(repo) else {
+        return;
+    };
+    if !subject.starts_with("reset:") {
+        return;
+    }
+
+    let head_ref = repo
+        .head()
+        .ok()
+        .and_then(|head| head.name().map(|name| name.to_string()))
+        .unwrap_or_else(|| "HEAD".to_string());
+    let updates = parse_reference_transaction_stdin(stdin);
+    let head_update = updates
+        .iter()
+        .find(|(_, _, reference)| reference == &head_ref || reference == "HEAD")
+        .cloned();
+    let Some((old_head, new_head, _)) = head_update else {
+        return;
+    };
+
+    if old_head.chars().all(|c| c == '0') || new_head.chars().all(|c| c == '0') {
+        return;
+    }
+
+    if old_head == new_head {
+        return;
+    }
+
+    let is_backward_reset = repo
+        .merge_base(new_head.clone(), old_head.clone())
+        .map(|merge_base| merge_base == new_head)
+        .unwrap_or(false);
+    if !is_backward_reset {
+        return;
+    }
+
+    let has_uncommitted_changes = repo
+        .get_staged_and_unstaged_filenames()
+        .map(|paths| !paths.is_empty())
+        .unwrap_or(false);
+
+    if has_uncommitted_changes {
+        let human_author = commit_hooks::get_commit_default_author(repo, &[]);
+        let _ = crate::authorship::rebase_authorship::reconstruct_working_log_after_reset(
+            repo,
+            &new_head,
+            &old_head,
+            &human_author,
+            None,
+        );
+    } else {
+        let _ = repo.storage.delete_working_log_for_base_commit(&old_head);
+    }
+}
+
+fn maybe_handle_stash_reference_transaction(
+    repo: &mut Repository,
+    hook_args: &[String],
+    stdin: &[u8],
+) {
+    if hook_args.first().map(String::as_str) != Some("committed") {
+        return;
+    }
+
+    for (old, new, reference) in parse_reference_transaction_stdin(stdin) {
+        if reference != "refs/stash" {
+            continue;
+        }
+
+        let old_is_zero = old.chars().all(|c| c == '0');
+        let new_is_zero = new.chars().all(|c| c == '0');
+
+        if old_is_zero && !new_is_zero {
+            // Stash push/save created a new stash entry. Persist authorship in stash notes.
+            let parsed = parsed_invocation("stash", vec!["push".to_string()]);
+            let context = default_context();
+            stash_hooks::post_stash_hook(&context, &parsed, repo, success_exit_status());
+        } else if !old_is_zero && new_is_zero {
+            // Stash pop removed stash@{0}. Restore attributions using captured stash SHA.
+            let parsed = parsed_invocation("stash", vec!["pop".to_string()]);
+            let mut context = default_context();
+            context.stash_sha = Some(old);
+            stash_hooks::post_stash_hook(&context, &parsed, repo, success_exit_status());
+        }
+    }
+}
+
+fn is_rebase_in_progress(repo: &Repository) -> bool {
+    repo.path().join("rebase-merge").is_dir() || repo.path().join("rebase-apply").is_dir()
+}
+
+fn pull_rebase_todo_is_empty(repo: &Repository) -> bool {
+    let todo_path = repo.path().join("rebase-merge").join("git-rebase-todo");
+    fs::read_to_string(todo_path)
+        .map(|contents| contents.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn maybe_capture_pull_pre_rebase_state(repo: &Repository) {
+    if !is_pull_reflog_action() {
+        return;
+    }
+
+    if let Ok(old_head) = repo.head().and_then(|head| head.target()) {
+        save_pull_hook_state(repo, &PullHookState { old_head });
+    }
+}
+
+fn maybe_handle_pull_post_merge(repo: &mut Repository) {
+    if !is_pull_reflog_action() {
+        return;
+    }
+
+    fetch_notes_from_all_remotes(repo);
+
+    let Ok(new_head) = repo.head().and_then(|head| head.target()) else {
+        return;
+    };
+
+    if !was_fast_forward_pull(repo, &new_head) {
+        return;
+    }
+
+    let Ok(old_head_obj) = repo.revparse_single("HEAD@{1}") else {
+        return;
+    };
+    let old_head = old_head_obj.id();
+    if old_head == new_head {
+        return;
+    }
+
+    let _ = repo.storage.rename_working_log(&old_head, &new_head);
+}
+
+fn maybe_handle_pull_post_rewrite(repo: &mut Repository) {
+    if !is_pull_reflog_action() {
+        return;
+    }
+
+    fetch_notes_from_all_remotes(repo);
+
+    let Ok(new_head) = repo.head().and_then(|head| head.target()) else {
+        clear_pull_hook_state(repo);
+        return;
+    };
+
+    let old_head = load_pull_hook_state(repo)
+        .map(|state| state.old_head)
+        .or_else(|| repo.revparse_single("HEAD@{1}").ok().map(|obj| obj.id()));
+
+    let Some(old_head) = old_head else {
+        clear_pull_hook_state(repo);
+        return;
+    };
+
+    if old_head == new_head {
+        clear_pull_hook_state(repo);
+        return;
+    }
+
+    // Preserve uncommitted attribution logs (including autostash/applied changes)
+    // by moving the old-head working log to the new head after pull --rebase.
+    let _ = repo.storage.rename_working_log(&old_head, &new_head);
+
+    // In skipped-commit pulls (`noop`), Git may not emit post-rewrite and no rebased
+    // commits are created. Avoid mapping upstream history as "new" commits.
+    let is_noop_rebase = fs::read_to_string(repo.path().join("rebase-merge").join("done"))
+        .map(|done| done.lines().all(|line| line.trim() == "noop"))
+        .unwrap_or(false);
+    if is_noop_rebase {
+        let original_count =
+            rebase_hooks::build_rebase_commit_mappings(repo, &old_head, &new_head, None)
+                .map(|(original, _)| original.len())
+                .unwrap_or(0);
+        debug_log(&format!(
+            "Commit mapping: {} original -> 0 new",
+            original_count
+        ));
+        debug_log(&format!(
+            "Pull rebase mappings: {} original -> 0 new commits",
+            original_count
+        ));
+        clear_pull_hook_state(repo);
+        return;
+    }
+
+    let onto_head = repo
+        .revparse_single("@{upstream}")
+        .and_then(|obj| obj.peel_to_commit())
+        .map(|commit| commit.id())
+        .ok();
+    let (original_commits, new_commits) = match rebase_hooks::build_rebase_commit_mappings(
+        repo,
+        &old_head,
+        &new_head,
+        onto_head.as_deref(),
+    ) {
+        Ok(mappings) => mappings,
+        Err(_) => {
+            clear_pull_hook_state(repo);
+            return;
+        }
+    };
+
+    debug_log(&format!(
+        "Pull rebase mappings: {} original -> {} new commits",
+        original_commits.len(),
+        new_commits.len()
+    ));
+
+    if original_commits.is_empty() || new_commits.is_empty() {
+        clear_pull_hook_state(repo);
+        return;
+    }
+
+    let rebase_event = crate::git::rewrite_log::RewriteLogEvent::rebase_complete(
+        crate::git::rewrite_log::RebaseCompleteEvent::new(
+            old_head,
+            new_head,
+            false,
+            original_commits,
+            new_commits,
+        ),
+    );
+
+    let commit_author = commit_hooks::get_commit_default_author(repo, &[]);
+    repo.handle_rewrite_log_event(rebase_event, commit_author, false, true);
+    clear_pull_hook_state(repo);
+}
+
+fn cherry_pick_state_path(repo: &Repository) -> PathBuf {
+    repo.path().join("ai").join("cherry_pick_hook_state")
+}
+
+fn clear_cherry_pick_state(repo: &Repository) {
+    let _ = fs::remove_file(cherry_pick_state_path(repo));
+}
+
+fn maybe_capture_cherry_pick_pre_commit_state(repo: &Repository) {
+    let cherry_pick_head_path = repo.path().join("CHERRY_PICK_HEAD");
+    let Ok(source_commit_raw) = fs::read_to_string(&cherry_pick_head_path) else {
+        clear_cherry_pick_state(repo);
+        return;
+    };
+    let source_commit = source_commit_raw.trim();
+    if source_commit.is_empty() {
+        clear_cherry_pick_state(repo);
+        return;
+    }
+
+    let Ok(base_commit) = repo.head().and_then(|head| head.target()) else {
+        return;
+    };
+
+    let state_path = cherry_pick_state_path(repo);
+    if let Some(parent) = state_path.parent()
+        && fs::create_dir_all(parent).is_err()
+    {
+        return;
+    }
+
+    let _ = fs::write(state_path, format!("{}\n{}\n", source_commit, base_commit));
+}
+
+fn load_cherry_pick_state(repo: &Repository) -> Option<(String, String)> {
+    let state = fs::read_to_string(cherry_pick_state_path(repo)).ok()?;
+    let mut lines = state.lines();
+    let source_commit = lines.next()?.trim().to_string();
+    let base_commit = lines.next()?.trim().to_string();
+    if source_commit.is_empty() || base_commit.is_empty() {
+        return None;
+    }
+    Some((source_commit, base_commit))
+}
+
+fn maybe_rewrite_cherry_pick_post_commit(repo: &mut Repository) {
+    let Ok(new_head) = repo.head().and_then(|head| head.target()) else {
+        clear_cherry_pick_state(repo);
+        return;
+    };
+    let original_head = repo
+        .find_commit(new_head.clone())
+        .ok()
+        .and_then(|commit| commit.parent(0).ok())
+        .map(|parent| parent.id());
+    let Some(original_head) = original_head else {
+        clear_cherry_pick_state(repo);
+        return;
+    };
+
+    let source_commit = fs::read_to_string(repo.path().join("CHERRY_PICK_HEAD"))
+        .ok()
+        .map(|contents| contents.trim().to_string())
+        .filter(|sha| !sha.is_empty())
+        .or_else(|| {
+            load_cherry_pick_state(repo).and_then(|(source, base)| {
+                if base == original_head {
+                    Some(source)
+                } else {
+                    None
+                }
+            })
+        });
+
+    let Some(source_commit) = source_commit else {
+        clear_cherry_pick_state(repo);
+        return;
+    };
+
+    // In unusual states HEAD may still point at the source commit; skip self-maps.
+    if source_commit == new_head {
+        clear_cherry_pick_state(repo);
+        return;
+    }
+
+    let commit_author = commit_hooks::get_commit_default_author(repo, &[]);
+    repo.handle_rewrite_log_event(
+        crate::git::rewrite_log::RewriteLogEvent::cherry_pick_complete(
+            crate::git::rewrite_log::CherryPickCompleteEvent::new(
+                original_head,
+                new_head.clone(),
+                vec![source_commit],
+                vec![new_head],
+            ),
+        ),
+        commit_author,
+        false,
+        true,
+    );
+    clear_cherry_pick_state(repo);
+}
+
+fn is_post_commit_for_cherry_pick(repo: &Repository) -> bool {
+    if repo.path().join("CHERRY_PICK_HEAD").is_file() {
+        return true;
+    }
+
+    let Some((_, base_commit)) = load_cherry_pick_state(repo) else {
+        return false;
+    };
+
+    let Ok(new_head) = repo.head().and_then(|head| head.target()) else {
+        return false;
+    };
+    let Ok(parent) = repo
+        .find_commit(new_head)
+        .and_then(|commit| commit.parent(0))
+        .map(|parent| parent.id())
+    else {
+        return false;
+    };
+
+    parent == base_commit
+}
+
+fn handle_rebase_post_rewrite_from_stdin(repo: &mut Repository, stdin: &[u8]) {
+    let mappings = parse_hook_stdin(stdin);
+    if mappings.is_empty() {
+        return;
+    }
+
+    let original_commits: Vec<String> = mappings.iter().map(|(old, _)| old.clone()).collect();
+    let new_commits: Vec<String> = mappings.iter().map(|(_, new)| new.clone()).collect();
+
+    debug_log(&format!(
+        "Commit mapping: {} original -> {} new",
+        original_commits.len(),
+        new_commits.len()
+    ));
+
+    let original_head = original_commits
+        .last()
+        .cloned()
+        .unwrap_or_else(|| original_commits[0].clone());
+    let new_head = repo
+        .head()
+        .ok()
+        .and_then(|head| head.target().ok())
+        .unwrap_or_else(|| new_commits.last().cloned().unwrap_or_default());
+
+    if new_head.is_empty() {
+        return;
+    }
+
+    let rebase_event = crate::git::rewrite_log::RewriteLogEvent::rebase_complete(
+        crate::git::rewrite_log::RebaseCompleteEvent::new(
+            original_head,
+            new_head,
+            false,
+            original_commits,
+            new_commits,
+        ),
+    );
+    let commit_author = commit_hooks::get_commit_default_author(repo, &[]);
+    repo.handle_rewrite_log_event(rebase_event, commit_author, false, true);
+}
+
 fn run_managed_hook(
     hook_name: &str,
     hook_args: &[String],
@@ -623,11 +1160,22 @@ fn run_managed_hook(
 
     match hook_name {
         "pre-commit" => {
+            maybe_capture_cherry_pick_pre_commit_state(&repo);
+            if is_rebase_in_progress(&repo) {
+                return 0;
+            }
             let parsed = parsed_invocation("commit", vec![]);
             let _ = commit_hooks::commit_pre_command_hook(&parsed, &mut repo);
             0
         }
         "post-commit" => {
+            if is_rebase_in_progress(&repo) {
+                return 0;
+            }
+            if is_post_commit_for_cherry_pick(&repo) {
+                maybe_rewrite_cherry_pick_post_commit(&mut repo);
+                return 0;
+            }
             if let Ok(parent) = repo.revparse_single("HEAD^") {
                 repo.pre_command_base_commit = Some(parent.id());
             }
@@ -643,23 +1191,29 @@ fn run_managed_hook(
             0
         }
         "pre-rebase" => {
-            let parsed = parsed_invocation("rebase", hook_args.to_vec());
-            let mut context = default_context();
-            rebase_hooks::pre_rebase_hook(&parsed, &mut repo, &mut context);
+            if is_pull_reflog_action() {
+                maybe_capture_pull_pre_rebase_state(&repo);
+            } else {
+                let parsed = parsed_invocation("rebase", hook_args.to_vec());
+                let mut context = default_context();
+                rebase_hooks::pre_rebase_hook(&parsed, &mut repo, &mut context);
+            }
             0
         }
         "post-rewrite" => {
             let rewrite_kind = hook_args.first().map(String::as_str).unwrap_or("");
             if rewrite_kind == "rebase" {
-                let parsed = parsed_invocation("rebase", vec![]);
-                let context = default_context();
-                rebase_hooks::handle_rebase_post_command(
-                    &context,
-                    &parsed,
-                    success_exit_status(),
-                    &mut repo,
-                );
+                if is_pull_reflog_action() {
+                    maybe_handle_pull_post_rewrite(&mut repo);
+                } else {
+                    handle_rebase_post_rewrite_from_stdin(&mut repo, stdin);
+                }
             } else if rewrite_kind == "amend" {
+                // During interactive rebase flows, amend rewrite events are intermediate.
+                // Let the final rebase post-rewrite event own attribution remapping.
+                if is_rebase_in_progress(&repo) {
+                    return 0;
+                }
                 for (old_sha, new_sha) in parse_hook_stdin(stdin) {
                     let commit_author = commit_hooks::get_commit_default_author(&repo, &[]);
                     repo.handle_rewrite_log_event(
@@ -677,19 +1231,33 @@ fn run_managed_hook(
                 let old_head = hook_args[0].clone();
                 let new_head = hook_args[1].clone();
                 repo.pre_command_base_commit = Some(old_head);
+                let is_pull_rebase_checkout =
+                    is_pull_reflog_action() && repo.path().join("rebase-merge").is_dir();
 
-                let parsed = parsed_invocation("checkout", vec![]);
-                let mut context = default_context();
-                checkout_hooks::post_checkout_hook(
-                    &parsed,
-                    &mut repo,
-                    success_exit_status(),
-                    &mut context,
-                );
+                if !is_pull_rebase_checkout {
+                    let parsed = parsed_invocation("checkout", vec![]);
+                    let mut context = default_context();
+                    checkout_hooks::post_checkout_hook(
+                        &parsed,
+                        &mut repo,
+                        success_exit_status(),
+                        &mut context,
+                    );
+                }
 
                 // During clone, post-checkout typically runs once with an all-zero old sha.
                 if hook_args[0].chars().all(|c| c == '0') && !new_head.chars().all(|c| c == '0') {
                     let _ = fetch_authorship_notes(&repo, "origin");
+                }
+
+                // In pull --rebase when all local commits are skipped as duplicates,
+                // Git may not invoke post-rewrite. The rebase todo is empty (noop case),
+                // so run pull post-rewrite handling from post-checkout as a fallback.
+                if is_pull_reflog_action()
+                    && repo.path().join("rebase-merge").is_dir()
+                    && pull_rebase_todo_is_empty(&repo)
+                {
+                    maybe_handle_pull_post_rewrite(&mut repo);
                 }
             }
             0
@@ -698,9 +1266,15 @@ fn run_managed_hook(
             let mut args = Vec::new();
             if hook_args.first().map(String::as_str) == Some("1") {
                 args.push("--squash".to_string());
+                if let Some(source_head) = resolve_squash_source_head(&repo) {
+                    args.push(source_head);
+                } else {
+                    debug_log("Could not resolve squash source head from MERGE_HEAD/SQUASH_MSG");
+                }
             }
             let parsed = parsed_invocation("merge", args);
             merge_hooks::post_merge_hook(&parsed, success_exit_status(), &mut repo);
+            maybe_handle_pull_post_merge(&mut repo);
             0
         }
         "pre-push" => {
@@ -719,11 +1293,15 @@ fn run_managed_hook(
             0
         }
         "reference-transaction" => {
-            // Placeholder hook for future reset/stash/head-move reconstruction. No-op for now.
+            maybe_handle_stash_reference_transaction(&mut repo, hook_args, stdin);
+            maybe_handle_reset_reference_transaction(&mut repo, hook_args, stdin);
             0
         }
-        "prepare-commit-msg"
-        | "commit-msg"
+        "prepare-commit-msg" => {
+            maybe_capture_cherry_pick_pre_commit_state(&repo);
+            0
+        }
+        "commit-msg"
         | "pre-merge-commit"
         | "pre-auto-gc"
         | "sendemail-validate"
