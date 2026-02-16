@@ -1229,7 +1229,7 @@ export class BlameLensManager {
           md.appendMarkdown('🔒 *Login to see prompt summaries from your teammates*\n\n');
           md.appendCodeblock('git-ai login', 'bash');
         } else {
-          md.appendMarkdown('*No prompt saved.');
+          md.appendMarkdown('*No prompt saved.*');
         }
       } else {
         // No metadata available (backward compat) - show generic message
@@ -1544,7 +1544,6 @@ export class BlameLensManager {
     }
 
     // Cap concurrent fetches at 3
-    const toFetch = promptsToFetch.slice(0, 3 - this.casFetchInProgress.size);
 
     for (const { promptId, record } of toFetch) {
       this.casFetchInProgress.add(promptId);
