@@ -144,3 +144,44 @@ fn wrapper_and_hooks_do_not_double_run_managed_logic() {
         "wrapper+hooks mode should not duplicate commit rewrite-log events"
     );
 }
+
+#[test]
+#[serial]
+fn hooks_mode_amend_uses_single_amend_rewrite_event() {
+    let _mode = EnvVarGuard::set("GIT_AI_TEST_GIT_MODE", "hooks");
+
+    let repo = TestRepo::new();
+
+    fs::write(repo.path().join("amend-mode.txt"), "line 1\n").expect("failed to write file");
+    repo.git(&["add", "amend-mode.txt"])
+        .expect("initial add should succeed");
+    repo.commit("initial commit")
+        .expect("initial commit should succeed");
+
+    fs::write(repo.path().join("amend-mode.txt"), "line 1\nline 2\n")
+        .expect("failed to update file");
+    repo.git(&["add", "amend-mode.txt"])
+        .expect("amend add should succeed");
+    repo.git(&["commit", "--amend", "-m", "initial commit amended"])
+        .expect("amend commit should succeed");
+
+    let rewrite_log = fs::read_to_string(repo.path().join(".git").join("ai").join("rewrite_log"))
+        .expect("rewrite log should exist");
+    let amend_events = rewrite_log
+        .lines()
+        .filter(|line| line.contains("\"commit_amend\""))
+        .count();
+    let plain_commit_events = rewrite_log
+        .lines()
+        .filter(|line| line.contains("\"commit\"") && !line.contains("\"commit_amend\""))
+        .count();
+
+    assert_eq!(
+        amend_events, 1,
+        "hooks mode amend should emit exactly one commit_amend event"
+    );
+    assert_eq!(
+        plain_commit_events, 1,
+        "hooks mode amend should not emit an extra plain commit event"
+    );
+}

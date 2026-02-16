@@ -25,6 +25,8 @@ const GLOBAL_HOOK_STATE_FILE: &str = "global_git_hooks_state.json";
 const REPO_HOOK_STATE_FILE: &str = "git_hooks_state.json";
 const PULL_HOOK_STATE_FILE: &str = "pull_hook_state.json";
 const REBASE_HOOK_SUPPRESSION_STATE_FILE: &str = "rebase_hook_suppression_state.json";
+const REBASE_HOOK_SUPPRESSION_DIR_NAME: &str = "git-hooks-rebase-suppressed";
+const STASH_REF_TX_STATE_FILE: &str = "stash_ref_tx_state.json";
 const GIT_HOOKS_DIR_NAME: &str = "git-hooks";
 
 pub const ENV_SKIP_ALL_HOOKS: &str = "GIT_AI_SKIP_ALL_HOOKS";
@@ -94,8 +96,14 @@ struct PullHookState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct HookSuppressionState {
-    hooks: Vec<String>,
+struct RebaseHookSuppressionState {
+    original_local_hooks_path: Option<String>,
+    suppressed_hooks_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct StashReferenceTransactionState {
+    before_count: usize,
 }
 
 #[cfg(unix)]
@@ -160,12 +168,59 @@ fn global_state_path() -> Option<PathBuf> {
     config::internal_dir_path().map(|dir| dir.join(GLOBAL_HOOK_STATE_FILE))
 }
 
-fn rebase_hook_suppression_state_path() -> Option<PathBuf> {
-    config::internal_dir_path().map(|dir| dir.join(REBASE_HOOK_SUPPRESSION_STATE_FILE))
-}
-
 fn repo_state_path(repo: &Repository) -> PathBuf {
     repo.path().join("ai").join(REPO_HOOK_STATE_FILE)
+}
+
+fn rebase_hook_suppression_state_path(repo: &Repository) -> PathBuf {
+    repo.path()
+        .join("ai")
+        .join(REBASE_HOOK_SUPPRESSION_STATE_FILE)
+}
+
+fn rebase_hook_suppression_state_path_from_git_dir(git_dir: &Path) -> PathBuf {
+    git_dir.join("ai").join(REBASE_HOOK_SUPPRESSION_STATE_FILE)
+}
+
+fn managed_rebase_suppressed_hooks_dir() -> PathBuf {
+    config::git_ai_dir_path()
+        .map(|dir| dir.join(REBASE_HOOK_SUPPRESSION_DIR_NAME))
+        .unwrap_or_else(|| managed_git_hooks_dir().with_file_name(REBASE_HOOK_SUPPRESSION_DIR_NAME))
+}
+
+fn sync_rebase_suppressed_hooks_dir(
+    hooks_dir: &Path,
+    binary_path: &Path,
+    dry_run: bool,
+) -> Result<bool, GitAiError> {
+    let mut changed = false;
+    if !dry_run {
+        fs::create_dir_all(hooks_dir)?;
+    }
+
+    for hook_name in CORE_GIT_HOOK_NAMES {
+        let hook_path = hooks_dir.join(hook_name);
+        if REBASE_SUPPRESSIBLE_HOOKS.contains(hook_name) {
+            if hook_path.exists() || hook_path.symlink_metadata().is_ok() {
+                changed = true;
+                if !dry_run {
+                    if hook_path.is_dir() {
+                        fs::remove_dir_all(&hook_path)?;
+                    } else {
+                        fs::remove_file(&hook_path)?;
+                    }
+                }
+            }
+        } else {
+            changed |= ensure_hook_symlink(&hook_path, binary_path, dry_run)?;
+        }
+    }
+
+    Ok(changed)
+}
+
+fn stash_reference_transaction_state_path(repo: &Repository) -> PathBuf {
+    repo.path().join("ai").join(STASH_REF_TX_STATE_FILE)
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
@@ -363,7 +418,7 @@ pub fn install_global_git_hooks(binary_path: &Path, dry_run: bool) -> Result<boo
         changed |= save_hook_state(
             &state_path,
             &HooksPathState {
-                previous_hooks_path: existing_hooks_path,
+                previous_hooks_path: existing_hooks_path.trim().to_string(),
             },
             dry_run,
         )?;
@@ -377,6 +432,12 @@ pub fn install_global_git_hooks(binary_path: &Path, dry_run: bool) -> Result<boo
         let hook_path = managed_dir.join(hook_name);
         changed |= ensure_hook_symlink(&hook_path, binary_path, dry_run)?;
     }
+
+    changed |= sync_rebase_suppressed_hooks_dir(
+        &managed_rebase_suppressed_hooks_dir(),
+        binary_path,
+        dry_run,
+    )?;
 
     changed |= set_hooks_path_in_config(
         &global_cfg_path,
@@ -513,7 +574,7 @@ fn ensure_repo_level_hooks_for_repo(repo: &Repository) -> Result<(), GitAiError>
         save_hook_state(
             &repo_state,
             &HooksPathState {
-                previous_hooks_path: current_local_hooks.clone(),
+                previous_hooks_path: current_local_hooks.trim().to_string(),
             },
             false,
         )?;
@@ -577,9 +638,12 @@ fn should_forward_repo_state_first(repo: Option<&Repository>) -> Option<PathBuf>
         && repo_state.exists()
     {
         if let Ok(Some(state)) = read_hook_state(&repo_state) {
-            let candidate = PathBuf::from(state.previous_hooks_path);
-            if !is_managed_hooks_path(&candidate) {
-                return Some(candidate);
+            let trimmed = state.previous_hooks_path.trim();
+            if !trimmed.is_empty() {
+                let candidate = PathBuf::from(trimmed);
+                if !is_managed_hooks_path(&candidate) {
+                    return Some(candidate);
+                }
             }
         }
         return None;
@@ -588,9 +652,12 @@ fn should_forward_repo_state_first(repo: Option<&Repository>) -> Option<PathBuf>
     if let Some(global_path) = global_state_path()
         && let Ok(Some(state)) = read_hook_state(&global_path)
     {
-        let candidate = PathBuf::from(state.previous_hooks_path);
-        if !is_managed_hooks_path(&candidate) {
-            return Some(candidate);
+        let trimmed = state.previous_hooks_path.trim();
+        if !trimmed.is_empty() {
+            let candidate = PathBuf::from(trimmed);
+            if !is_managed_hooks_path(&candidate) {
+                return Some(candidate);
+            }
         }
     }
 
@@ -678,14 +745,12 @@ fn forwarded_hook_path_for_name(repo: Option<&Repository>, hook_name: &str) -> O
     }
 }
 
-fn suppressed_hook_path(hooks_dir: &Path, hook_name: &str) -> PathBuf {
-    hooks_dir.join(format!(".git-ai-disabled-{}", hook_name))
+fn load_rebase_hook_suppression_state(path: &Path) -> Option<RebaseHookSuppressionState> {
+    let data = fs::read(path).ok()?;
+    serde_json::from_slice(&data).ok()
 }
 
-fn save_rebase_hook_suppression_state(state: &HookSuppressionState) {
-    let Some(path) = rebase_hook_suppression_state_path() else {
-        return;
-    };
+fn save_rebase_hook_suppression_state(path: &Path, state: &RebaseHookSuppressionState) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -694,93 +759,155 @@ fn save_rebase_hook_suppression_state(state: &HookSuppressionState) {
     }
 }
 
-fn load_rebase_hook_suppression_state() -> Option<HookSuppressionState> {
-    let path = rebase_hook_suppression_state_path()?;
-    let data = fs::read(path).ok()?;
-    serde_json::from_slice(&data).ok()
-}
-
-fn clear_rebase_hook_suppression_state() {
-    if let Some(path) = rebase_hook_suppression_state_path() {
-        let _ = fs::remove_file(path);
-    }
-}
-
-fn maybe_suppress_rebase_hooks(repo: Option<&Repository>) {
-    if load_rebase_hook_suppression_state().is_some() {
+fn restore_rebase_hooks_from_state(
+    local_config_path: &Path,
+    state_path: &Path,
+    state: &RebaseHookSuppressionState,
+) {
+    let original_local_hooks = state.original_local_hooks_path.as_deref().map(str::trim);
+    let restore_result =
+        if let Some(original) = original_local_hooks.filter(|value| !value.is_empty()) {
+            set_hooks_path_in_config(
+                local_config_path,
+                gix_config::Source::Local,
+                original,
+                false,
+            )
+        } else {
+            unset_hooks_path_in_config(local_config_path, gix_config::Source::Local, false)
+        };
+    if let Err(err) = restore_result {
+        debug_log(&format!(
+            "failed to restore repo hooksPath after rebase suppression: {}",
+            err
+        ));
         return;
     }
 
-    let hooks_dir = managed_git_hooks_dir();
-    if !hooks_dir.exists() {
+    let managed_suppressed_dir = managed_rebase_suppressed_hooks_dir();
+    let suppressed_hooks_path = state.suppressed_hooks_path.trim();
+    if !suppressed_hooks_path.is_empty() {
+        let stored_suppressed_dir = PathBuf::from(suppressed_hooks_path);
+        if normalize_path(&stored_suppressed_dir) != normalize_path(&managed_suppressed_dir) {
+            let _ = fs::remove_dir_all(stored_suppressed_dir);
+        }
+    }
+    let _ = fs::remove_file(state_path);
+}
+
+fn maybe_suppress_rebase_hooks(repo: &Repository) {
+    let state_path = rebase_hook_suppression_state_path(repo);
+    if load_rebase_hook_suppression_state(&state_path).is_some() {
         return;
     }
 
-    let mut suppressed_hooks = Vec::new();
+    let local_config_path = repo.path().join("config");
+    let current_local_hooks =
+        read_hooks_path_from_config(&local_config_path, gix_config::Source::Local);
+    let managed_source_hooks = current_local_hooks
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            read_hooks_path_from_config(&global_git_config_path(), gix_config::Source::User)
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
+        .unwrap_or_else(managed_git_hooks_dir);
 
-    for hook_name in REBASE_SUPPRESSIBLE_HOOKS {
-        if forwarded_hook_path_for_name(repo, hook_name).is_some() {
-            continue;
-        }
-
-        let active_hook = hooks_dir.join(hook_name);
-        if !active_hook.exists() {
-            continue;
-        }
-
-        let disabled_hook = suppressed_hook_path(&hooks_dir, hook_name);
-        if fs::rename(&active_hook, &disabled_hook).is_ok() {
-            suppressed_hooks.push((*hook_name).to_string());
-        }
+    if !is_managed_hooks_path(&managed_source_hooks) {
+        return;
     }
 
-    if !suppressed_hooks.is_empty() {
-        save_rebase_hook_suppression_state(&HookSuppressionState {
-            hooks: suppressed_hooks,
-        });
+    let has_forwarded_suppressible_hook = REBASE_SUPPRESSIBLE_HOOKS
+        .iter()
+        .copied()
+        .any(|hook_name| forwarded_hook_path_for_name(Some(repo), hook_name).is_some());
+    if has_forwarded_suppressible_hook {
+        return;
     }
+
+    let suppressed_hooks_dir = managed_rebase_suppressed_hooks_dir();
+    let binary_path = match std::env::current_exe() {
+        Ok(path) => fs::canonicalize(&path).unwrap_or(path),
+        Err(err) => {
+            debug_log(&format!(
+                "failed to locate current binary for rebase suppression hooks dir sync: {}",
+                err
+            ));
+            return;
+        }
+    };
+    if let Err(err) = sync_rebase_suppressed_hooks_dir(&suppressed_hooks_dir, &binary_path, false) {
+        debug_log(&format!(
+            "failed to sync rebase suppressed hooks dir: {}",
+            err
+        ));
+        return;
+    }
+
+    if let Err(err) = set_hooks_path_in_config(
+        &local_config_path,
+        gix_config::Source::Local,
+        &suppressed_hooks_dir.to_string_lossy(),
+        false,
+    ) {
+        debug_log(&format!(
+            "failed to set repo hooksPath for rebase suppression: {}",
+            err
+        ));
+        return;
+    }
+
+    let state = RebaseHookSuppressionState {
+        original_local_hooks_path: current_local_hooks.map(|value| value.trim().to_string()),
+        suppressed_hooks_path: suppressed_hooks_dir.to_string_lossy().to_string(),
+    };
+    save_rebase_hook_suppression_state(&state_path, &state);
 }
 
-fn restore_rebase_hooks(force: bool) {
+fn restore_rebase_hooks_for_repo(repo: &Repository, force: bool) {
+    if !force && is_rebase_in_progress(repo) {
+        return;
+    }
+
+    let state_path = rebase_hook_suppression_state_path(repo);
+    let Some(state) = load_rebase_hook_suppression_state(&state_path) else {
+        return;
+    };
+
+    restore_rebase_hooks_from_state(&repo.path().join("config"), &state_path, &state);
+}
+
+fn restore_rebase_hooks_from_context(force: bool) {
     if !force && is_rebase_in_progress_from_context() {
         return;
     }
 
-    let Some(state) = load_rebase_hook_suppression_state() else {
+    let Some(git_dir) = git_dir_from_context() else {
+        return;
+    };
+    let state_path = rebase_hook_suppression_state_path_from_git_dir(&git_dir);
+    let Some(state) = load_rebase_hook_suppression_state(&state_path) else {
         return;
     };
 
-    let hooks_dir = managed_git_hooks_dir();
-    let mut restored_all = true;
-
-    for hook_name in &state.hooks {
-        let active_hook = hooks_dir.join(hook_name);
-        let disabled_hook = suppressed_hook_path(&hooks_dir, hook_name);
-
-        if active_hook.exists() {
-            continue;
-        }
-
-        if !disabled_hook.exists() {
-            continue;
-        }
-
-        if fs::rename(&disabled_hook, &active_hook).is_err() {
-            restored_all = false;
-        }
-    }
-
-    if restored_all {
-        clear_rebase_hook_suppression_state();
-    }
+    restore_rebase_hooks_from_state(&git_dir.join("config"), &state_path, &state);
 }
 
 fn maybe_restore_rebase_hooks() {
-    restore_rebase_hooks(false);
+    restore_rebase_hooks_from_context(false);
 }
 
-fn force_restore_rebase_hooks() {
-    restore_rebase_hooks(true);
+fn force_restore_rebase_hooks(repo: Option<&Repository>) {
+    if let Some(repo) = repo {
+        restore_rebase_hooks_for_repo(repo, true);
+    } else {
+        restore_rebase_hooks_from_context(true);
+    }
 }
 
 fn parse_hook_stdin(stdin: &[u8]) -> Vec<(String, String)> {
@@ -855,6 +982,17 @@ fn is_pull_reflog_action() -> bool {
     std::env::var("GIT_REFLOG_ACTION")
         .map(|action| action.starts_with("pull"))
         .unwrap_or(false)
+}
+
+fn is_post_commit_amend(repo: &Repository) -> bool {
+    let Ok(previous_head) = repo.revparse_single("HEAD@{1}") else {
+        return false;
+    };
+    let Ok(new_first_parent) = repo.revparse_single("HEAD^") else {
+        return false;
+    };
+
+    previous_head.id() != new_first_parent.id()
 }
 
 fn pull_hook_state_path(repo: &Repository) -> PathBuf {
@@ -1013,33 +1151,142 @@ fn maybe_handle_reset_reference_transaction(
     }
 }
 
+fn load_stash_reference_transaction_state(
+    repo: &Repository,
+) -> Option<StashReferenceTransactionState> {
+    let path = stash_reference_transaction_state_path(repo);
+    let data = fs::read(path).ok()?;
+    serde_json::from_slice(&data).ok()
+}
+
+fn save_stash_reference_transaction_state(
+    repo: &Repository,
+    state: &StashReferenceTransactionState,
+) {
+    let path = stash_reference_transaction_state_path(repo);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(data) = serde_json::to_vec(state) {
+        let _ = fs::write(path, data);
+    }
+}
+
+fn clear_stash_reference_transaction_state(repo: &Repository) {
+    let _ = fs::remove_file(stash_reference_transaction_state_path(repo));
+}
+
+fn stash_entry_count(repo: &Repository) -> Option<usize> {
+    let mut args = repo.global_args_for_exec();
+    args.extend(
+        ["stash", "list", "--format=%H"]
+            .iter()
+            .map(|s| s.to_string()),
+    );
+
+    let output = crate::git::repository::exec_git(&args).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).lines().count())
+}
+
+fn has_working_tree_changes(repo: &Repository) -> bool {
+    repo.get_staged_and_unstaged_filenames()
+        .map(|paths| !paths.is_empty())
+        .unwrap_or(false)
+}
+
 fn maybe_handle_stash_reference_transaction(
     repo: &mut Repository,
     hook_args: &[String],
     updates: &[(String, String, String)],
 ) {
-    if hook_args.first().map(String::as_str) != Some("committed") {
+    if !config::Config::get().feature_flags().rewrite_stash {
+        clear_stash_reference_transaction_state(repo);
         return;
     }
 
-    for (old, new, reference) in updates {
-        if reference != "refs/stash" {
-            continue;
+    let phase = hook_args.first().map(String::as_str).unwrap_or("");
+    let stash_update = updates
+        .iter()
+        .find(|(_, _, reference)| reference == "refs/stash")
+        .cloned();
+
+    if phase == "aborted" {
+        clear_stash_reference_transaction_state(repo);
+        return;
+    }
+
+    if phase == "prepared" {
+        if stash_update.is_some() {
+            let state = StashReferenceTransactionState {
+                before_count: stash_entry_count(repo).unwrap_or(0),
+            };
+            save_stash_reference_transaction_state(repo, &state);
+        }
+        return;
+    }
+
+    if phase != "committed" {
+        return;
+    }
+
+    let Some((old, new, _)) = stash_update else {
+        clear_stash_reference_transaction_state(repo);
+        return;
+    };
+
+    let before_state = load_stash_reference_transaction_state(repo);
+    clear_stash_reference_transaction_state(repo);
+
+    let before_count = before_state
+        .as_ref()
+        .map(|state| state.before_count)
+        .unwrap_or_else(|| if old.chars().all(|c| c == '0') { 0 } else { 1 });
+    let after_count = stash_entry_count(repo).unwrap_or(before_count);
+
+    let old_is_zero = old.chars().all(|c| c == '0');
+    let new_is_zero = new.chars().all(|c| c == '0');
+
+    if !new_is_zero && (old_is_zero || after_count > before_count) {
+        // Stash push/save created a new stash entry. Persist authorship in stash notes.
+        let parsed = parsed_invocation("stash", vec!["push".to_string()]);
+        let context = default_context();
+        stash_hooks::post_stash_hook(&context, &parsed, repo, success_exit_status());
+        return;
+    }
+
+    if !old_is_zero && (new_is_zero || after_count < before_count) {
+        // Stash pop/apply removed stash@{0}. Restore attributions using removed stash SHA.
+        // Skip pure drop/clear flows where no file changes were applied.
+        if !has_working_tree_changes(repo) {
+            return;
         }
 
-        let old_is_zero = old.chars().all(|c| c == '0');
-        let new_is_zero = new.chars().all(|c| c == '0');
+        let parsed = parsed_invocation("stash", vec!["pop".to_string()]);
+        let mut context = default_context();
+        context.stash_sha = Some(old);
+        stash_hooks::post_stash_hook(&context, &parsed, repo, success_exit_status());
+        return;
+    }
 
-        if old_is_zero && !new_is_zero {
-            // Stash push/save created a new stash entry. Persist authorship in stash notes.
+    // Some Git versions emit non-zero -> non-zero refs/stash transitions for push/pop.
+    // Fall back to reflog action hints if count-based detection is inconclusive.
+    if !old_is_zero && !new_is_zero {
+        let action = std::env::var("GIT_REFLOG_ACTION")
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if action.contains("pop") || action.contains("apply") || action.contains("autostash") {
+            if has_working_tree_changes(repo) {
+                let parsed = parsed_invocation("stash", vec!["pop".to_string()]);
+                let mut context = default_context();
+                context.stash_sha = Some(old);
+                stash_hooks::post_stash_hook(&context, &parsed, repo, success_exit_status());
+            }
+        } else {
             let parsed = parsed_invocation("stash", vec!["push".to_string()]);
             let context = default_context();
-            stash_hooks::post_stash_hook(&context, &parsed, repo, success_exit_status());
-        } else if !old_is_zero && new_is_zero {
-            // Stash pop removed stash@{0}. Restore attributions using captured stash SHA.
-            let parsed = parsed_invocation("stash", vec!["pop".to_string()]);
-            let mut context = default_context();
-            context.stash_sha = Some(old.clone());
             stash_hooks::post_stash_hook(&context, &parsed, repo, success_exit_status());
         }
     }
@@ -1390,6 +1637,10 @@ fn run_managed_hook(
                 maybe_rewrite_cherry_pick_post_commit(&mut repo);
                 return 0;
             }
+            if is_post_commit_amend(&repo) {
+                // For --amend, post-rewrite (amend) owns rewrite mapping.
+                return 0;
+            }
             if let Ok(parent) = repo.revparse_single("HEAD^") {
                 repo.pre_command_base_commit = Some(parent.id());
             }
@@ -1405,7 +1656,7 @@ fn run_managed_hook(
             0
         }
         "pre-rebase" => {
-            maybe_suppress_rebase_hooks(Some(&repo));
+            maybe_suppress_rebase_hooks(&repo);
             if is_pull_reflog_action() {
                 maybe_capture_pull_pre_rebase_state(&repo);
             } else {
@@ -1425,7 +1676,7 @@ fn run_managed_hook(
                 }
                 // We may have temporarily disabled chatty hook entrypoints during rebase.
                 // Restore them when we reach the terminal rebase rewrite hook.
-                force_restore_rebase_hooks();
+                force_restore_rebase_hooks(Some(&repo));
             } else if rewrite_kind == "amend" {
                 // During interactive rebase flows, amend rewrite events are intermediate.
                 // Let the final rebase post-rewrite event own attribution remapping.
@@ -1477,7 +1728,7 @@ fn run_managed_hook(
                 {
                     maybe_handle_pull_post_rewrite(&mut repo);
                     // `pull --rebase` skip/no-op flows may not emit post-rewrite.
-                    force_restore_rebase_hooks();
+                    force_restore_rebase_hooks(Some(&repo));
                 }
             }
             0
@@ -1490,6 +1741,7 @@ fn run_managed_hook(
                     args.push(source_head);
                 } else {
                     debug_log("Could not resolve squash source head from MERGE_HEAD/SQUASH_MSG");
+                    return 0;
                 }
             }
             let parsed = parsed_invocation("merge", args);
@@ -1611,17 +1863,19 @@ fn hook_requires_managed_repo_lookup(
         }
         // Needed only for stash/reset handling; in all other flows this hook is a no-op.
         "reference-transaction" => {
-            if hook_args.first().map(String::as_str) != Some("committed") {
-                return false;
-            }
-
             let updates = parse_reference_transaction_stdin(stdin_data);
+            let phase = hook_args.first().map(String::as_str).unwrap_or("");
 
             if updates
                 .iter()
                 .any(|(_, _, reference)| reference == "refs/stash")
+                && config::Config::get().feature_flags().rewrite_stash
             {
-                return true;
+                return matches!(phase, "prepared" | "committed" | "aborted");
+            }
+
+            if phase != "committed" {
+                return false;
             }
 
             if let Ok(action) = std::env::var("GIT_REFLOG_ACTION") {
@@ -1774,7 +2028,7 @@ mod tests {
         let global_config = home.join(".gitconfig");
         fs::write(
             &global_config,
-            "[core]\n\thooksPath = /tmp/original-hooks\n",
+            "[core]\n\thooksPath = /tmp/original-hooks   \n",
         )
         .expect("failed to write global config");
 
@@ -1799,6 +2053,11 @@ mod tests {
         assert!(
             configured_hooks_path.ends_with("/.git-ai/git-hooks"),
             "hooksPath should point at managed hooks dir"
+        );
+        let suppression_dir = managed_rebase_suppressed_hooks_dir();
+        assert!(
+            suppression_dir.is_dir(),
+            "expected rebase suppression hooks dir to be created during install"
         );
 
         let state_path = global_state_path().expect("global state path should resolve");
@@ -1918,56 +2177,150 @@ mod tests {
     #[cfg(unix)]
     #[test]
     #[serial]
-    fn rebase_hook_suppression_roundtrip_restores_hooks() {
+    fn should_forward_ignores_empty_or_whitespace_paths() {
         let tmp = tempfile::tempdir().expect("failed to create tempdir");
         let home = tmp.path().join("home");
-        let hooks_dir = home.join(".git-ai").join("git-hooks");
-        fs::create_dir_all(&hooks_dir).expect("failed to create hooks dir");
+        fs::create_dir_all(&home).expect("failed to create temp home");
+        let _home = EnvVarGuard::set("HOME", &home.to_string_lossy());
 
-        for hook in REBASE_SUPPRESSIBLE_HOOKS {
-            fs::write(hooks_dir.join(hook), "#!/bin/sh\nexit 0\n")
-                .expect("failed to seed hook file");
-        }
+        let repo_dir = tmp.path().join("repo");
+        fs::create_dir_all(&repo_dir).expect("failed to create repo dir");
+        let init = Command::new("git")
+            .args(["init", "."])
+            .current_dir(&repo_dir)
+            .output()
+            .expect("failed to run git init");
+        assert!(init.status.success(), "git init should succeed");
 
+        let repo = crate::git::find_repository_in_path(&repo_dir.to_string_lossy())
+            .expect("failed to open initialized repo");
+
+        let repo_state = repo_state_path(&repo);
+        fs::create_dir_all(
+            repo_state
+                .parent()
+                .expect("repo state file should have parent"),
+        )
+        .expect("failed to create repo state parent");
+        save_hook_state(
+            &repo_state,
+            &HooksPathState {
+                previous_hooks_path: "   ".to_string(),
+            },
+            false,
+        )
+        .expect("failed to save repo state");
+        assert!(
+            should_forward_repo_state_first(Some(&repo)).is_none(),
+            "whitespace repo hook path should not be forwarded"
+        );
+
+        fs::remove_file(&repo_state).expect("failed to clear repo state file");
+
+        let global_state = global_state_path().expect("global state should resolve");
+        fs::create_dir_all(
+            global_state
+                .parent()
+                .expect("global state file should have parent"),
+        )
+        .expect("failed to create global state parent");
+        save_hook_state(
+            &global_state,
+            &HooksPathState {
+                previous_hooks_path: "".to_string(),
+            },
+            false,
+        )
+        .expect("failed to save global state");
+        assert!(
+            should_forward_repo_state_first(Some(&repo)).is_none(),
+            "empty global hook path should not be forwarded"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn rebase_hook_suppression_roundtrip_restores_repo_hooks_path() {
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let home = tmp.path().join("home");
         let _home_guard = EnvVarGuard::set("HOME", home.to_string_lossy().as_ref());
+        let _global_guard = EnvVarGuard::set(
+            "GIT_CONFIG_GLOBAL",
+            home.join(".gitconfig").to_string_lossy().as_ref(),
+        );
 
-        maybe_suppress_rebase_hooks(None);
+        let repo_dir = tmp.path().join("repo");
+        fs::create_dir_all(&repo_dir).expect("failed to create repo dir");
+        let init = Command::new("git")
+            .args(["init", "."])
+            .current_dir(&repo_dir)
+            .output()
+            .expect("failed to run git init");
+        assert!(init.status.success(), "git init should succeed");
+
+        let repo = crate::git::find_repository_in_path(&repo_dir.to_string_lossy())
+            .expect("failed to open initialized repo");
+
+        maybe_suppress_rebase_hooks(&repo);
+
+        let state_path = rebase_hook_suppression_state_path(&repo);
+        assert!(state_path.exists(), "expected suppression state file");
+        let state =
+            load_rebase_hook_suppression_state(&state_path).expect("expected suppression state");
+        assert!(
+            state.original_local_hooks_path.is_none(),
+            "expected no pre-existing local hooksPath"
+        );
+
+        let suppressed_dir = PathBuf::from(state.suppressed_hooks_path.clone());
+        assert!(suppressed_dir.exists(), "expected suppressed hooks dir");
+        let expected_root = home.join(".git-ai").join(REBASE_HOOK_SUPPRESSION_DIR_NAME);
+        assert!(
+            normalize_path(&suppressed_dir) == normalize_path(&expected_root),
+            "expected suppression to point at shared global suppressed hooks dir"
+        );
 
         for hook in REBASE_SUPPRESSIBLE_HOOKS {
             assert!(
-                !hooks_dir.join(hook).exists(),
+                !suppressed_dir.join(hook).exists(),
                 "expected hook to be suppressed: {}",
                 hook
             );
+        }
+        for hook in CORE_GIT_HOOK_NAMES {
+            if REBASE_SUPPRESSIBLE_HOOKS.contains(hook) {
+                continue;
+            }
             assert!(
-                suppressed_hook_path(&hooks_dir, hook).exists(),
-                "expected suppressed hook file for {}",
+                suppressed_dir.join(hook).exists(),
+                "expected non-suppressed hook to exist: {}",
                 hook
             );
         }
 
-        let state_path =
-            rebase_hook_suppression_state_path().expect("expected suppression state path");
-        assert!(state_path.exists(), "expected suppression state file");
+        let local_config = repo.path().join("config");
+        let configured_hooks_path =
+            read_hooks_path_from_config(&local_config, gix_config::Source::Local)
+                .expect("expected local hooksPath");
+        assert_eq!(
+            normalize_path(Path::new(configured_hooks_path.trim())),
+            normalize_path(&suppressed_dir)
+        );
 
-        maybe_restore_rebase_hooks();
-
-        for hook in REBASE_SUPPRESSIBLE_HOOKS {
-            assert!(
-                hooks_dir.join(hook).exists(),
-                "expected hook to be restored: {}",
-                hook
-            );
-            assert!(
-                !suppressed_hook_path(&hooks_dir, hook).exists(),
-                "expected suppressed file to be removed: {}",
-                hook
-            );
-        }
+        restore_rebase_hooks_for_repo(&repo, true);
 
         assert!(
             !state_path.exists(),
             "expected suppression state file to be removed after restore"
+        );
+        assert!(
+            suppressed_dir.exists(),
+            "expected shared suppressed hooks dir to persist after restore"
+        );
+        assert!(
+            read_hooks_path_from_config(&local_config, gix_config::Source::Local).is_none(),
+            "expected local hooksPath override to be removed after restore"
         );
     }
 
