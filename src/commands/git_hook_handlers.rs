@@ -741,8 +741,8 @@ fn maybe_suppress_rebase_hooks(repo: Option<&Repository>) {
     }
 }
 
-fn maybe_restore_rebase_hooks() {
-    if is_rebase_in_progress_from_context() {
+fn restore_rebase_hooks(force: bool) {
+    if !force && is_rebase_in_progress_from_context() {
         return;
     }
 
@@ -773,6 +773,14 @@ fn maybe_restore_rebase_hooks() {
     if restored_all {
         clear_rebase_hook_suppression_state();
     }
+}
+
+fn maybe_restore_rebase_hooks() {
+    restore_rebase_hooks(false);
+}
+
+fn force_restore_rebase_hooks() {
+    restore_rebase_hooks(true);
 }
 
 fn parse_hook_stdin(stdin: &[u8]) -> Vec<(String, String)> {
@@ -1415,6 +1423,9 @@ fn run_managed_hook(
                 } else {
                     handle_rebase_post_rewrite_from_stdin(&mut repo, stdin);
                 }
+                // We may have temporarily disabled chatty hook entrypoints during rebase.
+                // Restore them when we reach the terminal rebase rewrite hook.
+                force_restore_rebase_hooks();
             } else if rewrite_kind == "amend" {
                 // During interactive rebase flows, amend rewrite events are intermediate.
                 // Let the final rebase post-rewrite event own attribution remapping.
@@ -1465,6 +1476,8 @@ fn run_managed_hook(
                     && pull_rebase_todo_is_empty(&repo)
                 {
                     maybe_handle_pull_post_rewrite(&mut repo);
+                    // `pull --rebase` skip/no-op flows may not emit post-rewrite.
+                    force_restore_rebase_hooks();
                 }
             }
             0
