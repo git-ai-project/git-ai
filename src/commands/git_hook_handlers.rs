@@ -38,8 +38,8 @@ pub const ENV_SKIP_ALL_HOOKS: &str = "GIT_AI_SKIP_ALL_HOOKS";
 pub const ENV_SKIP_MANAGED_HOOKS: &str = "GITAI_SKIP_MANAGED_HOOKS";
 const ENV_SKIP_MANAGED_HOOKS_LEGACY: &str = "GIT_AI_SKIP_MANAGED_HOOKS";
 
-// All core hooks we proxy/forward. We install every known hook name so global forwarding works
-// even when git-ai doesn't have managed behavior for that hook.
+// All core hooks recognised by git. Non-managed hooks get symlinks only when a forward target
+// exists so that hooks-only mode properly delegates to prior repo-level or global hooks.
 const CORE_GIT_HOOK_NAMES: &[&str] = &[
     "applypatch-msg",
     "pre-applypatch",
@@ -72,7 +72,7 @@ const CORE_GIT_HOOK_NAMES: &[&str] = &[
     "pre-solve-refs",
 ];
 
-// Hooks with managed git-ai behavior. We only install these to minimize hook churn.
+// Hooks with managed git-ai behavior. Always installed as symlinks.
 const MANAGED_GIT_HOOK_NAMES: &[&str] = &[
     "pre-commit",
     "prepare-commit-msg",
@@ -569,6 +569,8 @@ pub fn ensure_repo_hooks_installed(
         fs::create_dir_all(&managed_hooks_dir)?;
     }
 
+    let has_forward_target = forward_hooks_path.is_some();
+
     for hook_name in MANAGED_GIT_HOOK_NAMES {
         let hook_path = managed_hooks_dir.join(hook_name);
         changed |= ensure_hook_symlink(&hook_path, &binary_path, dry_run)?;
@@ -579,7 +581,9 @@ pub fn ensure_repo_hooks_installed(
             continue;
         }
         let hook_path = managed_hooks_dir.join(hook_name);
-        if hook_path.exists() || hook_path.symlink_metadata().is_ok() {
+        if has_forward_target {
+            changed |= ensure_hook_symlink(&hook_path, &binary_path, dry_run)?;
+        } else if hook_path.exists() || hook_path.symlink_metadata().is_ok() {
             changed = true;
             if !dry_run {
                 if hook_path.is_dir() {
@@ -2289,10 +2293,14 @@ mod tests {
             );
         }
 
-        assert!(
-            !managed_hooks_dir.join("commit-msg").exists(),
-            "non-managed hooks should not be provisioned"
-        );
+        for hook_name in CORE_GIT_HOOK_NAMES {
+            let hook_path = managed_hooks_dir.join(hook_name);
+            assert!(
+                hook_path.exists() || hook_path.symlink_metadata().is_ok(),
+                "all core hooks should be provisioned when forward target exists: {}",
+                hook_name
+            );
+        }
 
         let state_path = repo_state_path(&repo);
         let state = read_repo_hook_state(&state_path)
@@ -2736,6 +2744,40 @@ mod tests {
                 name
             );
         }
+    }
+
+    #[test]
+    #[serial]
+    fn ensure_repo_hooks_no_forward_target_skips_non_managed() {
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let isolated_home = tmp.path().join("home");
+        fs::create_dir_all(&isolated_home).expect("failed to create isolated home");
+        let empty_global = isolated_home.join(".gitconfig");
+        fs::write(&empty_global, "").expect("failed to write empty global config");
+        let _home = EnvVarGuard::set("HOME", isolated_home.to_string_lossy().as_ref());
+        let _global = EnvVarGuard::set(
+            "GIT_CONFIG_GLOBAL",
+            empty_global.to_string_lossy().as_ref(),
+        );
+
+        let repo = init_repo(&tmp.path().join("repo"));
+
+        let _ =
+            ensure_repo_hooks_installed(&repo, false).expect("ensure repo hooks should succeed");
+
+        let managed_hooks_dir = managed_git_hooks_dir_for_repo(&repo);
+        for hook_name in MANAGED_GIT_HOOK_NAMES {
+            let hook_path = managed_hooks_dir.join(hook_name);
+            assert!(
+                hook_path.exists() || hook_path.symlink_metadata().is_ok(),
+                "managed hook should exist: {}",
+                hook_name
+            );
+        }
+        assert!(
+            !managed_hooks_dir.join("commit-msg").exists(),
+            "non-managed hooks should NOT be provisioned without a forward target"
+        );
     }
 
     #[test]
