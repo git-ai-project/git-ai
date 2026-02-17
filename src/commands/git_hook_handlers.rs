@@ -1749,7 +1749,9 @@ fn maybe_record_cherry_pick_post_commit(repo: &mut Repository) {
     batch_state.active = true;
     save_cherry_pick_batch_state(repo, &batch_state);
     clear_cherry_pick_state(repo);
-    maybe_finalize_cherry_pick_batch_state(repo, false);
+    // Finalize immediately per cherry-picked commit to avoid sequencer timing
+    // differences across Git versions/platforms.
+    maybe_finalize_cherry_pick_batch_state(repo, true);
 }
 
 fn is_post_commit_for_cherry_pick(repo: &Repository) -> bool {
