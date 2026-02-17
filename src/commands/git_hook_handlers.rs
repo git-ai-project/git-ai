@@ -38,8 +38,9 @@ pub const ENV_SKIP_ALL_HOOKS: &str = "GIT_AI_SKIP_ALL_HOOKS";
 pub const ENV_SKIP_MANAGED_HOOKS: &str = "GITAI_SKIP_MANAGED_HOOKS";
 const ENV_SKIP_MANAGED_HOOKS_LEGACY: &str = "GIT_AI_SKIP_MANAGED_HOOKS";
 
-// All core hooks recognised by git. Non-managed hooks get symlinks only when a forward target
-// exists so that hooks-only mode properly delegates to prior repo-level or global hooks.
+// All core hooks recognised by git. Non-managed hooks get symlinks to the git-ai binary only
+// when the corresponding hook script exists in the forward target directory, so git-ai can
+// properly forward to it at the original path (preserving $0/dirname for Husky-style hooks).
 const CORE_GIT_HOOK_NAMES: &[&str] = &[
     "applypatch-msg",
     "pre-applypatch",
@@ -425,6 +426,45 @@ fn ensure_hook_symlink(
     Ok(true)
 }
 
+fn remove_hook_entry(hook_path: &Path) -> Result<(), GitAiError> {
+    if hook_path.is_dir() {
+        fs::remove_dir_all(hook_path)?;
+    } else {
+        fs::remove_file(hook_path)?;
+    }
+    Ok(())
+}
+
+fn sync_non_managed_hook_symlinks(
+    managed_hooks_dir: &Path,
+    binary_path: &Path,
+    forward_hooks_path: Option<&str>,
+    dry_run: bool,
+) -> Result<bool, GitAiError> {
+    let mut changed = false;
+    let forward_dir = forward_hooks_path.map(Path::new);
+
+    for hook_name in CORE_GIT_HOOK_NAMES {
+        if MANAGED_GIT_HOOK_NAMES.contains(hook_name) {
+            continue;
+        }
+        let hook_path = managed_hooks_dir.join(hook_name);
+        let original_exists = forward_dir
+            .map(|d| d.join(hook_name))
+            .is_some_and(|p| p.exists() && !p.is_dir());
+
+        if original_exists {
+            changed |= ensure_hook_symlink(&hook_path, binary_path, dry_run)?;
+        } else if hook_path.exists() || hook_path.symlink_metadata().is_ok() {
+            changed = true;
+            if !dry_run {
+                remove_hook_entry(&hook_path)?;
+            }
+        }
+    }
+    Ok(changed)
+}
+
 fn is_path_inside_component(path: &Path, component: &str) -> bool {
     path.components().any(|part| {
         part.as_os_str()
@@ -569,31 +609,17 @@ pub fn ensure_repo_hooks_installed(
         fs::create_dir_all(&managed_hooks_dir)?;
     }
 
-    let has_forward_target = forward_hooks_path.is_some();
-
     for hook_name in MANAGED_GIT_HOOK_NAMES {
         let hook_path = managed_hooks_dir.join(hook_name);
         changed |= ensure_hook_symlink(&hook_path, &binary_path, dry_run)?;
     }
 
-    for hook_name in CORE_GIT_HOOK_NAMES {
-        if MANAGED_GIT_HOOK_NAMES.contains(hook_name) {
-            continue;
-        }
-        let hook_path = managed_hooks_dir.join(hook_name);
-        if has_forward_target {
-            changed |= ensure_hook_symlink(&hook_path, &binary_path, dry_run)?;
-        } else if hook_path.exists() || hook_path.symlink_metadata().is_ok() {
-            changed = true;
-            if !dry_run {
-                if hook_path.is_dir() {
-                    fs::remove_dir_all(&hook_path)?;
-                } else {
-                    fs::remove_file(&hook_path)?;
-                }
-            }
-        }
-    }
+    changed |= sync_non_managed_hook_symlinks(
+        &managed_hooks_dir,
+        &binary_path,
+        forward_hooks_path.as_deref(),
+        dry_run,
+    )?;
 
     changed |= set_hooks_path_in_config(
         &local_config_path,
@@ -2294,10 +2320,13 @@ mod tests {
         }
 
         for hook_name in CORE_GIT_HOOK_NAMES {
+            if MANAGED_GIT_HOOK_NAMES.contains(hook_name) {
+                continue;
+            }
             let hook_path = managed_hooks_dir.join(hook_name);
             assert!(
-                hook_path.exists() || hook_path.symlink_metadata().is_ok(),
-                "all core hooks should be provisioned when forward target exists: {}",
+                !hook_path.exists() && hook_path.symlink_metadata().is_err(),
+                "non-managed hook should NOT be provisioned when no original script exists in forward dir: {}",
                 hook_name
             );
         }
@@ -2777,6 +2806,88 @@ mod tests {
         assert!(
             !managed_hooks_dir.join("commit-msg").exists(),
             "non-managed hooks should NOT be provisioned without a forward target"
+        );
+    }
+
+    #[test]
+    fn non_managed_hooks_provisioned_only_when_original_exists() {
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let repo = init_repo(&tmp.path().join("repo"));
+        let user_hooks = tmp.path().join("user-hooks");
+        fs::create_dir_all(&user_hooks).expect("failed to create user hooks dir");
+
+        fs::write(user_hooks.join("commit-msg"), "#!/bin/sh\nexit 0\n")
+            .expect("failed to write commit-msg hook");
+        fs::write(user_hooks.join("pre-merge-commit"), "#!/bin/sh\nexit 0\n")
+            .expect("failed to write pre-merge-commit hook");
+
+        let local_config = repo.path().join("config");
+        set_hooks_path_in_config(
+            &local_config,
+            gix_config::Source::Local,
+            &user_hooks.to_string_lossy(),
+            false,
+        )
+        .expect("failed to set preexisting local hooksPath");
+
+        let _ =
+            ensure_repo_hooks_installed(&repo, false).expect("ensure repo hooks should succeed");
+
+        let managed_hooks_dir = managed_git_hooks_dir_for_repo(&repo);
+
+        assert!(
+            managed_hooks_dir.join("commit-msg").symlink_metadata().is_ok(),
+            "commit-msg should be provisioned when original exists in forward dir"
+        );
+        assert!(
+            managed_hooks_dir.join("pre-merge-commit").symlink_metadata().is_ok(),
+            "pre-merge-commit should be provisioned when original exists in forward dir"
+        );
+
+        assert!(
+            managed_hooks_dir.join("applypatch-msg").symlink_metadata().is_err(),
+            "hooks without originals in forward dir should not be provisioned"
+        );
+    }
+
+    #[test]
+    fn non_managed_hook_symlinks_cleaned_on_resync() {
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let managed_dir = tmp.path().join("managed");
+        fs::create_dir_all(&managed_dir).expect("failed to create managed dir");
+        let binary = tmp.path().join("fake-binary");
+        fs::write(&binary, "").expect("failed to write fake binary");
+
+        let forward_dir = tmp.path().join("forward");
+        fs::create_dir_all(&forward_dir).expect("failed to create forward dir");
+        fs::write(forward_dir.join("commit-msg"), "#!/bin/sh\nexit 0\n")
+            .expect("failed to write commit-msg");
+
+        let changed = sync_non_managed_hook_symlinks(
+            &managed_dir,
+            &binary,
+            Some(forward_dir.to_string_lossy().as_ref()),
+            false,
+        )
+        .expect("sync should succeed");
+        assert!(changed, "first sync should report changes");
+        assert!(
+            managed_dir.join("commit-msg").symlink_metadata().is_ok(),
+            "commit-msg symlink should exist after sync"
+        );
+
+        fs::remove_file(forward_dir.join("commit-msg")).expect("failed to remove original");
+        let changed = sync_non_managed_hook_symlinks(
+            &managed_dir,
+            &binary,
+            Some(forward_dir.to_string_lossy().as_ref()),
+            false,
+        )
+        .expect("resync should succeed");
+        assert!(changed, "resync should report changes (stale removal)");
+        assert!(
+            managed_dir.join("commit-msg").symlink_metadata().is_err(),
+            "commit-msg symlink should be removed after original deleted"
         );
     }
 
