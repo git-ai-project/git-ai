@@ -21,7 +21,7 @@ libc = "0.2"
 git2 = { version = "0.20.2", optional = true }
 jsonc-parser = { version = "0.27", features = ["cst"] }
 dirs = "5.0"
-minreq = { version = "2.12", features = ["https-rustls"] }
+minreq = { version = "2.12", features = ["https-rustls-probe"] }
 url = "2.5"
 glob = "0.3"
 uuid = { version = "1.11", features = ["v4"] }
@@ -40,6 +40,7 @@ keyring = ["dep:keyring"]
 
 [dev-dependencies]
 git-ai = { path = ".", features = ["test-support"] }
+rustls-native-certs = "0.8"
 tempfile = "3.8"
 assert_cmd = "2.0"
 predicates = "3.0"
