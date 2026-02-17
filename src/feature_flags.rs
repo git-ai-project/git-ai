@@ -181,6 +181,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_from_env_and_file_defaults_only() {
         // No file flags, env should be empty
         unsafe {
@@ -197,6 +198,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_from_env_and_file_file_overrides() {
         unsafe {
             std::env::remove_var("GIT_AI_REWRITE_STASH");
