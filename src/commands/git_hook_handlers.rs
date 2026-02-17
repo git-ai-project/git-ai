@@ -883,24 +883,18 @@ fn maybe_enable_rebase_hook_mask(repo: &Repository) {
         return;
     }
 
-    let session_id = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0)
-    );
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let session_id = format!("{}-{}", std::process::id(), now_ms);
     let state = RebaseHookMaskState {
         schema_version: rebase_hook_mask_state_schema_version(),
         managed_hooks_path: managed_hooks_dir.to_string_lossy().to_string(),
         masked_hooks,
         active: true,
         session_id,
-        created_at_unix_ms: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0),
+        created_at_unix_ms: now_ms as u64,
     };
     let _ = save_rebase_hook_mask_state(&state_path, &state, false);
 }
@@ -975,6 +969,10 @@ fn is_valid_git_oid(value: &str) -> bool {
 
 fn is_valid_git_oid_or_abbrev(value: &str) -> bool {
     value.len() >= 7 && value.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn is_null_oid(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(|c| c == '0')
 }
 
 fn resolve_squash_source_head(repo: &Repository) -> Option<String> {
@@ -1196,7 +1194,7 @@ fn maybe_handle_reset_reference_transaction(
         return;
     };
 
-    if old_head.chars().all(|c| c == '0') || new_head.chars().all(|c| c == '0') {
+    if is_null_oid(&old_head) || is_null_oid(&new_head) {
         return;
     }
 
@@ -1323,11 +1321,11 @@ fn maybe_handle_stash_reference_transaction(
     let before_count = before_state
         .as_ref()
         .map(|state| state.before_count)
-        .unwrap_or_else(|| if old.chars().all(|c| c == '0') { 0 } else { 1 });
+        .unwrap_or_else(|| if is_null_oid(&old) { 0 } else { 1 });
     let after_count = stash_entry_count(repo).unwrap_or(before_count);
 
-    let old_is_zero = old.chars().all(|c| c == '0');
-    let new_is_zero = new.chars().all(|c| c == '0');
+    let old_is_zero = is_null_oid(&old);
+    let new_is_zero = is_null_oid(&new);
 
     if !new_is_zero && (old_is_zero || after_count > before_count) {
         // Stash push/save created a new stash entry. Persist authorship in stash notes.
@@ -1806,10 +1804,7 @@ fn handle_rebase_post_rewrite_from_stdin(repo: &mut Repository, stdin: &[u8]) {
         new_commits.len()
     ));
 
-    let original_head = original_commits
-        .last()
-        .cloned()
-        .unwrap_or_else(|| original_commits[0].clone());
+    let original_head = original_commits.last().cloned().unwrap();
     let new_head = repo
         .head()
         .ok()
@@ -1955,7 +1950,7 @@ fn run_managed_hook(
                 }
 
                 // During clone, post-checkout typically runs once with an all-zero old sha.
-                if hook_args[0].chars().all(|c| c == '0') && !new_head.chars().all(|c| c == '0') {
+                if is_null_oid(&hook_args[0]) && !is_null_oid(&new_head) {
                     let _ = fetch_authorship_notes(&repo, "origin");
                 }
 
@@ -2045,37 +2040,8 @@ fn is_rebase_in_progress_from_context() -> bool {
     git_dir.join("rebase-merge").is_dir() || git_dir.join("rebase-apply").is_dir()
 }
 
-fn is_cherry_pick_in_progress_from_context() -> bool {
-    let Some(git_dir) = git_dir_from_context() else {
-        return false;
-    };
-    git_dir.join("CHERRY_PICK_HEAD").is_file() || git_dir.join("sequencer").is_dir()
-}
-
 fn hook_has_no_managed_behavior(hook_name: &str) -> bool {
-    matches!(
-        hook_name,
-        "commit-msg"
-            | "pre-merge-commit"
-            | "pre-auto-gc"
-            | "sendemail-validate"
-            | "post-index-change"
-            | "applypatch-msg"
-            | "pre-applypatch"
-            | "post-applypatch"
-            | "pre-receive"
-            | "update"
-            | "proc-receive"
-            | "post-receive"
-            | "post-update"
-            | "push-to-checkout"
-            | "pre-solve-refs"
-            | "fsmonitor-watchman"
-            | "p4-changelist"
-            | "p4-prepare-changelist"
-            | "p4-post-changelist"
-            | "p4-pre-submit"
-    )
+    !MANAGED_GIT_HOOK_NAMES.contains(&hook_name)
 }
 
 fn hook_requires_managed_repo_lookup(
@@ -2084,30 +2050,32 @@ fn hook_requires_managed_repo_lookup(
     stdin_data: &[u8],
 ) -> bool {
     match hook_name {
-        // During rebases these hooks are frequent and intentionally no-op in managed logic.
-        // Skip repository lookup up front.
         "pre-commit" | "post-commit" => !is_rebase_in_progress_from_context(),
-        // Managed hook logic is a no-op for these hooks.
         _ if hook_has_no_managed_behavior(hook_name) => false,
-        // Only needed for cherry-pick path capture.
         "prepare-commit-msg" => {
             if is_rebase_in_progress_from_context() {
                 return false;
             }
             needs_prepare_commit_msg_handling()
         }
-        // Needed only for stash/reset handling; in all other flows this hook is a no-op.
         "reference-transaction" => {
-            let updates = parse_reference_transaction_stdin(stdin_data);
             let phase = hook_args.first().map(String::as_str).unwrap_or("");
-            let in_rebase_or_cherry_pick =
-                is_rebase_in_progress_from_context() || is_cherry_pick_in_progress_from_context();
+            let git_dir = git_dir_from_context();
+            let in_rebase_or_cherry_pick = git_dir
+                .as_ref()
+                .map(|d| {
+                    d.join("rebase-merge").is_dir()
+                        || d.join("rebase-apply").is_dir()
+                        || d.join("CHERRY_PICK_HEAD").is_file()
+                        || d.join("sequencer").is_dir()
+                })
+                .unwrap_or(false);
 
-            if updates
+            let has_stash_update = parse_whitespace_fields(stdin_data, 3)
                 .iter()
-                .any(|(_, _, reference)| reference == "refs/stash")
-                && config::Config::get().feature_flags().rewrite_stash
-            {
+                .any(|fields| fields.len() >= 3 && fields[2] == "refs/stash");
+
+            if has_stash_update && config::Config::get().feature_flags().rewrite_stash {
                 return matches!(phase, "prepared" | "committed" | "aborted");
             }
 
@@ -2123,8 +2091,9 @@ fn hook_requires_managed_repo_lookup(
                 return false;
             }
 
-            updates.iter().any(|(_, _, reference)| {
-                reference == "HEAD" || reference.starts_with("refs/heads/")
+            parse_whitespace_fields(stdin_data, 3).iter().any(|fields| {
+                fields.len() >= 3
+                    && (fields[2] == "HEAD" || fields[2].starts_with("refs/heads/"))
             })
         }
         _ => true,
@@ -2766,6 +2735,49 @@ mod tests {
                 "rebase terminal hook {:?} should be in MANAGED_GIT_HOOK_NAMES",
                 name
             );
+        }
+    }
+
+    #[test]
+    fn null_oid_detection() {
+        assert!(is_null_oid("0000000000000000000000000000000000000000"));
+        assert!(is_null_oid("0000000"));
+        assert!(!is_null_oid(""));
+        assert!(!is_null_oid("abc0000000000000000000000000000000000000"));
+        assert!(!is_null_oid("0000000000000000000000000000000000000001"));
+    }
+
+    #[test]
+    fn hook_has_no_managed_behavior_matches_managed_list() {
+        for name in MANAGED_GIT_HOOK_NAMES {
+            assert!(
+                !hook_has_no_managed_behavior(name),
+                "managed hook {:?} should NOT be classified as no-managed-behavior",
+                name
+            );
+        }
+        assert!(hook_has_no_managed_behavior("commit-msg"));
+        assert!(hook_has_no_managed_behavior("pre-merge-commit"));
+        assert!(hook_has_no_managed_behavior("fsmonitor-watchman"));
+        assert!(hook_has_no_managed_behavior("totally-unknown-hook"));
+    }
+
+    #[test]
+    fn hook_has_no_managed_behavior_consistent_with_core() {
+        for name in CORE_GIT_HOOK_NAMES {
+            if MANAGED_GIT_HOOK_NAMES.contains(name) {
+                assert!(
+                    !hook_has_no_managed_behavior(name),
+                    "core+managed hook {:?} should have managed behavior",
+                    name
+                );
+            } else {
+                assert!(
+                    hook_has_no_managed_behavior(name),
+                    "core-only hook {:?} should have no managed behavior",
+                    name
+                );
+            }
         }
     }
 }
