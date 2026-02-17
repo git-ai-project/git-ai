@@ -1,0 +1,129 @@
+name: Performance Benchmarks
+
+on:
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+jobs:
+  pr-smoke-nasty:
+    if: github.event_name == 'pull_request'
+    name: PR Smoke Nasty Benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-perf-smoke-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-perf-smoke-
+            ${{ runner.os }}-perf-
+
+      - name: Run reduced nasty benchmark gate
+        run: |
+          python3 scripts/benchmarks/git/benchmark_nasty_modes_vs_main.py \
+            --work-root .benchmarks/pr-smoke \
+            --feature-commits 24 \
+            --main-commits 10 \
+            --side-commits 8 \
+            --files 4 \
+            --lines-per-file 400 \
+            --burst-every 6 \
+            --repetitions 1 \
+            --margin-pct 25 \
+            --margin-baseline current_wrapper \
+            --enforce-margin
+
+      - name: Upload smoke benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-smoke-nasty-benchmarks
+          path: .benchmarks/pr-smoke/artifacts/**
+          if-no-files-found: ignore
+
+  nightly-full-benchmarks:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: Nightly Full Performance Benchmarks
+    runs-on: ubuntu-latest
+    timeout-minutes: 480
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-perf-nightly-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-perf-nightly-
+            ${{ runner.os }}-perf-
+
+      - name: Run heavy benchmark matrix gate
+        run: |
+          python3 scripts/benchmarks/git/benchmark_modes_vs_main.py \
+            --work-root .benchmarks/nightly-modes \
+            --iterations-basic 5 \
+            --iterations-complex 4 \
+            --margin-pct 25 \
+            --margin-baseline current_wrapper \
+            --enforce-margin
+
+      - name: Run full nasty benchmark gate
+        run: |
+          python3 scripts/benchmarks/git/benchmark_nasty_modes_vs_main.py \
+            --work-root .benchmarks/nightly-nasty \
+            --feature-commits 90 \
+            --main-commits 35 \
+            --side-commits 25 \
+            --files 6 \
+            --lines-per-file 1500 \
+            --burst-every 15 \
+            --repetitions 2 \
+            --margin-pct 25 \
+            --margin-baseline current_wrapper \
+            --enforce-margin
+
+      - name: Upload nightly benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-performance-benchmarks
+          path: |
+            .benchmarks/nightly-modes/artifacts/**
+            .benchmarks/nightly-nasty/artifacts/**
+          if-no-files-found: ignore

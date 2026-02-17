@@ -3,6 +3,7 @@ mod repos;
 use repos::test_repo::TestRepo;
 use serial_test::serial;
 use std::fs;
+use std::path::Path;
 
 struct EnvVarGuard {
     key: &'static str,
@@ -58,6 +59,16 @@ fn assert_blame_line_author_contains(
     );
 }
 
+#[cfg(unix)]
+fn set_executable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(path)
+        .expect("failed to stat executable hook")
+        .permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(path, perms).expect("failed to set executable bit");
+}
+
 #[test]
 #[serial]
 fn hook_mode_runs_without_wrapper() {
@@ -99,21 +110,25 @@ fn wrapper_and_hooks_do_not_double_run_managed_logic() {
 
     let marker_path = repo.path().join(".git").join("hook-marker.txt");
     let pre_commit_path = user_hooks_dir.join("pre-commit");
+    let commit_msg_path = user_hooks_dir.join("commit-msg");
     fs::write(
         &pre_commit_path,
         format!(
-            "#!/bin/sh\necho forwarded >> '{}'\n",
+            "#!/bin/sh\necho pre-commit >> '{}'\n",
             marker_path.to_string_lossy()
         ),
     )
     .expect("failed to write forwarded pre-commit hook");
-
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = fs::metadata(&pre_commit_path)
-        .expect("failed to stat pre-commit hook")
-        .permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&pre_commit_path, perms).expect("failed to set hook executable bit");
+    fs::write(
+        &commit_msg_path,
+        format!(
+            "#!/bin/sh\nline=\"$(head -n 1 \"$1\")\"\necho \"commit-msg:${{line}}\" >> '{}'\n",
+            marker_path.to_string_lossy()
+        ),
+    )
+    .expect("failed to write forwarded commit-msg hook");
+    set_executable(&pre_commit_path);
+    set_executable(&commit_msg_path);
 
     let repo_state_path = repo
         .path()
@@ -129,7 +144,13 @@ fn wrapper_and_hooks_do_not_double_run_managed_logic() {
     fs::write(
         &repo_state_path,
         format!(
-            "{{\n  \"previous_hooks_path\": \"{}\"\n}}\n",
+            "{{\n  \"schema_version\": \"repo_hooks/2\",\n  \"managed_hooks_path\": \"{}\",\n  \"original_local_hooks_path\": null,\n  \"forward_mode\": \"repo_local\",\n  \"forward_hooks_path\": \"{}\",\n  \"binary_path\": \"test-binary\"\n}}\n",
+            repo.path()
+                .join(".git")
+                .join("ai")
+                .join("hooks")
+                .to_string_lossy()
+                .replace('\\', "\\\\"),
             user_hooks_dir.to_string_lossy().replace('\\', "\\\\")
         ),
     )
@@ -147,14 +168,22 @@ fn wrapper_and_hooks_do_not_double_run_managed_logic() {
         .expect("commit should succeed");
 
     let marker_content = fs::read_to_string(&marker_path).expect("marker hook should run");
-    let invocation_count = marker_content
+    let pre_commit_count = marker_content
         .lines()
-        .filter(|line| !line.trim().is_empty())
+        .filter(|line| line.trim() == "pre-commit")
+        .count();
+    let commit_msg_count = marker_content
+        .lines()
+        .filter(|line| line.starts_with("commit-msg:commit with wrapper+hooks"))
         .count();
 
     assert_eq!(
-        invocation_count, 1,
+        pre_commit_count, 1,
         "forwarded pre-commit hook should run exactly once"
+    );
+    assert_eq!(
+        commit_msg_count, 1,
+        "forwarded commit-msg hook should run exactly once"
     );
 
     let rewrite_log = fs::read_to_string(repo.path().join(".git").join("ai").join("rewrite_log"))
