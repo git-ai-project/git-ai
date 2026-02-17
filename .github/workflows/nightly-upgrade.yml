@@ -25,6 +25,8 @@ jobs:
         id: versions
         if: runner.os != 'Windows'
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           python - <<'PY'
@@ -34,10 +36,15 @@ jobs:
           import re
           import urllib.request
 
+          token = os.environ.get("GITHUB_TOKEN", "")
           url = "https://api.github.com/repos/git-ai-project/git-ai/releases?per_page=100"
-          req = urllib.request.Request(
-              url, headers={"Accept": "application/vnd.github+json"}
-          )
+          headers = {
+              "Accept": "application/vnd.github+json",
+              "User-Agent": "git-ai-nightly-upgrade",
+          }
+          if token:
+              headers["Authorization"] = f"Bearer {token}"
+          req = urllib.request.Request(url, headers=headers)
           with urllib.request.urlopen(req) as response:
               releases = json.load(response)
 
@@ -88,6 +95,8 @@ jobs:
         id: versions-windows
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $ErrorActionPreference = 'Stop'
           $script = @'
@@ -97,10 +106,15 @@ jobs:
           import re
           import urllib.request
 
+          token = os.environ.get("GITHUB_TOKEN", "")
           url = "https://api.github.com/repos/git-ai-project/git-ai/releases?per_page=100"
-          req = urllib.request.Request(
-              url, headers={"Accept": "application/vnd.github+json"}
-          )
+          headers = {
+              "Accept": "application/vnd.github+json",
+              "User-Agent": "git-ai-nightly-upgrade",
+          }
+          if token:
+              headers["Authorization"] = f"Bearer {token}"
+          req = urllib.request.Request(url, headers=headers)
           with urllib.request.urlopen(req) as response:
               releases = json.load(response)
 
