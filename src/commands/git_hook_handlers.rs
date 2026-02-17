@@ -286,8 +286,17 @@ fn read_repo_hook_state(path: &Path) -> Result<Option<RepoHookState>, GitAiError
         return Ok(None);
     }
     let content = fs::read_to_string(path)?;
-    let state = serde_json::from_str::<RepoHookState>(&content)?;
-    Ok(Some(state))
+    match serde_json::from_str::<RepoHookState>(&content) {
+        Ok(state) => Ok(Some(state)),
+        Err(err) => {
+            debug_log(&format!(
+                "ignoring invalid repo hook state {}: {}",
+                path.display(),
+                err
+            ));
+            Ok(None)
+        }
+    }
 }
 
 fn save_repo_hook_state(
@@ -316,8 +325,17 @@ fn read_rebase_hook_mask_state(path: &Path) -> Result<Option<RebaseHookMaskState
         return Ok(None);
     }
     let content = fs::read_to_string(path)?;
-    let state = serde_json::from_str::<RebaseHookMaskState>(&content)?;
-    Ok(Some(state))
+    match serde_json::from_str::<RebaseHookMaskState>(&content) {
+        Ok(state) => Ok(Some(state)),
+        Err(err) => {
+            debug_log(&format!(
+                "ignoring invalid rebase hook mask state {}: {}",
+                path.display(),
+                err
+            ));
+            Ok(None)
+        }
+    }
 }
 
 fn save_rebase_hook_mask_state(
