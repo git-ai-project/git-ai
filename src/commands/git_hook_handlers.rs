@@ -1601,6 +1601,24 @@ fn load_cherry_pick_state(repo: &Repository) -> Option<(String, String)> {
     Some((source_commit, base_commit))
 }
 
+fn latest_cherry_pick_source_from_sequencer(repo: &Repository) -> Option<String> {
+    let done_path = repo.path().join("sequencer").join("done");
+    let done = fs::read_to_string(done_path).ok()?;
+    for line in done.lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let mut parts = trimmed.split_whitespace();
+        let _command = parts.next()?;
+        let source = parts.next()?;
+        if is_valid_git_oid(source) {
+            return Some(source.to_string());
+        }
+    }
+    None
+}
+
 fn maybe_finalize_cherry_pick_batch_state(repo: &mut Repository, force: bool) {
     let Some(state) = read_cherry_pick_batch_state(repo) else {
         return;
@@ -1686,6 +1704,7 @@ fn maybe_record_cherry_pick_post_commit(repo: &mut Repository) {
         .ok()
         .map(|contents| contents.trim().to_string())
         .filter(|sha| !sha.is_empty())
+        .or_else(|| latest_cherry_pick_source_from_sequencer(repo))
         .or_else(|| {
             load_cherry_pick_state(repo).and_then(|(source, base)| {
                 if base == original_head {
@@ -1697,7 +1716,6 @@ fn maybe_record_cherry_pick_post_commit(repo: &mut Repository) {
         });
 
     let Some(source_commit) = source_commit else {
-        clear_cherry_pick_state(repo);
         return;
     };
 
@@ -1736,6 +1754,12 @@ fn maybe_record_cherry_pick_post_commit(repo: &mut Repository) {
 
 fn is_post_commit_for_cherry_pick(repo: &Repository) -> bool {
     if repo.path().join("CHERRY_PICK_HEAD").is_file() {
+        return true;
+    }
+
+    if repo.path().join("sequencer").is_dir()
+        && latest_cherry_pick_source_from_sequencer(repo).is_some()
+    {
         return true;
     }
 
