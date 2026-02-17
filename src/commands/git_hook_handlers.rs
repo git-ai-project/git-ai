@@ -824,7 +824,9 @@ fn execute_forwarded_hook(
     repo: Option<&Repository>,
     cached_forward_dir: Option<PathBuf>,
 ) -> i32 {
-    let Some(forward_hooks_dir) = cached_forward_dir.or_else(|| should_forward_repo_state_first(repo)) else {
+    let Some(forward_hooks_dir) =
+        cached_forward_dir.or_else(|| should_forward_repo_state_first(repo))
+    else {
         return 0;
     };
 
@@ -2122,8 +2124,7 @@ fn hook_requires_managed_repo_lookup(
             }
 
             parse_whitespace_fields(stdin_data, 3).iter().any(|fields| {
-                fields.len() >= 3
-                    && (fields[2] == "HEAD" || fields[2].starts_with("refs/heads/"))
+                fields.len() >= 3 && (fields[2] == "HEAD" || fields[2].starts_with("refs/heads/"))
             })
         }
         _ => true,
@@ -2192,7 +2193,13 @@ pub fn handle_git_hook_invocation(hook_name: &str, hook_args: &[String]) -> i32 
     }
 
     let forward_start = Instant::now();
-    let status = execute_forwarded_hook(hook_name, hook_args, &stdin_data, repo.as_ref(), cached_forward_dir);
+    let status = execute_forwarded_hook(
+        hook_name,
+        hook_args,
+        &stdin_data,
+        repo.as_ref(),
+        cached_forward_dir,
+    );
     let forward_ms = forward_start.elapsed().as_millis();
     if perf_enabled {
         debug_performance_log_structured(serde_json::json!({
@@ -2524,9 +2531,7 @@ mod tests {
 
     #[test]
     fn valid_git_oid_accepts_sha1_and_sha256() {
-        assert!(is_valid_git_oid(
-            "a94a8fe5ccb19ba61c4c0873d391e987982fbbd3"
-        ));
+        assert!(is_valid_git_oid("a94a8fe5ccb19ba61c4c0873d391e987982fbbd3"));
         assert!(is_valid_git_oid(
             "a94a8fe5ccb19ba61c4c0873d391e987982fbbd3a94a8fe5ccb19ba61c4c0873"
         ));
@@ -2583,11 +2588,7 @@ mod tests {
         assert_eq!(parsed.len(), 1);
         assert_eq!(
             parsed[0],
-            (
-                "old".to_string(),
-                "new".to_string(),
-                "ref".to_string()
-            )
+            ("old".to_string(), "new".to_string(), "ref".to_string())
         );
     }
 
@@ -2624,9 +2625,7 @@ mod tests {
         assert!(!is_path_inside_any_git_ai_dir(Path::new(
             "/repo/.git/hooks"
         )));
-        assert!(!is_path_inside_any_git_ai_dir(Path::new(
-            "/repo/ai/hooks"
-        )));
+        assert!(!is_path_inside_any_git_ai_dir(Path::new("/repo/ai/hooks")));
         assert!(is_path_inside_any_git_ai_dir(Path::new(
             "/other/.git/AI/deep/path"
         )));
@@ -2784,10 +2783,8 @@ mod tests {
         let empty_global = isolated_home.join(".gitconfig");
         fs::write(&empty_global, "").expect("failed to write empty global config");
         let _home = EnvVarGuard::set("HOME", isolated_home.to_string_lossy().as_ref());
-        let _global = EnvVarGuard::set(
-            "GIT_CONFIG_GLOBAL",
-            empty_global.to_string_lossy().as_ref(),
-        );
+        let _global =
+            EnvVarGuard::set("GIT_CONFIG_GLOBAL", empty_global.to_string_lossy().as_ref());
 
         let repo = init_repo(&tmp.path().join("repo"));
 
@@ -2836,16 +2833,25 @@ mod tests {
         let managed_hooks_dir = managed_git_hooks_dir_for_repo(&repo);
 
         assert!(
-            managed_hooks_dir.join("commit-msg").symlink_metadata().is_ok(),
+            managed_hooks_dir
+                .join("commit-msg")
+                .symlink_metadata()
+                .is_ok(),
             "commit-msg should be provisioned when original exists in forward dir"
         );
         assert!(
-            managed_hooks_dir.join("pre-merge-commit").symlink_metadata().is_ok(),
+            managed_hooks_dir
+                .join("pre-merge-commit")
+                .symlink_metadata()
+                .is_ok(),
             "pre-merge-commit should be provisioned when original exists in forward dir"
         );
 
         assert!(
-            managed_hooks_dir.join("applypatch-msg").symlink_metadata().is_err(),
+            managed_hooks_dir
+                .join("applypatch-msg")
+                .symlink_metadata()
+                .is_err(),
             "hooks without originals in forward dir should not be provisioned"
         );
     }
