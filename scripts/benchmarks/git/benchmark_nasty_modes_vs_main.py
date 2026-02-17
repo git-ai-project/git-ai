@@ -19,39 +19,6 @@ from pathlib import Path
 from typing import Any
 
 
-CORE_HOOK_NAMES = [
-    "applypatch-msg",
-    "pre-applypatch",
-    "post-applypatch",
-    "pre-commit",
-    "pre-merge-commit",
-    "prepare-commit-msg",
-    "commit-msg",
-    "post-commit",
-    "pre-rebase",
-    "post-checkout",
-    "post-merge",
-    "pre-push",
-    "pre-auto-gc",
-    "post-rewrite",
-    "sendemail-validate",
-    "fsmonitor-watchman",
-    "p4-changelist",
-    "p4-prepare-changelist",
-    "p4-post-changelist",
-    "p4-pre-submit",
-    "post-index-change",
-    "pre-receive",
-    "update",
-    "proc-receive",
-    "post-receive",
-    "post-update",
-    "push-to-checkout",
-    "reference-transaction",
-    "pre-solve-refs",
-]
-
-
 class BenchmarkError(RuntimeError):
     pass
 
@@ -223,7 +190,6 @@ def setup_variant_runtime(
 ) -> tuple[dict[str, str], Path]:
     home_dir = runtime_root / "home"
     bin_dir = runtime_root / "bin"
-    hooks_dir = home_dir / ".git-ai" / "git-hooks"
     wrapper_git = bin_dir / ("git.exe" if os.name == "nt" else "git")
 
     home_dir.mkdir(parents=True, exist_ok=True)
@@ -231,14 +197,6 @@ def setup_variant_runtime(
 
     if variant.mode in ("wrapper", "both"):
         create_link_or_copy(variant.binary, wrapper_git)
-
-    if variant.mode in ("hooks", "both"):
-        hooks_dir.mkdir(parents=True, exist_ok=True)
-        for hook in CORE_HOOK_NAMES:
-            create_link_or_copy(variant.binary, hooks_dir / hook)
-
-        gitconfig = home_dir / ".gitconfig"
-        gitconfig.write_text(f"[core]\n\thooksPath = {hooks_dir}\n", encoding="utf-8")
 
     env = dict(os.environ)
     env["HOME"] = str(home_dir)
@@ -613,6 +571,8 @@ def main() -> int:
                     str(git_bin),
                     "--git-ai-bin",
                     str(variant.binary),
+                    "--hook-mode",
+                    variant.mode,
                 ]
 
                 print(
