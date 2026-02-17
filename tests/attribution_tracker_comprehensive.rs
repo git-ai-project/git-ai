@@ -19,7 +19,7 @@
 mod repos;
 
 use git_ai::authorship::attribution_tracker::{
-    Attribution, AttributionConfig, AttributionTracker, LineAttribution, INITIAL_ATTRIBUTION_TS,
+    Attribution, AttributionConfig, AttributionTracker, INITIAL_ATTRIBUTION_TS, LineAttribution,
 };
 use repos::test_file::ExpectedLineExt;
 use repos::test_repo::TestRepo;
@@ -54,15 +54,15 @@ fn test_attribution_overlaps_basic() {
     let attr = Attribution::new(10, 20, "ai-1".to_string(), 1000);
 
     // Overlaps
-    assert!(attr.overlaps(5, 15));  // Starts before, overlaps start
+    assert!(attr.overlaps(5, 15)); // Starts before, overlaps start
     assert!(attr.overlaps(15, 25)); // Overlaps end, extends after
     assert!(attr.overlaps(12, 18)); // Fully contained
-    assert!(attr.overlaps(5, 25));  // Fully encompasses
+    assert!(attr.overlaps(5, 25)); // Fully encompasses
 
     // Does not overlap
-    assert!(!attr.overlaps(0, 10));  // Ends at start
+    assert!(!attr.overlaps(0, 10)); // Ends at start
     assert!(!attr.overlaps(20, 30)); // Starts at end
-    assert!(!attr.overlaps(0, 5));   // Completely before
+    assert!(!attr.overlaps(0, 5)); // Completely before
     assert!(!attr.overlaps(25, 30)); // Completely after
 }
 
@@ -103,12 +103,12 @@ fn test_line_attribution_overlaps() {
     // Test line attribution overlap detection
     let attr = LineAttribution::new(10, 20, "ai-1".to_string(), None);
 
-    assert!(attr.overlaps(5, 15));  // Overlaps start
+    assert!(attr.overlaps(5, 15)); // Overlaps start
     assert!(attr.overlaps(15, 25)); // Overlaps end
     assert!(attr.overlaps(12, 18)); // Fully contained
-    assert!(attr.overlaps(5, 25));  // Fully encompasses
+    assert!(attr.overlaps(5, 25)); // Fully encompasses
 
-    assert!(!attr.overlaps(1, 9));   // Before
+    assert!(!attr.overlaps(1, 9)); // Before
     assert!(!attr.overlaps(21, 30)); // After
 }
 
@@ -183,9 +183,17 @@ fn test_tracker_simple_addition_at_start() {
         .unwrap();
 
     // New content at start should be attributed to current author
-    assert!(new_attrs.iter().any(|a| a.author_id == "current-author" && a.start == 0));
+    assert!(
+        new_attrs
+            .iter()
+            .any(|a| a.author_id == "current-author" && a.start == 0)
+    );
     // Old content should be shifted and preserved
-    assert!(new_attrs.iter().any(|a| a.author_id == "ai-1" && a.start > 0));
+    assert!(
+        new_attrs
+            .iter()
+            .any(|a| a.author_id == "ai-1" && a.start > 0)
+    );
 }
 
 #[test]
@@ -208,7 +216,11 @@ fn test_tracker_simple_deletion_at_end() {
     assert!(new_attrs.iter().any(|a| a.author_id == "ai-1"));
     // Deleted content attribution should be gone or marked with deletion
     // There might be a marker attribution for the deletion
-    assert!(new_attrs.iter().any(|a| a.author_id == "current-author" || a.author_id == "ai-1"));
+    assert!(
+        new_attrs
+            .iter()
+            .any(|a| a.author_id == "current-author" || a.author_id == "ai-1")
+    );
 }
 
 #[test]
@@ -228,7 +240,11 @@ fn test_tracker_simple_deletion_at_start() {
         .unwrap();
 
     // Should preserve second attribution, shifted to start
-    assert!(new_attrs.iter().any(|a| a.author_id == "ai-2" || a.author_id == "current-author"));
+    assert!(
+        new_attrs
+            .iter()
+            .any(|a| a.author_id == "ai-2" || a.author_id == "current-author")
+    );
 }
 
 #[test]
@@ -454,7 +470,11 @@ fn test_tracker_simple_line_move_within_file() {
     // Should have some attributions preserved or new ones created
     assert!(!new_attrs.is_empty());
     // Third line should be preserved as it didn't move
-    assert!(new_attrs.iter().any(|a| a.author_id == "ai-3" || a.author_id == "current-author"));
+    assert!(
+        new_attrs
+            .iter()
+            .any(|a| a.author_id == "ai-3" || a.author_id == "current-author")
+    );
 }
 
 #[test]
@@ -654,9 +674,17 @@ fn test_attribute_unattributed_fills_gaps() {
     let result = tracker.attribute_unattributed_ranges(content, &attrs, "filler", 2000);
 
     // Should have 3 attributions: start gap, original, end gap
-    assert!(result.iter().any(|a| a.start == 0 && a.author_id == "filler"));
+    assert!(
+        result
+            .iter()
+            .any(|a| a.start == 0 && a.author_id == "filler")
+    );
     assert!(result.iter().any(|a| a.start == 3 && a.author_id == "ai-1"));
-    assert!(result.iter().any(|a| a.author_id == "filler" && a.end == content.len()));
+    assert!(
+        result
+            .iter()
+            .any(|a| a.author_id == "filler" && a.end == content.len())
+    );
 }
 
 #[test]
@@ -688,16 +716,27 @@ fn test_attribute_unattributed_multiple_gaps() {
     let result = tracker.attribute_unattributed_ranges(content, &attrs, "filler", 3000);
 
     // Should fill gaps: before first, between first and second, and after second
-    assert!(result.iter().any(|a| a.start == 0 && a.author_id == "filler"));
+    assert!(
+        result
+            .iter()
+            .any(|a| a.start == 0 && a.author_id == "filler")
+    );
     assert!(result.iter().any(|a| a.start == 3 && a.author_id == "ai-1"));
     // There should be a gap filled between the two attributed ranges
-    let has_middle_gap = result.iter().any(|a| {
-        a.author_id == "filler" && a.start >= 5 && a.end <= 9
-    });
-    assert!(has_middle_gap, "Should have filler attribution in middle gap");
+    let has_middle_gap = result
+        .iter()
+        .any(|a| a.author_id == "filler" && a.start >= 5 && a.end <= 9);
+    assert!(
+        has_middle_gap,
+        "Should have filler attribution in middle gap"
+    );
     assert!(result.iter().any(|a| a.start == 9 && a.author_id == "ai-2"));
     // Should have filler at the end too
-    assert!(result.iter().any(|a| a.author_id == "filler" && a.end == content.len()));
+    assert!(
+        result
+            .iter()
+            .any(|a| a.author_id == "filler" && a.end == content.len())
+    );
 }
 
 #[test]
@@ -730,7 +769,11 @@ fn test_attribute_unattributed_overlapping_attrs() {
     // Should preserve overlapping attributions and fill the remaining gap
     assert!(result.iter().any(|a| a.author_id == "ai-1"));
     assert!(result.iter().any(|a| a.author_id == "ai-2"));
-    assert!(result.iter().any(|a| a.author_id == "filler" && a.end == 12));
+    assert!(
+        result
+            .iter()
+            .any(|a| a.author_id == "filler" && a.end == 12)
+    );
 }
 
 // =============================================================================
@@ -769,7 +812,12 @@ fn test_tracker_large_file_many_lines() {
         let line = format!("line {}\n", i);
         let len = line.len();
         old_lines.push(line);
-        old_attrs.push(Attribution::new(pos, pos + len, format!("ai-{}", i % 10), 1000));
+        old_attrs.push(Attribution::new(
+            pos,
+            pos + len,
+            format!("ai-{}", i % 10),
+            1000,
+        ));
         pos += len;
     }
     let old_content = old_lines.join("");
@@ -780,7 +828,8 @@ fn test_tracker_large_file_many_lines() {
     new_lines[501] = "modified line 501\n".to_string();
     let new_content = new_lines.join("");
 
-    let result = tracker.update_attributions(&old_content, &new_content, &old_attrs, "current", 2000);
+    let result =
+        tracker.update_attributions(&old_content, &new_content, &old_attrs, "current", 2000);
     assert!(result.is_ok());
 
     let new_attrs = result.unwrap();
@@ -803,7 +852,8 @@ fn test_tracker_large_file_long_lines() {
         Attribution::new(10001, 20002, "ai-2".to_string(), 2000),
     ];
 
-    let result = tracker.update_attributions(&old_content, &new_content, &old_attrs, "current", 3000);
+    let result =
+        tracker.update_attributions(&old_content, &new_content, &old_attrs, "current", 3000);
     assert!(result.is_ok());
 }
 
@@ -1121,7 +1171,8 @@ fn test_tracker_very_long_single_line() {
 
     let old_attrs = vec![Attribution::new(0, 100001, "ai-1".to_string(), 1000)];
 
-    let result = tracker.update_attributions(&old_content, &new_content, &old_attrs, "current", 2000);
+    let result =
+        tracker.update_attributions(&old_content, &new_content, &old_attrs, "current", 2000);
     assert!(result.is_ok());
 }
 
@@ -1287,7 +1338,12 @@ fn test_tracker_massive_deletion() {
     let old_attrs = vec![
         Attribution::new(0, 6, "ai-1".to_string(), 1000),
         Attribution::new(6, old_content.len() - 4, "ai-2".to_string(), 2000),
-        Attribution::new(old_content.len() - 4, old_content.len(), "ai-3".to_string(), 3000),
+        Attribution::new(
+            old_content.len() - 4,
+            old_content.len(),
+            "ai-3".to_string(),
+            3000,
+        ),
     ];
 
     let new_attrs = tracker
@@ -1334,6 +1390,9 @@ fn test_attribution_through_complex_branch_workflow() {
     file.set_contents(lines!["base".human()]);
     repo.stage_all_and_commit("Initial").unwrap();
 
+    // Capture the original branch name before switching
+    let original_branch = repo.current_branch();
+
     // Create and switch to a branch
     repo.git(&["checkout", "-b", "feature"]).unwrap();
 
@@ -1341,8 +1400,8 @@ fn test_attribution_through_complex_branch_workflow() {
     file.set_contents(lines!["base".human(), "feature".ai()]);
     repo.stage_all_and_commit("Feature work").unwrap();
 
-    // Switch back to main
-    repo.git(&["checkout", "main"]).unwrap();
+    // Switch back to the original branch
+    repo.git(&["checkout", &original_branch]).unwrap();
 
     // Verify original content
     let content = std::fs::read_to_string(file.file_path.clone()).unwrap();
@@ -1440,11 +1499,11 @@ fn test_attribution_boundary_conditions() {
     let attr = Attribution::new(10, 20, "ai-1".to_string(), 1000);
 
     // Test overlaps at exact boundaries
-    assert!(!attr.overlaps(0, 10));   // Ends exactly at start
-    assert!(!attr.overlaps(20, 30));  // Starts exactly at end
-    assert!(attr.overlaps(10, 20));   // Exact match
-    assert!(attr.overlaps(9, 11));    // Crosses start boundary
-    assert!(attr.overlaps(19, 21));   // Crosses end boundary
+    assert!(!attr.overlaps(0, 10)); // Ends exactly at start
+    assert!(!attr.overlaps(20, 30)); // Starts exactly at end
+    assert!(attr.overlaps(10, 20)); // Exact match
+    assert!(attr.overlaps(9, 11)); // Crosses start boundary
+    assert!(attr.overlaps(19, 21)); // Crosses end boundary
 }
 
 #[test]
@@ -1453,11 +1512,11 @@ fn test_line_attribution_boundary_conditions() {
     let attr = LineAttribution::new(10, 20, "ai-1".to_string(), None);
 
     // Boundary checks
-    assert!(!attr.overlaps(1, 9));    // Before
-    assert!(!attr.overlaps(21, 30));  // After
-    assert!(attr.overlaps(10, 20));   // Exact
-    assert!(attr.overlaps(9, 11));    // Crosses start
-    assert!(attr.overlaps(19, 21));   // Crosses end
+    assert!(!attr.overlaps(1, 9)); // Before
+    assert!(!attr.overlaps(21, 30)); // After
+    assert!(attr.overlaps(10, 20)); // Exact
+    assert!(attr.overlaps(9, 11)); // Crosses start
+    assert!(attr.overlaps(19, 21)); // Crosses end
 }
 
 #[test]
@@ -1474,7 +1533,13 @@ fn test_tracker_progressive_file_growth() {
     for i in 1..10 {
         let new_content = format!("{}line {}\n", content, i);
         attrs = tracker
-            .update_attributions(&content, &new_content, &attrs, &format!("author{}", i), 1000 + i as u128 * 100)
+            .update_attributions(
+                &content,
+                &new_content,
+                &attrs,
+                &format!("author{}", i),
+                1000 + i as u128 * 100,
+            )
             .unwrap();
         content = new_content;
     }

@@ -261,11 +261,7 @@ mod tests {
     #[test]
     fn test_log_performance_checkpoint_many_files() {
         // 100 files = 5000ms target
-        log_performance_for_checkpoint(
-            100,
-            Duration::from_millis(4000),
-            CheckpointKind::AiAgent,
-        );
+        log_performance_for_checkpoint(100, Duration::from_millis(4000), CheckpointKind::AiAgent);
     }
 
     #[test]

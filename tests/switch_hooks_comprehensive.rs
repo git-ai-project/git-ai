@@ -38,7 +38,8 @@ fn test_pre_switch_hook_normal() {
 
     repo.git(&["checkout", "-b", "feature"]).unwrap();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let mut context = CommandHooksContext {
         pre_commit_hook_result: None,
         rebase_original_head: None,
@@ -60,9 +61,7 @@ fn test_pre_switch_hook_normal() {
 fn test_pre_switch_hook_with_merge_flag() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base commit").unwrap();
 
     repo.git(&["checkout", "-b", "feature"]).unwrap();
@@ -76,7 +75,8 @@ fn test_pre_switch_hook_with_merge_flag() {
         .set_contents(vec!["uncommitted changes"])
         .stage();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let mut context = CommandHooksContext {
         pre_commit_hook_result: None,
         rebase_original_head: None,
@@ -106,7 +106,8 @@ fn test_pre_switch_hook_merge_without_changes() {
 
     repo.git(&["checkout", "-b", "feature"]).unwrap();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let mut context = CommandHooksContext {
         pre_commit_hook_result: None,
         rebase_original_head: None,
@@ -140,7 +141,8 @@ fn test_pre_switch_hook_merge_short_flag() {
         .set_contents(vec!["uncommitted"])
         .stage();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let mut context = CommandHooksContext {
         pre_commit_hook_result: None,
         rebase_original_head: None,
@@ -166,9 +168,7 @@ fn test_pre_switch_hook_merge_short_flag() {
 fn test_post_switch_hook_success() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     let base_commit = repo.commit("base commit").unwrap();
 
     repo.git(&["checkout", "-b", "feature"]).unwrap();
@@ -177,7 +177,8 @@ fn test_post_switch_hook_success() {
         .stage();
     let feature_commit = repo.commit("feature commit").unwrap();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     repository.pre_command_base_commit = Some(feature_commit.commit_sha.clone());
 
     // Switch back to main
@@ -211,7 +212,8 @@ fn test_post_switch_hook_failed() {
 
     repo.git(&["checkout", "-b", "feature"]).unwrap();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let parsed_args = make_switch_invocation(&["main"]);
     let mut context = CommandHooksContext {
         pre_commit_hook_result: None,
@@ -224,7 +226,13 @@ fn test_post_switch_hook_failed() {
     };
     let exit_status = std::process::Command::new("false")
         .status()
-        .unwrap_or_else(|_| std::process::Command::new("sh").arg("-c").arg("exit 1").status().unwrap());
+        .unwrap_or_else(|_| {
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg("exit 1")
+                .status()
+                .unwrap()
+        });
 
     post_switch_hook(&parsed_args, &mut repository, exit_status, &mut context);
 
@@ -240,7 +248,8 @@ fn test_post_switch_hook_head_unchanged() {
         .stage();
     let commit = repo.commit("initial commit").unwrap();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     repository.pre_command_base_commit = Some(commit.commit_sha.clone());
 
     let parsed_args = make_switch_invocation(&["main"]);
@@ -264,9 +273,7 @@ fn test_post_switch_hook_head_unchanged() {
 fn test_post_switch_hook_force_switch() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     let base_commit = repo.commit("base commit").unwrap();
 
     repo.git(&["checkout", "-b", "feature"]).unwrap();
@@ -280,12 +287,18 @@ fn test_post_switch_hook_force_switch() {
         .set_contents(vec!["uncommitted"])
         .stage();
 
-    let old_head = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap().head().unwrap().target().unwrap();
+    let old_head = repository::find_repository_in_path(repo.path().to_str().unwrap())
+        .unwrap()
+        .head()
+        .unwrap()
+        .target()
+        .unwrap();
 
     // Force switch discards changes
     repo.git(&["checkout", "-f", "main"]).unwrap();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     repository.pre_command_base_commit = Some(old_head.clone());
 
     let parsed_args = make_switch_invocation(&["--force", "main"]);
@@ -309,18 +322,22 @@ fn test_post_switch_hook_force_switch() {
 fn test_post_switch_hook_force_short_flag() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base commit").unwrap();
 
     repo.git(&["checkout", "-b", "feature"]).unwrap();
 
-    let old_head = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap().head().unwrap().target().unwrap();
+    let old_head = repository::find_repository_in_path(repo.path().to_str().unwrap())
+        .unwrap()
+        .head()
+        .unwrap()
+        .target()
+        .unwrap();
 
     repo.git(&["checkout", "main"]).unwrap();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     repository.pre_command_base_commit = Some(old_head.clone());
 
     let parsed_args = make_switch_invocation(&["-f", "main"]);
@@ -344,18 +361,22 @@ fn test_post_switch_hook_force_short_flag() {
 fn test_post_switch_hook_discard_changes_flag() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base commit").unwrap();
 
     repo.git(&["checkout", "-b", "feature"]).unwrap();
 
-    let old_head = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap().head().unwrap().target().unwrap();
+    let old_head = repository::find_repository_in_path(repo.path().to_str().unwrap())
+        .unwrap()
+        .head()
+        .unwrap()
+        .target()
+        .unwrap();
 
     repo.git(&["checkout", "main"]).unwrap();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     repository.pre_command_base_commit = Some(old_head.clone());
 
     let parsed_args = make_switch_invocation(&["--discard-changes", "main"]);
@@ -372,25 +393,33 @@ fn test_post_switch_hook_discard_changes_flag() {
 
     post_switch_hook(&parsed_args, &mut repository, exit_status, &mut context);
 
-    assert!(parsed_args.command_args.contains(&"--discard-changes".to_string()));
+    assert!(
+        parsed_args
+            .command_args
+            .contains(&"--discard-changes".to_string())
+    );
 }
 
 #[test]
 fn test_post_switch_hook_with_merge() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base commit").unwrap();
 
     repo.git(&["checkout", "-b", "feature"]).unwrap();
 
-    let old_head = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap().head().unwrap().target().unwrap();
+    let old_head = repository::find_repository_in_path(repo.path().to_str().unwrap())
+        .unwrap()
+        .head()
+        .unwrap()
+        .target()
+        .unwrap();
 
     repo.git(&["checkout", "main"]).unwrap();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     repository.pre_command_base_commit = Some(old_head.clone());
 
     // Create stashed VA
@@ -462,9 +491,7 @@ fn test_merge_short_flag_detection() {
 fn test_detect_uncommitted_changes_staged() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base commit").unwrap();
 
     // Stage new changes
@@ -482,9 +509,7 @@ fn test_detect_uncommitted_changes_staged() {
 fn test_detect_uncommitted_changes_unstaged() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base commit").unwrap();
 
     // Modify without staging
@@ -502,9 +527,7 @@ fn test_detect_uncommitted_changes_unstaged() {
 fn test_no_uncommitted_changes() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base commit").unwrap();
 
     let repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
@@ -521,9 +544,7 @@ fn test_no_uncommitted_changes() {
 fn test_working_log_rename() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     let commit1 = repo.commit("commit 1").unwrap();
 
     repo.git(&["checkout", "-b", "feature"]).unwrap();
@@ -535,7 +556,9 @@ fn test_working_log_rename() {
     let repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
 
     // Simulate working log for commit1
-    let working_log = repository.storage.working_log_for_base_commit(&commit1.commit_sha);
+    let working_log = repository
+        .storage
+        .working_log_for_base_commit(&commit1.commit_sha);
 
     // In actual code, this would be renamed during switch
     // let _ = repository.storage.rename_working_log(&commit1.commit_sha, &commit2.commit_sha);
@@ -549,9 +572,7 @@ fn test_working_log_rename() {
 fn test_switch_normal_flow() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base commit").unwrap();
 
     repo.git(&["checkout", "-b", "feature"]).unwrap();
@@ -560,7 +581,8 @@ fn test_switch_normal_flow() {
         .stage();
     let feature_commit = repo.commit("feature commit").unwrap();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let mut context = CommandHooksContext {
         pre_commit_hook_result: None,
         rebase_original_head: None,
@@ -593,9 +615,7 @@ fn test_switch_normal_flow() {
 fn test_switch_force_flow() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base commit").unwrap();
 
     repo.git(&["checkout", "-b", "feature"]).unwrap();
@@ -609,7 +629,8 @@ fn test_switch_force_flow() {
         .set_contents(vec!["uncommitted"])
         .stage();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let mut context = CommandHooksContext {
         pre_commit_hook_result: None,
         rebase_original_head: None,
@@ -642,12 +663,11 @@ fn test_switch_force_flow() {
 fn test_switch_new_branch_creation() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base commit").unwrap();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let mut context = CommandHooksContext {
         pre_commit_hook_result: None,
         rebase_original_head: None,
@@ -675,9 +695,7 @@ fn test_switch_new_branch_creation() {
 fn test_switch_between_multiple_branches() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base commit").unwrap();
 
     // Create branch1
@@ -695,7 +713,8 @@ fn test_switch_between_multiple_branches() {
     repo.commit("commit 2").unwrap();
 
     // Switch to branch1
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let mut context = CommandHooksContext {
         pre_commit_hook_result: None,
         rebase_original_head: None,

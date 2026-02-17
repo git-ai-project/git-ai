@@ -24,7 +24,8 @@ fn create_test_plugin_zip() -> Vec<u8> {
         zip.add_directory("git-ai-plugin/lib/", options).unwrap();
 
         // Add a jar file
-        zip.start_file("git-ai-plugin/lib/plugin.jar", options).unwrap();
+        zip.start_file("git-ai-plugin/lib/plugin.jar", options)
+            .unwrap();
         zip.write_all(b"fake jar content").unwrap();
 
         zip.finish().unwrap();
@@ -40,13 +41,16 @@ fn create_test_plugin_zip_with_executable() -> Vec<u8> {
         let mut zip = ZipWriter::new(std::io::Cursor::new(&mut buffer));
 
         // Add executable script with Unix permissions
-        let options: FileOptions<zip::write::ExtendedFileOptions> = FileOptions::default().unix_permissions(0o755);
-        zip.start_file("git-ai-plugin/bin/plugin-launcher.sh", options).unwrap();
+        let options: FileOptions<zip::write::ExtendedFileOptions> =
+            FileOptions::default().unix_permissions(0o755);
+        zip.start_file("git-ai-plugin/bin/plugin-launcher.sh", options)
+            .unwrap();
         zip.write_all(b"#!/bin/bash\necho 'test'").unwrap();
 
         // Add regular file
         let regular_options: FileOptions<()> = FileOptions::default();
-        zip.start_file("git-ai-plugin/README.md", regular_options).unwrap();
+        zip.start_file("git-ai-plugin/README.md", regular_options)
+            .unwrap();
         zip.write_all(b"# Plugin README").unwrap();
 
         zip.finish().unwrap();
@@ -93,11 +97,17 @@ fn test_install_plugin_extracts_correct_content() {
     // Verify file contents
     let plugin_xml = plugin_dir.join("git-ai-plugin/plugin.xml");
     let content = fs::read_to_string(plugin_xml).unwrap();
-    assert!(content.contains("<idea-plugin>"), "plugin.xml should have correct content");
+    assert!(
+        content.contains("<idea-plugin>"),
+        "plugin.xml should have correct content"
+    );
 
     let jar_file = plugin_dir.join("git-ai-plugin/lib/plugin.jar");
     let jar_content = fs::read(jar_file).unwrap();
-    assert_eq!(jar_content, b"fake jar content", "JAR should have correct content");
+    assert_eq!(
+        jar_content, b"fake jar content",
+        "JAR should have correct content"
+    );
 }
 
 #[test]
@@ -138,7 +148,10 @@ fn test_install_plugin_invalid_zip_data() {
 
     assert!(result.is_err(), "Should fail with invalid ZIP data");
     let err_msg = result.unwrap_err().to_string();
-    assert!(err_msg.contains("Failed to read plugin ZIP"), "Error should mention ZIP reading");
+    assert!(
+        err_msg.contains("Failed to read plugin ZIP"),
+        "Error should mention ZIP reading"
+    );
 }
 
 #[test]
@@ -192,10 +205,12 @@ fn test_install_plugin_handles_directory_entries() {
 
         // Add directory entry (ends with /)
         zip.add_directory("git-ai-plugin/", options).unwrap();
-        zip.add_directory("git-ai-plugin/resources/", options).unwrap();
+        zip.add_directory("git-ai-plugin/resources/", options)
+            .unwrap();
 
         // Add file in directory
-        zip.start_file("git-ai-plugin/resources/config.json", options).unwrap();
+        zip.start_file("git-ai-plugin/resources/config.json", options)
+            .unwrap();
         zip.write_all(b"{}").unwrap();
 
         zip.finish().unwrap();
@@ -219,7 +234,11 @@ fn test_install_plugin_via_cli_with_invalid_binary() {
 
     // Should return Ok(false) when CLI fails, not an error
     assert!(result.is_ok(), "Should handle missing binary gracefully");
-    assert_eq!(result.unwrap(), false, "Should return false for failed installation");
+    assert_eq!(
+        result.unwrap(),
+        false,
+        "Should return false for failed installation"
+    );
 }
 
 #[test]
@@ -244,14 +263,13 @@ fn test_download_plugin_url_format() {
 
     // Test with invalid URL will fail quickly
     // The actual function will try to connect, so we just verify it's callable
-    let result = download_plugin_from_marketplace(
-        "test-plugin-id",
-        "IU",
-        "252.12345",
-    );
+    let result = download_plugin_from_marketplace("test-plugin-id", "IU", "252.12345");
 
     // Should return an error (network or 404), not panic
-    assert!(result.is_err(), "Should fail gracefully with test parameters");
+    assert!(
+        result.is_err(),
+        "Should fail gracefully with test parameters"
+    );
 }
 
 #[test]
@@ -265,17 +283,22 @@ fn test_install_plugin_with_special_characters_in_filename() {
         let mut zip = ZipWriter::new(std::io::Cursor::new(&mut buffer));
         let options: FileOptions<()> = FileOptions::default();
 
-        zip.start_file("git-ai-plugin/resources/strings_en.xml", options).unwrap();
+        zip.start_file("git-ai-plugin/resources/strings_en.xml", options)
+            .unwrap();
         zip.write_all(b"<strings></strings>").unwrap();
 
-        zip.start_file("git-ai-plugin/resources/strings_中文.xml", options).unwrap();
+        zip.start_file("git-ai-plugin/resources/strings_中文.xml", options)
+            .unwrap();
         zip.write_all(b"<strings></strings>").unwrap();
 
         zip.finish().unwrap();
     }
 
     let result = install_plugin_to_directory(&buffer, &plugin_dir);
-    assert!(result.is_ok(), "Should handle special characters in filenames");
+    assert!(
+        result.is_ok(),
+        "Should handle special characters in filenames"
+    );
 
     let en_file = plugin_dir.join("git-ai-plugin/resources/strings_en.xml");
     assert!(en_file.exists(), "English strings file should exist");
@@ -297,7 +320,8 @@ fn test_install_plugin_with_deep_nesting() {
 
         let deep_path = "git-ai-plugin/src/main/java/com/usegitai/plugin/actions/DeepFile.java";
         zip.start_file(deep_path, options).unwrap();
-        zip.write_all(b"package com.usegitai.plugin.actions;").unwrap();
+        zip.write_all(b"package com.usegitai.plugin.actions;")
+            .unwrap();
 
         zip.finish().unwrap();
     }
@@ -305,7 +329,8 @@ fn test_install_plugin_with_deep_nesting() {
     let result = install_plugin_to_directory(&buffer, &plugin_dir);
     assert!(result.is_ok(), "Should handle deeply nested paths");
 
-    let deep_file = plugin_dir.join("git-ai-plugin/src/main/java/com/usegitai/plugin/actions/DeepFile.java");
+    let deep_file =
+        plugin_dir.join("git-ai-plugin/src/main/java/com/usegitai/plugin/actions/DeepFile.java");
     assert!(deep_file.exists(), "Deeply nested file should be created");
 }
 
@@ -325,8 +350,14 @@ fn test_install_plugin_overwrites_existing_files() {
 
     // Verify file was overwritten
     let content = fs::read_to_string(&file_path).unwrap();
-    assert!(content.contains("<idea-plugin>"), "File should be overwritten with new content");
-    assert!(!content.contains("old content"), "Old content should be replaced");
+    assert!(
+        content.contains("<idea-plugin>"),
+        "File should be overwritten with new content"
+    );
+    assert!(
+        !content.contains("old content"),
+        "Old content should be replaced"
+    );
 }
 
 #[test]
@@ -342,7 +373,8 @@ fn test_install_plugin_with_large_files() {
 
         // Create 1MB file
         let large_content = vec![b'x'; 1024 * 1024];
-        zip.start_file("git-ai-plugin/large-library.jar", options).unwrap();
+        zip.start_file("git-ai-plugin/large-library.jar", options)
+            .unwrap();
         zip.write_all(&large_content).unwrap();
 
         zip.finish().unwrap();

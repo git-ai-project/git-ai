@@ -1124,10 +1124,7 @@ mod tests {
 
     #[test]
     fn test_detect_pattern_type_question_mark_pattern() {
-        assert_eq!(
-            detect_pattern_type("repo-?"),
-            PatternType::UrlOrGitProtocol
-        );
+        assert_eq!(detect_pattern_type("repo-?"), PatternType::UrlOrGitProtocol);
     }
 
     #[test]
@@ -1269,20 +1266,11 @@ mod tests {
             detect_pattern_type("user@host:path"),
             PatternType::UrlOrGitProtocol
         );
-        assert_eq!(
-            detect_pattern_type("@:"),
-            PatternType::UrlOrGitProtocol
-        );
+        assert_eq!(detect_pattern_type("@:"), PatternType::UrlOrGitProtocol);
         // @ but no : means file path
-        assert_eq!(
-            detect_pattern_type("file@name"),
-            PatternType::FilePath
-        );
+        assert_eq!(detect_pattern_type("file@name"), PatternType::FilePath);
         // : but no @ means file path (unless absolute)
-        assert_eq!(
-            detect_pattern_type("file:name"),
-            PatternType::FilePath
-        );
+        assert_eq!(detect_pattern_type("file:name"), PatternType::FilePath);
     }
 
     #[test]

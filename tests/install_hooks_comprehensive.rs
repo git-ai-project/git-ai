@@ -4,7 +4,7 @@
 //! which handle installation of git hooks for various IDEs and coding agents.
 
 use git_ai::commands::install_hooks::{
-    run, run_uninstall, to_hashmap, InstallResult, InstallStatus,
+    InstallResult, InstallStatus, run, run_uninstall, to_hashmap,
 };
 use std::collections::HashMap;
 
@@ -207,7 +207,10 @@ fn test_to_hashmap_all_statuses() {
     let result = to_hashmap(statuses);
     assert_eq!(result.get("not_found"), Some(&"not_found".to_string()));
     assert_eq!(result.get("installed"), Some(&"installed".to_string()));
-    assert_eq!(result.get("already"), Some(&"already_installed".to_string()));
+    assert_eq!(
+        result.get("already"),
+        Some(&"already_installed".to_string())
+    );
     assert_eq!(result.get("failed"), Some(&"failed".to_string()));
 }
 
@@ -574,13 +577,30 @@ fn test_uninstall_workflow_dry_run_does_not_modify_system() {
 
 #[test]
 fn test_all_status_strings_are_lowercase() {
-    assert!(InstallStatus::NotFound.as_str().chars().all(|c| !c.is_uppercase()));
-    assert!(InstallStatus::Installed.as_str().chars().all(|c| !c.is_uppercase()));
-    assert!(InstallStatus::AlreadyInstalled
-        .as_str()
-        .chars()
-        .all(|c| !c.is_uppercase()));
-    assert!(InstallStatus::Failed.as_str().chars().all(|c| !c.is_uppercase()));
+    assert!(
+        InstallStatus::NotFound
+            .as_str()
+            .chars()
+            .all(|c| !c.is_uppercase())
+    );
+    assert!(
+        InstallStatus::Installed
+            .as_str()
+            .chars()
+            .all(|c| !c.is_uppercase())
+    );
+    assert!(
+        InstallStatus::AlreadyInstalled
+            .as_str()
+            .chars()
+            .all(|c| !c.is_uppercase())
+    );
+    assert!(
+        InstallStatus::Failed
+            .as_str()
+            .chars()
+            .all(|c| !c.is_uppercase())
+    );
 }
 
 #[test]

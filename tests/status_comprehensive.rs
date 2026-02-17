@@ -212,7 +212,12 @@ fn test_status_json_stats_accuracy() {
     repo.stage_all_and_commit("Initial").unwrap();
 
     // Add 3 lines, delete 1 line
-    file.set_contents(lines!["Line 1".human(), "Line 3".ai(), "Line 4".ai(), "Line 5".ai()]);
+    file.set_contents(lines![
+        "Line 1".human(),
+        "Line 3".ai(),
+        "Line 4".ai(),
+        "Line 5".ai()
+    ]);
 
     // Run status with --json
     let output = repo
@@ -540,7 +545,10 @@ fn test_status_output_format() {
     let output = repo.git_ai(&["status"]).expect("status should succeed");
 
     // Should have structured output (not empty)
-    assert!(!output.trim().is_empty(), "Status output should not be empty");
+    assert!(
+        !output.trim().is_empty(),
+        "Status output should not be empty"
+    );
 
     // Should contain some standard elements
     assert!(
@@ -612,7 +620,9 @@ fn test_status_handles_special_characters_in_filenames() {
     special_file.set_contents(lines!["Content".human(), "New line".ai()]);
 
     // Run status
-    let output = repo.git_ai(&["status"]).expect("status should handle special filenames");
+    let output = repo
+        .git_ai(&["status"])
+        .expect("status should handle special filenames");
 
     // Should show changes
     assert!(
@@ -631,10 +641,16 @@ fn test_status_unicode_content() {
     repo.stage_all_and_commit("Initial").unwrap();
 
     // Modify with more unicode
-    file_uni.set_contents(lines!["Hello 世界".human(), "こんにちは".ai(), "مرحبا".ai()]);
+    file_uni.set_contents(lines![
+        "Hello 世界".human(),
+        "こんにちは".ai(),
+        "مرحبا".ai()
+    ]);
 
     // Run status
-    let output = repo.git_ai(&["status"]).expect("status should handle unicode");
+    let output = repo
+        .git_ai(&["status"])
+        .expect("status should handle unicode");
 
     // Should show changes
     assert!(
@@ -656,16 +672,22 @@ fn test_status_with_many_files() {
         let mut file = repo.filename(&format!("file{}.txt", i));
         file.set_contents(lines![format!("Content {}", i).human()]);
     }
-    repo.stage_all_and_commit("Initial with many files").unwrap();
+    repo.stage_all_and_commit("Initial with many files")
+        .unwrap();
 
     // Modify some files
     for i in 0..10 {
         let mut file = repo.filename(&format!("file{}.txt", i));
-        file.set_contents(lines![format!("Content {}", i).human(), format!("New {}", i).ai()]);
+        file.set_contents(lines![
+            format!("Content {}", i).human(),
+            format!("New {}", i).ai()
+        ]);
     }
 
     // Run status
-    let output = repo.git_ai(&["status"]).expect("status should handle many files");
+    let output = repo
+        .git_ai(&["status"])
+        .expect("status should handle many files");
 
     // Should complete successfully and show changes
     assert!(

@@ -71,14 +71,7 @@ mod tests {
 
         test_repo
             .repo()
-            .commit(
-                Some("HEAD"),
-                &sig,
-                &sig,
-                "Initial commit",
-                &tree,
-                &[],
-            )
+            .commit(Some("HEAD"), &sig, &sig, "Initial commit", &tree, &[])
             .unwrap();
 
         // Run pre_commit with no staged changes

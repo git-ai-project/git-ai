@@ -47,7 +47,8 @@ fn test_post_merge_hook_squash_success() {
     // Go back to main
     repo.git(&["checkout", "main"]).unwrap();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let parsed_args = make_merge_invocation(&["--squash", "feature"]);
     let exit_status = std::process::Command::new("true").status().unwrap();
 
@@ -79,11 +80,18 @@ fn test_post_merge_hook_squash_failed() {
 
     repo.git(&["checkout", "main"]).unwrap();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let parsed_args = make_merge_invocation(&["--squash", "feature"]);
     let exit_status = std::process::Command::new("false")
         .status()
-        .unwrap_or_else(|_| std::process::Command::new("sh").arg("-c").arg("exit 1").status().unwrap());
+        .unwrap_or_else(|_| {
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg("exit 1")
+                .status()
+                .unwrap()
+        });
 
     let events_before = repository.storage.read_rewrite_events().unwrap_or_default();
     let initial_count = events_before.len();
@@ -92,7 +100,11 @@ fn test_post_merge_hook_squash_failed() {
 
     // Failed merge should not log events
     let events_after = repository.storage.read_rewrite_events().unwrap_or_default();
-    assert_eq!(events_after.len(), initial_count, "Failed merge should not log events");
+    assert_eq!(
+        events_after.len(),
+        initial_count,
+        "Failed merge should not log events"
+    );
 }
 
 #[test]
@@ -112,7 +124,8 @@ fn test_post_merge_hook_normal_merge() {
 
     repo.git(&["checkout", "main"]).unwrap();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let parsed_args = make_merge_invocation(&["feature"]);
     let exit_status = std::process::Command::new("true").status().unwrap();
 
@@ -128,7 +141,10 @@ fn test_post_merge_hook_normal_merge() {
         .skip(initial_count)
         .any(|e| matches!(e, RewriteLogEvent::MergeSquash { .. }));
 
-    assert!(!has_merge_squash, "Normal merge should not log MergeSquash events");
+    assert!(
+        !has_merge_squash,
+        "Normal merge should not log MergeSquash events"
+    );
 }
 
 #[test]
@@ -148,7 +164,8 @@ fn test_post_merge_hook_dry_run() {
 
     repo.git(&["checkout", "main"]).unwrap();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let parsed_args = make_merge_invocation(&["--squash", "--dry-run", "feature"]);
     let exit_status = std::process::Command::new("true").status().unwrap();
 
@@ -159,7 +176,11 @@ fn test_post_merge_hook_dry_run() {
 
     // Dry run should not log events
     let events_after = repository.storage.read_rewrite_events().unwrap_or_default();
-    assert_eq!(events_after.len(), initial_count, "Dry run should not log events");
+    assert_eq!(
+        events_after.len(),
+        initial_count,
+        "Dry run should not log events"
+    );
 }
 
 #[test]
@@ -171,7 +192,8 @@ fn test_post_merge_hook_invalid_branch() {
         .stage();
     repo.commit("base commit").unwrap();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let parsed_args = make_merge_invocation(&["--squash", "nonexistent-branch"]);
     let exit_status = std::process::Command::new("true").status().unwrap();
 
@@ -305,9 +327,7 @@ fn test_resolve_current_head() {
 fn test_resolve_branch_head() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     let base = repo.commit("base commit").unwrap();
 
     repo.git(&["checkout", "-b", "feature"]).unwrap();
@@ -355,7 +375,8 @@ fn test_merge_squash_full_flow() {
     repo.git(&["checkout", "main"]).unwrap();
 
     // Execute merge --squash
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let parsed_args = make_merge_invocation(&["--squash", "feature"]);
     let exit_status = std::process::Command::new("true").status().unwrap();
 
@@ -395,7 +416,8 @@ fn test_merge_squash_with_commit() {
     repo.git(&["checkout", "main"]).unwrap();
 
     // Merge --squash (stages changes)
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let parsed_args = make_merge_invocation(&["--squash", "feature"]);
     let exit_status = std::process::Command::new("true").status().unwrap();
 
@@ -441,7 +463,10 @@ fn test_merge_author_with_flag() {
 
     use git_ai::commands::hooks::commit_hooks::get_commit_default_author;
 
-    let args = vec!["--author".to_string(), "Merge Author <merge@example.com>".to_string()];
+    let args = vec![
+        "--author".to_string(),
+        "Merge Author <merge@example.com>".to_string(),
+    ];
     let author = get_commit_default_author(&repository, &args);
 
     assert!(author.contains("Merge Author"));
@@ -456,16 +481,15 @@ fn test_merge_author_with_flag() {
 fn test_merge_squash_empty_branch() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base commit").unwrap();
 
     // Create empty feature branch (same as main)
     repo.git(&["checkout", "-b", "feature"]).unwrap();
     repo.git(&["checkout", "main"]).unwrap();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let parsed_args = make_merge_invocation(&["--squash", "feature"]);
     let exit_status = std::process::Command::new("true").status().unwrap();
 
@@ -478,9 +502,7 @@ fn test_merge_squash_empty_branch() {
 fn test_merge_squash_detached_head() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     let commit = repo.commit("base commit").unwrap();
 
     // Create feature
@@ -493,7 +515,8 @@ fn test_merge_squash_detached_head() {
     // Detach head
     repo.git(&["checkout", &commit.commit_sha]).unwrap();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let parsed_args = make_merge_invocation(&["--squash", "feature"]);
     let exit_status = std::process::Command::new("true").status().unwrap();
 

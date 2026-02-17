@@ -36,17 +36,17 @@ fn test_diff_json_structure() {
     let json: Value = serde_json::from_str(&output).expect("Should be valid JSON");
 
     // Verify top-level structure
-    assert!(json.get("files").is_some(), "JSON should have 'files' field");
+    assert!(
+        json.get("files").is_some(),
+        "JSON should have 'files' field"
+    );
     assert!(
         json.get("prompts").is_some(),
         "JSON should have 'prompts' field"
     );
 
     // Verify files is an object
-    assert!(
-        json["files"].is_object(),
-        "files should be an object (map)"
-    );
+    assert!(json["files"].is_object(), "files should be an object (map)");
 
     // Verify prompts is an object
     assert!(
@@ -263,7 +263,10 @@ fn test_diff_deleted_file() {
         .expect("diff with deleted file should succeed");
 
     // Should show deletions
-    assert!(output.contains("-"), "Should show deletions for deleted file");
+    assert!(
+        output.contains("-"),
+        "Should show deletions for deleted file"
+    );
 }
 
 #[test]
@@ -276,8 +279,7 @@ fn test_diff_renamed_file() {
     repo.stage_all_and_commit("Add file").unwrap();
 
     // Rename file via git
-    repo.git(&["mv", "old_name.rs", "new_name.rs"])
-        .unwrap();
+    repo.git(&["mv", "old_name.rs", "new_name.rs"]).unwrap();
     let commit = repo.stage_all_and_commit("Rename file").unwrap();
 
     // Run diff
@@ -336,7 +338,10 @@ fn test_diff_with_very_long_lines() {
         .expect("diff with long lines should succeed");
 
     // Should handle long lines
-    assert!(output.contains("+") && output.contains("-"), "Should show diff");
+    assert!(
+        output.contains("+") && output.contains("-"),
+        "Should show diff"
+    );
 }
 
 #[test]
@@ -349,7 +354,9 @@ fn test_diff_with_special_regex_chars() {
     repo.stage_all_and_commit("Special chars").unwrap();
 
     // Modify
-    file.set_contents(lines!["Line with $pecial [chars] (and) {braces} modified".ai()]);
+    file.set_contents(lines![
+        "Line with $pecial [chars] (and) {braces} modified".ai()
+    ]);
     let commit = repo.stage_all_and_commit("Modify special").unwrap();
 
     // Run diff
@@ -435,7 +442,10 @@ fn test_diff_many_files() {
     // Modify some files
     for i in 0..10 {
         let mut file = repo.filename(&format!("file{}.txt", i));
-        file.set_contents(lines![format!("Content {}", i).human(), format!("Added {}", i).ai()]);
+        file.set_contents(lines![
+            format!("Content {}", i).human(),
+            format!("Added {}", i).ai()
+        ]);
     }
     let commit = repo.stage_all_and_commit("Modify many").unwrap();
 
@@ -473,7 +483,12 @@ fn test_diff_range_multiple_commits() {
     file.set_contents(lines!["Line 1".human(), "Line 2".ai(), "Line 3".human()]);
     repo.stage_all_and_commit("Commit 3").unwrap();
 
-    file.set_contents(lines!["Line 1".human(), "Line 2".ai(), "Line 3".human(), "Line 4".ai()]);
+    file.set_contents(lines![
+        "Line 1".human(),
+        "Line 2".ai(),
+        "Line 3".human(),
+        "Line 4".ai()
+    ]);
     let last = repo.stage_all_and_commit("Commit 4").unwrap();
 
     // Run diff across all commits

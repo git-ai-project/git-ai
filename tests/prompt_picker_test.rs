@@ -87,7 +87,8 @@ fn test_prompt_record_first_message_snippet_user_message() {
 
 #[test]
 fn test_prompt_record_first_message_snippet_truncation() {
-    let long_message = "This is a very long message that should be truncated at the specified length";
+    let long_message =
+        "This is a very long message that should be truncated at the specified length";
     let prompt = create_test_prompt(
         "test1",
         None,
@@ -107,7 +108,14 @@ fn test_prompt_record_first_message_snippet_truncation() {
 fn test_prompt_record_first_message_snippet_unicode_boundary() {
     // Test with emoji/unicode characters
     let message = "Hello 🎉 World! This is a test with unicode characters";
-    let prompt = create_test_prompt("test1", None, "test-agent", "test-model", message, "Response");
+    let prompt = create_test_prompt(
+        "test1",
+        None,
+        "test-agent",
+        "test-model",
+        message,
+        "Response",
+    );
 
     // Truncate in the middle of unicode sequence
     let snippet = prompt.first_message_snippet(10);
@@ -485,9 +493,7 @@ fn test_database_list_prompts_with_workdir_filter() {
 
     let db = InternalDatabase::global().unwrap();
     let db_guard = db.lock().unwrap();
-    let results = db_guard
-        .list_prompts(Some(&workdir), None, 10, 0)
-        .unwrap();
+    let results = db_guard.list_prompts(Some(&workdir), None, 10, 0).unwrap();
 
     assert!(
         !results.is_empty(),
@@ -598,7 +604,9 @@ fn test_database_search_prompts_finds_matches() {
 
     assert!(!results.is_empty(), "Should find authentication prompt");
     assert!(
-        results[0].first_message_snippet(100).contains("authentication"),
+        results[0]
+            .first_message_snippet(100)
+            .contains("authentication"),
         "Result should contain search term"
     );
 }
@@ -667,7 +675,10 @@ fn test_database_search_prompts_no_matches() {
         .search_prompts("nonexistent_term_xyz", None, 10, 0)
         .unwrap();
 
-    assert!(results.is_empty(), "Should return empty results for no matches");
+    assert!(
+        results.is_empty(),
+        "Should return empty results for no matches"
+    );
 }
 
 #[test]
@@ -804,10 +815,7 @@ fn test_prompt_record_with_all_message_types() {
 #[test]
 fn test_prompt_record_snippet_prefers_user_over_assistant() {
     let mut transcript = AiTranscript::new();
-    transcript.add_message(Message::assistant(
-        "Assistant first".to_string(),
-        None,
-    ));
+    transcript.add_message(Message::assistant("Assistant first".to_string(), None));
     transcript.add_message(Message::user("User message".to_string(), None));
 
     let now = std::time::SystemTime::now()

@@ -336,10 +336,7 @@ mod tests {
         assert_eq!(attrs.tool, Some(Some("cursor".to_string())));
         assert_eq!(attrs.model, Some(Some("gpt-4".to_string())));
         assert_eq!(attrs.prompt_id, Some(Some("prompt-456".to_string())));
-        assert_eq!(
-            attrs.external_prompt_id,
-            Some(Some("ext-789".to_string()))
-        );
+        assert_eq!(attrs.external_prompt_id, Some(Some("ext-789".to_string())));
     }
 
     #[test]
@@ -396,7 +393,10 @@ mod tests {
             sparse.get("3"),
             Some(&Value::String("commit-sha".to_string()))
         );
-        assert_eq!(sparse.get("4"), Some(&Value::String("base-sha".to_string())));
+        assert_eq!(
+            sparse.get("4"),
+            Some(&Value::String("base-sha".to_string()))
+        );
         assert_eq!(sparse.get("5"), Some(&Value::String("main".to_string())));
         assert_eq!(
             sparse.get("20"),

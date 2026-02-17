@@ -119,7 +119,11 @@ fn test_notes_existence_in_option() {
 
 #[test]
 fn test_notes_existence_in_vec() {
-    let results = vec![NotesExistence::Found, NotesExistence::NotFound, NotesExistence::Found];
+    let results = vec![
+        NotesExistence::Found,
+        NotesExistence::NotFound,
+        NotesExistence::Found,
+    ];
     assert_eq!(results.len(), 3);
     assert_eq!(results[0], NotesExistence::Found);
     assert_eq!(results[1], NotesExistence::NotFound);
@@ -324,16 +328,28 @@ fn test_fetch_arg_parsing_concepts() {
     let args4 = vec!["fetch", "--tags", "origin"];
 
     // Find first non-flag argument after "fetch"
-    let remote1 = args1.iter().skip(1).find(|a| !a.starts_with('-')).map(|s| &**s);
+    let remote1 = args1
+        .iter()
+        .skip(1)
+        .find(|a| !a.starts_with('-'))
+        .map(|s| &**s);
     assert_eq!(remote1, Some("origin"));
 
-    let remote2 = args2.iter().skip(1).find(|a| !a.starts_with('-')).map(|s| &**s);
+    let remote2 = args2
+        .iter()
+        .skip(1)
+        .find(|a| !a.starts_with('-'))
+        .map(|s| &**s);
     assert_eq!(remote2, Some("upstream"));
 
     let remote3 = args3.iter().skip(1).find(|a| !a.starts_with('-'));
     assert_eq!(remote3, None);
 
-    let remote4 = args4.iter().skip(1).find(|a| !a.starts_with('-')).map(|s| &**s);
+    let remote4 = args4
+        .iter()
+        .skip(1)
+        .find(|a| !a.starts_with('-'))
+        .map(|s| &**s);
     assert_eq!(remote4, Some("origin"));
 }
 
@@ -346,13 +362,25 @@ fn test_push_arg_parsing_concepts() {
     let args3 = vec!["push", "--force", "origin"];
 
     // Find first non-flag positional arg
-    let remote1 = args1.iter().skip(1).find(|a| !a.starts_with('-')).map(|s| &**s);
+    let remote1 = args1
+        .iter()
+        .skip(1)
+        .find(|a| !a.starts_with('-'))
+        .map(|s| &**s);
     assert_eq!(remote1, Some("origin"));
 
-    let remote2 = args2.iter().skip(1).find(|a| !a.starts_with('-')).map(|s| &**s);
+    let remote2 = args2
+        .iter()
+        .skip(1)
+        .find(|a| !a.starts_with('-'))
+        .map(|s| &**s);
     assert_eq!(remote2, Some("upstream"));
 
-    let remote3 = args3.iter().skip(1).find(|a| !a.starts_with('-')).map(|s| &**s);
+    let remote3 = args3
+        .iter()
+        .skip(1)
+        .find(|a| !a.starts_with('-'))
+        .map(|s| &**s);
     assert_eq!(remote3, Some("origin"));
 }
 

@@ -232,22 +232,18 @@ fn test_fast_forward_pull_preserves_ai_attribution() {
     let setup = setup_pull_test();
     let local = setup.local;
 
-    // Create local AI changes (uncommitted)
+    // Create local AI changes and commit them
     let mut ai_file = local.filename("ai_work.txt");
     ai_file.set_contents(vec!["AI generated line 1".ai(), "AI generated line 2".ai()]);
 
     local
-        .git_ai(&["checkpoint", "mock_ai"])
-        .expect("checkpoint should succeed");
+        .stage_all_and_commit("AI work commit")
+        .expect("commit should succeed");
 
     // Perform fast-forward pull
     local.git(&["pull"]).expect("pull should succeed");
 
-    // Commit and verify AI attribution is preserved through the ff pull
-    local
-        .stage_all_and_commit("commit after pull")
-        .expect("commit should succeed");
-
+    // Verify AI attribution is preserved through the ff pull
     ai_file.assert_lines_and_blame(vec!["AI generated line 1".ai(), "AI generated line 2".ai()]);
 }
 

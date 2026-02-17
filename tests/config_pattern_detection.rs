@@ -93,7 +93,9 @@ fn test_git_ssh_shorthand() {
 
 #[test]
 fn test_ssh_url_patterns() {
-    assert!(is_url_or_git_protocol("ssh://git@github.com/owner/repo.git"));
+    assert!(is_url_or_git_protocol(
+        "ssh://git@github.com/owner/repo.git"
+    ));
     assert!(is_url_or_git_protocol("ssh://user@example.com:22/repo.git"));
     assert!(is_url_or_git_protocol("ssh://git@gitlab.com/project.git"));
 }
@@ -127,7 +129,9 @@ fn test_glob_patterns_with_question_marks() {
 
 #[test]
 fn test_glob_patterns_with_brackets() {
-    assert!(is_url_or_git_protocol("https://github.com/[org1|org2]/repo"));
+    assert!(is_url_or_git_protocol(
+        "https://github.com/[org1|org2]/repo"
+    ));
     assert!(is_url_or_git_protocol("git@github.com:user/[a-z]*.git"));
 }
 
@@ -191,13 +195,19 @@ fn test_edge_cases_whitespace() {
 fn test_urls_with_ports() {
     assert!(is_url_or_git_protocol("https://github.com:443/org/repo"));
     assert!(is_url_or_git_protocol("http://localhost:8080/repo.git"));
-    assert!(is_url_or_git_protocol("ssh://git@example.com:2222/repo.git"));
+    assert!(is_url_or_git_protocol(
+        "ssh://git@example.com:2222/repo.git"
+    ));
 }
 
 #[test]
 fn test_urls_with_authentication() {
-    assert!(is_url_or_git_protocol("https://user:pass@github.com/org/repo"));
-    assert!(is_url_or_git_protocol("http://token@gitlab.com/project.git"));
+    assert!(is_url_or_git_protocol(
+        "https://user:pass@github.com/org/repo"
+    ));
+    assert!(is_url_or_git_protocol(
+        "http://token@gitlab.com/project.git"
+    ));
 }
 
 #[test]

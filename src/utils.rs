@@ -807,7 +807,10 @@ mod tests {
     #[test]
     fn test_unescape_invalid_octal() {
         // Invalid octal digit (8 and 9 are not valid octal)
-        assert_eq!(unescape_git_path("\"file\\389.txt\""), "file\x038\u{0039}.txt");
+        assert_eq!(
+            unescape_git_path("\"file\\389.txt\""),
+            "file\x038\u{0039}.txt"
+        );
     }
 
     #[test]
@@ -852,10 +855,7 @@ mod tests {
     #[test]
     fn test_normalize_to_posix_windows() {
         // Windows paths
-        assert_eq!(
-            normalize_to_posix("path\\to\\file.txt"),
-            "path/to/file.txt"
-        );
+        assert_eq!(normalize_to_posix("path\\to\\file.txt"), "path/to/file.txt");
         assert_eq!(normalize_to_posix("C:\\Users\\file"), "C:/Users/file");
     }
 

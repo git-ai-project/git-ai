@@ -142,7 +142,12 @@ fn test_populate_creates_database_with_schema() {
     // Create a checkpoint
     let file_path = repo.path().join("test.txt");
     fs::write(&file_path, "AI content\n").unwrap();
-    checkpoint_with_message(&repo, "Add test file", vec!["test.txt".to_string()], "conv-1");
+    checkpoint_with_message(
+        &repo,
+        "Add test file",
+        vec!["test.txt".to_string()],
+        "conv-1",
+    );
 
     // Commit the changes
     repo.git(&["add", "-A"]).unwrap();
@@ -186,7 +191,12 @@ fn test_populate_with_since_filter() {
     // Create checkpoint
     let file_path = repo.path().join("test.txt");
     fs::write(&file_path, "AI content\n").unwrap();
-    checkpoint_with_message(&repo, "Add test file", vec!["test.txt".to_string()], "conv-1");
+    checkpoint_with_message(
+        &repo,
+        "Add test file",
+        vec!["test.txt".to_string()],
+        "conv-1",
+    );
 
     repo.git(&["add", "-A"]).unwrap();
     repo.git(&["commit", "-m", "Add test file"]).unwrap();
@@ -226,7 +236,12 @@ fn test_populate_with_author_filter() {
     // Create checkpoint (will be attributed to "Test User" from git config)
     let file_path = repo.path().join("test.txt");
     fs::write(&file_path, "AI content\n").unwrap();
-    checkpoint_with_message(&repo, "Add test file", vec!["test.txt".to_string()], "conv-1");
+    checkpoint_with_message(
+        &repo,
+        "Add test file",
+        vec!["test.txt".to_string()],
+        "conv-1",
+    );
 
     repo.git(&["add", "-A"]).unwrap();
     repo.git(&["commit", "-m", "Add test file"]).unwrap();
@@ -245,11 +260,9 @@ fn test_populate_with_author_filter() {
 
     // Verify the author field (may include email)
     let author: Option<String> = conn
-        .query_row(
-            "SELECT human_author FROM prompts LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
+        .query_row("SELECT human_author FROM prompts LIMIT 1", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert!(
         author.is_some() && author.as_ref().unwrap().contains("Test User"),
@@ -287,7 +300,12 @@ fn test_populate_with_all_authors_flag() {
     // Create checkpoint
     let file_path = repo.path().join("test.txt");
     fs::write(&file_path, "AI content\n").unwrap();
-    checkpoint_with_message(&repo, "Add test file", vec!["test.txt".to_string()], "conv-1");
+    checkpoint_with_message(
+        &repo,
+        "Add test file",
+        vec!["test.txt".to_string()],
+        "conv-1",
+    );
 
     repo.git(&["add", "-A"]).unwrap();
     repo.git(&["commit", "-m", "Add test file"]).unwrap();
@@ -322,7 +340,12 @@ fn test_list_command_outputs_tsv() {
 
     let file_path = repo.path().join("test.txt");
     fs::write(&file_path, "AI content\n").unwrap();
-    checkpoint_with_message(&repo, "Add test file", vec!["test.txt".to_string()], "conv-1");
+    checkpoint_with_message(
+        &repo,
+        "Add test file",
+        vec!["test.txt".to_string()],
+        "conv-1",
+    );
 
     repo.git(&["add", "-A"]).unwrap();
     repo.git(&["commit", "-m", "Add test file"]).unwrap();
@@ -349,10 +372,7 @@ fn test_list_command_outputs_tsv() {
     // Data rows should be tab-separated
     if lines.len() > 1 {
         let data_row = lines[1];
-        assert!(
-            data_row.contains('\t'),
-            "Data rows should be tab-separated"
-        );
+        assert!(data_row.contains('\t'), "Data rows should be tab-separated");
     }
 }
 
@@ -373,7 +393,12 @@ fn test_list_command_with_custom_columns() {
 
     let file_path = repo.path().join("test.txt");
     fs::write(&file_path, "AI content\n").unwrap();
-    checkpoint_with_message(&repo, "Add test file", vec!["test.txt".to_string()], "conv-1");
+    checkpoint_with_message(
+        &repo,
+        "Add test file",
+        vec!["test.txt".to_string()],
+        "conv-1",
+    );
 
     repo.git(&["add", "-A"]).unwrap();
     repo.git(&["commit", "-m", "Add test file"]).unwrap();
@@ -411,7 +436,12 @@ fn test_next_command_returns_json() {
 
     let file_path = repo.path().join("test.txt");
     fs::write(&file_path, "AI content\n").unwrap();
-    checkpoint_with_message(&repo, "Add test file", vec!["test.txt".to_string()], "conv-1");
+    checkpoint_with_message(
+        &repo,
+        "Add test file",
+        vec!["test.txt".to_string()],
+        "conv-1",
+    );
 
     repo.git(&["add", "-A"]).unwrap();
     repo.git(&["commit", "-m", "Add test file"]).unwrap();
@@ -531,7 +561,12 @@ fn test_next_command_no_more_prompts() {
 
     let file_path = repo.path().join("test.txt");
     fs::write(&file_path, "AI content\n").unwrap();
-    checkpoint_with_message(&repo, "Add test file", vec!["test.txt".to_string()], "conv-1");
+    checkpoint_with_message(
+        &repo,
+        "Add test file",
+        vec!["test.txt".to_string()],
+        "conv-1",
+    );
 
     repo.git(&["add", "-A"]).unwrap();
     repo.git(&["commit", "-m", "Add test file"]).unwrap();
@@ -544,7 +579,10 @@ fn test_next_command_no_more_prompts() {
 
     // Try to get another prompt (should fail)
     let result2 = repo.git_ai(&["prompts", "next"]);
-    assert!(result2.is_err(), "Second next should fail (no more prompts)");
+    assert!(
+        result2.is_err(),
+        "Second next should fail (no more prompts)"
+    );
 
     let error = result2.unwrap_err();
     assert!(
@@ -570,7 +608,12 @@ fn test_reset_command() {
 
     let file_path = repo.path().join("test.txt");
     fs::write(&file_path, "AI content\n").unwrap();
-    checkpoint_with_message(&repo, "Add test file", vec!["test.txt".to_string()], "conv-1");
+    checkpoint_with_message(
+        &repo,
+        "Add test file",
+        vec!["test.txt".to_string()],
+        "conv-1",
+    );
 
     repo.git(&["add", "-A"]).unwrap();
     repo.git(&["commit", "-m", "Add test file"]).unwrap();
@@ -677,7 +720,12 @@ fn test_exec_command_select_query() {
 
     let file_path = repo.path().join("test.txt");
     fs::write(&file_path, "AI content\n").unwrap();
-    checkpoint_with_message(&repo, "Add test file", vec!["test.txt".to_string()], "conv-1");
+    checkpoint_with_message(
+        &repo,
+        "Add test file",
+        vec!["test.txt".to_string()],
+        "conv-1",
+    );
 
     repo.git(&["add", "-A"]).unwrap();
     repo.git(&["commit", "-m", "Add test file"]).unwrap();
@@ -721,7 +769,12 @@ fn test_exec_command_update_query() {
 
     let file_path = repo.path().join("test.txt");
     fs::write(&file_path, "AI content\n").unwrap();
-    checkpoint_with_message(&repo, "Add test file", vec!["test.txt".to_string()], "conv-1");
+    checkpoint_with_message(
+        &repo,
+        "Add test file",
+        vec!["test.txt".to_string()],
+        "conv-1",
+    );
 
     repo.git(&["add", "-A"]).unwrap();
     repo.git(&["commit", "-m", "Add test file"]).unwrap();
@@ -781,7 +834,12 @@ fn test_upsert_deduplicates_prompts() {
 
     let file_path = repo.path().join("test.txt");
     fs::write(&file_path, "AI content\n").unwrap();
-    checkpoint_with_message(&repo, "Add test file", vec!["test.txt".to_string()], "conv-1");
+    checkpoint_with_message(
+        &repo,
+        "Add test file",
+        vec!["test.txt".to_string()],
+        "conv-1",
+    );
 
     repo.git(&["add", "-A"]).unwrap();
     repo.git(&["commit", "-m", "Add test file"]).unwrap();
@@ -817,7 +875,12 @@ fn test_populate_aggregates_from_git_notes() {
 
     let file_path = repo.path().join("test.txt");
     fs::write(&file_path, "AI content\n").unwrap();
-    checkpoint_with_message(&repo, "Add test file", vec!["test.txt".to_string()], "conv-1");
+    checkpoint_with_message(
+        &repo,
+        "Add test file",
+        vec!["test.txt".to_string()],
+        "conv-1",
+    );
 
     repo.git(&["add", "-A"]).unwrap();
     repo.git(&["commit", "-m", "Add test file"]).unwrap();
@@ -913,7 +976,12 @@ fn test_accepted_rate_calculation() {
 
     let file_path = repo.path().join("test.txt");
     fs::write(&file_path, "AI content\n").unwrap();
-    checkpoint_with_message(&repo, "Add test file", vec!["test.txt".to_string()], "conv-1");
+    checkpoint_with_message(
+        &repo,
+        "Add test file",
+        vec!["test.txt".to_string()],
+        "conv-1",
+    );
 
     repo.git(&["add", "-A"]).unwrap();
     repo.git(&["commit", "-m", "Add test file"]).unwrap();
@@ -925,11 +993,10 @@ fn test_accepted_rate_calculation() {
     let conn = Connection::open(&prompts_db_path).unwrap();
 
     // Check that the column exists and can be queried
-    let result: rusqlite::Result<Option<f64>> = conn.query_row(
-        "SELECT accepted_rate FROM prompts LIMIT 1",
-        [],
-        |row| row.get(0),
-    );
+    let result: rusqlite::Result<Option<f64>> =
+        conn.query_row("SELECT accepted_rate FROM prompts LIMIT 1", [], |row| {
+            row.get(0)
+        });
 
     assert!(result.is_ok(), "Should be able to query accepted_rate");
 }
@@ -951,7 +1018,12 @@ fn test_timestamp_fields_populated() {
 
     let file_path = repo.path().join("test.txt");
     fs::write(&file_path, "AI content\n").unwrap();
-    checkpoint_with_message(&repo, "Add test file", vec!["test.txt".to_string()], "conv-1");
+    checkpoint_with_message(
+        &repo,
+        "Add test file",
+        vec!["test.txt".to_string()],
+        "conv-1",
+    );
 
     repo.git(&["add", "-A"]).unwrap();
     repo.git(&["commit", "-m", "Add test file"]).unwrap();
@@ -972,7 +1044,10 @@ fn test_timestamp_fields_populated() {
 
     assert!(created_at > 0, "created_at should be a valid timestamp");
     assert!(updated_at > 0, "updated_at should be a valid timestamp");
-    assert!(updated_at >= created_at, "updated_at should be >= created_at");
+    assert!(
+        updated_at >= created_at,
+        "updated_at should be >= created_at"
+    );
 
     // start_time and last_time may be Some or None depending on transcript
     if let Some(start) = start_time {
@@ -1028,7 +1103,12 @@ fn test_commit_sha_field_populated() {
 
     let file_path = repo.path().join("test.txt");
     fs::write(&file_path, "AI content\n").unwrap();
-    checkpoint_with_message(&repo, "Add test file", vec!["test.txt".to_string()], "conv-1");
+    checkpoint_with_message(
+        &repo,
+        "Add test file",
+        vec!["test.txt".to_string()],
+        "conv-1",
+    );
 
     repo.git(&["add", "-A"]).unwrap();
     let _commit_result = repo.git(&["commit", "-m", "Add test file"]).unwrap();
@@ -1039,7 +1119,9 @@ fn test_commit_sha_field_populated() {
     let prompts_db_path = repo.path().join("prompts.db");
     let conn = Connection::open(&prompts_db_path).unwrap();
     let commit_sha: Option<String> = conn
-        .query_row("SELECT commit_sha FROM prompts LIMIT 1", [], |row| row.get(0))
+        .query_row("SELECT commit_sha FROM prompts LIMIT 1", [], |row| {
+            row.get(0)
+        })
         .unwrap();
 
     assert!(
@@ -1068,7 +1150,12 @@ fn test_workdir_field_populated() {
 
     let file_path = repo.path().join("test.txt");
     fs::write(&file_path, "AI content\n").unwrap();
-    checkpoint_with_message(&repo, "Add test file", vec!["test.txt".to_string()], "conv-1");
+    checkpoint_with_message(
+        &repo,
+        "Add test file",
+        vec!["test.txt".to_string()],
+        "conv-1",
+    );
 
     repo.git(&["add", "-A"]).unwrap();
     repo.git(&["commit", "-m", "Add test file"]).unwrap();
@@ -1159,7 +1246,12 @@ fn test_unique_constraint_on_id() {
 
     let file_path = repo.path().join("test.txt");
     fs::write(&file_path, "AI content\n").unwrap();
-    checkpoint_with_message(&repo, "Add test file", vec!["test.txt".to_string()], "conv-1");
+    checkpoint_with_message(
+        &repo,
+        "Add test file",
+        vec!["test.txt".to_string()],
+        "conv-1",
+    );
 
     repo.git(&["add", "-A"]).unwrap();
     repo.git(&["commit", "-m", "Add test file"]).unwrap();

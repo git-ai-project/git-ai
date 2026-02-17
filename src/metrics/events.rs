@@ -789,7 +789,9 @@ mod tests {
         );
         assert_eq!(
             values.commit_body,
-            Some(Some("This is the commit body\n\nWith multiple lines".to_string()))
+            Some(Some(
+                "This is the commit body\n\nWith multiple lines".to_string()
+            ))
         );
     }
 
@@ -874,10 +876,7 @@ mod tests {
 
         let sparse = PosEncoded::to_sparse(&values);
 
-        assert_eq!(
-            sparse.get("0"),
-            Some(&Value::String("copilot".to_string()))
-        );
+        assert_eq!(sparse.get("0"), Some(&Value::String("copilot".to_string())));
         assert_eq!(sparse.get("1"), Some(&Value::String("failed".to_string())));
         assert_eq!(
             sparse.get("2"),
@@ -900,19 +899,13 @@ mod tests {
         let values = <InstallHooksValues as PosEncoded>::from_sparse(&sparse);
 
         assert_eq!(values.tool_id, Some(Some("windsurf".to_string())));
-        assert_eq!(
-            values.status,
-            Some(Some("already_installed".to_string()))
-        );
+        assert_eq!(values.status, Some(Some("already_installed".to_string())));
         assert_eq!(values.message, Some(None));
     }
 
     #[test]
     fn test_install_hooks_event_id() {
-        assert_eq!(
-            InstallHooksValues::event_id(),
-            MetricEventId::InstallHooks
-        );
+        assert_eq!(InstallHooksValues::event_id(), MetricEventId::InstallHooks);
         assert_eq!(InstallHooksValues::event_id() as u16, 3);
     }
 

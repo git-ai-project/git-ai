@@ -24,7 +24,10 @@ fn test_sublime_merge_installer_id() {
 #[test]
 fn test_sublime_merge_platform_supported() {
     let installer = SublimeMergeInstaller;
-    assert!(installer.is_platform_supported(), "Sublime Merge should be supported on all platforms");
+    assert!(
+        installer.is_platform_supported(),
+        "Sublime Merge should be supported on all platforms"
+    );
 }
 
 #[test]
@@ -47,7 +50,8 @@ fn test_check_client_not_installed() {
 #[test]
 fn test_install_prefs_creates_directory_structure() {
     let temp_dir = TempDir::new().unwrap();
-    let prefs_file = temp_dir.path()
+    let prefs_file = temp_dir
+        .path()
         .join("Packages")
         .join("User")
         .join("Preferences.sublime-settings");
@@ -200,9 +204,7 @@ fn test_windows_paths() {
 fn test_linux_paths() {
     // Verify Linux-specific path logic
     let home = std::env::var("HOME").unwrap_or_else(|_| "/home/test".to_string());
-    let expected = PathBuf::from(&home)
-        .join(".config")
-        .join("sublime-merge");
+    let expected = PathBuf::from(&home).join(".config").join("sublime-merge");
 
     assert!(expected.to_string_lossy().contains(".config"));
     assert!(expected.to_string_lossy().contains("sublime-merge"));
@@ -243,12 +245,21 @@ fn test_check_result_consistency() {
 
     // Logical consistency checks
     if !result.client_installed {
-        assert!(!result.prefs_configured, "Can't be configured if not installed");
-        assert!(!result.prefs_up_to_date, "Can't be up to date if not installed");
+        assert!(
+            !result.prefs_configured,
+            "Can't be configured if not installed"
+        );
+        assert!(
+            !result.prefs_up_to_date,
+            "Can't be up to date if not installed"
+        );
     }
 
     if result.prefs_up_to_date {
-        assert!(result.prefs_configured, "Must be configured to be up to date");
+        assert!(
+            result.prefs_configured,
+            "Must be configured to be up to date"
+        );
     }
 }
 
@@ -274,10 +285,7 @@ fn test_git_path_with_unicode() {
 #[test]
 fn test_very_long_git_path() {
     let installer = SublimeMergeInstaller;
-    let long_path = format!(
-        "/usr/local/bin/{}",
-        "very_long_directory_name_".repeat(10)
-    );
+    let long_path = format!("/usr/local/bin/{}", "very_long_directory_name_".repeat(10));
     let params = create_test_params(PathBuf::from(long_path));
 
     let result = installer.check_client(&params);
@@ -290,7 +298,10 @@ fn test_backslash_conversion_for_windows_compatibility() {
     {
         let path = PathBuf::from("C:\\Users\\Test\\git-ai.exe");
         let converted = path.to_string_lossy().replace('\\', "/");
-        assert!(converted.contains("/"), "Should convert backslashes to forward slashes");
+        assert!(
+            converted.contains("/"),
+            "Should convert backslashes to forward slashes"
+        );
         assert!(!converted.contains("\\"), "Should not contain backslashes");
         assert_eq!(converted, "C:/Users/Test/git-ai.exe");
     }
@@ -299,7 +310,10 @@ fn test_backslash_conversion_for_windows_compatibility() {
     {
         let path = PathBuf::from("/usr/local/bin/git-ai");
         let converted = path.to_string_lossy().replace('\\', "/");
-        assert_eq!(converted, "/usr/local/bin/git-ai", "Unix paths should be unchanged");
+        assert_eq!(
+            converted, "/usr/local/bin/git-ai",
+            "Unix paths should be unchanged"
+        );
     }
 }
 
@@ -312,7 +326,10 @@ fn test_jsonc_property_setting() {
     let root = CstRootNode::parse(content, &parse_options).unwrap();
 
     let obj = root.object_value_or_set();
-    assert!(obj.get("git_binary").is_none(), "New object should not have git_binary");
+    assert!(
+        obj.get("git_binary").is_none(),
+        "New object should not have git_binary"
+    );
 
     // Test appending a new property
     obj.append("git_binary", jsonc_parser::json!("/test/path"));

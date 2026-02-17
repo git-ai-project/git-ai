@@ -9,7 +9,6 @@
 /// 5. Edge cases: empty arguments, special characters
 /// 6. Stats command with various options
 /// 7. Repository-aware commands (blame, diff, stats)
-
 mod repos;
 
 use repos::test_file::ExpectedLineExt;
@@ -302,10 +301,7 @@ fn test_blame_without_file_argument() {
 
     // Blame without a file should fail
     let result = repo.git_ai(&["blame"]);
-    assert!(
-        result.is_err(),
-        "blame without file argument should fail"
-    );
+    assert!(result.is_err(), "blame without file argument should fail");
 
     let err = result.unwrap_err();
     assert!(
@@ -806,7 +802,11 @@ fn test_stats_no_commit_found() {
     let repo = TestRepo::new();
 
     // Try to get stats for a non-existent commit
-    let result = repo.git_ai(&["stats", "--json", "0000000000000000000000000000000000000000"]);
+    let result = repo.git_ai(&[
+        "stats",
+        "--json",
+        "0000000000000000000000000000000000000000",
+    ]);
 
     // Should fail with error
     assert!(result.is_err(), "stats for invalid commit should fail");
@@ -847,10 +847,7 @@ fn test_blame_nonexistent_file() {
     let result = repo.git_ai(&["blame", "nonexistent_file.txt"]);
 
     // Should fail
-    assert!(
-        result.is_err(),
-        "blame on nonexistent file should fail"
-    );
+    assert!(result.is_err(), "blame on nonexistent file should fail");
     let err = result.unwrap_err();
     assert!(
         err.contains("failed") || err.contains("not found") || err.contains("No such file"),

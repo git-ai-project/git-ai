@@ -67,10 +67,7 @@ fn test_blame_success_only_human_lines() {
     let repo = TestRepo::new();
     let mut file = repo.filename("human.txt");
 
-    file.set_contents(lines![
-        "Human line 1".human(),
-        "Human line 2".human()
-    ]);
+    file.set_contents(lines!["Human line 1".human(), "Human line 2".human()]);
 
     repo.stage_all_and_commit("All human").unwrap();
 
@@ -88,10 +85,7 @@ fn test_blame_success_only_ai_lines() {
     let repo = TestRepo::new();
     let mut file = repo.filename("ai.txt");
 
-    file.set_contents(lines![
-        "AI line 1".ai(),
-        "AI line 2".ai()
-    ]);
+    file.set_contents(lines!["AI line 1".ai(), "AI line 2".ai()]);
 
     repo.stage_all_and_commit("All AI").unwrap();
 
@@ -108,13 +102,7 @@ fn test_blame_success_with_line_range() {
     let repo = TestRepo::new();
     let mut file = repo.filename("ranges.txt");
 
-    file.set_contents(lines![
-        "Line 1",
-        "Line 2",
-        "Line 3",
-        "Line 4",
-        "Line 5"
-    ]);
+    file.set_contents(lines!["Line 1", "Line 2", "Line 3", "Line 4", "Line 5"]);
 
     repo.stage_all_and_commit("Multi-line file").unwrap();
 
@@ -159,10 +147,7 @@ fn test_blame_success_json_format() {
     let repo = TestRepo::new();
     let mut file = repo.filename("json_test.txt");
 
-    file.set_contents(lines![
-        "Human line".human(),
-        "AI line".ai()
-    ]);
+    file.set_contents(lines!["Human line".human(), "AI line".ai()]);
 
     repo.stage_all_and_commit("JSON test").unwrap();
 
@@ -173,8 +158,8 @@ fn test_blame_success_json_format() {
     assert!(output.contains("\"prompts\""));
 
     // Parse JSON to verify structure
-    let json: serde_json::Value = serde_json::from_str(&output)
-        .expect("Output should be valid JSON");
+    let json: serde_json::Value =
+        serde_json::from_str(&output).expect("Output should be valid JSON");
 
     assert!(json["lines"].is_object());
     assert!(json["prompts"].is_object());
@@ -195,11 +180,12 @@ fn test_blame_error_missing_file() {
     let err = result.unwrap_err();
     assert!(
         err.contains("File not found")
-        || err.contains("does not exist")
-        || err.contains("No such file")
-        || err.contains("pathspec")
-        || err.contains("did not match"),
-        "Expected error about missing file, got: {}", err
+            || err.contains("does not exist")
+            || err.contains("No such file")
+            || err.contains("pathspec")
+            || err.contains("did not match"),
+        "Expected error about missing file, got: {}",
+        err
     );
 }
 
@@ -327,7 +313,10 @@ fn test_blame_edge_empty_file() {
 
     // Empty files return an error because line range 1:0 is invalid
     let result = repo.git_ai(&["blame", "empty.txt"]);
-    assert!(result.is_err(), "Empty file should fail with line range error");
+    assert!(
+        result.is_err(),
+        "Empty file should fail with line range error"
+    );
 }
 
 #[test]
@@ -494,7 +483,9 @@ fn test_blame_format_line_porcelain() {
     file.set_contents(lines!["Line 1", "Line 2"]);
     repo.stage_all_and_commit("Test").unwrap();
 
-    let output = repo.git_ai(&["blame", "--line-porcelain", "test.txt"]).unwrap();
+    let output = repo
+        .git_ai(&["blame", "--line-porcelain", "test.txt"])
+        .unwrap();
 
     // Line porcelain should have metadata for each line
     let author_count = output.matches("author ").count();
@@ -510,7 +501,9 @@ fn test_blame_format_incremental() {
     file.set_contents(lines!["Line 1", "Line 2"]);
     repo.stage_all_and_commit("Test").unwrap();
 
-    let output = repo.git_ai(&["blame", "--incremental", "test.txt"]).unwrap();
+    let output = repo
+        .git_ai(&["blame", "--incremental", "test.txt"])
+        .unwrap();
 
     // Incremental format should have metadata without content lines
     assert!(output.contains("author "));
@@ -529,15 +522,16 @@ fn test_blame_format_json_structure() {
 
     let output = repo.git_ai(&["blame", "--json", "test.txt"]).unwrap();
 
-    let json: serde_json::Value = serde_json::from_str(&output)
-        .expect("Should be valid JSON");
+    let json: serde_json::Value = serde_json::from_str(&output).expect("Should be valid JSON");
 
     // Verify JSON structure matches JsonBlameOutput
     assert!(json.get("lines").is_some());
     assert!(json.get("prompts").is_some());
 
     let lines = json["lines"].as_object().expect("lines should be object");
-    let prompts = json["prompts"].as_object().expect("prompts should be object");
+    let prompts = json["prompts"]
+        .as_object()
+        .expect("prompts should be object");
 
     // Should have AI line mapped to prompt
     assert!(!lines.is_empty());
@@ -561,15 +555,17 @@ fn test_blame_format_json_line_ranges() {
 
     let output = repo.git_ai(&["blame", "--json", "test.txt"]).unwrap();
 
-    let json: serde_json::Value = serde_json::from_str(&output)
-        .expect("Should be valid JSON");
+    let json: serde_json::Value = serde_json::from_str(&output).expect("Should be valid JSON");
 
     let lines = json["lines"].as_object().unwrap();
 
     // Consecutive AI lines should be grouped into ranges
     // Format should be either "1" or "1-3" for ranges
     let has_range = lines.keys().any(|k| k.contains("-"));
-    assert!(has_range || lines.len() == 1, "Should group consecutive lines");
+    assert!(
+        has_range || lines.len() == 1,
+        "Should group consecutive lines"
+    );
 }
 
 #[test]
@@ -609,11 +605,7 @@ fn test_blame_ai_authorship_hunk_splitting() {
     let repo = TestRepo::new();
     let mut file = repo.filename("test.txt");
 
-    file.set_contents(lines![
-        "Line 1",
-        "Line 2",
-        "Line 3"
-    ]);
+    file.set_contents(lines!["Line 1", "Line 2", "Line 3"]);
 
     let commit_sha = repo.stage_all_and_commit("Initial").unwrap().commit_sha;
 
@@ -684,10 +676,7 @@ fn test_blame_ai_authorship_hunk_splitting() {
     let hunks = gitai_repo.blame_hunks("test.txt", 1, 3, &options).unwrap();
 
     // Should have separate hunks for different human authors
-    let ai_authors: Vec<_> = hunks
-        .iter()
-        .map(|h| h.ai_human_author.clone())
-        .collect();
+    let ai_authors: Vec<_> = hunks.iter().map(|h| h.ai_human_author.clone()).collect();
 
     assert!(ai_authors.contains(&Some("Alice <alice@example.com>".to_string())));
     assert!(ai_authors.contains(&Some("Bob <bob@example.com>".to_string())));
@@ -766,7 +755,11 @@ fn test_blame_ai_authorship_return_human_as_human() {
 
     // Human lines should be marked as "Human" (case-insensitive check)
     let author = line_authors.get(&1).unwrap();
-    assert!(author.eq_ignore_ascii_case("human"), "Expected 'Human' but got '{}'", author);
+    assert!(
+        author.eq_ignore_ascii_case("human"),
+        "Expected 'Human' but got '{}'",
+        author
+    );
 }
 
 // =============================================================================
@@ -895,10 +888,12 @@ fn test_blame_contents_modified_buffer() {
     // Modified content not yet committed
     let modified = "Modified line\n";
 
-    let output = repo.git_ai_with_stdin(
-        &["blame", "--contents", "-", "test.txt"],
-        modified.as_bytes()
-    ).unwrap();
+    let output = repo
+        .git_ai_with_stdin(
+            &["blame", "--contents", "-", "test.txt"],
+            modified.as_bytes(),
+        )
+        .unwrap();
 
     assert!(output.contains("Modified line"));
     assert!(output.contains("External file"));
@@ -914,13 +909,7 @@ fn test_blame_multiple_line_ranges() {
     let repo = TestRepo::new();
     let mut file = repo.filename("test.txt");
 
-    file.set_contents(lines![
-        "Line 1",
-        "Line 2",
-        "Line 3",
-        "Line 4",
-        "Line 5"
-    ]);
+    file.set_contents(lines!["Line 1", "Line 2", "Line 3", "Line 4", "Line 5"]);
     repo.stage_all_and_commit("Five lines").unwrap();
 
     let gitai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
@@ -981,7 +970,9 @@ fn test_blame_abbrev_custom_length() {
     file.set_contents(lines!["Line 1"]);
     repo.stage_all_and_commit("Test").unwrap();
 
-    let output = repo.git_ai(&["blame", "--abbrev", "10", "test.txt"]).unwrap();
+    let output = repo
+        .git_ai(&["blame", "--abbrev", "10", "test.txt"])
+        .unwrap();
 
     // First field should be 10-character hash
     let first_field = output.split_whitespace().next().unwrap();
@@ -1017,12 +1008,15 @@ fn test_blame_date_format_short() {
     file.set_contents(lines!["Line 1"]);
     repo.stage_all_and_commit("Test").unwrap();
 
-    let output = repo.git_ai(&["blame", "--date", "short", "test.txt"]).unwrap();
+    let output = repo
+        .git_ai(&["blame", "--date", "short", "test.txt"])
+        .unwrap();
 
     // Should contain date in YYYY-MM-DD format
     assert!(output.contains("-")); // Date separator
     let parts: Vec<&str> = output.split_whitespace().collect();
-    let date_field = parts.iter()
+    let date_field = parts
+        .iter()
         .find(|s| s.len() == 10 && s.matches('-').count() == 2);
     assert!(date_field.is_some(), "Should have YYYY-MM-DD date");
 }
@@ -1060,9 +1054,16 @@ fn test_blame_stress_deeply_nested_path() {
     // Stress: File in deeply nested directory structure
     let repo = TestRepo::new();
 
-    let deep_path = repo.path()
-        .join("a").join("b").join("c").join("d")
-        .join("e").join("f").join("g").join("h");
+    let deep_path = repo
+        .path()
+        .join("a")
+        .join("b")
+        .join("c")
+        .join("d")
+        .join("e")
+        .join("f")
+        .join("g")
+        .join("h");
     std::fs::create_dir_all(&deep_path).unwrap();
 
     let file_path = deep_path.join("deep.txt");

@@ -345,11 +345,11 @@ fn test_layout_constraints() {
     use ratatui::layout::{Constraint, Direction};
 
     let constraints = vec![
-        Constraint::Length(3),  // Header
-        Constraint::Length(5),  // Title input
-        Constraint::Length(8),  // Options
-        Constraint::Min(0),     // Spacer
-        Constraint::Length(3),  // Footer
+        Constraint::Length(3), // Header
+        Constraint::Length(5), // Title input
+        Constraint::Length(8), // Options
+        Constraint::Min(0),    // Spacer
+        Constraint::Length(3), // Footer
     ];
 
     assert_eq!(constraints.len(), 5);

@@ -56,7 +56,8 @@ fn test_pre_rebase_hook_starts_new_rebase() {
         stashed_va: None,
     };
     let parsed_args = make_rebase_invocation(&["main"]);
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
 
     // Execute pre-hook
     pre_rebase_hook(&parsed_args, &mut repository, &mut context);
@@ -66,7 +67,9 @@ fn test_pre_rebase_hook_starts_new_rebase() {
 
     // Verify RebaseStart event was logged
     let events = repository.storage.read_rewrite_events().unwrap();
-    let has_start = events.iter().any(|e| matches!(e, RewriteLogEvent::RebaseStart { .. }));
+    let has_start = events
+        .iter()
+        .any(|e| matches!(e, RewriteLogEvent::RebaseStart { .. }));
     assert!(has_start, "RebaseStart event should be logged");
 }
 
@@ -84,7 +87,8 @@ fn test_pre_rebase_hook_continuing_rebase() {
     let rebase_dir = repo.path().join(".git").join("rebase-merge");
     std::fs::create_dir_all(&rebase_dir).unwrap();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let mut context = CommandHooksContext {
         pre_commit_hook_result: None,
         rebase_original_head: None,
@@ -119,7 +123,8 @@ fn test_pre_rebase_hook_interactive_mode() {
         .stage();
     repo.commit("feature commit").unwrap();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let mut context = CommandHooksContext {
         pre_commit_hook_result: None,
         rebase_original_head: None,
@@ -165,7 +170,8 @@ fn test_pre_rebase_hook_with_onto() {
         .stage();
     repo.commit("feature commit").unwrap();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let mut context = CommandHooksContext {
         pre_commit_hook_result: None,
         rebase_original_head: None,
@@ -191,16 +197,15 @@ fn test_pre_rebase_hook_with_onto() {
 fn test_post_rebase_hook_still_in_progress() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base commit").unwrap();
 
     // Simulate in-progress rebase
     let rebase_dir = repo.path().join(".git").join("rebase-merge");
     std::fs::create_dir_all(&rebase_dir).unwrap();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let context = CommandHooksContext {
         pre_commit_hook_result: None,
         rebase_original_head: None,
@@ -211,9 +216,7 @@ fn test_post_rebase_hook_still_in_progress() {
         stashed_va: None,
     };
     let parsed_args = make_rebase_invocation(&["main"]);
-    let exit_status = std::process::Command::new("true")
-        .status()
-        .unwrap();
+    let exit_status = std::process::Command::new("true").status().unwrap();
 
     // Execute post-hook
     handle_rebase_post_command(&context, &parsed_args, exit_status, &mut repository);
@@ -239,21 +242,22 @@ fn test_post_rebase_hook_still_in_progress() {
 fn test_post_rebase_hook_aborted() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     let original_commit = repo.commit("base commit").unwrap();
 
     // Log a RebaseStart event
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let start_event = RewriteLogEvent::rebase_start(
-        git_ai::git::rewrite_log::RebaseStartEvent::new_with_onto(
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let start_event =
+        RewriteLogEvent::rebase_start(git_ai::git::rewrite_log::RebaseStartEvent::new_with_onto(
             original_commit.commit_sha.clone(),
             false,
             None,
-        ),
-    );
-    repository.storage.append_rewrite_event(start_event).unwrap();
+        ));
+    repository
+        .storage
+        .append_rewrite_event(start_event)
+        .unwrap();
 
     // Prepare context with original head
     let mut context = CommandHooksContext {
@@ -270,7 +274,13 @@ fn test_post_rebase_hook_aborted() {
     let parsed_args = make_rebase_invocation(&["--abort"]);
     let exit_status = std::process::Command::new("false")
         .status()
-        .unwrap_or_else(|_| std::process::Command::new("sh").arg("-c").arg("exit 1").status().unwrap());
+        .unwrap_or_else(|_| {
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg("exit 1")
+                .status()
+                .unwrap()
+        });
 
     handle_rebase_post_command(&context, &parsed_args, exit_status, &mut repository);
 
@@ -287,12 +297,11 @@ fn test_post_rebase_hook_aborted() {
 fn test_post_rebase_hook_dry_run() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base commit").unwrap();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let context = CommandHooksContext {
         pre_commit_hook_result: None,
         rebase_original_head: None,
@@ -303,9 +312,7 @@ fn test_post_rebase_hook_dry_run() {
         stashed_va: None,
     };
     let parsed_args = make_rebase_invocation(&["--dry-run", "main"]);
-    let exit_status = std::process::Command::new("true")
-        .status()
-        .unwrap();
+    let exit_status = std::process::Command::new("true").status().unwrap();
 
     handle_rebase_post_command(&context, &parsed_args, exit_status, &mut repository);
 
@@ -317,7 +324,11 @@ fn test_post_rebase_hook_dry_run() {
     handle_rebase_post_command(&context, &parsed_args, exit_status, &mut repository);
 
     let events_after = repository.storage.read_rewrite_events().unwrap_or_default();
-    assert_eq!(events_after.len(), initial_count, "Dry run should not add events");
+    assert_eq!(
+        events_after.len(),
+        initial_count,
+        "Dry run should not add events"
+    );
 }
 
 // ==============================================================================
@@ -419,7 +430,8 @@ fn test_rebase_event_sequence_start_abort() {
 fn test_rebase_start_event_creation() {
     use git_ai::git::rewrite_log::RebaseStartEvent;
 
-    let event = RebaseStartEvent::new_with_onto("abc123".to_string(), true, Some("def456".to_string()));
+    let event =
+        RebaseStartEvent::new_with_onto("abc123".to_string(), true, Some("def456".to_string()));
 
     assert_eq!(event.original_head, "abc123");
     assert!(event.is_interactive);
@@ -536,11 +548,9 @@ fn test_rebase_interactive_long_flag() {
 fn test_active_rebase_with_start_event() {
     use git_ai::git::rewrite_log::RebaseStartEvent;
 
-    let events = vec![RewriteLogEvent::rebase_start(RebaseStartEvent::new_with_onto(
-        "abc123".to_string(),
-        false,
-        None,
-    ))];
+    let events = vec![RewriteLogEvent::rebase_start(
+        RebaseStartEvent::new_with_onto("abc123".to_string(), false, None),
+    )];
 
     // Simulate active detection (newest-first)
     let mut has_active = false;

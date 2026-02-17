@@ -182,11 +182,7 @@ fn test_parse_commits_with_flags() {
 
 #[test]
 fn test_filter_flag_with_value() {
-    let args = vec![
-        "-m".to_string(),
-        "1".to_string(),
-        "commit1".to_string(),
-    ];
+    let args = vec!["-m".to_string(), "1".to_string(), "commit1".to_string()];
 
     // Simulate filtering -m and its value
     let mut filtered = Vec::new();
@@ -389,7 +385,9 @@ fn test_pre_hook_new_cherry_pick() {
     let repo = TestRepo::new();
 
     // Create a commit
-    repo.filename("test.txt").set_contents(vec!["content"]).stage();
+    repo.filename("test.txt")
+        .set_contents(vec!["content"])
+        .stage();
     let commit = repo.commit("test commit").unwrap();
 
     // In a new cherry-pick, CHERRY_PICK_HEAD doesn't exist
@@ -405,7 +403,9 @@ fn test_pre_hook_continuing_cherry_pick() {
     let repo = TestRepo::new();
 
     // Create a commit
-    repo.filename("test.txt").set_contents(vec!["content"]).stage();
+    repo.filename("test.txt")
+        .set_contents(vec!["content"])
+        .stage();
     repo.commit("test commit").unwrap();
 
     // Simulate continuing state by creating CHERRY_PICK_HEAD
@@ -490,16 +490,22 @@ fn test_build_commit_mappings() {
     let repo = TestRepo::new();
 
     // Create first commit
-    repo.filename("file1.txt").set_contents(vec!["content1"]).stage();
+    repo.filename("file1.txt")
+        .set_contents(vec!["content1"])
+        .stage();
     let commit1 = repo.commit("commit 1").unwrap();
     let original_head = commit1.commit_sha;
 
     // Create second commit
-    repo.filename("file2.txt").set_contents(vec!["content2"]).stage();
+    repo.filename("file2.txt")
+        .set_contents(vec!["content2"])
+        .stage();
     repo.commit("commit 2").unwrap();
 
     // Create third commit
-    repo.filename("file3.txt").set_contents(vec!["content3"]).stage();
+    repo.filename("file3.txt")
+        .set_contents(vec!["content3"])
+        .stage();
     let commit3 = repo.commit("commit 3").unwrap();
     let new_head = commit3.commit_sha;
 
@@ -512,7 +518,11 @@ fn test_build_commit_mappings() {
 
 #[test]
 fn test_commit_mapping_reversal() {
-    let mut commits = vec!["commit3".to_string(), "commit2".to_string(), "commit1".to_string()];
+    let mut commits = vec![
+        "commit3".to_string(),
+        "commit2".to_string(),
+        "commit1".to_string(),
+    ];
 
     // Reverse to get chronological order
     commits.reverse();
@@ -615,7 +625,11 @@ fn test_no_start_event_found() {
 
 #[test]
 fn test_dry_run_detection() {
-    let args1 = vec!["cherry-pick".to_string(), "--dry-run".to_string(), "commit".to_string()];
+    let args1 = vec![
+        "cherry-pick".to_string(),
+        "--dry-run".to_string(),
+        "commit".to_string(),
+    ];
     let args2 = vec!["cherry-pick".to_string(), "commit".to_string()];
 
     let is_dry_run_1 = args1.iter().any(|a| a == "--dry-run");
@@ -682,7 +696,9 @@ fn test_cherry_pick_complete_flow() {
 
     // Create a branch
     repo.git(&["checkout", "-b", "feature"]).unwrap();
-    repo.filename("feature.txt").set_contents(vec!["feature"]).stage();
+    repo.filename("feature.txt")
+        .set_contents(vec!["feature"])
+        .stage();
     let commit2 = repo.commit("feature commit").unwrap();
     let feature_commit = commit2.commit_sha;
 

@@ -36,10 +36,8 @@ fn test_find_repository_in_valid_repo() {
     repo.stage_all_and_commit("Initial commit").unwrap();
 
     // Should successfully find repository
-    let found_repo = find_repository(&[
-        "-C".to_string(),
-        repo.path().to_str().unwrap().to_string(),
-    ]);
+    let found_repo =
+        find_repository(&["-C".to_string(), repo.path().to_str().unwrap().to_string()]);
 
     assert!(found_repo.is_ok(), "Should find valid repository");
 }
@@ -53,12 +51,12 @@ fn test_find_repository_in_subdirectory() {
     fs::create_dir(&subdir).unwrap();
 
     // Should find repository from subdirectory
-    let found_repo = find_repository(&[
-        "-C".to_string(),
-        subdir.to_str().unwrap().to_string(),
-    ]);
+    let found_repo = find_repository(&["-C".to_string(), subdir.to_str().unwrap().to_string()]);
 
-    assert!(found_repo.is_ok(), "Should find repository from subdirectory");
+    assert!(
+        found_repo.is_ok(),
+        "Should find repository from subdirectory"
+    );
 }
 
 #[test]
@@ -70,12 +68,12 @@ fn test_find_repository_in_nested_subdirectory() {
     fs::create_dir_all(&nested).unwrap();
 
     // Should find repository from deeply nested subdirectory
-    let found_repo = find_repository(&[
-        "-C".to_string(),
-        nested.to_str().unwrap().to_string(),
-    ]);
+    let found_repo = find_repository(&["-C".to_string(), nested.to_str().unwrap().to_string()]);
 
-    assert!(found_repo.is_ok(), "Should find repository from nested subdirectory");
+    assert!(
+        found_repo.is_ok(),
+        "Should find repository from nested subdirectory"
+    );
 }
 
 #[test]
@@ -90,7 +88,10 @@ fn test_find_repository_for_bare_repo() {
     assert!(found_repo.is_ok(), "Should find bare repository");
 
     let repo = found_repo.unwrap();
-    assert!(repo.is_bare_repository().unwrap(), "Should detect bare repository");
+    assert!(
+        repo.is_bare_repository().unwrap(),
+        "Should detect bare repository"
+    );
 }
 
 #[test]
@@ -104,13 +105,19 @@ fn test_repository_path_methods() {
 
     // Test path() returns .git directory
     let git_path = repo.path();
-    assert!(git_path.ends_with(".git"), "path() should return .git directory");
+    assert!(
+        git_path.ends_with(".git"),
+        "path() should return .git directory"
+    );
 
     // Test workdir() returns repository root (use canonical paths for macOS /var vs /private/var)
     let workdir = repo.workdir().unwrap();
     let canonical_workdir = workdir.canonicalize().unwrap();
     let canonical_test_path = test_repo.path().canonicalize().unwrap();
-    assert_eq!(canonical_workdir, canonical_test_path, "workdir() should return repository root");
+    assert_eq!(
+        canonical_workdir, canonical_test_path,
+        "workdir() should return repository root"
+    );
 }
 
 #[test]
@@ -123,7 +130,10 @@ fn test_canonical_workdir() {
     .unwrap();
 
     let canonical = repo.canonical_workdir();
-    assert!(canonical.is_absolute(), "Canonical workdir should be absolute");
+    assert!(
+        canonical.is_absolute(),
+        "Canonical workdir should be absolute"
+    );
 }
 
 #[test]
@@ -138,11 +148,17 @@ fn test_path_is_in_workdir() {
     // Path inside workdir - create the file so it can be canonicalized
     let inside = test_repo.path().join("file.txt");
     fs::write(&inside, "test content").unwrap();
-    assert!(repo.path_is_in_workdir(&inside), "File in workdir should return true");
+    assert!(
+        repo.path_is_in_workdir(&inside),
+        "File in workdir should return true"
+    );
 
     // Path outside workdir
     let outside = Path::new("/tmp/outside.txt");
-    assert!(!repo.path_is_in_workdir(outside), "File outside workdir should return false");
+    assert!(
+        !repo.path_is_in_workdir(outside),
+        "File outside workdir should return false"
+    );
 }
 
 // ============================================================================
@@ -217,7 +233,10 @@ fn test_head_target() {
     let head = repo.head().unwrap();
     let target = head.target().unwrap();
 
-    assert_eq!(target, commit.commit_sha, "HEAD target should match commit SHA");
+    assert_eq!(
+        target, commit.commit_sha,
+        "HEAD target should match commit SHA"
+    );
 }
 
 #[test]
@@ -286,7 +305,11 @@ fn test_find_commit() {
     assert!(commit.is_ok(), "Should find commit by SHA");
 
     let commit = commit.unwrap();
-    assert_eq!(commit.id(), commit_info.commit_sha, "Commit ID should match");
+    assert_eq!(
+        commit.id(),
+        commit_info.commit_sha,
+        "Commit ID should match"
+    );
 }
 
 #[test]
@@ -296,7 +319,9 @@ fn test_commit_summary() {
     // Create commit with message
     let mut file = test_repo.filename("test.txt");
     file.set_contents(lines!["content".human()]);
-    let commit_info = test_repo.stage_all_and_commit("Test summary message").unwrap();
+    let commit_info = test_repo
+        .stage_all_and_commit("Test summary message")
+        .unwrap();
 
     let repo = find_repository(&[
         "-C".to_string(),
@@ -307,7 +332,10 @@ fn test_commit_summary() {
     let commit = repo.find_commit(commit_info.commit_sha).unwrap();
     let summary = commit.summary().unwrap();
 
-    assert_eq!(summary, "Test summary message", "Summary should match commit message");
+    assert_eq!(
+        summary, "Test summary message",
+        "Summary should match commit message"
+    );
 }
 
 #[test]
@@ -322,7 +350,11 @@ fn test_commit_body() {
     let message = "Summary line\n\nBody line 1\nBody line 2";
     test_repo.git(&["commit", "-m", message]).unwrap();
 
-    let commit_sha = test_repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let commit_sha = test_repo
+        .git(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
 
     let repo = find_repository(&[
         "-C".to_string(),
@@ -333,8 +365,14 @@ fn test_commit_body() {
     let commit = repo.find_commit(commit_sha).unwrap();
     let body = commit.body().unwrap();
 
-    assert!(body.contains("Body line 1"), "Body should contain first body line");
-    assert!(body.contains("Body line 2"), "Body should contain second body line");
+    assert!(
+        body.contains("Body line 1"),
+        "Body should contain first body line"
+    );
+    assert!(
+        body.contains("Body line 2"),
+        "Body should contain second body line"
+    );
 }
 
 #[test]
@@ -358,7 +396,11 @@ fn test_commit_parent() {
     let commit = repo.find_commit(second.commit_sha).unwrap();
     let parent = commit.parent(0).unwrap();
 
-    assert_eq!(parent.id(), first.commit_sha, "Parent should be first commit");
+    assert_eq!(
+        parent.id(),
+        first.commit_sha,
+        "Parent should be first commit"
+    );
 }
 
 #[test]
@@ -373,7 +415,11 @@ fn test_commit_parents_iterator() {
     file.set_contents(lines!["content2".human()]);
     test_repo.stage_all_and_commit("Second commit").unwrap();
 
-    let commit_sha = test_repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let commit_sha = test_repo
+        .git(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
 
     let repo = find_repository(&[
         "-C".to_string(),
@@ -408,12 +454,24 @@ fn test_commit_parent_count() {
 
     // Initial commit has no parents
     let first_commit = repo.find_commit(first.commit_sha).unwrap();
-    assert_eq!(first_commit.parent_count().unwrap(), 0, "Initial commit should have no parents");
+    assert_eq!(
+        first_commit.parent_count().unwrap(),
+        0,
+        "Initial commit should have no parents"
+    );
 
     // Second commit has one parent
-    let head_sha = test_repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let head_sha = test_repo
+        .git(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
     let second_commit = repo.find_commit(head_sha).unwrap();
-    assert_eq!(second_commit.parent_count().unwrap(), 1, "Second commit should have one parent");
+    assert_eq!(
+        second_commit.parent_count().unwrap(),
+        1,
+        "Second commit should have one parent"
+    );
 }
 
 #[test]
@@ -618,7 +676,10 @@ fn test_blob_content() {
     let blob_content = blob.content().unwrap();
 
     let blob_str = String::from_utf8(blob_content).unwrap();
-    assert!(blob_str.contains(content), "Blob content should match file content");
+    assert!(
+        blob_str.contains(content),
+        "Blob content should match file content"
+    );
 }
 
 // ============================================================================
@@ -641,7 +702,11 @@ fn test_config_get_str() {
 
     let name = name.unwrap();
     assert!(name.is_some(), "user.name should be set");
-    assert_eq!(name.unwrap(), "Test User", "user.name should be 'Test User'");
+    assert_eq!(
+        name.unwrap(),
+        "Test User",
+        "user.name should be 'Test User'"
+    );
 }
 
 #[test]
@@ -677,8 +742,14 @@ fn test_config_get_regexp() {
     assert!(configs.is_ok(), "Should get matching configs");
 
     let configs = configs.unwrap();
-    assert!(!configs.is_empty(), "Should have at least one user.* config");
-    assert!(configs.contains_key("user.name"), "Should contain user.name");
+    assert!(
+        !configs.is_empty(),
+        "Should have at least one user.* config"
+    );
+    assert!(
+        configs.contains_key("user.name"),
+        "Should contain user.name"
+    );
 }
 
 #[test]
@@ -711,7 +782,10 @@ fn test_git_supports_ignore_revs_file() {
     // Most modern git versions support this (added in 2.23.0)
     let supports = repo.git_supports_ignore_revs_file();
     // Just verify it returns a boolean without error
-    assert!(supports || !supports, "Should return boolean for ignore-revs-file support");
+    assert!(
+        supports || !supports,
+        "Should return boolean for ignore-revs-file support"
+    );
 }
 
 // ============================================================================
@@ -729,7 +803,10 @@ fn test_remotes_empty() {
     .unwrap();
 
     let remotes = repo.remotes().unwrap();
-    assert!(remotes.is_empty() || remotes == vec!["".to_string()], "New repo should have no remotes");
+    assert!(
+        remotes.is_empty() || remotes == vec!["".to_string()],
+        "New repo should have no remotes"
+    );
 }
 
 #[test]
@@ -743,7 +820,10 @@ fn test_remotes_with_origin() {
     .unwrap();
 
     let remotes = repo.remotes().unwrap();
-    assert!(remotes.contains(&"origin".to_string()), "Cloned repo should have origin remote");
+    assert!(
+        remotes.contains(&"origin".to_string()),
+        "Cloned repo should have origin remote"
+    );
 }
 
 #[test]
@@ -757,9 +837,14 @@ fn test_remotes_with_urls() {
     .unwrap();
 
     let remotes_with_urls = repo.remotes_with_urls().unwrap();
-    assert!(!remotes_with_urls.is_empty(), "Should have remotes with URLs");
+    assert!(
+        !remotes_with_urls.is_empty(),
+        "Should have remotes with URLs"
+    );
 
-    let has_origin = remotes_with_urls.iter().any(|(name, _url)| name == "origin");
+    let has_origin = remotes_with_urls
+        .iter()
+        .any(|(name, _url)| name == "origin");
     assert!(has_origin, "Should have origin remote with URL");
 }
 
@@ -775,7 +860,11 @@ fn test_get_default_remote() {
 
     let default_remote = repo.get_default_remote().unwrap();
     assert!(default_remote.is_some(), "Should have default remote");
-    assert_eq!(default_remote.unwrap(), "origin", "Default remote should be origin");
+    assert_eq!(
+        default_remote.unwrap(),
+        "origin",
+        "Default remote should be origin"
+    );
 }
 
 #[test]
@@ -790,8 +879,10 @@ fn test_get_default_remote_no_remotes() {
 
     let default_remote = repo.get_default_remote().unwrap();
     // New repos might have an empty string as a remote or None
-    assert!(default_remote.is_none() || default_remote == Some("".to_string()),
-            "Repo without remotes should have no default or empty default");
+    assert!(
+        default_remote.is_none() || default_remote == Some("".to_string()),
+        "Repo without remotes should have no default or empty default"
+    );
 }
 
 // ============================================================================
@@ -829,7 +920,10 @@ fn test_commit_range_length() {
     .unwrap();
 
     let length = range.length();
-    assert_eq!(length, 2, "Range should contain 2 commits (second and third)");
+    assert_eq!(
+        length, 2,
+        "Range should contain 2 commits (second and third)"
+    );
 }
 
 #[test]
@@ -865,8 +959,16 @@ fn test_commit_range_iteration() {
     assert_eq!(commits.len(), 2, "Should iterate over 2 commits");
 
     // Commits should be in reverse chronological order (newest first)
-    assert_eq!(commits[0].id(), third.commit_sha, "First commit should be newest");
-    assert_eq!(commits[1].id(), second.commit_sha, "Second commit should be middle");
+    assert_eq!(
+        commits[0].id(),
+        third.commit_sha,
+        "First commit should be newest"
+    );
+    assert_eq!(
+        commits[1].id(),
+        second.commit_sha,
+        "Second commit should be middle"
+    );
 }
 
 #[test]
@@ -960,7 +1062,10 @@ fn test_merge_base_with_branches() {
     assert!(merge_base.is_ok(), "Should find merge base");
 
     let merge_base_sha = merge_base.unwrap();
-    assert_eq!(merge_base_sha, base.commit_sha, "Merge base should be base commit");
+    assert_eq!(
+        merge_base_sha, base.commit_sha,
+        "Merge base should be base commit"
+    );
 }
 
 // ============================================================================
@@ -1087,7 +1192,10 @@ fn test_diff_changed_files() {
     assert!(changed.is_ok(), "Should get changed files");
 
     let files = changed.unwrap();
-    assert!(files.contains(&"test.txt".to_string()), "Should contain changed file");
+    assert!(
+        files.contains(&"test.txt".to_string()),
+        "Should contain changed file"
+    );
 }
 
 // ============================================================================
@@ -1130,7 +1238,10 @@ fn test_find_blob_with_commit_sha() {
 
     // Try to find blob using commit SHA (should fail)
     let result = repo.find_blob(commit.commit_sha);
-    assert!(result.is_err(), "Should error when finding blob with commit SHA");
+    assert!(
+        result.is_err(),
+        "Should error when finding blob with commit SHA"
+    );
 }
 
 #[test]
@@ -1150,7 +1261,10 @@ fn test_find_tree_with_commit_sha() {
 
     // Try to find tree using commit SHA (should fail)
     let result = repo.find_tree(commit.commit_sha);
-    assert!(result.is_err(), "Should error when finding tree with commit SHA");
+    assert!(
+        result.is_err(),
+        "Should error when finding tree with commit SHA"
+    );
 }
 
 #[test]
@@ -1232,7 +1346,11 @@ fn test_commit_author() {
 
     let author = author.unwrap();
     assert_eq!(author.name(), Some("Test User"), "Author name should match");
-    assert_eq!(author.email(), Some("test@example.com"), "Author email should match");
+    assert_eq!(
+        author.email(),
+        Some("test@example.com"),
+        "Author email should match"
+    );
 }
 
 #[test]
@@ -1256,7 +1374,11 @@ fn test_commit_committer() {
     assert!(committer.is_ok(), "Should get commit committer");
 
     let committer = committer.unwrap();
-    assert_eq!(committer.name(), Some("Test User"), "Committer name should match");
+    assert_eq!(
+        committer.name(),
+        Some("Test User"),
+        "Committer name should match"
+    );
 }
 
 #[test]
@@ -1335,7 +1457,10 @@ fn test_global_args_for_exec() {
     let args = repo.global_args_for_exec();
 
     // Should include --no-pager
-    assert!(args.contains(&"--no-pager".to_string()), "Global args should include --no-pager");
+    assert!(
+        args.contains(&"--no-pager".to_string()),
+        "Global args should include --no-pager"
+    );
 }
 
 #[test]
@@ -1473,7 +1598,10 @@ fn test_initial_commit_has_no_parent() {
 
     // Should have no parents
     let parent_result = commit_obj.parent(0);
-    assert!(parent_result.is_err(), "Initial commit should have no parent");
+    assert!(
+        parent_result.is_err(),
+        "Initial commit should have no parent"
+    );
 }
 
 #[test]
@@ -1495,7 +1623,11 @@ fn test_tree_clone() {
     let tree = commit_obj.tree().unwrap();
     let tree_clone = tree.clone();
 
-    assert_eq!(tree.id(), tree_clone.id(), "Cloned tree should have same ID");
+    assert_eq!(
+        tree.id(),
+        tree_clone.id(),
+        "Cloned tree should have same ID"
+    );
 }
 
 #[test]
@@ -1506,9 +1638,15 @@ fn test_commit_with_unicode_message() {
     let mut file = test_repo.filename("test.txt");
     file.set_contents(lines!["content".human()]);
     test_repo.git(&["add", "-A"]).unwrap();
-    test_repo.git(&["commit", "-m", "Unicode message: 你好世界 🎉"]).unwrap();
+    test_repo
+        .git(&["commit", "-m", "Unicode message: 你好世界 🎉"])
+        .unwrap();
 
-    let commit_sha = test_repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let commit_sha = test_repo
+        .git(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
 
     let repo = find_repository(&[
         "-C".to_string(),
@@ -1519,7 +1657,10 @@ fn test_commit_with_unicode_message() {
     let commit = repo.find_commit(commit_sha).unwrap();
     let summary = commit.summary().unwrap();
 
-    assert!(summary.contains("你好世界"), "Summary should contain unicode characters");
+    assert!(
+        summary.contains("你好世界"),
+        "Summary should contain unicode characters"
+    );
 }
 
 #[test]

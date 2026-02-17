@@ -1137,9 +1137,15 @@ mod tests {
 
     #[test]
     fn test_upgrade_action_to_string() {
-        assert_eq!(UpgradeAction::UpgradeAvailable.to_string(), "upgrade_available");
+        assert_eq!(
+            UpgradeAction::UpgradeAvailable.to_string(),
+            "upgrade_available"
+        );
         assert_eq!(UpgradeAction::AlreadyLatest.to_string(), "already_latest");
-        assert_eq!(UpgradeAction::RunningNewerVersion.to_string(), "running_newer_version");
+        assert_eq!(
+            UpgradeAction::RunningNewerVersion.to_string(),
+            "running_newer_version"
+        );
         assert_eq!(UpgradeAction::ForceReinstall.to_string(), "force_reinstall");
     }
 
@@ -1199,7 +1205,10 @@ mod tests {
         let content = "abc123  file_with_spaces.txt";
         let checksums = parse_checksums(content);
         assert_eq!(checksums.len(), 1);
-        assert_eq!(checksums.get("file_with_spaces.txt"), Some(&"abc123".to_string()));
+        assert_eq!(
+            checksums.get("file_with_spaces.txt"),
+            Some(&"abc123".to_string())
+        );
     }
 
     #[test]
@@ -1301,7 +1310,10 @@ mod tests {
             available_semver: None,
             channel: "latest".to_string(),
         };
-        assert!(should_check_for_updates(UpdateChannel::Latest, Some(&cache)));
+        assert!(should_check_for_updates(
+            UpdateChannel::Latest,
+            Some(&cache)
+        ));
     }
 
     #[test]

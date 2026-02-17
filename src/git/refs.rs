@@ -656,18 +656,36 @@ mod tests {
         assert_eq!(sanitize_remote_name("origin"), "origin");
         assert_eq!(sanitize_remote_name("my-remote"), "my-remote");
         assert_eq!(sanitize_remote_name("remote_123"), "remote_123");
-        assert_eq!(sanitize_remote_name("remote/with/slashes"), "remote_with_slashes");
-        assert_eq!(sanitize_remote_name("remote@with#special$chars"), "remote_with_special_chars");
+        assert_eq!(
+            sanitize_remote_name("remote/with/slashes"),
+            "remote_with_slashes"
+        );
+        assert_eq!(
+            sanitize_remote_name("remote@with#special$chars"),
+            "remote_with_special_chars"
+        );
         assert_eq!(sanitize_remote_name("has spaces"), "has_spaces");
     }
 
     #[test]
     fn test_tracking_ref_for_remote() {
-        assert_eq!(tracking_ref_for_remote("origin"), "refs/notes/ai-remote/origin");
-        assert_eq!(tracking_ref_for_remote("upstream"), "refs/notes/ai-remote/upstream");
-        assert_eq!(tracking_ref_for_remote("my-fork"), "refs/notes/ai-remote/my-fork");
+        assert_eq!(
+            tracking_ref_for_remote("origin"),
+            "refs/notes/ai-remote/origin"
+        );
+        assert_eq!(
+            tracking_ref_for_remote("upstream"),
+            "refs/notes/ai-remote/upstream"
+        );
+        assert_eq!(
+            tracking_ref_for_remote("my-fork"),
+            "refs/notes/ai-remote/my-fork"
+        );
         // Special characters get sanitized
-        assert_eq!(tracking_ref_for_remote("remote/with/slashes"), "refs/notes/ai-remote/remote_with_slashes");
+        assert_eq!(
+            tracking_ref_for_remote("remote/with/slashes"),
+            "refs/notes/ai-remote/remote_with_slashes"
+        );
     }
 
     #[test]
@@ -675,18 +693,28 @@ mod tests {
         let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
 
         // Create initial commit
-        tmp_repo.write_file("test.txt", "content\n", true).expect("write file");
-        tmp_repo.commit_with_message("Initial commit").expect("commit");
+        tmp_repo
+            .write_file("test.txt", "content\n", true)
+            .expect("write file");
+        tmp_repo
+            .commit_with_message("Initial commit")
+            .expect("commit");
 
         // HEAD should exist
         assert!(ref_exists(tmp_repo.gitai_repo(), "HEAD"));
 
         // refs/heads/main (or master) should exist
         let branch_name = tmp_repo.current_branch().expect("get branch");
-        assert!(ref_exists(tmp_repo.gitai_repo(), &format!("refs/heads/{}", branch_name)));
+        assert!(ref_exists(
+            tmp_repo.gitai_repo(),
+            &format!("refs/heads/{}", branch_name)
+        ));
 
         // Non-existent ref should not exist
-        assert!(!ref_exists(tmp_repo.gitai_repo(), "refs/heads/nonexistent-branch"));
+        assert!(!ref_exists(
+            tmp_repo.gitai_repo(),
+            "refs/heads/nonexistent-branch"
+        ));
         assert!(!ref_exists(tmp_repo.gitai_repo(), "refs/notes/ai-test"));
     }
 
@@ -712,14 +740,26 @@ mod tests {
         crate::git::repository::exec_git(&args).expect("add files");
 
         let mut args = tmp_repo.gitai_repo().global_args_for_exec();
-        args.extend_from_slice(&["commit".to_string(), "-m".to_string(), "Commit C".to_string()]);
+        args.extend_from_slice(&[
+            "commit".to_string(),
+            "-m".to_string(),
+            "Commit C".to_string(),
+        ]);
         crate::git::repository::exec_git(&args).expect("commit");
         let commit_c = tmp_repo.get_head_commit_sha().expect("head C");
 
         // Add note to commit C on a different ref
         let note_c = "{\"note\":\"c\"}";
         let mut args = tmp_repo.gitai_repo().global_args_for_exec();
-        args.extend_from_slice(&["notes".to_string(), "--ref=test".to_string(), "add".to_string(), "-f".to_string(), "-m".to_string(), note_c.to_string(), commit_c.clone()]);
+        args.extend_from_slice(&[
+            "notes".to_string(),
+            "--ref=test".to_string(),
+            "add".to_string(),
+            "-f".to_string(),
+            "-m".to_string(),
+            note_c.to_string(),
+            commit_c.clone(),
+        ]);
         crate::git::repository::exec_git(&args).expect("add note C on test ref");
 
         // Verify initial state - commit C should not have note on refs/notes/ai
@@ -740,7 +780,9 @@ mod tests {
         let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
 
         // Create commit with note
-        tmp_repo.write_file("test.txt", "content\n", true).expect("write file");
+        tmp_repo
+            .write_file("test.txt", "content\n", true)
+            .expect("write file");
         tmp_repo.commit_with_message("Commit").expect("commit");
         let commit_sha = tmp_repo.get_head_commit_sha().expect("head");
 
@@ -754,20 +796,34 @@ mod tests {
         assert!(!ref_exists(tmp_repo.gitai_repo(), "refs/notes/ai-backup"));
 
         // Copy refs/notes/ai to refs/notes/ai-backup
-        copy_ref(tmp_repo.gitai_repo(), "refs/notes/ai", "refs/notes/ai-backup").expect("copy ref");
+        copy_ref(
+            tmp_repo.gitai_repo(),
+            "refs/notes/ai",
+            "refs/notes/ai-backup",
+        )
+        .expect("copy ref");
 
         // Both should now exist and point to the same commit
         assert!(ref_exists(tmp_repo.gitai_repo(), "refs/notes/ai"));
         assert!(ref_exists(tmp_repo.gitai_repo(), "refs/notes/ai-backup"));
 
         // Verify content is accessible from both refs
-        let note_from_ai = show_authorship_note(tmp_repo.gitai_repo(), &commit_sha).expect("note from ai");
+        let note_from_ai =
+            show_authorship_note(tmp_repo.gitai_repo(), &commit_sha).expect("note from ai");
 
         // Read from backup ref
         let mut args = tmp_repo.gitai_repo().global_args_for_exec();
-        args.extend_from_slice(&["notes".to_string(), "--ref=ai-backup".to_string(), "show".to_string(), commit_sha.clone()]);
+        args.extend_from_slice(&[
+            "notes".to_string(),
+            "--ref=ai-backup".to_string(),
+            "show".to_string(),
+            commit_sha.clone(),
+        ]);
         let output = crate::git::repository::exec_git(&args).expect("show note from backup");
-        let note_from_backup = String::from_utf8(output.stdout).expect("utf8").trim().to_string();
+        let note_from_backup = String::from_utf8(output.stdout)
+            .expect("utf8")
+            .trim()
+            .to_string();
 
         assert_eq!(note_from_ai, note_from_backup);
     }
@@ -776,7 +832,9 @@ mod tests {
     fn test_grep_ai_notes_single_match() {
         let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
 
-        tmp_repo.write_file("test.txt", "content\n", true).expect("write file");
+        tmp_repo
+            .write_file("test.txt", "content\n", true)
+            .expect("write file");
         tmp_repo.commit_with_message("Commit").expect("commit");
         let commit_sha = tmp_repo.get_head_commit_sha().expect("head");
 
@@ -815,19 +873,34 @@ mod tests {
         let results = grep_ai_notes(tmp_repo.gitai_repo(), "cursor").expect("grep");
 
         // Should find at least 3 commits (may find more from auto-created notes)
-        assert!(results.len() >= 3, "Expected at least 3 results, got {}", results.len());
+        assert!(
+            results.len() >= 3,
+            "Expected at least 3 results, got {}",
+            results.len()
+        );
 
         // Verify our three commits are in the results
-        assert!(results.contains(&commit_a), "Results should contain commit A");
-        assert!(results.contains(&commit_b), "Results should contain commit B");
-        assert!(results.contains(&commit_c), "Results should contain commit C");
+        assert!(
+            results.contains(&commit_a),
+            "Results should contain commit A"
+        );
+        assert!(
+            results.contains(&commit_b),
+            "Results should contain commit B"
+        );
+        assert!(
+            results.contains(&commit_c),
+            "Results should contain commit C"
+        );
     }
 
     #[test]
     fn test_grep_ai_notes_no_match() {
         let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
 
-        tmp_repo.write_file("test.txt", "content\n", true).expect("write file");
+        tmp_repo
+            .write_file("test.txt", "content\n", true)
+            .expect("write file");
         tmp_repo.commit_with_message("Commit").expect("commit");
         let commit_sha = tmp_repo.get_head_commit_sha().expect("head");
 
@@ -839,7 +912,7 @@ mod tests {
         // grep may return empty or error if no matches, both are acceptable
         match results {
             Ok(refs) => assert_eq!(refs.len(), 0),
-            Err(_) => {}, // Also acceptable - git grep returns non-zero when no matches
+            Err(_) => {} // Also acceptable - git grep returns non-zero when no matches
         }
     }
 
@@ -847,7 +920,9 @@ mod tests {
     fn test_grep_ai_notes_no_notes() {
         let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
 
-        tmp_repo.write_file("test.txt", "content\n", true).expect("write file");
+        tmp_repo
+            .write_file("test.txt", "content\n", true)
+            .expect("write file");
         tmp_repo.commit_with_message("Commit").expect("commit");
 
         // No notes exist, search should return empty or error
@@ -855,7 +930,7 @@ mod tests {
         // grep may return empty or error if refs/notes/ai doesn't exist
         match results {
             Ok(refs) => assert_eq!(refs.len(), 0),
-            Err(_) => {}, // Also acceptable - refs/notes/ai may not exist yet
+            Err(_) => {} // Also acceptable - refs/notes/ai may not exist yet
         }
     }
 
@@ -879,21 +954,26 @@ mod tests {
 
         // Get authorship for all commits
         let commit_list = vec![commit_a.clone(), commit_b.clone(), commit_c.clone()];
-        let result = get_commits_with_notes_from_list(tmp_repo.gitai_repo(), &commit_list).expect("get commits");
+        let result = get_commits_with_notes_from_list(tmp_repo.gitai_repo(), &commit_list)
+            .expect("get commits");
 
         assert_eq!(result.len(), 3);
 
         // All commits should have logs since commit_with_message creates them
         for (idx, commit_authorship) in result.iter().enumerate() {
             match commit_authorship {
-                CommitAuthorship::Log { sha, git_author: _, authorship_log: _ } => {
+                CommitAuthorship::Log {
+                    sha,
+                    git_author: _,
+                    authorship_log: _,
+                } => {
                     // This is expected - verify SHA matches
                     let expected_sha = &commit_list[idx];
                     assert_eq!(sha, expected_sha);
-                },
+                }
                 CommitAuthorship::NoLog { .. } => {
                     // Also acceptable if checkpoint system didn't run
-                },
+                }
             }
         }
     }
@@ -905,24 +985,38 @@ mod tests {
         assert_eq!(notes_path_for_object("ab"), "ab");
 
         // Normal SHA (40 chars)
-        assert_eq!(notes_path_for_object("abcdef1234567890abcdef1234567890abcdef12"), "ab/cdef1234567890abcdef1234567890abcdef12");
+        assert_eq!(
+            notes_path_for_object("abcdef1234567890abcdef1234567890abcdef12"),
+            "ab/cdef1234567890abcdef1234567890abcdef12"
+        );
 
         // SHA-256 (64 chars)
-        assert_eq!(notes_path_for_object("abc1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcd"), "ab/c1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcd");
+        assert_eq!(
+            notes_path_for_object(
+                "abc1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcd"
+            ),
+            "ab/c1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcd"
+        );
     }
 
     #[test]
     fn test_flat_note_pathspec_for_commit() {
         let sha = "abcdef1234567890abcdef1234567890abcdef12";
         let pathspec = flat_note_pathspec_for_commit(sha);
-        assert_eq!(pathspec, "refs/notes/ai:abcdef1234567890abcdef1234567890abcdef12");
+        assert_eq!(
+            pathspec,
+            "refs/notes/ai:abcdef1234567890abcdef1234567890abcdef12"
+        );
     }
 
     #[test]
     fn test_fanout_note_pathspec_for_commit() {
         let sha = "abcdef1234567890abcdef1234567890abcdef12";
         let pathspec = fanout_note_pathspec_for_commit(sha);
-        assert_eq!(pathspec, "refs/notes/ai:ab/cdef1234567890abcdef1234567890abcdef12");
+        assert_eq!(
+            pathspec,
+            "refs/notes/ai:ab/cdef1234567890abcdef1234567890abcdef12"
+        );
     }
 
     #[test]
@@ -939,12 +1033,15 @@ mod tests {
     fn test_note_blob_oids_for_commits_no_notes() {
         let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
 
-        tmp_repo.write_file("test.txt", "content\n", true).expect("write file");
+        tmp_repo
+            .write_file("test.txt", "content\n", true)
+            .expect("write file");
         tmp_repo.commit_with_message("Commit").expect("commit");
         let commit_sha = tmp_repo.get_head_commit_sha().expect("head");
 
         // Commit exists but has no note
-        let result = note_blob_oids_for_commits(tmp_repo.gitai_repo(), &[commit_sha]).expect("no notes");
+        let result =
+            note_blob_oids_for_commits(tmp_repo.gitai_repo(), &[commit_sha]).expect("no notes");
         assert!(result.is_empty());
     }
 
@@ -965,21 +1062,27 @@ mod tests {
         notes_add(tmp_repo.gitai_repo(), &commit_a, "{\"test\":\"note\"}").expect("add note");
 
         let commits = vec![commit_a.clone(), commit_b.clone()];
-        let result = commits_with_authorship_notes(tmp_repo.gitai_repo(), &commits).expect("check notes");
+        let result =
+            commits_with_authorship_notes(tmp_repo.gitai_repo(), &commits).expect("check notes");
 
         // Commit A should definitely be in results
         assert!(result.contains(&commit_a), "Commit A should have a note");
 
         // Commit B may or may not have a note depending on checkpoint system
         // Just verify we got at least 1 result (commit A)
-        assert!(result.len() >= 1, "Should have at least 1 commit with notes");
+        assert!(
+            result.len() >= 1,
+            "Should have at least 1 commit with notes"
+        );
     }
 
     #[test]
     fn test_get_reference_as_working_log() {
         let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
 
-        tmp_repo.write_file("test.txt", "content\n", true).expect("write file");
+        tmp_repo
+            .write_file("test.txt", "content\n", true)
+            .expect("write file");
         tmp_repo.commit_with_message("Commit").expect("commit");
         let commit_sha = tmp_repo.get_head_commit_sha().expect("head");
 
@@ -987,7 +1090,8 @@ mod tests {
         let working_log_json = "[]";
         notes_add(tmp_repo.gitai_repo(), &commit_sha, working_log_json).expect("add note");
 
-        let result = get_reference_as_working_log(tmp_repo.gitai_repo(), &commit_sha).expect("get working log");
+        let result = get_reference_as_working_log(tmp_repo.gitai_repo(), &commit_sha)
+            .expect("get working log");
         assert_eq!(result.len(), 0); // Empty array
     }
 
@@ -995,7 +1099,9 @@ mod tests {
     fn test_get_reference_as_authorship_log_v3_version_mismatch() {
         let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
 
-        tmp_repo.write_file("test.txt", "content\n", true).expect("write file");
+        tmp_repo
+            .write_file("test.txt", "content\n", true)
+            .expect("write file");
         tmp_repo.commit_with_message("Commit").expect("commit");
         let commit_sha = tmp_repo.get_head_commit_sha().expect("head");
 

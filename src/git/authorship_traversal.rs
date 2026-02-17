@@ -354,10 +354,7 @@ mod tests {
     fn test_parse_cat_file_batch_output_malformed_header() {
         let data = b"abc123\n";
         let result = parse_cat_file_batch_output_with_oids(data).unwrap();
-        assert!(
-            result.is_empty(),
-            "Malformed header should skip that entry"
-        );
+        assert!(result.is_empty(), "Malformed header should skip that entry");
     }
 
     #[test]

@@ -1,8 +1,8 @@
 /// Comprehensive tests for performance target tracking and benchmarking
 use git_ai::authorship::working_log::CheckpointKind;
 use git_ai::observability::wrapper_performance_targets::{
-    log_performance_for_checkpoint, log_performance_target_if_violated, BenchmarkResult,
-    PERFORMANCE_FLOOR_MS,
+    BenchmarkResult, PERFORMANCE_FLOOR_MS, log_performance_for_checkpoint,
+    log_performance_target_if_violated,
 };
 use std::time::Duration;
 
@@ -305,8 +305,16 @@ fn test_checkpoint_target_exact_boundary() {
 #[test]
 fn test_all_supported_commands() {
     let commands = vec![
-        "commit", "rebase", "cherry-pick", "reset",
-        "fetch", "pull", "push", "status", "add", "rm",
+        "commit",
+        "rebase",
+        "cherry-pick",
+        "reset",
+        "fetch",
+        "pull",
+        "push",
+        "status",
+        "add",
+        "rm",
     ];
 
     let git_duration = Duration::from_millis(1000);
@@ -322,9 +330,21 @@ fn test_all_supported_commands() {
 fn test_performance_logging_does_not_panic() {
     // Verify various edge cases don't cause panics
     let test_cases = vec![
-        (Duration::from_millis(0), Duration::from_millis(0), Duration::from_millis(0)),
-        (Duration::from_millis(1), Duration::from_millis(1), Duration::from_millis(1)),
-        (Duration::from_millis(u64::MAX / 2), Duration::from_millis(100), Duration::from_millis(100)),
+        (
+            Duration::from_millis(0),
+            Duration::from_millis(0),
+            Duration::from_millis(0),
+        ),
+        (
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+        ),
+        (
+            Duration::from_millis(u64::MAX / 2),
+            Duration::from_millis(100),
+            Duration::from_millis(100),
+        ),
     ];
 
     for (git_dur, pre_dur, post_dur) in test_cases {

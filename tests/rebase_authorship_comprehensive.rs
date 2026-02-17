@@ -20,7 +20,9 @@ use git_ai::git::rewrite_log::{RebaseCompleteEvent, RewriteLogEvent};
 
 fn create_ai_commit(repo: &mut TestRepo, filename: &str, content: &[&str]) -> String {
     // Use TestRepo's built-in commit which creates authorship logs
-    repo.filename(filename).set_contents(content.to_vec()).stage();
+    repo.filename(filename)
+        .set_contents(content.to_vec())
+        .stage();
     let result = repo.commit(&format!("Add {}", filename));
     match result {
         Ok(new_commit) => new_commit.commit_sha,
@@ -28,10 +30,7 @@ fn create_ai_commit(repo: &mut TestRepo, filename: &str, content: &[&str]) -> St
             // Fallback: try with git-ai if regular commit fails
             repo.git_ai(&["commit", "-m", &format!("Add {}", filename)])
                 .unwrap_or_else(|_| panic!("Failed to create commit: {}", e));
-            repo.git(&["rev-parse", "HEAD"])
-                .unwrap()
-                .trim()
-                .to_string()
+            repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string()
         }
     }
 }
@@ -86,9 +85,7 @@ fn test_prompt_line_metrics_default() {
 #[test]
 fn test_prompt_line_metrics_accumulation() {
     let mut repo = TestRepo::new();
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("initial").unwrap();
 
     // Create multiple AI commits
@@ -108,9 +105,7 @@ fn test_prompt_line_metrics_accumulation() {
 #[test]
 fn test_commit_tracked_delta_empty() {
     let mut repo = TestRepo::new();
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     let base = repo.commit("initial").unwrap();
 
     // No changes in commit
@@ -121,9 +116,7 @@ fn test_commit_tracked_delta_empty() {
 #[test]
 fn test_commit_tracked_delta_with_files() {
     let mut repo = TestRepo::new();
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("initial").unwrap();
 
     let commit = create_ai_commit(&mut repo, "tracked.txt", &["tracked content"]);
@@ -138,9 +131,7 @@ fn test_commit_tracked_delta_with_files() {
 #[test]
 fn test_commit_tracked_delta_multiple_files() {
     let mut repo = TestRepo::new();
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("initial").unwrap();
 
     repo.filename("file1.txt")
@@ -169,9 +160,7 @@ fn test_rebase_single_commit_preserves_authorship() {
     let mut repo = TestRepo::new();
 
     // Create base
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     let base = repo.commit("base").unwrap();
 
     // Create feature branch
@@ -200,9 +189,7 @@ fn test_rebase_single_commit_preserves_authorship() {
 fn test_rebase_multiple_commits_preserves_order() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base").unwrap();
 
     // Create feature branch with multiple commits
@@ -213,9 +200,7 @@ fn test_rebase_multiple_commits_preserves_order() {
 
     // Create main branch commit
     repo.git(&["checkout", "main"]).unwrap();
-    repo.filename("main.txt")
-        .set_contents(vec!["main"])
-        .stage();
+    repo.filename("main.txt").set_contents(vec!["main"]).stage();
     repo.commit("main").unwrap();
 
     // Rebase feature onto main
@@ -236,9 +221,7 @@ fn test_rebase_multiple_commits_preserves_order() {
 fn test_rebase_empty_commits_filtered() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base").unwrap();
 
     // Create feature branch
@@ -261,9 +244,7 @@ fn test_rebase_empty_commits_filtered() {
 fn test_interactive_rebase_detection() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base").unwrap();
 
     repo.git(&["checkout", "-b", "feature"]).unwrap();
@@ -271,7 +252,10 @@ fn test_interactive_rebase_detection() {
 
     // Interactive rebase creates rebase-merge directory
     let rebase_merge_dir = repo.path().join(".git").join("rebase-merge");
-    assert!(!rebase_merge_dir.exists(), "Initially no rebase in progress");
+    assert!(
+        !rebase_merge_dir.exists(),
+        "Initially no rebase in progress"
+    );
 }
 
 #[test]
@@ -279,12 +263,14 @@ fn test_interactive_rebase_todo_list() {
     // Verify that interactive rebase state is detectable
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base").unwrap();
 
-    let todo_path = repo.path().join(".git").join("rebase-merge").join("git-rebase-todo");
+    let todo_path = repo
+        .path()
+        .join(".git")
+        .join("rebase-merge")
+        .join("git-rebase-todo");
     assert!(!todo_path.exists(), "No rebase todo initially");
 }
 
@@ -326,18 +312,14 @@ fn test_rebase_with_conflict_detection() {
 fn test_rebase_continue_after_conflict_resolution() {
     let mut repo = TestRepo::new();
 
-    repo.filename("file.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("file.txt").set_contents(vec!["base"]).stage();
     repo.commit("base").unwrap();
 
     repo.git(&["checkout", "-b", "feature"]).unwrap();
     let original_commit = create_ai_commit(&mut repo, "feature.txt", &["feature"]);
 
     repo.git(&["checkout", "main"]).unwrap();
-    repo.filename("main.txt")
-        .set_contents(vec!["main"])
-        .stage();
+    repo.filename("main.txt").set_contents(vec!["main"]).stage();
     repo.commit("main").unwrap();
 
     // Rebase without conflicts
@@ -357,9 +339,7 @@ fn test_rebase_continue_after_conflict_resolution() {
 fn test_rebase_onto_specific_commit() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     let base = repo.commit("base").unwrap();
 
     repo.filename("second.txt")
@@ -385,9 +365,7 @@ fn test_rebase_onto_specific_commit() {
 fn test_rebase_onto_different_branch() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base").unwrap();
 
     // Create target branch
@@ -418,9 +396,7 @@ fn test_rebase_onto_different_branch() {
 fn test_prepare_working_log_after_squash() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base").unwrap();
     let target_head = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
@@ -444,9 +420,7 @@ fn test_prepare_working_log_after_squash() {
 fn test_prepare_working_log_after_squash_no_changes() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base").unwrap();
     let commit = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
@@ -454,19 +428,14 @@ fn test_prepare_working_log_after_squash_no_changes() {
     let git_repo = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let result = prepare_working_log_after_squash(&git_repo, &commit, &commit, "human");
 
-    assert!(
-        result.is_ok(),
-        "Should handle no changes gracefully"
-    );
+    assert!(result.is_ok(), "Should handle no changes gracefully");
 }
 
 #[test]
 fn test_squash_merge_with_merge_base() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     let base = repo.commit("base").unwrap();
 
     // Create feature branch
@@ -476,9 +445,7 @@ fn test_squash_merge_with_merge_base() {
 
     // Add commit to main
     repo.git(&["checkout", "main"]).unwrap();
-    repo.filename("main.txt")
-        .set_contents(vec!["main"])
-        .stage();
+    repo.filename("main.txt").set_contents(vec!["main"]).stage();
     repo.commit("main").unwrap();
     let target_head = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
@@ -496,9 +463,7 @@ fn test_squash_merge_with_merge_base() {
 fn test_rewrite_authorship_after_squash_or_rebase() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base").unwrap();
     let base = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
@@ -529,19 +494,14 @@ fn test_rewrite_authorship_after_squash_or_rebase() {
     );
 
     let log = get_authorship_log(&repo, &merge_commit);
-    assert!(
-        log.is_some(),
-        "Squash merge commit should have authorship"
-    );
+    assert!(log.is_some(), "Squash merge commit should have authorship");
 }
 
 #[test]
 fn test_squash_or_rebase_no_ai_files() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base").unwrap();
 
     // Create feature branch with non-AI commit
@@ -579,20 +539,12 @@ fn test_squash_or_rebase_no_ai_files() {
 fn test_rewrite_authorship_after_rebase_v2_empty_commits() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base").unwrap();
     let original_head = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
     let git_repo = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let result = rewrite_authorship_after_rebase_v2(
-        &git_repo,
-        &original_head,
-        &[],
-        &[],
-        "human",
-    );
+    let result = rewrite_authorship_after_rebase_v2(&git_repo, &original_head, &[], &[], "human");
 
     assert!(result.is_ok(), "Should handle empty commit list");
 }
@@ -601,9 +553,7 @@ fn test_rewrite_authorship_after_rebase_v2_empty_commits() {
 fn test_rebase_v2_preserves_prompt_metadata() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base").unwrap();
 
     repo.git(&["checkout", "-b", "feature"]).unwrap();
@@ -611,9 +561,7 @@ fn test_rebase_v2_preserves_prompt_metadata() {
     let original_head = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
     repo.git(&["checkout", "main"]).unwrap();
-    repo.filename("main.txt")
-        .set_contents(vec!["main"])
-        .stage();
+    repo.filename("main.txt").set_contents(vec!["main"]).stage();
     repo.commit("main").unwrap();
 
     // Rebase
@@ -638,9 +586,7 @@ fn test_rebase_v2_preserves_prompt_metadata() {
 fn test_rebase_v2_skips_existing_authorship_logs() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base").unwrap();
 
     // Create AI commit on main (already has authorship)
@@ -666,9 +612,7 @@ fn test_rebase_v2_skips_existing_authorship_logs() {
 fn test_rewrite_authorship_after_cherry_pick_empty() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base").unwrap();
 
     let git_repo = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
@@ -681,9 +625,7 @@ fn test_rewrite_authorship_after_cherry_pick_empty() {
 fn test_cherry_pick_single_commit() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base").unwrap();
 
     // Create commit to cherry-pick
@@ -706,9 +648,7 @@ fn test_cherry_pick_single_commit() {
 fn test_cherry_pick_multiple_commits() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base").unwrap();
 
     // Create multiple commits
@@ -731,9 +671,7 @@ fn test_cherry_pick_multiple_commits() {
 fn test_cherry_pick_preserves_file_content() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base").unwrap();
 
     repo.git(&["checkout", "-b", "source"]).unwrap();
@@ -754,9 +692,7 @@ fn test_cherry_pick_preserves_file_content() {
 fn test_rewrite_authorship_after_commit_amend() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base").unwrap();
 
     let original_commit = create_ai_commit(&mut repo, "file.txt", &["original content"]);
@@ -788,9 +724,7 @@ fn test_rewrite_authorship_after_commit_amend() {
 fn test_amend_preserves_existing_authorship() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base").unwrap();
 
     let original_commit = create_ai_commit(&mut repo, "file.txt", &["content"]);
@@ -822,9 +756,7 @@ fn test_amend_preserves_existing_authorship() {
 fn test_reconstruct_working_log_after_reset() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base").unwrap();
 
     create_ai_commit(&mut repo, "file.txt", &["content"]);
@@ -834,7 +766,11 @@ fn test_reconstruct_working_log_after_reset() {
     repo.git(&["reset", "HEAD~1"]).unwrap();
 
     let git_repo = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let old_head = repo.git(&["rev-parse", "HEAD^"]).unwrap().trim().to_string();
+    let old_head = repo
+        .git(&["rev-parse", "HEAD^"])
+        .unwrap()
+        .trim()
+        .to_string();
     let result = reconstruct_working_log_after_reset(&git_repo, &old_head, &commit, "human", None);
 
     assert!(result.is_ok(), "Should reconstruct working log after reset");
@@ -844,9 +780,7 @@ fn test_reconstruct_working_log_after_reset() {
 fn test_reset_soft_preserves_staged_files() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     let base = repo.commit("base").unwrap();
 
     create_ai_commit(&mut repo, "file.txt", &["content"]);
@@ -863,9 +797,7 @@ fn test_reset_soft_preserves_staged_files() {
 fn test_reset_hard_removes_working_changes() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     let base = repo.commit("base").unwrap();
 
     create_ai_commit(&mut repo, "file.txt", &["content"]);
@@ -886,24 +818,14 @@ fn test_reset_hard_removes_working_changes() {
 fn test_rewrite_authorship_if_needed_commit_event() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     let base = repo.commit("base").unwrap();
 
     let git_repo = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let event = RewriteLogEvent::commit(
-        Some(base.commit_sha.clone()),
-        base.commit_sha.clone(),
-    );
+    let event = RewriteLogEvent::commit(Some(base.commit_sha.clone()), base.commit_sha.clone());
 
-    let result = rewrite_authorship_if_needed(
-        &git_repo,
-        &event,
-        "human".to_string(),
-        &vec![],
-        true,
-    );
+    let result =
+        rewrite_authorship_if_needed(&git_repo, &event, "human".to_string(), &vec![], true);
 
     assert!(result.is_ok(), "Should process commit event");
 }
@@ -912,9 +834,7 @@ fn test_rewrite_authorship_if_needed_commit_event() {
 fn test_rewrite_authorship_if_needed_rebase_complete() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base").unwrap();
 
     repo.git(&["checkout", "-b", "feature"]).unwrap();
@@ -922,9 +842,7 @@ fn test_rewrite_authorship_if_needed_rebase_complete() {
     let original_head = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
     repo.git(&["checkout", "main"]).unwrap();
-    repo.filename("main.txt")
-        .set_contents(vec!["main"])
-        .stage();
+    repo.filename("main.txt").set_contents(vec!["main"]).stage();
     repo.commit("main").unwrap();
 
     repo.git(&["checkout", "feature"]).unwrap();
@@ -940,13 +858,8 @@ fn test_rewrite_authorship_if_needed_rebase_complete() {
     ));
 
     let git_repo = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let result = rewrite_authorship_if_needed(
-        &git_repo,
-        &event,
-        "human".to_string(),
-        &vec![],
-        true,
-    );
+    let result =
+        rewrite_authorship_if_needed(&git_repo, &event, "human".to_string(), &vec![], true);
 
     assert!(result.is_ok(), "Should process rebase complete event");
 }
@@ -959,17 +872,11 @@ fn test_rewrite_authorship_if_needed_rebase_complete() {
 fn test_filter_pathspecs_to_ai_touched_files_empty() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     let base = repo.commit("base").unwrap();
 
     let git_repo = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let result = filter_pathspecs_to_ai_touched_files(
-        &git_repo,
-        &[base.commit_sha],
-        &[],
-    );
+    let result = filter_pathspecs_to_ai_touched_files(&git_repo, &[base.commit_sha], &[]);
 
     assert!(result.is_ok());
     assert!(result.unwrap().is_empty());
@@ -979,19 +886,14 @@ fn test_filter_pathspecs_to_ai_touched_files_empty() {
 fn test_filter_pathspecs_includes_ai_files() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base").unwrap();
 
     let commit = create_ai_commit(&mut repo, "ai-file.txt", &["ai content"]);
 
     let git_repo = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let result = filter_pathspecs_to_ai_touched_files(
-        &git_repo,
-        &[commit],
-        &["ai-file.txt".to_string()],
-    );
+    let result =
+        filter_pathspecs_to_ai_touched_files(&git_repo, &[commit], &["ai-file.txt".to_string()]);
 
     assert!(result.is_ok());
     let filtered = result.unwrap();
@@ -1002,9 +904,7 @@ fn test_filter_pathspecs_includes_ai_files() {
 fn test_filter_pathspecs_excludes_non_ai_files() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     let base = repo.commit("base").unwrap();
 
     repo.filename("non-ai.txt")
@@ -1032,9 +932,7 @@ fn test_filter_pathspecs_excludes_non_ai_files() {
 fn test_rebase_large_commit() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base").unwrap();
 
     // Create large commit (many files)
@@ -1048,9 +946,7 @@ fn test_rebase_large_commit() {
     let original_commit = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
     repo.git(&["checkout", "main"]).unwrap();
-    repo.filename("main.txt")
-        .set_contents(vec!["main"])
-        .stage();
+    repo.filename("main.txt").set_contents(vec!["main"]).stage();
     repo.commit("main").unwrap();
 
     // Rebase large commit
@@ -1066,9 +962,7 @@ fn test_rebase_large_commit() {
 fn test_rebase_commit_with_long_lines() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base").unwrap();
 
     repo.git(&["checkout", "-b", "feature"]).unwrap();
@@ -1076,9 +970,7 @@ fn test_rebase_commit_with_long_lines() {
     create_ai_commit(&mut repo, "long.txt", &[&long_line]);
 
     repo.git(&["checkout", "main"]).unwrap();
-    repo.filename("main.txt")
-        .set_contents(vec!["main"])
-        .stage();
+    repo.filename("main.txt").set_contents(vec!["main"]).stage();
     repo.commit("main").unwrap();
 
     repo.git(&["checkout", "feature"]).unwrap();
@@ -1097,9 +989,7 @@ fn test_rebase_commit_with_long_lines() {
 fn test_rebase_with_deleted_file() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base").unwrap();
 
     repo.git(&["checkout", "-b", "feature"]).unwrap();
@@ -1110,9 +1000,7 @@ fn test_rebase_with_deleted_file() {
     repo.git_ai(&["commit", "-m", "Delete temp"]).unwrap();
 
     repo.git(&["checkout", "main"]).unwrap();
-    repo.filename("main.txt")
-        .set_contents(vec!["main"])
-        .stage();
+    repo.filename("main.txt").set_contents(vec!["main"]).stage();
     repo.commit("main").unwrap();
 
     // Rebase
@@ -1128,9 +1016,7 @@ fn test_rebase_with_deleted_file() {
 fn test_rebase_with_renamed_file() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base").unwrap();
 
     repo.git(&["checkout", "-b", "feature"]).unwrap();
@@ -1141,9 +1027,7 @@ fn test_rebase_with_renamed_file() {
     repo.git_ai(&["commit", "-m", "Rename"]).unwrap();
 
     repo.git(&["checkout", "main"]).unwrap();
-    repo.filename("main.txt")
-        .set_contents(vec!["main"])
-        .stage();
+    repo.filename("main.txt").set_contents(vec!["main"]).stage();
     repo.commit("main").unwrap();
 
     // Rebase
@@ -1160,24 +1044,23 @@ fn test_rebase_with_renamed_file() {
 fn test_rebase_with_empty_file() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base").unwrap();
 
     repo.git(&["checkout", "-b", "feature"]).unwrap();
     create_ai_commit(&mut repo, "empty.txt", &[]);
 
     repo.git(&["checkout", "main"]).unwrap();
-    repo.filename("main.txt")
-        .set_contents(vec!["main"])
-        .stage();
+    repo.filename("main.txt").set_contents(vec!["main"]).stage();
     repo.commit("main").unwrap();
 
     repo.git(&["checkout", "feature"]).unwrap();
     repo.git(&["rebase", "main"]).unwrap();
 
-    let log = get_authorship_log(&repo, &repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string());
+    let log = get_authorship_log(
+        &repo,
+        &repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string(),
+    );
     // Empty file commits might not have authorship
     assert!(log.is_some() || log.is_none());
 }
@@ -1186,9 +1069,7 @@ fn test_rebase_with_empty_file() {
 fn test_rebase_binary_file() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base").unwrap();
 
     repo.git(&["checkout", "-b", "feature"]).unwrap();
@@ -1200,9 +1081,7 @@ fn test_rebase_binary_file() {
     repo.git_ai(&["commit", "-m", "Add binary"]).unwrap();
 
     repo.git(&["checkout", "main"]).unwrap();
-    repo.filename("main.txt")
-        .set_contents(vec!["main"])
-        .stage();
+    repo.filename("main.txt").set_contents(vec!["main"]).stage();
     repo.commit("main").unwrap();
 
     // Rebase with binary file
@@ -1215,9 +1094,7 @@ fn test_rebase_binary_file() {
 fn test_rebase_with_submodule() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base").unwrap();
 
     // Note: Full submodule testing is complex, just verify basic handling
@@ -1233,22 +1110,22 @@ fn test_rebase_with_submodule() {
 fn test_rebase_many_commits_performance() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base").unwrap();
 
     repo.git(&["checkout", "-b", "feature"]).unwrap();
 
     // Create 20 commits
     for i in 0..20 {
-        create_ai_commit(&mut repo, &format!("file{}.txt", i), &[&format!("content {}", i)]);
+        create_ai_commit(
+            &mut repo,
+            &format!("file{}.txt", i),
+            &[&format!("content {}", i)],
+        );
     }
 
     repo.git(&["checkout", "main"]).unwrap();
-    repo.filename("main.txt")
-        .set_contents(vec!["main"])
-        .stage();
+    repo.filename("main.txt").set_contents(vec!["main"]).stage();
     repo.commit("main").unwrap();
 
     // Rebase all commits
@@ -1265,9 +1142,7 @@ fn test_rebase_many_commits_performance() {
 fn test_rebase_with_many_files_per_commit() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base").unwrap();
 
     repo.git(&["checkout", "-b", "feature"]).unwrap();
@@ -1281,9 +1156,7 @@ fn test_rebase_with_many_files_per_commit() {
     repo.git_ai(&["commit", "-m", "Many files"]).unwrap();
 
     repo.git(&["checkout", "main"]).unwrap();
-    repo.filename("main.txt")
-        .set_contents(vec!["main"])
-        .stage();
+    repo.filename("main.txt").set_contents(vec!["main"]).stage();
     repo.commit("main").unwrap();
 
     repo.git(&["checkout", "feature"]).unwrap();
@@ -1299,18 +1172,14 @@ fn test_rebase_with_many_files_per_commit() {
 fn test_authorship_log_base_commit_sha_updated() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base").unwrap();
 
     repo.git(&["checkout", "-b", "feature"]).unwrap();
     create_ai_commit(&mut repo, "file.txt", &["content"]);
 
     repo.git(&["checkout", "main"]).unwrap();
-    repo.filename("main.txt")
-        .set_contents(vec!["main"])
-        .stage();
+    repo.filename("main.txt").set_contents(vec!["main"]).stage();
     repo.commit("main").unwrap();
 
     repo.git(&["checkout", "feature"]).unwrap();
@@ -1328,9 +1197,7 @@ fn test_authorship_log_base_commit_sha_updated() {
 fn test_authorship_log_prompts_preserved() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base").unwrap();
 
     repo.git(&["checkout", "-b", "feature"]).unwrap();
@@ -1338,9 +1205,7 @@ fn test_authorship_log_prompts_preserved() {
     let original_log = get_authorship_log(&repo, &original_commit);
 
     repo.git(&["checkout", "main"]).unwrap();
-    repo.filename("main.txt")
-        .set_contents(vec!["main"])
-        .stage();
+    repo.filename("main.txt").set_contents(vec!["main"]).stage();
     repo.commit("main").unwrap();
 
     repo.git(&["checkout", "feature"]).unwrap();
@@ -1363,9 +1228,7 @@ fn test_authorship_log_prompts_preserved() {
 fn test_authorship_log_attestations_preserved() {
     let mut repo = TestRepo::new();
 
-    repo.filename("base.txt")
-        .set_contents(vec!["base"])
-        .stage();
+    repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base").unwrap();
 
     repo.git(&["checkout", "-b", "feature"]).unwrap();
@@ -1373,9 +1236,7 @@ fn test_authorship_log_attestations_preserved() {
     let original_log = get_authorship_log(&repo, &original_commit);
 
     repo.git(&["checkout", "main"]).unwrap();
-    repo.filename("main.txt")
-        .set_contents(vec!["main"])
-        .stage();
+    repo.filename("main.txt").set_contents(vec!["main"]).stage();
     repo.commit("main").unwrap();
 
     repo.git(&["checkout", "feature"]).unwrap();

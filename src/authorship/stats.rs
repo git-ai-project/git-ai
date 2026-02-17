@@ -1507,9 +1507,7 @@ mod tests {
 
     #[test]
     fn test_calculate_waiting_time_no_messages() {
-        let transcript = crate::authorship::transcript::AiTranscript {
-            messages: vec![],
-        };
+        let transcript = crate::authorship::transcript::AiTranscript { messages: vec![] };
         assert_eq!(calculate_waiting_time(&transcript), 0);
     }
 
@@ -1673,7 +1671,9 @@ mod tests {
         let tmp_repo = TmpRepo::new().unwrap();
 
         tmp_repo.write_file("test.txt", "content\n", true).unwrap();
-        tmp_repo.trigger_checkpoint_with_author("test_user").unwrap();
+        tmp_repo
+            .trigger_checkpoint_with_author("test_user")
+            .unwrap();
         tmp_repo.commit_with_message("Commit").unwrap();
 
         let head_sha = tmp_repo.get_head_commit_sha().unwrap();
@@ -1688,7 +1688,9 @@ mod tests {
         let tmp_repo = TmpRepo::new().unwrap();
 
         tmp_repo.write_file("test.txt", "content\n", true).unwrap();
-        tmp_repo.trigger_checkpoint_with_author("test_user").unwrap();
+        tmp_repo
+            .trigger_checkpoint_with_author("test_user")
+            .unwrap();
         tmp_repo.commit_with_message("Commit").unwrap();
 
         // No SHA provided should default to HEAD
@@ -1702,7 +1704,9 @@ mod tests {
 
         // Create initial commit
         tmp_repo.write_file("text.txt", "text\n", true).unwrap();
-        tmp_repo.trigger_checkpoint_with_author("test_user").unwrap();
+        tmp_repo
+            .trigger_checkpoint_with_author("test_user")
+            .unwrap();
         tmp_repo.commit_with_message("Initial").unwrap();
 
         // Add binary file (git will detect it as binary if it contains null bytes)
@@ -1749,19 +1753,25 @@ mod tests {
             id: "session".to_string(),
             model: "claude-3-sonnet".to_string(),
         };
-        let hash = crate::authorship::authorship_log_serialization::generate_short_hash(&agent_id.id, &agent_id.tool);
+        let hash = crate::authorship::authorship_log_serialization::generate_short_hash(
+            &agent_id.id,
+            &agent_id.tool,
+        );
 
         // Prompt with 100 overridden lines (way more than the diff)
-        log.metadata.prompts.insert(hash, crate::authorship::authorship_log::PromptRecord {
-            agent_id,
-            human_author: None,
-            messages: vec![],
-            total_additions: 50,
-            total_deletions: 0,
-            accepted_lines: 0,
-            overriden_lines: 100, // Unrealistically high
-            messages_url: None,
-        });
+        log.metadata.prompts.insert(
+            hash,
+            crate::authorship::authorship_log::PromptRecord {
+                agent_id,
+                human_author: None,
+                messages: vec![],
+                total_additions: 50,
+                total_deletions: 0,
+                accepted_lines: 0,
+                overriden_lines: 100, // Unrealistically high
+                messages_url: None,
+            },
+        );
 
         // Only 10 lines added, 5 accepted by AI
         let stats = stats_from_authorship_log(Some(&log), 10, 0, 5, &BTreeMap::new());
@@ -1785,12 +1795,21 @@ mod tests {
         assert_eq!(line_range_overlap_len(&LineRange::Range(5, 5), &[4, 6]), 0);
 
         // Range before all lines
-        assert_eq!(line_range_overlap_len(&LineRange::Range(1, 2), &[10, 20, 30]), 0);
+        assert_eq!(
+            line_range_overlap_len(&LineRange::Range(1, 2), &[10, 20, 30]),
+            0
+        );
 
         // Range after all lines
-        assert_eq!(line_range_overlap_len(&LineRange::Range(50, 60), &[10, 20, 30]), 0);
+        assert_eq!(
+            line_range_overlap_len(&LineRange::Range(50, 60), &[10, 20, 30]),
+            0
+        );
 
         // Range partially overlapping
-        assert_eq!(line_range_overlap_len(&LineRange::Range(5, 15), &[1, 3, 10, 12, 20]), 2);
+        assert_eq!(
+            line_range_overlap_len(&LineRange::Range(5, 15), &[1, 3, 10, 12, 20]),
+            2
+        );
     }
 }

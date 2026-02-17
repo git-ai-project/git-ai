@@ -168,7 +168,10 @@ mod tests {
 
     #[test]
     fn test_message_user() {
-        let msg = Message::user("Hello".to_string(), Some("2024-01-01T00:00:00Z".to_string()));
+        let msg = Message::user(
+            "Hello".to_string(),
+            Some("2024-01-01T00:00:00Z".to_string()),
+        );
         match msg {
             Message::User { text, timestamp } => {
                 assert_eq!(text, "Hello");
@@ -210,7 +213,10 @@ mod tests {
 
     #[test]
     fn test_message_plan() {
-        let msg = Message::plan("Plan step".to_string(), Some("2024-01-01T00:00:03Z".to_string()));
+        let msg = Message::plan(
+            "Plan step".to_string(),
+            Some("2024-01-01T00:00:03Z".to_string()),
+        );
         match msg {
             Message::Plan { text, timestamp } => {
                 assert_eq!(text, "Plan step");
@@ -386,7 +392,10 @@ mod tests {
 
     #[test]
     fn test_message_serialization() {
-        let msg = Message::user("Hello".to_string(), Some("2024-01-01T00:00:00Z".to_string()));
+        let msg = Message::user(
+            "Hello".to_string(),
+            Some("2024-01-01T00:00:00Z".to_string()),
+        );
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"user\""));
         assert!(json.contains("\"text\":\"Hello\""));
@@ -428,7 +437,8 @@ mod tests {
 
     #[test]
     fn test_ai_transcript_deserialization() {
-        let json = r#"{"messages":[{"type":"user","text":"Hello"},{"type":"assistant","text":"Hi"}]}"#;
+        let json =
+            r#"{"messages":[{"type":"user","text":"Hello"},{"type":"assistant","text":"Hi"}]}"#;
         let transcript: AiTranscript = serde_json::from_str(json).unwrap();
         assert_eq!(transcript.messages.len(), 2);
     }

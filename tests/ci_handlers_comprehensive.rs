@@ -21,8 +21,8 @@ fn test_ci_handlers_module_exists() {
 #[test]
 fn test_ci_result_types_coverage() {
     // Test that we understand all CiRunResult variants
-    use git_ai::ci::ci_context::CiRunResult;
     use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
+    use git_ai::ci::ci_context::CiRunResult;
 
     // Test variant construction
     let result1 = CiRunResult::AuthorshipRewritten {
@@ -293,7 +293,9 @@ fn test_ci_requires_valid_repository() {
     assert!(repo.path().join(".git").exists());
 
     // Create a commit so we have a HEAD
-    repo.filename("README.md").set_contents(vec!["test"]).stage();
+    repo.filename("README.md")
+        .set_contents(vec!["test"])
+        .stage();
     let commit = repo.commit("initial commit").unwrap();
 
     assert!(!commit.commit_sha.is_empty());
@@ -311,7 +313,10 @@ fn test_ci_context_with_temp_dir() {
     let test_repo = TestRepo::new();
 
     // Create a commit
-    test_repo.filename("file.txt").set_contents(vec!["content"]).stage();
+    test_repo
+        .filename("file.txt")
+        .set_contents(vec!["content"])
+        .stage();
     let commit = test_repo.commit("test commit").unwrap();
     let sha = commit.commit_sha;
 
@@ -360,10 +365,18 @@ fn test_github_workflow_file_creation() {
 #[test]
 fn test_github_workflow_path_structure() {
     let repo = TestRepo::new();
-    let expected_path = repo.path().join(".github").join("workflows").join("git-ai-authorship.yml");
+    let expected_path = repo
+        .path()
+        .join(".github")
+        .join("workflows")
+        .join("git-ai-authorship.yml");
 
     // Verify path components
     assert!(expected_path.to_string_lossy().contains(".github"));
     assert!(expected_path.to_string_lossy().contains("workflows"));
-    assert!(expected_path.to_string_lossy().contains("git-ai-authorship.yml"));
+    assert!(
+        expected_path
+            .to_string_lossy()
+            .contains("git-ai-authorship.yml")
+    );
 }

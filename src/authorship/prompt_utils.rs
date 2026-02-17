@@ -943,10 +943,12 @@ mod tests {
 
         let result = find_prompt_in_history(tmp_repo.gitai_repo(), &prompt_id, 1);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("found 1 time(s), but offset 1 requested"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("found 1 time(s), but offset 1 requested")
+        );
     }
 
     #[test]
@@ -965,10 +967,12 @@ mod tests {
 
         let result = find_prompt_in_history(tmp_repo.gitai_repo(), "nonexistent-prompt", 0);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Prompt not found in history"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Prompt not found in history")
+        );
     }
 
     #[test]
@@ -1036,10 +1040,12 @@ mod tests {
         // Test when prompt is not in DB and no repo is provided
         let result = find_prompt_with_db_fallback("nonexistent-prompt", None);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("not found in database and no repository provided"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("not found in database and no repository provided")
+        );
     }
 
     #[test]
@@ -1086,12 +1092,15 @@ mod tests {
             .commit_with_message("Test commit")
             .expect("Failed to commit");
 
-        let result = find_prompt_with_db_fallback("nonexistent-prompt", Some(tmp_repo.gitai_repo()));
+        let result =
+            find_prompt_with_db_fallback("nonexistent-prompt", Some(tmp_repo.gitai_repo()));
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("not found in database or repository"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("not found in database or repository")
+        );
     }
 
     #[test]
@@ -1135,7 +1144,9 @@ mod tests {
         let result = update_prompt_from_tool("opencode", "session-123", None, "model");
         // Can be Unchanged, Failed, or Updated depending on storage availability
         match result {
-            PromptUpdateResult::Unchanged | PromptUpdateResult::Failed(_) | PromptUpdateResult::Updated(_, _) => {}
+            PromptUpdateResult::Unchanged
+            | PromptUpdateResult::Failed(_)
+            | PromptUpdateResult::Updated(_, _) => {}
         }
     }
 
@@ -1267,10 +1278,12 @@ mod tests {
 
         let result = find_prompt_in_history(tmp_repo.gitai_repo(), "any-prompt", 0);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Prompt not found in history"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Prompt not found in history")
+        );
     }
 
     #[test]
@@ -1291,9 +1304,11 @@ mod tests {
         // Try to find a different prompt ID
         let result = find_prompt_in_commit(tmp_repo.gitai_repo(), "wrong-prompt-id", "HEAD");
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Prompt 'wrong-prompt-id' not found in commit"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Prompt 'wrong-prompt-id' not found in commit")
+        );
     }
 }

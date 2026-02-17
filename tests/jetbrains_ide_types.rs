@@ -1,6 +1,6 @@
 /// Comprehensive tests for JetBrains IDE type definitions and compatibility checking
 use git_ai::mdm::jetbrains::ide_types::{
-    DetectedIde, MIN_INTELLIJ_BUILD, PLUGIN_ID, MARKETPLACE_URL, JETBRAINS_IDES,
+    DetectedIde, JETBRAINS_IDES, MARKETPLACE_URL, MIN_INTELLIJ_BUILD, PLUGIN_ID,
 };
 use std::path::PathBuf;
 
@@ -21,8 +21,16 @@ fn test_jetbrains_ides_definitions() {
     let ide_names: Vec<&str> = JETBRAINS_IDES.iter().map(|ide| ide.name).collect();
 
     // Check for major IDEs
-    assert!(ide_names.iter().any(|n| n.contains("IntelliJ IDEA Ultimate")));
-    assert!(ide_names.iter().any(|n| n.contains("IntelliJ IDEA Community")));
+    assert!(
+        ide_names
+            .iter()
+            .any(|n| n.contains("IntelliJ IDEA Ultimate"))
+    );
+    assert!(
+        ide_names
+            .iter()
+            .any(|n| n.contains("IntelliJ IDEA Community"))
+    );
     assert!(ide_names.iter().any(|n| n.contains("PyCharm")));
     assert!(ide_names.iter().any(|n| n.contains("WebStorm")));
     assert!(ide_names.iter().any(|n| n.contains("GoLand")));
@@ -56,7 +64,11 @@ fn test_intellij_community_definition() {
         .find(|ide| ide.name == "IntelliJ IDEA Community")
         .expect("IntelliJ Community should be defined");
 
-    assert!(intellij_ce.bundle_ids.contains(&"com.jetbrains.intellij.ce"));
+    assert!(
+        intellij_ce
+            .bundle_ids
+            .contains(&"com.jetbrains.intellij.ce")
+    );
     assert_eq!(intellij_ce.binary_name_macos, "idea");
     assert_eq!(intellij_ce.product_code, "IC");
     assert_eq!(intellij_ce.toolbox_app_name, "IDEA-C");
@@ -185,32 +197,59 @@ fn test_android_studio_definition() {
 #[test]
 fn test_all_ides_have_bundle_ids() {
     for ide in JETBRAINS_IDES {
-        assert!(!ide.bundle_ids.is_empty(), "{} should have bundle IDs", ide.name);
+        assert!(
+            !ide.bundle_ids.is_empty(),
+            "{} should have bundle IDs",
+            ide.name
+        );
     }
 }
 
 #[test]
 fn test_all_ides_have_binary_names() {
     for ide in JETBRAINS_IDES {
-        assert!(!ide.binary_name_macos.is_empty(), "{} should have macOS binary", ide.name);
-        assert!(!ide.binary_name_windows.is_empty(), "{} should have Windows binary", ide.name);
-        assert!(!ide.binary_name_linux.is_empty(), "{} should have Linux binary", ide.name);
+        assert!(
+            !ide.binary_name_macos.is_empty(),
+            "{} should have macOS binary",
+            ide.name
+        );
+        assert!(
+            !ide.binary_name_windows.is_empty(),
+            "{} should have Windows binary",
+            ide.name
+        );
+        assert!(
+            !ide.binary_name_linux.is_empty(),
+            "{} should have Linux binary",
+            ide.name
+        );
     }
 }
 
 #[test]
 fn test_all_ides_have_product_codes() {
     for ide in JETBRAINS_IDES {
-        assert!(!ide.product_code.is_empty(), "{} should have product code", ide.name);
-        assert!(ide.product_code.chars().all(|c| c.is_ascii_uppercase()),
-               "{} product code should be uppercase ASCII", ide.name);
+        assert!(
+            !ide.product_code.is_empty(),
+            "{} should have product code",
+            ide.name
+        );
+        assert!(
+            ide.product_code.chars().all(|c| c.is_ascii_uppercase()),
+            "{} product code should be uppercase ASCII",
+            ide.name
+        );
     }
 }
 
 #[test]
 fn test_all_ides_have_toolbox_names() {
     for ide in JETBRAINS_IDES {
-        assert!(!ide.toolbox_app_name.is_empty(), "{} should have toolbox name", ide.name);
+        assert!(
+            !ide.toolbox_app_name.is_empty(),
+            "{} should have toolbox name",
+            ide.name
+        );
     }
 }
 
@@ -259,7 +298,10 @@ fn test_detected_ide_incompatible_with_old_build() {
         plugins_dir: PathBuf::from("/Users/test/Library/Application Support/JetBrains/IU2024.1"),
     };
 
-    assert!(!detected.is_compatible(), "Build 251 should be incompatible");
+    assert!(
+        !detected.is_compatible(),
+        "Build 251 should be incompatible"
+    );
 }
 
 #[test]
@@ -275,7 +317,10 @@ fn test_detected_ide_incompatible_without_build_number() {
         plugins_dir: PathBuf::from("/Users/test/Library/Application Support/JetBrains/IU2025.2"),
     };
 
-    assert!(!detected.is_compatible(), "Should be incompatible without build number");
+    assert!(
+        !detected.is_compatible(),
+        "Should be incompatible without build number"
+    );
 }
 
 #[test]
@@ -291,25 +336,40 @@ fn test_detected_ide_incompatible_with_only_build_string() {
         plugins_dir: PathBuf::from("/Users/test/Library/Application Support/JetBrains/IU2025.2"),
     };
 
-    assert!(!detected.is_compatible(), "Should be incompatible without parsed major build");
+    assert!(
+        !detected.is_compatible(),
+        "Should be incompatible without parsed major build"
+    );
 }
 
 #[test]
 fn test_binary_names_have_correct_extensions() {
     for ide in JETBRAINS_IDES {
         // macOS and Linux should not have .exe
-        assert!(!ide.binary_name_macos.ends_with(".exe"),
-               "{} macOS binary should not end with .exe", ide.name);
-        assert!(!ide.binary_name_linux.ends_with(".exe"),
-               "{} Linux binary should not end with .exe", ide.name);
+        assert!(
+            !ide.binary_name_macos.ends_with(".exe"),
+            "{} macOS binary should not end with .exe",
+            ide.name
+        );
+        assert!(
+            !ide.binary_name_linux.ends_with(".exe"),
+            "{} Linux binary should not end with .exe",
+            ide.name
+        );
 
         // Windows should have .exe
-        assert!(ide.binary_name_windows.ends_with(".exe"),
-               "{} Windows binary should end with .exe", ide.name);
+        assert!(
+            ide.binary_name_windows.ends_with(".exe"),
+            "{} Windows binary should end with .exe",
+            ide.name
+        );
 
         // Linux should typically have .sh
-        assert!(ide.binary_name_linux.ends_with(".sh"),
-               "{} Linux binary should end with .sh", ide.name);
+        assert!(
+            ide.binary_name_linux.ends_with(".sh"),
+            "{} Linux binary should end with .sh",
+            ide.name
+        );
     }
 }
 
@@ -319,8 +379,11 @@ fn test_product_codes_are_unique() {
 
     let mut product_codes = HashSet::new();
     for ide in JETBRAINS_IDES {
-        assert!(product_codes.insert(ide.product_code),
-               "Product code {} is not unique", ide.product_code);
+        assert!(
+            product_codes.insert(ide.product_code),
+            "Product code {} is not unique",
+            ide.product_code
+        );
     }
 }
 
@@ -330,8 +393,11 @@ fn test_toolbox_names_are_unique() {
 
     let mut toolbox_names = HashSet::new();
     for ide in JETBRAINS_IDES {
-        assert!(toolbox_names.insert(ide.toolbox_app_name),
-               "Toolbox name {} is not unique", ide.toolbox_app_name);
+        assert!(
+            toolbox_names.insert(ide.toolbox_app_name),
+            "Toolbox name {} is not unique",
+            ide.toolbox_app_name
+        );
     }
 }
 

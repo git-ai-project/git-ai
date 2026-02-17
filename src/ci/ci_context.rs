@@ -304,7 +304,8 @@ mod tests {
     fn test_ci_context_with_repository() {
         let test_repo = TmpRepo::new().unwrap();
         let repo_path = test_repo.path().to_path_buf();
-        let repo = crate::git::repository::find_repository_in_path(repo_path.to_str().unwrap()).unwrap();
+        let repo =
+            crate::git::repository::find_repository_in_path(repo_path.to_str().unwrap()).unwrap();
 
         let event = CiEvent::Merge {
             merge_commit_sha: "abc".to_string(),
@@ -322,7 +323,8 @@ mod tests {
     fn test_ci_context_teardown_empty_temp_dir() {
         let test_repo = TmpRepo::new().unwrap();
         let repo_path = test_repo.path().to_path_buf();
-        let repo = crate::git::repository::find_repository_in_path(repo_path.to_str().unwrap()).unwrap();
+        let repo =
+            crate::git::repository::find_repository_in_path(repo_path.to_str().unwrap()).unwrap();
 
         let event = CiEvent::Merge {
             merge_commit_sha: "abc".to_string(),
@@ -341,7 +343,8 @@ mod tests {
     fn test_ci_context_teardown_with_temp_dir() {
         let test_repo = TmpRepo::new().unwrap();
         let repo_path = test_repo.path().to_path_buf();
-        let repo = crate::git::repository::find_repository_in_path(repo_path.to_str().unwrap()).unwrap();
+        let repo =
+            crate::git::repository::find_repository_in_path(repo_path.to_str().unwrap()).unwrap();
         let temp_dir = tempfile::tempdir().unwrap();
         let temp_path = temp_dir.path().to_path_buf();
 
@@ -418,7 +421,8 @@ mod tests {
             .unwrap();
 
         let repo_path = test_repo.path().to_path_buf();
-        let gitai_repo = crate::git::repository::find_repository_in_path(repo_path.to_str().unwrap()).unwrap();
+        let gitai_repo =
+            crate::git::repository::find_repository_in_path(repo_path.to_str().unwrap()).unwrap();
 
         let event = CiEvent::Merge {
             merge_commit_sha: commit3.to_string(),
@@ -458,7 +462,8 @@ mod tests {
             .unwrap();
 
         let repo_path = test_repo.path().to_path_buf();
-        let gitai_repo = crate::git::repository::find_repository_in_path(repo_path.to_str().unwrap()).unwrap();
+        let gitai_repo =
+            crate::git::repository::find_repository_in_path(repo_path.to_str().unwrap()).unwrap();
 
         let event = CiEvent::Merge {
             merge_commit_sha: commit.to_string(),
@@ -480,7 +485,8 @@ mod tests {
     fn test_ci_context_debug() {
         let test_repo = TmpRepo::new().unwrap();
         let repo_path = test_repo.path().to_path_buf();
-        let repo = crate::git::repository::find_repository_in_path(repo_path.to_str().unwrap()).unwrap();
+        let repo =
+            crate::git::repository::find_repository_in_path(repo_path.to_str().unwrap()).unwrap();
 
         let event = CiEvent::Merge {
             merge_commit_sha: "abc".to_string(),

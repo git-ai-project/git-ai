@@ -81,7 +81,9 @@ fn test_show_with_head_ref() {
     repo.stage_all_and_commit("AI commit").unwrap();
 
     // Run show with HEAD reference
-    let output = repo.git_ai(&["show", "HEAD"]).expect("show HEAD should succeed");
+    let output = repo
+        .git_ai(&["show", "HEAD"])
+        .expect("show HEAD should succeed");
 
     // Should show authorship data
     assert!(
@@ -106,7 +108,9 @@ fn test_show_with_relative_ref() {
     repo.stage_all_and_commit("Second AI").unwrap();
 
     // Run show with HEAD~1 (first commit)
-    let output = repo.git_ai(&["show", "HEAD~1"]).expect("show HEAD~1 should succeed");
+    let output = repo
+        .git_ai(&["show", "HEAD~1"])
+        .expect("show HEAD~1 should succeed");
 
     // First commit should have no authorship data
     assert!(
@@ -115,7 +119,9 @@ fn test_show_with_relative_ref() {
     );
 
     // Run show with HEAD (second commit)
-    let output2 = repo.git_ai(&["show", "HEAD"]).expect("show HEAD should succeed");
+    let output2 = repo
+        .git_ai(&["show", "HEAD"])
+        .expect("show HEAD should succeed");
 
     // Second commit should have authorship data
     assert!(
@@ -149,14 +155,13 @@ fn test_show_commit_range() {
 
     // Run show with commit range
     let range = format!("{}..{}", first.commit_sha, third.commit_sha);
-    let output = repo.git_ai(&["show", &range]).expect("show range should succeed");
+    let output = repo
+        .git_ai(&["show", &range])
+        .expect("show range should succeed");
 
     // Should show multiple commits
     // The range output may vary - it might show all commits in the range
-    assert!(
-        !output.is_empty(),
-        "Range output should not be empty"
-    );
+    assert!(!output.is_empty(), "Range output should not be empty");
 }
 
 #[test]
@@ -178,7 +183,9 @@ fn test_show_range_with_mixed_authorship() {
 
     // Run show with range
     let range = format!("{}..{}", first.commit_sha, third.commit_sha);
-    let output = repo.git_ai(&["show", &range]).expect("show range should succeed");
+    let output = repo
+        .git_ai(&["show", &range])
+        .expect("show range should succeed");
 
     // Should show some commits (implementation may vary)
     assert!(!output.is_empty(), "Range should show commits");
@@ -195,12 +202,16 @@ fn test_show_range_empty() {
 
     // Try to show range from commit to itself (empty range)
     let range = format!("{}..{}", commit.commit_sha, commit.commit_sha);
-    let output = repo.git_ai(&["show", &range]).expect("show empty range should succeed");
+    let output = repo
+        .git_ai(&["show", &range])
+        .expect("show empty range should succeed");
 
     // May show nothing or the commit itself (implementation dependent)
     // Should not error
     assert!(
-        output.contains("No authorship data") || output.is_empty() || output.contains(&commit.commit_sha[..8]),
+        output.contains("No authorship data")
+            || output.is_empty()
+            || output.contains(&commit.commit_sha[..8]),
         "Empty range should handle gracefully"
     );
 }
@@ -338,7 +349,9 @@ fn test_show_includes_commit_sha_in_range() {
 
     // Run show with range
     let range = format!("{}..{}", first.commit_sha, third.commit_sha);
-    let output = repo.git_ai(&["show", &range]).expect("show range should succeed");
+    let output = repo
+        .git_ai(&["show", &range])
+        .expect("show range should succeed");
 
     // When showing multiple commits, each should be identifiable
     // (implementation may vary - might show SHAs or other identifiers)
@@ -385,7 +398,11 @@ fn test_show_commit_with_mixed_attribution() {
     repo.stage_all_and_commit("Initial").unwrap();
 
     // Create commit with both AI and human changes
-    file.set_contents(lines!["Line 1 modified".human(), "Line 2".ai(), "Line 3".human()]);
+    file.set_contents(lines![
+        "Line 1 modified".human(),
+        "Line 2".ai(),
+        "Line 3".human()
+    ]);
     let commit = repo.stage_all_and_commit("Mixed changes").unwrap();
 
     // Run show
@@ -445,7 +462,9 @@ fn test_show_merge_commit() {
 
     if merge_result.is_ok() {
         // If merge succeeded, show the merge commit
-        let output = repo.git_ai(&["show", "HEAD"]).expect("show merge commit should succeed");
+        let output = repo
+            .git_ai(&["show", "HEAD"])
+            .expect("show merge commit should succeed");
 
         // Merge commits may or may not have authorship data depending on implementation
         assert!(
@@ -483,9 +502,7 @@ fn test_show_with_special_characters_in_filename() {
     // Create file with special characters
     let mut file_with_spaces = repo.filename("file with spaces.rs");
     file_with_spaces.set_contents(lines!["fn test() {}".ai()]);
-    let commit = repo
-        .stage_all_and_commit("Special filename AI")
-        .unwrap();
+    let commit = repo.stage_all_and_commit("Special filename AI").unwrap();
 
     // Run show
     let output = repo
@@ -592,7 +609,10 @@ fn test_show_sequential_commits() {
     let output3 = repo.git_ai(&["show", &commit3.commit_sha]).expect("show 3");
 
     // First should have no authorship, second and third should have authorship
-    assert!(output1.contains("No authorship data"), "Commit 1 human-only");
+    assert!(
+        output1.contains("No authorship data"),
+        "Commit 1 human-only"
+    );
     assert!(
         !output2.contains("No authorship data"),
         "Commit 2 should have AI data"

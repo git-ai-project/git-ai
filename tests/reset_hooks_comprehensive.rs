@@ -14,7 +14,8 @@ fn test_extract_tree_ish_no_args_defaults_to_head() {
     repo.stage_all_and_commit("Initial").unwrap();
 
     // Reset with no args should work (defaults to HEAD)
-    repo.git(&["reset"]).expect("reset with no args should succeed");
+    repo.git(&["reset"])
+        .expect("reset with no args should succeed");
 
     file = repo.filename("test.txt");
     file.assert_lines_and_blame(lines!["line 1".human()]);

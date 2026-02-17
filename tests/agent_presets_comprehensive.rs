@@ -111,7 +111,10 @@ fn test_claude_preset_pretooluse_checkpoint() {
     assert_eq!(result.checkpoint_kind, CheckpointKind::Human);
     assert!(result.transcript.is_none());
     assert!(result.edited_filepaths.is_none());
-    assert_eq!(result.will_edit_filepaths, Some(vec!["/some/file.rs".to_string()]));
+    assert_eq!(
+        result.will_edit_filepaths,
+        Some(vec!["/some/file.rs".to_string()])
+    );
 }
 
 #[test]
@@ -140,9 +143,8 @@ fn test_claude_transcript_parsing_empty_file() {
     let temp_file = std::env::temp_dir().join("empty_claude.jsonl");
     fs::write(&temp_file, "").expect("Failed to write temp file");
 
-    let result = ClaudePreset::transcript_and_model_from_claude_code_jsonl(
-        temp_file.to_str().unwrap(),
-    );
+    let result =
+        ClaudePreset::transcript_and_model_from_claude_code_jsonl(temp_file.to_str().unwrap());
 
     assert!(result.is_ok());
     let (transcript, model) = result.unwrap();
@@ -157,9 +159,8 @@ fn test_claude_transcript_parsing_malformed_json() {
     let temp_file = std::env::temp_dir().join("malformed_claude.jsonl");
     fs::write(&temp_file, "{invalid json}\n").expect("Failed to write temp file");
 
-    let result = ClaudePreset::transcript_and_model_from_claude_code_jsonl(
-        temp_file.to_str().unwrap(),
-    );
+    let result =
+        ClaudePreset::transcript_and_model_from_claude_code_jsonl(temp_file.to_str().unwrap());
 
     assert!(result.is_err());
     fs::remove_file(temp_file).ok();
@@ -175,9 +176,8 @@ fn test_claude_transcript_parsing_with_empty_lines() {
     "#;
     fs::write(&temp_file, content).expect("Failed to write temp file");
 
-    let result = ClaudePreset::transcript_and_model_from_claude_code_jsonl(
-        temp_file.to_str().unwrap(),
-    );
+    let result =
+        ClaudePreset::transcript_and_model_from_claude_code_jsonl(temp_file.to_str().unwrap());
 
     assert!(result.is_ok());
     let (transcript, model) = result.unwrap();
@@ -330,13 +330,15 @@ fn test_gemini_preset_beforetool_checkpoint() {
 
     assert_eq!(result.checkpoint_kind, CheckpointKind::Human);
     assert!(result.transcript.is_none());
-    assert_eq!(result.will_edit_filepaths, Some(vec!["/file.js".to_string()]));
+    assert_eq!(
+        result.will_edit_filepaths,
+        Some(vec!["/file.js".to_string()])
+    );
 }
 
 #[test]
 fn test_gemini_transcript_parsing_invalid_path() {
-    let result =
-        GeminiPreset::transcript_and_model_from_gemini_json("/nonexistent/path.json");
+    let result = GeminiPreset::transcript_and_model_from_gemini_json("/nonexistent/path.json");
 
     assert!(result.is_err());
     match result {
@@ -353,8 +355,7 @@ fn test_gemini_transcript_parsing_empty_messages() {
     });
     fs::write(&temp_file, content.to_string()).expect("Failed to write temp file");
 
-    let result =
-        GeminiPreset::transcript_and_model_from_gemini_json(temp_file.to_str().unwrap());
+    let result = GeminiPreset::transcript_and_model_from_gemini_json(temp_file.to_str().unwrap());
 
     assert!(result.is_ok());
     let (transcript, model) = result.unwrap();
@@ -372,8 +373,7 @@ fn test_gemini_transcript_parsing_missing_messages_field() {
     });
     fs::write(&temp_file, content.to_string()).expect("Failed to write temp file");
 
-    let result =
-        GeminiPreset::transcript_and_model_from_gemini_json(temp_file.to_str().unwrap());
+    let result = GeminiPreset::transcript_and_model_from_gemini_json(temp_file.to_str().unwrap());
 
     assert!(result.is_err());
     match result {
@@ -503,7 +503,10 @@ fn test_continue_preset_pretooluse_checkpoint() {
 
     assert_eq!(result.checkpoint_kind, CheckpointKind::Human);
     assert!(result.transcript.is_none());
-    assert_eq!(result.will_edit_filepaths, Some(vec!["/file.py".to_string()]));
+    assert_eq!(
+        result.will_edit_filepaths,
+        Some(vec!["/file.py".to_string()])
+    );
 }
 
 // ==============================================================================
@@ -908,10 +911,7 @@ fn test_aitab_preset_after_edit_checkpoint() {
 
     assert_eq!(result.checkpoint_kind, CheckpointKind::AiTab);
     assert!(result.transcript.is_none());
-    assert_eq!(
-        result.edited_filepaths,
-        Some(vec!["/file1.rs".to_string()])
-    );
+    assert_eq!(result.edited_filepaths, Some(vec!["/file1.rs".to_string()]));
 }
 
 #[test]
@@ -1123,9 +1123,8 @@ fn test_gemini_transcript_with_unknown_message_types() {
     });
     fs::write(&temp_file, content.to_string()).expect("Failed to write temp file");
 
-    let result =
-        GeminiPreset::transcript_and_model_from_gemini_json(temp_file.to_str().unwrap())
-            .expect("Should parse successfully");
+    let result = GeminiPreset::transcript_and_model_from_gemini_json(temp_file.to_str().unwrap())
+        .expect("Should parse successfully");
 
     let (transcript, _) = result;
     // Should only parse user and gemini messages
@@ -1141,10 +1140,9 @@ fn test_claude_transcript_with_tool_result_in_user_content() {
 {"type":"assistant","timestamp":"2025-01-01T00:00:01Z","message":{"model":"claude-3","content":[{"type":"text","text":"response"}]}}"#;
     fs::write(&temp_file, content).expect("Failed to write temp file");
 
-    let result = ClaudePreset::transcript_and_model_from_claude_code_jsonl(
-        temp_file.to_str().unwrap(),
-    )
-    .expect("Should parse successfully");
+    let result =
+        ClaudePreset::transcript_and_model_from_claude_code_jsonl(temp_file.to_str().unwrap())
+            .expect("Should parse successfully");
 
     let (transcript, _) = result;
     // Should skip tool_result but include the text content
@@ -1172,9 +1170,8 @@ fn test_gemini_transcript_with_empty_tool_calls() {
     });
     fs::write(&temp_file, content.to_string()).expect("Failed to write temp file");
 
-    let result =
-        GeminiPreset::transcript_and_model_from_gemini_json(temp_file.to_str().unwrap())
-            .expect("Should parse successfully");
+    let result = GeminiPreset::transcript_and_model_from_gemini_json(temp_file.to_str().unwrap())
+        .expect("Should parse successfully");
 
     let (transcript, _) = result;
     assert_eq!(transcript.messages().len(), 1);
@@ -1197,9 +1194,8 @@ fn test_gemini_transcript_tool_call_without_args() {
     });
     fs::write(&temp_file, content.to_string()).expect("Failed to write temp file");
 
-    let result =
-        GeminiPreset::transcript_and_model_from_gemini_json(temp_file.to_str().unwrap())
-            .expect("Should parse successfully");
+    let result = GeminiPreset::transcript_and_model_from_gemini_json(temp_file.to_str().unwrap())
+        .expect("Should parse successfully");
 
     let (transcript, _) = result;
     // Tool call should still be added with empty args object

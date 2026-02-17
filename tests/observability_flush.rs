@@ -12,9 +12,10 @@
 /// 8. Lock file handling for concurrent flush-logs processes
 /// 9. File I/O error handling
 /// 10. Concurrent access patterns
-
-use git_ai::metrics::{MetricEvent, MetricsBatch, EventAttributes, CommittedValues, METRICS_API_VERSION, PosEncoded};
-use serde_json::{json, Value};
+use git_ai::metrics::{
+    CommittedValues, EventAttributes, METRICS_API_VERSION, MetricEvent, MetricsBatch, PosEncoded,
+};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -33,7 +34,8 @@ impl TempLogsDir {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let id = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let path = std::env::temp_dir().join(format!("git-ai-test-logs-{}-{}", std::process::id(), id));
+        let path =
+            std::env::temp_dir().join(format!("git-ai-test-logs-{}-{}", std::process::id(), id));
         fs::create_dir_all(&path).expect("Failed to create temp logs dir");
         Self { path }
     }
@@ -283,7 +285,10 @@ fn test_mixed_envelope_types_in_one_file() {
         "duration_ms": 100
     });
 
-    temp_dir.create_log_with_envelopes("1234.log", &[metrics_envelope, error_envelope, perf_envelope]);
+    temp_dir.create_log_with_envelopes(
+        "1234.log",
+        &[metrics_envelope, error_envelope, perf_envelope],
+    );
 
     // Should process all envelope types correctly
 }
@@ -305,8 +310,7 @@ fn test_cleanup_skipped_when_fewer_than_100_files() {
         .unwrap()
         .filter_map(|e| e.ok())
         .filter(|e| {
-            e.path().is_file()
-                && e.path().extension().and_then(|s| s.to_str()) == Some("log")
+            e.path().is_file() && e.path().extension().and_then(|s| s.to_str()) == Some("log")
         })
         .count();
 
@@ -329,8 +333,7 @@ fn test_cleanup_triggered_with_more_than_100_files() {
         .unwrap()
         .filter_map(|e| e.ok())
         .filter(|e| {
-            e.path().is_file()
-                && e.path().extension().and_then(|s| s.to_str()) == Some("log")
+            e.path().is_file() && e.path().extension().and_then(|s| s.to_str()) == Some("log")
         })
         .count();
 
@@ -389,7 +392,11 @@ fn test_current_pid_log_excluded_from_processing() {
         })
         .collect();
 
-    assert_eq!(log_files.len(), 1, "Should only include non-current PID logs");
+    assert_eq!(
+        log_files.len(),
+        1,
+        "Should only include non-current PID logs"
+    );
     assert!(log_files[0].ends_with(&other_log));
 }
 
@@ -423,16 +430,20 @@ fn test_sentry_dsn_parsing_invalid() {
     let test_cases = vec![
         "",
         "not-a-url",
-        "https://example.com",  // Missing project ID
-        "https://sentry.io/123",  // Missing public key
-        "ftp://key@sentry.io/123",  // Invalid scheme (though our parser might accept it)
+        "https://example.com",     // Missing project ID
+        "https://sentry.io/123",   // Missing public key
+        "ftp://key@sentry.io/123", // Invalid scheme (though our parser might accept it)
     ];
 
     for dsn in test_cases {
         let parsed = parse_sentry_dsn(dsn);
         // Some may parse successfully, but we're testing error handling
         if let Some((endpoint, _)) = parsed {
-            assert!(endpoint.contains("://"), "Endpoint should have scheme: {}", dsn);
+            assert!(
+                endpoint.contains("://"),
+                "Endpoint should have scheme: {}",
+                dsn
+            );
         }
     }
 }
@@ -473,8 +484,14 @@ fn test_sentry_auth_header_format() {
 #[test]
 fn test_posthog_endpoint_construction() {
     let test_cases = vec![
-        ("https://us.i.posthog.com", "https://us.i.posthog.com/capture/"),
-        ("https://us.i.posthog.com/", "https://us.i.posthog.com/capture/"),
+        (
+            "https://us.i.posthog.com",
+            "https://us.i.posthog.com/capture/",
+        ),
+        (
+            "https://us.i.posthog.com/",
+            "https://us.i.posthog.com/capture/",
+        ),
         ("http://localhost:8000", "http://localhost:8000/capture/"),
         ("http://localhost:8000/", "http://localhost:8000/capture/"),
     ];
@@ -517,7 +534,11 @@ fn test_posthog_only_sends_message_envelopes() {
         if env_type == "message" {
             assert!(should_send, "PostHog should accept message envelopes");
         } else {
-            assert!(!should_send, "PostHog should not accept {} envelopes", env_type);
+            assert!(
+                !should_send,
+                "PostHog should not accept {} envelopes",
+                env_type
+            );
         }
     }
 }
@@ -726,8 +747,7 @@ fn test_posthog_config_from_env() {
     assert_eq!(api_key, Some("runtime_key".to_string()));
 
     // Default host when not specified
-    let host = None::<String>
-        .unwrap_or_else(|| "https://us.i.posthog.com".to_string());
+    let host = None::<String>.unwrap_or_else(|| "https://us.i.posthog.com".to_string());
     assert_eq!(host, "https://us.i.posthog.com");
 }
 
@@ -744,9 +764,15 @@ fn test_skip_non_metrics_in_debug_mode() {
     let skip_non_metrics = is_debug_build && !force_flag;
 
     if cfg!(debug_assertions) {
-        assert!(skip_non_metrics, "Debug build should skip non-metrics without --force");
+        assert!(
+            skip_non_metrics,
+            "Debug build should skip non-metrics without --force"
+        );
     } else {
-        assert!(!skip_non_metrics, "Release build should process all envelopes");
+        assert!(
+            !skip_non_metrics,
+            "Release build should process all envelopes"
+        );
     }
 }
 
@@ -758,7 +784,10 @@ fn test_force_flag_enables_all_envelopes_in_debug() {
 
     let skip_non_metrics = is_debug_build && !force_flag;
 
-    assert!(!skip_non_metrics, "--force flag should enable all envelope processing");
+    assert!(
+        !skip_non_metrics,
+        "--force flag should enable all envelope processing"
+    );
 }
 
 // ============================================================================
@@ -809,8 +838,7 @@ fn test_flush_logs_with_empty_directory() {
         .unwrap()
         .filter_map(|e| e.ok())
         .filter(|e| {
-            e.path().is_file()
-                && e.path().extension().and_then(|s| s.to_str()) == Some("log")
+            e.path().is_file() && e.path().extension().and_then(|s| s.to_str()) == Some("log")
         })
         .count();
     assert_eq!(log_count, 0);
@@ -924,8 +952,14 @@ fn test_message_envelope_to_sentry_event() {
 #[test]
 fn test_remote_info_included_in_tags() {
     let remotes_info = vec![
-        ("origin".to_string(), "https://github.com/user/repo.git".to_string()),
-        ("upstream".to_string(), "https://github.com/upstream/repo.git".to_string()),
+        (
+            "origin".to_string(),
+            "https://github.com/user/repo.git".to_string(),
+        ),
+        (
+            "upstream".to_string(),
+            "https://github.com/upstream/repo.git".to_string(),
+        ),
     ];
 
     // Tags should include remote information
@@ -934,8 +968,14 @@ fn test_remote_info_included_in_tags() {
         tags.insert(format!("remote.{}", remote_name), remote_url.clone());
     }
 
-    assert_eq!(tags.get("remote.origin"), Some(&"https://github.com/user/repo.git".to_string()));
-    assert_eq!(tags.get("remote.upstream"), Some(&"https://github.com/upstream/repo.git".to_string()));
+    assert_eq!(
+        tags.get("remote.origin"),
+        Some(&"https://github.com/user/repo.git".to_string())
+    );
+    assert_eq!(
+        tags.get("remote.upstream"),
+        Some(&"https://github.com/upstream/repo.git".to_string())
+    );
 }
 
 #[test]
@@ -999,7 +1039,8 @@ fn test_only_log_files_processed() {
         .map(|entry| entry.path())
         .filter(|path| {
             path.is_file()
-                && path.extension()
+                && path
+                    .extension()
                     .and_then(|ext| ext.to_str())
                     .map(|ext| ext == "log")
                     .unwrap_or(false)
@@ -1018,7 +1059,10 @@ fn test_timestamp_format_rfc3339() {
     let timestamp = chrono::Utc::now().to_rfc3339();
 
     // RFC3339 format: 2024-01-01T00:00:00Z or 2024-01-01T00:00:00+00:00
-    assert!(timestamp.contains('T'), "Should contain date/time separator");
+    assert!(
+        timestamp.contains('T'),
+        "Should contain date/time separator"
+    );
     assert!(timestamp.contains('-'), "Should contain date separators");
     assert!(timestamp.contains(':'), "Should contain time separators");
 }
@@ -1026,10 +1070,7 @@ fn test_timestamp_format_rfc3339() {
 #[test]
 fn test_unix_timestamp_for_cleanup() {
     let now = SystemTime::now();
-    let unix_timestamp = now
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let unix_timestamp = now.duration_since(UNIX_EPOCH).unwrap().as_secs();
 
     let one_week_ago = unix_timestamp.saturating_sub(7 * 24 * 60 * 60);
 
@@ -1048,13 +1089,15 @@ fn test_has_telemetry_clients_check() {
     let enterprise_client_present = false;
     let posthog_client_present = false;
 
-    let has_telemetry_clients = oss_client_present || enterprise_client_present || posthog_client_present;
+    let has_telemetry_clients =
+        oss_client_present || enterprise_client_present || posthog_client_present;
 
     assert!(!has_telemetry_clients, "No clients should be present");
 
     // With at least one client
     let oss_client_present = true;
-    let has_telemetry_clients = oss_client_present || enterprise_client_present || posthog_client_present;
+    let has_telemetry_clients =
+        oss_client_present || enterprise_client_present || posthog_client_present;
 
     assert!(has_telemetry_clients, "At least one client present");
 }
@@ -1113,9 +1156,7 @@ fn test_collect_metrics_flattens_events_from_multiple_envelopes() {
         create_test_metric_event(200, 100, 50),
     ]);
 
-    let envelope2 = create_metrics_envelope(vec![
-        create_test_metric_event(300, 150, 75),
-    ]);
+    let envelope2 = create_metrics_envelope(vec![create_test_metric_event(300, 150, 75)]);
 
     temp_dir.create_log_with_envelopes("test.log", &[envelope1, envelope2]);
 

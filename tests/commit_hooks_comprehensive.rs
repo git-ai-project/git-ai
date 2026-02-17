@@ -45,7 +45,8 @@ fn test_pre_commit_hook_success() {
         .set_contents(vec!["initial content"])
         .stage();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let parsed_args = make_commit_invocation(&["-m", "test commit"]);
 
     let result = commit_pre_command_hook(&parsed_args, &mut repository);
@@ -65,7 +66,8 @@ fn test_pre_commit_hook_dry_run() {
         .set_contents(vec!["initial content"])
         .stage();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let parsed_args = make_commit_invocation(&["--dry-run", "-m", "test commit"]);
 
     let result = commit_pre_command_hook(&parsed_args, &mut repository);
@@ -88,7 +90,8 @@ fn test_pre_commit_hook_captures_head() {
         .set_contents(vec!["test content"])
         .stage();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let parsed_args = make_commit_invocation(&["-m", "test commit"]);
 
     commit_pre_command_hook(&parsed_args, &mut repository);
@@ -113,7 +116,8 @@ fn test_post_commit_hook_success() {
 
     let commit = repo.commit("test commit").unwrap();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     repository.pre_command_base_commit = None;
 
     let parsed_args = make_commit_invocation(&["-m", "test commit"]);
@@ -155,9 +159,12 @@ fn test_post_commit_hook_amend() {
     repo.filename("test.txt")
         .set_contents(vec!["amended"])
         .stage();
-    let amended_commit = repo.git(&["commit", "--amend", "-m", "amended commit"]).unwrap();
+    let amended_commit = repo
+        .git(&["commit", "--amend", "-m", "amended commit"])
+        .unwrap();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     repository.pre_command_base_commit = Some(original_commit.commit_sha.clone());
 
     let parsed_args = make_commit_invocation(&["--amend", "-m", "amended commit"]);
@@ -193,7 +200,8 @@ fn test_post_commit_hook_dry_run() {
         .set_contents(vec!["content"])
         .stage();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let parsed_args = make_commit_invocation(&["--dry-run", "-m", "test"]);
     let mut context = CommandHooksContext {
         pre_commit_hook_result: None,
@@ -226,7 +234,8 @@ fn test_post_commit_hook_failed_status() {
         .set_contents(vec!["content"])
         .stage();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let parsed_args = make_commit_invocation(&["-m", "test"]);
     let mut context = CommandHooksContext {
         pre_commit_hook_result: None,
@@ -241,7 +250,13 @@ fn test_post_commit_hook_failed_status() {
 
     let exit_status = std::process::Command::new("false")
         .status()
-        .unwrap_or_else(|_| std::process::Command::new("sh").arg("-c").arg("exit 1").status().unwrap());
+        .unwrap_or_else(|_| {
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg("exit 1")
+                .status()
+                .unwrap()
+        });
 
     commit_post_command_hook(&parsed_args, exit_status, &mut repository, &mut context);
 
@@ -263,7 +278,8 @@ fn test_post_commit_hook_pre_hook_failed() {
         .stage();
     repo.commit("test commit").unwrap();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let parsed_args = make_commit_invocation(&["-m", "test"]);
     let mut context = CommandHooksContext {
         pre_commit_hook_result: None,
@@ -285,7 +301,11 @@ fn test_post_commit_hook_pre_hook_failed() {
 
     // Should skip if pre-commit hook failed
     let events_after = repository.storage.read_rewrite_events().unwrap_or_default();
-    assert_eq!(events_after.len(), initial_count, "Should not log if pre-hook failed");
+    assert_eq!(
+        events_after.len(),
+        initial_count,
+        "Should not log if pre-hook failed"
+    );
 }
 
 #[test]
@@ -297,7 +317,8 @@ fn test_post_commit_hook_porcelain_suppresses_output() {
         .stage();
     repo.commit("test commit").unwrap();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     repository.pre_command_base_commit = None;
 
     let parsed_args = make_commit_invocation(&["--porcelain", "-m", "test"]);
@@ -329,7 +350,8 @@ fn test_post_commit_hook_quiet_suppresses_output() {
         .stage();
     repo.commit("test commit").unwrap();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     repository.pre_command_base_commit = None;
 
     let parsed_args = make_commit_invocation(&["--quiet", "-m", "test"]);
@@ -376,7 +398,10 @@ fn test_get_commit_default_author_from_author_flag() {
     let repo = TestRepo::new();
     let repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
 
-    let args = vec!["--author".to_string(), "Custom Author <custom@example.com>".to_string()];
+    let args = vec![
+        "--author".to_string(),
+        "Custom Author <custom@example.com>".to_string(),
+    ];
     let author = get_commit_default_author(&repository, &args);
 
     // --author flag should override config
@@ -573,17 +598,19 @@ fn test_dry_run_flag_detection() {
 fn test_extract_author_with_equals() {
     let args = vec!["--author=John Doe <john@example.com>".to_string()];
 
-    let author = args.iter().find_map(|arg| {
-        arg.strip_prefix("--author=")
-            .map(|s| s.to_string())
-    });
+    let author = args
+        .iter()
+        .find_map(|arg| arg.strip_prefix("--author=").map(|s| s.to_string()));
 
     assert_eq!(author, Some("John Doe <john@example.com>".to_string()));
 }
 
 #[test]
 fn test_extract_author_separate_arg() {
-    let args = vec!["--author".to_string(), "John Doe <john@example.com>".to_string()];
+    let args = vec![
+        "--author".to_string(),
+        "John Doe <john@example.com>".to_string(),
+    ];
 
     let mut author = None;
     for i in 0..args.len() {
@@ -600,10 +627,9 @@ fn test_extract_author_separate_arg() {
 fn test_extract_author_not_present() {
     let args = vec!["-m".to_string(), "message".to_string()];
 
-    let author = args.iter().find_map(|arg| {
-        arg.strip_prefix("--author=")
-            .map(|s| s.to_string())
-    });
+    let author = args
+        .iter()
+        .find_map(|arg| arg.strip_prefix("--author=").map(|s| s.to_string()));
 
     assert_eq!(author, None);
 }
@@ -621,7 +647,8 @@ fn test_commit_full_flow() {
         .set_contents(vec!["content"])
         .stage();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let parsed_args = make_commit_invocation(&["-m", "test commit"]);
 
     // Pre-hook
@@ -670,7 +697,8 @@ fn test_commit_amend_full_flow() {
         .set_contents(vec!["amended"])
         .stage();
 
-    let mut repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let mut repository =
+        repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     repository.pre_command_base_commit = Some(original_commit.commit_sha.clone());
 
     let parsed_args = make_commit_invocation(&["--amend", "-m", "amended commit"]);
@@ -680,7 +708,9 @@ fn test_commit_amend_full_flow() {
     assert!(pre_result);
 
     // Actual amend
-    let amended_commit = repo.git(&["commit", "--amend", "-m", "amended commit"]).unwrap();
+    let amended_commit = repo
+        .git(&["commit", "--amend", "-m", "amended commit"])
+        .unwrap();
 
     // Post-hook
     let mut context = CommandHooksContext {
