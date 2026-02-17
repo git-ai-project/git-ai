@@ -792,8 +792,9 @@ fn execute_forwarded_hook(
     hook_args: &[String],
     stdin_bytes: &[u8],
     repo: Option<&Repository>,
+    cached_forward_dir: Option<PathBuf>,
 ) -> i32 {
-    let Some(forward_hooks_dir) = should_forward_repo_state_first(repo) else {
+    let Some(forward_hooks_dir) = cached_forward_dir.or_else(|| should_forward_repo_state_first(repo)) else {
         return 0;
     };
 
@@ -947,20 +948,33 @@ fn force_restore_rebase_hooks(repo: &Repository) {
     restore_rebase_hooks_for_repo(repo, true);
 }
 
-fn parse_hook_stdin(stdin: &[u8]) -> Vec<(String, String)> {
+fn parse_whitespace_fields(stdin: &[u8], min_fields: usize) -> Vec<Vec<String>> {
     String::from_utf8_lossy(stdin)
         .lines()
         .filter_map(|line| {
-            let mut parts = line.split_whitespace();
-            let old_sha = parts.next()?;
-            let new_sha = parts.next()?;
-            Some((old_sha.to_string(), new_sha.to_string()))
+            let fields: Vec<String> = line.split_whitespace().map(String::from).collect();
+            if fields.len() >= min_fields {
+                Some(fields)
+            } else {
+                None
+            }
         })
+        .collect()
+}
+
+fn parse_hook_stdin(stdin: &[u8]) -> Vec<(String, String)> {
+    parse_whitespace_fields(stdin, 2)
+        .into_iter()
+        .map(|fields| (fields[0].clone(), fields[1].clone()))
         .collect()
 }
 
 fn is_valid_git_oid(value: &str) -> bool {
     (value.len() == 40 || value.len() == 64) && value.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn is_valid_git_oid_or_abbrev(value: &str) -> bool {
+    value.len() >= 7 && value.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 fn resolve_squash_source_head(repo: &Repository) -> Option<String> {
@@ -1129,15 +1143,9 @@ fn was_fast_forward_pull(repository: &Repository, expected_new_head: &str) -> bo
 }
 
 fn parse_reference_transaction_stdin(stdin: &[u8]) -> Vec<(String, String, String)> {
-    String::from_utf8_lossy(stdin)
-        .lines()
-        .filter_map(|line| {
-            let mut parts = line.split_whitespace();
-            let old = parts.next()?;
-            let new = parts.next()?;
-            let reference = parts.next()?;
-            Some((old.to_string(), new.to_string(), reference.to_string()))
-        })
+    parse_whitespace_fields(stdin, 3)
+        .into_iter()
+        .map(|fields| (fields[0].clone(), fields[1].clone(), fields[2].clone()))
         .collect()
 }
 
@@ -1612,7 +1620,7 @@ fn latest_cherry_pick_source_from_sequencer(repo: &Repository) -> Option<String>
         let mut parts = trimmed.split_whitespace();
         let _command = parts.next()?;
         let source = parts.next()?;
-        if is_valid_git_oid(source) {
+        if is_valid_git_oid_or_abbrev(source) {
             return Some(source.to_string());
         }
     }
@@ -2013,26 +2021,6 @@ fn run_managed_hook(
             maybe_capture_cherry_pick_pre_commit_state(&repo);
             0
         }
-        "commit-msg"
-        | "pre-merge-commit"
-        | "pre-auto-gc"
-        | "sendemail-validate"
-        | "post-index-change"
-        | "applypatch-msg"
-        | "pre-applypatch"
-        | "post-applypatch"
-        | "pre-receive"
-        | "update"
-        | "proc-receive"
-        | "post-receive"
-        | "post-update"
-        | "push-to-checkout"
-        | "pre-solve-refs"
-        | "fsmonitor-watchman"
-        | "p4-changelist"
-        | "p4-prepare-changelist"
-        | "p4-post-changelist"
-        | "p4-pre-submit" => 0,
         _ => 0,
     }
 }
@@ -2153,7 +2141,8 @@ pub fn handle_git_hook_invocation(hook_name: &str, hook_args: &[String]) -> i32 
 
     let skip_managed_hooks = std::env::var(ENV_SKIP_MANAGED_HOOKS).as_deref() == Ok("1")
         || std::env::var(ENV_SKIP_MANAGED_HOOKS_LEGACY).as_deref() == Ok("1");
-    let forward_hooks_dir_exists = should_forward_repo_state_first(None).is_some();
+    let cached_forward_dir = should_forward_repo_state_first(None);
+    let forward_hooks_dir_exists = cached_forward_dir.is_some();
 
     // Fast path: child wrapper invocations in both mode set skip-managed-hooks.
     // If there is no forwarding target, this hook execution is guaranteed to be a no-op.
@@ -2204,7 +2193,7 @@ pub fn handle_git_hook_invocation(hook_name: &str, hook_args: &[String]) -> i32 
     }
 
     let forward_start = Instant::now();
-    let status = execute_forwarded_hook(hook_name, hook_args, &stdin_data, repo.as_ref());
+    let status = execute_forwarded_hook(hook_name, hook_args, &stdin_data, repo.as_ref(), cached_forward_dir);
     let forward_ms = forward_start.elapsed().as_millis();
     if perf_enabled {
         debug_performance_log_structured(serde_json::json!({
@@ -2525,5 +2514,258 @@ mod tests {
             normalize_path(repo.path()),
             "bare repos should self-heal using git dir path"
         );
+    }
+
+    #[test]
+    fn valid_git_oid_accepts_sha1_and_sha256() {
+        assert!(is_valid_git_oid(
+            "a94a8fe5ccb19ba61c4c0873d391e987982fbbd3"
+        ));
+        assert!(is_valid_git_oid(
+            "a94a8fe5ccb19ba61c4c0873d391e987982fbbd3a94a8fe5ccb19ba61c4c0873"
+        ));
+    }
+
+    #[test]
+    fn valid_git_oid_rejects_short_and_invalid() {
+        assert!(!is_valid_git_oid("abcdef0"));
+        assert!(!is_valid_git_oid(""));
+        assert!(!is_valid_git_oid(
+            "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+        ));
+        assert!(!is_valid_git_oid("abc"));
+    }
+
+    #[test]
+    fn valid_git_oid_or_abbrev_accepts_short_hex() {
+        assert!(is_valid_git_oid_or_abbrev("abcdef0"));
+        assert!(is_valid_git_oid_or_abbrev(
+            "a94a8fe5ccb19ba61c4c0873d391e987982fbbd3"
+        ));
+        assert!(!is_valid_git_oid_or_abbrev("abcde"));
+        assert!(!is_valid_git_oid_or_abbrev(""));
+        assert!(!is_valid_git_oid_or_abbrev("zzzzzzz"));
+    }
+
+    #[test]
+    fn parse_reference_transaction_stdin_extracts_three_fields() {
+        let input = b"0000000 1111111 refs/heads/main\naaa bbb refs/stash\n";
+        let parsed = parse_reference_transaction_stdin(input);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(
+            parsed[0],
+            (
+                "0000000".to_string(),
+                "1111111".to_string(),
+                "refs/heads/main".to_string()
+            )
+        );
+        assert_eq!(
+            parsed[1],
+            (
+                "aaa".to_string(),
+                "bbb".to_string(),
+                "refs/stash".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn parse_reference_transaction_stdin_skips_incomplete_lines() {
+        let input = b"only_one_field\ntwo fields\nold new ref\n";
+        let parsed = parse_reference_transaction_stdin(input);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(
+            parsed[0],
+            (
+                "old".to_string(),
+                "new".to_string(),
+                "ref".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn parse_hook_stdin_skips_single_field_lines() {
+        let input = b"only_one\nabc def\n\nghi jkl extra\n";
+        let parsed = parse_hook_stdin(input);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0], ("abc".to_string(), "def".to_string()));
+        assert_eq!(parsed[1], ("ghi".to_string(), "jkl".to_string()));
+    }
+
+    #[test]
+    fn is_path_inside_component_finds_nested_segment() {
+        assert!(is_path_inside_component(
+            Path::new("/home/user/.git-ai/hooks"),
+            ".git-ai"
+        ));
+        assert!(!is_path_inside_component(
+            Path::new("/home/user/hooks"),
+            ".git-ai"
+        ));
+        assert!(is_path_inside_component(
+            Path::new("/a/.GIT-AI/b"),
+            ".git-ai"
+        ));
+    }
+
+    #[test]
+    fn is_path_inside_any_git_ai_dir_detects_git_ai_subtree() {
+        assert!(is_path_inside_any_git_ai_dir(Path::new(
+            "/repo/.git/ai/hooks"
+        )));
+        assert!(!is_path_inside_any_git_ai_dir(Path::new(
+            "/repo/.git/hooks"
+        )));
+        assert!(!is_path_inside_any_git_ai_dir(Path::new(
+            "/repo/ai/hooks"
+        )));
+        assert!(is_path_inside_any_git_ai_dir(Path::new(
+            "/other/.git/AI/deep/path"
+        )));
+    }
+
+    #[test]
+    fn hook_has_no_managed_behavior_classifies_correctly() {
+        assert!(hook_has_no_managed_behavior("commit-msg"));
+        assert!(hook_has_no_managed_behavior("pre-auto-gc"));
+        assert!(hook_has_no_managed_behavior("fsmonitor-watchman"));
+        assert!(!hook_has_no_managed_behavior("pre-commit"));
+        assert!(!hook_has_no_managed_behavior("post-rewrite"));
+        assert!(!hook_has_no_managed_behavior("reference-transaction"));
+        assert!(!hook_has_no_managed_behavior("pre-push"));
+    }
+
+    #[test]
+    fn cherry_pick_batch_state_serialization_roundtrip() {
+        let state = CherryPickBatchState {
+            schema_version: cherry_pick_batch_state_schema_version(),
+            initial_head: "abc123".to_string(),
+            mappings: vec![
+                CherryPickBatchMapping {
+                    source_commit: "aaa".to_string(),
+                    new_commit: "bbb".to_string(),
+                },
+                CherryPickBatchMapping {
+                    source_commit: "ccc".to_string(),
+                    new_commit: "ddd".to_string(),
+                },
+            ],
+            active: true,
+        };
+
+        let json = serde_json::to_string_pretty(&state).expect("serialization should succeed");
+        let deserialized: CherryPickBatchState =
+            serde_json::from_str(&json).expect("deserialization should succeed");
+        assert_eq!(state, deserialized);
+    }
+
+    #[test]
+    fn ensure_hook_symlink_is_idempotent() {
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let repo = init_repo(&tmp.path().join("repo"));
+        ensure_repo_hooks_installed(&repo, false).expect("ensure repo hooks should succeed");
+
+        let managed_hooks_dir = managed_git_hooks_dir_for_repo(&repo);
+        let binary_path = std::env::current_exe()
+            .ok()
+            .and_then(|path| fs::canonicalize(path).ok())
+            .unwrap_or_else(|| PathBuf::from("git-ai"));
+
+        let hook_path = managed_hooks_dir.join("pre-commit");
+        let first = ensure_hook_symlink(&hook_path, &binary_path, false)
+            .expect("first ensure_hook_symlink");
+        assert!(!first, "second call should report no change");
+
+        let second = ensure_hook_symlink(&hook_path, &binary_path, false)
+            .expect("second ensure_hook_symlink");
+        assert!(!second, "third call should also report no change");
+    }
+
+    #[test]
+    fn rebase_hook_mask_double_enable_is_noop() {
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let repo = init_repo(&tmp.path().join("repo"));
+        ensure_repo_hooks_installed(&repo, false).expect("ensure repo hooks should succeed");
+
+        maybe_enable_rebase_hook_mask(&repo);
+
+        let state_path = rebase_hook_mask_state_path(&repo);
+        let state1 = read_rebase_hook_mask_state(&state_path)
+            .expect("read should succeed")
+            .expect("state should exist");
+
+        maybe_enable_rebase_hook_mask(&repo);
+
+        let state2 = read_rebase_hook_mask_state(&state_path)
+            .expect("read should succeed")
+            .expect("state should exist");
+        assert_eq!(
+            state1.session_id, state2.session_id,
+            "second enable should not create a new session"
+        );
+
+        restore_rebase_hooks_for_repo(&repo, true);
+    }
+
+    #[test]
+    fn repo_hook_state_serialization_roundtrip() {
+        let state = RepoHookState {
+            schema_version: repo_hook_state_schema_version(),
+            managed_hooks_path: "/tmp/test/.git/ai/hooks".to_string(),
+            original_local_hooks_path: Some("/tmp/user-hooks".to_string()),
+            forward_mode: ForwardMode::RepoLocal,
+            forward_hooks_path: Some("/tmp/user-hooks".to_string()),
+            binary_path: "/usr/local/bin/git-ai".to_string(),
+        };
+
+        let json = serde_json::to_string_pretty(&state).expect("serialization should succeed");
+        let deserialized: RepoHookState =
+            serde_json::from_str(&json).expect("deserialization should succeed");
+        assert_eq!(state, deserialized);
+    }
+
+    #[test]
+    fn forward_mode_none_serialization() {
+        let state = RepoHookState {
+            forward_mode: ForwardMode::None,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&state).expect("serialization should succeed");
+        assert!(json.contains("\"none\""));
+        let deserialized: RepoHookState =
+            serde_json::from_str(&json).expect("deserialization should succeed");
+        assert_eq!(deserialized.forward_mode, ForwardMode::None);
+    }
+
+    #[test]
+    fn parse_whitespace_fields_handles_empty_input() {
+        let empty: &[u8] = b"";
+        assert!(parse_whitespace_fields(empty, 2).is_empty());
+        assert!(parse_whitespace_fields(b"\n\n", 1).is_empty());
+        assert!(parse_whitespace_fields(b"  \n  \n", 1).is_empty());
+    }
+
+    #[test]
+    fn managed_git_hook_names_subset_of_core() {
+        for name in MANAGED_GIT_HOOK_NAMES {
+            assert!(
+                CORE_GIT_HOOK_NAMES.contains(name),
+                "managed hook {:?} should be in CORE_GIT_HOOK_NAMES",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn rebase_terminal_hooks_subset_of_managed() {
+        for name in REBASE_TERMINAL_HOOK_NAMES {
+            assert!(
+                MANAGED_GIT_HOOK_NAMES.contains(name),
+                "rebase terminal hook {:?} should be in MANAGED_GIT_HOOK_NAMES",
+                name
+            );
+        }
     }
 }
