@@ -96,6 +96,17 @@ class RunResult:
     duration_ms: float
 
 
+@dataclasses.dataclass(frozen=True)
+class MarginCheckResult:
+    scenario: str
+    variant: str
+    baseline_ms: float
+    median_ms: float
+    allowed_ms: float
+    slowdown_pct: float
+    passed: bool
+
+
 def now_iso_utc() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -697,6 +708,41 @@ def compute_slowdowns(
     return slowdowns
 
 
+def compute_margin_checks(
+    summary: dict[str, dict[str, dict[str, float | list[float]]]],
+    *,
+    baseline_key: str,
+    margin_pct: float,
+    variants: list[str],
+) -> list[MarginCheckResult]:
+    checks: list[MarginCheckResult] = []
+    multiplier = 1.0 + (margin_pct / 100.0)
+    for scenario, by_variant in summary.items():
+        if baseline_key not in by_variant:
+            continue
+        baseline = float(by_variant[baseline_key]["median_ms"])  # type: ignore[index]
+        if baseline <= 0.0:
+            continue
+        allowed = baseline * multiplier
+        for variant in variants:
+            if variant not in by_variant:
+                continue
+            median = float(by_variant[variant]["median_ms"])  # type: ignore[index]
+            slowdown = ((median - baseline) / baseline) * 100.0
+            checks.append(
+                MarginCheckResult(
+                    scenario=scenario,
+                    variant=variant,
+                    baseline_ms=round(baseline, 3),
+                    median_ms=round(median, 3),
+                    allowed_ms=round(allowed, 3),
+                    slowdown_pct=round(slowdown, 3),
+                    passed=median <= allowed,
+                )
+            )
+    return checks
+
+
 def geometric_mean(values: list[float]) -> float:
     if not values:
         return 1.0
@@ -710,8 +756,11 @@ def render_report(
     variants: list[Variant],
     summary: dict[str, dict[str, dict[str, float | list[float]]]],
     slowdowns: dict[str, dict[str, float]],
+    margin_checks: list[MarginCheckResult],
 ) -> None:
     baseline_key = "main_wrapper"
+    margin_baseline_key = str(metadata["margin_baseline"])
+    margin_baseline_label = margin_baseline_key.replace("_", " ")
 
     lines: list[str] = []
     lines.append("# git-ai Mode Benchmark Report")
@@ -791,12 +840,36 @@ def render_report(
         lines.append(f"| {key} | {gm:.4f}x | {(gm - 1.0) * 100.0:.3f}% |")
 
     lines.append("")
+    lines.append("## Margin Check")
+    lines.append("")
+    lines.append(
+        f"- Required margin: current modes must be <= `{float(metadata['margin_pct']):.1f}%` slower than `{margin_baseline_label}`"
+    )
+    lines.append(
+        "| Scenario | Variant | Baseline (ms) | Variant Median (ms) | Allowed Max (ms) | Slowdown | Status |"
+    )
+    lines.append("|---|---|---:|---:|---:|---:|---|")
+    for check in sorted(margin_checks, key=lambda c: (c.scenario, c.variant)):
+        status = "PASS" if check.passed else "FAIL"
+        lines.append(
+            f"| {check.scenario} | {check.variant} | {check.baseline_ms:.3f} | "
+            f"{check.median_ms:.3f} | {check.allowed_ms:.3f} | {check.slowdown_pct:.3f}% | {status} |"
+        )
+    failed = [check for check in margin_checks if not check.passed]
+    lines.append("")
+    lines.append(
+        f"- Overall: `{len(margin_checks) - len(failed)}/{len(margin_checks)}` checks passing"
+    )
+
+    lines.append("")
     lines.append("## Re-run")
     lines.append("")
     lines.append("```bash")
     lines.append(
         "python3 scripts/benchmarks/git/benchmark_modes_vs_main.py --iterations-basic "
-        f"{metadata['iterations_basic']} --iterations-complex {metadata['iterations_complex']}"
+        f"{metadata['iterations_basic']} --iterations-complex {metadata['iterations_complex']} "
+        f"--margin-pct {float(metadata['margin_pct']):.1f} "
+        f"--margin-baseline {metadata['margin_baseline']}"
     )
     lines.append("```")
 
@@ -866,6 +939,24 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Use an existing main-branch git-ai binary (skip main build/worktree).",
     )
+    parser.add_argument(
+        "--margin-pct",
+        type=float,
+        default=25.0,
+        help="Maximum allowed slowdown percentage relative to --margin-baseline.",
+    )
+    parser.add_argument(
+        "--enforce-margin",
+        action="store_true",
+        help="Exit non-zero when any current_hooks/current_both margin check fails.",
+    )
+    parser.add_argument(
+        "--margin-baseline",
+        type=str,
+        choices=["current_wrapper", "main_wrapper"],
+        default="current_wrapper",
+        help="Baseline variant for margin checks.",
+    )
     return parser.parse_args()
 
 
@@ -875,6 +966,8 @@ def main() -> int:
 
     if args.iterations_basic <= 0 or args.iterations_complex <= 0:
         raise BenchmarkError("Iterations must be positive integers.")
+    if args.margin_pct < 0:
+        raise BenchmarkError("--margin-pct must be non-negative")
 
     if args.work_root is None:
         work_root = Path(tempfile.mkdtemp(prefix="git-ai-modes-bench-"))
@@ -979,6 +1072,12 @@ def main() -> int:
 
         summary = summarize_runs(raw_results)
         slowdowns = compute_slowdowns(summary, baseline_key="main_wrapper")
+        margin_checks = compute_margin_checks(
+            summary,
+            baseline_key=args.margin_baseline,
+            margin_pct=args.margin_pct,
+            variants=["current_hooks", "current_both"],
+        )
 
         metadata: dict[str, str | int | dict[str, str]] = {
             "timestamp_utc": now_iso_utc(),
@@ -990,6 +1089,8 @@ def main() -> int:
             "real_git": str(real_git),
             "iterations_basic": args.iterations_basic,
             "iterations_complex": args.iterations_complex,
+            "margin_pct": args.margin_pct,
+            "margin_baseline": args.margin_baseline,
             "variants": {v.key: str(v.binary) for v in variants},
         }
 
@@ -1003,19 +1104,33 @@ def main() -> int:
                     "metadata": metadata,
                     "summary": summary,
                     "slowdowns_pct_vs_main_wrapper": slowdowns,
+                    "margin_checks": [dataclasses.asdict(check) for check in margin_checks],
                 },
                 indent=2,
             )
             + "\n",
             encoding="utf-8",
         )
-        render_report(md_path, metadata, SCENARIOS, variants, summary, slowdowns)
+        render_report(md_path, metadata, SCENARIOS, variants, summary, slowdowns, margin_checks)
 
         print("")
         print("Benchmark complete")
         print(f"- Report: {md_path}")
         print(f"- JSON:   {json_path}")
         print(f"- CSV:    {csv_path}")
+        failed_checks = [check for check in margin_checks if not check.passed]
+        print(
+            f"- Margin checks: {len(margin_checks) - len(failed_checks)}/{len(margin_checks)} passing"
+        )
+        if args.enforce_margin and failed_checks:
+            print("")
+            print("Margin enforcement failed:")
+            for check in failed_checks:
+                print(
+                    f"  - {check.scenario} / {check.variant}: "
+                    f"{check.slowdown_pct:.3f}% > {args.margin_pct:.1f}%"
+                )
+            return 2
         return 0
 
     finally:

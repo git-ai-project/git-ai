@@ -1,7 +1,9 @@
 use std::collections::HashSet;
 
 use crate::authorship::virtual_attribution::VirtualAttributions;
-use crate::commands::git_hook_handlers::ENV_SKIP_MANAGED_HOOKS;
+use crate::commands::git_hook_handlers::{
+    ENV_SKIP_MANAGED_HOOKS, resolve_previous_non_managed_hooks_path,
+};
 use crate::commands::hooks::checkout_hooks;
 use crate::commands::hooks::cherry_pick_hooks;
 use crate::commands::hooks::clone_hooks;
@@ -104,7 +106,7 @@ pub fn handle_git(args: &[String]) {
     // and delegate directly to the real git so existing completion scripts work.
     if in_shell_completion_context() {
         let orig_args: Vec<String> = std::env::args().skip(1).collect();
-        proxy_to_git(&orig_args, true);
+        proxy_to_git(&orig_args, true, None);
         return;
     }
 
@@ -128,7 +130,7 @@ pub fn handle_git(args: &[String]) {
     // Note: clone aliases (e.g., alias.cl = clone) won't trigger clone hooks because
     // alias resolution requires a Repository object, which doesn't exist yet for clone.
     if parsed_args.command.as_deref() == Some("clone") && !parsed_args.is_help && !skip_hooks {
-        let exit_status = proxy_to_git(&parsed_args.to_invocation_vec(), false);
+        let exit_status = proxy_to_git(&parsed_args.to_invocation_vec(), false, None);
         if exit_status_was_interrupted(&exit_status) {
             exit_with_status(exit_status);
         }
@@ -158,8 +160,14 @@ pub fn handle_git(args: &[String]) {
         run_pre_command_hooks(&mut command_hooks_context, &mut parsed_args, repository);
         let pre_command_duration = pre_command_start.elapsed();
 
+        let child_hooks_path_override =
+            resolve_child_git_hooks_path_override(&parsed_args, Some(repository));
         let git_start = Instant::now();
-        let exit_status = proxy_to_git(&parsed_args.to_invocation_vec(), false);
+        let exit_status = proxy_to_git(
+            &parsed_args.to_invocation_vec(),
+            false,
+            child_hooks_path_override.as_deref(),
+        );
         if exit_status_was_interrupted(&exit_status) {
             exit_with_status(exit_status);
         }
@@ -184,7 +192,13 @@ pub fn handle_git(args: &[String]) {
         exit_status
     } else {
         // run without hooks
-        proxy_to_git(&parsed_args.to_invocation_vec(), false)
+        let child_hooks_path_override =
+            resolve_child_git_hooks_path_override(&parsed_args, repository_option.as_ref());
+        proxy_to_git(
+            &parsed_args.to_invocation_vec(),
+            false,
+            child_hooks_path_override.as_deref(),
+        )
     };
     exit_with_status(exit_status);
 }
@@ -493,7 +507,63 @@ fn run_post_command_hooks(
     }
 }
 
-fn proxy_to_git(args: &[String], exit_on_completion: bool) -> std::process::ExitStatus {
+#[cfg(windows)]
+fn platform_null_hooks_path() -> &'static str {
+    "NUL"
+}
+
+#[cfg(not(windows))]
+fn platform_null_hooks_path() -> &'static str {
+    "/dev/null"
+}
+
+fn command_uses_managed_hooks(command: Option<&str>) -> bool {
+    matches!(
+        command,
+        Some(
+            "commit"
+                | "rebase"
+                | "cherry-pick"
+                | "reset"
+                | "stash"
+                | "merge"
+                | "checkout"
+                | "switch"
+                | "pull"
+                | "fetch"
+                | "push"
+        )
+    )
+}
+
+fn has_explicit_hooks_path_override(args: &[String]) -> bool {
+    args.windows(2)
+        .any(|pair| pair[0] == "-c" && pair[1].starts_with("core.hooksPath="))
+        || args.iter().any(|arg| {
+            arg.starts_with("-ccore.hooksPath=") || arg.starts_with("--config=core.hooksPath=")
+        })
+}
+
+fn resolve_child_git_hooks_path_override(
+    parsed_args: &ParsedGitInvocation,
+    repository: Option<&Repository>,
+) -> Option<String> {
+    if !command_uses_managed_hooks(parsed_args.command.as_deref()) {
+        return None;
+    }
+
+    let hooks_path = resolve_previous_non_managed_hooks_path(repository)
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_else(|| platform_null_hooks_path().to_string());
+
+    Some(hooks_path)
+}
+
+fn proxy_to_git(
+    args: &[String],
+    exit_on_completion: bool,
+    child_hooks_path_override: Option<&str>,
+) -> std::process::ExitStatus {
     // debug_log(&format!("proxying to git with args: {:?}", args));
     // debug_log(&format!("prepended global args: {:?}", prepend_global(args)));
     // Use spawn for interactive commands
@@ -507,6 +577,11 @@ fn proxy_to_git(args: &[String], exit_on_completion: bool) -> std::process::Exit
             let should_setpgid = !is_interactive;
 
             let mut cmd = Command::new(config::Config::get().git_cmd());
+            if let Some(hooks_path) = child_hooks_path_override
+                && !has_explicit_hooks_path_override(args)
+            {
+                cmd.arg("-c").arg(format!("core.hooksPath={}", hooks_path));
+            }
             cmd.args(args);
             cmd.env(ENV_SKIP_MANAGED_HOOKS, "1");
             unsafe {
@@ -528,6 +603,11 @@ fn proxy_to_git(args: &[String], exit_on_completion: bool) -> std::process::Exit
         #[cfg(not(unix))]
         {
             let mut cmd = Command::new(config::Config::get().git_cmd());
+            if let Some(hooks_path) = child_hooks_path_override
+                && !has_explicit_hooks_path_override(args)
+            {
+                cmd.arg("-c").arg(format!("core.hooksPath={}", hooks_path));
+            }
             cmd.args(args);
             cmd.env(ENV_SKIP_MANAGED_HOOKS, "1");
 
