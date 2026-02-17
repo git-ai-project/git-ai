@@ -19,6 +19,14 @@ struct GitLabMergeRequest {
     merge_commit_sha: Option<String>,
     squash_commit_sha: Option<String>,
     squash: Option<bool>,
+    source_project_id: u64,
+    target_project_id: u64,
+}
+
+/// GitLab Project API response (minimal fields for fork detection)
+#[derive(Debug, Clone, Deserialize)]
+struct GitLabProject {
+    http_url_to_repo: String,
 }
 
 /// Query GitLab API for recently merged MRs and find one matching the current commit SHA.
@@ -175,6 +183,57 @@ pub fn get_gitlab_ci_context() -> Result<Option<CiContext>, GitAiError> {
         effective_merge_sha
     );
 
+    // Detect fork: if source_project_id differs from target_project_id, this is a fork MR
+    let fork_clone_url = if mr.source_project_id != mr.target_project_id {
+        println!(
+            "[GitLab CI] Detected fork MR: source project {} differs from target project {}",
+            mr.source_project_id, mr.target_project_id
+        );
+        // Query the source project API to get its clone URL
+        let source_project_endpoint = format!("{}/projects/{}", api_url, mr.source_project_id);
+        match minreq::get(&source_project_endpoint)
+            .with_header(auth_header_name, &auth_token)
+            .with_header(
+                "User-Agent",
+                format!("git-ai/{}", env!("CARGO_PKG_VERSION")),
+            )
+            .with_timeout(30)
+            .send()
+        {
+            Ok(resp) if resp.status_code == 200 => {
+                match serde_json::from_str::<GitLabProject>(resp.as_str().unwrap_or("{}")) {
+                    Ok(project) => {
+                        println!("[GitLab CI] Fork clone URL: {}", project.http_url_to_repo);
+                        Some(project.http_url_to_repo)
+                    }
+                    Err(e) => {
+                        println!(
+                            "[GitLab CI] Warning: Failed to parse source project response: {}",
+                            e
+                        );
+                        None
+                    }
+                }
+            }
+            Ok(resp) => {
+                println!(
+                    "[GitLab CI] Warning: Failed to query source project (status {}), fork notes may be lost",
+                    resp.status_code
+                );
+                None
+            }
+            Err(e) => {
+                println!(
+                    "[GitLab CI] Warning: Failed to query source project: {}, fork notes may be lost",
+                    e
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Found a matching MR - clone and fetch
     let clone_dir = "git-ai-ci-clone".to_string();
     let clone_url = format!("{}/{}.git", server_url, project_path);
@@ -262,6 +321,18 @@ pub fn get_gitlab_ci_context() -> Result<Option<CiContext>, GitAiError> {
         effective_merge_sha, mr.sha, mr.source_branch, mr.target_branch
     );
 
+    // Authenticate the fork clone URL for fetching notes
+    let authenticated_fork_url = fork_clone_url.map(|fork_url| {
+        if let Ok(job_token) = std::env::var("CI_JOB_TOKEN") {
+            fork_url.replace(
+                &server_url,
+                &format!("{}://gitlab-ci-token:{}@{}", scheme, job_token, server_host),
+            )
+        } else {
+            fork_url
+        }
+    });
+
     Ok(Some(CiContext {
         repo,
         event: CiEvent::Merge {
@@ -270,6 +341,7 @@ pub fn get_gitlab_ci_context() -> Result<Option<CiContext>, GitAiError> {
             head_sha: mr.sha.clone(),
             base_ref: mr.target_branch.clone(),
             base_sha: String::new(), // Not readily available from MR API, but not used in current impl
+            fork_clone_url: authenticated_fork_url,
         },
         temp_dir: PathBuf::from(clone_dir),
     }))

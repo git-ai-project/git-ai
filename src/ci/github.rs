@@ -63,6 +63,18 @@ pub fn get_github_ci_context() -> Result<Option<CiContext>, GitAiError> {
     let base_ref = pull_request.base.ref_name;
     let clone_url = pull_request.base.repo.clone_url.clone();
 
+    // Detect fork: if head repo URL differs from base repo URL, this is a fork PR
+    let fork_clone_url = if pull_request.head.repo.clone_url != pull_request.base.repo.clone_url {
+        let fork_url = pull_request.head.repo.clone_url.clone();
+        println!(
+            "Detected fork PR: head repo {} differs from base repo {}",
+            fork_url, clone_url
+        );
+        Some(fork_url)
+    } else {
+        None
+    };
+
     let clone_dir = "git-ai-ci-clone".to_string();
 
     // Authenticate the clone URL with GITHUB_TOKEN if available
@@ -97,6 +109,18 @@ pub fn get_github_ci_context() -> Result<Option<CiContext>, GitAiError> {
         format!("pull/{}/head:refs/github/pr/{}", pr_number, pr_number),
     ])?;
 
+    // Authenticate the fork clone URL if this is a fork PR
+    let authenticated_fork_url = fork_clone_url.map(|fork_url| {
+        if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+            fork_url.replace(
+                "https://github.com/",
+                &format!("https://x-access-token:{}@github.com/", token),
+            )
+        } else {
+            fork_url
+        }
+    });
+
     let repo = find_repository_in_path(&clone_dir.clone())?;
 
     Ok(Some(CiContext {
@@ -107,6 +131,7 @@ pub fn get_github_ci_context() -> Result<Option<CiContext>, GitAiError> {
             head_sha: head_sha.clone(),
             base_ref: base_ref.clone(),
             base_sha: pull_request.base.sha.clone(),
+            fork_clone_url: authenticated_fork_url,
         },
         temp_dir: PathBuf::from(clone_dir),
     }))
