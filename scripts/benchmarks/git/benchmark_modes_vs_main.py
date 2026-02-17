@@ -33,36 +33,16 @@ from pathlib import Path
 from typing import Callable
 
 
-CORE_HOOK_NAMES = [
-    "applypatch-msg",
-    "pre-applypatch",
-    "post-applypatch",
+MANAGED_HOOK_NAMES = [
     "pre-commit",
-    "pre-merge-commit",
     "prepare-commit-msg",
-    "commit-msg",
     "post-commit",
     "pre-rebase",
     "post-checkout",
     "post-merge",
     "pre-push",
-    "pre-auto-gc",
     "post-rewrite",
-    "sendemail-validate",
-    "fsmonitor-watchman",
-    "p4-changelist",
-    "p4-prepare-changelist",
-    "p4-post-changelist",
-    "p4-pre-submit",
-    "post-index-change",
-    "pre-receive",
-    "update",
-    "proc-receive",
-    "post-receive",
-    "post-update",
-    "push-to-checkout",
     "reference-transaction",
-    "pre-solve-refs",
 ]
 
 
@@ -253,7 +233,6 @@ class VariantRunner:
 
         self.home_dir = run_root / "home"
         self.bin_dir = run_root / "bin"
-        self.hooks_dir = self.home_dir / ".git-ai" / "git-hooks"
         self.git_wrapper = self.bin_dir / ("git.exe" if os.name == "nt" else "git")
 
         self.home_dir.mkdir(parents=True, exist_ok=True)
@@ -262,11 +241,6 @@ class VariantRunner:
         if self.variant.mode in ("wrapper", "both"):
             create_link_or_copy(self.variant.binary, self.git_wrapper)
 
-        if self.variant.mode in ("hooks", "both"):
-            self.hooks_dir.mkdir(parents=True, exist_ok=True)
-            for hook_name in CORE_HOOK_NAMES:
-                create_link_or_copy(self.variant.binary, self.hooks_dir / hook_name)
-
         self.base_env = dict(os.environ)
         self.base_env["HOME"] = str(self.home_dir)
         self.base_env["GIT_CONFIG_GLOBAL"] = str(self.home_dir / ".gitconfig")
@@ -274,6 +248,45 @@ class VariantRunner:
         self.base_env["GIT_AI_DEBUG"] = "0"
         self.base_env["GIT_AI_DEBUG_PERFORMANCE"] = "0"
         self.base_env["PATH"] = f"{self.bin_dir}{os.pathsep}{self.base_env.get('PATH', '')}"
+
+    def assert_repo_local_hooks(self, repo_dir: Path) -> None:
+        expected_hooks_dir = (repo_dir / ".git" / "ai" / "hooks").resolve()
+        hooks_path = (
+            self.run_git(["config", "--local", "--get", "core.hooksPath"], cwd=repo_dir)
+            .stdout.strip()
+        )
+        if not hooks_path:
+            raise BenchmarkError("Expected local core.hooksPath to be configured, found empty")
+        resolved_hooks_path = Path(hooks_path)
+        if not resolved_hooks_path.is_absolute():
+            resolved_hooks_path = (repo_dir / resolved_hooks_path).resolve()
+        else:
+            resolved_hooks_path = resolved_hooks_path.resolve()
+        if resolved_hooks_path != expected_hooks_dir:
+            raise BenchmarkError(
+                "Expected repo-local hooks path\n"
+                f"expected={expected_hooks_dir}\n"
+                f"actual={resolved_hooks_path}\n"
+            )
+
+        if not expected_hooks_dir.exists():
+            raise BenchmarkError(f"Managed hooks dir missing: {expected_hooks_dir}")
+
+        installed_hooks = {
+            entry.name
+            for entry in expected_hooks_dir.iterdir()
+            if not entry.name.startswith(".")
+        }
+        expected_set = set(MANAGED_HOOK_NAMES)
+        missing = sorted(expected_set.difference(installed_hooks))
+        extras = sorted(installed_hooks.difference(expected_set))
+        if missing or extras:
+            raise BenchmarkError(
+                "Unexpected managed hook surface in repo-local hooks dir\n"
+                f"missing={missing}\n"
+                f"extras={extras}\n"
+                f"path={expected_hooks_dir}\n"
+            )
 
     def run_git(self, args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
         if self.variant.mode in ("wrapper", "both"):
@@ -308,7 +321,8 @@ class VariantRunner:
         self.run_git(["config", "user.email", "benchmark@git-ai.local"], cwd=repo_dir)
 
         if self.variant.mode in ("hooks", "both"):
-            self.run_git(["config", "core.hooksPath", str(self.hooks_dir)], cwd=repo_dir)
+            self.run_git_ai(["git-hooks", "ensure"], cwd=repo_dir)
+            self.assert_repo_local_hooks(repo_dir)
 
     def checkpoint_mock_ai(self, repo_dir: Path, files: list[str]) -> None:
         if not files:
