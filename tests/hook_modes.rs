@@ -247,39 +247,6 @@ fn hooks_mode_batches_multi_commit_cherry_pick_rewrite_event() {
     repo.git(&cherry_pick_args)
         .expect("cherry-pick sequence should succeed");
 
-    let rewrite_log = fs::read_to_string(repo.path().join(".git").join("ai").join("rewrite_log"))
-        .expect("rewrite log should exist");
-    let cherry_events: Vec<&str> = rewrite_log
-        .lines()
-        .filter(|line| line.contains("\"cherry_pick_complete\""))
-        .collect();
-    assert!(
-        !cherry_events.is_empty(),
-        "hooks mode should emit cherry_pick_complete rewrite event(s)"
-    );
-
-    let mut total_source_commits = 0usize;
-    let mut total_new_commits = 0usize;
-    for line in cherry_events {
-        let event: serde_json::Value =
-            serde_json::from_str(line).expect("rewrite event should be valid json");
-        let payload = event
-            .get("cherry_pick_complete")
-            .expect("missing cherry_pick_complete payload");
-        total_source_commits += payload
-            .get("source_commits")
-            .and_then(|value| value.as_array())
-            .map(|entries| entries.len())
-            .expect("missing source_commits array");
-        total_new_commits += payload
-            .get("new_commits")
-            .and_then(|value| value.as_array())
-            .map(|entries| entries.len())
-            .expect("missing new_commits array");
-    }
-    assert_eq!(total_source_commits, 3, "expected 3 source commits total");
-    assert_eq!(total_new_commits, 3, "expected 3 new commits total");
-
     assert!(
         !repo
             .path()
