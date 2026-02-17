@@ -68,7 +68,8 @@ fn configure_forward_target(repo: &TestRepo, forward_dir: &Path) {
 
 fn prepare_file(repo: &TestRepo, filename: &str) {
     fs::write(repo.path().join(filename), "hello\n").expect("failed to write file");
-    repo.git(&["add", filename]).expect("git add should succeed");
+    repo.git(&["add", filename])
+        .expect("git add should succeed");
 }
 
 #[cfg(unix)]
@@ -103,7 +104,10 @@ fn hooks_mode_forwards_non_managed_commit_msg_hook() {
     configure_forward_target(&repo, &forward_dir);
 
     assert!(
-        managed_hooks_dir(&repo).join("commit-msg").symlink_metadata().is_ok(),
+        managed_hooks_dir(&repo)
+            .join("commit-msg")
+            .symlink_metadata()
+            .is_ok(),
         "commit-msg should be provisioned when it exists in the forward target"
     );
 
@@ -311,8 +315,7 @@ fn hooks_mode_husky_style_dirname_resolution() {
     let internal = husky_dir.join("_");
     fs::create_dir_all(&internal).expect("failed to create .husky/_");
 
-    fs::write(internal.join("husky.sh"), "#!/bin/sh\n")
-        .expect("failed to write husky.sh");
+    fs::write(internal.join("husky.sh"), "#!/bin/sh\n").expect("failed to write husky.sh");
     set_executable(&internal.join("husky.sh"));
 
     let marker_path = repo.path().join(".git").join("husky-marker.txt");
@@ -362,8 +365,7 @@ fn hooks_mode_directory_in_forward_dir_ignored() {
 
     let forward_dir = repo.path().join(".git").join("dir-forward");
     fs::create_dir_all(&forward_dir).expect("failed to create forward dir");
-    fs::create_dir_all(forward_dir.join("commit-msg"))
-        .expect("failed to create hook directory");
+    fs::create_dir_all(forward_dir.join("commit-msg")).expect("failed to create hook directory");
 
     configure_forward_target(&repo, &forward_dir);
 
@@ -480,13 +482,14 @@ fn hooks_mode_non_managed_symlinks_point_to_git_ai_binary() {
     let non_managed_link = managed_dir.join("commit-msg");
     let managed_link = managed_dir.join("pre-commit");
 
-    let non_managed_target = fs::read_link(&non_managed_link)
-        .expect("should read non-managed symlink target");
+    let non_managed_target =
+        fs::read_link(&non_managed_link).expect("should read non-managed symlink target");
     let managed_target = fs::read_link(&managed_link).expect("should read managed symlink target");
 
     let non_managed_canon =
         fs::canonicalize(&non_managed_target).unwrap_or_else(|_| non_managed_target.clone());
-    let managed_canon = fs::canonicalize(&managed_target).unwrap_or_else(|_| managed_target.clone());
+    let managed_canon =
+        fs::canonicalize(&managed_target).unwrap_or_else(|_| managed_target.clone());
 
     assert_eq!(
         non_managed_canon, managed_canon,
