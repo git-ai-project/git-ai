@@ -262,3 +262,236 @@ impl CiContext {
         commits
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::git::test_utils::TmpRepo;
+    use std::fs;
+
+    #[test]
+    fn test_ci_event_debug() {
+        let event = CiEvent::Merge {
+            merge_commit_sha: "abc123".to_string(),
+            head_ref: "feature".to_string(),
+            head_sha: "def456".to_string(),
+            base_ref: "main".to_string(),
+            base_sha: "ghi789".to_string(),
+        };
+
+        let debug_str = format!("{:?}", event);
+        assert!(debug_str.contains("Merge"));
+        assert!(debug_str.contains("abc123"));
+        assert!(debug_str.contains("feature"));
+    }
+
+    #[test]
+    fn test_ci_run_result_debug() {
+        let result = CiRunResult::SkippedSimpleMerge;
+        let debug_str = format!("{:?}", result);
+        assert!(debug_str.contains("SkippedSimpleMerge"));
+
+        let result2 = CiRunResult::SkippedFastForward;
+        let debug_str2 = format!("{:?}", result2);
+        assert!(debug_str2.contains("SkippedFastForward"));
+
+        let result3 = CiRunResult::NoAuthorshipAvailable;
+        let debug_str3 = format!("{:?}", result3);
+        assert!(debug_str3.contains("NoAuthorshipAvailable"));
+    }
+
+    #[test]
+    fn test_ci_context_with_repository() {
+        let test_repo = TmpRepo::new().unwrap();
+        let repo_path = test_repo.path().to_path_buf();
+        let repo = crate::git::repository::find_repository_in_path(repo_path.to_str().unwrap()).unwrap();
+
+        let event = CiEvent::Merge {
+            merge_commit_sha: "abc".to_string(),
+            head_ref: "feature".to_string(),
+            head_sha: "def".to_string(),
+            base_ref: "main".to_string(),
+            base_sha: "ghi".to_string(),
+        };
+
+        let context = CiContext::with_repository(repo, event);
+        assert!(context.temp_dir.as_os_str().is_empty());
+    }
+
+    #[test]
+    fn test_ci_context_teardown_empty_temp_dir() {
+        let test_repo = TmpRepo::new().unwrap();
+        let repo_path = test_repo.path().to_path_buf();
+        let repo = crate::git::repository::find_repository_in_path(repo_path.to_str().unwrap()).unwrap();
+
+        let event = CiEvent::Merge {
+            merge_commit_sha: "abc".to_string(),
+            head_ref: "feature".to_string(),
+            head_sha: "def".to_string(),
+            base_ref: "main".to_string(),
+            base_sha: "ghi".to_string(),
+        };
+
+        let context = CiContext::with_repository(repo, event);
+        let result = context.teardown();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_ci_context_teardown_with_temp_dir() {
+        let test_repo = TmpRepo::new().unwrap();
+        let repo_path = test_repo.path().to_path_buf();
+        let repo = crate::git::repository::find_repository_in_path(repo_path.to_str().unwrap()).unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let temp_path = temp_dir.path().to_path_buf();
+
+        // Write a test file
+        fs::write(temp_path.join("test.txt"), "test").unwrap();
+
+        let event = CiEvent::Merge {
+            merge_commit_sha: "abc".to_string(),
+            head_ref: "feature".to_string(),
+            head_sha: "def".to_string(),
+            base_ref: "main".to_string(),
+            base_sha: "ghi".to_string(),
+        };
+
+        let context = CiContext {
+            repo,
+            event,
+            temp_dir: temp_path.clone(),
+        };
+
+        // Directory should exist before teardown
+        assert!(temp_path.exists());
+
+        let result = context.teardown();
+        assert!(result.is_ok());
+
+        // Directory should be removed after teardown
+        assert!(!temp_path.exists());
+    }
+
+    #[test]
+    fn test_get_rebased_commits_linear_history() {
+        let test_repo = TmpRepo::new().unwrap();
+        let repo = test_repo.gitai_repo();
+
+        // Create a linear commit history
+        let file_path = test_repo.path().join("test.txt");
+
+        // First commit
+        fs::write(&file_path, "commit 1").unwrap();
+        let mut index = test_repo.repo().index().unwrap();
+        index.add_path(std::path::Path::new("test.txt")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = test_repo.repo().find_tree(tree_id).unwrap();
+        let sig = test_repo.repo().signature().unwrap();
+        let commit1 = test_repo
+            .repo()
+            .commit(Some("HEAD"), &sig, &sig, "Commit 1", &tree, &[])
+            .unwrap();
+
+        // Second commit
+        fs::write(&file_path, "commit 2").unwrap();
+        index.add_path(std::path::Path::new("test.txt")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = test_repo.repo().find_tree(tree_id).unwrap();
+        let parent1 = test_repo.repo().find_commit(commit1).unwrap();
+        let commit2 = test_repo
+            .repo()
+            .commit(Some("HEAD"), &sig, &sig, "Commit 2", &tree, &[&parent1])
+            .unwrap();
+
+        // Third commit
+        fs::write(&file_path, "commit 3").unwrap();
+        index.add_path(std::path::Path::new("test.txt")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = test_repo.repo().find_tree(tree_id).unwrap();
+        let parent2 = test_repo.repo().find_commit(commit2).unwrap();
+        let commit3 = test_repo
+            .repo()
+            .commit(Some("HEAD"), &sig, &sig, "Commit 3", &tree, &[&parent2])
+            .unwrap();
+
+        let repo_path = test_repo.path().to_path_buf();
+        let gitai_repo = crate::git::repository::find_repository_in_path(repo_path.to_str().unwrap()).unwrap();
+
+        let event = CiEvent::Merge {
+            merge_commit_sha: commit3.to_string(),
+            head_ref: "HEAD".to_string(),
+            head_sha: commit3.to_string(),
+            base_ref: "main".to_string(),
+            base_sha: commit1.to_string(),
+        };
+
+        let context = CiContext::with_repository(gitai_repo, event);
+
+        // Get the last 3 commits
+        let commits = context.get_rebased_commits(&commit3.to_string(), 3);
+        assert_eq!(commits.len(), 3);
+        assert_eq!(commits[2], commit3.to_string());
+        assert_eq!(commits[1], commit2.to_string());
+        assert_eq!(commits[0], commit1.to_string());
+    }
+
+    #[test]
+    fn test_get_rebased_commits_more_than_available() {
+        let test_repo = TmpRepo::new().unwrap();
+        let repo = test_repo.gitai_repo();
+
+        // Create single commit
+        let file_path = test_repo.path().join("test.txt");
+        fs::write(&file_path, "content").unwrap();
+        let mut index = test_repo.repo().index().unwrap();
+        index.add_path(std::path::Path::new("test.txt")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = test_repo.repo().find_tree(tree_id).unwrap();
+        let sig = test_repo.repo().signature().unwrap();
+        let commit = test_repo
+            .repo()
+            .commit(Some("HEAD"), &sig, &sig, "Commit", &tree, &[])
+            .unwrap();
+
+        let repo_path = test_repo.path().to_path_buf();
+        let gitai_repo = crate::git::repository::find_repository_in_path(repo_path.to_str().unwrap()).unwrap();
+
+        let event = CiEvent::Merge {
+            merge_commit_sha: commit.to_string(),
+            head_ref: "HEAD".to_string(),
+            head_sha: commit.to_string(),
+            base_ref: "main".to_string(),
+            base_sha: "base".to_string(),
+        };
+
+        let context = CiContext::with_repository(gitai_repo, event);
+
+        // Try to get 10 commits when only 1 exists
+        let commits = context.get_rebased_commits(&commit.to_string(), 10);
+        // Should stop at the root commit
+        assert_eq!(commits.len(), 1);
+    }
+
+    #[test]
+    fn test_ci_context_debug() {
+        let test_repo = TmpRepo::new().unwrap();
+        let repo_path = test_repo.path().to_path_buf();
+        let repo = crate::git::repository::find_repository_in_path(repo_path.to_str().unwrap()).unwrap();
+
+        let event = CiEvent::Merge {
+            merge_commit_sha: "abc".to_string(),
+            head_ref: "feature".to_string(),
+            head_sha: "def".to_string(),
+            base_ref: "main".to_string(),
+            base_sha: "ghi".to_string(),
+        };
+
+        let context = CiContext::with_repository(repo, event);
+        let debug_str = format!("{:?}", context);
+        assert!(debug_str.contains("CiContext"));
+    }
+}
