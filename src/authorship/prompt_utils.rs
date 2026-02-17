@@ -552,18 +552,16 @@ pub fn enrich_prompt_messages(
         .map(|(id, _)| id.clone())
         .collect();
 
-    if !ids_needing_messages.is_empty() {
-        if let Ok(db) = InternalDatabase::global() {
-            if let Ok(db_guard) = db.lock() {
-                for id in &ids_needing_messages {
-                    if let Ok(Some(db_record)) = db_guard.get_prompt(id) {
-                        if !db_record.messages.messages.is_empty() {
-                            if let Some(prompt) = prompts.get_mut(id) {
-                                prompt.messages = db_record.messages.messages;
-                            }
-                        }
-                    }
-                }
+    if !ids_needing_messages.is_empty()
+        && let Ok(db) = InternalDatabase::global()
+        && let Ok(db_guard) = db.lock()
+    {
+        for id in &ids_needing_messages {
+            if let Ok(Some(db_record)) = db_guard.get_prompt(id)
+                && !db_record.messages.messages.is_empty()
+                && let Some(prompt) = prompts.get_mut(id)
+            {
+                prompt.messages = db_record.messages.messages;
             }
         }
     }
