@@ -19,6 +19,7 @@ Options:
   --burst-every <n>            Every Nth feature commit rewrites all generated files (default: 25)
   --git-bin <path>             Git binary to use (default: wrapper next to git-ai, else PATH git)
   --git-ai-bin <path>          git-ai binary (default: PATH git-ai)
+  --hook-mode <mode>           wrapper | hooks | both (default: wrapper)
   --skip-clone                 Reuse existing clone in <work-root>/repo
   -h, --help                   Show help
 
@@ -39,6 +40,7 @@ BURST_EVERY=25
 SKIP_CLONE=0
 GIT_BIN=""
 GIT_AI_BIN=""
+HOOK_MODE="wrapper"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -52,6 +54,7 @@ while [[ $# -gt 0 ]]; do
     --burst-every) BURST_EVERY="$2"; shift 2 ;;
     --git-bin) GIT_BIN="$2"; shift 2 ;;
     --git-ai-bin) GIT_AI_BIN="$2"; shift 2 ;;
+    --hook-mode) HOOK_MODE="$2"; shift 2 ;;
     --skip-clone) SKIP_CLONE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1"; usage; exit 1 ;;
@@ -78,6 +81,11 @@ fi
 
 if [[ -z "$WORK_ROOT" ]]; then
   WORK_ROOT="${TMPDIR:-/tmp}/git-ai-nasty-rebase-$(date +%Y%m%d-%H%M%S)"
+fi
+
+if [[ "$HOOK_MODE" != "wrapper" && "$HOOK_MODE" != "hooks" && "$HOOK_MODE" != "both" ]]; then
+  echo "error: --hook-mode must be one of wrapper|hooks|both" >&2
+  exit 1
 fi
 
 REPO_DIR="$WORK_ROOT/repo"
@@ -232,6 +240,7 @@ echo "work_root=$WORK_ROOT"
 echo "repo_dir=$REPO_DIR"
 echo "git_bin=$GIT_BIN"
 echo "git_ai_bin=$GIT_AI_BIN"
+echo "hook_mode=$HOOK_MODE"
 echo "feature_commits=$FEATURE_COMMITS main_commits=$MAIN_COMMITS side_commits=$SIDE_COMMITS"
 echo "files=$FILES lines_per_file=$LINES_PER_FILE burst_every=$BURST_EVERY"
 
@@ -263,6 +272,62 @@ g config user.name "git-ai bench"
 g config user.email "bench@git-ai.local"
 g config commit.gpgsign false
 g config gc.auto 0
+
+if [[ "$HOOK_MODE" == "hooks" || "$HOOK_MODE" == "both" ]]; then
+  echo "Ensuring repo-local git-ai hooks..."
+  (
+    cd "$REPO_DIR"
+    GIT_AI_DEBUG=0 GIT_AI_DEBUG_PERFORMANCE=0 "$GIT_AI_BIN" git-hooks ensure >/dev/null
+  )
+
+  HOOKS_PATH="$(g config --local --get core.hooksPath || true)"
+  EXPECTED_HOOKS_PATH="$REPO_DIR/.git/ai/hooks"
+  python3 - "$HOOKS_PATH" "$EXPECTED_HOOKS_PATH" "$REPO_DIR" <<'PY'
+import os
+import pathlib
+import sys
+
+hooks_path = sys.argv[1].strip()
+expected = pathlib.Path(sys.argv[2]).resolve()
+repo_dir = pathlib.Path(sys.argv[3]).resolve()
+if not hooks_path:
+    print("error: expected local core.hooksPath after git-hooks ensure", file=sys.stderr)
+    sys.exit(1)
+
+actual = pathlib.Path(hooks_path)
+if not actual.is_absolute():
+    actual = repo_dir / actual
+actual = actual.resolve()
+if actual != expected:
+    print(
+        f"error: expected repo-local hooks path {expected}, got {actual}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+expected_hooks = {
+    "pre-commit",
+    "prepare-commit-msg",
+    "post-commit",
+    "pre-rebase",
+    "post-checkout",
+    "post-merge",
+    "pre-push",
+    "post-rewrite",
+    "reference-transaction",
+}
+installed = {p.name for p in actual.iterdir() if not p.name.startswith(".")}
+missing = sorted(expected_hooks - installed)
+extras = sorted(installed - expected_hooks)
+if missing or extras:
+    print(
+        "error: unexpected repo-local hook surface "
+        f"(missing={missing}, extras={extras})",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+PY
+fi
 
 g checkout -B bench-main "origin/$DEFAULT_BRANCH" >/dev/null
 
