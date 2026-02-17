@@ -117,6 +117,10 @@ def append_line(path: Path, line: str) -> None:
         fh.write(f"{line}\n")
 
 
+def ignore_transient_git_lockfiles(_src: str, names: list[str]) -> set[str]:
+    return {name for name in names if name.endswith(".lock")}
+
+
 def run_cmd(
     cmd: list[str],
     *,
@@ -1062,7 +1066,14 @@ def main() -> int:
                         shutil.rmtree(run_dir)
                     run_repo = run_dir / "repo"
                     run_repo.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copytree(template_repo, run_repo)
+                    shutil.copytree(
+                        template_repo,
+                        run_repo,
+                        ignore=ignore_transient_git_lockfiles,
+                    )
+                    if variant.mode in ("hooks", "both"):
+                        runner.run_git_ai(["git-hooks", "ensure"], cwd=run_repo)
+                        runner.assert_repo_local_hooks(run_repo)
 
                     t0 = time.perf_counter()
                     scenario.measure(runner, run_repo, run_index)
