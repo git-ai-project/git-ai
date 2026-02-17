@@ -3,6 +3,7 @@ mod repos;
 use repos::test_repo::TestRepo;
 use serial_test::serial;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 struct EnvVarGuard {
@@ -196,6 +197,92 @@ fn wrapper_and_hooks_do_not_double_run_managed_logic() {
     assert_eq!(
         commit_events, 1,
         "wrapper+hooks mode should not duplicate commit rewrite-log events"
+    );
+}
+
+#[test]
+#[serial]
+fn hooks_mode_batches_multi_commit_cherry_pick_rewrite_event() {
+    let _mode = EnvVarGuard::set("GIT_AI_TEST_GIT_MODE", "hooks");
+
+    let repo = TestRepo::new();
+    let main_branch = repo.current_branch();
+    let file_path = repo.path().join("cherry-batch.txt");
+    fs::write(&file_path, "base line\n").expect("failed to create file");
+    repo.git(&["add", "cherry-batch.txt"])
+        .expect("staging base file should succeed");
+    repo.git(&["commit", "-m", "base commit"])
+        .expect("base commit should succeed");
+
+    repo.git(&["checkout", "-b", "feature"])
+        .expect("feature checkout should succeed");
+    let mut commits = Vec::new();
+    for i in 1..=3 {
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&file_path)
+            .expect("failed to open file for append");
+        writeln!(file, "ai line {}", i).expect("failed to append ai line");
+
+        repo.git_ai(&["checkpoint", "mock_ai", "cherry-batch.txt"])
+            .expect("checkpoint should succeed");
+        repo.git(&["add", "cherry-batch.txt"])
+            .expect("staging ai line should succeed");
+        repo.git(&["commit", "-m", &format!("ai commit {}", i)])
+            .expect("feature ai commit should succeed");
+        commits.push(
+            repo.git(&["rev-parse", "HEAD"])
+                .expect("rev-parse should succeed")
+                .trim()
+                .to_string(),
+        );
+    }
+
+    repo.git(&["checkout", &main_branch])
+        .expect("checkout main should succeed");
+    let mut cherry_pick_args: Vec<&str> = vec!["cherry-pick"];
+    for commit in &commits {
+        cherry_pick_args.push(commit);
+    }
+    repo.git(&cherry_pick_args)
+        .expect("cherry-pick sequence should succeed");
+
+    let rewrite_log = fs::read_to_string(repo.path().join(".git").join("ai").join("rewrite_log"))
+        .expect("rewrite log should exist");
+    let cherry_events: Vec<&str> = rewrite_log
+        .lines()
+        .filter(|line| line.contains("\"cherry_pick_complete\""))
+        .collect();
+    assert_eq!(
+        cherry_events.len(),
+        1,
+        "hooks mode should emit one batched cherry_pick_complete rewrite event"
+    );
+
+    let event: serde_json::Value =
+        serde_json::from_str(cherry_events[0]).expect("rewrite event should be valid json");
+    let payload = event
+        .get("cherry_pick_complete")
+        .expect("missing cherry_pick_complete payload");
+    let source_commits = payload
+        .get("source_commits")
+        .and_then(|value| value.as_array())
+        .expect("missing source_commits array");
+    let new_commits = payload
+        .get("new_commits")
+        .and_then(|value| value.as_array())
+        .expect("missing new_commits array");
+    assert_eq!(source_commits.len(), 3, "expected 3 source commits");
+    assert_eq!(new_commits.len(), 3, "expected 3 new commits");
+
+    assert!(
+        !repo
+            .path()
+            .join(".git")
+            .join("ai")
+            .join("cherry_pick_batch_state.json")
+            .exists(),
+        "cherry-pick batch state should be cleaned up after terminal event"
     );
 }
 
