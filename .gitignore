@@ -5,3 +5,4 @@
 .performance-repos/
 prompts.db
 .benchmarks/
+__pycache__/

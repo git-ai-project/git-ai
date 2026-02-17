@@ -25,9 +25,11 @@ const REPO_HOOK_STATE_FILE: &str = "git_hooks_state.json";
 const PULL_HOOK_STATE_FILE: &str = "pull_hook_state.json";
 const REBASE_HOOK_MASK_STATE_FILE: &str = "rebase_hook_mask_state.json";
 const STASH_REF_TX_STATE_FILE: &str = "stash_ref_tx_state.json";
+const CHERRY_PICK_BATCH_STATE_FILE: &str = "cherry_pick_batch_state.json";
 const GIT_HOOKS_DIR_NAME: &str = "hooks";
 const REPO_HOOK_STATE_SCHEMA_VERSION: &str = "repo_hooks/2";
 const REBASE_HOOK_MASK_STATE_SCHEMA_VERSION: &str = "rebase_hook_mask/1";
+const CHERRY_PICK_BATCH_STATE_SCHEMA_VERSION: &str = "cherry_pick_batch/1";
 const REBASE_HOOK_MASK_SUFFIX: &str = ".gitai-masked";
 
 pub const ENV_SKIP_ALL_HOOKS: &str = "GIT_AI_SKIP_ALL_HOOKS";
@@ -134,6 +136,21 @@ struct StashReferenceTransactionState {
     before_count: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+struct CherryPickBatchMapping {
+    source_commit: String,
+    new_commit: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+struct CherryPickBatchState {
+    #[serde(default = "cherry_pick_batch_state_schema_version")]
+    schema_version: String,
+    initial_head: String,
+    mappings: Vec<CherryPickBatchMapping>,
+    active: bool,
+}
+
 #[cfg(unix)]
 fn create_file_symlink(target: &Path, link: &Path) -> Result<(), GitAiError> {
     std::os::unix::fs::symlink(target, link)?;
@@ -180,6 +197,10 @@ fn rebase_hook_mask_state_schema_version() -> String {
     REBASE_HOOK_MASK_STATE_SCHEMA_VERSION.to_string()
 }
 
+fn cherry_pick_batch_state_schema_version() -> String {
+    CHERRY_PICK_BATCH_STATE_SCHEMA_VERSION.to_string()
+}
+
 fn repo_state_path(repo: &Repository) -> PathBuf {
     repo.path().join("ai").join(REPO_HOOK_STATE_FILE)
 }
@@ -198,6 +219,10 @@ fn managed_git_hooks_dir_from_context() -> Option<PathBuf> {
 
 fn stash_reference_transaction_state_path(repo: &Repository) -> PathBuf {
     repo.path().join("ai").join(STASH_REF_TX_STATE_FILE)
+}
+
+fn cherry_pick_batch_state_path(repo: &Repository) -> PathBuf {
+    repo.path().join("ai").join(CHERRY_PICK_BATCH_STATE_FILE)
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
@@ -408,12 +433,27 @@ fn is_path_inside_component(path: &Path, component: &str) -> bool {
     })
 }
 
+fn is_path_inside_any_git_ai_dir(path: &Path) -> bool {
+    let mut previous_was_git_dir = false;
+    for part in path.components() {
+        let part = part.as_os_str().to_string_lossy();
+        if previous_was_git_dir && part.eq_ignore_ascii_case("ai") {
+            return true;
+        }
+        previous_was_git_dir = part.eq_ignore_ascii_case(".git");
+    }
+    false
+}
+
 fn is_disallowed_forward_hooks_path(
     path: &Path,
     repo: Option<&Repository>,
     managed_hooks_path: Option<&Path>,
 ) -> bool {
     if is_path_inside_component(path, ".git-ai") {
+        return true;
+    }
+    if is_path_inside_any_git_ai_dir(path) {
         return true;
     }
 
@@ -990,6 +1030,15 @@ fn is_rebase_abort_reflog_action() -> bool {
         .unwrap_or(false)
 }
 
+fn is_cherry_pick_abort_reflog_action() -> bool {
+    std::env::var("GIT_REFLOG_ACTION")
+        .map(|action| {
+            let action = action.to_ascii_lowercase();
+            action.contains("cherry-pick (abort)") || action.contains("cherry-pick --abort")
+        })
+        .unwrap_or(false)
+}
+
 fn is_post_commit_amend(repo: &Repository) -> bool {
     if let Ok(action) = std::env::var("GIT_REFLOG_ACTION")
         && action.to_ascii_lowercase().contains("amend")
@@ -1466,6 +1515,55 @@ fn clear_cherry_pick_state(repo: &Repository) {
     let _ = fs::remove_file(cherry_pick_state_path(repo));
 }
 
+fn read_cherry_pick_batch_state(repo: &Repository) -> Option<CherryPickBatchState> {
+    let path = cherry_pick_batch_state_path(repo);
+    let content = fs::read_to_string(path).ok()?;
+    match serde_json::from_str::<CherryPickBatchState>(&content) {
+        Ok(state) => Some(state),
+        Err(err) => {
+            debug_log(&format!(
+                "ignoring invalid cherry-pick batch state: {}",
+                err
+            ));
+            None
+        }
+    }
+}
+
+fn save_cherry_pick_batch_state(repo: &Repository, state: &CherryPickBatchState) {
+    let path = cherry_pick_batch_state_path(repo);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(content) = serde_json::to_string_pretty(state) {
+        let _ = fs::write(path, content);
+    }
+}
+
+fn clear_cherry_pick_batch_state(repo: &Repository) {
+    let _ = fs::remove_file(cherry_pick_batch_state_path(repo));
+}
+
+fn cherry_pick_todo_has_pending(repo: &Repository) -> bool {
+    let todo_path = repo.path().join("sequencer").join("todo");
+    fs::read_to_string(todo_path)
+        .map(|todo| {
+            todo.lines().any(|line| {
+                let trimmed = line.trim();
+                !trimmed.is_empty() && !trimmed.starts_with('#')
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn is_cherry_pick_in_progress(repo: &Repository) -> bool {
+    repo.path().join("CHERRY_PICK_HEAD").is_file() || repo.path().join("sequencer").is_dir()
+}
+
+fn is_cherry_pick_terminal_step(repo: &Repository) -> bool {
+    !cherry_pick_todo_has_pending(repo)
+}
+
 fn maybe_capture_cherry_pick_pre_commit_state(repo: &Repository) {
     let cherry_pick_head_path = repo.path().join("CHERRY_PICK_HEAD");
     let Ok(source_commit_raw) = fs::read_to_string(&cherry_pick_head_path) else {
@@ -1503,9 +1601,75 @@ fn load_cherry_pick_state(repo: &Repository) -> Option<(String, String)> {
     Some((source_commit, base_commit))
 }
 
-fn maybe_rewrite_cherry_pick_post_commit(repo: &mut Repository) {
+fn maybe_finalize_cherry_pick_batch_state(repo: &mut Repository, force: bool) {
+    let Some(state) = read_cherry_pick_batch_state(repo) else {
+        return;
+    };
+    if !force && !is_cherry_pick_terminal_step(repo) {
+        return;
+    }
+    if state.mappings.is_empty() {
+        clear_cherry_pick_batch_state(repo);
+        clear_cherry_pick_state(repo);
+        return;
+    }
+
+    let Ok(new_head) = repo.head().and_then(|head| head.target()) else {
+        clear_cherry_pick_batch_state(repo);
+        clear_cherry_pick_state(repo);
+        return;
+    };
+
+    let source_commits: Vec<String> = state
+        .mappings
+        .iter()
+        .map(|mapping| mapping.source_commit.clone())
+        .collect();
+    let new_commits: Vec<String> = state
+        .mappings
+        .iter()
+        .map(|mapping| mapping.new_commit.clone())
+        .collect();
+    if source_commits.is_empty() || new_commits.is_empty() {
+        clear_cherry_pick_batch_state(repo);
+        clear_cherry_pick_state(repo);
+        return;
+    }
+
+    let original_head = if state.initial_head.trim().is_empty() {
+        source_commits[0].clone()
+    } else {
+        state.initial_head.clone()
+    };
+
+    let commit_author = commit_hooks::get_commit_default_author(repo, &[]);
+    repo.handle_rewrite_log_event(
+        crate::git::rewrite_log::RewriteLogEvent::cherry_pick_complete(
+            crate::git::rewrite_log::CherryPickCompleteEvent::new(
+                original_head,
+                new_head.clone(),
+                source_commits,
+                new_commits,
+            ),
+        ),
+        commit_author,
+        false,
+        true,
+    );
+    clear_cherry_pick_batch_state(repo);
+    clear_cherry_pick_state(repo);
+}
+
+fn maybe_finalize_stale_cherry_pick_batch_state(repo: &mut Repository) {
+    if !is_cherry_pick_in_progress(repo) {
+        maybe_finalize_cherry_pick_batch_state(repo, true);
+    }
+}
+
+fn maybe_record_cherry_pick_post_commit(repo: &mut Repository) {
     let Ok(new_head) = repo.head().and_then(|head| head.target()) else {
         clear_cherry_pick_state(repo);
+        clear_cherry_pick_batch_state(repo);
         return;
     };
     let original_head = repo
@@ -1543,21 +1707,31 @@ fn maybe_rewrite_cherry_pick_post_commit(repo: &mut Repository) {
         return;
     }
 
-    let commit_author = commit_hooks::get_commit_default_author(repo, &[]);
-    repo.handle_rewrite_log_event(
-        crate::git::rewrite_log::RewriteLogEvent::cherry_pick_complete(
-            crate::git::rewrite_log::CherryPickCompleteEvent::new(
-                original_head,
-                new_head.clone(),
-                vec![source_commit],
-                vec![new_head],
-            ),
-        ),
-        commit_author,
-        false,
-        true,
-    );
+    let mut batch_state = read_cherry_pick_batch_state(repo).unwrap_or(CherryPickBatchState {
+        schema_version: cherry_pick_batch_state_schema_version(),
+        initial_head: original_head.clone(),
+        mappings: Vec::new(),
+        active: true,
+    });
+    if batch_state.schema_version.trim().is_empty() {
+        batch_state.schema_version = cherry_pick_batch_state_schema_version();
+    }
+    if batch_state.initial_head.trim().is_empty() {
+        batch_state.initial_head = original_head;
+    }
+    if !matches!(
+        batch_state.mappings.last(),
+        Some(last) if last.source_commit == source_commit && last.new_commit == new_head
+    ) {
+        batch_state.mappings.push(CherryPickBatchMapping {
+            source_commit,
+            new_commit: new_head,
+        });
+    }
+    batch_state.active = true;
+    save_cherry_pick_batch_state(repo, &batch_state);
     clear_cherry_pick_state(repo);
+    maybe_finalize_cherry_pick_batch_state(repo, false);
 }
 
 fn is_post_commit_for_cherry_pick(repo: &Repository) -> bool {
@@ -1642,10 +1816,15 @@ fn run_managed_hook(
 
     let mut repo = repo.clone();
     maybe_restore_stale_rebase_hooks(&repo);
+    maybe_finalize_stale_cherry_pick_batch_state(&mut repo);
 
     match hook_name {
         "pre-commit" => {
             if is_rebase_in_progress(&repo) {
+                return 0;
+            }
+            if is_cherry_pick_in_progress(&repo) {
+                maybe_capture_cherry_pick_pre_commit_state(&repo);
                 return 0;
             }
             maybe_capture_cherry_pick_pre_commit_state(&repo);
@@ -1658,7 +1837,7 @@ fn run_managed_hook(
                 return 0;
             }
             if is_post_commit_for_cherry_pick(&repo) {
-                maybe_rewrite_cherry_pick_post_commit(&mut repo);
+                maybe_record_cherry_pick_post_commit(&mut repo);
                 return 0;
             }
             if is_post_commit_amend(&repo) {
@@ -1763,6 +1942,11 @@ fn run_managed_hook(
                 if is_rebase_abort_reflog_action() {
                     force_restore_rebase_hooks(&repo);
                 }
+
+                if is_cherry_pick_abort_reflog_action() {
+                    clear_cherry_pick_state(&repo);
+                    clear_cherry_pick_batch_state(&repo);
+                }
             }
             0
         }
@@ -1847,6 +2031,13 @@ fn is_rebase_in_progress_from_context() -> bool {
     git_dir.join("rebase-merge").is_dir() || git_dir.join("rebase-apply").is_dir()
 }
 
+fn is_cherry_pick_in_progress_from_context() -> bool {
+    let Some(git_dir) = git_dir_from_context() else {
+        return false;
+    };
+    git_dir.join("CHERRY_PICK_HEAD").is_file() || git_dir.join("sequencer").is_dir()
+}
+
 fn hook_has_no_managed_behavior(hook_name: &str) -> bool {
     matches!(
         hook_name,
@@ -1895,6 +2086,8 @@ fn hook_requires_managed_repo_lookup(
         "reference-transaction" => {
             let updates = parse_reference_transaction_stdin(stdin_data);
             let phase = hook_args.first().map(String::as_str).unwrap_or("");
+            let in_rebase_or_cherry_pick =
+                is_rebase_in_progress_from_context() || is_cherry_pick_in_progress_from_context();
 
             if updates
                 .iter()
@@ -1910,6 +2103,10 @@ fn hook_requires_managed_repo_lookup(
 
             if let Ok(action) = std::env::var("GIT_REFLOG_ACTION") {
                 return action.starts_with("reset:");
+            }
+
+            if in_rebase_or_cherry_pick {
+                return false;
             }
 
             updates.iter().any(|(_, _, reference)| {
@@ -2181,6 +2378,13 @@ mod tests {
         let repo_ai_path = repo.path().join("ai").join("other-hooks");
         fs::create_dir_all(&repo_ai_path).expect("failed to create repo-managed hooks candidate");
         let nested_git_ai = tmp.path().join(".git-ai").join("hooks");
+        let foreign_git_ai = tmp
+            .path()
+            .join("foreign")
+            .join(".git")
+            .join("ai")
+            .join("hooks");
+        fs::create_dir_all(&foreign_git_ai).expect("failed to create foreign .git/ai candidate");
         let safe_target = tmp.path().join("external-hooks");
 
         assert!(is_disallowed_forward_hooks_path(
@@ -2195,6 +2399,11 @@ mod tests {
         ));
         assert!(is_disallowed_forward_hooks_path(
             &nested_git_ai,
+            Some(&repo),
+            Some(&managed_hooks)
+        ));
+        assert!(is_disallowed_forward_hooks_path(
+            &foreign_git_ai,
             Some(&repo),
             Some(&managed_hooks)
         ));
