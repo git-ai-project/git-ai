@@ -9,7 +9,15 @@ use crate::{
 
 use super::repository::Repository;
 
-const DISABLED_HOOKS_CONFIG: &str = "core.hooksPath=/dev/null";
+#[cfg(windows)]
+fn disabled_hooks_config() -> &'static str {
+    "core.hooksPath=NUL"
+}
+
+#[cfg(not(windows))]
+fn disabled_hooks_config() -> &'static str {
+    "core.hooksPath=/dev/null"
+}
 
 /// Result of checking for authorship notes on a remote
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -295,7 +303,7 @@ fn extract_remote_from_fetch_args(args: &[String]) -> Option<String> {
 
 fn with_disabled_hooks(mut args: Vec<String>) -> Vec<String> {
     args.push("-c".to_string());
-    args.push(DISABLED_HOOKS_CONFIG.to_string());
+    args.push(disabled_hooks_config().to_string());
     args
 }
 
@@ -334,6 +342,7 @@ mod tests {
 
     #[test]
     fn authorship_fetch_args_always_disable_hooks() {
+        let disabled_hooks = disabled_hooks_config();
         let args = build_authorship_fetch_args(
             vec!["-C".to_string(), "/tmp/repo".to_string()],
             "origin",
@@ -342,19 +351,20 @@ mod tests {
 
         assert!(
             args.windows(2)
-                .any(|pair| { pair[0] == "-c" && pair[1] == DISABLED_HOOKS_CONFIG })
+                .any(|pair| pair[0] == "-c" && pair[1] == disabled_hooks)
         );
         assert!(args.contains(&"fetch".to_string()));
     }
 
     #[test]
     fn authorship_push_args_always_disable_hooks() {
+        let disabled_hooks = disabled_hooks_config();
         let args =
             build_authorship_push_args(vec!["-C".to_string(), "/tmp/repo".to_string()], "origin");
 
         assert!(
             args.windows(2)
-                .any(|pair| { pair[0] == "-c" && pair[1] == DISABLED_HOOKS_CONFIG })
+                .any(|pair| pair[0] == "-c" && pair[1] == disabled_hooks)
         );
         assert!(args.contains(&"push".to_string()));
     }
