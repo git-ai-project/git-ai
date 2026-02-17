@@ -46,17 +46,6 @@ impl GitTestMode {
     }
 }
 
-#[cfg(unix)]
-fn create_file_symlink(target: &PathBuf, link: &PathBuf) -> std::io::Result<()> {
-    std::os::unix::fs::symlink(target, link)
-}
-
-#[cfg(windows)]
-fn create_file_symlink(target: &PathBuf, link: &PathBuf) -> std::io::Result<()> {
-    std::os::windows::fs::symlink_file(target, link)
-        .or_else(|_| std::fs::copy(target, link).map(|_| ()))
-}
-
 #[derive(Clone, Debug)]
 pub struct TestRepo {
     path: PathBuf,
@@ -280,31 +269,23 @@ impl TestRepo {
             return;
         }
 
-        if fs::create_dir_all(self.test_home.join(".git-ai").join("git-hooks")).is_err() {
-            return;
-        }
-
-        let hooks_dir = self.test_home.join(".git-ai").join("git-hooks");
         let binary_path = get_binary_path();
+        let mut command = Command::new(binary_path);
+        command
+            .current_dir(&self.path)
+            .args(["git-hooks", "ensure"]);
+        self.configure_git_ai_env(&mut command);
+        command.env("GIT_AI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
 
-        for hook in git_ai::commands::git_hook_handlers::core_git_hook_names() {
-            let link_path = hooks_dir.join(hook);
-            if link_path.exists() {
-                let _ = fs::remove_file(&link_path);
-            }
-            if create_file_symlink(binary_path, &link_path).is_err() {
-                return;
-            }
-        }
-
-        let repo = match Repository::open(&self.path).or_else(|_| Repository::open_bare(&self.path))
-        {
-            Ok(repo) => repo,
-            Err(_) => return,
-        };
-
-        if let Ok(mut cfg) = repo.config() {
-            let _ = cfg.set_str("core.hooksPath", hooks_dir.to_str().unwrap_or_default());
+        let output = command
+            .output()
+            .expect("failed to run git-ai git-hooks ensure in test setup");
+        if !output.status.success() {
+            panic!(
+                "git-ai git-hooks ensure failed during test setup:\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
         }
     }
 
@@ -312,7 +293,6 @@ impl TestRepo {
         if self.git_mode.uses_hooks() {
             command.env("HOME", &self.test_home);
             command.env("GIT_CONFIG_GLOBAL", self.test_home.join(".gitconfig"));
-            command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
         }
 
         if self.git_mode.uses_wrapper() {
@@ -324,7 +304,6 @@ impl TestRepo {
         if self.git_mode.uses_hooks() {
             command.env("HOME", &self.test_home);
             command.env("GIT_CONFIG_GLOBAL", self.test_home.join(".gitconfig"));
-            command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
         }
     }
 

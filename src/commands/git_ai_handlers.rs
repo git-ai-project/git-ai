@@ -122,6 +122,9 @@ pub fn handle_git_ai(args: &[String]) {
                 std::process::exit(1);
             }
         },
+        "git-hooks" => {
+            handle_git_hooks(&args[1..]);
+        }
         "squash-authorship" => {
             commands::squash_authorship::handle_squash_authorship(&args[1..]);
         }
@@ -227,6 +230,7 @@ fn print_help() {
     eprintln!("    unset <key>           Remove config value (reverts to default)");
     eprintln!("  install-hooks      Install git hooks for AI authorship tracking");
     eprintln!("  uninstall-hooks    Remove git-ai hooks from all detected tools");
+    eprintln!("  git-hooks ensure   Ensure repo-local git-ai hooks are installed/healed");
     eprintln!("  ci                 Continuous integration utilities");
     eprintln!("    github                 GitHub CI helpers");
     eprintln!("  squash-authorship  Generate authorship log for squashed commits");
@@ -1042,6 +1046,40 @@ fn handle_stats(args: &[String]) {
             }
         }
         std::process::exit(1);
+    }
+}
+
+fn handle_git_hooks(args: &[String]) {
+    match args.first().map(String::as_str) {
+        Some("ensure") => {
+            let repo = match find_repository(&Vec::<String>::new()) {
+                Ok(repo) => repo,
+                Err(e) => {
+                    eprintln!("Failed to find repository: {}", e);
+                    std::process::exit(1);
+                }
+            };
+
+            match commands::git_hook_handlers::ensure_repo_hooks_installed(&repo, false) {
+                Ok(report) => {
+                    let status = if report.changed { "updated" } else { "ok" };
+                    println!(
+                        "repo hooks {}: {}",
+                        status,
+                        report.managed_hooks_path.to_string_lossy()
+                    );
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("Failed to ensure repo hooks: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        _ => {
+            eprintln!("Usage: git-ai git-hooks ensure");
+            std::process::exit(1);
+        }
     }
 }
 

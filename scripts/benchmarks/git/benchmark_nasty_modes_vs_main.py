@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the nasty rebase benchmark across mode variants vs main(wrapper)."""
+"""Run the nasty rebase benchmark across mode variants."""
 
 from __future__ import annotations
 
@@ -72,6 +72,17 @@ class VariantRunResult:
     statuses: dict[str, str]
     saved_logs: dict[str, int]
     head_has_note: dict[str, str]
+
+
+@dataclasses.dataclass(frozen=True)
+class MarginCheckResult:
+    scenario: str
+    variant: str
+    baseline_s: float
+    median_s: float
+    allowed_s: float
+    slowdown_pct: float
+    passed: bool
 
 
 def now_iso_utc() -> str:
@@ -312,6 +323,43 @@ def compute_slowdowns(
     return out
 
 
+def compute_margin_checks(
+    summary: dict[str, dict[str, dict[str, Any]]],
+    *,
+    baseline_key: str,
+    margin_pct: float,
+    variants: list[str],
+) -> list[MarginCheckResult]:
+    checks: list[MarginCheckResult] = []
+    margin_multiplier = 1.0 + (margin_pct / 100.0)
+    for scenario, by_variant in summary.items():
+        baseline = by_variant.get(baseline_key, {}).get("median_s")
+        if baseline is None:
+            continue
+        baseline_f = float(baseline)
+        if baseline_f <= 0.0:
+            continue
+        allowed = baseline_f * margin_multiplier
+        for variant in variants:
+            stats = by_variant.get(variant)
+            if stats is None:
+                continue
+            median = float(stats["median_s"])
+            slowdown = ((median - baseline_f) / baseline_f) * 100.0
+            checks.append(
+                MarginCheckResult(
+                    scenario=scenario,
+                    variant=variant,
+                    baseline_s=round(baseline_f, 3),
+                    median_s=round(median, 3),
+                    allowed_s=round(allowed, 3),
+                    slowdown_pct=round(slowdown, 3),
+                    passed=median <= allowed,
+                )
+            )
+    return checks
+
+
 def geometric_mean(values: list[float]) -> float:
     if not values:
         return 1.0
@@ -323,9 +371,12 @@ def render_report(
     metadata: dict[str, Any],
     summary: dict[str, dict[str, dict[str, Any]]],
     slowdowns: dict[str, dict[str, float]],
+    margin_checks: list[MarginCheckResult],
 ) -> None:
     scenarios = ["linear", "onto", "rebase_merges"]
     variants = ["main_wrapper", "current_wrapper", "current_hooks", "current_both"]
+    margin_baseline_key = str(metadata["margin_baseline"])
+    margin_baseline_label = margin_baseline_key.replace("_", " ")
 
     lines: list[str] = []
     lines.append("# git-ai Nasty Rebase Benchmark (Modes vs main)")
@@ -386,6 +437,28 @@ def render_report(
         lines.append(f"| {key} | {gm:.4f}x | {(gm - 1.0) * 100.0:.3f}% |")
 
     lines.append("")
+    lines.append("## Margin Check")
+    lines.append("")
+    lines.append(
+        f"- Required margin: current modes must be <= `{metadata['margin_pct']:.1f}%` slower than `{margin_baseline_label}`"
+    )
+    lines.append(
+        "| Scenario | Variant | Baseline (s) | Variant Median (s) | Allowed Max (s) | Slowdown | Status |"
+    )
+    lines.append("|---|---|---:|---:|---:|---:|---|")
+    for check in sorted(margin_checks, key=lambda c: (c.scenario, c.variant)):
+        status = "PASS" if check.passed else "FAIL"
+        lines.append(
+            f"| {check.scenario} | {check.variant} | {check.baseline_s:.3f} | "
+            f"{check.median_s:.3f} | {check.allowed_s:.3f} | {check.slowdown_pct:.3f}% | {status} |"
+        )
+    failed = [check for check in margin_checks if not check.passed]
+    lines.append("")
+    lines.append(
+        f"- Overall: `{len(margin_checks) - len(failed)}/{len(margin_checks)}` checks passing"
+    )
+
+    lines.append("")
     lines.append("## Re-run")
     lines.append("")
     lines.append("```bash")
@@ -397,7 +470,9 @@ def render_report(
         f"--side-commits {metadata['side_commits']} "
         f"--files {metadata['files']} "
         f"--lines-per-file {metadata['lines_per_file']} "
-        f"--burst-every {metadata['burst_every']}"
+        f"--burst-every {metadata['burst_every']} "
+        f"--margin-pct {metadata['margin_pct']:.1f} "
+        f"--margin-baseline {metadata['margin_baseline']}"
     )
     lines.append("```")
 
@@ -406,7 +481,7 @@ def render_report(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run heavy nasty rebase benchmark across mode variants vs main wrapper"
+        description="Run heavy nasty rebase benchmark across mode variants."
     )
     parser.add_argument("--work-root", type=Path, default=None)
     parser.add_argument("--main-ref", default="origin/main")
@@ -418,6 +493,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lines-per-file", type=int, default=1500)
     parser.add_argument("--burst-every", type=int, default=15)
     parser.add_argument("--repetitions", type=int, default=1)
+    parser.add_argument(
+        "--margin-pct",
+        type=float,
+        default=25.0,
+        help="Maximum allowed slowdown percentage relative to --margin-baseline.",
+    )
+    parser.add_argument(
+        "--enforce-margin",
+        action="store_true",
+        help="Exit non-zero when any current_hooks/current_both margin check fails.",
+    )
+    parser.add_argument(
+        "--margin-baseline",
+        type=str,
+        choices=["current_wrapper", "main_wrapper"],
+        default="current_wrapper",
+        help="Baseline variant for margin checks.",
+    )
     parser.add_argument("--current-bin", type=Path, default=None)
     parser.add_argument("--main-bin", type=Path, default=None)
     parser.add_argument("--keep-artifacts", action="store_true")
@@ -434,6 +527,8 @@ def main() -> int:
 
     if args.repetitions <= 0:
         raise BenchmarkError("--repetitions must be positive")
+    if args.margin_pct < 0:
+        raise BenchmarkError("--margin-pct must be non-negative")
 
     if args.work_root is None:
         work_root = Path(tempfile.mkdtemp(prefix="git-ai-nasty-modes-"))
@@ -551,6 +646,12 @@ def main() -> int:
 
         summary = summarize_variant_runs(all_results)
         slowdowns = compute_slowdowns(summary, baseline_key="main_wrapper")
+        margin_checks = compute_margin_checks(
+            summary,
+            baseline_key=args.margin_baseline,
+            margin_pct=args.margin_pct,
+            variants=["current_hooks", "current_both"],
+        )
 
         timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
         artifacts = work_root / "artifacts" / timestamp
@@ -573,6 +674,8 @@ def main() -> int:
             "lines_per_file": args.lines_per_file,
             "burst_every": args.burst_every,
             "real_git": str(real_git),
+            "margin_pct": args.margin_pct,
+            "margin_baseline": args.margin_baseline,
             "variants": {v.key: str(v.binary) for v in variants},
         }
 
@@ -615,6 +718,7 @@ def main() -> int:
                     "metadata": metadata,
                     "summary": summary,
                     "slowdowns_pct_vs_main_wrapper": slowdowns,
+                    "margin_checks": [dataclasses.asdict(check) for check in margin_checks],
                 },
                 indent=2,
             )
@@ -623,13 +727,26 @@ def main() -> int:
         )
 
         report_path = artifacts / "report.md"
-        render_report(report_path, metadata, summary, slowdowns)
+        render_report(report_path, metadata, summary, slowdowns, margin_checks)
 
         print("")
         print("Nasty mode benchmark complete")
         print(f"- Report: {report_path}")
         print(f"- JSON:   {json_path}")
         print(f"- CSV:    {csv_path}")
+        failed_checks = [check for check in margin_checks if not check.passed]
+        print(
+            f"- Margin checks: {len(margin_checks) - len(failed_checks)}/{len(margin_checks)} passing"
+        )
+        if args.enforce_margin and failed_checks:
+            print("")
+            print("Margin enforcement failed:")
+            for check in failed_checks:
+                print(
+                    f"  - {check.scenario} / {check.variant}: "
+                    f"{check.slowdown_pct:.3f}% > {args.margin_pct:.1f}%"
+                )
+            return 2
         return 0
 
     finally:
