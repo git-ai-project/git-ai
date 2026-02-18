@@ -3668,4 +3668,459 @@ mod tests {
             "old working log should be cleaned up"
         );
     }
+
+    #[test]
+    fn regression_initial_preserved_through_checkpoint_commit_rebase() {
+        let repo = TmpRepo::new().expect("create tmp repo");
+
+        repo.write_file("app.py", "def main():\n    print('hello')\n", true)
+            .expect("write base app.py");
+        repo.commit_with_message("initial commit")
+            .expect("initial commit");
+        let default_branch = repo.current_branch().expect("default branch");
+
+        repo.create_branch("feature").expect("create feature");
+        repo.write_file(
+            "app.py",
+            "import logging\ndef main():\n    logging.info('Starting')\n    return 42\n",
+            true,
+        )
+        .expect("write AI app.py");
+        repo.write_file(
+            "utils.py",
+            "def helper():\n    return 'one'\ndef helper_two():\n    return 'two'\n",
+            true,
+        )
+        .expect("write AI utils.py");
+
+        repo.trigger_checkpoint_with_ai("cursor", None, None)
+            .expect("AI checkpoint for both files");
+
+        repo.commit_with_message("AI feature work")
+            .expect("feature commit");
+        let original_head = repo.get_head_commit_sha().expect("feature sha");
+
+        let mut initial_files = HashMap::new();
+        initial_files.insert(
+            "utils.py".to_string(),
+            vec![LineAttribution {
+                start_line: 1,
+                end_line: 4,
+                author_id: "cursor".to_string(),
+                overrode: None,
+            }],
+        );
+        let mut prompts = HashMap::new();
+        prompts.insert(
+            "cursor".to_string(),
+            PromptRecord {
+                agent_id: AgentId {
+                    tool: "cursor".to_string(),
+                    id: "session-1".to_string(),
+                    model: "test-model".to_string(),
+                },
+                human_author: None,
+                messages: vec![],
+                total_additions: 4,
+                total_deletions: 0,
+                accepted_lines: 4,
+                overriden_lines: 0,
+                messages_url: None,
+            },
+        );
+        let old_wl = repo
+            .gitai_repo()
+            .storage
+            .working_log_for_base_commit(&original_head);
+        old_wl
+            .write_initial_attributions(initial_files, prompts)
+            .expect("write INITIAL for uncommitted utils.py");
+
+        let pre_rebase_initial = old_wl.read_initial_attributions();
+        assert_eq!(
+            pre_rebase_initial.files.len(),
+            1,
+            "INITIAL should exist before rebase"
+        );
+
+        repo.switch_branch(&default_branch)
+            .expect("switch to default");
+        repo.write_file("README.md", "# Test Project\n", true)
+            .expect("write upstream README");
+        repo.commit_with_message("upstream: add README")
+            .expect("upstream commit");
+        let new_head = repo.get_head_commit_sha().expect("upstream sha");
+
+        let rebase_event = RewriteLogEvent::RebaseComplete {
+            rebase_complete: RebaseCompleteEvent::new(
+                original_head.clone(),
+                new_head.clone(),
+                false,
+                vec![original_head.clone()],
+                vec![new_head.clone()],
+            ),
+        };
+
+        super::rewrite_authorship_if_needed(
+            repo.gitai_repo(),
+            &rebase_event,
+            "Test User".to_string(),
+            &vec![rebase_event.clone()],
+            true,
+        )
+        .expect("rewrite should succeed");
+
+        let new_wl = repo
+            .gitai_repo()
+            .storage
+            .working_log_for_base_commit(&new_head);
+        let migrated = new_wl.read_initial_attributions();
+
+        assert_eq!(
+            migrated.files.len(),
+            1,
+            "INITIAL should be migrated to new HEAD after rebase"
+        );
+        assert!(
+            migrated.files.contains_key("utils.py"),
+            "utils.py should be in migrated INITIAL"
+        );
+        let utils_attrs = &migrated.files["utils.py"];
+        assert_eq!(utils_attrs.len(), 1);
+        assert_eq!(utils_attrs[0].start_line, 1);
+        assert_eq!(utils_attrs[0].end_line, 4);
+        assert_eq!(utils_attrs[0].author_id, "cursor");
+
+        assert!(
+            migrated.prompts.contains_key("cursor"),
+            "cursor prompt record should be migrated"
+        );
+        assert!(
+            !repo.gitai_repo().storage.has_working_log(&original_head),
+            "old working log should not exist after rename"
+        );
+    }
+
+    #[test]
+    fn regression_initial_survives_amend_then_rebase() {
+        let repo = TmpRepo::new().expect("create tmp repo");
+
+        repo.write_file("app.py", "def main():\n    pass\n", true)
+            .expect("write base");
+        repo.commit_with_message("base commit")
+            .expect("commit base");
+        let default_branch = repo.current_branch().expect("default branch");
+
+        repo.create_branch("feature").expect("create feature");
+        repo.write_file(
+            "app.py",
+            "import logging\ndef main():\n    logging.info('v1')\n    return 1\n",
+            true,
+        )
+        .expect("write feature v1");
+        repo.commit_with_message("feature v1")
+            .expect("commit feature v1");
+        let v1_head = repo.get_head_commit_sha().expect("v1 sha");
+
+        let mut initial_files = HashMap::new();
+        initial_files.insert(
+            "utils.py".to_string(),
+            vec![LineAttribution {
+                start_line: 1,
+                end_line: 8,
+                author_id: "ai-cursor".to_string(),
+                overrode: None,
+            }],
+        );
+        let mut prompts = HashMap::new();
+        prompts.insert(
+            "ai-cursor".to_string(),
+            PromptRecord {
+                agent_id: AgentId {
+                    tool: "cursor".to_string(),
+                    id: "sess-amend".to_string(),
+                    model: "gpt-4".to_string(),
+                },
+                human_author: None,
+                messages: vec![],
+                total_additions: 8,
+                total_deletions: 0,
+                accepted_lines: 8,
+                overriden_lines: 0,
+                messages_url: None,
+            },
+        );
+        let v1_wl = repo
+            .gitai_repo()
+            .storage
+            .working_log_for_base_commit(&v1_head);
+        v1_wl
+            .write_initial_attributions(initial_files.clone(), prompts.clone())
+            .expect("write INITIAL on v1");
+
+        repo.write_file(
+            "app.py",
+            "import logging\ndef main():\n    logging.info('v2')\n    return 2\n",
+            true,
+        )
+        .expect("write feature v2");
+        let amend_sha = repo.amend_commit("feature v2").expect("amend commit");
+        assert_ne!(v1_head, amend_sha, "amend should produce new SHA");
+
+        let amend_event = RewriteLogEvent::RebaseComplete {
+            rebase_complete: RebaseCompleteEvent::new(
+                v1_head.clone(),
+                amend_sha.clone(),
+                false,
+                vec![v1_head.clone()],
+                vec![amend_sha.clone()],
+            ),
+        };
+        super::rewrite_authorship_if_needed(
+            repo.gitai_repo(),
+            &amend_event,
+            "Test User".to_string(),
+            &vec![amend_event.clone()],
+            true,
+        )
+        .expect("amend rewrite should succeed");
+
+        let amend_initial = repo
+            .gitai_repo()
+            .storage
+            .working_log_for_base_commit(&amend_sha)
+            .read_initial_attributions();
+        assert_eq!(
+            amend_initial.files.len(),
+            1,
+            "INITIAL should survive amend"
+        );
+        assert!(amend_initial.files.contains_key("utils.py"));
+
+        repo.switch_branch(&default_branch)
+            .expect("switch to default");
+        repo.write_file("upstream.txt", "upstream change\n", true)
+            .expect("write upstream");
+        repo.commit_with_message("upstream commit")
+            .expect("commit upstream");
+        let rebase_new_head = repo.get_head_commit_sha().expect("rebase new head");
+
+        let rebase_event = RewriteLogEvent::RebaseComplete {
+            rebase_complete: RebaseCompleteEvent::new(
+                amend_sha.clone(),
+                rebase_new_head.clone(),
+                false,
+                vec![amend_sha.clone()],
+                vec![rebase_new_head.clone()],
+            ),
+        };
+        super::rewrite_authorship_if_needed(
+            repo.gitai_repo(),
+            &rebase_event,
+            "Test User".to_string(),
+            &vec![rebase_event.clone()],
+            true,
+        )
+        .expect("rebase rewrite should succeed");
+
+        let final_initial = repo
+            .gitai_repo()
+            .storage
+            .working_log_for_base_commit(&rebase_new_head)
+            .read_initial_attributions();
+        assert_eq!(
+            final_initial.files.len(),
+            1,
+            "INITIAL should survive amend + rebase"
+        );
+        assert!(final_initial.files.contains_key("utils.py"));
+        let attrs = &final_initial.files["utils.py"];
+        assert_eq!(attrs[0].start_line, 1);
+        assert_eq!(attrs[0].end_line, 8);
+        assert_eq!(attrs[0].author_id, "ai-cursor");
+        assert!(final_initial.prompts.contains_key("ai-cursor"));
+    }
+
+    #[test]
+    fn regression_multi_tool_initial_with_disjoint_files_survives_rebase() {
+        let repo = TmpRepo::new().expect("create tmp repo");
+
+        repo.write_file("base.txt", "base\n", true)
+            .expect("write base");
+        repo.commit_with_message("base commit")
+            .expect("commit base");
+        let default_branch = repo.current_branch().expect("default branch");
+
+        repo.create_branch("feature").expect("create feature");
+        repo.write_file("committed.py", "print('committed')\n", true)
+            .expect("write committed");
+        repo.commit_with_message("feature commit")
+            .expect("commit feature");
+        let original_head = repo.get_head_commit_sha().expect("feature sha");
+
+        let mut initial_files = HashMap::new();
+        initial_files.insert(
+            "cursor_file.py".to_string(),
+            vec![LineAttribution {
+                start_line: 1,
+                end_line: 10,
+                author_id: "ai-cursor".to_string(),
+                overrode: None,
+            }],
+        );
+        initial_files.insert(
+            "copilot_file.py".to_string(),
+            vec![
+                LineAttribution {
+                    start_line: 1,
+                    end_line: 5,
+                    author_id: "ai-copilot".to_string(),
+                    overrode: None,
+                },
+                LineAttribution {
+                    start_line: 10,
+                    end_line: 15,
+                    author_id: "ai-copilot".to_string(),
+                    overrode: None,
+                },
+            ],
+        );
+        initial_files.insert(
+            "shared_file.py".to_string(),
+            vec![
+                LineAttribution {
+                    start_line: 1,
+                    end_line: 3,
+                    author_id: "ai-cursor".to_string(),
+                    overrode: None,
+                },
+                LineAttribution {
+                    start_line: 4,
+                    end_line: 8,
+                    author_id: "ai-copilot".to_string(),
+                    overrode: None,
+                },
+            ],
+        );
+
+        let mut prompts = HashMap::new();
+        prompts.insert(
+            "ai-cursor".to_string(),
+            PromptRecord {
+                agent_id: AgentId {
+                    tool: "cursor".to_string(),
+                    id: "sess-cursor".to_string(),
+                    model: "gpt-4".to_string(),
+                },
+                human_author: None,
+                messages: vec![],
+                total_additions: 13,
+                total_deletions: 0,
+                accepted_lines: 13,
+                overriden_lines: 0,
+                messages_url: None,
+            },
+        );
+        prompts.insert(
+            "ai-copilot".to_string(),
+            PromptRecord {
+                agent_id: AgentId {
+                    tool: "copilot".to_string(),
+                    id: "sess-copilot".to_string(),
+                    model: "gpt-4o".to_string(),
+                },
+                human_author: None,
+                messages: vec![],
+                total_additions: 16,
+                total_deletions: 0,
+                accepted_lines: 16,
+                overriden_lines: 0,
+                messages_url: None,
+            },
+        );
+
+        let old_wl = repo
+            .gitai_repo()
+            .storage
+            .working_log_for_base_commit(&original_head);
+        old_wl
+            .write_initial_attributions(initial_files, prompts)
+            .expect("write multi-tool INITIAL");
+
+        repo.switch_branch(&default_branch)
+            .expect("switch to default");
+        repo.write_file("upstream.txt", "upstream\n", true)
+            .expect("write upstream");
+        repo.commit_with_message("upstream commit")
+            .expect("commit upstream");
+        let new_head = repo.get_head_commit_sha().expect("new sha");
+
+        let rebase_event = RewriteLogEvent::RebaseComplete {
+            rebase_complete: RebaseCompleteEvent::new(
+                original_head.clone(),
+                new_head.clone(),
+                false,
+                vec![original_head.clone()],
+                vec![new_head.clone()],
+            ),
+        };
+
+        super::rewrite_authorship_if_needed(
+            repo.gitai_repo(),
+            &rebase_event,
+            "Test User".to_string(),
+            &vec![rebase_event.clone()],
+            true,
+        )
+        .expect("rewrite should succeed");
+
+        let migrated = repo
+            .gitai_repo()
+            .storage
+            .working_log_for_base_commit(&new_head)
+            .read_initial_attributions();
+
+        assert_eq!(
+            migrated.files.len(),
+            3,
+            "all three files should be migrated"
+        );
+        assert!(migrated.files.contains_key("cursor_file.py"));
+        assert!(migrated.files.contains_key("copilot_file.py"));
+        assert!(migrated.files.contains_key("shared_file.py"));
+
+        let copilot_attrs = &migrated.files["copilot_file.py"];
+        assert_eq!(
+            copilot_attrs.len(),
+            2,
+            "copilot_file.py should have both attribution ranges"
+        );
+        assert_eq!(copilot_attrs[0].start_line, 1);
+        assert_eq!(copilot_attrs[0].end_line, 5);
+        assert_eq!(copilot_attrs[1].start_line, 10);
+        assert_eq!(copilot_attrs[1].end_line, 15);
+
+        let shared_attrs = &migrated.files["shared_file.py"];
+        assert_eq!(
+            shared_attrs.len(),
+            2,
+            "shared_file.py should have attributions from both tools"
+        );
+
+        assert_eq!(
+            migrated.prompts.len(),
+            2,
+            "both prompt records should be migrated"
+        );
+        assert!(migrated.prompts.contains_key("ai-cursor"));
+        assert!(migrated.prompts.contains_key("ai-copilot"));
+
+        let cursor_prompt = &migrated.prompts["ai-cursor"];
+        assert_eq!(cursor_prompt.agent_id.tool, "cursor");
+        assert_eq!(cursor_prompt.total_additions, 13);
+
+        let copilot_prompt = &migrated.prompts["ai-copilot"];
+        assert_eq!(copilot_prompt.agent_id.tool, "copilot");
+        assert_eq!(copilot_prompt.total_additions, 16);
+    }
 }
