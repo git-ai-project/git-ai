@@ -13,7 +13,7 @@ use rusqlite::{Connection, OpenFlags};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 pub struct AgentCheckpointFlags {
     pub hook_input: Option<String>,
@@ -324,19 +324,32 @@ impl ClaudePreset {
     }
 }
 
-/// Check if a file path refers to a plan file based on its basename.
+/// Check if a file path refers to a Claude plan file.
 ///
-/// Claude Code writes plans to files outside the repo (e.g., in ~/.claude/projects/).
-/// These show up as Write/Edit tool calls in the JSONL transcript. We detect them
-/// by checking if the filename contains "plan" (case-insensitive).
+/// Claude plans are written under `~/.claude/plans/`. We treat a path as a plan
+/// file only when it:
+/// - ends with `.md` (case-insensitive), and
+/// - contains the path segment pair `.claude/plans` (platform-aware separators).
 pub fn is_plan_file_path(file_path: &str) -> bool {
     let path = Path::new(file_path);
-    if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-        let lower = file_name.to_ascii_lowercase();
-        let has_plan = lower == "plan.md" || lower.starts_with("plan.") || lower.starts_with("plan-") || lower.starts_with("plan_") || lower.contains("-plan") || lower.contains("_plan");
-        has_plan && lower.ends_with(".md")
-    } else {
+    let is_markdown = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("md"));
+    if !is_markdown {
         false
+    } else {
+        let components: Vec<String> = path
+            .components()
+            .filter_map(|component| match component {
+                Component::Normal(segment) => Some(segment.to_string_lossy().to_ascii_lowercase()),
+                _ => None,
+            })
+            .collect();
+
+        components
+            .windows(2)
+            .any(|window| window[0] == ".claude" && window[1] == "plans")
     }
 }
 

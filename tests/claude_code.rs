@@ -442,16 +442,18 @@ fn test_user_text_content_blocks_are_parsed_correctly() {
 
 #[test]
 fn test_is_plan_file_path_detects_plan_files() {
-    // Standard plan file paths
+    // Plan files under ~/.claude/plans should match
     assert!(is_plan_file_path(
-        "/Users/dev/.claude/projects/-Users-dev-myproject/plan.md"
+        "/Users/dev/.claude/plans/abstract-frolicking-neumann.md"
     ));
-    assert!(is_plan_file_path("/tmp/claude-plan.md"));
-    assert!(is_plan_file_path("/home/user/.claude/plan.md"));
-    assert!(is_plan_file_path("plan.md"));
-    assert!(is_plan_file_path("/some/path/my-plan.md"));
-    assert!(is_plan_file_path("/some/path/implementation-plan.md"));
-    assert!(is_plan_file_path("/some/path/PLAN.md"));
+    assert!(is_plan_file_path(
+        "/home/user/.claude/plans/glistening-doodling-manatee.md"
+    ));
+    #[cfg(windows)]
+    assert!(is_plan_file_path(
+        r"C:\Users\dev\.claude\plans\tender-watching-thompson.md"
+    ));
+    assert!(is_plan_file_path("/Users/dev/.claude/plans/PLAN.MD"));
 
     // Non-plan files should not match
     assert!(!is_plan_file_path("/Users/dev/myproject/src/main.rs"));
@@ -461,19 +463,26 @@ fn test_is_plan_file_path_detects_plan_files() {
         "/Users/dev/.claude/projects/settings.json"
     ));
 
-    // plan in directory but not in filename should not match
-    assert!(!is_plan_file_path("/plan/README.md"));
+    // Outside ~/.claude/plans should not match
+    assert!(!is_plan_file_path(
+        "/Users/dev/.claude/projects/-Users-dev-myproject/plan.md"
+    ));
+    assert!(!is_plan_file_path("/tmp/claude-plan.md"));
+    assert!(!is_plan_file_path("/home/user/.claude/plan.md"));
+    assert!(!is_plan_file_path("plan.md"));
+    assert!(!is_plan_file_path("/some/path/my-plan.md"));
 
-    // plan in filename but not .md should not match
+    // Correct dir but not .md should not match
     assert!(!is_plan_file_path("/some/path/plan.txt"));
     assert!(!is_plan_file_path("/some/path/plan.json"));
+    assert!(!is_plan_file_path("/Users/dev/.claude/plans/plan.txt"));
 }
 
 #[test]
 fn test_extract_plan_from_write_tool() {
     let mut plan_states = HashMap::new();
     let input = serde_json::json!({
-        "file_path": "/Users/dev/.claude/projects/-Users-dev-myproject/plan.md",
+        "file_path": "/Users/dev/.claude/plans/abstract-frolicking-neumann.md",
         "content": "# My Plan\n\n## Step 1\nDo something"
     });
 
@@ -483,14 +492,14 @@ fn test_extract_plan_from_write_tool() {
 
     // State should be tracked for subsequent edits
     assert_eq!(
-        plan_states.get("/Users/dev/.claude/projects/-Users-dev-myproject/plan.md"),
+        plan_states.get("/Users/dev/.claude/plans/abstract-frolicking-neumann.md"),
         Some(&"# My Plan\n\n## Step 1\nDo something".to_string())
     );
 }
 
 #[test]
 fn test_extract_plan_from_edit_tool_with_prior_state() {
-    let plan_path = "/Users/dev/.claude/projects/-Users-dev-myproject/plan.md";
+    let plan_path = "/Users/dev/.claude/plans/abstract-frolicking-neumann.md";
     let mut plan_states = HashMap::new();
 
     // First, Write the full plan
@@ -524,7 +533,7 @@ fn test_extract_plan_from_edit_tool_without_prior_state() {
 
     // Edit without a prior Write — falls back to the new_string fragment
     let edit_input = serde_json::json!({
-        "file_path": "/Users/dev/.claude/plan.md",
+        "file_path": "/Users/dev/.claude/plans/bright-inventing-crescent.md",
         "old_string": "old text",
         "new_string": "new text"
     });
@@ -549,7 +558,7 @@ fn test_extract_plan_returns_none_for_non_plan_files() {
 fn test_extract_plan_returns_none_for_non_write_edit_tools() {
     let mut plan_states = HashMap::new();
     let input = serde_json::json!({
-        "file_path": "/Users/dev/.claude/plan.md",
+        "file_path": "/Users/dev/.claude/plans/bright-inventing-crescent.md",
         "content": "# Plan"
     });
 
@@ -561,7 +570,7 @@ fn test_extract_plan_returns_none_for_non_write_edit_tools() {
 fn test_extract_plan_returns_none_for_empty_content() {
     let mut plan_states = HashMap::new();
     let input = serde_json::json!({
-        "file_path": "/Users/dev/.claude/plan.md",
+        "file_path": "/Users/dev/.claude/plans/bright-inventing-crescent.md",
         "content": "   "
     });
 
@@ -715,7 +724,7 @@ fn test_plan_write_with_inline_jsonl() {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
-    let jsonl_content = r##"{"type":"assistant","message":{"model":"claude-sonnet-4-20250514","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Write","input":{"file_path":"/home/user/.claude/projects/test/plan.md","content":"# Plan\n\n1. First step\n2. Second step"}}]},"timestamp":"2025-01-01T00:00:00Z"}"##;
+    let jsonl_content = r##"{"type":"assistant","message":{"model":"claude-sonnet-4-20250514","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Write","input":{"file_path":"/home/user/.claude/plans/tender-watching-thompson.md","content":"# Plan\n\n1. First step\n2. Second step"}}]},"timestamp":"2025-01-01T00:00:00Z"}"##;
 
     let mut temp_file = NamedTempFile::new().unwrap();
     temp_file.write_all(jsonl_content.as_bytes()).unwrap();
@@ -739,7 +748,7 @@ fn test_plan_edit_with_inline_jsonl() {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
-    let jsonl_content = r##"{"type":"assistant","message":{"model":"claude-sonnet-4-20250514","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Edit","input":{"file_path":"/tmp/plan.md","old_string":"1. First step","new_string":"1. First step (done)\n2. New step"}}]},"timestamp":"2025-01-01T00:00:00Z"}"##;
+    let jsonl_content = r##"{"type":"assistant","message":{"model":"claude-sonnet-4-20250514","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Edit","input":{"file_path":"/home/user/.claude/plans/tender-watching-thompson.md","old_string":"1. First step","new_string":"1. First step (done)\n2. New step"}}]},"timestamp":"2025-01-01T00:00:00Z"}"##;
 
     let mut temp_file = NamedTempFile::new().unwrap();
     temp_file.write_all(jsonl_content.as_bytes()).unwrap();
@@ -803,7 +812,7 @@ fn test_mixed_plan_and_code_edits_in_single_assistant_message() {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
-    let jsonl_content = r##"{"type":"assistant","message":{"model":"claude-sonnet-4-20250514","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Write","input":{"file_path":"/home/user/.claude/projects/test/plan.md","content":"# Plan\nStep 1"}},{"type":"tool_use","id":"toolu_2","name":"Write","input":{"file_path":"/home/user/project/src/lib.rs","content":"pub fn hello() {}"}}]},"timestamp":"2025-01-01T00:00:00Z"}"##;
+    let jsonl_content = r##"{"type":"assistant","message":{"model":"claude-sonnet-4-20250514","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Write","input":{"file_path":"/home/user/.claude/plans/tender-watching-thompson.md","content":"# Plan\nStep 1"}},{"type":"tool_use","id":"toolu_2","name":"Write","input":{"file_path":"/home/user/project/src/lib.rs","content":"pub fn hello() {}"}}]},"timestamp":"2025-01-01T00:00:00Z"}"##;
 
     let mut temp_file = NamedTempFile::new().unwrap();
     temp_file.write_all(jsonl_content.as_bytes()).unwrap();
