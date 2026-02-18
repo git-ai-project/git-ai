@@ -142,7 +142,8 @@ impl AgentCheckpointPreset for ClaudePreset {
 }
 
 impl ClaudePreset {
-    /// Parse a Claude Code JSONL file into a transcript and extract model info
+    /// Parse a Claude Code JSONL file into a transcript and extract model info.
+    /// Also discovers and includes subagent transcripts from the sibling subagents directory.
     pub fn transcript_and_model_from_claude_code_jsonl(
         transcript_path: &str,
     ) -> Result<(AiTranscript, Option<String>), GitAiError> {
@@ -151,10 +152,69 @@ impl ClaudePreset {
         let mut transcript = AiTranscript::new();
         let mut model = None;
 
+        Self::parse_claude_jsonl_content(&jsonl_content, &mut transcript, &mut model);
+
+        // Discover and parse subagent transcripts.
+        // Claude Code stores subagent JSONL files at:
+        //   <session-uuid>/subagents/agent-<id>.jsonl
+        // relative to the main transcript at <session-uuid>.jsonl
+        let transcript_path_buf = Path::new(transcript_path);
+        if let Some(stem) = transcript_path_buf.file_stem().and_then(|s| s.to_str()) {
+            let subagents_dir = transcript_path_buf
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join(stem)
+                .join("subagents");
+
+            if subagents_dir.is_dir()
+                && let Ok(entries) = std::fs::read_dir(&subagents_dir)
+            {
+                let mut subagent_files: Vec<PathBuf> = entries
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .filter(|p| {
+                        p.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
+                            && p.file_name()
+                                .and_then(|n| n.to_str())
+                                .is_some_and(|n| n.starts_with("agent-"))
+                    })
+                    .collect();
+
+                // Sort for deterministic ordering
+                subagent_files.sort();
+
+                for subagent_path in subagent_files {
+                    if let Ok(subagent_content) = std::fs::read_to_string(&subagent_path) {
+                        // Each subagent gets a separate model tracker since subagents
+                        // may use different models than the main thread
+                        let mut _subagent_model = None;
+                        Self::parse_claude_jsonl_content(
+                            &subagent_content,
+                            &mut transcript,
+                            &mut _subagent_model,
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok((transcript, model))
+    }
+
+    /// Parse Claude Code JSONL content and append messages to a transcript.
+    /// Extracts model info into `model` if not already set.
+    fn parse_claude_jsonl_content(
+        jsonl_content: &str,
+        transcript: &mut AiTranscript,
+        model: &mut Option<String>,
+    ) {
         for line in jsonl_content.lines() {
             if !line.trim().is_empty() {
                 // Parse the raw JSONL entry
-                let raw_entry: serde_json::Value = serde_json::from_str(line)?;
+                let raw_entry: serde_json::Value = match serde_json::from_str(line) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
                 let timestamp = raw_entry["timestamp"].as_str().map(|s| s.to_string());
 
                 // Extract model from assistant messages if we haven't found it yet
@@ -162,7 +222,7 @@ impl ClaudePreset {
                     && raw_entry["type"].as_str() == Some("assistant")
                     && let Some(model_str) = raw_entry["message"]["model"].as_str()
                 {
-                    model = Some(model_str.to_string());
+                    *model = Some(model_str.to_string());
                 }
 
                 // Extract messages based on the type
@@ -253,8 +313,6 @@ impl ClaudePreset {
                 }
             }
         }
-
-        Ok((transcript, model))
     }
 }
 

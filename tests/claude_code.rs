@@ -709,3 +709,96 @@ fn test_mixed_plan_and_code_edits_in_single_assistant_message() {
         "Second tool_use should remain ToolUse"
     );
 }
+
+// ===== Subagent transcript tests =====
+
+#[test]
+fn test_parse_claude_code_jsonl_with_subagents() {
+    let fixture = fixture_path("claude-code-with-subagents.jsonl");
+    let (transcript, model) =
+        ClaudePreset::transcript_and_model_from_claude_code_jsonl(fixture.to_str().unwrap())
+            .expect("Failed to parse JSONL");
+
+    // Verify model is extracted from the main transcript
+    assert_eq!(
+        model.as_deref(),
+        Some("claude-sonnet-4-20250514"),
+        "Model should be extracted from main transcript"
+    );
+
+    // Count messages by type from both main + subagent transcripts
+    let user_messages: Vec<_> = transcript
+        .messages()
+        .iter()
+        .filter(|m| matches!(m, Message::User { .. }))
+        .collect();
+    let assistant_messages: Vec<_> = transcript
+        .messages()
+        .iter()
+        .filter(|m| matches!(m, Message::Assistant { .. }))
+        .collect();
+    let tool_use_messages: Vec<_> = transcript
+        .messages()
+        .iter()
+        .filter(|m| matches!(m, Message::ToolUse { .. }))
+        .collect();
+
+    // Main transcript: 1 user + 3 assistant text + 2 tool_use (Task, Edit)
+    // Subagent transcript: 1 user + 2 assistant text + 1 tool_use (Glob)
+    // tool_result user messages are skipped
+    assert_eq!(
+        user_messages.len(),
+        2,
+        "Expected 2 user messages (1 main + 1 subagent)"
+    );
+    assert_eq!(
+        assistant_messages.len(),
+        5,
+        "Expected 5 assistant messages (3 main + 2 subagent)"
+    );
+    assert_eq!(
+        tool_use_messages.len(),
+        3,
+        "Expected 3 tool_use messages (2 main + 1 subagent)"
+    );
+
+    // Verify subagent messages are included by checking for subagent-specific content
+    let has_subagent_text = transcript.messages().iter().any(|m| {
+        if let Message::Assistant { text, .. } = m {
+            text.contains("search for auth-related files")
+        } else {
+            false
+        }
+    });
+    assert!(
+        has_subagent_text,
+        "Subagent assistant messages should be included in the transcript"
+    );
+
+    // Verify subagent tool_use is included
+    let has_subagent_tool = transcript.messages().iter().any(|m| {
+        if let Message::ToolUse { name, .. } = m {
+            name == "Glob"
+        } else {
+            false
+        }
+    });
+    assert!(
+        has_subagent_tool,
+        "Subagent tool_use messages should be included in the transcript"
+    );
+}
+
+#[test]
+fn test_parse_claude_code_jsonl_without_subagents_dir() {
+    // Existing fixture has no subagents directory - should work fine
+    let fixture = fixture_path("example-claude-code.jsonl");
+    let (transcript, model) =
+        ClaudePreset::transcript_and_model_from_claude_code_jsonl(fixture.to_str().unwrap())
+            .expect("Failed to parse JSONL");
+
+    assert!(!transcript.messages().is_empty());
+    assert!(model.is_some());
+    // Should parse exactly as before (no subagent messages added)
+    assert_eq!(model.unwrap(), "claude-sonnet-4-20250514");
+}
