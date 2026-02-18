@@ -20,6 +20,17 @@ use git_ai::authorship::transcript::{AiTranscript, Message};
 use repos::test_repo::TestRepo;
 use std::collections::HashMap;
 use std::fs;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static TEST_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn unique_id(base: &str) -> String {
+    format!(
+        "{}-{}",
+        base,
+        TEST_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
+}
 
 /// Helper to create a test PromptDbRecord
 fn create_test_prompt(
@@ -61,7 +72,7 @@ fn create_test_prompt(
 /// Helper to populate internal database with test prompts
 fn populate_test_database(_repo: &TestRepo, prompts: Vec<PromptDbRecord>) {
     let db = InternalDatabase::global().expect("Failed to get global database");
-    let mut db_guard = db.lock().expect("Failed to lock database");
+    let mut db_guard = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
     for prompt in prompts {
         db_guard
@@ -428,7 +439,7 @@ fn test_database_list_prompts_no_filter() {
     let workdir = repo.path().to_string_lossy().to_string();
     let prompts = vec![
         create_test_prompt(
-            "prompt1",
+            &unique_id("prompt"),
             Some(workdir.clone()),
             "agent1",
             "model1",
@@ -436,7 +447,7 @@ fn test_database_list_prompts_no_filter() {
             "Response 1",
         ),
         create_test_prompt(
-            "prompt2",
+            &unique_id("prompt"),
             Some(workdir.clone()),
             "agent2",
             "model2",
@@ -449,7 +460,7 @@ fn test_database_list_prompts_no_filter() {
 
     // List all prompts
     let db = InternalDatabase::global().unwrap();
-    let db_guard = db.lock().unwrap();
+    let db_guard = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let results = db_guard.list_prompts(None, None, 10, 0).unwrap();
 
     assert!(results.len() >= 2, "Should have at least 2 prompts");
@@ -472,7 +483,7 @@ fn test_database_list_prompts_with_workdir_filter() {
     let workdir = repo.path().to_string_lossy().to_string();
     let prompts = vec![
         create_test_prompt(
-            "prompt1",
+            &unique_id("prompt"),
             Some(workdir.clone()),
             "agent1",
             "model1",
@@ -480,7 +491,7 @@ fn test_database_list_prompts_with_workdir_filter() {
             "Response",
         ),
         create_test_prompt(
-            "prompt2",
+            &unique_id("prompt"),
             Some("/other/path".to_string()),
             "agent2",
             "model2",
@@ -492,7 +503,7 @@ fn test_database_list_prompts_with_workdir_filter() {
     populate_test_database(&repo, prompts);
 
     let db = InternalDatabase::global().unwrap();
-    let db_guard = db.lock().unwrap();
+    let db_guard = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let results = db_guard.list_prompts(Some(&workdir), None, 10, 0).unwrap();
 
     assert!(
@@ -523,7 +534,7 @@ fn test_database_list_prompts_pagination() {
     let prompts: Vec<_> = (1..=5)
         .map(|i| {
             create_test_prompt(
-                &format!("prompt{}", i),
+                &unique_id(&format!("prompt{}", i)),
                 Some(workdir.clone()),
                 "agent",
                 "model",
@@ -536,7 +547,7 @@ fn test_database_list_prompts_pagination() {
     populate_test_database(&repo, prompts);
 
     let db = InternalDatabase::global().unwrap();
-    let db_guard = db.lock().unwrap();
+    let db_guard = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
     // First page: limit 2, offset 0
     let page1 = db_guard.list_prompts(None, None, 2, 0).unwrap();
@@ -567,7 +578,7 @@ fn test_database_search_prompts_finds_matches() {
     let workdir = repo.path().to_string_lossy().to_string();
     let prompts = vec![
         create_test_prompt(
-            "prompt1",
+            &unique_id("prompt"),
             Some(workdir.clone()),
             "agent1",
             "model1",
@@ -575,7 +586,7 @@ fn test_database_search_prompts_finds_matches() {
             "I'll help fix that",
         ),
         create_test_prompt(
-            "prompt2",
+            &unique_id("prompt"),
             Some(workdir.clone()),
             "agent2",
             "model2",
@@ -583,7 +594,7 @@ fn test_database_search_prompts_finds_matches() {
             "Let me add that feature",
         ),
         create_test_prompt(
-            "prompt3",
+            &unique_id("prompt"),
             Some(workdir.clone()),
             "agent3",
             "model3",
@@ -595,11 +606,11 @@ fn test_database_search_prompts_finds_matches() {
     populate_test_database(&repo, prompts);
 
     let db = InternalDatabase::global().unwrap();
-    let db_guard = db.lock().unwrap();
+    let db_guard = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
-    // Search for "authentication"
+    // Search for "authentication" scoped to this test's workdir
     let results = db_guard
-        .search_prompts("authentication", None, 10, 0)
+        .search_prompts("authentication", Some(&workdir), 10, 0)
         .unwrap();
 
     assert!(!results.is_empty(), "Should find authentication prompt");
@@ -622,8 +633,8 @@ fn test_database_search_prompts_case_insensitive() {
 
     let workdir = repo.path().to_string_lossy().to_string();
     let prompts = vec![create_test_prompt(
-        "prompt1",
-        Some(workdir),
+        &unique_id("prompt"),
+        Some(workdir.clone()),
         "agent1",
         "model1",
         "Fix the AUTHENTICATION bug",
@@ -633,11 +644,11 @@ fn test_database_search_prompts_case_insensitive() {
     populate_test_database(&repo, prompts);
 
     let db = InternalDatabase::global().unwrap();
-    let db_guard = db.lock().unwrap();
+    let db_guard = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
-    // Search with lowercase
+    // Search with lowercase scoped to this test's workdir
     let results = db_guard
-        .search_prompts("authentication", None, 10, 0)
+        .search_prompts("authentication", Some(&workdir), 10, 0)
         .unwrap();
 
     // SQLite LIKE is case-insensitive by default for ASCII characters
@@ -658,8 +669,8 @@ fn test_database_search_prompts_no_matches() {
 
     let workdir = repo.path().to_string_lossy().to_string();
     let prompts = vec![create_test_prompt(
-        "prompt1",
-        Some(workdir),
+        &unique_id("prompt"),
+        Some(workdir.clone()),
         "agent1",
         "model1",
         "Some prompt",
@@ -669,10 +680,10 @@ fn test_database_search_prompts_no_matches() {
     populate_test_database(&repo, prompts);
 
     let db = InternalDatabase::global().unwrap();
-    let db_guard = db.lock().unwrap();
+    let db_guard = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let results = db_guard
-        .search_prompts("nonexistent_term_xyz", None, 10, 0)
+        .search_prompts("nonexistent_term_xyz", Some(&workdir), 10, 0)
         .unwrap();
 
     assert!(
@@ -693,7 +704,7 @@ fn test_database_search_prompts_with_workdir_filter() {
     let workdir = repo.path().to_string_lossy().to_string();
     let prompts = vec![
         create_test_prompt(
-            "prompt1",
+            &unique_id("prompt"),
             Some(workdir.clone()),
             "agent1",
             "model1",
@@ -701,7 +712,7 @@ fn test_database_search_prompts_with_workdir_filter() {
             "Response",
         ),
         create_test_prompt(
-            "prompt2",
+            &unique_id("prompt"),
             Some("/other/path".to_string()),
             "agent2",
             "model2",
@@ -713,7 +724,7 @@ fn test_database_search_prompts_with_workdir_filter() {
     populate_test_database(&repo, prompts);
 
     let db = InternalDatabase::global().unwrap();
-    let db_guard = db.lock().unwrap();
+    let db_guard = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let results = db_guard
         .search_prompts("Fix bug", Some(&workdir), 10, 0)
@@ -744,7 +755,7 @@ fn test_database_search_prompts_pagination() {
     let prompts: Vec<_> = (1..=5)
         .map(|i| {
             create_test_prompt(
-                &format!("prompt{}", i),
+                &unique_id(&format!("prompt{}", i)),
                 Some(workdir.clone()),
                 "agent",
                 "model",
@@ -757,14 +768,18 @@ fn test_database_search_prompts_pagination() {
     populate_test_database(&repo, prompts);
 
     let db = InternalDatabase::global().unwrap();
-    let db_guard = db.lock().unwrap();
+    let db_guard = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
-    // First page
-    let page1 = db_guard.search_prompts("feature", None, 2, 0).unwrap();
+    // First page scoped to this test's workdir
+    let page1 = db_guard
+        .search_prompts("feature", Some(&workdir), 2, 0)
+        .unwrap();
     assert!(page1.len() <= 2, "First page should have at most 2 items");
 
     // Second page
-    let page2 = db_guard.search_prompts("feature", None, 2, 2).unwrap();
+    let page2 = db_guard
+        .search_prompts("feature", Some(&workdir), 2, 2)
+        .unwrap();
     assert!(page2.len() <= 2, "Second page should have at most 2 items");
 
     // Verify pagination works
