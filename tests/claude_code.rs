@@ -8,6 +8,7 @@ use git_ai::commands::checkpoint_agent::agent_presets::{
     is_plan_file_path,
 };
 use serde_json::json;
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use test_utils::fixture_path;
@@ -470,62 +471,101 @@ fn test_is_plan_file_path_detects_plan_files() {
 
 #[test]
 fn test_extract_plan_from_write_tool() {
+    let mut plan_states = HashMap::new();
     let input = serde_json::json!({
         "file_path": "/Users/dev/.claude/projects/-Users-dev-myproject/plan.md",
         "content": "# My Plan\n\n## Step 1\nDo something"
     });
 
-    let result = extract_plan_from_tool_use("Write", &input);
+    let result = extract_plan_from_tool_use("Write", &input, &mut plan_states);
     assert!(result.is_some());
     assert_eq!(result.unwrap(), "# My Plan\n\n## Step 1\nDo something");
+
+    // State should be tracked for subsequent edits
+    assert_eq!(
+        plan_states.get("/Users/dev/.claude/projects/-Users-dev-myproject/plan.md"),
+        Some(&"# My Plan\n\n## Step 1\nDo something".to_string())
+    );
 }
 
 #[test]
-fn test_extract_plan_from_edit_tool() {
-    let input = serde_json::json!({
-        "file_path": "/Users/dev/.claude/projects/-Users-dev-myproject/plan.md",
-        "old_string": "## Step 1\nDo something",
-        "new_string": "## Step 1\nDo something specific\n## Step 2\nDo something else"
-    });
+fn test_extract_plan_from_edit_tool_with_prior_state() {
+    let plan_path = "/Users/dev/.claude/projects/-Users-dev-myproject/plan.md";
+    let mut plan_states = HashMap::new();
 
-    let result = extract_plan_from_tool_use("Edit", &input);
+    // First, Write the full plan
+    let write_input = serde_json::json!({
+        "file_path": plan_path,
+        "content": "# My Plan\n\n## Step 1\nDo something\n\n## Step 2\nDo another thing"
+    });
+    let write_result = extract_plan_from_tool_use("Write", &write_input, &mut plan_states);
+    assert!(write_result.is_some());
+
+    // Then, Edit a portion of it
+    let edit_input = serde_json::json!({
+        "file_path": plan_path,
+        "old_string": "## Step 1\nDo something",
+        "new_string": "## Step 1\nDo something specific"
+    });
+    let result = extract_plan_from_tool_use("Edit", &edit_input, &mut plan_states);
     assert!(result.is_some());
     let text = result.unwrap();
-    assert!(text.contains("--- old plan"));
-    assert!(text.contains("--- new plan"));
-    assert!(text.contains("Do something specific"));
+
+    // Should be the FULL plan with the replacement applied
+    assert_eq!(
+        text,
+        "# My Plan\n\n## Step 1\nDo something specific\n\n## Step 2\nDo another thing"
+    );
+}
+
+#[test]
+fn test_extract_plan_from_edit_tool_without_prior_state() {
+    let mut plan_states = HashMap::new();
+
+    // Edit without a prior Write — falls back to the new_string fragment
+    let edit_input = serde_json::json!({
+        "file_path": "/Users/dev/.claude/plan.md",
+        "old_string": "old text",
+        "new_string": "new text"
+    });
+    let result = extract_plan_from_tool_use("Edit", &edit_input, &mut plan_states);
+    assert!(result.is_some());
+    assert_eq!(result.unwrap(), "new text");
 }
 
 #[test]
 fn test_extract_plan_returns_none_for_non_plan_files() {
+    let mut plan_states = HashMap::new();
     let input = serde_json::json!({
         "file_path": "/Users/dev/myproject/src/main.rs",
         "content": "fn main() {}"
     });
 
-    let result = extract_plan_from_tool_use("Write", &input);
+    let result = extract_plan_from_tool_use("Write", &input, &mut plan_states);
     assert!(result.is_none());
 }
 
 #[test]
 fn test_extract_plan_returns_none_for_non_write_edit_tools() {
+    let mut plan_states = HashMap::new();
     let input = serde_json::json!({
         "file_path": "/Users/dev/.claude/plan.md",
         "content": "# Plan"
     });
 
-    let result = extract_plan_from_tool_use("Read", &input);
+    let result = extract_plan_from_tool_use("Read", &input, &mut plan_states);
     assert!(result.is_none());
 }
 
 #[test]
 fn test_extract_plan_returns_none_for_empty_content() {
+    let mut plan_states = HashMap::new();
     let input = serde_json::json!({
         "file_path": "/Users/dev/.claude/plan.md",
         "content": "   "
     });
 
-    let result = extract_plan_from_tool_use("Write", &input);
+    let result = extract_plan_from_tool_use("Write", &input, &mut plan_states);
     assert!(result.is_none());
 }
 
@@ -621,20 +661,30 @@ fn test_parse_claude_code_jsonl_with_plan() {
         "Fourth message should be Assistant"
     );
 
-    // Check Plan from Edit (old/new diff)
+    // Check Plan from Edit — should be the FULL plan with the replacement applied
     match &transcript.messages()[4] {
         Message::Plan { text, .. } => {
+            // The edit replaced "- Add users table with email, password_hash columns"
+            // with "- Add users table with id (UUID)..." — the full plan should reflect this
             assert!(
-                text.contains("--- old plan"),
-                "Edit plan should contain old plan marker"
+                text.contains("Authentication Implementation Plan"),
+                "Full plan should still contain the title"
             );
             assert!(
-                text.contains("--- new plan"),
-                "Edit plan should contain new plan marker"
+                text.contains("id (UUID)"),
+                "Full plan should contain the updated column list"
             );
             assert!(
-                text.contains("UUID"),
-                "New plan content should contain the updated text"
+                text.contains("Add index on email for fast lookups"),
+                "Full plan should contain the new line added by the edit"
+            );
+            assert!(
+                text.contains("POST /auth/register"),
+                "Full plan should still contain unchanged sections"
+            );
+            assert!(
+                !text.contains("--- old plan"),
+                "Full plan reconstruction should not use diff format"
             );
         }
         other => panic!("Expected Plan message from Edit, got {:?}", other),
@@ -701,10 +751,8 @@ fn test_plan_edit_with_inline_jsonl() {
     assert_eq!(transcript.messages().len(), 1);
     match &transcript.messages()[0] {
         Message::Plan { text, .. } => {
-            assert!(text.contains("--- old plan"));
-            assert!(text.contains("1. First step"));
-            assert!(text.contains("--- new plan"));
-            assert!(text.contains("1. First step (done)"));
+            // No prior Write state, so falls back to new_string
+            assert_eq!(text, "1. First step (done)\n2. New step");
         }
         other => panic!("Expected Plan, got {:?}", other),
     }

@@ -213,6 +213,7 @@ impl ClaudePreset {
             std::fs::read_to_string(transcript_path).map_err(GitAiError::IoError)?;
         let mut transcript = AiTranscript::new();
         let mut model = None;
+        let mut plan_states = std::collections::HashMap::new();
 
         for line in jsonl_content.lines() {
             if !line.trim().is_empty() {
@@ -291,9 +292,11 @@ impl ClaudePreset {
                                             (item["name"].as_str(), item["input"].as_object())
                                         {
                                             // Check if this is a Write/Edit to a plan file
-                                            if let Some(plan_text) =
-                                                extract_plan_from_tool_use(name, &item["input"])
-                                            {
+                                            if let Some(plan_text) = extract_plan_from_tool_use(
+                                                name,
+                                                &item["input"],
+                                                &mut plan_states,
+                                            ) {
                                                 transcript.add_message(Message::Plan {
                                                     text: plan_text,
                                                     timestamp: timestamp.clone(),
@@ -338,10 +341,17 @@ pub fn is_plan_file_path(file_path: &str) -> bool {
 
 /// Extract plan content from a Write or Edit tool_use input if it targets a plan file.
 ///
-/// For Write: returns the full content being written.
-/// For Edit: returns a formatted representation showing the old and new state.
+/// Maintains a running `plan_states` map keyed by file path so that Edit operations
+/// can reconstruct the full plan text (not just the replaced fragment). On Write the
+/// full content is stored; on Edit the old_string→new_string replacement is applied
+/// to the tracked state and the complete result is returned.
+///
 /// Returns None if this is not a plan file edit.
-pub fn extract_plan_from_tool_use(tool_name: &str, input: &serde_json::Value) -> Option<String> {
+pub fn extract_plan_from_tool_use(
+    tool_name: &str,
+    input: &serde_json::Value,
+    plan_states: &mut std::collections::HashMap<String, String>,
+) -> Option<String> {
     match tool_name {
         "Write" => {
             let file_path = input.get("file_path")?.as_str()?;
@@ -352,6 +362,7 @@ pub fn extract_plan_from_tool_use(tool_name: &str, input: &serde_json::Value) ->
             if content.trim().is_empty() {
                 return None;
             }
+            plan_states.insert(file_path.to_string(), content.to_string());
             Some(content.to_string())
         }
         "Edit" => {
@@ -359,13 +370,26 @@ pub fn extract_plan_from_tool_use(tool_name: &str, input: &serde_json::Value) ->
             if !is_plan_file_path(file_path) {
                 return None;
             }
-            let new_string = input.get("new_string").and_then(|v| v.as_str());
             let old_string = input.get("old_string").and_then(|v| v.as_str());
+            let new_string = input.get("new_string").and_then(|v| v.as_str());
+
             match (old_string, new_string) {
                 (Some(old), Some(new)) if !old.is_empty() || !new.is_empty() => {
-                    Some(format!("--- old plan\n{}\n--- new plan\n{}", old, new))
+                    // Apply the replacement to the tracked plan state if available
+                    if let Some(current) = plan_states.get(file_path) {
+                        let updated = current.replacen(old, new, 1);
+                        plan_states.insert(file_path.to_string(), updated.clone());
+                        Some(updated)
+                    } else {
+                        // No prior state tracked — store what we can and return the fragment
+                        plan_states.insert(file_path.to_string(), new.to_string());
+                        Some(new.to_string())
+                    }
                 }
-                (None, Some(new)) if !new.is_empty() => Some(new.to_string()),
+                (None, Some(new)) if !new.is_empty() => {
+                    plan_states.insert(file_path.to_string(), new.to_string());
+                    Some(new.to_string())
+                }
                 _ => None,
             }
         }
@@ -2601,6 +2625,7 @@ impl DroidPreset {
         let jsonl_content =
             std::fs::read_to_string(transcript_path).map_err(GitAiError::IoError)?;
         let mut transcript = AiTranscript::new();
+        let mut plan_states = std::collections::HashMap::new();
 
         for line in jsonl_content.lines() {
             if line.trim().is_empty() {
@@ -2678,9 +2703,11 @@ impl DroidPreset {
                                         (item["name"].as_str(), item["input"].as_object())
                                     {
                                         // Check if this is a Write/Edit to a plan file
-                                        if let Some(plan_text) =
-                                            extract_plan_from_tool_use(name, &item["input"])
-                                        {
+                                        if let Some(plan_text) = extract_plan_from_tool_use(
+                                            name,
+                                            &item["input"],
+                                            &mut plan_states,
+                                        ) {
                                             transcript.add_message(Message::Plan {
                                                 text: plan_text,
                                                 timestamp: timestamp.clone(),
