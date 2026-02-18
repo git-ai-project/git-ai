@@ -474,7 +474,9 @@ impl VirtualAttributions {
         // (committed AI work) are not dropped when INITIAL covers a disjoint set of files.
         let mut final_state = checkpoint_va.file_contents.clone();
         for (file, content) in &blame_va.file_contents {
-            final_state.entry(file.clone()).or_insert_with(|| content.clone());
+            final_state
+                .entry(file.clone())
+                .or_insert_with(|| content.clone());
         }
         let merged_va = merge_attributions_favoring_first(checkpoint_va, blame_va, final_state)?;
 
