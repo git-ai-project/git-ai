@@ -290,11 +290,21 @@ impl ClaudePreset {
                                         if let (Some(name), Some(_input)) =
                                             (item["name"].as_str(), item["input"].as_object())
                                         {
-                                            transcript.add_message(Message::ToolUse {
-                                                name: name.to_string(),
-                                                input: item["input"].clone(),
-                                                timestamp: timestamp.clone(),
-                                            });
+                                            // Check if this is a Write/Edit to a plan file
+                                            if let Some(plan_text) =
+                                                extract_plan_from_tool_use(name, &item["input"])
+                                            {
+                                                transcript.add_message(Message::Plan {
+                                                    text: plan_text,
+                                                    timestamp: timestamp.clone(),
+                                                });
+                                            } else {
+                                                transcript.add_message(Message::ToolUse {
+                                                    name: name.to_string(),
+                                                    input: item["input"].clone(),
+                                                    timestamp: timestamp.clone(),
+                                                });
+                                            }
                                         }
                                     }
                                     _ => continue, // Skip unknown content types
@@ -308,6 +318,58 @@ impl ClaudePreset {
         }
 
         Ok((transcript, model))
+    }
+}
+
+/// Check if a file path refers to a plan file based on its basename.
+///
+/// Claude Code writes plans to files outside the repo (e.g., in ~/.claude/projects/).
+/// These show up as Write/Edit tool calls in the JSONL transcript. We detect them
+/// by checking if the filename contains "plan" (case-insensitive).
+pub fn is_plan_file_path(file_path: &str) -> bool {
+    let path = Path::new(file_path);
+    if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+        let lower = file_name.to_ascii_lowercase();
+        lower.contains("plan") && lower.ends_with(".md")
+    } else {
+        false
+    }
+}
+
+/// Extract plan content from a Write or Edit tool_use input if it targets a plan file.
+///
+/// For Write: returns the full content being written.
+/// For Edit: returns a formatted representation showing the old and new state.
+/// Returns None if this is not a plan file edit.
+pub fn extract_plan_from_tool_use(tool_name: &str, input: &serde_json::Value) -> Option<String> {
+    match tool_name {
+        "Write" => {
+            let file_path = input.get("file_path")?.as_str()?;
+            if !is_plan_file_path(file_path) {
+                return None;
+            }
+            let content = input.get("content")?.as_str()?;
+            if content.trim().is_empty() {
+                return None;
+            }
+            Some(content.to_string())
+        }
+        "Edit" => {
+            let file_path = input.get("file_path")?.as_str()?;
+            if !is_plan_file_path(file_path) {
+                return None;
+            }
+            let new_string = input.get("new_string").and_then(|v| v.as_str());
+            let old_string = input.get("old_string").and_then(|v| v.as_str());
+            match (old_string, new_string) {
+                (Some(old), Some(new)) if !old.is_empty() || !new.is_empty() => {
+                    Some(format!("--- old plan\n{}\n--- new plan\n{}", old, new))
+                }
+                (None, Some(new)) if !new.is_empty() => Some(new.to_string()),
+                _ => None,
+            }
+        }
+        _ => None,
     }
 }
 
@@ -2615,11 +2677,21 @@ impl DroidPreset {
                                     if let (Some(name), Some(_input)) =
                                         (item["name"].as_str(), item["input"].as_object())
                                     {
-                                        transcript.add_message(Message::ToolUse {
-                                            name: name.to_string(),
-                                            input: item["input"].clone(),
-                                            timestamp: timestamp.clone(),
-                                        });
+                                        // Check if this is a Write/Edit to a plan file
+                                        if let Some(plan_text) =
+                                            extract_plan_from_tool_use(name, &item["input"])
+                                        {
+                                            transcript.add_message(Message::Plan {
+                                                text: plan_text,
+                                                timestamp: timestamp.clone(),
+                                            });
+                                        } else {
+                                            transcript.add_message(Message::ToolUse {
+                                                name: name.to_string(),
+                                                input: item["input"].clone(),
+                                                timestamp: timestamp.clone(),
+                                            });
+                                        }
                                     }
                                 }
                                 _ => continue,
