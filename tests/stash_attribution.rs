@@ -1,3 +1,4 @@
+#[macro_use]
 mod repos;
 
 use repos::test_file::ExpectedLineExt;
@@ -133,6 +134,103 @@ fn test_stash_apply_named_reference() {
         !commit.authorship_log.metadata.prompts.is_empty(),
         "Expected AI prompts in authorship log"
     );
+}
+
+#[test]
+fn test_stash_pop_with_existing_stack_entries() {
+    let repo = TestRepo::new();
+
+    let mut readme = repo.filename("README.md");
+    readme.set_contents(vec!["# Test Repo".to_string()]);
+    repo.stage_all_and_commit("initial commit")
+        .expect("commit should succeed");
+
+    let mut first = repo.filename("first.txt");
+    first.set_contents(vec!["first stash line".ai()]);
+    repo.git_ai(&["checkpoint", "mock_ai"])
+        .expect("checkpoint should succeed");
+    repo.git(&["stash", "push", "-m", "first"])
+        .expect("first stash should succeed");
+
+    let mut second = repo.filename("second.txt");
+    second.set_contents(vec!["second stash line".ai()]);
+    repo.git_ai(&["checkpoint", "mock_ai"])
+        .expect("checkpoint should succeed");
+    repo.git(&["stash", "push", "-m", "second"])
+        .expect("second stash should succeed");
+
+    // Pop when stash stack still has another entry (non-empty -> non-empty on some Git versions).
+    repo.git(&["stash", "pop"])
+        .expect("first pop should succeed");
+    let first_pop_commit = repo
+        .stage_all_and_commit("apply top stash entry")
+        .expect("commit after first pop should succeed");
+
+    second.assert_lines_and_blame(vec!["second stash line".ai()]);
+    assert!(
+        !first_pop_commit.authorship_log.metadata.prompts.is_empty(),
+        "expected AI prompts for first pop commit"
+    );
+
+    // Pop remaining stash entry and verify attribution still restores correctly.
+    repo.git(&["stash", "pop"])
+        .expect("second pop should succeed");
+    let second_pop_commit = repo
+        .stage_all_and_commit("apply remaining stash entry")
+        .expect("commit after second pop should succeed");
+
+    first.assert_lines_and_blame(vec!["first stash line".ai()]);
+    assert!(
+        !second_pop_commit.authorship_log.metadata.prompts.is_empty(),
+        "expected AI prompts for second pop commit"
+    );
+}
+
+#[test]
+fn test_stash_pop_with_multiple_entries_restores_top_stash_attribution() {
+    let repo = TestRepo::new();
+
+    // Create initial commit.
+    let mut readme = repo.filename("README.md");
+    readme.set_contents(vec!["# Test Repo".to_string()]);
+    repo.stage_all_and_commit("initial commit")
+        .expect("commit should succeed");
+
+    // Stash 1 (older): file1 attribution.
+    let mut file1 = repo.filename("file1.txt");
+    file1.set_contents(vec!["older stash line".ai()]);
+    repo.git_ai(&["checkpoint", "mock_ai"])
+        .expect("checkpoint should succeed");
+    repo.git(&["stash", "push", "-m", "older"])
+        .expect("first stash should succeed");
+
+    // Stash 2 (top): file2 attribution.
+    let mut file2 = repo.filename("file2.txt");
+    file2.set_contents(vec!["top stash line".ai()]);
+    repo.git_ai(&["checkpoint", "mock_ai"])
+        .expect("checkpoint should succeed");
+    repo.git(&["stash", "push", "-m", "top"])
+        .expect("second stash should succeed");
+
+    // The top stash should have an ai-stash note even when another stash entry exists.
+    repo.git(&["notes", "--ref=ai-stash", "show", "stash@{0}"])
+        .expect("top stash should have ai-stash note");
+
+    // Pop default stash@{0} (top). Another stash entry still remains.
+    repo.git(&["stash", "pop"])
+        .expect("stash pop should succeed");
+
+    // Commit only the popped file and verify attribution comes from the top stash.
+    repo.git(&["add", "file2.txt"]).expect("add should succeed");
+    let commit = repo
+        .git(&["commit", "-m", "apply top stash"])
+        .expect("commit should succeed");
+    assert!(
+        !commit.is_empty(),
+        "commit command output should not be unexpectedly empty"
+    );
+
+    file2.assert_lines_and_blame(vec!["top stash line".ai()]);
 }
 
 #[test]
@@ -946,4 +1044,24 @@ fn test_stash_apply_reset_apply_again() {
         !commit.authorship_log.metadata.prompts.is_empty(),
         "Expected AI prompts in authorship log after multiple apply/reset cycles"
     );
+}
+
+worktree_test_wrappers! {
+    test_stash_pop_with_ai_attribution,
+    test_stash_apply_with_ai_attribution,
+    test_stash_apply_named_reference,
+    test_stash_multiple_files,
+    test_stash_with_existing_initial_attributions,
+    test_stash_pop_default_reference,
+    test_stash_pop_empty_repo,
+    test_stash_mixed_human_and_ai,
+    test_stash_push_with_pathspec_single_file,
+    test_stash_push_with_pathspec_directory,
+    test_stash_push_multiple_pathspecs,
+    test_stash_pop_with_conflict,
+    test_stash_mixed_staged_and_unstaged,
+    test_stash_pop_onto_head_with_ai_changes,
+    test_stash_pop_across_branches,
+    test_stash_pop_across_branches_with_conflict,
+    test_stash_apply_reset_apply_again,
 }

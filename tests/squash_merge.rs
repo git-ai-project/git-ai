@@ -293,3 +293,10 @@ fn test_prepare_working_log_squash_with_mixed_additions() {
         "Sum of accepted_lines across prompts should match ai_accepted stat"
     );
 }
+
+worktree_test_wrappers! {
+    test_prepare_working_log_simple_squash,
+    test_prepare_working_log_squash_with_main_changes,
+    test_prepare_working_log_squash_multiple_sessions,
+    test_prepare_working_log_squash_with_mixed_additions,
+}

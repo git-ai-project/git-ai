@@ -1,3 +1,4 @@
+#[macro_use]
 mod repos;
 
 use git_ai::authorship::transcript::{AiTranscript, Message};
@@ -306,4 +307,11 @@ fn test_prompt_sharing_disabled_with_empty_transcript() {
     // Note: When transcript is empty, the prompt record may still exist but with no messages
     // The key thing is the checkpoint should succeed
     assert!(!commit.commit_sha.is_empty());
+}
+
+worktree_test_wrappers! {
+    test_checkpoint_with_prompt_sharing_enabled,
+    test_checkpoint_with_prompt_sharing_disabled_strips_messages,
+    test_multiple_checkpoints_with_messages,
+    test_prompt_sharing_disabled_with_empty_transcript,
 }

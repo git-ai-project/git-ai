@@ -976,9 +976,10 @@ fn test_blame_abbrev_custom_length() {
         .git_ai(&["blame", "--abbrev", "10", "test.txt"])
         .unwrap();
 
-    // First field should be 10-character hash
+    // First field is ^<10 hex> = 11 chars for boundary commits (matches git)
     let first_field = output.split_whitespace().next().unwrap();
-    assert_eq!(first_field.len(), 10);
+    assert_eq!(first_field.len(), 11);
+    assert!(first_field.starts_with('^'));
 }
 
 #[test]

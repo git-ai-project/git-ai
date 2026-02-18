@@ -623,13 +623,15 @@ fn build_config() -> Config {
 }
 
 fn build_feature_flags(file_cfg: &Option<FileConfig>) -> FeatureFlags {
-    let file_flags_value = file_cfg.as_ref().and_then(|c| c.feature_flags.as_ref());
-
     // Try to deserialize the feature flags from the JSON value
-    let file_flags = file_flags_value.and_then(|value| {
-        // Use from_value to deserialize, but ignore any errors and fall back to defaults
-        serde_json::from_value(value.clone()).ok()
-    });
+    let file_flags = file_cfg
+        .as_ref()
+        .and_then(|c| c.feature_flags.as_ref())
+        .cloned()
+        .and_then(|value| {
+            // Use from_value to deserialize, but ignore any errors and fall back to defaults
+            serde_json::from_value(value).ok()
+        });
 
     FeatureFlags::from_env_and_file(file_flags)
 }

@@ -500,6 +500,34 @@ impl Repository {
         }
 
         let mut hunks: Vec<BlameHunk> = Vec::new();
+        let mut abbrev_cache: HashMap<String, String> = HashMap::new();
+        let mut abbreviate_sha = |sha: &str, min_len: usize| -> Result<String, GitAiError> {
+            if min_len >= sha.len() {
+                return Ok(sha.to_string());
+            }
+            if sha.chars().all(|c| c == '0') {
+                return Ok(sha[..min_len].to_string());
+            }
+            if let Some(existing) = abbrev_cache.get(sha) {
+                return Ok(existing.clone());
+            }
+
+            let mut args = self.global_args_for_exec();
+            args.push("rev-parse".to_string());
+            args.push(format!("--short={}", min_len.max(4)));
+            args.push(sha.to_string());
+            let output = exec_git(&args)?;
+            let stdout = String::from_utf8(output.stdout)?;
+            let resolved = stdout.lines().next().unwrap_or("").trim().to_string();
+
+            let abbrev = if resolved.is_empty() {
+                sha.to_string()
+            } else {
+                resolved
+            };
+            abbrev_cache.insert(sha.to_string(), abbrev.clone());
+            Ok(abbrev)
+        };
         let mut cur_commit: Option<String> = None;
         let mut cur_final_start: u32 = 0;
         let mut cur_orig_start: u32 = 0;
@@ -604,10 +632,10 @@ impl Repository {
                     } else {
                         options.abbrev.unwrap_or(7) as usize
                     };
-                    let abbrev = if abbrev_len < prev_sha.len() {
-                        prev_sha[..abbrev_len].to_string()
-                    } else {
+                    let abbrev = if options.long_rev {
                         prev_sha.clone()
+                    } else {
+                        abbreviate_sha(&prev_sha, abbrev_len)?
                     };
 
                     hunks.push(BlameHunk {
@@ -673,10 +701,10 @@ impl Repository {
             } else {
                 options.abbrev.unwrap_or(7) as usize
             };
-            let abbrev = if abbrev_len < prev_sha.len() {
-                prev_sha[..abbrev_len].to_string()
-            } else {
+            let abbrev = if options.long_rev {
                 prev_sha.clone()
+            } else {
+                abbreviate_sha(&prev_sha, abbrev_len)?
             };
 
             hunks.push(BlameHunk {
@@ -1372,30 +1400,38 @@ fn output_default_format(
             };
 
             if let Some(hunk) = line_to_hunk.get(&line_num) {
-                // Determine hash length - match git blame default (7 chars)
+                // Determine hash column width - git may emit one extra char over requested abbrev
+                // for non-boundary commits to preserve uniqueness.
                 let hash_len = if options.long_rev {
-                    40 // Full hash for long revision
+                    40
                 } else if let Some(abbrev) = options.abbrev {
-                    abbrev as usize
+                    if hunk.is_boundary {
+                        abbrev as usize
+                    } else {
+                        (abbrev + 1) as usize
+                    }
                 } else {
-                    7 // Default 7 chars
+                    7
                 };
-                let sha = if hash_len < hunk.commit_sha.len() {
+                let sha = if options.long_rev && hunk.is_boundary {
+                    // Git shows ^<39 hex> = 40 total for long-rev boundary commits
+                    &hunk.commit_sha[..39.min(hunk.commit_sha.len())]
+                } else if options.long_rev {
+                    hunk.commit_sha.as_str()
+                } else if hash_len < hunk.commit_sha.len() {
                     &hunk.commit_sha[..hash_len]
                 } else {
-                    &hunk.commit_sha
+                    hunk.commit_sha.as_str()
                 };
 
-                // Add boundary marker if this is a boundary commit
-                let boundary_marker = if hunk.is_boundary && options.blank_boundary {
-                    "^"
-                } else {
-                    ""
-                };
+                // Preserve git's hash column width for boundary lines. With -b, git blanks
+                // the whole boundary column (including the marker slot) instead of printing '^'.
                 let full_sha = if hunk.is_boundary && options.blank_boundary {
-                    format!("{}{}", boundary_marker, "        ") // Empty hash for boundary
+                    " ".repeat(hash_len + 1)
+                } else if hunk.is_boundary {
+                    format!("^{}", sha)
                 } else {
-                    format!("{}{}", boundary_marker, sha)
+                    sha.to_string()
                 };
 
                 // Get the author for this line (AI authorship or original)

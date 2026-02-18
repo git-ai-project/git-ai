@@ -1,3 +1,7 @@
+use crate::commands::core_hooks::{
+    INSTALLED_HOOKS, PREVIOUS_HOOKS_PATH_FILE, managed_core_hooks_dir, normalize_hook_binary_path,
+    sync_non_managed_core_hook_scripts, write_core_hook_scripts,
+};
 use crate::commands::flush_metrics_db::spawn_background_metrics_db_flush;
 use crate::error::GitAiError;
 use crate::mdm::agents::get_all_installers;
@@ -7,7 +11,11 @@ use crate::mdm::hook_installer::HookInstallerParams;
 use crate::mdm::skills_installer;
 use crate::mdm::spinner::{Spinner, print_diff};
 use crate::mdm::utils::{get_current_binary_path, git_shim_path};
+use crate::utils::GIT_AI_SKIP_CORE_HOOKS_ENV;
 use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 
 /// Installation status for a tool
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +109,8 @@ pub fn to_hashmap(statuses: HashMap<String, InstallStatus>) -> HashMap<String, S
         .collect()
 }
 
+const GIT_CORE_HOOKS_STATUS_ID: &str = "git-core-hooks";
+
 /// Main entry point for install-hooks command
 pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
     // Parse flags
@@ -157,7 +167,7 @@ async fn async_run_install(
     dry_run: bool,
     verbose: bool,
 ) -> Result<HashMap<String, InstallStatus>, GitAiError> {
-    let mut any_checked = false;
+    let mut any_checked = true;
     let mut has_changes = false;
     let mut statuses: HashMap<String, InstallStatus> = HashMap::new();
     // Track detailed results for metrics (tool_id, result)
@@ -174,6 +184,54 @@ async fn async_run_install(
     // Ensure git symlinks for Fork compatibility
     if let Err(e) = crate::mdm::ensure_git_symlinks() {
         eprintln!("Warning: Failed to create git symlinks: {}", e);
+    }
+
+    // === Git Core Hooks ===
+    println!("\n\x1b[1mGit Core Hooks\x1b[0m");
+    let core_spinner = Spinner::new("Git: checking core.hooksPath");
+    core_spinner.start();
+    match install_git_core_hooks(params, dry_run) {
+        Ok(Some(diff)) => {
+            if dry_run {
+                core_spinner.pending("Git: Pending core hook updates");
+            } else {
+                core_spinner.success("Git: Core hooks configured");
+            }
+            if verbose {
+                println!();
+                print_diff(&diff);
+            }
+            has_changes = true;
+            statuses.insert(
+                GIT_CORE_HOOKS_STATUS_ID.to_string(),
+                InstallStatus::Installed,
+            );
+            detailed_results.push((
+                GIT_CORE_HOOKS_STATUS_ID.to_string(),
+                InstallResult::installed(),
+            ));
+        }
+        Ok(None) => {
+            core_spinner.success("Git: Core hooks already up to date");
+            statuses.insert(
+                GIT_CORE_HOOKS_STATUS_ID.to_string(),
+                InstallStatus::AlreadyInstalled,
+            );
+            detailed_results.push((
+                GIT_CORE_HOOKS_STATUS_ID.to_string(),
+                InstallResult::already_installed(),
+            ));
+        }
+        Err(e) => {
+            core_spinner.error("Git: Failed to configure core hooks");
+            let error_msg = e.to_string();
+            eprintln!("  Error: {}", error_msg);
+            statuses.insert(GIT_CORE_HOOKS_STATUS_ID.to_string(), InstallStatus::Failed);
+            detailed_results.push((
+                GIT_CORE_HOOKS_STATUS_ID.to_string(),
+                InstallResult::failed(error_msg),
+            ));
+        }
     }
 
     // === Coding Agents ===
@@ -419,7 +477,7 @@ async fn async_run_uninstall(
     dry_run: bool,
     verbose: bool,
 ) -> Result<HashMap<String, InstallStatus>, GitAiError> {
-    let mut any_checked = false;
+    let mut any_checked = true;
     let mut has_changes = false;
     let mut statuses: HashMap<String, InstallStatus> = HashMap::new();
 
@@ -430,6 +488,41 @@ async fn async_run_uninstall(
             statuses.insert("skills".to_string(), InstallStatus::Installed);
         } else {
             statuses.insert("skills".to_string(), InstallStatus::AlreadyInstalled);
+        }
+    }
+
+    // === Git Core Hooks ===
+    println!("\n\x1b[1mGit Core Hooks\x1b[0m");
+    let core_spinner = Spinner::new("Git: checking core.hooksPath");
+    core_spinner.start();
+    match uninstall_git_core_hooks(dry_run) {
+        Ok(Some(diff)) => {
+            if dry_run {
+                core_spinner.pending("Git: Pending core hook removal");
+            } else {
+                core_spinner.success("Git: Core hooks removed");
+            }
+            if verbose {
+                println!();
+                print_diff(&diff);
+            }
+            has_changes = true;
+            statuses.insert(
+                GIT_CORE_HOOKS_STATUS_ID.to_string(),
+                InstallStatus::Installed,
+            );
+        }
+        Ok(None) => {
+            core_spinner.success("Git: Core hooks already removed");
+            statuses.insert(
+                GIT_CORE_HOOKS_STATUS_ID.to_string(),
+                InstallStatus::AlreadyInstalled,
+            );
+        }
+        Err(e) => {
+            core_spinner.error("Git: Failed to remove core hooks");
+            eprintln!("  Error: {}", e);
+            statuses.insert(GIT_CORE_HOOKS_STATUS_ID.to_string(), InstallStatus::Failed);
         }
     }
 
@@ -598,4 +691,333 @@ async fn async_run_uninstall(
     }
 
     Ok(statuses)
+}
+
+fn install_git_core_hooks(
+    params: &HookInstallerParams,
+    dry_run: bool,
+) -> Result<Option<String>, GitAiError> {
+    let hooks_dir = managed_core_hooks_dir()?;
+    let desired_hooks_path = hooks_dir.to_string_lossy().to_string();
+    let current_hooks_path = git_config_get_global("core.hooksPath")?;
+    let scripts_up_to_date = core_hook_scripts_up_to_date(&hooks_dir, &params.binary_path);
+
+    let config_needs_update =
+        !hooks_path_matches_desired(current_hooks_path.as_deref(), &hooks_dir);
+    if !config_needs_update && scripts_up_to_date {
+        return Ok(None);
+    }
+
+    if !dry_run {
+        fs::create_dir_all(&hooks_dir)?;
+
+        // Persist the active non-managed hooks path so uninstall can restore current user intent.
+        // This is intentionally updated on each transition to managed hooks in case users
+        // reconfigure `core.hooksPath` while git-ai is installed, then reinstall.
+        if config_needs_update {
+            let previous_path_file = hooks_dir.join(PREVIOUS_HOOKS_PATH_FILE);
+            write_previous_hooks_path(&previous_path_file, current_hooks_path.as_deref())?;
+        }
+
+        write_core_hook_scripts(&hooks_dir, &params.binary_path)?;
+        sync_non_managed_core_hook_scripts(&hooks_dir)?;
+
+        if config_needs_update {
+            git_config_set_global("core.hooksPath", &desired_hooks_path)?;
+        }
+    }
+
+    let mut diff = String::new();
+    if config_needs_update {
+        diff.push_str(&format_config_change_diff(
+            current_hooks_path.as_deref(),
+            Some(desired_hooks_path.as_str()),
+        ));
+    }
+    if !scripts_up_to_date {
+        if !diff.is_empty() {
+            diff.push('\n');
+        }
+        diff.push_str(&format_core_hook_scripts_diff(&hooks_dir, true));
+    }
+
+    Ok(Some(diff))
+}
+
+fn uninstall_git_core_hooks(dry_run: bool) -> Result<Option<String>, GitAiError> {
+    let hooks_dir = managed_core_hooks_dir()?;
+    let current_hooks_path = git_config_get_global("core.hooksPath")?;
+    let previous_path_file = hooks_dir.join(PREVIOUS_HOOKS_PATH_FILE);
+    let previous_hooks_path = read_previous_hooks_path(&previous_path_file)?;
+
+    let config_points_to_managed =
+        hooks_path_matches_desired(current_hooks_path.as_deref(), &hooks_dir);
+    let hooks_dir_exists = hooks_dir.exists();
+
+    if !config_points_to_managed && !hooks_dir_exists {
+        return Ok(None);
+    }
+
+    let mut diff = String::new();
+    if config_points_to_managed {
+        diff.push_str(&format_config_change_diff(
+            current_hooks_path.as_deref(),
+            previous_hooks_path.as_deref(),
+        ));
+    }
+    if hooks_dir_exists {
+        if !diff.is_empty() {
+            diff.push('\n');
+        }
+        diff.push_str(&format_core_hook_scripts_diff(&hooks_dir, false));
+    }
+
+    if !dry_run {
+        if config_points_to_managed {
+            if let Some(previous_hooks_path) = previous_hooks_path {
+                git_config_set_global("core.hooksPath", &previous_hooks_path)?;
+            } else {
+                let _ = git_config_unset_global("core.hooksPath");
+            }
+        }
+
+        if hooks_dir_exists {
+            fs::remove_dir_all(&hooks_dir)?;
+        }
+    }
+
+    Ok(Some(diff))
+}
+
+fn core_hook_scripts_up_to_date(hooks_dir: &Path, binary_path: &Path) -> bool {
+    if !hooks_dir.exists() {
+        return false;
+    }
+
+    let binary = normalize_hook_binary_path(binary_path);
+    INSTALLED_HOOKS.iter().all(|hook| {
+        let hook_path = hooks_dir.join(hook);
+        let content = fs::read_to_string(&hook_path).unwrap_or_default();
+        hook_path.exists()
+            && content.contains(&format!("hook {}", hook))
+            && content.contains(&binary)
+    })
+}
+
+fn hooks_path_matches_desired(current_hooks_path: Option<&str>, desired_hooks_path: &Path) -> bool {
+    let Some(current_hooks_path) = current_hooks_path else {
+        return false;
+    };
+    let Some(current_path) = parse_hooks_path(current_hooks_path) else {
+        return false;
+    };
+
+    if let (Ok(current_canonical), Ok(desired_canonical)) = (
+        current_path.canonicalize(),
+        desired_hooks_path.canonicalize(),
+    ) && normalize_hooks_path_for_compare(&current_canonical)
+        == normalize_hooks_path_for_compare(&desired_canonical)
+    {
+        return true;
+    }
+
+    normalize_hooks_path_for_compare(&current_path)
+        == normalize_hooks_path_for_compare(desired_hooks_path)
+}
+
+fn parse_hooks_path(raw_path: &str) -> Option<PathBuf> {
+    let trimmed = raw_path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if trimmed == "~" {
+        return dirs::home_dir();
+    }
+    if let Some(rest) = trimmed.strip_prefix("~/") {
+        return dirs::home_dir().map(|home| home.join(rest));
+    }
+
+    Some(PathBuf::from(trimmed))
+}
+
+fn normalize_hooks_path_for_compare(path: &Path) -> String {
+    let mut normalized = path.to_string_lossy().replace('\\', "/");
+    while normalized.ends_with('/') {
+        if normalized == "/" {
+            break;
+        }
+        #[cfg(windows)]
+        if normalized.len() == 3
+            && normalized.as_bytes()[1] == b':'
+            && normalized.as_bytes()[2] == b'/'
+        {
+            break;
+        }
+        normalized.pop();
+    }
+    #[cfg(windows)]
+    normalized.make_ascii_lowercase();
+    normalized
+}
+
+fn git_config_get_global(key: &str) -> Result<Option<String>, GitAiError> {
+    let args = vec![
+        "config".to_string(),
+        "--global".to_string(),
+        "--get".to_string(),
+        key.to_string(),
+    ];
+    let output = run_git_command(&args)?;
+
+    if output.status.success() {
+        let value = String::from_utf8(output.stdout)?.trim().to_string();
+        if value.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(value))
+        }
+    } else if output.status.code() == Some(1) {
+        Ok(None)
+    } else {
+        Err(git_cli_error(args, output))
+    }
+}
+
+fn git_config_set_global(key: &str, value: &str) -> Result<(), GitAiError> {
+    let args = vec![
+        "config".to_string(),
+        "--global".to_string(),
+        key.to_string(),
+        value.to_string(),
+    ];
+    let output = run_git_command(&args)?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(git_cli_error(args, output))
+    }
+}
+
+fn git_config_unset_global(key: &str) -> Result<(), GitAiError> {
+    let args = vec![
+        "config".to_string(),
+        "--global".to_string(),
+        "--unset".to_string(),
+        key.to_string(),
+    ];
+    let output = run_git_command(&args)?;
+    if output.status.success() || output.status.code() == Some(5) {
+        // Exit 5 means "not found", which is effectively already unset.
+        Ok(())
+    } else {
+        Err(git_cli_error(args, output))
+    }
+}
+
+fn run_git_command(args: &[String]) -> Result<Output, GitAiError> {
+    let output = Command::new(crate::config::Config::get().git_cmd())
+        .args(args)
+        .env(GIT_AI_SKIP_CORE_HOOKS_ENV, "1")
+        .output()?;
+    Ok(output)
+}
+
+fn git_cli_error(args: Vec<String>, output: Output) -> GitAiError {
+    GitAiError::GitCliError {
+        code: output.status.code(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        args,
+    }
+}
+
+fn format_config_change_diff(previous: Option<&str>, next: Option<&str>) -> String {
+    let before = previous.unwrap_or("<unset>");
+    let after = next.unwrap_or("<unset>");
+    format!(
+        "--- git config --global core.hooksPath\n+++ git config --global core.hooksPath\n-{}\n+{}\n",
+        before, after
+    )
+}
+
+fn format_core_hook_scripts_diff(hooks_dir: &Path, installing: bool) -> String {
+    let mut diff = format!("--- {}\n+++ {}\n", hooks_dir.display(), hooks_dir.display());
+    for hook in INSTALLED_HOOKS {
+        let sign = if installing { '+' } else { '-' };
+        diff.push_str(&format!("{}{}\n", sign, hooks_dir.join(hook).display()));
+    }
+    diff
+}
+
+fn write_previous_hooks_path(
+    path: &Path,
+    previous_hooks_path: Option<&str>,
+) -> Result<(), GitAiError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, previous_hooks_path.unwrap_or_default())?;
+    Ok(())
+}
+
+fn read_previous_hooks_path(path: &Path) -> Result<Option<String>, GitAiError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(path)?;
+    let value = content.trim().to_string();
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(value))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn core_hook_scripts_up_to_date_handles_escaped_quotes_in_binary_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let hooks_dir = temp.path().join("core-hooks");
+        let binary_path = PathBuf::from("/tmp/path-with-\"quote\"/git-ai");
+
+        write_core_hook_scripts(&hooks_dir, &binary_path).expect("write core hook scripts");
+        assert!(
+            core_hook_scripts_up_to_date(&hooks_dir, &binary_path),
+            "quoted binary path should be considered up to date"
+        );
+    }
+
+    #[test]
+    fn hooks_path_matches_managed_with_trailing_separator() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let managed = temp.path().join("managed-hooks");
+        fs::create_dir_all(&managed).expect("create managed hooks dir");
+        let with_trailing_sep = format!("{}/", managed.display());
+
+        assert!(
+            hooks_path_matches_desired(Some(with_trailing_sep.as_str()), &managed),
+            "managed path aliases with trailing separators should match"
+        );
+    }
+
+    #[test]
+    fn hooks_path_matches_managed_with_tilde_prefix() {
+        let home = dirs::home_dir().expect("home dir");
+        let temp = tempfile::tempdir_in(&home).expect("tempdir in home");
+        let leaf = temp
+            .path()
+            .file_name()
+            .expect("tempdir leaf")
+            .to_string_lossy();
+        let with_tilde = format!("~/{}", leaf);
+
+        assert!(
+            hooks_path_matches_desired(Some(with_tilde.as_str()), temp.path()),
+            "tilde-prefixed hooks path should resolve to managed home path"
+        );
+    }
 }

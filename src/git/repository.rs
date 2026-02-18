@@ -1,5 +1,3 @@
-use regex::Regex;
-
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::rebase_authorship::rewrite_authorship_if_needed;
 use crate::config;
@@ -9,9 +7,11 @@ use crate::git::repo_storage::RepoStorage;
 use crate::git::rewrite_log::RewriteLogEvent;
 use crate::git::status::MAX_PATHSPEC_ARGS;
 use crate::git::sync_authorship::{fetch_authorship_notes, push_authorship_notes};
+use crate::utils::GIT_AI_SKIP_CORE_HOOKS_ENV;
 #[cfg(windows)]
 use crate::utils::is_interactive_terminal;
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -20,6 +20,72 @@ use std::process::{Command, Output};
 use crate::utils::CREATE_NO_WINDOW;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+
+// This is intentionally thread-local so top-level wrapper operations can suppress managed
+// hooks for their own internal `exec_git*` calls without affecting unrelated threads.
+// Background threads that run authorship sync remain safe because those commands also pass
+// explicit `-c core.hooksPath=...` overrides in sync_authorship.rs.
+thread_local! {
+    static INTERNAL_GIT_HOOKS_DISABLED_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+pub struct InternalGitHooksGuard;
+
+impl Drop for InternalGitHooksGuard {
+    fn drop(&mut self) {
+        INTERNAL_GIT_HOOKS_DISABLED_DEPTH.with(|depth| {
+            let current = depth.get();
+            if current > 0 {
+                depth.set(current - 1);
+            }
+        });
+    }
+}
+
+/// Disable managed git hooks for internal `git` subprocesses executed through `exec_git*`.
+/// Use this guard around higher-level operations that already execute hook logic explicitly.
+pub fn disable_internal_git_hooks() -> InternalGitHooksGuard {
+    INTERNAL_GIT_HOOKS_DISABLED_DEPTH.with(|depth| depth.set(depth.get() + 1));
+    InternalGitHooksGuard
+}
+
+fn should_disable_internal_git_hooks() -> bool {
+    INTERNAL_GIT_HOOKS_DISABLED_DEPTH.with(|depth| depth.get() > 0)
+}
+
+#[cfg(windows)]
+fn null_hooks_path() -> &'static str {
+    "NUL"
+}
+
+#[cfg(not(windows))]
+fn null_hooks_path() -> &'static str {
+    "/dev/null"
+}
+
+fn args_with_disabled_hooks_if_needed(args: &[String]) -> Vec<String> {
+    if !should_disable_internal_git_hooks() {
+        return args.to_vec();
+    }
+
+    // Respect explicit hook-path overrides if a caller already set one.
+    let already_overrides_hooks = args
+        .windows(2)
+        .any(|pair| pair[0] == "-c" && pair[1].starts_with("core.hooksPath="))
+        || args.iter().any(|arg| {
+            arg.starts_with("-ccore.hooksPath=") || arg.starts_with("--config=core.hooksPath=")
+        });
+
+    if already_overrides_hooks {
+        return args.to_vec();
+    }
+
+    let mut out = Vec::with_capacity(args.len() + 2);
+    out.push("-c".to_string());
+    out.push(format!("core.hooksPath={}", null_hooks_path()));
+    out.extend(args.iter().cloned());
+    out
+}
 
 pub struct Object<'a> {
     repo: &'a Repository,
@@ -853,6 +919,8 @@ impl<'a> Iterator for References<'a> {
 pub struct Repository {
     global_args: Vec<String>,
     git_dir: PathBuf,
+    #[allow(dead_code)]
+    common_git_dir: PathBuf,
     pub storage: RepoStorage,
     pub pre_command_base_commit: Option<String>,
     pub pre_command_refname: Option<String>,
@@ -963,6 +1031,12 @@ impl Repository {
         self.git_dir.as_path()
     }
 
+    /// Returns the common .git directory shared by all worktrees.
+    #[allow(dead_code)]
+    pub fn common_git_dir(&self) -> &Path {
+        self.common_git_dir.as_path()
+    }
+
     // Get the path of the working directory for this repository.
     // If this repository is bare, then None is returned.
     pub fn workdir(&self) -> Result<PathBuf, GitAiError> {
@@ -1048,66 +1122,53 @@ impl Repository {
         Ok(remotes)
     }
 
-    /// Get the git config file for this repository and fallback to global config if not found.
-    fn get_git_config_file(&self) -> Result<gix_config::File<'static>, GitAiError> {
-        match gix_config::File::from_git_dir(self.path().to_path_buf()) {
-            Ok(git_config_file) => Ok(git_config_file),
-            Err(e) => match gix_config::File::from_globals() {
-                Ok(system_config) => Ok(system_config),
-                Err(_) => Err(GitAiError::GixError(e.to_string())),
-            },
-        }
-    }
     /// Get config value for a given key as a String.
+    ///
+    /// Uses the git CLI so worktree config, includeIf directives, and precedence
+    /// match native git behavior exactly.
     pub fn config_get_str(&self, key: &str) -> Result<Option<String>, GitAiError> {
-        match self.get_git_config_file() {
-            Ok(git_config_file) => Ok(git_config_file.string(key).map(|cow| cow.to_string())),
+        let mut args = self.global_args_for_exec();
+        args.push("config".to_string());
+        args.push("--get".to_string());
+        args.push(key.to_string());
+
+        match exec_git(&args) {
+            Ok(output) => {
+                let value = String::from_utf8(output.stdout)?;
+                Ok(Some(value.trim_end_matches(['\r', '\n']).to_string()))
+            }
+            Err(GitAiError::GitCliError { code: Some(1), .. }) => Ok(None),
             Err(e) => Err(e),
         }
     }
 
     /// Get all config values matching a regex pattern.
-    ///
-    /// Regular expression matching is currently case-sensitive
-    /// and done against a canonicalized version of the key
-    /// in which section and variable names are lowercased, but subsection names are not.
-    ///
     /// Returns a HashMap of key -> value for all matching config entries.
     pub fn config_get_regexp(
         &self,
         pattern: &str,
     ) -> Result<std::collections::HashMap<String, String>, GitAiError> {
-        match self.get_git_config_file() {
-            Ok(git_config_file) => {
+        let mut args = self.global_args_for_exec();
+        args.push("config".to_string());
+        args.push("--get-regexp".to_string());
+        args.push(pattern.to_string());
+
+        match exec_git(&args) {
+            Ok(output) => {
+                let stdout = String::from_utf8(output.stdout)?;
                 let mut matches: HashMap<String, String> = HashMap::new();
-
-                let re = Regex::new(pattern)
-                    .map_err(|e| GitAiError::Generic(format!("Invalid regex pattern: {}", e)))?;
-
-                // iterate over all sections
-                for section in git_config_file.sections() {
-                    // Support subsections in the key
-                    let section_name = section.header().name().to_string().to_lowercase();
-                    let subsection = section.header().subsection_name();
-
-                    for value_name in section.body().value_names() {
-                        let value_name_str = value_name.to_string().to_lowercase();
-                        let full_key = if let Some(sub) = subsection {
-                            format!("{}.{}.{}", section_name, sub, value_name_str)
-                        } else {
-                            format!("{}.{}", section_name, value_name_str)
-                        };
-
-                        if re.is_match(&full_key)
-                            && let Some(value) =
-                                section.body().value(value_name).map(|c| c.to_string())
-                        {
-                            matches.insert(full_key, value);
-                        }
+                for line in stdout.lines().filter(|line| !line.is_empty()) {
+                    if let Some(split_at) = line.find(char::is_whitespace) {
+                        let key = line[..split_at].to_string();
+                        let value = line[split_at..].trim_start().to_string();
+                        matches.insert(key, value);
+                    } else {
+                        matches.insert(line.to_string(), String::new());
                     }
                 }
                 Ok(matches)
             }
+            Err(GitAiError::GitCliError { code: Some(1), .. }) => Ok(HashMap::new()),
             Err(e) => Err(e),
         }
     }
@@ -1415,7 +1476,8 @@ impl Repository {
             rp_args.push(target_ref.clone());
 
             let old_tip: Option<String> = match Command::new(config::Config::get().git_cmd())
-                .args(&rp_args)
+                .args(args_with_disabled_hooks_if_needed(&rp_args))
+                .env(GIT_AI_SKIP_CORE_HOOKS_ENV, "1")
                 .output()
             {
                 Ok(output) if output.status.success() => {
@@ -2022,10 +2084,13 @@ pub fn find_repository(global_args: &[String]) -> Result<Repository, GitAiError>
         ))
     })?;
 
+    let common_git_dir = resolve_common_git_dir(&git_dir);
+
     Ok(Repository {
         global_args: normalized_global_args,
         storage: RepoStorage::for_repo_path(&git_dir, &workdir),
         git_dir,
+        common_git_dir,
         pre_command_base_commit: None,
         pre_command_refname: None,
         pre_reset_target_commit: None,
@@ -2069,16 +2134,31 @@ pub fn from_bare_repository(git_dir: &Path) -> Result<Repository, GitAiError> {
 
     let canonical_workdir = workdir.canonicalize().unwrap_or_else(|_| workdir.clone());
 
+    let common_git_dir = resolve_common_git_dir(git_dir);
+
     Ok(Repository {
         global_args,
         storage: RepoStorage::for_repo_path(git_dir, &workdir),
         git_dir: git_dir.to_path_buf(),
+        common_git_dir,
         pre_command_base_commit: None,
         pre_command_refname: None,
         pre_reset_target_commit: None,
         workdir,
         canonical_workdir,
     })
+}
+
+fn resolve_common_git_dir(git_dir: &Path) -> PathBuf {
+    let commondir_path = git_dir.join("commondir");
+    if let Ok(contents) = std::fs::read_to_string(&commondir_path) {
+        let relative = contents.trim();
+        if !relative.is_empty() {
+            let resolved = git_dir.join(relative);
+            return resolved.canonicalize().unwrap_or(resolved);
+        }
+    }
+    git_dir.to_path_buf()
 }
 
 pub fn find_repository_in_path(path: &str) -> Result<Repository, GitAiError> {
@@ -2218,8 +2298,10 @@ pub fn group_files_by_repository(
 /// Helper to execute a git command
 pub fn exec_git(args: &[String]) -> Result<Output, GitAiError> {
     // TODO Make sure to handle process signals, etc.
+    let effective_args = args_with_disabled_hooks_if_needed(args);
     let mut cmd = Command::new(config::Config::get().git_cmd());
-    cmd.args(args);
+    cmd.args(&effective_args);
+    cmd.env(GIT_AI_SKIP_CORE_HOOKS_ENV, "1");
 
     #[cfg(windows)]
     {
@@ -2236,7 +2318,7 @@ pub fn exec_git(args: &[String]) -> Result<Output, GitAiError> {
         return Err(GitAiError::GitCliError {
             code,
             stderr,
-            args: args.to_vec(),
+            args: effective_args,
         });
     }
 
@@ -2246,8 +2328,10 @@ pub fn exec_git(args: &[String]) -> Result<Output, GitAiError> {
 /// Helper to execute a git command with data provided on stdin
 pub fn exec_git_stdin(args: &[String], stdin_data: &[u8]) -> Result<Output, GitAiError> {
     // TODO Make sure to handle process signals, etc.
+    let effective_args = args_with_disabled_hooks_if_needed(args);
     let mut cmd = Command::new(config::Config::get().git_cmd());
-    cmd.args(args)
+    cmd.args(&effective_args)
+        .env(GIT_AI_SKIP_CORE_HOOKS_ENV, "1")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -2276,7 +2360,7 @@ pub fn exec_git_stdin(args: &[String], stdin_data: &[u8]) -> Result<Output, GitA
         return Err(GitAiError::GitCliError {
             code,
             stderr,
-            args: args.to_vec(),
+            args: effective_args,
         });
     }
 
@@ -2291,8 +2375,10 @@ pub fn exec_git_stdin_with_env(
     stdin_data: &[u8],
 ) -> Result<Output, GitAiError> {
     // TODO Make sure to handle process signals, etc.
+    let effective_args = args_with_disabled_hooks_if_needed(args);
     let mut cmd = Command::new(config::Config::get().git_cmd());
-    cmd.args(args)
+    cmd.args(&effective_args)
+        .env(GIT_AI_SKIP_CORE_HOOKS_ENV, "1")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -2326,7 +2412,7 @@ pub fn exec_git_stdin_with_env(
         return Err(GitAiError::GitCliError {
             code,
             stderr,
-            args: args.to_vec(),
+            args: effective_args,
         });
     }
 

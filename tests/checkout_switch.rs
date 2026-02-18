@@ -1,3 +1,4 @@
+#[macro_use]
 mod repos;
 
 use repos::test_file::ExpectedLineExt;
@@ -417,4 +418,18 @@ fn test_checkout_pathspec_multiple_files() {
     file_a.assert_lines_and_blame(vec!["Original A".human()]);
     file_b.assert_lines_and_blame(vec!["Original B".human()]);
     file_c.assert_lines_and_blame(vec!["Modified C by AI".ai()]);
+}
+
+worktree_test_wrappers! {
+    test_checkout_branch_migrates_working_log,
+    test_checkout_force_deletes_working_log,
+    test_checkout_pathspec_removes_file_attributions,
+    test_switch_branch_migrates_working_log,
+    test_switch_discard_changes_deletes_working_log,
+    test_switch_force_flag_deletes_working_log,
+    test_checkout_merge_migrates_working_log,
+    test_switch_merge_migrates_working_log,
+    test_checkout_same_branch_no_op,
+    test_checkout_with_mixed_attribution,
+    test_checkout_pathspec_multiple_files,
 }

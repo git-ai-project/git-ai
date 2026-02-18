@@ -544,6 +544,49 @@ fn test_rebase_root_with_explicit_branch_argument_preserves_authorship() {
     feature_file.assert_lines_and_blame(lines!["// AI feature".ai(), "fn feature() {}".ai()]);
 }
 
+#[test]
+fn test_failed_rebase_does_not_leak_stale_autostash_attribution() {
+    let repo = TestRepo::new();
+
+    let mut file = repo.filename("test.txt");
+    let mut ghost = repo.filename("ghost.txt");
+    file.set_contents(lines!["base".human()]);
+    ghost.set_contents(lines!["ghost base".human()]);
+    repo.stage_all_and_commit("base").unwrap();
+    let default_branch = repo.current_branch();
+
+    // Upstream branch to rebase onto.
+    repo.git(&["checkout", "-b", "upstream"]).unwrap();
+    let mut upstream_only = repo.filename("upstream.txt");
+    upstream_only.set_contents(lines!["upstream".human()]);
+    repo.stage_all_and_commit("upstream commit").unwrap();
+
+    // Return to the default branch and create an AI commit that will be rebased.
+    repo.git(&["checkout", &default_branch]).unwrap();
+    file.set_contents(lines!["base".human(), "ai committed".ai()]);
+    repo.git_ai(&["checkpoint", "mock_ai"]).unwrap();
+    repo.stage_all_and_commit("ai commit").unwrap();
+
+    // Create additional uncommitted AI change, then attempt rebase without autostash.
+    ghost.set_contents(lines!["ghost base".human(), "ghost ai".ai()]);
+    repo.git_ai(&["checkpoint", "mock_ai"]).unwrap();
+    let failed_rebase = repo.git(&["rebase", "upstream"]);
+    assert!(failed_rebase.is_err(), "dirty rebase should fail");
+
+    // Drop uncommitted changes and run successful rebase.
+    repo.git(&["reset", "--hard", "HEAD"]).unwrap();
+    repo.git(&["rebase", "upstream"]).unwrap();
+
+    // Human-only commit after successful rebase should not re-introduce stale AI prompt metadata.
+    let mut human_only = repo.filename("human.txt");
+    human_only.set_contents(lines!["human only".human()]);
+    let final_commit = repo.stage_all_and_commit("human follow-up").unwrap();
+    assert!(
+        final_commit.authorship_log.metadata.prompts.is_empty(),
+        "stale autostash attribution leaked into later human-only commit"
+    );
+}
+
 /// Test interactive rebase with commit reordering - verifies interactive rebase works
 #[test]
 fn test_rebase_interactive_reorder() {
@@ -1448,4 +1491,28 @@ cat {} > "$1"
         "// AI feature 3".ai(),
         "function feature3() {}".ai()
     ]);
+}
+
+worktree_test_wrappers! {
+    test_rebase_no_conflicts_identical_trees,
+    test_rebase_with_different_trees,
+    test_rebase_multiple_commits,
+    test_rebase_mixed_authorship,
+    test_rebase_fast_forward,
+    test_rebase_interactive_reorder,
+    test_rebase_skip,
+    test_rebase_keep_empty,
+    test_rebase_rerere,
+    test_rebase_patch_stack,
+    test_rebase_already_up_to_date,
+    test_rebase_with_conflicts,
+    test_rebase_abort,
+    test_rebase_branch_switch_during,
+    test_rebase_autosquash,
+    test_rebase_autostash,
+    test_rebase_exec,
+    test_rebase_preserve_merges,
+    test_rebase_commit_splitting,
+    test_rebase_squash_preserves_all_authorship,
+    test_rebase_reword_commit_with_children,
 }

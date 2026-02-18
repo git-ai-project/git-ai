@@ -9,6 +9,16 @@ use crate::{
 
 use super::repository::Repository;
 
+#[cfg(windows)]
+fn disabled_hooks_config() -> &'static str {
+    "core.hooksPath=NUL"
+}
+
+#[cfg(not(windows))]
+fn disabled_hooks_config() -> &'static str {
+    "core.hooksPath=/dev/null"
+}
+
 /// Result of checking for authorship notes on a remote
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotesExistence {
@@ -116,19 +126,13 @@ pub fn fetch_authorship_notes(
     // Now fetch the notes to the tracking ref with explicit refspec
     let fetch_refspec = format!("+refs/notes/ai:{}", tracking_ref);
 
-    // Build the internal authorship fetch with explicit flags and disabled hooks
-    // IMPORTANT: use repository.global_args_for_exec() to ensure -C flag is present for bare repos
-    let mut fetch_authorship: Vec<String> = repository.global_args_for_exec();
-    fetch_authorship.push("-c".to_string());
-    fetch_authorship.push("core.hooksPath=/dev/null".to_string());
-    fetch_authorship.push("fetch".to_string());
-    fetch_authorship.push("--no-tags".to_string());
-    fetch_authorship.push("--recurse-submodules=no".to_string());
-    fetch_authorship.push("--no-write-fetch-head".to_string());
-    fetch_authorship.push("--no-write-commit-graph".to_string());
-    fetch_authorship.push("--no-auto-maintenance".to_string());
-    fetch_authorship.push(remote_name.to_string());
-    fetch_authorship.push(fetch_refspec.clone());
+    // Build the internal authorship fetch with explicit flags and disabled hooks.
+    // IMPORTANT: use repository.global_args_for_exec() to ensure -C flag is present for bare repos.
+    let fetch_authorship = build_authorship_fetch_args(
+        repository.global_args_for_exec(),
+        remote_name,
+        &fetch_refspec,
+    );
 
     debug_log(&format!("fetch command: {:?}", fetch_authorship));
 
@@ -190,17 +194,11 @@ pub fn push_authorship_notes(repository: &Repository, remote_name: &str) -> Resu
     let tracking_ref = tracking_ref_for_remote(remote_name);
     let fetch_refspec = format!("+refs/notes/ai:{}", tracking_ref);
 
-    let mut fetch_before_push: Vec<String> = repository.global_args_for_exec();
-    fetch_before_push.push("-c".to_string());
-    fetch_before_push.push("core.hooksPath=/dev/null".to_string());
-    fetch_before_push.push("fetch".to_string());
-    fetch_before_push.push("--no-tags".to_string());
-    fetch_before_push.push("--recurse-submodules=no".to_string());
-    fetch_before_push.push("--no-write-fetch-head".to_string());
-    fetch_before_push.push("--no-write-commit-graph".to_string());
-    fetch_before_push.push("--no-auto-maintenance".to_string());
-    fetch_before_push.push(remote_name.to_string());
-    fetch_before_push.push(fetch_refspec);
+    let fetch_before_push = build_authorship_fetch_args(
+        repository.global_args_for_exec(),
+        remote_name,
+        &fetch_refspec,
+    );
 
     debug_log(&format!(
         "pre-push authorship fetch: {:?}",
@@ -236,16 +234,8 @@ pub fn push_authorship_notes(repository: &Repository, remote_name: &str) -> Resu
     }
 
     // STEP 2: Push notes without force (requires fast-forward)
-    let mut push_authorship: Vec<String> = repository.global_args_for_exec();
-    push_authorship.push("-c".to_string());
-    push_authorship.push("core.hooksPath=/dev/null".to_string());
-    push_authorship.push("push".to_string());
-    push_authorship.push("--quiet".to_string());
-    push_authorship.push("--no-recurse-submodules".to_string());
-    push_authorship.push("--no-verify".to_string());
-    push_authorship.push("--no-signed".to_string());
-    push_authorship.push(remote_name.to_string());
-    push_authorship.push(AI_AUTHORSHIP_PUSH_REFSPEC.to_string());
+    let push_authorship =
+        build_authorship_push_args(repository.global_args_for_exec(), remote_name);
 
     debug_log(&format!(
         "pushing authorship refs (no force): {:?}",
@@ -309,4 +299,73 @@ fn extract_remote_from_fetch_args(args: &[String]) -> Option<String> {
     }
 
     None
+}
+
+fn with_disabled_hooks(mut args: Vec<String>) -> Vec<String> {
+    args.push("-c".to_string());
+    args.push(disabled_hooks_config().to_string());
+    args
+}
+
+fn build_authorship_fetch_args(
+    global_args: Vec<String>,
+    remote_name: &str,
+    fetch_refspec: &str,
+) -> Vec<String> {
+    let mut args = with_disabled_hooks(global_args);
+    args.push("fetch".to_string());
+    args.push("--no-tags".to_string());
+    args.push("--recurse-submodules=no".to_string());
+    args.push("--no-write-fetch-head".to_string());
+    args.push("--no-write-commit-graph".to_string());
+    args.push("--no-auto-maintenance".to_string());
+    args.push(remote_name.to_string());
+    args.push(fetch_refspec.to_string());
+    args
+}
+
+fn build_authorship_push_args(global_args: Vec<String>, remote_name: &str) -> Vec<String> {
+    let mut args = with_disabled_hooks(global_args);
+    args.push("push".to_string());
+    args.push("--quiet".to_string());
+    args.push("--no-recurse-submodules".to_string());
+    args.push("--no-verify".to_string());
+    args.push("--no-signed".to_string());
+    args.push(remote_name.to_string());
+    args.push(AI_AUTHORSHIP_PUSH_REFSPEC.to_string());
+    args
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authorship_fetch_args_always_disable_hooks() {
+        let disabled_hooks = disabled_hooks_config();
+        let args = build_authorship_fetch_args(
+            vec!["-C".to_string(), "/tmp/repo".to_string()],
+            "origin",
+            "+refs/notes/ai:refs/notes/ai-remote/origin",
+        );
+
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-c" && pair[1] == disabled_hooks)
+        );
+        assert!(args.contains(&"fetch".to_string()));
+    }
+
+    #[test]
+    fn authorship_push_args_always_disable_hooks() {
+        let disabled_hooks = disabled_hooks_config();
+        let args =
+            build_authorship_push_args(vec!["-C".to_string(), "/tmp/repo".to_string()], "origin");
+
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-c" && pair[1] == disabled_hooks)
+        );
+        assert!(args.contains(&"push".to_string()));
+    }
 }
