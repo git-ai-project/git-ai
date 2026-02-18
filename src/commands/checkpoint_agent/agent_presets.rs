@@ -333,7 +333,8 @@ pub fn is_plan_file_path(file_path: &str) -> bool {
     let path = Path::new(file_path);
     if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
         let lower = file_name.to_ascii_lowercase();
-        lower.contains("plan") && lower.ends_with(".md")
+        let has_plan = lower == "plan.md" || lower.starts_with("plan.") || lower.starts_with("plan-") || lower.starts_with("plan_") || lower.contains("-plan") || lower.contains("_plan");
+        has_plan && lower.ends_with(".md")
     } else {
         false
     }
