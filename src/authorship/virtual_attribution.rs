@@ -470,7 +470,12 @@ impl VirtualAttributions {
 
         // Step 3: Merge blame and checkpoint attributions
         // Checkpoint attributions should override blame attributions for overlapping lines
-        let final_state = checkpoint_va.file_contents.clone();
+        // Use the union of both VAs' file contents so files tracked only via blame/notes
+        // (committed AI work) are not dropped when INITIAL covers a disjoint set of files.
+        let mut final_state = checkpoint_va.file_contents.clone();
+        for (file, content) in &blame_va.file_contents {
+            final_state.entry(file.clone()).or_insert_with(|| content.clone());
+        }
         let merged_va = merge_attributions_favoring_first(checkpoint_va, blame_va, final_state)?;
 
         Ok(merged_va)

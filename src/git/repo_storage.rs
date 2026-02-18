@@ -68,6 +68,10 @@ impl RepoStorage {
 
     /* Working Log Persistance */
 
+    pub fn has_working_log(&self, sha: &str) -> bool {
+        self.working_logs.join(sha).exists()
+    }
+
     pub fn working_log_for_base_commit(&self, sha: &str) -> PersistedWorkingLog {
         let working_log_dir = self.working_logs.join(sha);
         fs::create_dir_all(&working_log_dir).unwrap();
@@ -84,7 +88,6 @@ impl RepoStorage {
         )
     }
 
-    #[allow(dead_code)]
     pub fn delete_working_log_for_base_commit(&self, sha: &str) -> Result<(), GitAiError> {
         let working_log_dir = self.working_logs.join(sha);
         if working_log_dir.exists() {
