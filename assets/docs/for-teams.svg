@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 200" fill="none">
+
+  <!-- Cloud shape -->
+  <path d="M160 55 Q160 35 180 35 Q190 20 210 25 Q225 15 240 30 Q260 25 260 45 Q275 45 275 60 Q275 75 260 75 L160 75 Q140 75 140 60 Q140 45 160 55 Z" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.5"/>
+
+  <!-- Team members -->
+  <!-- Person 1 (left) -->
+  <circle cx="90" cy="105" r="12" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.5"/>
+  <circle cx="90" cy="102" r="4" fill="#656d76"/>
+  <path d="M82 113 Q90 108 98 113" stroke="#656d76" stroke-width="1.5" fill="none"/>
+  <rect x="72" y="122" width="36" height="24" rx="3" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.5"/>
+  <rect x="79" y="128" width="22" height="3" rx="1" fill="#1a7f37"/>
+  <rect x="79" y="134" width="16" height="3" rx="1" fill="#656d76"/>
+
+  <!-- Person 2 (center) -->
+  <circle cx="200" cy="105" r="12" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.5"/>
+  <circle cx="200" cy="102" r="4" fill="#656d76"/>
+  <path d="M192 113 Q200 108 208 113" stroke="#656d76" stroke-width="1.5" fill="none"/>
+  <rect x="182" y="122" width="36" height="24" rx="3" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.5"/>
+  <rect x="189" y="128" width="22" height="3" rx="1" fill="#0969da"/>
+  <rect x="189" y="134" width="18" height="3" rx="1" fill="#656d76"/>
+
+  <!-- Person 3 (right) -->
+  <circle cx="310" cy="105" r="12" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.5"/>
+  <circle cx="310" cy="102" r="4" fill="#656d76"/>
+  <path d="M302 113 Q310 108 318 113" stroke="#656d76" stroke-width="1.5" fill="none"/>
+  <rect x="292" y="122" width="36" height="24" rx="3" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.5"/>
+  <rect x="299" y="128" width="22" height="3" rx="1" fill="#cf222e"/>
+  <rect x="299" y="134" width="14" height="3" rx="1" fill="#656d76"/>
+
+  <!-- Connection lines to cloud -->
+  <line x1="90" y1="93" x2="170" y2="75" stroke="#d0d7de" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <line x1="200" y1="93" x2="207" y2="75" stroke="#d0d7de" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <line x1="310" y1="93" x2="245" y2="75" stroke="#d0d7de" stroke-width="1.5" stroke-dasharray="4 3"/>
+
+  <!-- Labels -->
+  <text x="200" y="168" text-anchor="middle" fill="#1f2328" font-family="system-ui, -apple-system, sans-serif" font-size="14" font-weight="600">Shared context across your team</text>
+  <text x="200" y="185" text-anchor="middle" fill="#656d76" font-family="system-ui, -apple-system, sans-serif" font-size="11">Dashboards, access control, PII filtering</text>
+</svg>

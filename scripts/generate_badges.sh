@@ -12,7 +12,7 @@ mkdir -p "$OUT_DIR"
 height=100
 right_width=${height}
 padding=4
-radius=0
+radius=12
 
 count=$(jq length "$CONFIG")
 
@@ -37,13 +37,24 @@ with open('$png','rb') as f:
   # Per-icon padding overrides
   icon_padding=${padding}
   icon_y_offset=0
+  icon_x_offset=0
   if [[ "$icon" == "claude_code" ]]; then
-    icon_padding=8
+    icon_padding=12
   elif [[ "$icon" == "gemini" ]]; then
-    icon_padding=6
-    icon_y_offset=3
+    icon_padding=10
+    icon_y_offset=6
   elif [[ "$icon" == "rovodev" ]]; then
+    icon_padding=6
     icon_y_offset=-3
+  elif [[ "$icon" == "junie_white" ]]; then
+    icon_padding=2
+    icon_y_offset=-4
+  elif [[ "$icon" == "cursor" ]]; then
+    icon_y_offset=2
+  elif [[ "$icon" == "copilot" ]]; then
+    icon_padding=6
+  elif [[ "$icon" == "droid" ]]; then
+    icon_padding=6
   fi
 
   img_height=$(( height - icon_padding * 2 ))
@@ -63,17 +74,26 @@ with open('$png','rb') as f:
     <clipPath id="clip-${icon}">
       <rect width="${width}" height="${height}" rx="${radius}" ry="${radius}"/>
     </clipPath>
+    <linearGradient id="green-${icon}" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#34D399"/>
+      <stop offset="100%" stop-color="#16A34A"/>
+    </linearGradient>
+    <linearGradient id="gray-${icon}" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#F3F4F6"/>
+      <stop offset="100%" stop-color="#E5E7EB"/>
+    </linearGradient>
     <filter id="shadow-${icon}" x="-2%" y="-2%" width="104%" height="104%">
       <feDropShadow dx="0" dy="1" stdDeviation="1" flood-color="#000000" flood-opacity="0.1"/>
     </filter>
   </defs>
   <g clip-path="url(#clip-${icon})" filter="url(#shadow-${icon})">
-    <rect width="${left_width}" height="${height}" fill="#D6D3D1"/>
-    <rect x="${left_width}" width="${right_width}" height="${height}" fill="#000000"/>
+    <rect width="${left_width}" height="${height}" fill="url(#gray-${icon})"/>
+    <rect x="${left_width}" width="${right_width}" height="${height}" fill="url(#green-${icon})"/>
   </g>
   <image x="${icon_padding}" y="$(( icon_padding + icon_y_offset ))" width="${img_width}" height="${img_height}" xlink:href="data:image/png;base64,${b64}"/>
   <polyline points="$(( check_cx - 12 )),${check_cy} $(( check_cx - 4 )),$(( check_cy + 12 )) $(( check_cx + 14 )),$(( check_cy - 12 ))" fill="none" stroke="#FFFFFF" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
-  <line x1="${left_width}" y1="0" x2="${left_width}" y2="${height}" stroke="#000000" stroke-width="1.5"/>
+  <line x1="${left_width}" y1="0" x2="${left_width}" y2="${height}" stroke="#9CA3AF" stroke-width="1.5"/>
+  <rect width="${width}" height="${height}" rx="${radius}" ry="${radius}" fill="none" stroke="#9CA3AF" stroke-width="3"/>
 </svg>
 SVGEOF
 
