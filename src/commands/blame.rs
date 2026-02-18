@@ -1413,7 +1413,10 @@ fn output_default_format(
                 } else {
                     7
                 };
-                let sha = if options.long_rev {
+                let sha = if options.long_rev && hunk.is_boundary {
+                    // Git shows ^<39 hex> = 40 total for long-rev boundary commits
+                    &hunk.commit_sha[..39.min(hunk.commit_sha.len())]
+                } else if options.long_rev {
                     hunk.commit_sha.as_str()
                 } else if hash_len < hunk.commit_sha.len() {
                     &hunk.commit_sha[..hash_len]
