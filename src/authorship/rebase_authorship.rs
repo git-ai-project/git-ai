@@ -3253,7 +3253,8 @@ mod tests {
             .expect("commit base");
         let default_branch = repo.current_branch().expect("default branch");
 
-        repo.create_branch("feature").expect("create feature branch");
+        repo.create_branch("feature")
+            .expect("create feature branch");
         repo.write_file("feature.txt", "feature code\n", true)
             .expect("write feature");
         repo.commit_with_message("feature commit")
@@ -3298,7 +3299,11 @@ mod tests {
             .expect("write INITIAL");
 
         let old_initial = old_wl.read_initial_attributions();
-        assert_eq!(old_initial.files.len(), 1, "INITIAL should exist on old HEAD before rebase");
+        assert_eq!(
+            old_initial.files.len(),
+            1,
+            "INITIAL should exist on old HEAD before rebase"
+        );
 
         repo.switch_branch(&default_branch)
             .expect("switch default branch");
@@ -3306,7 +3311,9 @@ mod tests {
             .expect("write upstream");
         repo.commit_with_message("upstream commit")
             .expect("commit upstream");
-        let new_head = repo.get_head_commit_sha().expect("upstream sha as simulated new_head");
+        let new_head = repo
+            .get_head_commit_sha()
+            .expect("upstream sha as simulated new_head");
 
         let rebase_event = RewriteLogEvent::RebaseComplete {
             rebase_complete: RebaseCompleteEvent::new(
@@ -3529,18 +3536,22 @@ mod tests {
             .working_log_for_base_commit(&new_head)
             .read_initial_attributions();
 
-        assert_eq!(
-            migrated.files.len(),
-            2,
-            "both files should be migrated"
-        );
+        assert_eq!(migrated.files.len(), 2, "both files should be migrated");
         assert!(migrated.files.contains_key("file_a.py"));
         assert!(migrated.files.contains_key("file_b.py"));
 
         let b_attrs = &migrated.files["file_b.py"];
-        assert_eq!(b_attrs.len(), 2, "file_b.py should have both attribution ranges");
+        assert_eq!(
+            b_attrs.len(),
+            2,
+            "file_b.py should have both attribution ranges"
+        );
 
-        assert_eq!(migrated.prompts.len(), 2, "both prompt records should be migrated");
+        assert_eq!(
+            migrated.prompts.len(),
+            2,
+            "both prompt records should be migrated"
+        );
         assert!(migrated.prompts.contains_key("ai-cursor"));
         assert!(migrated.prompts.contains_key("ai-copilot"));
     }
@@ -3890,11 +3901,7 @@ mod tests {
             .storage
             .working_log_for_base_commit(&amend_sha)
             .read_initial_attributions();
-        assert_eq!(
-            amend_initial.files.len(),
-            1,
-            "INITIAL should survive amend"
-        );
+        assert_eq!(amend_initial.files.len(), 1, "INITIAL should survive amend");
         assert!(amend_initial.files.contains_key("utils.py"));
 
         repo.switch_branch(&default_branch)
