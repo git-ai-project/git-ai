@@ -29,13 +29,6 @@ Thank you for your interest in contributing to `git-ai`. This is a cool moment f
    cargo test
    ```
 
-5. **Check code coverage** (optional but recommended):
-   ```bash
-   task coverage
-   ```
-
-   The project maintains a minimum code coverage threshold of **50%** (enforced in CI). This threshold is based on the current coverage rounded down to the nearest 5%. Pull requests that reduce coverage below this threshold will fail CI checks.
-
 ### (Option 1) Putting a development build on your path
 
 It's often helpful to point your `git` and `git-ai`  to a development build of `git-ai`. 

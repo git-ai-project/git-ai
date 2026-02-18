@@ -41,16 +41,14 @@ fn claude_skills_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".claude").join("skills"))
 }
 
-/// Link a skill directory to the target location.
-/// On Unix, creates a symlink. On Windows, copies the directory to avoid requiring
-/// Administrator privileges (which symlink creation requires on Windows).
-fn link_skill_dir(target: &PathBuf, link_path: &PathBuf) -> Result<(), GitAiError> {
+/// Create a symlink from link_path to target, removing any existing file/symlink first
+fn create_skills_symlink(target: &PathBuf, link_path: &PathBuf) -> Result<(), GitAiError> {
     // Create parent directory if needed
     if let Some(parent) = link_path.parent() {
         fs::create_dir_all(parent)?;
     }
 
-    // Remove existing file/symlink/directory if present
+    // Remove existing file/symlink if present
     if link_path.exists() || link_path.symlink_metadata().is_ok() {
         if link_path.is_dir()
             && !link_path
@@ -58,50 +56,33 @@ fn link_skill_dir(target: &PathBuf, link_path: &PathBuf) -> Result<(), GitAiErro
                 .map(|m| m.file_type().is_symlink())
                 .unwrap_or(false)
         {
+            // It's a real directory, not a symlink - remove it
             fs::remove_dir_all(link_path)?;
         } else {
+            // It's a file or symlink
             fs::remove_file(link_path)?;
         }
     }
 
+    // Create the symlink
     #[cfg(unix)]
     std::os::unix::fs::symlink(target, link_path)?;
 
     #[cfg(windows)]
-    copy_dir_recursive(target, link_path)?;
+    std::os::windows::fs::symlink_dir(target, link_path)?;
 
     Ok(())
 }
 
-/// Recursively copy a directory and its contents from src to dst.
-#[cfg(windows)]
-fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) -> Result<(), GitAiError> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let entry_path = entry.path();
-        let dest_path = dst.join(entry.file_name());
-        if entry_path.is_dir() {
-            copy_dir_recursive(&entry_path, &dest_path)?;
-        } else {
-            fs::copy(&entry_path, &dest_path)?;
-        }
-    }
-    Ok(())
-}
-
-/// Remove a skill link (symlink on Unix, copied directory on Windows) if it exists.
-fn remove_skill_link(link_path: &PathBuf) -> Result<(), GitAiError> {
-    if link_path.symlink_metadata().is_ok() {
-        let is_symlink = link_path
+/// Remove a symlink if it exists
+fn remove_skills_symlink(link_path: &PathBuf) -> Result<(), GitAiError> {
+    if link_path.symlink_metadata().is_ok()
+        && link_path
             .symlink_metadata()
             .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false);
-        if is_symlink {
-            fs::remove_file(link_path)?;
-        } else if link_path.is_dir() {
-            fs::remove_dir_all(link_path)?;
-        }
+            .unwrap_or(false)
+    {
+        fs::remove_file(link_path)?;
     }
     Ok(())
 }
@@ -114,9 +95,9 @@ fn remove_skill_link(link_path: &PathBuf) -> Result<(), GitAiError> {
 /// └── prompt-analysis/
 ///     └── SKILL.md
 ///
-/// Then links each skill to:
-/// - ~/.agents/skills/{skill-name} (symlink on Unix, copy on Windows)
-/// - ~/.claude/skills/{skill-name} (symlink on Unix, copy on Windows)
+/// Then symlinks each skill to:
+/// - ~/.agents/skills/{skill-name}
+/// - ~/.claude/skills/{skill-name}
 pub fn install_skills(dry_run: bool, _verbose: bool) -> Result<SkillsInstallResult, GitAiError> {
     let skills_base = skills_dir_path().ok_or_else(|| {
         GitAiError::Generic("Could not determine skills directory path".to_string())
@@ -147,20 +128,26 @@ pub fn install_skills(dry_run: bool, _verbose: bool) -> Result<SkillsInstallResu
         let skill_md_path = skill_dir.join("SKILL.md");
         write_atomic(&skill_md_path, skill.skill_md.as_bytes())?;
 
-        // Link this skill to agent directories
+        // Create symlinks for this skill
         // ~/.agents/skills/{skill-name} -> ~/.git-ai/skills/{skill-name}
         if let Some(agents_dir) = agents_skills_dir() {
             let agents_link = agents_dir.join(skill.name);
-            if let Err(e) = link_skill_dir(&skill_dir, &agents_link) {
-                eprintln!("Warning: Failed to link skill at {:?}: {}", agents_link, e);
+            if let Err(e) = create_skills_symlink(&skill_dir, &agents_link) {
+                eprintln!(
+                    "Warning: Failed to create symlink at {:?}: {}",
+                    agents_link, e
+                );
             }
         }
 
         // ~/.claude/skills/{skill-name} -> ~/.git-ai/skills/{skill-name}
         if let Some(claude_dir) = claude_skills_dir() {
             let claude_link = claude_dir.join(skill.name);
-            if let Err(e) = link_skill_dir(&skill_dir, &claude_link) {
-                eprintln!("Warning: Failed to link skill at {:?}: {}", claude_link, e);
+            if let Err(e) = create_skills_symlink(&skill_dir, &claude_link) {
+                eprintln!(
+                    "Warning: Failed to create symlink at {:?}: {}",
+                    claude_link, e
+                );
             }
         }
     }
@@ -171,7 +158,7 @@ pub fn install_skills(dry_run: bool, _verbose: bool) -> Result<SkillsInstallResu
     })
 }
 
-/// Uninstall all skills by removing ~/.git-ai/skills/ and linked skill directories
+/// Uninstall all skills by removing ~/.git-ai/skills/ and symlinks
 pub fn uninstall_skills(dry_run: bool, _verbose: bool) -> Result<SkillsInstallResult, GitAiError> {
     let skills_base = skills_dir_path().ok_or_else(|| {
         GitAiError::Generic("Could not determine skills directory path".to_string())
@@ -191,14 +178,14 @@ pub fn uninstall_skills(dry_run: bool, _verbose: bool) -> Result<SkillsInstallRe
         });
     }
 
-    // Remove linked skill directories first
+    // Remove symlinks for each skill first
     for skill in EMBEDDED_SKILLS {
         // ~/.agents/skills/{skill-name}
         if let Some(agents_dir) = agents_skills_dir() {
             let agents_link = agents_dir.join(skill.name);
-            if let Err(e) = remove_skill_link(&agents_link) {
+            if let Err(e) = remove_skills_symlink(&agents_link) {
                 eprintln!(
-                    "Warning: Failed to remove skill link at {:?}: {}",
+                    "Warning: Failed to remove symlink at {:?}: {}",
                     agents_link, e
                 );
             }
@@ -207,9 +194,9 @@ pub fn uninstall_skills(dry_run: bool, _verbose: bool) -> Result<SkillsInstallRe
         // ~/.claude/skills/{skill-name}
         if let Some(claude_dir) = claude_skills_dir() {
             let claude_link = claude_dir.join(skill.name);
-            if let Err(e) = remove_skill_link(&claude_link) {
+            if let Err(e) = remove_skills_symlink(&claude_link) {
                 eprintln!(
-                    "Warning: Failed to remove skill link at {:?}: {}",
+                    "Warning: Failed to remove symlink at {:?}: {}",
                     claude_link, e
                 );
             }
@@ -231,6 +218,7 @@ mod tests {
 
     #[test]
     fn test_embedded_skills_are_loaded() {
+        // Verify that the embedded skills are not empty
         for skill in EMBEDDED_SKILLS {
             assert!(!skill.name.is_empty(), "Skill name should not be empty");
             assert!(
@@ -253,164 +241,5 @@ mod tests {
             let parent = path.parent().unwrap();
             assert!(parent.ends_with(".git-ai"));
         }
-    }
-
-    #[test]
-    fn test_link_skill_dir_creates_link_and_content_is_accessible() {
-        let tmp = tempfile::tempdir().unwrap();
-        let source = tmp.path().join("source-skill");
-        fs::create_dir_all(&source).unwrap();
-        fs::write(source.join("SKILL.md"), "test content").unwrap();
-
-        let link = tmp.path().join("linked-skill");
-        link_skill_dir(&source, &link).unwrap();
-
-        assert!(link.exists());
-        assert!(link.join("SKILL.md").exists());
-        assert_eq!(
-            fs::read_to_string(link.join("SKILL.md")).unwrap(),
-            "test content"
-        );
-    }
-
-    #[test]
-    fn test_link_skill_dir_replaces_existing_directory() {
-        let tmp = tempfile::tempdir().unwrap();
-        let source = tmp.path().join("source-skill");
-        fs::create_dir_all(&source).unwrap();
-        fs::write(source.join("SKILL.md"), "new content").unwrap();
-
-        let link = tmp.path().join("linked-skill");
-        fs::create_dir_all(&link).unwrap();
-        fs::write(link.join("SKILL.md"), "old content").unwrap();
-
-        link_skill_dir(&source, &link).unwrap();
-
-        assert_eq!(
-            fs::read_to_string(link.join("SKILL.md")).unwrap(),
-            "new content"
-        );
-    }
-
-    #[test]
-    fn test_link_skill_dir_replaces_existing_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let source = tmp.path().join("source-skill");
-        fs::create_dir_all(&source).unwrap();
-        fs::write(source.join("SKILL.md"), "content").unwrap();
-
-        let link = tmp.path().join("linked-skill");
-        fs::write(&link, "i am a file").unwrap();
-
-        link_skill_dir(&source, &link).unwrap();
-
-        assert!(link.is_dir() || link.is_symlink());
-        assert!(link.join("SKILL.md").exists());
-    }
-
-    #[test]
-    fn test_link_skill_dir_creates_parent_directories() {
-        let tmp = tempfile::tempdir().unwrap();
-        let source = tmp.path().join("source-skill");
-        fs::create_dir_all(&source).unwrap();
-        fs::write(source.join("SKILL.md"), "content").unwrap();
-
-        let link = tmp.path().join("deep").join("nested").join("linked-skill");
-        link_skill_dir(&source, &link).unwrap();
-
-        assert!(link.exists());
-        assert!(link.join("SKILL.md").exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_link_skill_dir_creates_symlink_on_unix() {
-        let tmp = tempfile::tempdir().unwrap();
-        let source = tmp.path().join("source-skill");
-        fs::create_dir_all(&source).unwrap();
-        fs::write(source.join("SKILL.md"), "content").unwrap();
-
-        let link = tmp.path().join("linked-skill");
-        link_skill_dir(&source, &link).unwrap();
-
-        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
-        assert_eq!(fs::read_link(&link).unwrap(), source);
-    }
-
-    #[test]
-    fn test_remove_skill_link_removes_directory() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("skill-dir");
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("SKILL.md"), "content").unwrap();
-
-        remove_skill_link(&dir).unwrap();
-        assert!(!dir.exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_remove_skill_link_removes_symlink() {
-        let tmp = tempfile::tempdir().unwrap();
-        let target = tmp.path().join("target");
-        fs::create_dir_all(&target).unwrap();
-
-        let link = tmp.path().join("link");
-        std::os::unix::fs::symlink(&target, &link).unwrap();
-
-        remove_skill_link(&link).unwrap();
-        assert!(!link.symlink_metadata().is_ok());
-        assert!(target.exists(), "original target should not be removed");
-    }
-
-    #[test]
-    fn test_remove_skill_link_noop_on_nonexistent_path() {
-        let tmp = tempfile::tempdir().unwrap();
-        let nonexistent = tmp.path().join("does-not-exist");
-        remove_skill_link(&nonexistent).unwrap();
-    }
-
-    #[test]
-    fn test_install_and_uninstall_skills_lifecycle() {
-        let skills_base = skills_dir_path().unwrap();
-
-        // Dry run should not create anything
-        let dry_result = install_skills(true, false).unwrap();
-        assert!(dry_result.changed);
-        assert_eq!(dry_result.installed_count, EMBEDDED_SKILLS.len());
-
-        // Install creates skill files with correct content
-        let result = install_skills(false, false).unwrap();
-        assert!(result.changed);
-        assert_eq!(result.installed_count, EMBEDDED_SKILLS.len());
-        assert!(skills_base.exists());
-        for skill in EMBEDDED_SKILLS {
-            let skill_md = skills_base.join(skill.name).join("SKILL.md");
-            assert!(skill_md.exists(), "SKILL.md missing for {}", skill.name);
-            let content = fs::read_to_string(&skill_md).unwrap();
-            assert_eq!(content, skill.skill_md);
-        }
-
-        // Install again is idempotent
-        let result2 = install_skills(false, false).unwrap();
-        assert!(result2.changed);
-        for skill in EMBEDDED_SKILLS {
-            let skill_md = skills_base.join(skill.name).join("SKILL.md");
-            assert!(
-                skill_md.exists(),
-                "SKILL.md missing after re-install for {}",
-                skill.name
-            );
-        }
-
-        // Uninstall removes skills directory
-        let uninstall_result = uninstall_skills(false, false).unwrap();
-        assert!(uninstall_result.changed);
-        assert!(!skills_base.exists());
-
-        // Uninstall again is a no-op
-        let noop_result = uninstall_skills(false, false).unwrap();
-        assert!(!noop_result.changed);
-        assert_eq!(noop_result.installed_count, 0);
     }
 }

@@ -10,8 +10,6 @@ on:
 
 env:
   CARGO_INCREMENTAL: 0
-  # Coverage threshold is set to current coverage (54.10%) rounded down to nearest 5%
-  # This ensures code coverage never falls below this baseline
   COVERAGE_THRESHOLD: 50
 
 jobs:
