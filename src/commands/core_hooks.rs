@@ -23,13 +23,20 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Hook names that git-ai installs into `core.hooksPath`.
+/// Each listed hook gets a managed shell script that dispatches to `git-ai hook <name>`
+/// and then chains to the user's previous hooks directory.  Hooks not listed here
+/// but present in the user's previous hooks directory are handled by
+/// [`sync_non_managed_core_hook_scripts`], which writes lightweight passthrough scripts.
 pub const INSTALLED_HOOKS: &[&str] = &[
     "pre-commit",
+    "prepare-commit-msg",
+    "commit-msg",
     "post-commit",
     "pre-rebase",
     "post-rewrite",
     "post-checkout",
     "post-merge",
+    "pre-merge-commit",
     "pre-push",
     "reference-transaction",
     "post-index-change",
@@ -1610,6 +1617,149 @@ pub(crate) fn normalize_hook_binary_path(git_ai_binary: &Path) -> String {
         .to_string_lossy()
         .replace('\\', "/")
         .replace('"', "\\\"")
+}
+
+/// Write passthrough scripts for hooks found in the user's previous hooks directory
+/// that are NOT in [`INSTALLED_HOOKS`].  This prevents `core.hooksPath` redirection
+/// from silently dropping user hooks that git-ai does not manage (e.g. `applypatch-msg`,
+/// `sendemail-validate`, or any custom hook a tool like Husky might create).
+///
+/// Stale passthrough scripts from a previous installation are removed first so
+/// the managed directory stays in sync with the user's current hooks.
+pub fn sync_non_managed_core_hook_scripts(hooks_dir: &Path) -> Result<(), GitAiError> {
+    let managed: HashSet<&str> = INSTALLED_HOOKS.iter().copied().collect();
+
+    // Remove stale passthrough scripts (anything not in INSTALLED_HOOKS and not a
+    // known metadata file).
+    if let Ok(entries) = fs::read_dir(hooks_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if managed.contains(name_str.as_ref()) {
+                continue;
+            }
+            // Preserve metadata files
+            if name_str.as_ref() == PREVIOUS_HOOKS_PATH_FILE
+                || name_str.as_ref() == CORE_HOOK_STATE_FILE
+            {
+                continue;
+            }
+            // Files with extensions (e.g. `.sample`) are not hook scripts
+            if name_str.contains('.') {
+                continue;
+            }
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+
+    // Read the previous hooks path from the metadata file written during install.
+    let previous_path_file = hooks_dir.join(PREVIOUS_HOOKS_PATH_FILE);
+    let prev_dir = match fs::read_to_string(&previous_path_file) {
+        Ok(content) => {
+            let trimmed = content.trim().to_string();
+            if trimmed.is_empty() {
+                return Ok(());
+            }
+            expand_hooks_path(&trimmed)
+        }
+        Err(_) => return Ok(()),
+    };
+
+    if !prev_dir.is_dir() {
+        return Ok(());
+    }
+
+    let entries = match fs::read_dir(&prev_dir) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(()),
+    };
+
+    for entry in entries.flatten() {
+        let hook_name = entry.file_name();
+        let hook_name_str = hook_name.to_string_lossy().to_string();
+
+        if managed.contains(hook_name_str.as_str()) {
+            continue;
+        }
+        if hook_name_str.contains('.') {
+            continue;
+        }
+        let ft = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        if !ft.is_file() && !ft.is_symlink() {
+            continue;
+        }
+
+        let script = format!(
+            r#"#!/bin/sh
+# Passthrough to user's previous hook (not managed by git-ai)
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+previous_hooks_file="$script_dir/{previous_hooks_file}"
+previous_hooks_dir=""
+
+if [ -f "$previous_hooks_file" ]; then
+  previous_hooks_dir=$(tr -d '\r' < "$previous_hooks_file")
+  case "$previous_hooks_dir" in
+    "~") previous_hooks_dir="$HOME" ;;
+    "~/"*) previous_hooks_dir="$HOME/${{previous_hooks_dir#\~/}}" ;;
+  esac
+  previous_hooks_dir=$(printf '%s' "$previous_hooks_dir" | tr '\\' '/')
+fi
+
+if [ -n "$previous_hooks_dir" ]; then
+  hook="$previous_hooks_dir/{hook}"
+
+  is_windows_shell=0
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) is_windows_shell=1 ;;
+  esac
+
+  if [ "$is_windows_shell" = "1" ]; then
+    if [ -f "$hook" ]; then
+      exec sh "$hook" "$@"
+    fi
+  elif [ -x "$hook" ]; then
+    exec "$hook" "$@"
+  fi
+fi
+
+exit 0
+"#,
+            previous_hooks_file = PREVIOUS_HOOKS_PATH_FILE,
+            hook = hook_name_str,
+        );
+
+        let hook_path = hooks_dir.join(&hook_name_str);
+        fs::write(&hook_path, &script)?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&hook_path)?.permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&hook_path, perms)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Expand `~` and `~/...` to the user's home directory.
+fn expand_hooks_path(path: &str) -> PathBuf {
+    if path == "~" {
+        home_dir_from_env()
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| PathBuf::from(path))
+    } else if let Some(rest) = path.strip_prefix("~/") {
+        home_dir_from_env()
+            .or_else(dirs::home_dir)
+            .map(|h| h.join(rest))
+            .unwrap_or_else(|| PathBuf::from(path))
+    } else {
+        PathBuf::from(path)
+    }
 }
 
 #[cfg(test)]

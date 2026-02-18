@@ -1,6 +1,6 @@
 use crate::commands::core_hooks::{
     INSTALLED_HOOKS, PREVIOUS_HOOKS_PATH_FILE, managed_core_hooks_dir, normalize_hook_binary_path,
-    write_core_hook_scripts,
+    sync_non_managed_core_hook_scripts, write_core_hook_scripts,
 };
 use crate::commands::flush_metrics_db::spawn_background_metrics_db_flush;
 use crate::error::GitAiError;
@@ -720,6 +720,7 @@ fn install_git_core_hooks(
         }
 
         write_core_hook_scripts(&hooks_dir, &params.binary_path)?;
+        sync_non_managed_core_hook_scripts(&hooks_dir)?;
 
         if config_needs_update {
             git_config_set_global("core.hooksPath", &desired_hooks_path)?;
