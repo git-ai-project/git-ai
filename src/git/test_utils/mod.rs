@@ -1054,6 +1054,14 @@ impl TmpRepo {
         &self.repo_gitai
     }
 
+    /// Adds a remote with the given name and URL
+    pub fn add_remote(&self, name: &str, url: &str) -> Result<(), GitAiError> {
+        self.repo_git2
+            .remote(name, url)
+            .map_err(|e| GitAiError::Generic(format!("Failed to add remote: {}", e)))?;
+        Ok(())
+    }
+
     /// Amends the current commit with the staged changes and returns the new commit SHA
     pub fn amend_commit(&self, message: &str) -> Result<String, GitAiError> {
         // Get the current HEAD commit that we're amending

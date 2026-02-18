@@ -28,13 +28,6 @@ pub fn handle_git_ai(args: &[String]) {
         return;
     }
 
-    let current_dir = env::current_dir().unwrap().to_string_lossy().to_string();
-    let repository_option = find_repository_in_path(&current_dir).ok();
-
-    let config = config::Config::get();
-
-    let allowed_repository = config.is_allowed_repository(&repository_option);
-
     // Start DB warmup early for commands that need database access
     match args[0].as_str() {
         "checkpoint" | "show-prompt" | "share" | "sync-prompts" | "flush-cas" | "search"
@@ -75,12 +68,6 @@ pub fn handle_git_ai(args: &[String]) {
             commands::show::handle_show(&args[1..]);
         }
         "checkpoint" => {
-            if !allowed_repository {
-                eprintln!(
-                    "Skipping checkpoint because repository is excluded or not in allow_repositories list"
-                );
-                std::process::exit(0);
-            }
             handle_checkpoint(&args[1..]);
         }
         "blame" => {
@@ -546,6 +533,16 @@ fn handle_checkpoint(args: &[String]) {
     // First, try the standard approach using the working directory
     let repo_result = find_repository_in_path(&final_working_dir);
 
+    let config = config::Config::get();
+    if let Ok(ref repo) = repo_result
+        && !config.is_allowed_repository(&Some(repo.clone()))
+    {
+        eprintln!(
+            "Skipping checkpoint because repository is excluded or not in allow_repositories list"
+        );
+        std::process::exit(0);
+    }
+
     // If the working directory is not a git repository, we need to detect repos from file paths
     // This happens in multi-repo workspaces where the workspace root contains multiple git repos
     let needs_file_based_repo_detection = repo_result.is_err();
@@ -626,6 +623,13 @@ fn handle_checkpoint(args: &[String]) {
 
             // Process each repository separately
             for (repo_workdir, (repo, repo_file_paths)) in repo_files {
+                if !config.is_allowed_repository(&Some(repo.clone())) {
+                    eprintln!(
+                        "Skipping checkpoint for {} because repository is excluded or not in allow_repositories list",
+                        repo_workdir.display()
+                    );
+                    continue;
+                }
                 repos_processed += 1;
                 eprintln!(
                     "Processing repository {}/{}: {}",
