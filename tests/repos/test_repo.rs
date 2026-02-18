@@ -906,11 +906,14 @@ impl TestRepo {
                     .target()
                     .map_err(|e| format!("Failed to get HEAD target: {}", e))?;
 
-                // Get the authorship log for the new commit
+                // Get the authorship log for the new commit.
+                // In hooks-only mode the wrapper pipeline doesn't run, so the
+                // authorship note may not exist yet.  Fall back to default.
                 let authorship_log =
                     match git_ai::git::refs::show_authorship_note(&repo, &head_commit) {
                         Some(content) => AuthorshipLog::deserialize_from_string(&content)
                             .map_err(|e| format!("Failed to parse authorship log: {}", e))?,
+                        None if !self.git_mode.uses_wrapper() => AuthorshipLog::default(),
                         None => {
                             return Err("No authorship log found for the new commit".to_string());
                         }
@@ -1228,6 +1231,7 @@ impl WorktreeRepo {
                     match git_ai::git::refs::show_authorship_note(&repo, &head_commit) {
                         Some(content) => AuthorshipLog::deserialize_from_string(&content)
                             .map_err(|e| format!("Failed to parse authorship log: {}", e))?,
+                        None if !self.git_mode.uses_wrapper() => AuthorshipLog::default(),
                         None => {
                             return Err("No authorship log found for the new commit".to_string());
                         }
