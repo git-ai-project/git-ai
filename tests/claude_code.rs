@@ -4,7 +4,8 @@ mod test_utils;
 
 use git_ai::authorship::transcript::Message;
 use git_ai::commands::checkpoint_agent::agent_presets::{
-    AgentCheckpointFlags, AgentCheckpointPreset, ClaudePreset,
+    AgentCheckpointFlags, AgentCheckpointPreset, ClaudePreset, extract_plan_from_tool_use,
+    is_plan_file_path,
 };
 use serde_json::json;
 use std::fs;
@@ -433,5 +434,347 @@ fn test_user_text_content_blocks_are_parsed_correctly() {
     assert!(
         matches!(transcript.messages()[1], Message::Assistant { .. }),
         "Second message should be Assistant"
+    );
+}
+
+// ===== Plan detection tests =====
+
+#[test]
+fn test_is_plan_file_path_detects_plan_files() {
+    // Standard plan file paths
+    assert!(is_plan_file_path(
+        "/Users/dev/.claude/projects/-Users-dev-myproject/plan.md"
+    ));
+    assert!(is_plan_file_path("/tmp/claude-plan.md"));
+    assert!(is_plan_file_path("/home/user/.claude/plan.md"));
+    assert!(is_plan_file_path("plan.md"));
+    assert!(is_plan_file_path("/some/path/my-plan.md"));
+    assert!(is_plan_file_path("/some/path/implementation-plan.md"));
+    assert!(is_plan_file_path("/some/path/PLAN.md"));
+
+    // Non-plan files should not match
+    assert!(!is_plan_file_path("/Users/dev/myproject/src/main.rs"));
+    assert!(!is_plan_file_path("/Users/dev/myproject/README.md"));
+    assert!(!is_plan_file_path("/Users/dev/myproject/index.ts"));
+    assert!(!is_plan_file_path(
+        "/Users/dev/.claude/projects/settings.json"
+    ));
+
+    // plan in directory but not in filename should not match
+    assert!(!is_plan_file_path("/plan/README.md"));
+
+    // plan in filename but not .md should not match
+    assert!(!is_plan_file_path("/some/path/plan.txt"));
+    assert!(!is_plan_file_path("/some/path/plan.json"));
+}
+
+#[test]
+fn test_extract_plan_from_write_tool() {
+    let input = serde_json::json!({
+        "file_path": "/Users/dev/.claude/projects/-Users-dev-myproject/plan.md",
+        "content": "# My Plan\n\n## Step 1\nDo something"
+    });
+
+    let result = extract_plan_from_tool_use("Write", &input);
+    assert!(result.is_some());
+    assert_eq!(result.unwrap(), "# My Plan\n\n## Step 1\nDo something");
+}
+
+#[test]
+fn test_extract_plan_from_edit_tool() {
+    let input = serde_json::json!({
+        "file_path": "/Users/dev/.claude/projects/-Users-dev-myproject/plan.md",
+        "old_string": "## Step 1\nDo something",
+        "new_string": "## Step 1\nDo something specific\n## Step 2\nDo something else"
+    });
+
+    let result = extract_plan_from_tool_use("Edit", &input);
+    assert!(result.is_some());
+    let text = result.unwrap();
+    assert!(text.contains("--- old plan"));
+    assert!(text.contains("--- new plan"));
+    assert!(text.contains("Do something specific"));
+}
+
+#[test]
+fn test_extract_plan_returns_none_for_non_plan_files() {
+    let input = serde_json::json!({
+        "file_path": "/Users/dev/myproject/src/main.rs",
+        "content": "fn main() {}"
+    });
+
+    let result = extract_plan_from_tool_use("Write", &input);
+    assert!(result.is_none());
+}
+
+#[test]
+fn test_extract_plan_returns_none_for_non_write_edit_tools() {
+    let input = serde_json::json!({
+        "file_path": "/Users/dev/.claude/plan.md",
+        "content": "# Plan"
+    });
+
+    let result = extract_plan_from_tool_use("Read", &input);
+    assert!(result.is_none());
+}
+
+#[test]
+fn test_extract_plan_returns_none_for_empty_content() {
+    let input = serde_json::json!({
+        "file_path": "/Users/dev/.claude/plan.md",
+        "content": "   "
+    });
+
+    let result = extract_plan_from_tool_use("Write", &input);
+    assert!(result.is_none());
+}
+
+#[test]
+fn test_parse_claude_code_jsonl_with_plan() {
+    let fixture = fixture_path("claude-code-with-plan.jsonl");
+    let (transcript, model) =
+        ClaudePreset::transcript_and_model_from_claude_code_jsonl(fixture.to_str().unwrap())
+            .expect("Failed to parse JSONL");
+
+    // Verify model
+    assert_eq!(model.unwrap(), "claude-sonnet-4-20250514");
+
+    // Print for debugging
+    println!("Parsed {} messages:", transcript.messages().len());
+    for (i, message) in transcript.messages().iter().enumerate() {
+        match message {
+            Message::User { text, .. } => {
+                println!("{}: User: {}", i, text.chars().take(80).collect::<String>())
+            }
+            Message::Assistant { text, .. } => {
+                println!(
+                    "{}: Assistant: {}",
+                    i,
+                    text.chars().take(80).collect::<String>()
+                )
+            }
+            Message::ToolUse { name, .. } => {
+                println!("{}: ToolUse: {}", i, name)
+            }
+            Message::Thinking { text, .. } => {
+                println!(
+                    "{}: Thinking: {}",
+                    i,
+                    text.chars().take(80).collect::<String>()
+                )
+            }
+            Message::Plan { text, .. } => {
+                println!("{}: Plan: {}", i, text.chars().take(80).collect::<String>())
+            }
+        }
+    }
+
+    // Expected messages from the fixture:
+    // 1. User: "Help me implement user authentication"
+    // 2. Assistant: "I'll create a plan..."
+    // 3. Plan: Write to plan.md (full plan content)
+    // 4. Assistant: "Now let me update the plan..."
+    // 5. Plan: Edit to plan.md (old/new plan diff)
+    // 6. ToolUse: Edit to src/main.rs (NOT a plan - regular code edit)
+    // 7. Assistant: "I've created the plan and started implementing..."
+    assert_eq!(
+        transcript.messages().len(),
+        7,
+        "Expected 7 messages (1 user + 3 assistant + 2 plan + 1 tool_use)"
+    );
+
+    // Check User message
+    assert!(
+        matches!(&transcript.messages()[0], Message::User { text, .. } if text.contains("authentication")),
+        "First message should be User asking about authentication"
+    );
+
+    // Check Assistant text
+    assert!(
+        matches!(&transcript.messages()[1], Message::Assistant { .. }),
+        "Second message should be Assistant"
+    );
+
+    // Check Plan from Write (full plan content)
+    match &transcript.messages()[2] {
+        Message::Plan { text, timestamp } => {
+            assert!(
+                text.contains("Authentication Implementation Plan"),
+                "Plan should contain the plan title"
+            );
+            assert!(
+                text.contains("Phase 1: Database Schema"),
+                "Plan should contain phase 1"
+            );
+            assert!(
+                text.contains("POST /auth/register"),
+                "Plan should contain API endpoints"
+            );
+            assert!(timestamp.is_some(), "Plan should have a timestamp");
+        }
+        other => panic!("Expected Plan message, got {:?}", other),
+    }
+
+    // Check Assistant text before edit
+    assert!(
+        matches!(&transcript.messages()[3], Message::Assistant { .. }),
+        "Fourth message should be Assistant"
+    );
+
+    // Check Plan from Edit (old/new diff)
+    match &transcript.messages()[4] {
+        Message::Plan { text, .. } => {
+            assert!(
+                text.contains("--- old plan"),
+                "Edit plan should contain old plan marker"
+            );
+            assert!(
+                text.contains("--- new plan"),
+                "Edit plan should contain new plan marker"
+            );
+            assert!(
+                text.contains("UUID"),
+                "New plan content should contain the updated text"
+            );
+        }
+        other => panic!("Expected Plan message from Edit, got {:?}", other),
+    }
+
+    // Check ToolUse for non-plan Edit (regular code edit to main.rs)
+    match &transcript.messages()[5] {
+        Message::ToolUse { name, input, .. } => {
+            assert_eq!(name, "Edit", "Should be an Edit tool use");
+            assert!(
+                input["file_path"].as_str().unwrap().contains("src/main.rs"),
+                "Should be editing main.rs, not a plan file"
+            );
+        }
+        other => panic!("Expected ToolUse for code edit, got {:?}", other),
+    }
+
+    // Check final Assistant text
+    assert!(
+        matches!(&transcript.messages()[6], Message::Assistant { .. }),
+        "Last message should be Assistant"
+    );
+}
+
+#[test]
+fn test_plan_write_with_inline_jsonl() {
+    // Test with minimal inline JSONL to verify Write to plan file becomes Message::Plan
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    let jsonl_content = r##"{"type":"assistant","message":{"model":"claude-sonnet-4-20250514","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Write","input":{"file_path":"/home/user/.claude/projects/test/plan.md","content":"# Plan\n\n1. First step\n2. Second step"}}]},"timestamp":"2025-01-01T00:00:00Z"}"##;
+
+    let mut temp_file = NamedTempFile::new().unwrap();
+    temp_file.write_all(jsonl_content.as_bytes()).unwrap();
+    let temp_path = temp_file.path().to_str().unwrap();
+
+    let (transcript, _) =
+        ClaudePreset::transcript_and_model_from_claude_code_jsonl(temp_path).unwrap();
+
+    assert_eq!(transcript.messages().len(), 1);
+    match &transcript.messages()[0] {
+        Message::Plan { text, .. } => {
+            assert_eq!(text, "# Plan\n\n1. First step\n2. Second step");
+        }
+        other => panic!("Expected Plan, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_plan_edit_with_inline_jsonl() {
+    // Test with minimal inline JSONL to verify Edit to plan file becomes Message::Plan
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    let jsonl_content = r##"{"type":"assistant","message":{"model":"claude-sonnet-4-20250514","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Edit","input":{"file_path":"/tmp/plan.md","old_string":"1. First step","new_string":"1. First step (done)\n2. New step"}}]},"timestamp":"2025-01-01T00:00:00Z"}"##;
+
+    let mut temp_file = NamedTempFile::new().unwrap();
+    temp_file.write_all(jsonl_content.as_bytes()).unwrap();
+    let temp_path = temp_file.path().to_str().unwrap();
+
+    let (transcript, _) =
+        ClaudePreset::transcript_and_model_from_claude_code_jsonl(temp_path).unwrap();
+
+    assert_eq!(transcript.messages().len(), 1);
+    match &transcript.messages()[0] {
+        Message::Plan { text, .. } => {
+            assert!(text.contains("--- old plan"));
+            assert!(text.contains("1. First step"));
+            assert!(text.contains("--- new plan"));
+            assert!(text.contains("1. First step (done)"));
+        }
+        other => panic!("Expected Plan, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_non_plan_edit_remains_tool_use() {
+    // Verify that Edit to non-plan files still creates ToolUse messages
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    let jsonl_content = r##"{"type":"assistant","message":{"model":"claude-sonnet-4-20250514","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Edit","input":{"file_path":"/home/user/project/src/main.rs","old_string":"old code","new_string":"new code"}}]},"timestamp":"2025-01-01T00:00:00Z"}"##;
+
+    let mut temp_file = NamedTempFile::new().unwrap();
+    temp_file.write_all(jsonl_content.as_bytes()).unwrap();
+    let temp_path = temp_file.path().to_str().unwrap();
+
+    let (transcript, _) =
+        ClaudePreset::transcript_and_model_from_claude_code_jsonl(temp_path).unwrap();
+
+    assert_eq!(transcript.messages().len(), 1);
+    assert!(
+        matches!(&transcript.messages()[0], Message::ToolUse { name, .. } if name == "Edit"),
+        "Non-plan Edit should remain as ToolUse"
+    );
+}
+
+#[test]
+fn test_plan_message_serialization_roundtrip() {
+    // Verify that Plan messages serialize and deserialize correctly
+    let plan_msg = Message::Plan {
+        text: "# My Plan\n\n## Step 1\nDo something".to_string(),
+        timestamp: Some("2025-01-01T00:00:00Z".to_string()),
+    };
+
+    let serialized = serde_json::to_string(&plan_msg).unwrap();
+    let deserialized: Message = serde_json::from_str(&serialized).unwrap();
+
+    assert_eq!(plan_msg, deserialized);
+    // Verify serde tag is "plan"
+    assert!(serialized.contains(r#""type":"plan""#));
+}
+
+#[test]
+fn test_mixed_plan_and_code_edits_in_single_assistant_message() {
+    // Test that a single assistant message with both plan and code edits
+    // correctly separates them into Plan and ToolUse messages
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    let jsonl_content = r##"{"type":"assistant","message":{"model":"claude-sonnet-4-20250514","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Write","input":{"file_path":"/home/user/.claude/projects/test/plan.md","content":"# Plan\nStep 1"}},{"type":"tool_use","id":"toolu_2","name":"Write","input":{"file_path":"/home/user/project/src/lib.rs","content":"pub fn hello() {}"}}]},"timestamp":"2025-01-01T00:00:00Z"}"##;
+
+    let mut temp_file = NamedTempFile::new().unwrap();
+    temp_file.write_all(jsonl_content.as_bytes()).unwrap();
+    let temp_path = temp_file.path().to_str().unwrap();
+
+    let (transcript, _) =
+        ClaudePreset::transcript_and_model_from_claude_code_jsonl(temp_path).unwrap();
+
+    assert_eq!(transcript.messages().len(), 2);
+
+    // First should be Plan (plan.md write)
+    assert!(
+        matches!(&transcript.messages()[0], Message::Plan { text, .. } if text.contains("Step 1")),
+        "First tool_use should become Plan"
+    );
+
+    // Second should be ToolUse (lib.rs write)
+    assert!(
+        matches!(&transcript.messages()[1], Message::ToolUse { name, .. } if name == "Write"),
+        "Second tool_use should remain ToolUse"
     );
 }
