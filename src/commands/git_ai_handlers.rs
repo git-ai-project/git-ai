@@ -28,13 +28,6 @@ pub fn handle_git_ai(args: &[String]) {
         return;
     }
 
-    let current_dir = env::current_dir().unwrap().to_string_lossy().to_string();
-    let repository_option = find_repository_in_path(&current_dir).ok();
-
-    let config = config::Config::get();
-
-    let allowed_repository = config.is_allowed_repository(&repository_option);
-
     // Start DB warmup early for commands that need database access
     match args[0].as_str() {
         "checkpoint" | "show-prompt" | "share" | "sync-prompts" | "flush-cas" | "search"
@@ -75,12 +68,6 @@ pub fn handle_git_ai(args: &[String]) {
             commands::show::handle_show(&args[1..]);
         }
         "checkpoint" => {
-            if !allowed_repository {
-                eprintln!(
-                    "Skipping checkpoint because repository is excluded or not in allow_repositories list"
-                );
-                std::process::exit(0);
-            }
             handle_checkpoint(&args[1..]);
         }
         "blame" => {
