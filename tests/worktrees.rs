@@ -647,15 +647,17 @@ fn test_worktree_config_overrides_global_config() {
 
     let temp_home = temp_dir_with_prefix("git-ai-home");
     let home_str = temp_home.to_str().expect("valid home path");
+    let global_config = temp_home.join("gitconfig");
+    let global_config_str = global_config.to_str().expect("valid config path");
     base_repo
         .git_with_env(
             &["config", "--global", "user.name", "Global"],
-            &[("HOME", home_str)],
+            &[("HOME", home_str), ("GIT_CONFIG_GLOBAL", global_config_str)],
             None,
         )
         .expect("set global user.name");
 
-    let envs = [("HOME", home_str)];
+    let envs = [("HOME", home_str), ("GIT_CONFIG_GLOBAL", global_config_str)];
 
     write_file(&base_repo, "file.txt", "base\n");
     base_repo.git_ai_with_env(&["checkpoint"], &envs).unwrap();
