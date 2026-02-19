@@ -270,6 +270,10 @@ fn test_rebase_complete_rewrite_event_recorded_once() {
 
 #[test]
 fn test_cherry_pick_complete_rewrite_event_recorded_once() {
+    if !test_mode_uses_wrapper() {
+        // git cherry-pick does not fire post-rewrite; tracking requires the wrapper.
+        return;
+    }
     let repo = TestRepo::new();
     let default_branch = repo.current_branch();
 
