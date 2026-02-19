@@ -1222,6 +1222,27 @@ fn process_rebase_completion_from_start(
     let _ = maybe_restore_rebase_autostash(repository, &new_head);
 }
 
+/// Best-effort heuristic to detect the reset mode from worktree state.
+///
+/// **Known limitation:** This function is called during the `reference-transaction
+/// committed` hook phase, at which point git has updated the branch ref but has
+/// NOT yet updated the index or worktree.  This means:
+///
+/// - For `--hard` resets the index still matches the old HEAD, so `status()`
+///   reports staged changes and this function returns `Soft` instead of `Hard`.
+/// - For `--mixed` resets the same timing issue applies, though the code path
+///   for `Soft` and `Mixed` is identical (`reconstruct_working_log_after_reset`),
+///   so the behavior is coincidentally correct.
+/// - No git hook fires after the worktree update for reset, so there is no
+///   reliable way to distinguish `--hard` from `--mixed` within hooks alone.
+///
+/// The wrapper path (`git-ai` binary invoked as `git`) handles this correctly
+/// by parsing the actual command-line flags.  In core-hooks-only mode the
+/// `--hard` misclassification means `reconstruct_working_log_after_reset` is
+/// called instead of `delete_working_log_for_base_commit`.  This preserves
+/// stale attribution metadata; however, since the worktree content is reset to
+/// the target commit, the stale entries reference lines that no longer exist
+/// and are pruned on the next checkpoint / commit cycle.
 fn detect_reset_mode_from_worktree(repository: &Repository) -> ResetKind {
     let entries = repository.status(None, false).unwrap_or_default();
 
@@ -1504,19 +1525,44 @@ pub fn managed_core_hooks_dir() -> Result<PathBuf, GitAiError> {
     Ok(home.join(".git-ai").join("core-hooks"))
 }
 
+/// Hooks that receive data on stdin from git (old/new SHA pairs, ref updates, etc.).
+/// These need stdin buffering so it can be replayed for chained user hooks.
+const STDIN_HOOKS: &[&str] = &["post-rewrite", "reference-transaction", "pre-push"];
+
 /// Writes git hook shims that dispatch to `git-ai hook <hook-name>`.
 pub fn write_core_hook_scripts(hooks_dir: &Path, git_ai_binary: &Path) -> Result<(), GitAiError> {
     fs::create_dir_all(hooks_dir)?;
     let binary = normalize_hook_binary_path(git_ai_binary);
 
     for hook in INSTALLED_HOOKS {
+        let uses_stdin = STDIN_HOOKS.contains(hook);
+
+        // For hooks that receive data on stdin (post-rewrite, reference-transaction,
+        // pre-push), we buffer stdin so it can be replayed for both the git-ai
+        // invocation and the chained user hook.
+        let stdin_capture = if uses_stdin {
+            "_stdin_buf=$(cat)\n"
+        } else {
+            ""
+        };
+        let invoke_prefix = if uses_stdin {
+            r#"printf '%s' "$_stdin_buf" | "#
+        } else {
+            ""
+        };
+        let chain_prefix = if uses_stdin {
+            r#"printf '%s' "$_stdin_buf" | "#
+        } else {
+            ""
+        };
+
         let script = format!(
             r#"#!/bin/sh
 if [ "${{{skip_env}:-}}" = "1" ]; then
   exit 0
 fi
 
-"{bin}" hook {hook} "$@"
+{stdin_capture}{invoke_prefix}"{bin}" hook {hook} "$@"
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 previous_hooks_file="$script_dir/{previous_hooks_file}"
@@ -1572,7 +1618,7 @@ run_chained_hook() {{
 
 if [ -n "$previous_hooks_dir" ]; then
   previous_hook="$previous_hooks_dir/{hook}"
-  run_chained_hook "$previous_hook" "$@"
+  {chain_prefix}run_chained_hook "$previous_hook" "$@"
   previous_status=$?
   if [ $previous_status -ne 0 ]; then
     exit $previous_status
@@ -1580,7 +1626,7 @@ if [ -n "$previous_hooks_dir" ]; then
 else
   repo_git_dir="${{GIT_DIR:-.git}}"
   repo_hook="$repo_git_dir/hooks/{hook}"
-  run_chained_hook "$repo_hook" "$@"
+  {chain_prefix}run_chained_hook "$repo_hook" "$@"
   repo_status=$?
   if [ $repo_status -ne 0 ]; then
     exit $repo_status
@@ -1593,6 +1639,9 @@ exit 0
             bin = binary,
             hook = hook,
             previous_hooks_file = PREVIOUS_HOOKS_PATH_FILE,
+            stdin_capture = stdin_capture,
+            invoke_prefix = invoke_prefix,
+            chain_prefix = chain_prefix,
         );
         let hook_path = hooks_dir.join(hook);
         fs::write(&hook_path, script)?;

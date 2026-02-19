@@ -817,6 +817,16 @@ pub fn resolve_previous_non_managed_hooks_path(repo: Option<&Repository>) -> Opt
     should_forward_repo_state_first(repo)
 }
 
+/// Returns `true` when hooks mode is active for the given repository, i.e.
+/// when a repo hook state file (`.git/ai/git_hooks_state.json`) exists.
+pub fn is_hooks_mode_active(repo: Option<&Repository>) -> bool {
+    let state_path = repo.map(repo_state_path).or_else(repo_state_path_from_env);
+    match state_path {
+        Some(path) => path.exists(),
+        None => false,
+    }
+}
+
 fn execute_forwarded_hook(
     hook_name: &str,
     hook_args: &[String],

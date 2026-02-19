@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use crate::authorship::virtual_attribution::VirtualAttributions;
 use crate::commands::git_hook_handlers::{
-    ENV_SKIP_MANAGED_HOOKS, resolve_previous_non_managed_hooks_path,
+    ENV_SKIP_MANAGED_HOOKS, is_hooks_mode_active, resolve_previous_non_managed_hooks_path,
 };
 use crate::commands::hooks::checkout_hooks;
 use crate::commands::hooks::cherry_pick_hooks;
@@ -549,6 +549,12 @@ fn resolve_child_git_hooks_path_override(
     repository: Option<&Repository>,
 ) -> Option<String> {
     if !command_uses_managed_hooks(parsed_args.command.as_deref()) {
+        return None;
+    }
+
+    // In wrapper-only mode (no hooks state file), don't override hooks path.
+    // Let git use its default hook discovery (.git/hooks/ or core.hooksPath).
+    if !is_hooks_mode_active(repository) {
         return None;
     }
 
