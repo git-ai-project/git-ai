@@ -106,22 +106,29 @@ fn get_observability() -> &'static Mutex<ObservabilityInner> {
     })
 }
 
-/// Append an envelope (buffer if no repo context, write to disk if context set)
-fn append_envelope(envelope: LogEnvelope) {
-    let mut obs = get_observability().lock().unwrap();
+/// Append an envelope (buffer if no repo context, write to disk if context set).
+/// No-op in test builds to avoid polluting the user's ~/.git-ai/internal/logs.
+fn append_envelope(#[cfg_attr(any(test, feature = "test-support"), allow(unused))] envelope: LogEnvelope) {
+    #[cfg(any(test, feature = "test-support"))]
+    return;
 
-    match &mut obs.mode {
-        LogMode::Buffered(buffer) => {
-            buffer.push(envelope);
-        }
-        LogMode::Disk(log_path) => {
-            let log_path = log_path.clone();
-            drop(obs); // Release lock before file I/O
+    #[cfg(not(any(test, feature = "test-support")))]
+    {
+        let mut obs = get_observability().lock().unwrap();
 
-            if let Some(json) = envelope.to_json()
-                && let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path)
-            {
-                let _ = writeln!(file, "{}", json);
+        match &mut obs.mode {
+            LogMode::Buffered(buffer) => {
+                buffer.push(envelope);
+            }
+            LogMode::Disk(log_path) => {
+                let log_path = log_path.clone();
+                drop(obs); // Release lock before file I/O
+
+                if let Some(json) = envelope.to_json()
+                    && let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path)
+                {
+                    let _ = writeln!(file, "{}", json);
+                }
             }
         }
     }
@@ -233,29 +240,21 @@ fn should_spawn_background_flush() -> bool {
 /// Events are batched into envelopes of up to 250 events each.
 /// The flush-logs command will then upload them to the API or
 /// store them in SQLite for later upload.
-pub fn log_metrics(
-    #[cfg_attr(any(test, feature = "test-support"), allow(unused))] events: Vec<MetricEvent>,
-) {
-    #[cfg(any(test, feature = "test-support"))]
-    return;
+pub fn log_metrics(events: Vec<MetricEvent>) {
+    if events.is_empty() {
+        return;
+    }
 
-    #[cfg(not(any(test, feature = "test-support")))]
-    {
-        if events.is_empty() {
-            return;
-        }
+    // Split into chunks of MAX_METRICS_PER_ENVELOPE
+    for chunk in events.chunks(MAX_METRICS_PER_ENVELOPE) {
+        let envelope = MetricsEnvelope {
+            event_type: "metrics".to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            version: METRICS_API_VERSION,
+            events: chunk.to_vec(),
+        };
 
-        // Split into chunks of MAX_METRICS_PER_ENVELOPE
-        for chunk in events.chunks(MAX_METRICS_PER_ENVELOPE) {
-            let envelope = MetricsEnvelope {
-                event_type: "metrics".to_string(),
-                timestamp: chrono::Utc::now().to_rfc3339(),
-                version: METRICS_API_VERSION,
-                events: chunk.to_vec(),
-            };
-
-            append_envelope(LogEnvelope::Metrics(envelope));
-        }
+        append_envelope(LogEnvelope::Metrics(envelope));
     }
 }
 
