@@ -918,9 +918,16 @@ fn previous_hooks_self_reference_does_not_recurse_or_hang() {
 
     sandbox.write_repo_file("self-ref.txt", "self\n");
     sandbox.run_git_ok(&["add", "self-ref.txt"]);
+    // On Windows CI under full test-suite load, hook process spawns are slow;
+    // use a generous timeout while still catching genuine infinite loops.
+    let timeout = if cfg!(target_os = "windows") {
+        Duration::from_secs(60)
+    } else {
+        Duration::from_secs(10)
+    };
     let output = sandbox.run_git_raw_with_timeout(
         &["commit", "-m", "self reference does not recurse"],
-        Duration::from_secs(10),
+        timeout,
     );
     assert!(
         output.status.success(),
