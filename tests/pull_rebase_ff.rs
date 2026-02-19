@@ -538,6 +538,14 @@ fn test_pull_rebase_skip_commit_does_not_map_entire_upstream_history() {
 
 #[test]
 fn test_failed_pull_rebase_without_autostash_does_not_leak_stale_ai_metadata() {
+    // Stale metadata cleanup after `git reset --hard` requires the wrapper
+    // binary; there is no post-reset hook in git.
+    let mode = std::env::var("GIT_AI_TEST_GIT_MODE")
+        .unwrap_or_else(|_| "wrapper".to_string())
+        .to_lowercase();
+    if mode == "hooks" {
+        return;
+    }
     let setup = setup_divergent_pull_test();
     let local = setup.local;
 
