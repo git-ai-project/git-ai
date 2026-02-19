@@ -3380,6 +3380,7 @@ mod tests {
                 accepted_lines: 5,
                 overriden_lines: 0,
                 messages_url: None,
+                parent_id: None,
             },
         );
 
@@ -3568,6 +3569,7 @@ mod tests {
                 accepted_lines: 13,
                 overriden_lines: 0,
                 messages_url: None,
+                parent_id: None,
             },
         );
         prompts.insert(
@@ -3585,6 +3587,7 @@ mod tests {
                 accepted_lines: 6,
                 overriden_lines: 0,
                 messages_url: None,
+                parent_id: None,
             },
         );
 
@@ -3691,6 +3694,7 @@ mod tests {
                 accepted_lines: 3,
                 overriden_lines: 0,
                 messages_url: None,
+                parent_id: None,
             },
         );
 
@@ -3830,6 +3834,7 @@ mod tests {
                 accepted_lines: 4,
                 overriden_lines: 0,
                 messages_url: None,
+                parent_id: None,
             },
         );
         let old_wl = repo
@@ -3952,6 +3957,7 @@ mod tests {
                 accepted_lines: 8,
                 overriden_lines: 0,
                 messages_url: None,
+                parent_id: None,
             },
         );
         let v1_wl = repo
@@ -4119,6 +4125,7 @@ mod tests {
                 accepted_lines: 13,
                 overriden_lines: 0,
                 messages_url: None,
+                parent_id: None,
             },
         );
         prompts.insert(
@@ -4136,6 +4143,7 @@ mod tests {
                 accepted_lines: 16,
                 overriden_lines: 0,
                 messages_url: None,
+                parent_id: None,
             },
         );
 

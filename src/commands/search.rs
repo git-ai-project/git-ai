@@ -1440,6 +1440,7 @@ mod tests {
             accepted_lines: 0,
             overriden_lines: 0,
             messages_url: None,
+            parent_id: None,
         }
     }
 

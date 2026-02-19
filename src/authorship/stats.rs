@@ -1310,6 +1310,7 @@ mod tests {
                 accepted_lines: 5,
                 overriden_lines: 0,
                 messages_url: None,
+                parent_id: None,
             },
         );
 
@@ -1355,6 +1356,7 @@ mod tests {
                 accepted_lines: 3,
                 overriden_lines: 0,
                 messages_url: None,
+                parent_id: None,
             },
         );
 
@@ -1402,6 +1404,7 @@ mod tests {
                 accepted_lines: 3,
                 overriden_lines: 0,
                 messages_url: None,
+                parent_id: None,
             },
         );
 
@@ -1770,6 +1773,7 @@ mod tests {
                 accepted_lines: 0,
                 overriden_lines: 100, // Unrealistically high
                 messages_url: None,
+                parent_id: None,
             },
         );
 

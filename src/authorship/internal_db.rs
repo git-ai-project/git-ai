@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 /// Current schema version (must match MIGRATIONS.len())
-const SCHEMA_VERSION: usize = 3;
+const SCHEMA_VERSION: usize = 4;
 
 /// Database migrations - each migration upgrades the schema by one version
 /// Migration at index N upgrades from version N to version N+1
@@ -77,6 +77,10 @@ const MIGRATIONS: &[&str] = &[
         cached_at INTEGER NOT NULL
     );
     "#,
+    // Migration 3 -> 4: Add parent_id for subagent prompt records
+    r#"
+    ALTER TABLE prompts ADD COLUMN parent_id TEXT;
+    "#,
 ];
 
 /// Global database singleton
@@ -98,6 +102,7 @@ pub struct PromptDbRecord {
     pub total_deletions: Option<u32>,                    // Line deletions from checkpoint stats
     pub accepted_lines: Option<u32>,                     // Lines accepted in commit (future)
     pub overridden_lines: Option<u32>,                   // Lines overridden in commit (future)
+    pub parent_id: Option<String>,                       // Parent prompt hash (for subagent records)
     pub created_at: i64,                                 // Unix timestamp
     pub updated_at: i64,                                 // Unix timestamp
 }
@@ -138,6 +143,7 @@ impl PromptDbRecord {
             total_deletions: Some(checkpoint.line_stats.deletions),
             accepted_lines: None,   // Not yet calculated
             overridden_lines: None, // Not yet calculated
+            parent_id: None,
             created_at,
             updated_at,
         })
@@ -161,6 +167,7 @@ impl PromptDbRecord {
             accepted_lines: self.accepted_lines.unwrap_or(0),
             overriden_lines: self.overridden_lines.unwrap_or(0),
             messages_url: None,
+            parent_id: self.parent_id.clone(),
         }
     }
 
@@ -506,8 +513,8 @@ impl InternalDatabase {
                 id, workdir, tool, model, external_thread_id,
                 messages, commit_sha, agent_metadata, human_author,
                 total_additions, total_deletions, accepted_lines,
-                overridden_lines, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                overridden_lines, created_at, updated_at, parent_id
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
             ON CONFLICT(id) DO UPDATE SET
                 workdir = excluded.workdir,
                 model = excluded.model,
@@ -519,7 +526,8 @@ impl InternalDatabase {
                 total_deletions = excluded.total_deletions,
                 accepted_lines = excluded.accepted_lines,
                 overridden_lines = excluded.overridden_lines,
-                updated_at = excluded.updated_at
+                updated_at = excluded.updated_at,
+                parent_id = excluded.parent_id
             "#,
             params![
                 record.id,
@@ -537,6 +545,7 @@ impl InternalDatabase {
                 record.overridden_lines,
                 record.created_at,
                 record.updated_at,
+                record.parent_id,
             ],
         )?;
 
@@ -559,8 +568,8 @@ impl InternalDatabase {
                     id, workdir, tool, model, external_thread_id,
                     messages, commit_sha, agent_metadata, human_author,
                     total_additions, total_deletions, accepted_lines,
-                    overridden_lines, created_at, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                    overridden_lines, created_at, updated_at, parent_id
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
                 ON CONFLICT(id) DO UPDATE SET
                     workdir = excluded.workdir,
                     model = excluded.model,
@@ -572,7 +581,8 @@ impl InternalDatabase {
                     total_deletions = excluded.total_deletions,
                     accepted_lines = excluded.accepted_lines,
                     overridden_lines = excluded.overridden_lines,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at,
+                    parent_id = excluded.parent_id
                 "#,
             )?;
 
@@ -599,6 +609,7 @@ impl InternalDatabase {
                     record.overridden_lines,
                     record.created_at,
                     record.updated_at,
+                    record.parent_id,
                 ])?;
             }
         }
@@ -613,7 +624,7 @@ impl InternalDatabase {
             "SELECT id, workdir, tool, model, external_thread_id, messages,
                     commit_sha, agent_metadata, human_author,
                     total_additions, total_deletions, accepted_lines,
-                    overridden_lines, created_at, updated_at
+                    overridden_lines, created_at, updated_at, parent_id
              FROM prompts WHERE id = ?1",
         )?;
 
@@ -645,6 +656,7 @@ impl InternalDatabase {
                 total_deletions: row.get(10)?,
                 accepted_lines: row.get(11)?,
                 overridden_lines: row.get(12)?,
+                parent_id: row.get(15)?,
                 created_at: row.get(13)?,
                 updated_at: row.get(14)?,
             })
@@ -667,7 +679,7 @@ impl InternalDatabase {
             "SELECT id, workdir, tool, model, external_thread_id, messages,
                     commit_sha, agent_metadata, human_author,
                     total_additions, total_deletions, accepted_lines,
-                    overridden_lines, created_at, updated_at
+                    overridden_lines, created_at, updated_at, parent_id
              FROM prompts WHERE commit_sha = ?1",
         )?;
 
@@ -699,6 +711,7 @@ impl InternalDatabase {
                 total_deletions: row.get(10)?,
                 accepted_lines: row.get(11)?,
                 overridden_lines: row.get(12)?,
+                parent_id: row.get(15)?,
                 created_at: row.get(13)?,
                 updated_at: row.get(14)?,
             })
@@ -725,7 +738,7 @@ impl InternalDatabase {
                 "SELECT id, workdir, tool, model, external_thread_id, messages,
                         commit_sha, agent_metadata, human_author,
                         total_additions, total_deletions, accepted_lines,
-                        overridden_lines, created_at, updated_at
+                        overridden_lines, created_at, updated_at, parent_id
                  FROM prompts WHERE workdir = ?1 AND updated_at >= ?2 ORDER BY updated_at DESC LIMIT ?3 OFFSET ?4".to_string(),
                 vec![Box::new(wd.to_string()), Box::new(ts), Box::new(limit as i64), Box::new(offset as i64)],
             ),
@@ -733,7 +746,7 @@ impl InternalDatabase {
                 "SELECT id, workdir, tool, model, external_thread_id, messages,
                         commit_sha, agent_metadata, human_author,
                         total_additions, total_deletions, accepted_lines,
-                        overridden_lines, created_at, updated_at
+                        overridden_lines, created_at, updated_at, parent_id
                  FROM prompts WHERE workdir = ?1 ORDER BY updated_at DESC LIMIT ?2 OFFSET ?3".to_string(),
                 vec![Box::new(wd.to_string()), Box::new(limit as i64), Box::new(offset as i64)],
             ),
@@ -741,7 +754,7 @@ impl InternalDatabase {
                 "SELECT id, workdir, tool, model, external_thread_id, messages,
                         commit_sha, agent_metadata, human_author,
                         total_additions, total_deletions, accepted_lines,
-                        overridden_lines, created_at, updated_at
+                        overridden_lines, created_at, updated_at, parent_id
                  FROM prompts WHERE updated_at >= ?1 ORDER BY updated_at DESC LIMIT ?2 OFFSET ?3".to_string(),
                 vec![Box::new(ts), Box::new(limit as i64), Box::new(offset as i64)],
             ),
@@ -749,7 +762,7 @@ impl InternalDatabase {
                 "SELECT id, workdir, tool, model, external_thread_id, messages,
                         commit_sha, agent_metadata, human_author,
                         total_additions, total_deletions, accepted_lines,
-                        overridden_lines, created_at, updated_at
+                        overridden_lines, created_at, updated_at, parent_id
                  FROM prompts ORDER BY updated_at DESC LIMIT ?1 OFFSET ?2".to_string(),
                 vec![Box::new(limit as i64), Box::new(offset as i64)],
             ),
@@ -786,6 +799,7 @@ impl InternalDatabase {
                 total_deletions: row.get(10)?,
                 accepted_lines: row.get(11)?,
                 overridden_lines: row.get(12)?,
+                parent_id: row.get(15)?,
                 created_at: row.get(13)?,
                 updated_at: row.get(14)?,
             })
@@ -814,7 +828,7 @@ impl InternalDatabase {
                 "SELECT id, workdir, tool, model, external_thread_id, messages,
                         commit_sha, agent_metadata, human_author,
                         total_additions, total_deletions, accepted_lines,
-                        overridden_lines, created_at, updated_at
+                        overridden_lines, created_at, updated_at, parent_id
                  FROM prompts WHERE messages LIKE ?1 AND workdir = ?2 ORDER BY updated_at DESC LIMIT ?3 OFFSET ?4".to_string(),
                 vec![Box::new(search_pattern), Box::new(wd.to_string()), Box::new(limit as i64), Box::new(offset as i64)],
             ),
@@ -822,7 +836,7 @@ impl InternalDatabase {
                 "SELECT id, workdir, tool, model, external_thread_id, messages,
                         commit_sha, agent_metadata, human_author,
                         total_additions, total_deletions, accepted_lines,
-                        overridden_lines, created_at, updated_at
+                        overridden_lines, created_at, updated_at, parent_id
                  FROM prompts WHERE messages LIKE ?1 ORDER BY updated_at DESC LIMIT ?2 OFFSET ?3".to_string(),
                 vec![Box::new(search_pattern), Box::new(limit as i64), Box::new(offset as i64)],
             ),
@@ -859,6 +873,7 @@ impl InternalDatabase {
                 total_deletions: row.get(10)?,
                 accepted_lines: row.get(11)?,
                 overridden_lines: row.get(12)?,
+                parent_id: row.get(15)?,
                 created_at: row.get(13)?,
                 updated_at: row.get(14)?,
             })
@@ -1103,6 +1118,7 @@ mod tests {
             total_deletions: Some(5),
             accepted_lines: None,
             overridden_lines: None,
+            parent_id: None,
             created_at: 1234567890,
             updated_at: 1234567890,
         }
@@ -1173,7 +1189,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "3");
+        assert_eq!(version, "4");
     }
 
     #[test]
