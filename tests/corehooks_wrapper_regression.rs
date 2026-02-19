@@ -6,6 +6,15 @@ use repos::test_file::ExpectedLineExt;
 use repos::test_repo::TestRepo;
 use std::fs;
 
+/// Returns true when the test mode uses the wrapper binary (wrapper or both).
+/// Reset tracking requires the wrapper because git has no post-reset hook.
+fn test_mode_uses_wrapper() -> bool {
+    let mode = std::env::var("GIT_AI_TEST_GIT_MODE")
+        .unwrap_or_else(|_| "wrapper".to_string())
+        .to_lowercase();
+    mode != "hooks"
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RewriteEventCounts {
     commit: usize,
@@ -119,6 +128,10 @@ fn test_commit_rewrite_event_recorded_once() {
 
 #[test]
 fn test_reset_rewrite_event_recorded_once() {
+    if !test_mode_uses_wrapper() {
+        // git reset has no hook; reset tracking requires the wrapper binary.
+        return;
+    }
     let repo = TestRepo::new();
 
     let mut file = repo.filename("test.txt");
@@ -147,6 +160,10 @@ fn test_reset_rewrite_event_recorded_once() {
 
 #[test]
 fn test_reset_hard_with_untracked_files_records_hard_mode() {
+    if !test_mode_uses_wrapper() {
+        // git reset has no hook; reset tracking requires the wrapper binary.
+        return;
+    }
     let repo = TestRepo::new();
 
     let mut file = repo.filename("tracked.txt");
