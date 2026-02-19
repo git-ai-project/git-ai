@@ -29,14 +29,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// [`sync_non_managed_core_hook_scripts`], which writes lightweight passthrough scripts.
 pub const INSTALLED_HOOKS: &[&str] = &[
     "pre-commit",
-    "prepare-commit-msg",
-    "commit-msg",
     "post-commit",
     "pre-rebase",
     "post-rewrite",
     "post-checkout",
     "post-merge",
-    "pre-merge-commit",
     "pre-push",
     "reference-transaction",
     "post-index-change",
@@ -1708,8 +1705,24 @@ if [ -f "$previous_hooks_file" ]; then
   previous_hooks_dir=$(printf '%s' "$previous_hooks_dir" | tr '\\' '/')
 fi
 
+# Detect self-reference: if previous hooks dir resolves to our own dir, skip.
+if [ -n "$previous_hooks_dir" ]; then
+  script_dir_real=$(CDPATH= cd -- "$script_dir" 2>/dev/null && pwd -P)
+  previous_hooks_dir_real=$(CDPATH= cd -- "$previous_hooks_dir" 2>/dev/null && pwd -P)
+  if [ -n "$script_dir_real" ] && [ -n "$previous_hooks_dir_real" ] && \
+     [ "$script_dir_real" = "$previous_hooks_dir_real" ]; then
+    previous_hooks_dir=""
+  fi
+fi
+
 if [ -n "$previous_hooks_dir" ]; then
   hook="$previous_hooks_dir/{hook}"
+
+  hook_normalized=$(printf '%s' "$hook" | tr '\\' '/')
+  self_normalized=$(printf '%s' "$0" | tr '\\' '/')
+  if [ "$hook_normalized" = "$self_normalized" ]; then
+    exit 0
+  fi
 
   is_windows_shell=0
   case "$(uname -s 2>/dev/null)" in
