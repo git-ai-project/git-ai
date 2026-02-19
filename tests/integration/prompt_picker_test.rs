@@ -62,6 +62,7 @@ fn create_test_prompt(
         total_deletions: Some(5),
         accepted_lines: Some(8),
         overridden_lines: Some(2),
+        parent_id: None,
         created_at: now - 3600, // 1 hour ago
         updated_at: now - 1800, // 30 minutes ago
     }
@@ -160,6 +161,7 @@ fn test_prompt_record_first_message_snippet_no_user_message() {
         total_deletions: None,
         accepted_lines: None,
         overridden_lines: None,
+        parent_id: None,
         created_at: now,
         updated_at: now,
     };
@@ -191,6 +193,7 @@ fn test_prompt_record_first_message_snippet_empty_transcript() {
         total_deletions: None,
         accepted_lines: None,
         overridden_lines: None,
+        parent_id: None,
         created_at: now,
         updated_at: now,
     };
@@ -235,6 +238,7 @@ fn test_prompt_record_message_count_empty() {
         total_deletions: None,
         accepted_lines: None,
         overridden_lines: None,
+        parent_id: None,
         created_at: now,
         updated_at: now,
     };
@@ -813,6 +817,7 @@ fn test_prompt_record_with_all_message_types() {
         total_deletions: None,
         accepted_lines: None,
         overridden_lines: None,
+        parent_id: None,
         created_at: now,
         updated_at: now,
     };
@@ -850,6 +855,7 @@ fn test_prompt_record_snippet_prefers_user_over_assistant() {
         total_deletions: None,
         accepted_lines: None,
         overridden_lines: None,
+        parent_id: None,
         created_at: now,
         updated_at: now,
     };
@@ -916,6 +922,7 @@ fn test_prompt_record_optional_fields_none() {
         total_deletions: None,
         accepted_lines: None,
         overridden_lines: None,
+        parent_id: None,
         created_at: now,
         updated_at: now,
     };
