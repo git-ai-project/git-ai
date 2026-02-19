@@ -632,6 +632,7 @@ fn test_blame_ai_authorship_hunk_splitting() {
             accepted_lines: 1,
             overriden_lines: 0,
             messages_url: None,
+            parent_id: None,
         },
     );
 
@@ -652,6 +653,7 @@ fn test_blame_ai_authorship_hunk_splitting() {
             accepted_lines: 1,
             overriden_lines: 0,
             messages_url: None,
+            parent_id: None,
         },
     );
 
@@ -712,6 +714,7 @@ fn test_blame_ai_authorship_no_splitting() {
             accepted_lines: 2,
             overriden_lines: 0,
             messages_url: None,
+            parent_id: None,
         },
     );
 

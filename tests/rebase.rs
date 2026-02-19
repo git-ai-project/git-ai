@@ -399,6 +399,7 @@ fn test_rebase_preserves_prompt_only_commit_note_metadata() {
             accepted_lines: 0,
             overriden_lines: 0,
             messages_url: None,
+            parent_id: None,
         },
     );
 

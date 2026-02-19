@@ -1124,6 +1124,7 @@ fn test_blame_ai_human_author() {
             accepted_lines: 1,
             overriden_lines: 0,
             messages_url: None,
+            parent_id: None,
         },
     );
 
@@ -1145,6 +1146,7 @@ fn test_blame_ai_human_author() {
             accepted_lines: 1,
             overriden_lines: 0,
             messages_url: None,
+            parent_id: None,
         },
     );
 
