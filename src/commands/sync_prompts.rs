@@ -203,7 +203,7 @@ fn update_prompt_record(record: &PromptDbRecord) -> Result<Option<PromptDbRecord
     );
 
     match result {
-        PromptUpdateResult::Updated(new_transcript, new_model) => {
+        PromptUpdateResult::Updated(new_transcript, new_model, _subagents) => {
             // Check if transcript actually changed
             if new_transcript == record.messages {
                 return Ok(None); // No actual change

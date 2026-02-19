@@ -1290,7 +1290,7 @@ fn handle_show_transcript(args: &[String]) {
         crate::error::GitAiError,
     > = match agent_name.as_str() {
         "claude" => match ClaudePreset::transcript_and_model_from_claude_code_jsonl(path_or_id) {
-            Ok((transcript, model)) => Ok((transcript, model)),
+            Ok((transcript, model, _subagents)) => Ok((transcript, model)),
             Err(e) => {
                 eprintln!("Error loading Claude transcript: {}", e);
                 std::process::exit(1);

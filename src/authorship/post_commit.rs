@@ -4,6 +4,7 @@ use crate::authorship::ignore::{
     build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher,
 };
 use crate::authorship::prompt_utils::{PromptUpdateResult, update_prompt_from_tool};
+use crate::authorship::transcript::AiTranscript;
 use crate::authorship::secrets::{redact_secrets_from_prompts, strip_prompt_messages};
 use crate::authorship::stats::{stats_for_commit_stats, write_stats_to_terminal};
 use crate::authorship::virtual_attribution::VirtualAttributions;
@@ -395,11 +396,29 @@ fn update_prompts_to_latest(checkpoints: &mut [Checkpoint]) -> Result<(), GitAiE
 
             // Apply the update to the last checkpoint only
             match result {
-                PromptUpdateResult::Updated(latest_transcript, latest_model) => {
+                PromptUpdateResult::Updated(latest_transcript, latest_model, subagents) => {
                     let checkpoint = &mut checkpoints[last_idx];
                     checkpoint.transcript = Some(latest_transcript);
                     if let Some(agent_id) = &mut checkpoint.agent_id {
                         agent_id.model = latest_model;
+                    }
+                    // Store subagent info in agent_metadata for downstream expansion
+                    if !subagents.is_empty() {
+                        let checkpoint = &mut checkpoints[last_idx];
+                        let metadata =
+                            checkpoint.agent_metadata.get_or_insert_with(HashMap::new);
+                        if let Ok(subagents_json) =
+                            serde_json::to_string(&subagents.iter().map(|s| {
+                                serde_json::json!({
+                                    "agent_id": s.agent_id,
+                                    "transcript": s.transcript,
+                                    "model": s.model,
+                                })
+                            }).collect::<Vec<_>>())
+                        {
+                            metadata
+                                .insert("__subagents".to_string(), subagents_json);
+                        }
                     }
                 }
                 PromptUpdateResult::Unchanged => {
@@ -454,6 +473,61 @@ fn batch_upsert_prompts_to_db(
             Some(commit_sha.to_string()),
         ) {
             records.push(record);
+        }
+
+        // Check for subagent data in agent_metadata and expand into separate records
+        if let Some(metadata) = &checkpoint.agent_metadata
+            && let Some(subagents_json) = metadata.get("__subagents")
+            && let Ok(subagents) =
+                serde_json::from_str::<Vec<serde_json::Value>>(subagents_json)
+        {
+            let parent_hash = checkpoint.agent_id.as_ref().map(|aid| {
+                crate::authorship::authorship_log_serialization::generate_short_hash(
+                    &aid.id, &aid.tool,
+                )
+            });
+            for subagent in subagents {
+                if let (Some(agent_id_str), Some(transcript_value)) = (
+                    subagent.get("agent_id").and_then(|v| v.as_str()),
+                    subagent.get("transcript"),
+                ) {
+                    let subagent_hash =
+                        crate::authorship::authorship_log_serialization::generate_short_hash(
+                            agent_id_str, "claude",
+                        );
+                    if let Ok(transcript) =
+                        serde_json::from_value::<AiTranscript>(transcript_value.clone())
+                    {
+                        let model = subagent
+                            .get("model")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs() as i64;
+                        records.push(PromptDbRecord {
+                            id: subagent_hash,
+                            workdir: Some(workdir.clone()),
+                            tool: "claude".to_string(),
+                            model,
+                            external_thread_id: agent_id_str.to_string(),
+                            messages: transcript,
+                            commit_sha: Some(commit_sha.to_string()),
+                            agent_metadata: None,
+                            human_author: Some(checkpoint.author.clone()),
+                            total_additions: None,
+                            total_deletions: None,
+                            accepted_lines: None,
+                            overridden_lines: None,
+                            parent_id: parent_hash.clone(),
+                            created_at: now,
+                            updated_at: now,
+                        });
+                    }
+                }
+            }
         }
     }
 

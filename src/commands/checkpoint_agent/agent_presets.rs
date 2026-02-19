@@ -31,6 +31,13 @@ pub struct AgentRunResult {
     pub dirty_files: Option<HashMap<String, String>>,
 }
 
+#[derive(Clone, Debug)]
+pub struct SubagentInfo {
+    pub agent_id: String,
+    pub transcript: AiTranscript,
+    pub model: Option<String>,
+}
+
 pub trait AgentCheckpointPreset {
     fn run(&self, flags: AgentCheckpointFlags) -> Result<AgentRunResult, GitAiError>;
 }
@@ -85,7 +92,7 @@ impl AgentCheckpointPreset for ClaudePreset {
         // Parse into transcript and extract model
         let (transcript, model) =
             match ClaudePreset::transcript_and_model_from_claude_code_jsonl(transcript_path) {
-                Ok((transcript, model)) => (transcript, model),
+                Ok((transcript, model, _subagents)) => (transcript, model),
                 Err(e) => {
                     eprintln!("[Warning] Failed to parse Claude JSONL: {e}");
                     log_error(
@@ -162,10 +169,11 @@ impl ClaudePreset {
     }
 
     /// Parse a Claude Code JSONL file into a transcript and extract model info.
-    /// Also discovers and includes subagent transcripts from the sibling subagents directory.
+    /// Also discovers subagent transcripts from the sibling subagents directory
+    /// and returns them as separate SubagentInfo entries.
     pub fn transcript_and_model_from_claude_code_jsonl(
         transcript_path: &str,
-    ) -> Result<(AiTranscript, Option<String>), GitAiError> {
+    ) -> Result<(AiTranscript, Option<String>, Vec<SubagentInfo>), GitAiError> {
         let jsonl_content =
             std::fs::read_to_string(transcript_path).map_err(GitAiError::IoError)?;
         let mut transcript = AiTranscript::new();
@@ -183,6 +191,7 @@ impl ClaudePreset {
         // Claude Code stores subagent JSONL files at:
         //   <session-uuid>/subagents/agent-<id>.jsonl
         // relative to the main transcript at <session-uuid>.jsonl
+        let mut subagents = Vec::new();
         let transcript_path_buf = Path::new(transcript_path);
         if let Some(stem) = transcript_path_buf.file_stem().and_then(|s| s.to_str()) {
             let subagents_dir = transcript_path_buf
@@ -210,22 +219,30 @@ impl ClaudePreset {
 
                 for subagent_path in subagent_files {
                     if let Ok(subagent_content) = std::fs::read_to_string(&subagent_path) {
-                        // Each subagent gets a separate model tracker since subagents
-                        // may use different models than the main thread
-                        let mut _subagent_model = None;
+                        let mut subagent_transcript = AiTranscript::new();
+                        let mut subagent_model = None;
                         let mut subagent_plan_states = std::collections::HashMap::new();
                         Self::parse_claude_jsonl_content(
                             &subagent_content,
-                            &mut transcript,
-                            &mut _subagent_model,
+                            &mut subagent_transcript,
+                            &mut subagent_model,
                             &mut subagent_plan_states,
                         );
+                        // Extract agent ID from filename (e.g., "agent-test-sub-1" from "agent-test-sub-1.jsonl")
+                        if let Some(agent_id) = subagent_path.file_stem().and_then(|s| s.to_str())
+                        {
+                            subagents.push(SubagentInfo {
+                                agent_id: agent_id.to_string(),
+                                transcript: subagent_transcript,
+                                model: subagent_model,
+                            });
+                        }
                     }
                 }
             }
         }
 
-        Ok((transcript, model))
+        Ok((transcript, model, subagents))
     }
 
     /// Parse Claude Code JSONL content and append messages to a transcript.
