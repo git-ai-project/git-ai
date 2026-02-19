@@ -82,6 +82,7 @@ impl TestRepo {
         // Create DB path as sibling to repo (not inside) to avoid git conflicts with WAL files
         let test_db_path = base.join(format!("{}-db", n));
         let test_home = base.join(format!("{}-home", n));
+        fs::create_dir_all(&test_home).expect("failed to create test home directory");
         let git_mode = GitTestMode::from_env();
         let repo = Repository::init(&path).expect("failed to initialize git2 repository");
         let mut config = Repository::config(&repo).expect("failed to initialize git2 repository");
@@ -178,6 +179,7 @@ impl TestRepo {
         let path = base.join(n.to_string());
         let test_db_path = base.join(format!("{}-db", n));
         let test_home = base.join(format!("{}-home", n));
+        fs::create_dir_all(&test_home).expect("failed to create test home directory");
         let git_mode = GitTestMode::from_env();
 
         Repository::init_bare(&path).expect("failed to init bare repository");
@@ -222,6 +224,7 @@ impl TestRepo {
         // Create DB path as sibling to repo (not inside) to avoid git conflicts with WAL files
         let upstream_test_db_path = base.join(format!("{}-db", upstream_n));
         let upstream_test_home = base.join(format!("{}-home", upstream_n));
+        fs::create_dir_all(&upstream_test_home).expect("failed to create test home directory");
         let git_mode = GitTestMode::from_env();
         Repository::init_bare(&upstream_path).expect("failed to init bare upstream repository");
 
@@ -245,6 +248,7 @@ impl TestRepo {
         // Create DB path as sibling to repo (not inside) to avoid git conflicts with WAL files
         let mirror_test_db_path = base.join(format!("{}-db", mirror_n));
         let mirror_test_home = base.join(format!("{}-home", mirror_n));
+        fs::create_dir_all(&mirror_test_home).expect("failed to create test home directory");
 
         let clone_output = Command::new("git")
             .args([
@@ -302,6 +306,7 @@ impl TestRepo {
         let db_n: u64 = rng.gen_range(0..10000000000);
         let test_db_path = std::env::temp_dir().join(format!("{}-db", db_n));
         let test_home = std::env::temp_dir().join(format!("{}-home", db_n));
+        fs::create_dir_all(&test_home).expect("failed to create test home directory");
         let git_mode = GitTestMode::from_env();
         let repo = Repository::init(path).expect("failed to initialize git2 repository");
         let mut config = Repository::config(&repo).expect("failed to initialize git2 repository");
