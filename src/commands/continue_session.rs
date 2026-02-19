@@ -1387,6 +1387,7 @@ mod tests {
             overriden_lines: 0,
             messages_url: None,
             custom_attributes: None,
+            parent_id: None,
         }
     }
 
