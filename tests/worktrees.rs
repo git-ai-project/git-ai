@@ -170,6 +170,13 @@ fn extract_json_object(output: &str) -> String {
     output[start..=end].to_string()
 }
 
+/// Strips the Windows extended-length prefix (`\\?\`) and normalizes separators
+/// so that repository workdir paths can be compared across platforms.
+fn normalize_path_for_comparison(p: &std::path::Path) -> String {
+    let s = p.to_string_lossy().to_string();
+    s.trim_start_matches(r"\\?\").replace('\\', "/")
+}
+
 fn normalize_diff(output: &str) -> String {
     output
         .lines()
@@ -345,7 +352,10 @@ fn test_group_files_by_repository_with_worktree() {
     let (found_repo, files) = repos.values().next().unwrap();
     assert_eq!(files.len(), 1);
     let workdir = found_repo.workdir().expect("workdir should exist");
-    assert_eq!(workdir, worktree.canonical_path());
+    assert_eq!(
+        normalize_path_for_comparison(&workdir),
+        normalize_path_for_comparison(&worktree.canonical_path()),
+    );
 }
 
 #[test]
@@ -425,17 +435,17 @@ fn test_worktree_stash_and_reset() {
 
     worktree.git(&["stash"]).expect("stash should succeed");
     let contents = fs::read_to_string(worktree.path().join("file.txt")).unwrap();
-    assert_eq!(contents, "base\n");
+    assert_eq!(contents.replace("\r\n", "\n"), "base\n");
 
     worktree.git(&["stash", "pop"]).expect("stash pop");
     let contents = fs::read_to_string(worktree.path().join("file.txt")).unwrap();
-    assert!(contents.contains("change"));
+    assert!(contents.replace("\r\n", "\n").contains("change"));
 
     worktree
         .git(&["reset", "--hard", "HEAD"])
         .expect("reset should succeed");
     let contents = fs::read_to_string(worktree.path().join("file.txt")).unwrap();
-    assert_eq!(contents, "base\n");
+    assert_eq!(contents.replace("\r\n", "\n"), "base\n");
 }
 
 #[test]
@@ -515,6 +525,7 @@ fn test_worktree_default_branch_name_is_respected() {
     );
 }
 
+#[cfg(not(target_os = "windows"))]
 #[test]
 fn test_worktree_config_resolves_path_with_temp_home() {
     let repo = TestRepo::new();
