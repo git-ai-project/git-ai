@@ -161,6 +161,9 @@ pub fn handle_git_ai(args: &[String]) {
         "continue" => {
             commands::continue_session::handle_continue(&args[1..]);
         }
+        "synopsis" => {
+            commands::synopsis::handle_synopsis(&args[1..]);
+        }
         #[cfg(debug_assertions)]
         "show-transcript" => {
             handle_show_transcript(&args[1..]);
@@ -262,6 +265,10 @@ fn print_help() {
     eprintln!("    --launch              Launch agent CLI with restored context");
     eprintln!("    --clipboard           Copy context to system clipboard");
     eprintln!("    --json                Output context as structured JSON");
+    eprintln!("  synopsis           Generate AI-powered narrative synopses for commits");
+    eprintln!("    generate              Generate a synopsis for a commit (default: HEAD)");
+    eprintln!("    show [<commit>]       Show the stored synopsis for a commit");
+    eprintln!("    list                  List all commits with synopses");
     eprintln!("  login              Authenticate with Git AI");
     eprintln!("  logout             Clear stored credentials");
     eprintln!("  version, -v, --version     Print the git-ai version");
