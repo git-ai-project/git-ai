@@ -141,10 +141,16 @@ fn maybe_spawn_synopsis_background(commit_sha: &str) {
     match cmd.spawn() {
         Ok(_child) => {
             // Don't call child.wait() — we want background execution.
-            eprintln!("[synopsis] Generating synopsis for {} in the background...", &commit_sha[..8.min(commit_sha.len())]);
+            eprintln!(
+                "[synopsis] Generating synopsis for {} in the background...",
+                &commit_sha[..8.min(commit_sha.len())]
+            );
         }
         Err(e) => {
-            eprintln!("[synopsis] Warning: failed to launch background synopsis generation: {}", e);
+            eprintln!(
+                "[synopsis] Warning: failed to launch background synopsis generation: {}",
+                e
+            );
         }
     }
 }
