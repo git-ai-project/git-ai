@@ -32,6 +32,16 @@ pub enum ConversationSourceKind {
     None,
 }
 
+/// Which backend to use for AI generation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GenerationBackend {
+    /// Call the Anthropic Messages API directly (requires ANTHROPIC_API_KEY).
+    AnthropicApi,
+    /// Pipe the prompt to the `claude` CLI (`claude --print`).
+    /// Uses Claude Code's existing authentication — no separate API key needed.
+    ClaudeCli,
+}
+
 /// Runtime configuration for synopsis generation.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -52,6 +62,8 @@ pub struct SynopsisConfig {
     pub interactive: bool,
     pub api_key: Option<String>,
     pub api_base_url: String,
+    /// Which AI backend to use for generation.
+    pub backend: GenerationBackend,
 }
 
 impl Default for SynopsisConfig {
@@ -59,6 +71,20 @@ impl Default for SynopsisConfig {
         let api_key = env::var("ANTHROPIC_API_KEY")
             .ok()
             .or_else(|| env::var("GIT_AI_SYNOPSIS_API_KEY").ok());
+
+        // Standard Anthropic SDK env var; fall back to hardcoded default.
+        let api_base_url = env::var("ANTHROPIC_BASE_URL")
+            .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
+
+        // "claude" selects the claude-cli backend; anything else (or absent) uses the API.
+        let backend = match env::var("GIT_AI_SYNOPSIS_BACKEND")
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str()
+        {
+            "claude" | "claude-code" | "claude-cli" => GenerationBackend::ClaudeCli,
+            _ => GenerationBackend::AnthropicApi,
+        };
 
         Self {
             enabled: env::var("GIT_AI_SYNOPSIS")
@@ -75,7 +101,8 @@ impl Default for SynopsisConfig {
             notes_ref: "ai-synopsis".to_string(),
             interactive: true,
             api_key,
-            api_base_url: "https://api.anthropic.com".to_string(),
+            api_base_url,
+            backend,
         }
     }
 }

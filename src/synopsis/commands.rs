@@ -1,6 +1,8 @@
 use crate::git::find_repository;
 use crate::synopsis::collector::collect_input;
-use crate::synopsis::config::{ConversationSourceKind, SynopsisConfig, TargetLength};
+use crate::synopsis::config::{
+    ConversationSourceKind, GenerationBackend, SynopsisConfig, TargetLength,
+};
 use crate::synopsis::generator::{build_synopsis_prompt, estimate_input_tokens, generate_synopsis};
 use crate::synopsis::storage::{list_synopses, retrieve_synopsis, store_synopsis};
 use crate::synopsis::types::{Synopsis, SynopsisMetadata};
@@ -36,6 +38,7 @@ struct CommonFlags {
     no_conversation: bool,
     length: Option<String>,
     dry_run: bool,
+    via_claude: bool,
 }
 
 impl CommonFlags {
@@ -48,6 +51,7 @@ impl CommonFlags {
         let mut no_conversation = false;
         let mut length = None;
         let mut dry_run = false;
+        let mut via_claude = false;
         let mut remaining = Vec::new();
 
         let mut i = 0;
@@ -85,6 +89,10 @@ impl CommonFlags {
                     dry_run = true;
                     i += 1;
                 }
+                "--via-claude" | "--claude" => {
+                    via_claude = true;
+                    i += 1;
+                }
                 _ => {
                     remaining.push(args[i].clone());
                     i += 1;
@@ -102,6 +110,7 @@ impl CommonFlags {
                 no_conversation,
                 length,
                 dry_run,
+                via_claude,
             },
             remaining,
         )
@@ -136,10 +145,20 @@ fn handle_generate(args: &[String]) {
             _ => TargetLength::Standard,
         };
     }
+    if flags.via_claude {
+        config.backend = GenerationBackend::ClaudeCli;
+    }
 
-    // Check API key before doing any expensive work (but allow dry-run without a key)
-    if config.api_key.is_none() && !flags.dry_run {
-        eprintln!("Error: No API key found. Set ANTHROPIC_API_KEY or use --api-key <key>.");
+    // Check API key before doing any expensive work — not needed for the claude CLI backend
+    // or dry-run mode.
+    if config.api_key.is_none()
+        && !flags.dry_run
+        && config.backend == GenerationBackend::AnthropicApi
+    {
+        eprintln!(
+            "Error: No API key found. Set ANTHROPIC_API_KEY, use --api-key <key>, \
+             or use --via-claude to generate via the Claude Code CLI."
+        );
         std::process::exit(1);
     }
 
@@ -179,10 +198,16 @@ fn handle_generate(args: &[String]) {
         return;
     }
 
-    eprintln!(
-        "[synopsis] Generating synopsis using model {}...",
-        config.model
-    );
+    match config.backend {
+        GenerationBackend::ClaudeCli => eprintln!(
+            "[synopsis] Generating synopsis via `claude --print` (model: {})...",
+            config.model
+        ),
+        GenerationBackend::AnthropicApi => eprintln!(
+            "[synopsis] Generating synopsis via Anthropic API (model: {})...",
+            config.model
+        ),
+    }
 
     let content = match generate_synopsis(&input, &config) {
         Ok(c) => c,
@@ -355,6 +380,7 @@ fn print_synopsis_help() {
     eprintln!("    --commit <sha>      Commit to generate synopsis for (default: HEAD)");
     eprintln!("    --model <name>      Claude model to use (default: claude-opus-4-6)");
     eprintln!("    --api-key <key>     Anthropic API key (default: ANTHROPIC_API_KEY env)");
+    eprintln!("    --via-claude        Use the `claude` CLI instead of the Anthropic API");
     eprintln!(
         "    --length <level>    Target length: brief, standard, detailed (default: standard)"
     );
@@ -362,6 +388,13 @@ fn print_synopsis_help() {
     eprintln!("    --no-conversation   Do not include conversation context");
     eprintln!("    --notes-ref <ref>   Git notes ref (default: ai-synopsis)");
     eprintln!("    --dry-run           Print the prompt without calling the API");
+    eprintln!();
+    eprintln!("  Environment variables for automation:");
+    eprintln!("    ANTHROPIC_API_KEY         API key for direct API calls");
+    eprintln!("    ANTHROPIC_BASE_URL        Override API base URL (proxy, gateway, etc.)");
+    eprintln!("    GIT_AI_SYNOPSIS=1         Auto-generate synopsis after every commit");
+    eprintln!("    GIT_AI_SYNOPSIS_BACKEND=claude  Use the `claude` CLI as the backend");
+    eprintln!("    GIT_AI_SYNOPSIS_MODEL     Default model override");
     eprintln!();
     eprintln!("  show [<commit>]     Show the synopsis for a commit (default: HEAD)");
     eprintln!("    --commit <sha>      Commit to show (alternative to positional argument)");
