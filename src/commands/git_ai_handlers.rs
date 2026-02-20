@@ -242,6 +242,9 @@ pub fn handle_git_ai(args: &[String]) {
         "push-authorship-notes" | "push_authorship_notes" => {
             handle_push_authorship_notes_internal(&args[1..]);
         }
+        "synopsis" => {
+            commands::synopsis::handle_synopsis(&args[1..]);
+        }
         #[cfg(debug_assertions)]
         "show-transcript" => {
             handle_show_transcript(&args[1..]);
@@ -355,6 +358,10 @@ fn print_help() {
     eprintln!("  fetch-notes [remote] Synchronously fetch AI authorship notes");
     eprintln!("    --remote <name>       Explicit remote name (default: upstream or origin)");
     eprintln!("    --json                Output result as JSON");
+    eprintln!("  synopsis           Generate AI-powered narrative synopses for commits");
+    eprintln!("    generate              Generate a synopsis for a commit (default: HEAD)");
+    eprintln!("    show [<commit>]       Show the stored synopsis for a commit");
+    eprintln!("    list                  List all commits with synopses");
     eprintln!("  login              Authenticate with Git AI");
     eprintln!("  logout             Clear stored credentials");
     eprintln!("  whoami             Show auth state and login identity");
