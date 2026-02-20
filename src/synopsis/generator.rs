@@ -1,22 +1,79 @@
 use crate::error::GitAiError;
-use crate::synopsis::config::SynopsisConfig;
+use crate::synopsis::config::{GenerationBackend, SynopsisConfig};
 use crate::synopsis::conversation::render_conversation;
 use crate::synopsis::types::SynopsisInput;
 
-/// Call the Anthropic Messages API and return the generated synopsis as a
-/// Markdown string.
+/// Generate a synopsis using whichever backend is configured.
 pub fn generate_synopsis(
     input: &SynopsisInput,
     config: &SynopsisConfig,
 ) -> Result<String, GitAiError> {
+    let prompt = build_prompt(input, config);
+    match config.backend {
+        GenerationBackend::ClaudeCli => generate_via_claude_cli(&prompt, config),
+        GenerationBackend::AnthropicApi => generate_via_api(&prompt, config),
+    }
+}
+
+/// Call the `claude` CLI with `--print` to generate the synopsis.
+///
+/// This uses Claude Code's existing authentication — no separate API key is
+/// required. The model flag is passed when set; if the `claude` binary is not
+/// on PATH the error is surfaced clearly.
+fn generate_via_claude_cli(prompt: &str, config: &SynopsisConfig) -> Result<String, GitAiError> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut cmd = Command::new("claude");
+    cmd.arg("--print");
+    // Pass model if it looks like a real model name (non-empty, not the placeholder default
+    // that users might not have changed).
+    if !config.model.is_empty() {
+        cmd.arg("--model").arg(&config.model);
+    }
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| {
+        GitAiError::Generic(format!(
+            "Failed to launch `claude` CLI: {}. Is Claude Code installed and on your PATH?",
+            e
+        ))
+    })?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(prompt.as_bytes())
+            .map_err(GitAiError::IoError)?;
+    }
+
+    let output = child.wait_with_output().map_err(GitAiError::IoError)?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(GitAiError::Generic(format!(
+            "`claude --print` failed (exit {}): {}",
+            output.status.code().unwrap_or(-1),
+            stderr.trim()
+        )));
+    }
+
+    let text = String::from_utf8(output.stdout).map_err(GitAiError::FromUtf8Error)?;
+    Ok(text.trim().to_string())
+}
+
+/// Call the Anthropic Messages API directly.
+fn generate_via_api(prompt: &str, config: &SynopsisConfig) -> Result<String, GitAiError> {
     let api_key = config.api_key.as_deref().ok_or_else(|| {
         GitAiError::Generic(
-            "No API key found. Set ANTHROPIC_API_KEY or GIT_AI_SYNOPSIS_API_KEY.".to_string(),
+            "No API key found. Set ANTHROPIC_API_KEY, or use --via-claude to generate \
+             via the Claude Code CLI instead."
+                .to_string(),
         )
     })?;
 
-    let prompt = build_prompt(input, config);
-    let request_body = build_request_body(&config.model, &prompt);
+    let request_body = build_request_body(&config.model, prompt);
     let request_json = serde_json::to_string(&request_body).map_err(GitAiError::JsonError)?;
 
     let url = format!("{}/v1/messages", config.api_base_url);
@@ -26,7 +83,7 @@ pub fn generate_synopsis(
         .with_header("anthropic-version", "2023-06-01")
         .with_header("content-type", "application/json")
         .with_body(request_json)
-        .with_timeout(300) // Synopsis generation can take a while
+        .with_timeout(300)
         .send()
         .map_err(|e| GitAiError::Generic(format!("HTTP request to Anthropic API failed: {}", e)))?;
 
