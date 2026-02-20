@@ -2202,6 +2202,12 @@ fn hook_requires_managed_repo_lookup(
 ) -> bool {
     match hook_name {
         "pre-commit" | "post-commit" => !is_rebase_in_progress_from_context(),
+        "post-checkout" => {
+            if is_rebase_in_progress_from_context() {
+                return is_rebase_abort_reflog_action() || is_pull_reflog_action();
+            }
+            true
+        }
         _ if hook_has_no_managed_behavior(hook_name) => false,
         "prepare-commit-msg" => {
             if is_rebase_in_progress_from_context() {
@@ -2309,6 +2315,24 @@ pub fn handle_git_hook_invocation(hook_name: &str, hook_args: &[String]) -> i32 
                 return managed_status;
             }
         }
+    }
+
+    if cached_forward_dir.is_none() && repo.is_none() {
+        if perf_enabled {
+            debug_performance_log_structured(serde_json::json!({
+                "kind": "hook_invocation",
+                "hook": hook_name,
+                "managed_status": 0,
+                "forward_status": 0,
+                "repo_lookup_ms": lookup_ms,
+                "managed_ms": managed_ms,
+                "forward_ms": 0u128,
+                "total_ms": hook_start
+                    .map(|start| start.elapsed().as_millis())
+                    .unwrap_or(0),
+            }));
+        }
+        return 0;
     }
 
     let forward_start = Instant::now();
