@@ -162,7 +162,11 @@ fn test_claude_transcript_parsing_malformed_json() {
     let result =
         ClaudePreset::transcript_and_model_from_claude_code_jsonl(temp_file.to_str().unwrap());
 
-    assert!(result.is_err());
+    // Malformed JSON lines are silently skipped (not fatal), so we get Ok with empty transcript
+    let (transcript, model, subagents) = result.expect("File read should succeed");
+    assert!(transcript.messages().is_empty());
+    assert!(model.is_none());
+    assert!(subagents.is_empty());
     fs::remove_file(temp_file).ok();
 }
 

@@ -4,9 +4,9 @@ use crate::authorship::ignore::{
     build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher,
 };
 use crate::authorship::prompt_utils::{PromptUpdateResult, update_prompt_from_tool};
-use crate::authorship::transcript::AiTranscript;
 use crate::authorship::secrets::{redact_secrets_from_prompts, strip_prompt_messages};
 use crate::authorship::stats::{stats_for_commit_stats, write_stats_to_terminal};
+use crate::authorship::transcript::AiTranscript;
 use crate::authorship::virtual_attribution::VirtualAttributions;
 use crate::authorship::working_log::{Checkpoint, CheckpointKind, WorkingLogEntry};
 use crate::config::{Config, PromptStorageMode};
@@ -405,19 +405,20 @@ fn update_prompts_to_latest(checkpoints: &mut [Checkpoint]) -> Result<(), GitAiE
                     // Store subagent info in agent_metadata for downstream expansion
                     if !subagents.is_empty() {
                         let checkpoint = &mut checkpoints[last_idx];
-                        let metadata =
-                            checkpoint.agent_metadata.get_or_insert_with(HashMap::new);
-                        if let Ok(subagents_json) =
-                            serde_json::to_string(&subagents.iter().map(|s| {
-                                serde_json::json!({
-                                    "agent_id": s.agent_id,
-                                    "transcript": s.transcript,
-                                    "model": s.model,
+                        let metadata = checkpoint.agent_metadata.get_or_insert_with(HashMap::new);
+                        if let Ok(subagents_json) = serde_json::to_string(
+                            &subagents
+                                .iter()
+                                .map(|s| {
+                                    serde_json::json!({
+                                        "agent_id": s.agent_id,
+                                        "transcript": s.transcript,
+                                        "model": s.model,
+                                    })
                                 })
-                            }).collect::<Vec<_>>())
-                        {
-                            metadata
-                                .insert("__subagents".to_string(), subagents_json);
+                                .collect::<Vec<_>>(),
+                        ) {
+                            metadata.insert("__subagents".to_string(), subagents_json);
                         }
                     }
                 }
@@ -478,8 +479,7 @@ fn batch_upsert_prompts_to_db(
         // Check for subagent data in agent_metadata and expand into separate records
         if let Some(metadata) = &checkpoint.agent_metadata
             && let Some(subagents_json) = metadata.get("__subagents")
-            && let Ok(subagents) =
-                serde_json::from_str::<Vec<serde_json::Value>>(subagents_json)
+            && let Ok(subagents) = serde_json::from_str::<Vec<serde_json::Value>>(subagents_json)
         {
             let parent_hash = checkpoint.agent_id.as_ref().map(|aid| {
                 crate::authorship::authorship_log_serialization::generate_short_hash(
@@ -493,7 +493,8 @@ fn batch_upsert_prompts_to_db(
                 ) {
                     let subagent_hash =
                         crate::authorship::authorship_log_serialization::generate_short_hash(
-                            agent_id_str, "claude",
+                            agent_id_str,
+                            "claude",
                         );
                     if let Ok(transcript) =
                         serde_json::from_value::<AiTranscript>(transcript_value.clone())

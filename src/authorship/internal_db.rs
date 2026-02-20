@@ -102,9 +102,9 @@ pub struct PromptDbRecord {
     pub total_deletions: Option<u32>,                    // Line deletions from checkpoint stats
     pub accepted_lines: Option<u32>,                     // Lines accepted in commit (future)
     pub overridden_lines: Option<u32>,                   // Lines overridden in commit (future)
-    pub parent_id: Option<String>,                       // Parent prompt hash (for subagent records)
-    pub created_at: i64,                                 // Unix timestamp
-    pub updated_at: i64,                                 // Unix timestamp
+    pub parent_id: Option<String>, // Parent prompt hash (for subagent records)
+    pub created_at: i64,           // Unix timestamp
+    pub updated_at: i64,           // Unix timestamp
 }
 
 impl PromptDbRecord {

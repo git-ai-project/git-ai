@@ -229,8 +229,7 @@ impl ClaudePreset {
                             &mut subagent_plan_states,
                         );
                         // Extract agent ID from filename (e.g., "agent-test-sub-1" from "agent-test-sub-1.jsonl")
-                        if let Some(agent_id) = subagent_path.file_stem().and_then(|s| s.to_str())
-                        {
+                        if let Some(agent_id) = subagent_path.file_stem().and_then(|s| s.to_str()) {
                             subagents.push(SubagentInfo {
                                 agent_id: agent_id.to_string(),
                                 transcript: subagent_transcript,

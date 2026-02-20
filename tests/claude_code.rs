@@ -931,11 +931,7 @@ fn test_parse_claude_code_jsonl_with_subagents() {
         2,
         "Subagent should have 2 assistant messages"
     );
-    assert_eq!(
-        sub_tool.len(),
-        1,
-        "Subagent should have 1 tool_use message"
-    );
+    assert_eq!(sub_tool.len(), 1, "Subagent should have 1 tool_use message");
 
     // Verify subagent has the expected content
     let has_sub_text = subagents[0].transcript.messages().iter().any(|m| {

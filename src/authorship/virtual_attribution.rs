@@ -399,22 +399,21 @@ impl VirtualAttributions {
                                 })
                                 .unwrap_or_default();
 
-                            let subagent_prompt =
-                                crate::authorship::authorship_log::PromptRecord {
-                                    agent_id: crate::authorship::working_log::AgentId {
-                                        tool: "claude".to_string(),
-                                        id: agent_id_str.to_string(),
-                                        model: subagent_model,
-                                    },
-                                    human_author: human_author.clone(),
-                                    messages: subagent_messages,
-                                    total_additions: 0,
-                                    total_deletions: 0,
-                                    accepted_lines: 0,
-                                    overriden_lines: 0,
-                                    messages_url: None,
-                                    parent_id: Some(author_id.clone()),
-                                };
+                            let subagent_prompt = crate::authorship::authorship_log::PromptRecord {
+                                agent_id: crate::authorship::working_log::AgentId {
+                                    tool: "claude".to_string(),
+                                    id: agent_id_str.to_string(),
+                                    model: subagent_model,
+                                },
+                                human_author: human_author.clone(),
+                                messages: subagent_messages,
+                                total_additions: 0,
+                                total_deletions: 0,
+                                accepted_lines: 0,
+                                overriden_lines: 0,
+                                messages_url: None,
+                                parent_id: Some(author_id.clone()),
+                            };
 
                             prompts
                                 .entry(subagent_hash)
