@@ -6,20 +6,14 @@ use std::path::{Path, PathBuf};
 
 /// Derive the Claude Code project hash from a repository path.
 ///
-/// Claude Code encodes the project directory as a path with `/` replaced by `-`
-/// and the leading `-` stripped.
-///
-/// Example: `/Users/foo/myrepo` -> `Users-foo-myrepo`
+/// Claude Code encodes the project directory by replacing `/` with `-`.
+/// The leading `-` is preserved (e.g. `/Users/foo/myrepo` → `-Users-foo-myrepo`).
 fn claude_project_hash(repo_path: &Path) -> String {
     let path_str = repo_path.to_string_lossy();
-    // Replace path separators with `-`
     #[cfg(windows)]
-    let hash = path_str.replace('\\', "-").replace('/', "-");
+    return path_str.replace('\\', "-").replace('/', "-");
     #[cfg(not(windows))]
-    let hash = path_str.replace('/', "-");
-
-    // Strip leading `-`
-    hash.trim_start_matches('-').to_string()
+    path_str.replace('/', "-")
 }
 
 /// Find the most recently modified Claude Code conversation JSONL file for the
@@ -291,13 +285,13 @@ mod tests {
     #[test]
     fn test_claude_project_hash_unix() {
         let path = Path::new("/Users/foo/myrepo");
-        assert_eq!(claude_project_hash(path), "Users-foo-myrepo");
+        assert_eq!(claude_project_hash(path), "-Users-foo-myrepo");
     }
 
     #[test]
     fn test_claude_project_hash_nested() {
         let path = Path::new("/home/user/projects/git-ai");
-        assert_eq!(claude_project_hash(path), "home-user-projects-git-ai");
+        assert_eq!(claude_project_hash(path), "-home-user-projects-git-ai");
     }
 
     #[test]
