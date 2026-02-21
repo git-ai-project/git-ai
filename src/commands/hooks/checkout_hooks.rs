@@ -166,7 +166,7 @@ fn remove_attributions_for_pathspecs(repository: &Repository, head: &str, pathsp
 
     // Filter checkpoints
     if let Ok(checkpoints) = working_log.read_all_checkpoints() {
-        let filtered: Vec<_> = checkpoints
+        let mut filtered: Vec<_> = checkpoints
             .into_iter()
             .map(|mut cp| {
                 cp.entries
@@ -175,7 +175,7 @@ fn remove_attributions_for_pathspecs(repository: &Repository, head: &str, pathsp
             })
             .filter(|cp| !cp.entries.is_empty())
             .collect();
-        let _ = working_log.write_all_checkpoints(&filtered);
+        let _ = working_log.write_all_checkpoints(&mut filtered);
     }
 }
 
