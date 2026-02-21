@@ -510,34 +510,6 @@ impl PersistedWorkingLog {
         Ok(migrated_checkpoints)
     }
 
-    /// Remove char-level attributions from all but the most recent checkpoint per file.
-    /// This reduces storage size while preserving precision for the entries that matter.
-    /// Only the most recent checkpoint entry for each file is used when computing new entries.
-    fn prune_old_char_attributions(&self, checkpoints: &mut [Checkpoint]) {
-        // Track which checkpoint index has the most recent entry for each file
-        // Iterate from newest to oldest
-        let mut newest_for_file: HashMap<String, usize> = HashMap::new();
-
-        for (checkpoint_idx, checkpoint) in checkpoints.iter().enumerate().rev() {
-            for entry in &checkpoint.entries {
-                newest_for_file
-                    .entry(entry.file.clone())
-                    .or_insert(checkpoint_idx);
-            }
-        }
-
-        // Clear attributions from entries that aren't the most recent for their file
-        for (checkpoint_idx, checkpoint) in checkpoints.iter_mut().enumerate() {
-            for entry in &mut checkpoint.entries {
-                if let Some(&newest_idx) = newest_for_file.get(&entry.file)
-                    && checkpoint_idx != newest_idx
-                {
-                    entry.attributions.clear();
-                }
-            }
-        }
-    }
-
     /// Write all checkpoints to the JSONL file, replacing any existing content.
     /// Note: Unlike append_checkpoint(), this preserves transcripts because it's used
     /// by post-commit after transcripts have been refetched and need to be preserved
