@@ -488,135 +488,133 @@ pub fn run(
         }
     }
 
-    if let Some(agent_run) = agent_run_result.as_ref() {
-        if let Some(hook_meta) = agent_run.hook_metadata.as_ref() {
-            let hook_event_name = hook_meta.hook_event_name.as_deref();
-            let hook_tool_name = hook_meta.tool_name.as_deref();
+    if let Some(agent_run) = agent_run_result.as_ref()
+        && let Some(hook_meta) = agent_run.hook_metadata.as_ref()
+    {
+        let hook_event_name = hook_meta.hook_event_name.as_deref();
+        let hook_tool_name = hook_meta.tool_name.as_deref();
 
-            let is_user_message = matches!(
-                hook_event_name,
-                Some("UserPromptSubmit")
-                    | Some("beforeSubmitPrompt")
-                    | Some("before_submit_prompt")
-                    | Some("BeforeSubmitPrompt")
-                    | Some("BeforeModel")
-            );
-            let is_ai_message = matches!(
-                hook_event_name,
-                Some("Stop") | Some("SessionEnd") | Some("afterSubmitPrompt") | Some("AfterModel")
-            );
+        let is_user_message = matches!(
+            hook_event_name,
+            Some("UserPromptSubmit")
+                | Some("beforeSubmitPrompt")
+                | Some("before_submit_prompt")
+                | Some("BeforeSubmitPrompt")
+                | Some("BeforeModel")
+        );
+        let is_ai_message = matches!(
+            hook_event_name,
+            Some("Stop") | Some("SessionEnd") | Some("afterSubmitPrompt") | Some("AfterModel")
+        );
 
-            if is_user_message {
-                let values = crate::metrics::NewMessageValues::new().role("human");
-                crate::metrics::record(values, attrs.clone());
+        if is_user_message {
+            let values = crate::metrics::NewMessageValues::new().role("human");
+            crate::metrics::record(values, attrs.clone());
 
-                if should_emit_agent_usage(&agent_run.agent_id) {
-                    let values = crate::metrics::AgentUsageValues::new();
-                    crate::metrics::record(values, attrs.clone());
-                }
-            } else if is_ai_message {
-                let values = crate::metrics::NewMessageValues::new().role("ai");
-                crate::metrics::record(values, attrs.clone());
-
-                if should_emit_agent_usage(&agent_run.agent_id) {
-                    let values = crate::metrics::AgentUsageValues::new();
-                    crate::metrics::record(values, attrs.clone());
-                }
-            }
-
-            let is_tool_call = matches!(
-                hook_event_name,
-                Some("PostToolUse")
-                    | Some("AfterTool")
-                    | Some("afterFileEdit")
-                    | Some("after_file_edit")
-                    | Some("AfterToolUse")
-            );
-
-            if is_tool_call {
-                if let Some(tool_name) = hook_tool_name {
-                    let values = crate::metrics::ToolCallValues::new().tool_name(tool_name);
-                    crate::metrics::record(values, attrs.clone());
-
-                    if let Some(skill_name) = tool_name
-                        .strip_prefix("skill__")
-                        .or_else(|| tool_name.strip_prefix("skill:"))
-                    {
-                        let values = crate::metrics::SkillUsedValues::new().skill_name(skill_name);
-                        crate::metrics::record(values, attrs.clone());
-                    }
-
-                    if let Some((server_name, mcp_tool)) = parse_mcp_tool_name(tool_name) {
-                        let values = crate::metrics::McpInvocationValues::new()
-                            .server_name(server_name)
-                            .tool_name(mcp_tool);
-                        crate::metrics::record(values, attrs.clone());
-                    }
-                }
-            }
-
-            let is_mcp_hook = matches!(
-                hook_event_name,
-                Some("beforeMCPExecution")
-                    | Some("BeforeMCPExecution")
-                    | Some("before_mcp_execution")
-                    | Some("AfterMCPExecution")
-            );
-
-            if is_mcp_hook {
-                let server = agent_run
-                    .agent_metadata
-                    .as_ref()
-                    .and_then(|m| m.get("mcp_server_name").cloned());
-                let tool = agent_run
-                    .agent_metadata
-                    .as_ref()
-                    .and_then(|m| m.get("mcp_tool_name").cloned());
-
-                if let (Some(server_name), Some(tool_name)) = (server, tool) {
-                    let values = crate::metrics::McpInvocationValues::new()
-                        .server_name(server_name)
-                        .tool_name(tool_name);
-                    crate::metrics::record(values, attrs.clone());
-                } else if let Some(tool_name) = hook_tool_name {
-                    if let Some((server_name, mcp_tool)) = parse_mcp_tool_name(tool_name) {
-                        let values = crate::metrics::McpInvocationValues::new()
-                            .server_name(server_name)
-                            .tool_name(mcp_tool);
-                        crate::metrics::record(values, attrs.clone());
-                    }
-                }
-            }
-
-            let is_subagent = matches!(
-                hook_event_name,
-                Some("SubagentStart") | Some("SubagentStop")
-            );
-            if is_subagent {
-                let event_type = if hook_event_name == Some("SubagentStart") {
-                    "start"
-                } else {
-                    "stop"
-                };
-
-                let mut values = crate::metrics::SubagentEventValues::new().event_type(event_type);
-                if let Some(sub_id) = agent_run
-                    .agent_metadata
-                    .as_ref()
-                    .and_then(|m| m.get("subagent_id"))
-                {
-                    values = values.subagent_id(sub_id.as_str());
-                }
-                if let Some(sub_model) = agent_run
-                    .agent_metadata
-                    .as_ref()
-                    .and_then(|m| m.get("subagent_model"))
-                {
-                    values = values.subagent_model(sub_model.as_str());
-                }
-
+            if should_emit_agent_usage(&agent_run.agent_id) {
+                let values = crate::metrics::AgentUsageValues::new();
                 crate::metrics::record(values, attrs.clone());
             }
+        } else if is_ai_message {
+            let values = crate::metrics::NewMessageValues::new().role("ai");
+            crate::metrics::record(values, attrs.clone());
+
+            if should_emit_agent_usage(&agent_run.agent_id) {
+                let values = crate::metrics::AgentUsageValues::new();
+                crate::metrics::record(values, attrs.clone());
+            }
+        }
+
+        let is_tool_call = matches!(
+            hook_event_name,
+            Some("PostToolUse")
+                | Some("AfterTool")
+                | Some("afterFileEdit")
+                | Some("after_file_edit")
+                | Some("AfterToolUse")
+        );
+
+        if is_tool_call && let Some(tool_name) = hook_tool_name {
+            let values = crate::metrics::ToolCallValues::new().tool_name(tool_name);
+            crate::metrics::record(values, attrs.clone());
+
+            if let Some(skill_name) = tool_name
+                .strip_prefix("skill__")
+                .or_else(|| tool_name.strip_prefix("skill:"))
+            {
+                let values = crate::metrics::SkillUsedValues::new().skill_name(skill_name);
+                crate::metrics::record(values, attrs.clone());
+            }
+
+            if let Some((server_name, mcp_tool)) = parse_mcp_tool_name(tool_name) {
+                let values = crate::metrics::McpInvocationValues::new()
+                    .server_name(server_name)
+                    .tool_name(mcp_tool);
+                crate::metrics::record(values, attrs.clone());
+            }
+        }
+
+        let is_mcp_hook = matches!(
+            hook_event_name,
+            Some("beforeMCPExecution")
+                | Some("BeforeMCPExecution")
+                | Some("before_mcp_execution")
+                | Some("AfterMCPExecution")
+        );
+
+        if is_mcp_hook {
+            let server = agent_run
+                .agent_metadata
+                .as_ref()
+                .and_then(|m| m.get("mcp_server_name").cloned());
+            let tool = agent_run
+                .agent_metadata
+                .as_ref()
+                .and_then(|m| m.get("mcp_tool_name").cloned());
+
+            if let (Some(server_name), Some(tool_name)) = (server, tool) {
+                let values = crate::metrics::McpInvocationValues::new()
+                    .server_name(server_name)
+                    .tool_name(tool_name);
+                crate::metrics::record(values, attrs.clone());
+            } else if let Some(tool_name) = hook_tool_name
+                && let Some((server_name, mcp_tool)) = parse_mcp_tool_name(tool_name)
+            {
+                let values = crate::metrics::McpInvocationValues::new()
+                    .server_name(server_name)
+                    .tool_name(mcp_tool);
+                crate::metrics::record(values, attrs.clone());
+            }
+        }
+
+        let is_subagent = matches!(
+            hook_event_name,
+            Some("SubagentStart") | Some("SubagentStop")
+        );
+        if is_subagent {
+            let event_type = if hook_event_name == Some("SubagentStart") {
+                "start"
+            } else {
+                "stop"
+            };
+
+            let mut values = crate::metrics::SubagentEventValues::new().event_type(event_type);
+            if let Some(sub_id) = agent_run
+                .agent_metadata
+                .as_ref()
+                .and_then(|m| m.get("subagent_id"))
+            {
+                values = values.subagent_id(sub_id.as_str());
+            }
+            if let Some(sub_model) = agent_run
+                .agent_metadata
+                .as_ref()
+                .and_then(|m| m.get("subagent_model"))
+            {
+                values = values.subagent_model(sub_model.as_str());
+            }
+
+            crate::metrics::record(values, attrs.clone());
         }
     }
 

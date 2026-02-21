@@ -309,10 +309,10 @@ impl HookInstaller for ClaudeCodeInstaller {
                 None => {
                     let first = hook_type_array.first_mut();
                     if let Some(item) = first {
-                        if let Some(obj) = item.as_object_mut() {
-                            if !obj.contains_key("hooks") {
-                                obj.insert("hooks".to_string(), Value::Array(vec![]));
-                            }
+                        if let Some(obj) = item.as_object_mut()
+                            && !obj.contains_key("hooks")
+                        {
+                            obj.insert("hooks".to_string(), Value::Array(vec![]));
                         }
 
                         if let Some(hooks_array) =
