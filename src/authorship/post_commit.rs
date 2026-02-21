@@ -92,7 +92,7 @@ pub fn post_commit(
         );
     }
 
-    working_log.write_all_checkpoints(&mut parent_working_log)?;
+    working_log.write_all_checkpoints(&parent_working_log)?;
 
     // Create VirtualAttributions from working log (fast path - no blame)
     // We don't need to run blame because we only care about the working log data

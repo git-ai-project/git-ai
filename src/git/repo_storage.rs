@@ -366,16 +366,66 @@ impl PersistedWorkingLog {
             storage_checkpoint.transcript = None;
         }
 
-        // Append only the new checkpoint to the file (O(1) instead of O(N))
-        // This avoids reading all existing checkpoints just to add one.
-        // Char-level attribution pruning is deferred to write_all_checkpoints(),
-        // which is called by post_commit after reading all checkpoints anyway.
-        let json_line = serde_json::to_string(&storage_checkpoint)?;
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&checkpoints_file)?;
-        writeln!(file, "{}", json_line)?;
+        // Collect files from the new checkpoint to know which older attributions to prune
+        let new_files: HashSet<String> = storage_checkpoint
+            .entries
+            .iter()
+            .map(|e| e.file.clone())
+            .collect();
+
+        // If the file doesn't exist yet or the new checkpoint has no overlapping files,
+        // we can potentially skip the rewrite. But we always need to prune to keep the
+        // file small during long agent loops.
+        let needs_prune = !new_files.is_empty() && checkpoints_file.exists();
+
+        if needs_prune {
+            // Streaming prune-and-rewrite: read existing checkpoints one at a time,
+            // prune char attributions for files that the new checkpoint supersedes,
+            // write to a temp file, then append the new checkpoint and rename.
+            // Peak memory: one checkpoint at a time + the new checkpoint.
+            let tmp_file = self.dir.join("checkpoints.jsonl.tmp");
+            {
+                let existing = fs::File::open(&checkpoints_file)?;
+                let reader = BufReader::new(existing);
+                let out = fs::File::create(&tmp_file)?;
+                let mut writer = std::io::BufWriter::new(out);
+
+                for line_result in reader.lines() {
+                    let line = line_result?;
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    let mut cp: Checkpoint = serde_json::from_str(&line)
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+                    // Prune char-level attributions from entries whose file is superseded
+                    // by the new checkpoint. Only the newest checkpoint per file needs
+                    // char-level precision.
+                    for entry in &mut cp.entries {
+                        if new_files.contains(&entry.file) {
+                            entry.attributions.clear();
+                        }
+                    }
+
+                    let json_line = serde_json::to_string(&cp)?;
+                    writeln!(writer, "{}", json_line)?;
+                }
+
+                // Append the new checkpoint
+                let json_line = serde_json::to_string(&storage_checkpoint)?;
+                writeln!(writer, "{}", json_line)?;
+                writer.flush()?;
+            }
+            fs::rename(&tmp_file, &checkpoints_file)?;
+        } else {
+            // No existing file or no overlapping files — simple append
+            let json_line = serde_json::to_string(&storage_checkpoint)?;
+            let mut file = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&checkpoints_file)?;
+            writeln!(file, "{}", json_line)?;
+        }
 
         Ok(())
     }
@@ -489,20 +539,12 @@ impl PersistedWorkingLog {
     }
 
     /// Write all checkpoints to the JSONL file, replacing any existing content.
-    /// Also prunes char-level attributions from older checkpoints (deferred from append_checkpoint).
     /// Note: Unlike append_checkpoint(), this preserves transcripts because it's used
     /// by post-commit after transcripts have been refetched and need to be preserved
     /// for from_just_working_log() to read them.
-    pub fn write_all_checkpoints(&self, checkpoints: &mut [Checkpoint]) -> Result<(), GitAiError> {
+    pub fn write_all_checkpoints(&self, checkpoints: &[Checkpoint]) -> Result<(), GitAiError> {
         let checkpoints_file = self.dir.join("checkpoints.jsonl");
 
-        // Prune char-level attributions from older checkpoints for the same files.
-        // Only the most recent checkpoint per file needs char-level precision.
-        // This was previously done in append_checkpoint but is now deferred here
-        // to avoid the read-all-then-write-all pattern on every append.
-        self.prune_old_char_attributions(checkpoints);
-
-        // Use BufWriter for efficient serialization directly to file
         let file = fs::File::create(&checkpoints_file)?;
         let mut writer = std::io::BufWriter::new(file);
         for checkpoint in checkpoints.iter() {
