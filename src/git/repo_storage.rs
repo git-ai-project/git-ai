@@ -509,6 +509,7 @@ impl PersistedWorkingLog {
             let json_line = serde_json::to_string(checkpoint)?;
             writeln!(writer, "{}", json_line)?;
         }
+        writer.flush()?;
 
         Ok(())
     }
