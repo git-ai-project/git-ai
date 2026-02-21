@@ -2204,7 +2204,9 @@ fn hook_requires_managed_repo_lookup(
         "pre-commit" | "post-commit" => !is_rebase_in_progress_from_context(),
         "post-checkout" => {
             if is_rebase_in_progress_from_context() {
-                return is_rebase_abort_reflog_action() || is_pull_reflog_action() || is_cherry_pick_abort_reflog_action();
+                return is_rebase_abort_reflog_action()
+                    || is_pull_reflog_action()
+                    || is_cherry_pick_abort_reflog_action();
             }
             true
         }
