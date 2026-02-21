@@ -493,10 +493,7 @@ impl PersistedWorkingLog {
     /// Note: Unlike append_checkpoint(), this preserves transcripts because it's used
     /// by post-commit after transcripts have been refetched and need to be preserved
     /// for from_just_working_log() to read them.
-    pub fn write_all_checkpoints(
-        &self,
-        checkpoints: &mut [Checkpoint],
-    ) -> Result<(), GitAiError> {
+    pub fn write_all_checkpoints(&self, checkpoints: &mut [Checkpoint]) -> Result<(), GitAiError> {
         let checkpoints_file = self.dir.join("checkpoints.jsonl");
 
         // Prune char-level attributions from older checkpoints for the same files.
