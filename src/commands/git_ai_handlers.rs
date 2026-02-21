@@ -807,8 +807,7 @@ fn handle_checkpoint(args: &[String]) {
                             let abs = if std::path::Path::new(path).is_absolute() {
                                 path.clone()
                             } else {
-                                std::path::Path::new(&repository_working_dir)
-                                    .join(path)
+                                workdir.join(path)
                                     .to_string_lossy()
                                     .to_string()
                             };
