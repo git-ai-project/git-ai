@@ -522,6 +522,7 @@ fn handle_checkpoint(args: &[String]) {
                     edited_filepaths,
                     will_edit_filepaths: None,
                     dirty_files: None,
+                    hook_metadata: None,
                 });
             }
             _ => {}
@@ -768,6 +769,7 @@ fn handle_checkpoint(args: &[String]) {
             edited_filepaths: None,
             repo_working_dir: Some(effective_working_dir),
             dirty_files: None,
+            hook_metadata: None,
         });
     }
 

@@ -243,6 +243,95 @@ impl HookInstaller for ClaudeCodeInstaller {
             }
         }
 
+        for hook_type in &["UserPromptSubmit", "Stop", "SubagentStart", "SubagentStop"] {
+            let desired_cmd = pre_tool_cmd.as_str();
+
+            let mut hook_type_array = hooks_obj
+                .get(*hook_type)
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+
+            if hook_type_array.is_empty() {
+                hook_type_array.push(json!({ "hooks": [] }));
+            }
+
+            let mut found: Option<(usize, usize)> = None;
+            let mut needs_update = false;
+
+            for (item_idx, item) in hook_type_array.iter().enumerate() {
+                if let Some(hooks_array) = item.get("hooks").and_then(|h| h.as_array()) {
+                    for (hook_idx, hook) in hooks_array.iter().enumerate() {
+                        if let Some(cmd) = hook.get("command").and_then(|c| c.as_str())
+                            && is_git_ai_checkpoint_command(cmd)
+                            && found.is_none()
+                        {
+                            found = Some((item_idx, hook_idx));
+                            if cmd != desired_cmd {
+                                needs_update = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            match found {
+                Some((item_idx, hook_idx)) => {
+                    if needs_update
+                        && let Some(hooks_array) = hook_type_array[item_idx]
+                            .get_mut("hooks")
+                            .and_then(|h| h.as_array_mut())
+                    {
+                        hooks_array[hook_idx] = json!({
+                            "type": "command",
+                            "command": desired_cmd
+                        });
+                    }
+
+                    for (i, item) in hook_type_array.iter_mut().enumerate() {
+                        if let Some(hooks_array) =
+                            item.get_mut("hooks").and_then(|h| h.as_array_mut())
+                        {
+                            let mut current_idx = 0;
+                            hooks_array.retain(|hook| {
+                                let keep = i == item_idx && current_idx == hook_idx;
+                                let is_dup = hook
+                                    .get("command")
+                                    .and_then(|c| c.as_str())
+                                    .map(is_git_ai_checkpoint_command)
+                                    .unwrap_or(false);
+                                current_idx += 1;
+                                keep || !is_dup
+                            });
+                        }
+                    }
+                }
+                None => {
+                    let first = hook_type_array.first_mut();
+                    if let Some(item) = first {
+                        if let Some(obj) = item.as_object_mut() {
+                            if !obj.contains_key("hooks") {
+                                obj.insert("hooks".to_string(), Value::Array(vec![]));
+                            }
+                        }
+
+                        if let Some(hooks_array) =
+                            item.get_mut("hooks").and_then(|h| h.as_array_mut())
+                        {
+                            hooks_array.push(json!({
+                                "type": "command",
+                                "command": desired_cmd
+                            }));
+                        }
+                    }
+                }
+            }
+
+            if let Some(obj) = hooks_obj.as_object_mut() {
+                obj.insert((*hook_type).to_string(), Value::Array(hook_type_array));
+            }
+        }
+
         // Write back hooks to merged
         if let Some(root) = merged.as_object_mut() {
             root.insert("hooks".to_string(), hooks_obj);
@@ -289,8 +378,15 @@ impl HookInstaller for ClaudeCodeInstaller {
 
         let mut changed = false;
 
-        // Remove git-ai checkpoint commands from both PreToolUse and PostToolUse
-        for hook_type in &["PreToolUse", "PostToolUse"] {
+        // Remove git-ai checkpoint commands from hooks
+        for hook_type in &[
+            "PreToolUse",
+            "PostToolUse",
+            "UserPromptSubmit",
+            "Stop",
+            "SubagentStart",
+            "SubagentStop",
+        ] {
             if let Some(hook_type_array) =
                 hooks_obj.get_mut(*hook_type).and_then(|v| v.as_array_mut())
             {

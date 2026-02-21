@@ -665,6 +665,397 @@ impl EventValues for CheckpointValues {
     }
 }
 
+/// Value positions for "tool_call" event.
+pub mod tool_call_pos {
+    pub const TOOL_NAME: usize = 0;
+}
+
+/// Values for Event ID 5: tool_call
+///
+/// Recorded when an agent invokes a tool (e.g. Write, Edit, Bash, Read).
+///
+/// **Fields:**
+/// | Position | Name | Type |
+/// |----------|------|------|
+/// | 0 | tool_name | String |
+#[derive(Debug, Clone, Default)]
+pub struct ToolCallValues {
+    pub tool_name: PosField<String>,
+}
+
+impl ToolCallValues {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn tool_name(mut self, value: impl Into<String>) -> Self {
+        self.tool_name = Some(Some(value.into()));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn tool_name_null(mut self) -> Self {
+        self.tool_name = Some(None);
+        self
+    }
+}
+
+impl PosEncoded for ToolCallValues {
+    fn to_sparse(&self) -> SparseArray {
+        let mut map = SparseArray::new();
+        sparse_set(
+            &mut map,
+            tool_call_pos::TOOL_NAME,
+            string_to_json(&self.tool_name),
+        );
+        map
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        Self {
+            tool_name: sparse_get_string(arr, tool_call_pos::TOOL_NAME),
+        }
+    }
+}
+
+impl EventValues for ToolCallValues {
+    fn event_id() -> MetricEventId {
+        MetricEventId::ToolCall
+    }
+
+    fn to_sparse(&self) -> SparseArray {
+        PosEncoded::to_sparse(self)
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        PosEncoded::from_sparse(arr)
+    }
+}
+
+/// Value positions for "mcp_invocation" event.
+pub mod mcp_invocation_pos {
+    pub const SERVER_NAME: usize = 0;
+    pub const TOOL_NAME: usize = 1;
+}
+
+/// Values for Event ID 6: mcp_invocation
+///
+/// Recorded when an agent invokes an MCP server tool.
+///
+/// **Fields:**
+/// | Position | Name | Type |
+/// |----------|------|------|
+/// | 0 | server_name | String |
+/// | 1 | tool_name | String |
+#[derive(Debug, Clone, Default)]
+pub struct McpInvocationValues {
+    pub server_name: PosField<String>,
+    pub tool_name: PosField<String>,
+}
+
+impl McpInvocationValues {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn server_name(mut self, value: impl Into<String>) -> Self {
+        self.server_name = Some(Some(value.into()));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn server_name_null(mut self) -> Self {
+        self.server_name = Some(None);
+        self
+    }
+
+    pub fn tool_name(mut self, value: impl Into<String>) -> Self {
+        self.tool_name = Some(Some(value.into()));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn tool_name_null(mut self) -> Self {
+        self.tool_name = Some(None);
+        self
+    }
+}
+
+impl PosEncoded for McpInvocationValues {
+    fn to_sparse(&self) -> SparseArray {
+        let mut map = SparseArray::new();
+        sparse_set(
+            &mut map,
+            mcp_invocation_pos::SERVER_NAME,
+            string_to_json(&self.server_name),
+        );
+        sparse_set(
+            &mut map,
+            mcp_invocation_pos::TOOL_NAME,
+            string_to_json(&self.tool_name),
+        );
+        map
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        Self {
+            server_name: sparse_get_string(arr, mcp_invocation_pos::SERVER_NAME),
+            tool_name: sparse_get_string(arr, mcp_invocation_pos::TOOL_NAME),
+        }
+    }
+}
+
+impl EventValues for McpInvocationValues {
+    fn event_id() -> MetricEventId {
+        MetricEventId::McpInvocation
+    }
+
+    fn to_sparse(&self) -> SparseArray {
+        PosEncoded::to_sparse(self)
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        PosEncoded::from_sparse(arr)
+    }
+}
+
+/// Value positions for "new_message" event.
+pub mod new_message_pos {
+    pub const ROLE: usize = 0;
+}
+
+/// Values for Event ID 7: new_message
+///
+/// Recorded when a new human or AI message occurs in an agent session.
+///
+/// **Fields:**
+/// | Position | Name | Type |
+/// |----------|------|------|
+/// | 0 | role | String ("human" or "ai") |
+#[derive(Debug, Clone, Default)]
+pub struct NewMessageValues {
+    pub role: PosField<String>,
+}
+
+impl NewMessageValues {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn role(mut self, value: impl Into<String>) -> Self {
+        self.role = Some(Some(value.into()));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn role_null(mut self) -> Self {
+        self.role = Some(None);
+        self
+    }
+}
+
+impl PosEncoded for NewMessageValues {
+    fn to_sparse(&self) -> SparseArray {
+        let mut map = SparseArray::new();
+        sparse_set(&mut map, new_message_pos::ROLE, string_to_json(&self.role));
+        map
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        Self {
+            role: sparse_get_string(arr, new_message_pos::ROLE),
+        }
+    }
+}
+
+impl EventValues for NewMessageValues {
+    fn event_id() -> MetricEventId {
+        MetricEventId::NewMessage
+    }
+
+    fn to_sparse(&self) -> SparseArray {
+        PosEncoded::to_sparse(self)
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        PosEncoded::from_sparse(arr)
+    }
+}
+
+/// Value positions for "skill_used" event.
+pub mod skill_used_pos {
+    pub const SKILL_NAME: usize = 0;
+}
+
+/// Values for Event ID 8: skill_used
+///
+/// Recorded when a skill or custom command is invoked by an agent.
+///
+/// **Fields:**
+/// | Position | Name | Type |
+/// |----------|------|------|
+/// | 0 | skill_name | String |
+#[derive(Debug, Clone, Default)]
+pub struct SkillUsedValues {
+    pub skill_name: PosField<String>,
+}
+
+impl SkillUsedValues {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn skill_name(mut self, value: impl Into<String>) -> Self {
+        self.skill_name = Some(Some(value.into()));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn skill_name_null(mut self) -> Self {
+        self.skill_name = Some(None);
+        self
+    }
+}
+
+impl PosEncoded for SkillUsedValues {
+    fn to_sparse(&self) -> SparseArray {
+        let mut map = SparseArray::new();
+        sparse_set(
+            &mut map,
+            skill_used_pos::SKILL_NAME,
+            string_to_json(&self.skill_name),
+        );
+        map
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        Self {
+            skill_name: sparse_get_string(arr, skill_used_pos::SKILL_NAME),
+        }
+    }
+}
+
+impl EventValues for SkillUsedValues {
+    fn event_id() -> MetricEventId {
+        MetricEventId::SkillUsed
+    }
+
+    fn to_sparse(&self) -> SparseArray {
+        PosEncoded::to_sparse(self)
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        PosEncoded::from_sparse(arr)
+    }
+}
+
+/// Value positions for "subagent_event" event.
+pub mod subagent_event_pos {
+    pub const EVENT_TYPE: usize = 0;
+    pub const SUBAGENT_ID: usize = 1;
+    pub const SUBAGENT_MODEL: usize = 2;
+}
+
+/// Values for Event ID 9: subagent_event
+///
+/// Recorded when a subagent lifecycle event occurs (start/stop).
+///
+/// **Fields:**
+/// | Position | Name | Type |
+/// |----------|------|------|
+/// | 0 | event_type | String ("start" or "stop") |
+/// | 1 | subagent_id | String |
+/// | 2 | subagent_model | String |
+#[derive(Debug, Clone, Default)]
+pub struct SubagentEventValues {
+    pub event_type: PosField<String>,
+    pub subagent_id: PosField<String>,
+    pub subagent_model: PosField<String>,
+}
+
+impl SubagentEventValues {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn event_type(mut self, value: impl Into<String>) -> Self {
+        self.event_type = Some(Some(value.into()));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn event_type_null(mut self) -> Self {
+        self.event_type = Some(None);
+        self
+    }
+
+    pub fn subagent_id(mut self, value: impl Into<String>) -> Self {
+        self.subagent_id = Some(Some(value.into()));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn subagent_id_null(mut self) -> Self {
+        self.subagent_id = Some(None);
+        self
+    }
+
+    pub fn subagent_model(mut self, value: impl Into<String>) -> Self {
+        self.subagent_model = Some(Some(value.into()));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn subagent_model_null(mut self) -> Self {
+        self.subagent_model = Some(None);
+        self
+    }
+}
+
+impl PosEncoded for SubagentEventValues {
+    fn to_sparse(&self) -> SparseArray {
+        let mut map = SparseArray::new();
+        sparse_set(
+            &mut map,
+            subagent_event_pos::EVENT_TYPE,
+            string_to_json(&self.event_type),
+        );
+        sparse_set(
+            &mut map,
+            subagent_event_pos::SUBAGENT_ID,
+            string_to_json(&self.subagent_id),
+        );
+        sparse_set(
+            &mut map,
+            subagent_event_pos::SUBAGENT_MODEL,
+            string_to_json(&self.subagent_model),
+        );
+        map
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        Self {
+            event_type: sparse_get_string(arr, subagent_event_pos::EVENT_TYPE),
+            subagent_id: sparse_get_string(arr, subagent_event_pos::SUBAGENT_ID),
+            subagent_model: sparse_get_string(arr, subagent_event_pos::SUBAGENT_MODEL),
+        }
+    }
+}
+
+impl EventValues for SubagentEventValues {
+    fn event_id() -> MetricEventId {
+        MetricEventId::SubagentEvent
+    }
+
+    fn to_sparse(&self) -> SparseArray {
+        PosEncoded::to_sparse(self)
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        PosEncoded::from_sparse(arr)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1033,5 +1424,260 @@ mod tests {
         assert_eq!(values.total_ai_additions, Some(None));
         assert_eq!(values.total_ai_deletions, Some(None));
         assert_eq!(values.time_waiting_for_ai, Some(None));
+    }
+
+    #[test]
+    fn test_tool_call_values_builder() {
+        let values = ToolCallValues::new().tool_name("Write");
+        assert_eq!(values.tool_name, Some(Some("Write".to_string())));
+    }
+
+    #[test]
+    fn test_tool_call_values_to_sparse() {
+        use super::PosEncoded;
+        let values = ToolCallValues::new().tool_name("Edit");
+        let sparse = PosEncoded::to_sparse(&values);
+        assert_eq!(sparse.get("0"), Some(&Value::String("Edit".to_string())));
+    }
+
+    #[test]
+    fn test_tool_call_values_from_sparse() {
+        use super::PosEncoded;
+        let mut sparse = SparseArray::new();
+        sparse.insert("0".to_string(), Value::String("Bash".to_string()));
+        let values = <ToolCallValues as PosEncoded>::from_sparse(&sparse);
+        assert_eq!(values.tool_name, Some(Some("Bash".to_string())));
+    }
+
+    #[test]
+    fn test_tool_call_values_roundtrip() {
+        use super::PosEncoded;
+        let original = ToolCallValues::new().tool_name("Read");
+        let sparse = PosEncoded::to_sparse(&original);
+        let restored = <ToolCallValues as PosEncoded>::from_sparse(&sparse);
+        assert_eq!(restored.tool_name, Some(Some("Read".to_string())));
+    }
+
+    #[test]
+    fn test_tool_call_event_id() {
+        assert_eq!(ToolCallValues::event_id(), MetricEventId::ToolCall);
+        assert_eq!(ToolCallValues::event_id() as u16, 5);
+    }
+
+    #[test]
+    fn test_mcp_invocation_values_builder() {
+        let values = McpInvocationValues::new()
+            .server_name("filesystem")
+            .tool_name("read_file");
+        assert_eq!(values.server_name, Some(Some("filesystem".to_string())));
+        assert_eq!(values.tool_name, Some(Some("read_file".to_string())));
+    }
+
+    #[test]
+    fn test_mcp_invocation_values_to_sparse() {
+        use super::PosEncoded;
+        let values = McpInvocationValues::new()
+            .server_name("github")
+            .tool_name("create_issue");
+        let sparse = PosEncoded::to_sparse(&values);
+        assert_eq!(sparse.get("0"), Some(&Value::String("github".to_string())));
+        assert_eq!(
+            sparse.get("1"),
+            Some(&Value::String("create_issue".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_mcp_invocation_values_from_sparse() {
+        use super::PosEncoded;
+        let mut sparse = SparseArray::new();
+        sparse.insert("0".to_string(), Value::String("slack".to_string()));
+        sparse.insert("1".to_string(), Value::String("post_message".to_string()));
+        let values = <McpInvocationValues as PosEncoded>::from_sparse(&sparse);
+        assert_eq!(values.server_name, Some(Some("slack".to_string())));
+        assert_eq!(values.tool_name, Some(Some("post_message".to_string())));
+    }
+
+    #[test]
+    fn test_mcp_invocation_values_roundtrip() {
+        use super::PosEncoded;
+        let original = McpInvocationValues::new()
+            .server_name("db")
+            .tool_name("query");
+        let sparse = PosEncoded::to_sparse(&original);
+        let restored = <McpInvocationValues as PosEncoded>::from_sparse(&sparse);
+        assert_eq!(restored.server_name, Some(Some("db".to_string())));
+        assert_eq!(restored.tool_name, Some(Some("query".to_string())));
+    }
+
+    #[test]
+    fn test_mcp_invocation_event_id() {
+        assert_eq!(
+            McpInvocationValues::event_id(),
+            MetricEventId::McpInvocation
+        );
+        assert_eq!(McpInvocationValues::event_id() as u16, 6);
+    }
+
+    #[test]
+    fn test_new_message_values_builder() {
+        let values = NewMessageValues::new().role("human");
+        assert_eq!(values.role, Some(Some("human".to_string())));
+    }
+
+    #[test]
+    fn test_new_message_values_to_sparse() {
+        use super::PosEncoded;
+        let values = NewMessageValues::new().role("ai");
+        let sparse = PosEncoded::to_sparse(&values);
+        assert_eq!(sparse.get("0"), Some(&Value::String("ai".to_string())));
+    }
+
+    #[test]
+    fn test_new_message_values_from_sparse() {
+        use super::PosEncoded;
+        let mut sparse = SparseArray::new();
+        sparse.insert("0".to_string(), Value::String("human".to_string()));
+        let values = <NewMessageValues as PosEncoded>::from_sparse(&sparse);
+        assert_eq!(values.role, Some(Some("human".to_string())));
+    }
+
+    #[test]
+    fn test_new_message_values_roundtrip() {
+        use super::PosEncoded;
+        let original = NewMessageValues::new().role("ai");
+        let sparse = PosEncoded::to_sparse(&original);
+        let restored = <NewMessageValues as PosEncoded>::from_sparse(&sparse);
+        assert_eq!(restored.role, Some(Some("ai".to_string())));
+    }
+
+    #[test]
+    fn test_new_message_event_id() {
+        assert_eq!(NewMessageValues::event_id(), MetricEventId::NewMessage);
+        assert_eq!(NewMessageValues::event_id() as u16, 7);
+    }
+
+    #[test]
+    fn test_skill_used_values_builder() {
+        let values = SkillUsedValues::new().skill_name("deploy");
+        assert_eq!(values.skill_name, Some(Some("deploy".to_string())));
+    }
+
+    #[test]
+    fn test_skill_used_values_to_sparse() {
+        use super::PosEncoded;
+        let values = SkillUsedValues::new().skill_name("test-runner");
+        let sparse = PosEncoded::to_sparse(&values);
+        assert_eq!(
+            sparse.get("0"),
+            Some(&Value::String("test-runner".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_skill_used_values_from_sparse() {
+        use super::PosEncoded;
+        let mut sparse = SparseArray::new();
+        sparse.insert("0".to_string(), Value::String("lint".to_string()));
+        let values = <SkillUsedValues as PosEncoded>::from_sparse(&sparse);
+        assert_eq!(values.skill_name, Some(Some("lint".to_string())));
+    }
+
+    #[test]
+    fn test_skill_used_values_roundtrip() {
+        use super::PosEncoded;
+        let original = SkillUsedValues::new().skill_name("format");
+        let sparse = PosEncoded::to_sparse(&original);
+        let restored = <SkillUsedValues as PosEncoded>::from_sparse(&sparse);
+        assert_eq!(restored.skill_name, Some(Some("format".to_string())));
+    }
+
+    #[test]
+    fn test_skill_used_event_id() {
+        assert_eq!(SkillUsedValues::event_id(), MetricEventId::SkillUsed);
+        assert_eq!(SkillUsedValues::event_id() as u16, 8);
+    }
+
+    #[test]
+    fn test_subagent_event_values_builder() {
+        let values = SubagentEventValues::new()
+            .event_type("start")
+            .subagent_id("agent-123")
+            .subagent_model("claude-3-haiku");
+        assert_eq!(values.event_type, Some(Some("start".to_string())));
+        assert_eq!(values.subagent_id, Some(Some("agent-123".to_string())));
+        assert_eq!(
+            values.subagent_model,
+            Some(Some("claude-3-haiku".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_subagent_event_values_to_sparse() {
+        use super::PosEncoded;
+        let values = SubagentEventValues::new()
+            .event_type("stop")
+            .subagent_id("worker-1")
+            .subagent_model("claude-3-sonnet");
+        let sparse = PosEncoded::to_sparse(&values);
+        assert_eq!(sparse.get("0"), Some(&Value::String("stop".to_string())));
+        assert_eq!(
+            sparse.get("1"),
+            Some(&Value::String("worker-1".to_string()))
+        );
+        assert_eq!(
+            sparse.get("2"),
+            Some(&Value::String("claude-3-sonnet".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_subagent_event_values_from_sparse() {
+        use super::PosEncoded;
+        let mut sparse = SparseArray::new();
+        sparse.insert("0".to_string(), Value::String("start".to_string()));
+        sparse.insert("1".to_string(), Value::String("sub-456".to_string()));
+        sparse.insert("2".to_string(), Value::String("claude-3-opus".to_string()));
+        let values = <SubagentEventValues as PosEncoded>::from_sparse(&sparse);
+        assert_eq!(values.event_type, Some(Some("start".to_string())));
+        assert_eq!(values.subagent_id, Some(Some("sub-456".to_string())));
+        assert_eq!(
+            values.subagent_model,
+            Some(Some("claude-3-opus".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_subagent_event_values_roundtrip() {
+        use super::PosEncoded;
+        let original = SubagentEventValues::new()
+            .event_type("start")
+            .subagent_id("agent-abc")
+            .subagent_model("gpt-4");
+        let sparse = PosEncoded::to_sparse(&original);
+        let restored = <SubagentEventValues as PosEncoded>::from_sparse(&sparse);
+        assert_eq!(restored.event_type, Some(Some("start".to_string())));
+        assert_eq!(restored.subagent_id, Some(Some("agent-abc".to_string())));
+        assert_eq!(restored.subagent_model, Some(Some("gpt-4".to_string())));
+    }
+
+    #[test]
+    fn test_subagent_event_id() {
+        assert_eq!(
+            SubagentEventValues::event_id(),
+            MetricEventId::SubagentEvent
+        );
+        assert_eq!(SubagentEventValues::event_id() as u16, 9);
+    }
+
+    #[test]
+    fn test_subagent_event_values_with_nulls() {
+        let values = SubagentEventValues::new()
+            .event_type("start")
+            .subagent_id_null()
+            .subagent_model_null();
+        assert_eq!(values.event_type, Some(Some("start".to_string())));
+        assert_eq!(values.subagent_id, Some(None));
+        assert_eq!(values.subagent_model, Some(None));
     }
 }

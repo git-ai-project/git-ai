@@ -16,6 +16,7 @@ use std::path::PathBuf;
 // Command patterns for hooks
 const CURSOR_BEFORE_SUBMIT_CMD: &str = "checkpoint cursor --hook-input stdin";
 const CURSOR_AFTER_EDIT_CMD: &str = "checkpoint cursor --hook-input stdin";
+const CURSOR_BEFORE_MCP_CMD: &str = "checkpoint cursor --hook-input stdin";
 
 pub struct CursorInstaller;
 
@@ -138,6 +139,7 @@ impl HookInstaller for CursorInstaller {
             CURSOR_BEFORE_SUBMIT_CMD
         );
         let after_edit_cmd = format!("{} {}", params.binary_path.display(), CURSOR_AFTER_EDIT_CMD);
+        let before_mcp_cmd = format!("{} {}", params.binary_path.display(), CURSOR_BEFORE_MCP_CMD);
 
         // Desired hooks payload for Cursor
         let desired: Value = json!({
@@ -151,6 +153,11 @@ impl HookInstaller for CursorInstaller {
                 "afterFileEdit": [
                     {
                         "command": after_edit_cmd
+                    }
+                ],
+                "beforeMCPExecution": [
+                    {
+                        "command": before_mcp_cmd
                     }
                 ]
             }
@@ -170,7 +177,7 @@ impl HookInstaller for CursorInstaller {
         let mut hooks_obj = merged.get("hooks").cloned().unwrap_or_else(|| json!({}));
 
         // Process both hook types
-        for hook_name in &["beforeSubmitPrompt", "afterFileEdit"] {
+        for hook_name in &["beforeSubmitPrompt", "afterFileEdit", "beforeMCPExecution"] {
             let desired_hooks = desired
                 .get("hooks")
                 .and_then(|h| h.get(*hook_name))
@@ -276,7 +283,7 @@ impl HookInstaller for CursorInstaller {
         let mut changed = false;
 
         // Remove git-ai checkpoint cursor commands from both hook types
-        for hook_name in &["beforeSubmitPrompt", "afterFileEdit"] {
+        for hook_name in &["beforeSubmitPrompt", "afterFileEdit", "beforeMCPExecution"] {
             if let Some(hooks_array) = hooks_obj.get_mut(*hook_name).and_then(|v| v.as_array_mut())
             {
                 let original_len = hooks_array.len();
@@ -527,14 +534,13 @@ mod tests {
         let mut content: Value =
             serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
 
-        for hook_name in &["beforeSubmitPrompt", "afterFileEdit"] {
+        for hook_name in &["beforeSubmitPrompt", "afterFileEdit", "beforeMCPExecution"] {
             let hooks_obj = content.get_mut("hooks").unwrap();
             let mut hooks_array = hooks_obj
                 .get(*hook_name)
-                .unwrap()
-                .as_array()
-                .unwrap()
-                .clone();
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
             hooks_array.push(json!({"command": git_ai_cmd.clone()}));
             hooks_obj
                 .as_object_mut()
@@ -550,9 +556,11 @@ mod tests {
 
         let before_submit = hooks.get("beforeSubmitPrompt").unwrap().as_array().unwrap();
         let after_edit = hooks.get("afterFileEdit").unwrap().as_array().unwrap();
+        let before_mcp = hooks.get("beforeMCPExecution").unwrap().as_array().unwrap();
 
         assert_eq!(before_submit.len(), 2);
         assert_eq!(after_edit.len(), 2);
+        assert_eq!(before_mcp.len(), 1);
 
         assert_eq!(
             before_submit[0].get("command").unwrap().as_str().unwrap(),
@@ -599,14 +607,13 @@ mod tests {
         let mut content: Value =
             serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
 
-        for hook_name in &["beforeSubmitPrompt", "afterFileEdit"] {
+        for hook_name in &["beforeSubmitPrompt", "afterFileEdit", "beforeMCPExecution"] {
             let hooks_obj = content.get_mut("hooks").unwrap();
             let mut hooks_array = hooks_obj
                 .get(*hook_name)
-                .unwrap()
-                .as_array()
-                .unwrap()
-                .clone();
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
 
             for hook in hooks_array.iter_mut() {
                 if let Some(cmd) = hook.get("command").and_then(|c| c.as_str())
@@ -630,9 +637,11 @@ mod tests {
 
         let before_submit = hooks.get("beforeSubmitPrompt").unwrap().as_array().unwrap();
         let after_edit = hooks.get("afterFileEdit").unwrap().as_array().unwrap();
+        let before_mcp = hooks.get("beforeMCPExecution").unwrap().as_array().unwrap();
 
         assert_eq!(before_submit.len(), 1);
         assert_eq!(after_edit.len(), 1);
+        assert_eq!(before_mcp.len(), 0);
 
         assert_eq!(
             before_submit[0].get("command").unwrap().as_str().unwrap(),

@@ -111,6 +111,14 @@ fn should_emit_agent_usage(_agent_id: &AgentId) -> bool {
     false
 }
 
+fn parse_mcp_tool_name(tool_name: &str) -> Option<(String, String)> {
+    let rest = tool_name.strip_prefix("mcp__")?;
+    let mut parts = rest.split("__");
+    let server_name = parts.next()?;
+    let tool = parts.next()?;
+    Some((server_name.to_string(), tool.to_string()))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     repo: &Repository,
@@ -387,6 +395,13 @@ pub fn run(
         entries_start.elapsed()
     ));
 
+    // Build common attributes once (reused for all events)
+    let attrs = build_checkpoint_attrs(
+        repo,
+        &base_commit,
+        agent_run_result.as_ref().map(|r| &r.agent_id),
+    );
+
     // Skip adding checkpoint if there are no changes
     if !entries.is_empty() {
         let checkpoint_create_start = Instant::now();
@@ -445,9 +460,6 @@ pub fn run(
         ));
         checkpoints.push(checkpoint.clone());
 
-        // Build common attributes once (reused for all events)
-        let attrs = build_checkpoint_attrs(repo, &base_commit, checkpoint.agent_id.as_ref());
-
         // Record agent usage metric for AI checkpoints
         if kind != CheckpointKind::Human
             && let Some(agent_id) = checkpoint.agent_id.as_ref()
@@ -473,6 +485,138 @@ pub fn run(
             let file_attrs = attrs.clone().author(&checkpoint.author);
 
             crate::metrics::record(values, file_attrs);
+        }
+    }
+
+    if let Some(agent_run) = agent_run_result.as_ref() {
+        if let Some(hook_meta) = agent_run.hook_metadata.as_ref() {
+            let hook_event_name = hook_meta.hook_event_name.as_deref();
+            let hook_tool_name = hook_meta.tool_name.as_deref();
+
+            let is_user_message = matches!(
+                hook_event_name,
+                Some("UserPromptSubmit")
+                    | Some("beforeSubmitPrompt")
+                    | Some("before_submit_prompt")
+                    | Some("BeforeSubmitPrompt")
+                    | Some("BeforeModel")
+            );
+            let is_ai_message = matches!(
+                hook_event_name,
+                Some("Stop") | Some("SessionEnd") | Some("afterSubmitPrompt") | Some("AfterModel")
+            );
+
+            if is_user_message {
+                let values = crate::metrics::NewMessageValues::new().role("human");
+                crate::metrics::record(values, attrs.clone());
+
+                if should_emit_agent_usage(&agent_run.agent_id) {
+                    let values = crate::metrics::AgentUsageValues::new();
+                    crate::metrics::record(values, attrs.clone());
+                }
+            } else if is_ai_message {
+                let values = crate::metrics::NewMessageValues::new().role("ai");
+                crate::metrics::record(values, attrs.clone());
+
+                if should_emit_agent_usage(&agent_run.agent_id) {
+                    let values = crate::metrics::AgentUsageValues::new();
+                    crate::metrics::record(values, attrs.clone());
+                }
+            }
+
+            let is_tool_call = matches!(
+                hook_event_name,
+                Some("PostToolUse")
+                    | Some("AfterTool")
+                    | Some("afterFileEdit")
+                    | Some("after_file_edit")
+                    | Some("AfterToolUse")
+            );
+
+            if is_tool_call {
+                if let Some(tool_name) = hook_tool_name {
+                    let values = crate::metrics::ToolCallValues::new().tool_name(tool_name);
+                    crate::metrics::record(values, attrs.clone());
+
+                    if let Some(skill_name) = tool_name
+                        .strip_prefix("skill__")
+                        .or_else(|| tool_name.strip_prefix("skill:"))
+                    {
+                        let values = crate::metrics::SkillUsedValues::new().skill_name(skill_name);
+                        crate::metrics::record(values, attrs.clone());
+                    }
+
+                    if let Some((server_name, mcp_tool)) = parse_mcp_tool_name(tool_name) {
+                        let values = crate::metrics::McpInvocationValues::new()
+                            .server_name(server_name)
+                            .tool_name(mcp_tool);
+                        crate::metrics::record(values, attrs.clone());
+                    }
+                }
+            }
+
+            let is_mcp_hook = matches!(
+                hook_event_name,
+                Some("beforeMCPExecution")
+                    | Some("BeforeMCPExecution")
+                    | Some("before_mcp_execution")
+                    | Some("AfterMCPExecution")
+            );
+
+            if is_mcp_hook {
+                let server = agent_run
+                    .agent_metadata
+                    .as_ref()
+                    .and_then(|m| m.get("mcp_server_name").cloned());
+                let tool = agent_run
+                    .agent_metadata
+                    .as_ref()
+                    .and_then(|m| m.get("mcp_tool_name").cloned());
+
+                if let (Some(server_name), Some(tool_name)) = (server, tool) {
+                    let values = crate::metrics::McpInvocationValues::new()
+                        .server_name(server_name)
+                        .tool_name(tool_name);
+                    crate::metrics::record(values, attrs.clone());
+                } else if let Some(tool_name) = hook_tool_name {
+                    if let Some((server_name, mcp_tool)) = parse_mcp_tool_name(tool_name) {
+                        let values = crate::metrics::McpInvocationValues::new()
+                            .server_name(server_name)
+                            .tool_name(mcp_tool);
+                        crate::metrics::record(values, attrs.clone());
+                    }
+                }
+            }
+
+            let is_subagent = matches!(
+                hook_event_name,
+                Some("SubagentStart") | Some("SubagentStop")
+            );
+            if is_subagent {
+                let event_type = if hook_event_name == Some("SubagentStart") {
+                    "start"
+                } else {
+                    "stop"
+                };
+
+                let mut values = crate::metrics::SubagentEventValues::new().event_type(event_type);
+                if let Some(sub_id) = agent_run
+                    .agent_metadata
+                    .as_ref()
+                    .and_then(|m| m.get("subagent_id"))
+                {
+                    values = values.subagent_id(sub_id.as_str());
+                }
+                if let Some(sub_model) = agent_run
+                    .agent_metadata
+                    .as_ref()
+                    .and_then(|m| m.get("subagent_model"))
+                {
+                    values = values.subagent_model(sub_model.as_str());
+                }
+
+                crate::metrics::record(values, attrs.clone());
+            }
         }
     }
 
@@ -1668,6 +1812,7 @@ mod tests {
             ]),
             will_edit_filepaths: None,
             dirty_files: None,
+            hook_metadata: None,
         };
 
         // Run checkpoint - should not crash even with paths outside repo
@@ -2095,6 +2240,461 @@ mod tests {
         assert_eq!(
             latest_stats.deletions_sloc, 0,
             "Whitespace deletions ignored"
+        );
+    }
+
+    #[test]
+    fn test_parse_mcp_tool_name_valid() {
+        let result = parse_mcp_tool_name("mcp__filesystem__read_file");
+        assert_eq!(
+            result,
+            Some(("filesystem".to_string(), "read_file".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_parse_mcp_tool_name_no_prefix() {
+        assert_eq!(parse_mcp_tool_name("Write"), None);
+        assert_eq!(parse_mcp_tool_name("Read"), None);
+        assert_eq!(parse_mcp_tool_name("Bash"), None);
+    }
+
+    #[test]
+    fn test_parse_mcp_tool_name_incomplete() {
+        assert_eq!(parse_mcp_tool_name("mcp__"), None);
+        assert_eq!(parse_mcp_tool_name("mcp__server_only"), None);
+    }
+
+    #[test]
+    fn test_parse_mcp_tool_name_various_servers() {
+        let result = parse_mcp_tool_name("mcp__github__create_issue");
+        assert_eq!(
+            result,
+            Some(("github".to_string(), "create_issue".to_string()))
+        );
+
+        let result = parse_mcp_tool_name("mcp__slack__post_message");
+        assert_eq!(
+            result,
+            Some(("slack".to_string(), "post_message".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_with_hook_metadata_none_does_not_panic() {
+        use crate::authorship::transcript::AiTranscript;
+        use crate::authorship::working_log::AgentId;
+        use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
+
+        let (tmp_repo, mut file, _) = TmpRepo::new_with_base_commit().unwrap();
+        file.append("New line\n").unwrap();
+
+        let agent_run_result = AgentRunResult {
+            agent_id: AgentId {
+                tool: "claude-code".to_string(),
+                id: "test_session".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            agent_metadata: None,
+            transcript: Some(AiTranscript { messages: vec![] }),
+            checkpoint_kind: CheckpointKind::AiAgent,
+            repo_working_dir: None,
+            edited_filepaths: Some(vec![file.filename().to_string()]),
+            will_edit_filepaths: None,
+            dirty_files: None,
+            hook_metadata: None,
+        };
+
+        let result =
+            tmp_repo.trigger_checkpoint_with_agent_result("test_user", Some(agent_run_result));
+        assert!(
+            result.is_ok(),
+            "Checkpoint with hook_metadata=None should succeed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_with_hook_metadata_user_message() {
+        use crate::authorship::transcript::AiTranscript;
+        use crate::authorship::working_log::AgentId;
+        use crate::commands::checkpoint_agent::agent_presets::{AgentRunResult, HookMetadata};
+
+        let (tmp_repo, mut file, _) = TmpRepo::new_with_base_commit().unwrap();
+        file.append("User prompt line\n").unwrap();
+
+        let agent_run_result = AgentRunResult {
+            agent_id: AgentId {
+                tool: "claude-code".to_string(),
+                id: "test_session_msg".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            agent_metadata: None,
+            transcript: Some(AiTranscript { messages: vec![] }),
+            checkpoint_kind: CheckpointKind::AiAgent,
+            repo_working_dir: None,
+            edited_filepaths: Some(vec![file.filename().to_string()]),
+            will_edit_filepaths: None,
+            dirty_files: None,
+            hook_metadata: Some(HookMetadata {
+                hook_event_name: Some("UserPromptSubmit".to_string()),
+                tool_name: None,
+            }),
+        };
+
+        let result =
+            tmp_repo.trigger_checkpoint_with_agent_result("test_user", Some(agent_run_result));
+        assert!(
+            result.is_ok(),
+            "Checkpoint with UserPromptSubmit hook should succeed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_with_hook_metadata_tool_call() {
+        use crate::authorship::transcript::AiTranscript;
+        use crate::authorship::working_log::AgentId;
+        use crate::commands::checkpoint_agent::agent_presets::{AgentRunResult, HookMetadata};
+
+        let (tmp_repo, mut file, _) = TmpRepo::new_with_base_commit().unwrap();
+        file.append("Tool call line\n").unwrap();
+
+        let agent_run_result = AgentRunResult {
+            agent_id: AgentId {
+                tool: "claude-code".to_string(),
+                id: "test_session_tool".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            agent_metadata: None,
+            transcript: Some(AiTranscript { messages: vec![] }),
+            checkpoint_kind: CheckpointKind::AiAgent,
+            repo_working_dir: None,
+            edited_filepaths: Some(vec![file.filename().to_string()]),
+            will_edit_filepaths: None,
+            dirty_files: None,
+            hook_metadata: Some(HookMetadata {
+                hook_event_name: Some("PostToolUse".to_string()),
+                tool_name: Some("Write".to_string()),
+            }),
+        };
+
+        let result =
+            tmp_repo.trigger_checkpoint_with_agent_result("test_user", Some(agent_run_result));
+        assert!(
+            result.is_ok(),
+            "Checkpoint with PostToolUse hook should succeed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_with_hook_metadata_mcp_tool_via_tool_name() {
+        use crate::authorship::transcript::AiTranscript;
+        use crate::authorship::working_log::AgentId;
+        use crate::commands::checkpoint_agent::agent_presets::{AgentRunResult, HookMetadata};
+
+        let (tmp_repo, mut file, _) = TmpRepo::new_with_base_commit().unwrap();
+        file.append("MCP tool line\n").unwrap();
+
+        let agent_run_result = AgentRunResult {
+            agent_id: AgentId {
+                tool: "claude-code".to_string(),
+                id: "test_session_mcp".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            agent_metadata: None,
+            transcript: Some(AiTranscript { messages: vec![] }),
+            checkpoint_kind: CheckpointKind::AiAgent,
+            repo_working_dir: None,
+            edited_filepaths: Some(vec![file.filename().to_string()]),
+            will_edit_filepaths: None,
+            dirty_files: None,
+            hook_metadata: Some(HookMetadata {
+                hook_event_name: Some("PostToolUse".to_string()),
+                tool_name: Some("mcp__filesystem__read_file".to_string()),
+            }),
+        };
+
+        let result =
+            tmp_repo.trigger_checkpoint_with_agent_result("test_user", Some(agent_run_result));
+        assert!(
+            result.is_ok(),
+            "Checkpoint with MCP tool via PostToolUse should succeed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_with_hook_metadata_skill_tool() {
+        use crate::authorship::transcript::AiTranscript;
+        use crate::authorship::working_log::AgentId;
+        use crate::commands::checkpoint_agent::agent_presets::{AgentRunResult, HookMetadata};
+
+        let (tmp_repo, mut file, _) = TmpRepo::new_with_base_commit().unwrap();
+        file.append("Skill tool line\n").unwrap();
+
+        let agent_run_result = AgentRunResult {
+            agent_id: AgentId {
+                tool: "claude-code".to_string(),
+                id: "test_session_skill".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            agent_metadata: None,
+            transcript: Some(AiTranscript { messages: vec![] }),
+            checkpoint_kind: CheckpointKind::AiAgent,
+            repo_working_dir: None,
+            edited_filepaths: Some(vec![file.filename().to_string()]),
+            will_edit_filepaths: None,
+            dirty_files: None,
+            hook_metadata: Some(HookMetadata {
+                hook_event_name: Some("PostToolUse".to_string()),
+                tool_name: Some("skill__deploy".to_string()),
+            }),
+        };
+
+        let result =
+            tmp_repo.trigger_checkpoint_with_agent_result("test_user", Some(agent_run_result));
+        assert!(
+            result.is_ok(),
+            "Checkpoint with skill tool should succeed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_with_hook_metadata_subagent_start() {
+        use crate::authorship::transcript::AiTranscript;
+        use crate::authorship::working_log::AgentId;
+        use crate::commands::checkpoint_agent::agent_presets::{AgentRunResult, HookMetadata};
+
+        let (tmp_repo, mut file, _) = TmpRepo::new_with_base_commit().unwrap();
+        file.append("Subagent line\n").unwrap();
+
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("subagent_id".to_string(), "sub-123".to_string());
+        metadata.insert(
+            "subagent_model".to_string(),
+            "claude-sonnet-4-20250514".to_string(),
+        );
+
+        let agent_run_result = AgentRunResult {
+            agent_id: AgentId {
+                tool: "claude-code".to_string(),
+                id: "test_session_sub".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            agent_metadata: Some(metadata),
+            transcript: Some(AiTranscript { messages: vec![] }),
+            checkpoint_kind: CheckpointKind::AiAgent,
+            repo_working_dir: None,
+            edited_filepaths: Some(vec![file.filename().to_string()]),
+            will_edit_filepaths: None,
+            dirty_files: None,
+            hook_metadata: Some(HookMetadata {
+                hook_event_name: Some("SubagentStart".to_string()),
+                tool_name: None,
+            }),
+        };
+
+        let result =
+            tmp_repo.trigger_checkpoint_with_agent_result("test_user", Some(agent_run_result));
+        assert!(
+            result.is_ok(),
+            "Checkpoint with SubagentStart hook should succeed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_with_hook_metadata_mcp_hook_with_metadata() {
+        use crate::authorship::transcript::AiTranscript;
+        use crate::authorship::working_log::AgentId;
+        use crate::commands::checkpoint_agent::agent_presets::{AgentRunResult, HookMetadata};
+
+        let (tmp_repo, mut file, _) = TmpRepo::new_with_base_commit().unwrap();
+        file.append("MCP hook line\n").unwrap();
+
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("mcp_server_name".to_string(), "github".to_string());
+        metadata.insert("mcp_tool_name".to_string(), "create_issue".to_string());
+
+        let agent_run_result = AgentRunResult {
+            agent_id: AgentId {
+                tool: "cursor".to_string(),
+                id: "test_session_mcp_hook".to_string(),
+                model: "gpt-4o".to_string(),
+            },
+            agent_metadata: Some(metadata),
+            transcript: Some(AiTranscript { messages: vec![] }),
+            checkpoint_kind: CheckpointKind::AiAgent,
+            repo_working_dir: None,
+            edited_filepaths: Some(vec![file.filename().to_string()]),
+            will_edit_filepaths: None,
+            dirty_files: None,
+            hook_metadata: Some(HookMetadata {
+                hook_event_name: Some("beforeMCPExecution".to_string()),
+                tool_name: None,
+            }),
+        };
+
+        let result =
+            tmp_repo.trigger_checkpoint_with_agent_result("test_user", Some(agent_run_result));
+        assert!(
+            result.is_ok(),
+            "Checkpoint with beforeMCPExecution hook should succeed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_with_hook_metadata_ai_message_stop() {
+        use crate::authorship::transcript::AiTranscript;
+        use crate::authorship::working_log::AgentId;
+        use crate::commands::checkpoint_agent::agent_presets::{AgentRunResult, HookMetadata};
+
+        let (tmp_repo, mut file, _) = TmpRepo::new_with_base_commit().unwrap();
+        file.append("AI stop line\n").unwrap();
+
+        let agent_run_result = AgentRunResult {
+            agent_id: AgentId {
+                tool: "claude-code".to_string(),
+                id: "test_session_stop".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            agent_metadata: None,
+            transcript: Some(AiTranscript { messages: vec![] }),
+            checkpoint_kind: CheckpointKind::AiAgent,
+            repo_working_dir: None,
+            edited_filepaths: Some(vec![file.filename().to_string()]),
+            will_edit_filepaths: None,
+            dirty_files: None,
+            hook_metadata: Some(HookMetadata {
+                hook_event_name: Some("Stop".to_string()),
+                tool_name: None,
+            }),
+        };
+
+        let result =
+            tmp_repo.trigger_checkpoint_with_agent_result("test_user", Some(agent_run_result));
+        assert!(
+            result.is_ok(),
+            "Checkpoint with Stop hook (AI message) should succeed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_with_hook_metadata_gemini_before_model() {
+        use crate::authorship::transcript::AiTranscript;
+        use crate::authorship::working_log::AgentId;
+        use crate::commands::checkpoint_agent::agent_presets::{AgentRunResult, HookMetadata};
+
+        let (tmp_repo, mut file, _) = TmpRepo::new_with_base_commit().unwrap();
+        file.append("Gemini model line\n").unwrap();
+
+        let agent_run_result = AgentRunResult {
+            agent_id: AgentId {
+                tool: "gemini".to_string(),
+                id: "test_session_gemini".to_string(),
+                model: "gemini-2.0-flash".to_string(),
+            },
+            agent_metadata: None,
+            transcript: Some(AiTranscript { messages: vec![] }),
+            checkpoint_kind: CheckpointKind::AiAgent,
+            repo_working_dir: None,
+            edited_filepaths: Some(vec![file.filename().to_string()]),
+            will_edit_filepaths: None,
+            dirty_files: None,
+            hook_metadata: Some(HookMetadata {
+                hook_event_name: Some("BeforeModel".to_string()),
+                tool_name: None,
+            }),
+        };
+
+        let result =
+            tmp_repo.trigger_checkpoint_with_agent_result("test_user", Some(agent_run_result));
+        assert!(
+            result.is_ok(),
+            "Checkpoint with BeforeModel hook should succeed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_with_subagent_stop() {
+        use crate::authorship::transcript::AiTranscript;
+        use crate::authorship::working_log::AgentId;
+        use crate::commands::checkpoint_agent::agent_presets::{AgentRunResult, HookMetadata};
+
+        let (tmp_repo, mut file, _) = TmpRepo::new_with_base_commit().unwrap();
+        file.append("Subagent stop line\n").unwrap();
+
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("subagent_id".to_string(), "sub-456".to_string());
+
+        let agent_run_result = AgentRunResult {
+            agent_id: AgentId {
+                tool: "claude-code".to_string(),
+                id: "test_session_sub_stop".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            agent_metadata: Some(metadata),
+            transcript: Some(AiTranscript { messages: vec![] }),
+            checkpoint_kind: CheckpointKind::AiAgent,
+            repo_working_dir: None,
+            edited_filepaths: Some(vec![file.filename().to_string()]),
+            will_edit_filepaths: None,
+            dirty_files: None,
+            hook_metadata: Some(HookMetadata {
+                hook_event_name: Some("SubagentStop".to_string()),
+                tool_name: None,
+            }),
+        };
+
+        let result =
+            tmp_repo.trigger_checkpoint_with_agent_result("test_user", Some(agent_run_result));
+        assert!(
+            result.is_ok(),
+            "Checkpoint with SubagentStop hook should succeed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_with_skill_colon_prefix() {
+        use crate::authorship::transcript::AiTranscript;
+        use crate::authorship::working_log::AgentId;
+        use crate::commands::checkpoint_agent::agent_presets::{AgentRunResult, HookMetadata};
+
+        let (tmp_repo, mut file, _) = TmpRepo::new_with_base_commit().unwrap();
+        file.append("Skill colon line\n").unwrap();
+
+        let agent_run_result = AgentRunResult {
+            agent_id: AgentId {
+                tool: "claude-code".to_string(),
+                id: "test_session_skill_colon".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            agent_metadata: None,
+            transcript: Some(AiTranscript { messages: vec![] }),
+            checkpoint_kind: CheckpointKind::AiAgent,
+            repo_working_dir: None,
+            edited_filepaths: Some(vec![file.filename().to_string()]),
+            will_edit_filepaths: None,
+            dirty_files: None,
+            hook_metadata: Some(HookMetadata {
+                hook_event_name: Some("PostToolUse".to_string()),
+                tool_name: Some("skill:test_runner".to_string()),
+            }),
+        };
+
+        let result =
+            tmp_repo.trigger_checkpoint_with_agent_result("test_user", Some(agent_run_result));
+        assert!(
+            result.is_ok(),
+            "Checkpoint with skill:prefix tool should succeed: {:?}",
+            result.err()
         );
     }
 }

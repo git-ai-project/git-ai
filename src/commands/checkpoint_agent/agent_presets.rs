@@ -19,6 +19,12 @@ pub struct AgentCheckpointFlags {
     pub hook_input: Option<String>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct HookMetadata {
+    pub hook_event_name: Option<String>,
+    pub tool_name: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct AgentRunResult {
     pub agent_id: AgentId,
@@ -29,6 +35,7 @@ pub struct AgentRunResult {
     pub edited_filepaths: Option<Vec<String>>,
     pub will_edit_filepaths: Option<Vec<String>>,
     pub dirty_files: Option<HashMap<String, String>>,
+    pub hook_metadata: Option<HookMetadata>,
 }
 
 pub trait AgentCheckpointPreset {
@@ -117,11 +124,33 @@ impl AgentCheckpointPreset for ClaudePreset {
             .map(|path| vec![path.to_string()]);
 
         // Store transcript_path in metadata
-        let agent_metadata =
+        let mut agent_metadata =
             HashMap::from([("transcript_path".to_string(), transcript_path.to_string())]);
+
+        if let Some(subagent_id) = hook_data
+            .get("subagent_id")
+            .and_then(|v| v.as_str())
+            .or_else(|| hook_data.get("subagentId").and_then(|v| v.as_str()))
+        {
+            agent_metadata.insert("subagent_id".to_string(), subagent_id.to_string());
+        }
+
+        if let Some(subagent_model) = hook_data
+            .get("subagent_model")
+            .and_then(|v| v.as_str())
+            .or_else(|| hook_data.get("subagentModel").and_then(|v| v.as_str()))
+        {
+            agent_metadata.insert("subagent_model".to_string(), subagent_model.to_string());
+        }
 
         // Check if this is a PreToolUse event (human checkpoint)
         let hook_event_name = hook_data.get("hook_event_name").and_then(|v| v.as_str());
+        let tool_name = hook_data.get("tool_name").and_then(|v| v.as_str());
+
+        let hook_meta = Some(HookMetadata {
+            hook_event_name: hook_event_name.map(|s| s.to_string()),
+            tool_name: tool_name.map(|s| s.to_string()),
+        });
 
         if hook_event_name == Some("PreToolUse") {
             // Early return for human checkpoint
@@ -134,6 +163,7 @@ impl AgentCheckpointPreset for ClaudePreset {
                 edited_filepaths: None,
                 will_edit_filepaths: file_path_as_vec,
                 dirty_files: None,
+                hook_metadata: hook_meta,
             });
         }
 
@@ -147,6 +177,7 @@ impl AgentCheckpointPreset for ClaudePreset {
             edited_filepaths: file_path_as_vec,
             will_edit_filepaths: None,
             dirty_files: None,
+            hook_metadata: hook_meta,
         })
     }
 }
@@ -483,6 +514,17 @@ impl AgentCheckpointPreset for GeminiPreset {
         // Check if this is a PreToolUse event (human checkpoint)
         let hook_event_name = hook_data.get("hook_event_name").and_then(|v| v.as_str());
 
+        let hook_tool_name = hook_data
+            .get("tool_name")
+            .and_then(|v| v.as_str())
+            .or_else(|| hook_data.get("toolName").and_then(|v| v.as_str()))
+            .map(|s| s.to_string());
+
+        let hook_meta = Some(HookMetadata {
+            hook_event_name: hook_event_name.map(|s| s.to_string()),
+            tool_name: hook_tool_name,
+        });
+
         if hook_event_name == Some("BeforeTool") {
             // Early return for human checkpoint
             return Ok(AgentRunResult {
@@ -494,6 +536,7 @@ impl AgentCheckpointPreset for GeminiPreset {
                 edited_filepaths: None,
                 will_edit_filepaths: file_path_as_vec,
                 dirty_files: None,
+                hook_metadata: hook_meta.clone(),
             });
         }
 
@@ -507,6 +550,7 @@ impl AgentCheckpointPreset for GeminiPreset {
             edited_filepaths: file_path_as_vec,
             will_edit_filepaths: None,
             dirty_files: None,
+            hook_metadata: hook_meta,
         })
     }
 }
@@ -691,6 +735,17 @@ impl AgentCheckpointPreset for ContinueCliPreset {
         // Check if this is a PreToolUse event (human checkpoint)
         let hook_event_name = hook_data.get("hook_event_name").and_then(|v| v.as_str());
 
+        let hook_tool_name = hook_data
+            .get("tool_name")
+            .and_then(|v| v.as_str())
+            .or_else(|| hook_data.get("toolName").and_then(|v| v.as_str()))
+            .map(|s| s.to_string());
+
+        let hook_meta = Some(HookMetadata {
+            hook_event_name: hook_event_name.map(|s| s.to_string()),
+            tool_name: hook_tool_name,
+        });
+
         if hook_event_name == Some("PreToolUse") {
             // Early return for human checkpoint
             return Ok(AgentRunResult {
@@ -702,6 +757,7 @@ impl AgentCheckpointPreset for ContinueCliPreset {
                 edited_filepaths: None,
                 will_edit_filepaths: file_path_as_vec,
                 dirty_files: None,
+                hook_metadata: hook_meta.clone(),
             });
         }
 
@@ -715,6 +771,7 @@ impl AgentCheckpointPreset for ContinueCliPreset {
             edited_filepaths: file_path_as_vec,
             will_edit_filepaths: None,
             dirty_files: None,
+            hook_metadata: hook_meta,
         })
     }
 }
@@ -910,6 +967,7 @@ impl AgentCheckpointPreset for CodexPreset {
             edited_filepaths: None,
             will_edit_filepaths: None,
             dirty_files: None,
+            hook_metadata: None,
         })
     }
 }
@@ -1208,10 +1266,24 @@ impl AgentCheckpointPreset for CursorPreset {
             .map(|s| s.to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
+        let hook_tool_name = hook_data
+            .get("tool_name")
+            .and_then(|v| v.as_str())
+            .or_else(|| hook_data.get("toolName").and_then(|v| v.as_str()))
+            .map(|s| s.to_string());
+
+        let hook_meta = Some(HookMetadata {
+            hook_event_name: Some(hook_event_name.clone()),
+            tool_name: hook_tool_name,
+        });
+
         // Validate hook_event_name
-        if hook_event_name != "beforeSubmitPrompt" && hook_event_name != "afterFileEdit" {
+        if hook_event_name != "beforeSubmitPrompt"
+            && hook_event_name != "afterFileEdit"
+            && hook_event_name != "beforeMCPExecution"
+        {
             return Err(GitAiError::PresetError(format!(
-                "Invalid hook_event_name: {}. Expected 'beforeSubmitPrompt' or 'afterFileEdit'",
+                "Invalid hook_event_name: {}. Expected 'beforeSubmitPrompt', 'afterFileEdit', or 'beforeMCPExecution'",
                 hook_event_name
             )));
         }
@@ -1260,6 +1332,7 @@ impl AgentCheckpointPreset for CursorPreset {
                 edited_filepaths: None,
                 will_edit_filepaths: None,
                 dirty_files: None,
+                hook_metadata: hook_meta.clone(),
             });
         }
 
@@ -1315,16 +1388,42 @@ impl AgentCheckpointPreset for CursorPreset {
             model,
         };
 
+        let mut agent_metadata = HashMap::new();
+
         // Store cursor database path in metadata for refetching during post-commit.
         // This is only needed when GIT_AI_CURSOR_GLOBAL_DB_PATH env var is set (i.e., in tests),
         // because the env var isn't passed to git hook subprocesses.
-        let agent_metadata = if std::env::var("GIT_AI_CURSOR_GLOBAL_DB_PATH").is_ok() {
-            Some(HashMap::from([(
+        if std::env::var("GIT_AI_CURSOR_GLOBAL_DB_PATH").is_ok() {
+            agent_metadata.insert(
                 "__test_cursor_db_path".to_string(),
                 global_db.to_string_lossy().to_string(),
-            )]))
-        } else {
+            );
+        }
+
+        if hook_event_name == "beforeMCPExecution" {
+            if let Some(server_name) = hook_data
+                .get("mcp_server_name")
+                .and_then(|v| v.as_str())
+                .or_else(|| hook_data.get("server_name").and_then(|v| v.as_str()))
+                .or_else(|| hook_data.get("serverName").and_then(|v| v.as_str()))
+            {
+                agent_metadata.insert("mcp_server_name".to_string(), server_name.to_string());
+            }
+
+            if let Some(tool_name) = hook_data
+                .get("mcp_tool_name")
+                .and_then(|v| v.as_str())
+                .or_else(|| hook_data.get("tool_name").and_then(|v| v.as_str()))
+                .or_else(|| hook_data.get("toolName").and_then(|v| v.as_str()))
+            {
+                agent_metadata.insert("mcp_tool_name".to_string(), tool_name.to_string());
+            }
+        }
+
+        let agent_metadata = if agent_metadata.is_empty() {
             None
+        } else {
+            Some(agent_metadata)
         };
 
         Ok(AgentRunResult {
@@ -1336,6 +1435,7 @@ impl AgentCheckpointPreset for CursorPreset {
             edited_filepaths,
             will_edit_filepaths: None,
             dirty_files: None,
+            hook_metadata: hook_meta,
         })
     }
 }
@@ -1733,6 +1833,10 @@ impl GithubCopilotPreset {
                 edited_filepaths: None,
                 will_edit_filepaths: Some(will_edit_filepaths),
                 dirty_files,
+                hook_metadata: Some(HookMetadata {
+                    hook_event_name: Some(hook_event_name.to_string()),
+                    tool_name: None,
+                }),
             });
         }
 
@@ -1806,6 +1910,10 @@ impl GithubCopilotPreset {
             edited_filepaths: edited_filepaths.or(detected_edited_filepaths),
             will_edit_filepaths: None,
             dirty_files,
+            hook_metadata: Some(HookMetadata {
+                hook_event_name: Some(hook_event_name.to_string()),
+                tool_name: None,
+            }),
         })
     }
 
@@ -1969,6 +2077,7 @@ impl GithubCopilotPreset {
                 edited_filepaths: None,
                 will_edit_filepaths: Some(extracted_paths),
                 dirty_files,
+                hook_metadata: None,
             });
         }
 
@@ -2005,6 +2114,10 @@ impl GithubCopilotPreset {
             edited_filepaths: Some(extracted_paths),
             will_edit_filepaths: None,
             dirty_files,
+            hook_metadata: Some(HookMetadata {
+                hook_event_name: Some(hook_event_name.to_string()),
+                tool_name: Some(tool_name.to_string()),
+            }),
         })
     }
 
@@ -2611,6 +2724,7 @@ impl AgentCheckpointPreset for DroidPreset {
                 edited_filepaths: None,
                 will_edit_filepaths: file_path_as_vec,
                 dirty_files: None,
+                hook_metadata: None,
             });
         }
 
@@ -2624,6 +2738,7 @@ impl AgentCheckpointPreset for DroidPreset {
             edited_filepaths: file_path_as_vec,
             will_edit_filepaths: None,
             dirty_files: None,
+            hook_metadata: None,
         })
     }
 }
@@ -3381,6 +3496,7 @@ impl AgentCheckpointPreset for AiTabPreset {
                 edited_filepaths: None,
                 will_edit_filepaths,
                 dirty_files,
+                hook_metadata: None,
             });
         }
 
@@ -3393,6 +3509,7 @@ impl AgentCheckpointPreset for AiTabPreset {
             edited_filepaths,
             will_edit_filepaths: None,
             dirty_files,
+            hook_metadata: None,
         })
     }
 }
