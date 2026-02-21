@@ -54,7 +54,10 @@ fn generate_checkpoint_jsonl_line(
     }
 
     let transcript = if transcript_messages > 0 {
-        format!(r#","transcript":{}"#, generate_large_transcript(transcript_messages))
+        format!(
+            r#","transcript":{}"#,
+            generate_large_transcript(transcript_messages)
+        )
     } else {
         String::new()
     };
@@ -184,7 +187,11 @@ fn test_memory_overflow_append_checkpoint_quadratic_growth() {
         let result = repo.git_ai(&["checkpoint", "mock_ai", "test_file.rs"]);
         let elapsed = start.elapsed();
 
-        assert!(result.is_ok(), "checkpoint should succeed at iteration {}", i);
+        assert!(
+            result.is_ok(),
+            "checkpoint should succeed at iteration {}",
+            i
+        );
 
         let file_size = if checkpoints_file.exists() {
             fs::metadata(&checkpoints_file).unwrap().len()
@@ -261,9 +268,24 @@ fn test_memory_overflow_large_transcripts_accumulation() {
     let configs: &[(usize, usize, usize, &str)] = &[
         // (num_checkpoints, files_per_checkpoint, transcript_messages, description)
         (5, 3, 50, "Small session: 5 checkpoints, 50 messages each"),
-        (20, 5, 100, "Medium session: 20 checkpoints, 100 messages each"),
-        (50, 5, 200, "Large session: 50 checkpoints, 200 messages each"),
-        (100, 10, 300, "XL session: 100 checkpoints, 300 messages each"),
+        (
+            20,
+            5,
+            100,
+            "Medium session: 20 checkpoints, 100 messages each",
+        ),
+        (
+            50,
+            5,
+            200,
+            "Large session: 50 checkpoints, 200 messages each",
+        ),
+        (
+            100,
+            10,
+            300,
+            "XL session: 100 checkpoints, 300 messages each",
+        ),
     ];
 
     for (num_checkpoints, files_per_cp, transcript_msgs, description) in configs {
@@ -367,7 +389,10 @@ fn test_memory_overflow_multiplied_checkpoint_reads() {
         let path = repo.path().join(format!("src/file_{}.rs", i));
         fs::write(
             &path,
-            format!("// file {} - modified\nfn func_{}() {{ /* new */ }}\n", i, i),
+            format!(
+                "// file {} - modified\nfn func_{}() {{ /* new */ }}\n",
+                i, i
+            ),
         )
         .unwrap();
     }
@@ -376,7 +401,13 @@ fn test_memory_overflow_multiplied_checkpoint_reads() {
     let start = Instant::now();
 
     // This single call will read the full JSONL at least 4 times internally
-    let result = repo.git_ai(&["checkpoint", "mock_ai", "--", "src/file_0.rs", "src/file_1.rs"]);
+    let result = repo.git_ai(&[
+        "checkpoint",
+        "mock_ai",
+        "--",
+        "src/file_0.rs",
+        "src/file_1.rs",
+    ]);
     let elapsed = start.elapsed();
 
     let rss_after = get_rss_bytes();
@@ -396,8 +427,14 @@ fn test_memory_overflow_multiplied_checkpoint_reads() {
     );
 
     match result {
-        Ok(output) => eprintln!("  Checkpoint succeeded: {}", output.lines().next().unwrap_or("")),
-        Err(e) => eprintln!("  Checkpoint error (may be expected with synthetic data): {}", e),
+        Ok(output) => eprintln!(
+            "  Checkpoint succeeded: {}",
+            output.lines().next().unwrap_or("")
+        ),
+        Err(e) => eprintln!(
+            "  Checkpoint error (may be expected with synthetic data): {}",
+            e
+        ),
     }
 }
 
@@ -420,10 +457,7 @@ fn test_memory_overflow_realistic_multi_agent_session() {
     // Create initial files
     for i in 0..num_files {
         let path = repo.path().join(format!("module_{}.py", i));
-        let content = format!(
-            "# Module {}\ndef function_{}():\n    pass\n",
-            i, i
-        );
+        let content = format!("# Module {}\ndef function_{}():\n    pass\n", i, i);
         fs::write(&path, content).unwrap();
     }
     repo.git(&["add", "."]).unwrap();
@@ -578,8 +612,10 @@ fn test_memory_overflow_scaling_projection() {
         (150, 10, 300), // ~200+ MB
     ];
 
-    eprintln!("  {:>12} {:>12} {:>12} {:>12} {:>15}",
-        "Checkpoints", "JSONL Size", "Read Time", "RSS Delta", "Projected 1GB");
+    eprintln!(
+        "  {:>12} {:>12} {:>12} {:>12} {:>15}",
+        "Checkpoints", "JSONL Size", "Read Time", "RSS Delta", "Projected 1GB"
+    );
 
     for (num_cp, files_per_cp, transcript_msgs) in configs {
         let file_size = write_synthetic_checkpoints(
@@ -651,8 +687,10 @@ fn test_memory_overflow_append_rewrite_all_pattern() {
     let mut cumulative_write_bytes: u64 = 0;
     let mut times = Vec::new();
 
-    eprintln!("  {:>5} {:>12} {:>12} {:>15} {:>12}",
-        "Iter", "JSONL Size", "Time", "Cumul. Written", "Write Ampl.");
+    eprintln!(
+        "  {:>5} {:>12} {:>12} {:>15} {:>12}",
+        "Iter", "JSONL Size", "Time", "Cumul. Written", "Write Ampl."
+    );
 
     for i in 0..iterations {
         let content = format!("fn main() {{}}\n// iteration {}\n", i);
