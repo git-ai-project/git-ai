@@ -150,6 +150,40 @@ fn load_root_gitattributes_contents(repo: &Repository) -> Option<String> {
     fs::read_to_string(gitattributes_path).ok()
 }
 
+/// Load ignore patterns from a `.git-ai-ignore` file at the repository root.
+/// The file follows `.gitignore` syntax: one glob pattern per line, blank lines
+/// and lines starting with `#` are skipped.
+pub fn load_git_ai_ignore_patterns(repo: &Repository) -> Vec<String> {
+    let Some(contents) = load_root_git_ai_ignore_contents(repo) else {
+        return Vec::new();
+    };
+
+    let mut patterns = Vec::new();
+
+    for raw_line in contents.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        patterns.push(line.to_string());
+    }
+
+    dedupe_patterns(patterns)
+}
+
+fn load_root_git_ai_ignore_contents(repo: &Repository) -> Option<String> {
+    if repo.is_bare_repository().unwrap_or(false) {
+        return repo
+            .get_file_content(".git-ai-ignore", "HEAD")
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok());
+    }
+
+    let workdir = repo.workdir().ok()?;
+    let ignore_path = workdir.join(".git-ai-ignore");
+    fs::read_to_string(ignore_path).ok()
+}
+
 pub fn effective_ignore_patterns(
     repo: &Repository,
     user_patterns: &[String],
@@ -159,6 +193,7 @@ pub fn effective_ignore_patterns(
     patterns.extend(load_linguist_generated_patterns_from_root_gitattributes(
         repo,
     ));
+    patterns.extend(load_git_ai_ignore_patterns(repo));
     patterns.extend(extra_patterns.iter().cloned());
     patterns.extend(user_patterns.iter().cloned());
     dedupe_patterns(patterns)
@@ -430,5 +465,224 @@ generated/** linguist-generated=true
 
         let patterns = load_linguist_generated_patterns_from_root_gitattributes(&bare_repo);
         assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn loads_git_ai_ignore_patterns_from_workdir() {
+        let tmp_repo = TmpRepo::new().expect("tmp repo");
+        tmp_repo
+            .write_file(
+                ".git-ai-ignore",
+                "\
+# This is a comment
+docs/**
+*.pdf
+
+assets/images/**
+",
+                true,
+            )
+            .expect("write .git-ai-ignore");
+        tmp_repo
+            .commit_with_message("add .git-ai-ignore")
+            .expect("commit");
+
+        let patterns = load_git_ai_ignore_patterns(tmp_repo.gitai_repo());
+        assert_eq!(patterns.len(), 3);
+        assert!(patterns.contains(&"docs/**".to_string()));
+        assert!(patterns.contains(&"*.pdf".to_string()));
+        assert!(patterns.contains(&"assets/images/**".to_string()));
+    }
+
+    #[test]
+    fn git_ai_ignore_skips_comments_and_blank_lines() {
+        let tmp_repo = TmpRepo::new().expect("tmp repo");
+        tmp_repo
+            .write_file(
+                ".git-ai-ignore",
+                "\
+# comment line
+   # indented comment
+
+  *.log  
+build/**
+",
+                true,
+            )
+            .expect("write .git-ai-ignore");
+        tmp_repo
+            .commit_with_message("add .git-ai-ignore")
+            .expect("commit");
+
+        let patterns = load_git_ai_ignore_patterns(tmp_repo.gitai_repo());
+        assert_eq!(patterns.len(), 2);
+        assert!(patterns.contains(&"*.log".to_string()));
+        assert!(patterns.contains(&"build/**".to_string()));
+    }
+
+    #[test]
+    fn git_ai_ignore_deduplicates_patterns() {
+        let tmp_repo = TmpRepo::new().expect("tmp repo");
+        tmp_repo
+            .write_file(
+                ".git-ai-ignore",
+                "\
+*.pdf
+docs/**
+*.pdf
+",
+                true,
+            )
+            .expect("write .git-ai-ignore");
+        tmp_repo
+            .commit_with_message("add .git-ai-ignore")
+            .expect("commit");
+
+        let patterns = load_git_ai_ignore_patterns(tmp_repo.gitai_repo());
+        assert_eq!(patterns.len(), 2);
+    }
+
+    #[test]
+    fn git_ai_ignore_returns_empty_when_file_missing() {
+        let tmp_repo = TmpRepo::new().expect("tmp repo");
+        tmp_repo
+            .write_file("README.md", "# repo\n", true)
+            .expect("write readme");
+        tmp_repo.commit_with_message("initial").expect("commit");
+
+        let patterns = load_git_ai_ignore_patterns(tmp_repo.gitai_repo());
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn effective_patterns_include_git_ai_ignore() {
+        let tmp_repo = TmpRepo::new().expect("tmp repo");
+        tmp_repo
+            .write_file(".git-ai-ignore", "custom/**\n*.secret\n", true)
+            .expect("write .git-ai-ignore");
+        tmp_repo
+            .commit_with_message("add .git-ai-ignore")
+            .expect("commit");
+
+        let patterns = effective_ignore_patterns(tmp_repo.gitai_repo(), &[], &[]);
+        assert!(patterns.contains(&"custom/**".to_string()));
+        assert!(patterns.contains(&"*.secret".to_string()));
+        // Default patterns should still be present
+        assert!(patterns.contains(&"*.lock".to_string()));
+    }
+
+    #[test]
+    fn effective_patterns_union_gitattributes_and_git_ai_ignore() {
+        let tmp_repo = TmpRepo::new().expect("tmp repo");
+        tmp_repo
+            .write_file(
+                ".gitattributes",
+                "generated/** linguist-generated=true\n",
+                true,
+            )
+            .expect("write .gitattributes");
+        tmp_repo
+            .write_file(".git-ai-ignore", "docs/**\n", true)
+            .expect("write .git-ai-ignore");
+        tmp_repo
+            .commit_with_message("add gitattributes and git-ai-ignore")
+            .expect("commit");
+
+        let patterns = effective_ignore_patterns(tmp_repo.gitai_repo(), &[], &[]);
+        // From .gitattributes linguist-generated
+        assert!(patterns.contains(&"generated/**".to_string()));
+        // From .git-ai-ignore
+        assert!(patterns.contains(&"docs/**".to_string()));
+        // Defaults
+        assert!(patterns.contains(&"*.lock".to_string()));
+    }
+
+    #[test]
+    fn effective_patterns_union_git_ai_ignore_and_user_patterns() {
+        let tmp_repo = TmpRepo::new().expect("tmp repo");
+        tmp_repo
+            .write_file(".git-ai-ignore", "docs/**\n", true)
+            .expect("write .git-ai-ignore");
+        tmp_repo
+            .commit_with_message("add .git-ai-ignore")
+            .expect("commit");
+
+        let user = vec!["tests/**".to_string()];
+        let patterns = effective_ignore_patterns(tmp_repo.gitai_repo(), &user, &[]);
+        // From .git-ai-ignore
+        assert!(patterns.contains(&"docs/**".to_string()));
+        // From user --ignore flag
+        assert!(patterns.contains(&"tests/**".to_string()));
+        // Defaults
+        assert!(patterns.contains(&"*.lock".to_string()));
+    }
+
+    fn make_bare_repo_with_ignore(
+        root_gitattributes: Option<&str>,
+        git_ai_ignore: Option<&str>,
+    ) -> (tempfile::TempDir, Repository) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        let bare = temp.path().join("bare.git");
+        fs::create_dir_all(&source).expect("create source");
+
+        run_git(&source, &["init"]);
+        run_git(&source, &["config", "user.name", "Test User"]);
+        run_git(&source, &["config", "user.email", "test@example.com"]);
+
+        fs::write(source.join("README.md"), "# repo\n").expect("write readme");
+        if let Some(attrs) = root_gitattributes {
+            fs::write(source.join(".gitattributes"), attrs).expect("write attrs");
+        }
+        if let Some(ignore) = git_ai_ignore {
+            fs::write(source.join(".git-ai-ignore"), ignore).expect("write .git-ai-ignore");
+        }
+
+        run_git(&source, &["add", "."]);
+        run_git(&source, &["commit", "-m", "initial"]);
+        run_git(
+            temp.path(),
+            &[
+                "clone",
+                "--bare",
+                source.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+        );
+
+        (
+            temp,
+            from_bare_repository(&bare).expect("bare repository should load"),
+        )
+    }
+
+    #[test]
+    fn loads_git_ai_ignore_from_bare_repo_head() {
+        let (_tmp, bare_repo) = make_bare_repo_with_ignore(None, Some("docs/**\n*.pdf\n"));
+
+        let patterns = load_git_ai_ignore_patterns(&bare_repo);
+        assert!(patterns.contains(&"docs/**".to_string()));
+        assert!(patterns.contains(&"*.pdf".to_string()));
+    }
+
+    #[test]
+    fn bare_repo_returns_empty_when_git_ai_ignore_missing() {
+        let (_tmp, bare_repo) = make_bare_repo_with_ignore(None, None);
+
+        let patterns = load_git_ai_ignore_patterns(&bare_repo);
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn bare_repo_effective_patterns_union_gitattributes_and_git_ai_ignore() {
+        let (_tmp, bare_repo) = make_bare_repo_with_ignore(
+            Some("generated/** linguist-generated=true\n"),
+            Some("docs/**\n"),
+        );
+
+        let patterns = effective_ignore_patterns(&bare_repo, &[], &[]);
+        assert!(patterns.contains(&"generated/**".to_string()));
+        assert!(patterns.contains(&"docs/**".to_string()));
+        assert!(patterns.contains(&"*.lock".to_string()));
     }
 }
