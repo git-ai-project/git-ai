@@ -161,19 +161,14 @@ pub fn run(
     // previously the #1 cause of memory overflow (each read deserializes the entire
     // JSONL file into memory).
     let read_checkpoints_start = Instant::now();
-    let mut checkpoints = if reset {
-        working_log.reset_working_log()?;
-        Vec::new()
-    } else {
-        working_log.read_all_checkpoints()?
-    };
+    let mut checkpoints = working_log.read_all_checkpoints()?;
     debug_log(&format!(
         "[BENCHMARK] Reading {} checkpoints took {:?}",
         checkpoints.len(),
         read_checkpoints_start.elapsed()
     ));
 
-    // Early exit for human only
+    // Early exit for human only — must run BEFORE reset so we can inspect existing data.
     if is_pre_commit {
         let has_no_ai_edits = checkpoints.iter().all(|cp| {
             cp.entries.is_empty()
@@ -193,6 +188,12 @@ pub fn run(
             debug_log("No AI edits,in pre-commit checkpoint, skipping");
             return Ok((0, 0, 0));
         }
+    }
+
+    // Reset working log after the early-exit check (so existing data is inspected first)
+    if reset {
+        working_log.reset_working_log()?;
+        checkpoints.clear();
     }
 
     // Set dirty files if available
