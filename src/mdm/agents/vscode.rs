@@ -179,7 +179,9 @@ impl HookInstaller for VSCodeInstaller {
 
         // Configure git.path
         {
-            use crate::mdm::utils::{git_shim_path_string, update_git_path_setting};
+            use crate::mdm::utils::{
+                git_shim_path_string, update_git_path_setting, update_vscode_chat_hook_settings,
+            };
 
             let git_path = git_shim_path_string();
             for settings_path in Self::settings_targets() {
@@ -213,6 +215,39 @@ impl HookInstaller for VSCodeInstaller {
                             changed: false,
                             diff: None,
                             message: format!("VS Code: Failed to configure git.path: {}", e),
+                        });
+                    }
+                }
+
+                match update_vscode_chat_hook_settings(&settings_path, dry_run) {
+                    Ok(Some(diff)) => {
+                        results.push(InstallResult {
+                            changed: true,
+                            diff: Some(diff),
+                            message: format!(
+                                "VS Code: chat hook settings updated in {}",
+                                settings_path.display()
+                            ),
+                        });
+                    }
+                    Ok(None) => {
+                        results.push(InstallResult {
+                            changed: false,
+                            diff: None,
+                            message: format!(
+                                "VS Code: chat hook settings already configured in {}",
+                                settings_path.display()
+                            ),
+                        });
+                    }
+                    Err(e) => {
+                        results.push(InstallResult {
+                            changed: false,
+                            diff: None,
+                            message: format!(
+                                "VS Code: Failed to configure chat hook settings: {}",
+                                e
+                            ),
                         });
                     }
                 }
