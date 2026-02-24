@@ -2075,9 +2075,17 @@ fn is_post_commit_for_cherry_pick(repo: &Repository) -> bool {
         return true;
     }
 
+    if read_cherry_pick_batch_state(repo).is_some() {
+        return true;
+    }
+
     let Some((_, base_commit)) = load_cherry_pick_state(repo) else {
         return false;
     };
+
+    if base_commit.is_empty() {
+        return true;
+    }
 
     let Ok(new_head) = repo.head().and_then(|head| head.target()) else {
         return false;
@@ -2417,7 +2425,12 @@ pub fn handle_git_hook_invocation(hook_name: &str, hook_args: &[String]) -> i32 
     let mut stdin_data = Vec::new();
     let _ = std::io::stdin().read_to_end(&mut stdin_data);
 
-    if !skip_managed_hooks && hook_name == "prepare-commit-msg" {
+    if !skip_managed_hooks
+        && matches!(
+            hook_name,
+            "prepare-commit-msg" | "commit-msg" | "pre-commit"
+        )
+    {
         maybe_capture_cherry_pick_state_from_context();
     }
 
