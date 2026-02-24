@@ -1812,13 +1812,12 @@ fn is_cherry_pick_in_progress(repo: &Repository) -> bool {
 fn is_cherry_pick_terminal_step(repo: &Repository) -> bool {
     // Match rebase's "terminal event owns heavy rewrite" model:
     // only finalize once the sequence no longer has pending todo entries.
-    if repo.path().join("CHERRY_PICK_HEAD").is_file() {
-        return false;
+    if repo.path().join("sequencer").is_dir() {
+        return !cherry_pick_todo_has_pending(repo);
     }
-    if !repo.path().join("sequencer").is_dir() {
-        return true;
-    }
-    !cherry_pick_todo_has_pending(repo)
+    // Some Git versions keep CHERRY_PICK_HEAD present during post-commit for
+    // the final pick. Without a sequencer todo queue, treat this as terminal.
+    true
 }
 
 fn maybe_capture_cherry_pick_pre_commit_state(repo: &Repository) {
