@@ -1878,12 +1878,10 @@ fn maybe_capture_cherry_pick_state_from_context() {
         return;
     };
     let Ok(source_commit_raw) = fs::read_to_string(git_dir.join("CHERRY_PICK_HEAD")) else {
-        let _ = fs::remove_file(cherry_pick_state_path_from_git_dir(&git_dir));
         return;
     };
     let source_commit = source_commit_raw.trim();
     if source_commit.is_empty() {
-        let _ = fs::remove_file(cherry_pick_state_path_from_git_dir(&git_dir));
         return;
     }
 
