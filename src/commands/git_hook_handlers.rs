@@ -1793,27 +1793,50 @@ fn clear_cherry_pick_batch_state(repo: &Repository) {
     let _ = fs::remove_file(cherry_pick_batch_state_path(repo));
 }
 
-fn cherry_pick_todo_has_pending(repo: &Repository) -> bool {
+fn cherry_pick_todo_pending_commits(repo: &Repository) -> Vec<String> {
     let todo_path = repo.path().join("sequencer").join("todo");
     fs::read_to_string(todo_path)
         .map(|todo| {
-            todo.lines().any(|line| {
-                let trimmed = line.trim();
-                !trimmed.is_empty() && !trimmed.starts_with('#')
-            })
+            todo.lines()
+                .filter_map(|line| {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() || trimmed.starts_with('#') {
+                        return None;
+                    }
+                    let mut parts = trimmed.split_whitespace();
+                    let _command = parts.next()?;
+                    let source = parts.next()?;
+                    if is_valid_git_oid_or_abbrev(source) {
+                        return Some(source.to_string());
+                    }
+                    None
+                })
+                .collect()
         })
-        .unwrap_or(false)
+        .unwrap_or_default()
 }
 
 fn is_cherry_pick_in_progress(repo: &Repository) -> bool {
     repo.path().join("CHERRY_PICK_HEAD").is_file() || repo.path().join("sequencer").is_dir()
 }
 
-fn is_cherry_pick_terminal_step(repo: &Repository) -> bool {
+fn is_cherry_pick_terminal_step(repo: &Repository, current_source_commit: Option<&str>) -> bool {
     // Match rebase's "terminal event owns heavy rewrite" model:
     // only finalize once the sequence no longer has pending todo entries.
     if repo.path().join("sequencer").is_dir() {
-        return !cherry_pick_todo_has_pending(repo);
+        let pending = cherry_pick_todo_pending_commits(repo);
+        if pending.is_empty() {
+            return true;
+        }
+        if let Some(source_commit) = current_source_commit
+            && pending.len() == 1
+            && pending[0] == source_commit
+        {
+            // On some Git versions, the final post-commit hook still sees a
+            // single todo entry for the just-picked commit.
+            return true;
+        }
+        return false;
     }
     // Some Git versions keep CHERRY_PICK_HEAD present during post-commit for
     // the final pick. Without a sequencer todo queue, treat this as terminal.
@@ -1875,11 +1898,15 @@ fn latest_cherry_pick_source_from_sequencer(repo: &Repository) -> Option<String>
     None
 }
 
-fn maybe_finalize_cherry_pick_batch_state(repo: &mut Repository, force: bool) {
+fn maybe_finalize_cherry_pick_batch_state(
+    repo: &mut Repository,
+    force: bool,
+    current_source_commit: Option<&str>,
+) {
     let Some(state) = read_cherry_pick_batch_state(repo) else {
         return;
     };
-    if !force && !is_cherry_pick_terminal_step(repo) {
+    if !force && !is_cherry_pick_terminal_step(repo, current_source_commit) {
         return;
     }
     if state.mappings.is_empty() {
@@ -1936,7 +1963,7 @@ fn maybe_finalize_cherry_pick_batch_state(repo: &mut Repository, force: bool) {
 
 fn maybe_finalize_stale_cherry_pick_batch_state(repo: &mut Repository) {
     if !is_cherry_pick_in_progress(repo) {
-        maybe_finalize_cherry_pick_batch_state(repo, true);
+        maybe_finalize_cherry_pick_batch_state(repo, true, None);
     }
 }
 
@@ -1998,14 +2025,14 @@ fn maybe_record_cherry_pick_post_commit(repo: &mut Repository) {
         Some(last) if last.source_commit == source_commit && last.new_commit == new_head
     ) {
         batch_state.mappings.push(CherryPickBatchMapping {
-            source_commit,
+            source_commit: source_commit.clone(),
             new_commit: new_head,
         });
     }
     batch_state.active = true;
     save_cherry_pick_batch_state(repo, &batch_state);
     clear_cherry_pick_state(repo);
-    maybe_finalize_cherry_pick_batch_state(repo, false);
+    maybe_finalize_cherry_pick_batch_state(repo, false, Some(&source_commit));
 }
 
 fn is_post_commit_for_cherry_pick(repo: &Repository) -> bool {
