@@ -232,8 +232,9 @@ export const GitAiPlugin: Plugin = async (ctx) => {
         tool_name: toolName,
         tool_use_id: String(input?.callID ?? ""),
       }
-      if (typeof output?.duration === "number") {
-        telemetryPayload.duration_ms = String(Math.max(0, Math.floor(output.duration)))
+      const durationMs = output?.metadata?.duration_ms ?? output?.metadata?.duration
+      if (typeof durationMs === "number") {
+        telemetryPayload.duration_ms = String(Math.max(0, Math.floor(durationMs)))
       }
 
       await emitCheckpoint({
