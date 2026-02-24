@@ -9,8 +9,17 @@ use serde_json::{Value, json};
 use std::fs;
 use std::path::PathBuf;
 
-const GITHUB_COPILOT_PRE_TOOL_CMD: &str = "checkpoint github-copilot --hook-input stdin";
-const GITHUB_COPILOT_POST_TOOL_CMD: &str = "checkpoint github-copilot --hook-input stdin";
+const GITHUB_COPILOT_HOOK_CMD: &str = "checkpoint github-copilot --hook-input stdin";
+const GITHUB_COPILOT_HOOK_EVENTS: &[&str] = &[
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "PreCompact",
+    "SubagentStart",
+    "SubagentStop",
+    "Stop",
+];
 
 pub struct GitHubCopilotInstaller;
 
@@ -81,77 +90,51 @@ impl HookInstaller for GitHubCopilotInstaller {
         let content = fs::read_to_string(&hooks_path)?;
         let existing: Value = serde_json::from_str(&content).unwrap_or_else(|_| json!({}));
 
-        let pre_desired = format!(
+        let desired_cmd = format!(
             "{} {}",
             params.binary_path.display(),
-            GITHUB_COPILOT_PRE_TOOL_CMD
-        );
-        let post_desired = format!(
-            "{} {}",
-            params.binary_path.display(),
-            GITHUB_COPILOT_POST_TOOL_CMD
+            GITHUB_COPILOT_HOOK_CMD
         );
 
-        let has_pre_installed = existing
-            .get("hooks")
-            .and_then(|h| h.get("PreToolUse"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter().any(|hook| {
-                    hook.get("command")
-                        .and_then(|c| c.as_str())
-                        .map(Self::is_github_copilot_checkpoint_command)
-                        .unwrap_or(false)
+        let has_hook_for = |hook_name: &&str| {
+            existing
+                .get("hooks")
+                .and_then(|h| h.get(*hook_name))
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter().any(|hook| {
+                        hook.get("command")
+                            .and_then(|c| c.as_str())
+                            .map(Self::is_github_copilot_checkpoint_command)
+                            .unwrap_or(false)
+                    })
                 })
-            })
-            .unwrap_or(false);
+                .unwrap_or(false)
+        };
 
-        let has_post_installed = existing
-            .get("hooks")
-            .and_then(|h| h.get("PostToolUse"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter().any(|hook| {
-                    hook.get("command")
-                        .and_then(|c| c.as_str())
-                        .map(Self::is_github_copilot_checkpoint_command)
-                        .unwrap_or(false)
+        let up_to_date_for = |hook_name: &&str| {
+            existing
+                .get("hooks")
+                .and_then(|h| h.get(*hook_name))
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter().any(|hook| {
+                        hook.get("command")
+                            .and_then(|c| c.as_str())
+                            .map(|cmd| cmd == desired_cmd.as_str())
+                            .unwrap_or(false)
+                    })
                 })
-            })
-            .unwrap_or(false);
+                .unwrap_or(false)
+        };
 
-        let has_pre_up_to_date = existing
-            .get("hooks")
-            .and_then(|h| h.get("PreToolUse"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter().any(|hook| {
-                    hook.get("command")
-                        .and_then(|c| c.as_str())
-                        .map(|cmd| cmd == pre_desired)
-                        .unwrap_or(false)
-                })
-            })
-            .unwrap_or(false);
-
-        let has_post_up_to_date = existing
-            .get("hooks")
-            .and_then(|h| h.get("PostToolUse"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter().any(|hook| {
-                    hook.get("command")
-                        .and_then(|c| c.as_str())
-                        .map(|cmd| cmd == post_desired)
-                        .unwrap_or(false)
-                })
-            })
-            .unwrap_or(false);
+        let has_any = GITHUB_COPILOT_HOOK_EVENTS.iter().any(has_hook_for);
+        let has_all = GITHUB_COPILOT_HOOK_EVENTS.iter().all(up_to_date_for);
 
         Ok(HookCheckResult {
             tool_installed: true,
-            hooks_installed: has_pre_installed || has_post_installed,
-            hooks_up_to_date: has_pre_up_to_date && has_post_up_to_date,
+            hooks_installed: has_any,
+            hooks_up_to_date: has_all,
         })
     }
 
@@ -178,33 +161,11 @@ impl HookInstaller for GitHubCopilotInstaller {
             serde_json::from_str(&existing_content)?
         };
 
-        let pre_tool_cmd = format!(
+        let desired_cmd = format!(
             "{} {}",
             params.binary_path.display(),
-            GITHUB_COPILOT_PRE_TOOL_CMD
+            GITHUB_COPILOT_HOOK_CMD
         );
-        let post_tool_cmd = format!(
-            "{} {}",
-            params.binary_path.display(),
-            GITHUB_COPILOT_POST_TOOL_CMD
-        );
-
-        let desired: Value = json!({
-            "hooks": {
-                "PreToolUse": [
-                    {
-                        "type": "command",
-                        "command": pre_tool_cmd
-                    }
-                ],
-                "PostToolUse": [
-                    {
-                        "type": "command",
-                        "command": post_tool_cmd
-                    }
-                ]
-            }
-        });
 
         let mut merged = existing.clone();
         if !merged.is_object() {
@@ -217,21 +178,11 @@ impl HookInstaller for GitHubCopilotInstaller {
             None => json!({}),
         };
 
-        for hook_name in &["PreToolUse", "PostToolUse"] {
-            let desired_hook = desired
-                .get("hooks")
-                .and_then(|h| h.get(*hook_name))
-                .and_then(|v| v.as_array())
-                .and_then(|arr| arr.first())
-                .cloned();
-            let Some(desired_hook) = desired_hook else {
-                continue;
-            };
-
-            let desired_cmd = desired_hook.get("command").and_then(|c| c.as_str());
-            let Some(desired_cmd) = desired_cmd else {
-                continue;
-            };
+        for hook_name in GITHUB_COPILOT_HOOK_EVENTS {
+            let desired_hook = json!({
+                "type": "command",
+                "command": desired_cmd
+            });
 
             let mut existing_hooks = hooks_obj
                 .get(*hook_name)
@@ -324,7 +275,7 @@ impl HookInstaller for GitHubCopilotInstaller {
 
         let mut changed = false;
 
-        for hook_name in &["PreToolUse", "PostToolUse"] {
+        for hook_name in GITHUB_COPILOT_HOOK_EVENTS {
             if let Some(hooks_array) = hooks_obj.get_mut(*hook_name).and_then(|v| v.as_array_mut())
             {
                 let original_len = hooks_array.len();
@@ -365,6 +316,7 @@ mod tests {
     use super::*;
     use crate::mdm::hook_installer::HookInstaller;
     use serial_test::serial;
+    use std::ffi::OsString;
     use std::path::Path;
     use tempfile::tempdir;
 
@@ -372,12 +324,35 @@ mod tests {
         PathBuf::from("/tmp/git-ai/bin/git-ai")
     }
 
+    struct EnvRestoreGuard {
+        prev_home: Option<OsString>,
+        prev_userprofile: Option<OsString>,
+    }
+
+    impl Drop for EnvRestoreGuard {
+        fn drop(&mut self) {
+            // SAFETY: tests are serialized via #[serial], so restoring process env is safe.
+            unsafe {
+                match &self.prev_home {
+                    Some(v) => std::env::set_var("HOME", v),
+                    None => std::env::remove_var("HOME"),
+                }
+                match &self.prev_userprofile {
+                    Some(v) => std::env::set_var("USERPROFILE", v),
+                    None => std::env::remove_var("USERPROFILE"),
+                }
+            }
+        }
+    }
+
     fn with_temp_home<F: FnOnce(&Path)>(f: F) {
         let temp = tempdir().unwrap();
         let home = temp.path().to_path_buf();
 
-        let prev_home = std::env::var_os("HOME");
-        let prev_userprofile = std::env::var_os("USERPROFILE");
+        let _restore_guard = EnvRestoreGuard {
+            prev_home: std::env::var_os("HOME"),
+            prev_userprofile: std::env::var_os("USERPROFILE"),
+        };
 
         // SAFETY: tests are serialized via #[serial], so mutating process env is safe.
         unsafe {
@@ -386,20 +361,7 @@ mod tests {
         }
 
         f(&home);
-
-        // SAFETY: tests are serialized via #[serial], so restoring process env is safe.
-        unsafe {
-            match prev_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-            match prev_userprofile {
-                Some(v) => std::env::set_var("USERPROFILE", v),
-                None => std::env::remove_var("USERPROFILE"),
-            }
-        }
     }
-
     #[test]
     fn test_github_copilot_installer_name() {
         let installer = GitHubCopilotInstaller;
@@ -430,23 +392,24 @@ mod tests {
             let content: Value = serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap())
                 .expect("valid json");
 
-            let pre = content
-                .get("hooks")
-                .and_then(|h| h.get("PreToolUse"))
-                .and_then(|v| v.as_array())
-                .unwrap();
-            let post = content
-                .get("hooks")
-                .and_then(|h| h.get("PostToolUse"))
-                .and_then(|v| v.as_array())
-                .unwrap();
+            for hook_name in GITHUB_COPILOT_HOOK_EVENTS {
+                let hook_entries = content
+                    .get("hooks")
+                    .and_then(|h| h.get(*hook_name))
+                    .and_then(|v| v.as_array())
+                    .unwrap();
 
-            assert_eq!(pre.len(), 1);
-            assert_eq!(post.len(), 1);
-            assert_eq!(
-                pre[0].get("command").and_then(|v| v.as_str()),
-                Some("/tmp/git-ai/bin/git-ai checkpoint github-copilot --hook-input stdin")
-            );
+                assert_eq!(
+                    hook_entries.len(),
+                    1,
+                    "{} should have one git-ai hook entry",
+                    hook_name
+                );
+                assert_eq!(
+                    hook_entries[0].get("command").and_then(|v| v.as_str()),
+                    Some("/tmp/git-ai/bin/git-ai checkpoint github-copilot --hook-input stdin")
+                );
+            }
         });
     }
 
@@ -508,19 +471,19 @@ mod tests {
                 .expect("valid json");
             assert_eq!(content.get("extra").and_then(|v| v.as_str()), Some("keep"));
 
-            let pre = content
-                .get("hooks")
-                .and_then(|h| h.get("PreToolUse"))
-                .and_then(|v| v.as_array())
-                .unwrap();
-            let post = content
-                .get("hooks")
-                .and_then(|h| h.get("PostToolUse"))
-                .and_then(|v| v.as_array())
-                .unwrap();
-
-            assert_eq!(pre.len(), 1);
-            assert_eq!(post.len(), 1);
+            for hook_name in GITHUB_COPILOT_HOOK_EVENTS {
+                let hook_entries = content
+                    .get("hooks")
+                    .and_then(|h| h.get(*hook_name))
+                    .and_then(|v| v.as_array())
+                    .unwrap();
+                assert_eq!(
+                    hook_entries.len(),
+                    1,
+                    "{} should have one git-ai hook entry",
+                    hook_name
+                );
+            }
         });
     }
 
@@ -542,10 +505,17 @@ mod tests {
 
             let content: Value = serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap())
                 .expect("valid json");
-            let hooks = content.get("hooks").and_then(|v| v.as_object());
-            assert!(hooks.is_some());
-            assert!(hooks.unwrap().contains_key("PreToolUse"));
-            assert!(hooks.unwrap().contains_key("PostToolUse"));
+            let hooks = content
+                .get("hooks")
+                .and_then(|v| v.as_object())
+                .expect("hooks object should exist");
+            for hook_name in GITHUB_COPILOT_HOOK_EVENTS {
+                assert!(
+                    hooks.contains_key(*hook_name),
+                    "Missing hook key {}",
+                    hook_name
+                );
+            }
         });
     }
 
@@ -592,6 +562,12 @@ mod tests {
             let existing = json!({
                 "hooks": {
                     "PostToolUse": [
+                        {
+                            "type": "command",
+                            "command": "/tmp/git-ai/bin/git-ai checkpoint github-copilot --hook-input stdin"
+                        }
+                    ],
+                    "Stop": [
                         {
                             "type": "command",
                             "command": "/tmp/git-ai/bin/git-ai checkpoint github-copilot --hook-input stdin"
@@ -667,14 +643,22 @@ mod tests {
                 .get("hooks")
                 .and_then(|h| h.get("PostToolUse"))
                 .and_then(|v| v.as_array())
-                .unwrap();
+                .map(|arr| arr.len())
+                .unwrap_or(0);
+            let stop = content
+                .get("hooks")
+                .and_then(|h| h.get("Stop"))
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.len())
+                .unwrap_or(0);
 
             assert_eq!(pre.len(), 1);
             assert_eq!(
                 pre[0].get("command").and_then(|v| v.as_str()),
                 Some("echo before")
             );
-            assert!(post.is_empty());
+            assert_eq!(post, 0);
+            assert_eq!(stop, 0);
         });
     }
 }

@@ -29,10 +29,195 @@ pub struct AgentRunResult {
     pub edited_filepaths: Option<Vec<String>>,
     pub will_edit_filepaths: Option<Vec<String>>,
     pub dirty_files: Option<HashMap<String, String>>,
+    pub hook_event_name: Option<String>,
+    pub hook_source: Option<String>,
+    pub telemetry_payload: Option<HashMap<String, String>>,
 }
 
 pub trait AgentCheckpointPreset {
     fn run(&self, flags: AgentCheckpointFlags) -> Result<AgentRunResult, GitAiError>;
+}
+
+fn get_str_by_keys<'a>(data: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| data.get(*key).and_then(|v| v.as_str()))
+}
+
+fn get_u64_by_keys(data: &serde_json::Value, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .find_map(|key| data.get(*key).and_then(|v| v.as_u64()))
+}
+
+fn get_array_len_by_keys(data: &serde_json::Value, keys: &[&str]) -> Option<usize> {
+    keys.iter().find_map(|key| {
+        data.get(*key)
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.len())
+    })
+}
+
+fn add_chars_count_field(
+    payload: &mut HashMap<String, String>,
+    data: &serde_json::Value,
+    source_keys: &[&str],
+    target_key: &str,
+) {
+    if let Some(text) = get_str_by_keys(data, source_keys) {
+        payload.insert(target_key.to_string(), text.chars().count().to_string());
+    }
+}
+
+fn add_u64_field(
+    payload: &mut HashMap<String, String>,
+    data: &serde_json::Value,
+    source_keys: &[&str],
+    target_key: &str,
+) {
+    if let Some(value) = get_u64_by_keys(data, source_keys) {
+        payload.insert(target_key.to_string(), value.to_string());
+    }
+}
+
+fn add_str_field(
+    payload: &mut HashMap<String, String>,
+    data: &serde_json::Value,
+    source_keys: &[&str],
+    target_key: &str,
+) {
+    if let Some(value) = get_str_by_keys(data, source_keys)
+        && !value.trim().is_empty()
+    {
+        payload.insert(target_key.to_string(), value.to_string());
+    }
+}
+
+fn collect_common_hook_telemetry_payload(data: &serde_json::Value) -> HashMap<String, String> {
+    let mut payload = HashMap::new();
+
+    add_str_field(
+        &mut payload,
+        data,
+        &["role", "message_role", "messageRole"],
+        "role",
+    );
+    add_str_field(
+        &mut payload,
+        data,
+        &["tool_name", "toolName", "tool"],
+        "tool_name",
+    );
+    add_str_field(
+        &mut payload,
+        data,
+        &["tool_use_id", "toolUseId", "toolUseID", "callID"],
+        "tool_use_id",
+    );
+    add_str_field(
+        &mut payload,
+        data,
+        &["failure_type", "failureType"],
+        "failure_type",
+    );
+    add_str_field(&mut payload, data, &["source"], "source");
+    add_str_field(&mut payload, data, &["reason"], "reason");
+    add_str_field(&mut payload, data, &["status"], "status");
+    add_str_field(&mut payload, data, &["trigger"], "trigger");
+    add_str_field(
+        &mut payload,
+        data,
+        &["subagent_type", "subagentType", "agent_type", "agentType"],
+        "subagent_type",
+    );
+    add_str_field(
+        &mut payload,
+        data,
+        &["subagent_id", "subagentId", "agent_id", "agentId"],
+        "subagent_id",
+    );
+    add_str_field(
+        &mut payload,
+        data,
+        &["composer_mode", "composerMode"],
+        "mode",
+    );
+    add_str_field(
+        &mut payload,
+        data,
+        &["generation_id", "generationId", "turn_id", "turn-id"],
+        "generation_id",
+    );
+    add_str_field(
+        &mut payload,
+        data,
+        &[
+            "conversation_id",
+            "conversationId",
+            "session_id",
+            "sessionId",
+            "chat_session_id",
+            "chatSessionId",
+            "thread_id",
+            "threadId",
+        ],
+        "session_id",
+    );
+    add_str_field(
+        &mut payload,
+        data,
+        &["message_id", "messageId", "messageID", "msg_id", "msgId"],
+        "message_id",
+    );
+    add_u64_field(
+        &mut payload,
+        data,
+        &["duration", "duration_ms", "durationMs"],
+        "duration_ms",
+    );
+
+    add_chars_count_field(
+        &mut payload,
+        data,
+        &["prompt", "user_prompt", "userPrompt"],
+        "prompt_char_count",
+    );
+    add_chars_count_field(
+        &mut payload,
+        data,
+        &["text", "last-assistant-message", "last_assistant_message"],
+        "response_char_count",
+    );
+    add_chars_count_field(&mut payload, data, &["result"], "result_char_count");
+
+    if let Some(count) = get_array_len_by_keys(data, &["attachments"]) {
+        payload.insert("attachment_count".to_string(), count.to_string());
+    }
+
+    if let Some(tool_name) = payload.get("tool_name")
+        && tool_name.starts_with("mcp__")
+    {
+        payload.insert("mcp_tool_name".to_string(), tool_name.clone());
+    }
+
+    payload
+}
+
+fn infer_skill_name_from_prompt(prompt: &str) -> Option<String> {
+    for token in prompt.split_whitespace() {
+        if let Some(skill) = token.strip_prefix('$')
+            && !skill.trim().is_empty()
+        {
+            let normalized =
+                skill.trim_matches(|c: char| !c.is_alphanumeric() && c != '-' && c != '_');
+            if !normalized.is_empty() {
+                return Some(normalized.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn is_file_edit_tool_name(tool_name: &str) -> bool {
+    matches!(tool_name, "Write" | "Edit" | "MultiEdit" | "NotebookEdit")
 }
 
 // Claude Code to checkpoint preset
@@ -57,73 +242,169 @@ impl AgentCheckpointPreset for ClaudePreset {
             ));
         }
 
-        // Extract transcript_path and cwd from the JSON
+        let hook_event_name = hook_data
+            .get("hook_event_name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let tool_name = hook_data
+            .get("tool_name")
+            .and_then(|v| v.as_str())
+            .or_else(|| hook_data.get("toolName").and_then(|v| v.as_str()));
+
+        let is_tool_hook = matches!(
+            hook_event_name.as_deref(),
+            Some("PreToolUse" | "PostToolUse" | "PostToolUseFailure")
+        );
+        let has_file_path_in_tool_input = hook_data
+            .get("tool_input")
+            .and_then(|ti| ti.get("file_path"))
+            .and_then(|v| v.as_str())
+            .is_some();
+        let is_edit_tool_hook = is_tool_hook
+            && (tool_name.map(is_file_edit_tool_name).unwrap_or(false)
+                || has_file_path_in_tool_input);
+
+        let telemetry_only_hook = matches!(
+            hook_event_name.as_deref(),
+            Some(
+                "SessionStart"
+                    | "SessionEnd"
+                    | "UserPromptSubmit"
+                    | "PermissionRequest"
+                    | "SubagentStart"
+                    | "SubagentStop"
+                    | "Stop"
+                    | "PreCompact"
+                    | "Notification"
+                    | "PostToolUseFailure"
+            )
+        ) || (is_tool_hook && !is_edit_tool_hook);
+
         let transcript_path = hook_data
             .get("transcript_path")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                GitAiError::PresetError("transcript_path not found in hook_input".to_string())
-            })?;
+            .map(|s| s.to_string());
+        let _cwd = hook_data.get("cwd").and_then(|v| v.as_str());
 
-        let _cwd = hook_data
-            .get("cwd")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| GitAiError::PresetError("cwd not found in hook_input".to_string()))?;
+        if !telemetry_only_hook && transcript_path.is_none() {
+            return Err(GitAiError::PresetError(
+                "transcript_path not found in hook_input".to_string(),
+            ));
+        }
+        if !telemetry_only_hook && _cwd.is_none() {
+            return Err(GitAiError::PresetError(
+                "cwd not found in hook_input".to_string(),
+            ));
+        }
 
-        // Extract the ID from the filename
-        // Example: /Users/aidancunniffe/.claude/projects/-Users-aidancunniffe-Desktop-ghq/cb947e5b-246e-4253-a953-631f7e464c6b.jsonl
-        let path = Path::new(transcript_path);
-        let filename = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .ok_or_else(|| {
-                GitAiError::PresetError(
-                    "Could not extract filename from transcript_path".to_string(),
-                )
-            })?;
-
-        // Parse into transcript and extract model
-        let (transcript, model) =
-            match ClaudePreset::transcript_and_model_from_claude_code_jsonl(transcript_path) {
-                Ok((transcript, model)) => (transcript, model),
-                Err(e) => {
-                    eprintln!("[Warning] Failed to parse Claude JSONL: {e}");
-                    log_error(
-                        &e,
-                        Some(serde_json::json!({
-                            "agent_tool": "claude",
-                            "operation": "transcript_and_model_from_claude_code_jsonl"
-                        })),
-                    );
-                    (
-                        crate::authorship::transcript::AiTranscript::new(),
-                        Some("unknown".to_string()),
+        let (agent_session_id, transcript, model) = if let Some(path) = transcript_path.as_deref() {
+            let filename = Path::new(path)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .ok_or_else(|| {
+                    GitAiError::PresetError(
+                        "Could not extract filename from transcript_path".to_string(),
                     )
+                })?
+                .to_string();
+
+            let (transcript, model) = if telemetry_only_hook {
+                (
+                    crate::authorship::transcript::AiTranscript::new(),
+                    hook_data
+                        .get("model")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                )
+            } else {
+                match ClaudePreset::transcript_and_model_from_claude_code_jsonl(path) {
+                    Ok((transcript, model)) => (transcript, model),
+                    Err(e) => {
+                        eprintln!("[Warning] Failed to parse Claude JSONL: {e}");
+                        log_error(
+                            &e,
+                            Some(serde_json::json!({
+                                "agent_tool": "claude",
+                                "operation": "transcript_and_model_from_claude_code_jsonl"
+                            })),
+                        );
+                        (
+                            crate::authorship::transcript::AiTranscript::new(),
+                            Some("unknown".to_string()),
+                        )
+                    }
                 }
             };
 
-        // The filename should be a UUID
+            (filename, transcript, model)
+        } else {
+            (
+                hook_data
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown-session")
+                    .to_string(),
+                crate::authorship::transcript::AiTranscript::new(),
+                hook_data
+                    .get("model")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+            )
+        };
+
         let agent_id = AgentId {
             tool: "claude".to_string(),
-            id: filename.to_string(),
+            id: agent_session_id,
             model: model.unwrap_or_else(|| "unknown".to_string()),
         };
 
         // Extract file_path from tool_input if present
-        let file_path_as_vec = hook_data
-            .get("tool_input")
-            .and_then(|ti| ti.get("file_path"))
-            .and_then(|v| v.as_str())
-            .map(|path| vec![path.to_string()]);
+        let file_path_as_vec = if is_edit_tool_hook {
+            hook_data
+                .get("tool_input")
+                .and_then(|ti| ti.get("file_path"))
+                .and_then(|v| v.as_str())
+                .map(|path| vec![path.to_string()])
+        } else {
+            None
+        };
 
-        // Store transcript_path in metadata
-        let agent_metadata =
-            HashMap::from([("transcript_path".to_string(), transcript_path.to_string())]);
+        // Store transcript_path in metadata when present
+        let agent_metadata = transcript_path
+            .as_deref()
+            .map(|path| HashMap::from([("transcript_path".to_string(), path.to_string())]));
 
-        // Check if this is a PreToolUse event (human checkpoint)
-        let hook_event_name = hook_data.get("hook_event_name").and_then(|v| v.as_str());
+        let hook_source = Some("claude_hook".to_string());
 
-        if hook_event_name == Some("PreToolUse") {
+        let mut telemetry_payload = collect_common_hook_telemetry_payload(&hook_data);
+        if let Some(session_id) = hook_data.get("session_id").and_then(|v| v.as_str()) {
+            telemetry_payload.insert("session_id".to_string(), session_id.to_string());
+        }
+        if let Some(tool_name) = hook_data.get("tool_name").and_then(|v| v.as_str())
+            && tool_name.starts_with("mcp__")
+        {
+            telemetry_payload.insert("mcp_tool_name".to_string(), tool_name.to_string());
+        }
+        if let Some(prompt) = get_str_by_keys(&hook_data, &["prompt", "user_prompt", "userPrompt"])
+            && let Some(skill_name) = infer_skill_name_from_prompt(prompt)
+        {
+            telemetry_payload.insert("skill_name".to_string(), skill_name);
+            telemetry_payload.insert(
+                "skill_detection_method".to_string(),
+                "inferred_prompt".to_string(),
+            );
+        }
+        if telemetry_only_hook {
+            telemetry_payload.insert("telemetry_only".to_string(), "1".to_string());
+        }
+        let telemetry_payload = if telemetry_payload.is_empty() {
+            None
+        } else {
+            Some(telemetry_payload)
+        };
+
+        if hook_event_name.as_deref() == Some("PreToolUse") {
             // Early return for human checkpoint
             return Ok(AgentRunResult {
                 agent_id,
@@ -134,12 +415,15 @@ impl AgentCheckpointPreset for ClaudePreset {
                 edited_filepaths: None,
                 will_edit_filepaths: file_path_as_vec,
                 dirty_files: None,
+                hook_event_name,
+                hook_source,
+                telemetry_payload,
             });
         }
 
         Ok(AgentRunResult {
             agent_id,
-            agent_metadata: Some(agent_metadata),
+            agent_metadata,
             checkpoint_kind: CheckpointKind::AiAgent,
             transcript: Some(transcript),
             // use default.
@@ -147,6 +431,9 @@ impl AgentCheckpointPreset for ClaudePreset {
             edited_filepaths: file_path_as_vec,
             will_edit_filepaths: None,
             dirty_files: None,
+            hook_event_name,
+            hook_source,
+            telemetry_payload,
         })
     }
 }
@@ -450,6 +737,9 @@ impl AgentCheckpointPreset for GeminiPreset {
                 edited_filepaths: None,
                 will_edit_filepaths: file_path_as_vec,
                 dirty_files: None,
+                hook_event_name: None,
+                hook_source: None,
+                telemetry_payload: None,
             });
         }
 
@@ -463,6 +753,9 @@ impl AgentCheckpointPreset for GeminiPreset {
             edited_filepaths: file_path_as_vec,
             will_edit_filepaths: None,
             dirty_files: None,
+            hook_event_name: None,
+            hook_source: None,
+            telemetry_payload: None,
         })
     }
 }
@@ -658,6 +951,9 @@ impl AgentCheckpointPreset for ContinueCliPreset {
                 edited_filepaths: None,
                 will_edit_filepaths: file_path_as_vec,
                 dirty_files: None,
+                hook_event_name: None,
+                hook_source: None,
+                telemetry_payload: None,
             });
         }
 
@@ -671,6 +967,9 @@ impl AgentCheckpointPreset for ContinueCliPreset {
             edited_filepaths: file_path_as_vec,
             will_edit_filepaths: None,
             dirty_files: None,
+            hook_event_name: None,
+            hook_source: None,
+            telemetry_payload: None,
         })
     }
 }
@@ -793,6 +1092,68 @@ impl AgentCheckpointPreset for CodexPreset {
         let hook_data: serde_json::Value = serde_json::from_str(&stdin_json)
             .map_err(|e| GitAiError::PresetError(format!("Invalid JSON in hook_input: {}", e)))?;
 
+        let hook_event_name = hook_data
+            .get("type")
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                hook_data
+                    .get("hook_event")
+                    .and_then(|v| v.get("event_type"))
+                    .and_then(|v| v.as_str())
+            })
+            .map(|s| s.to_string());
+        let hook_source = Some("codex_notify".to_string());
+
+        let mut telemetry_payload = collect_common_hook_telemetry_payload(&hook_data);
+        if let Some(input_messages) = hook_data
+            .get("input-messages")
+            .or_else(|| {
+                hook_data
+                    .get("hook_event")
+                    .and_then(|v| v.get("input_messages"))
+            })
+            .and_then(|v| v.as_array())
+        {
+            telemetry_payload.insert(
+                "input_message_count".to_string(),
+                input_messages.len().to_string(),
+            );
+            let total_chars: usize = input_messages
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.chars().count())
+                .sum();
+            telemetry_payload.insert("prompt_char_count".to_string(), total_chars.to_string());
+            if let Some(first_prompt) = input_messages.iter().find_map(|v| v.as_str())
+                && let Some(skill_name) = infer_skill_name_from_prompt(first_prompt)
+            {
+                telemetry_payload.insert("skill_name".to_string(), skill_name);
+                telemetry_payload.insert(
+                    "skill_detection_method".to_string(),
+                    "inferred_prompt".to_string(),
+                );
+            }
+        }
+        if let Some(last_assistant) = hook_data
+            .get("last-assistant-message")
+            .or_else(|| {
+                hook_data
+                    .get("hook_event")
+                    .and_then(|v| v.get("last_assistant_message"))
+            })
+            .and_then(|v| v.as_str())
+        {
+            telemetry_payload.insert(
+                "response_char_count".to_string(),
+                last_assistant.chars().count().to_string(),
+            );
+        }
+        let telemetry_payload = if telemetry_payload.is_empty() {
+            None
+        } else {
+            Some(telemetry_payload)
+        };
+
         let session_id = CodexPreset::session_id_from_hook_data(&hook_data).ok_or_else(|| {
             GitAiError::PresetError("session_id/thread_id not found in hook_input".to_string())
         })?;
@@ -866,6 +1227,9 @@ impl AgentCheckpointPreset for CodexPreset {
             edited_filepaths: None,
             will_edit_filepaths: None,
             dirty_files: None,
+            hook_event_name,
+            hook_source,
+            telemetry_payload,
         })
     }
 }
@@ -1164,13 +1528,75 @@ impl AgentCheckpointPreset for CursorPreset {
             .map(|s| s.to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
-        // Validate hook_event_name
-        if hook_event_name != "beforeSubmitPrompt" && hook_event_name != "afterFileEdit" {
+        let supported_events = [
+            "sessionStart",
+            "sessionEnd",
+            "beforeSubmitPrompt",
+            "preToolUse",
+            "postToolUse",
+            "postToolUseFailure",
+            "subagentStart",
+            "subagentStop",
+            "beforeShellExecution",
+            "afterShellExecution",
+            "beforeMCPExecution",
+            "afterMCPExecution",
+            "beforeReadFile",
+            "afterFileEdit",
+            "afterAgentResponse",
+            "afterAgentThought",
+            "stop",
+        ];
+        if !supported_events.contains(&hook_event_name.as_str()) {
             return Err(GitAiError::PresetError(format!(
-                "Invalid hook_event_name: {}. Expected 'beforeSubmitPrompt' or 'afterFileEdit'",
+                "Invalid hook_event_name: {} for Cursor preset",
                 hook_event_name
             )));
         }
+
+        let hook_source = Some("cursor_hook".to_string());
+        let mut telemetry_payload = collect_common_hook_telemetry_payload(&hook_data);
+        if let Some(prompt) = hook_data.get("prompt").and_then(|v| v.as_str()) {
+            telemetry_payload.insert(
+                "prompt_char_count".to_string(),
+                prompt.chars().count().to_string(),
+            );
+            if let Some(skill_name) = infer_skill_name_from_prompt(prompt) {
+                telemetry_payload.insert("skill_name".to_string(), skill_name);
+                telemetry_payload.insert(
+                    "skill_detection_method".to_string(),
+                    "inferred_prompt".to_string(),
+                );
+            }
+        }
+        if let Some(attachments) = hook_data.get("attachments").and_then(|v| v.as_array()) {
+            telemetry_payload.insert(
+                "attachment_count".to_string(),
+                attachments.len().to_string(),
+            );
+        }
+        if let Some(text) = hook_data.get("text").and_then(|v| v.as_str()) {
+            telemetry_payload.insert(
+                "response_char_count".to_string(),
+                text.chars().count().to_string(),
+            );
+        }
+        if let Some(trigger) = hook_data.get("trigger").and_then(|v| v.as_str()) {
+            telemetry_payload.insert("reason".to_string(), trigger.to_string());
+        }
+        if let Some(tool_name) = hook_data.get("tool_name").and_then(|v| v.as_str())
+            && tool_name.starts_with("mcp__")
+        {
+            telemetry_payload.insert("mcp_tool_name".to_string(), tool_name.to_string());
+        }
+        if hook_event_name != "beforeSubmitPrompt" && hook_event_name != "afterFileEdit" {
+            telemetry_payload.insert("telemetry_only".to_string(), "1".to_string());
+        }
+        let telemetry_payload = if telemetry_payload.is_empty() {
+            None
+        } else {
+            Some(telemetry_payload)
+        };
 
         let file_path = hook_data
             .get("file_path")
@@ -1216,6 +1642,29 @@ impl AgentCheckpointPreset for CursorPreset {
                 edited_filepaths: None,
                 will_edit_filepaths: None,
                 dirty_files: None,
+                hook_event_name: Some(hook_event_name),
+                hook_source,
+                telemetry_payload,
+            });
+        }
+
+        if hook_event_name != "afterFileEdit" {
+            return Ok(AgentRunResult {
+                agent_id: AgentId {
+                    tool: "cursor".to_string(),
+                    id: conversation_id,
+                    model,
+                },
+                agent_metadata: None,
+                checkpoint_kind: CheckpointKind::AiAgent,
+                transcript: None,
+                repo_working_dir: Some(repo_working_dir),
+                edited_filepaths: None,
+                will_edit_filepaths: None,
+                dirty_files: None,
+                hook_event_name: Some(hook_event_name),
+                hook_source,
+                telemetry_payload,
             });
         }
 
@@ -1292,6 +1741,9 @@ impl AgentCheckpointPreset for CursorPreset {
             edited_filepaths,
             will_edit_filepaths: None,
             dirty_files: None,
+            hook_event_name: Some(hook_event_name),
+            hook_source,
+            telemetry_payload,
         })
     }
 }
@@ -1624,22 +2076,39 @@ impl AgentCheckpointPreset for GithubCopilotPreset {
             return Self::run_legacy_extension_hooks(&hook_data, hook_event_name);
         }
 
-        if hook_event_name == "PreToolUse" || hook_event_name == "PostToolUse" {
+        if Self::is_supported_vscode_hook_event(hook_event_name) {
             return Self::run_vscode_native_hooks(&hook_data, hook_event_name);
         }
 
         Err(GitAiError::PresetError(format!(
-            "Invalid hook_event_name: {}. Expected one of 'before_edit', 'after_edit', 'PreToolUse', or 'PostToolUse'",
+            "Invalid hook_event_name: {}. Expected one of 'before_edit', 'after_edit', 'SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PreCompact', 'SubagentStart', 'SubagentStop', or 'Stop'",
             hook_event_name
         )))
     }
 }
 
 impl GithubCopilotPreset {
+    fn is_supported_vscode_hook_event(hook_event_name: &str) -> bool {
+        matches!(
+            hook_event_name,
+            "SessionStart"
+                | "UserPromptSubmit"
+                | "PreToolUse"
+                | "PostToolUse"
+                | "PreCompact"
+                | "SubagentStart"
+                | "SubagentStop"
+                | "Stop"
+        )
+    }
+
     fn run_legacy_extension_hooks(
         hook_data: &serde_json::Value,
         hook_event_name: &str,
     ) -> Result<AgentRunResult, GitAiError> {
+        let hook_source = Some("github_copilot_hook".to_string());
+        let telemetry_payload_common = collect_common_hook_telemetry_payload(hook_data);
+
         let repo_working_dir: String = hook_data
             .get("workspace_folder")
             .and_then(|v| v.as_str())
@@ -1676,6 +2145,15 @@ impl GithubCopilotPreset {
                 ));
             }
 
+            let mut telemetry_payload = telemetry_payload_common.clone();
+            telemetry_payload.insert("tool_name".to_string(), "edit_file".to_string());
+            telemetry_payload.insert("agent_tool".to_string(), "github-copilot".to_string());
+            let telemetry_payload = if telemetry_payload.is_empty() {
+                None
+            } else {
+                Some(telemetry_payload)
+            };
+
             return Ok(AgentRunResult {
                 agent_id: AgentId {
                     tool: "human".to_string(),
@@ -1689,6 +2167,9 @@ impl GithubCopilotPreset {
                 edited_filepaths: None,
                 will_edit_filepaths: Some(will_edit_filepaths),
                 dirty_files,
+                hook_event_name: Some(hook_event_name.to_string()),
+                hook_source,
+                telemetry_payload,
             });
         }
 
@@ -1752,6 +2233,15 @@ impl GithubCopilotPreset {
             model: detected_model.unwrap_or_else(|| "unknown".to_string()),
         };
 
+        let mut telemetry_payload = telemetry_payload_common;
+        telemetry_payload.insert("tool_name".to_string(), "edit_file".to_string());
+        telemetry_payload.insert("agent_tool".to_string(), "github-copilot".to_string());
+        let telemetry_payload = if telemetry_payload.is_empty() {
+            None
+        } else {
+            Some(telemetry_payload)
+        };
+
         Ok(AgentRunResult {
             agent_id,
             agent_metadata: Some(agent_metadata),
@@ -1762,6 +2252,9 @@ impl GithubCopilotPreset {
             edited_filepaths: edited_filepaths.or(detected_edited_filepaths),
             will_edit_filepaths: None,
             dirty_files,
+            hook_event_name: Some(hook_event_name.to_string()),
+            hook_source,
+            telemetry_payload,
         })
     }
 
@@ -1769,13 +2262,13 @@ impl GithubCopilotPreset {
         hook_data: &serde_json::Value,
         hook_event_name: &str,
     ) -> Result<AgentRunResult, GitAiError> {
+        let hook_source = Some("github_copilot_hook".to_string());
         let cwd = hook_data
             .get("cwd")
             .and_then(|v| v.as_str())
             .or_else(|| hook_data.get("workspace_folder").and_then(|v| v.as_str()))
             .or_else(|| hook_data.get("workspaceFolder").and_then(|v| v.as_str()))
-            .ok_or_else(|| GitAiError::PresetError("cwd not found in hook_input".to_string()))?
-            .to_string();
+            .map(str::to_string);
 
         let dirty_files = Self::dirty_files_from_hook_data(hook_data);
         let chat_session_id = hook_data
@@ -1786,6 +2279,9 @@ impl GithubCopilotPreset {
             .or_else(|| hook_data.get("sessionId").and_then(|v| v.as_str()))
             .unwrap_or("unknown")
             .to_string();
+        let model_hint = get_str_by_keys(hook_data, &["model", "model_id", "modelId"])
+            .unwrap_or("unknown")
+            .to_string();
 
         let tool_name = hook_data
             .get("tool_name")
@@ -1793,14 +2289,47 @@ impl GithubCopilotPreset {
             .or_else(|| hook_data.get("toolName").and_then(|v| v.as_str()))
             .unwrap_or("unknown");
 
-        // VS Code currently executes imported hooks even when matcher/tool filters are ignored.
-        // Enforce tool filtering in git-ai to avoid creating checkpoints for read/search tools.
-        if !Self::is_supported_vscode_edit_tool_name(tool_name) {
-            return Err(GitAiError::PresetError(format!(
-                "Skipping VS Code hook for unsupported tool_name '{}' (non-edit tool).",
-                tool_name
-            )));
+        let mut telemetry_payload = collect_common_hook_telemetry_payload(hook_data);
+        telemetry_payload.insert("tool_name".to_string(), tool_name.to_string());
+        telemetry_payload.insert("agent_tool".to_string(), "github-copilot".to_string());
+
+        if !matches!(hook_event_name, "PreToolUse" | "PostToolUse") {
+            return Ok(Self::telemetry_only_result(
+                hook_event_name,
+                hook_source,
+                &chat_session_id,
+                &model_hint,
+                cwd,
+                dirty_files,
+                telemetry_payload,
+            ));
         }
+
+        // VS Code currently executes imported hooks even when matcher/tool filters are ignored.
+        // Keep telemetry for all tools; only create checkpoints for known edit tools.
+        if !Self::is_supported_vscode_edit_tool_name(tool_name) {
+            return Ok(Self::telemetry_only_result(
+                hook_event_name,
+                hook_source,
+                &chat_session_id,
+                &model_hint,
+                cwd,
+                dirty_files,
+                telemetry_payload,
+            ));
+        }
+
+        let Some(cwd) = cwd else {
+            return Ok(Self::telemetry_only_result(
+                hook_event_name,
+                hook_source,
+                &chat_session_id,
+                &model_hint,
+                None,
+                dirty_files,
+                telemetry_payload,
+            ));
+        };
 
         let tool_input = hook_data
             .get("tool_input")
@@ -1836,12 +2365,15 @@ impl GithubCopilotPreset {
 
         let transcript_path = Self::transcript_path_from_hook_data(hook_data).map(str::to_string);
 
-        if let Some(path) = transcript_path.as_deref()
-            && Self::looks_like_claude_transcript_path(path)
-        {
-            return Err(GitAiError::PresetError(
-                "Skipping VS Code hook because transcript_path looks like a Claude transcript path."
-                    .to_string(),
+        if !Self::is_likely_copilot_native_hook(transcript_path.as_deref()) {
+            return Ok(Self::telemetry_only_result(
+                hook_event_name,
+                hook_source,
+                &chat_session_id,
+                &model_hint,
+                Some(cwd),
+                dirty_files,
+                telemetry_payload,
             ));
         }
 
@@ -1878,14 +2410,6 @@ impl GithubCopilotPreset {
             detected_model = Some(chat_sessions_model);
         }
 
-        if !Self::is_likely_copilot_native_hook(transcript_path.as_deref()) {
-            return Err(GitAiError::PresetError(format!(
-                "Skipping VS Code hook for non-Copilot session (tool_name: {}, model: {}).",
-                tool_name,
-                detected_model.as_deref().unwrap_or("unknown")
-            )));
-        }
-
         let detected_edited_filepaths = detected_edited_filepaths.map(|paths| {
             paths
                 .into_iter()
@@ -1901,11 +2425,22 @@ impl GithubCopilotPreset {
 
         if hook_event_name == "PreToolUse" {
             if extracted_paths.is_empty() {
-                return Err(GitAiError::PresetError(format!(
-                    "No editable file paths found in VS Code hook input (tool_name: {}). Skipping checkpoint.",
-                    tool_name
-                )));
+                return Ok(Self::telemetry_only_result(
+                    hook_event_name,
+                    hook_source,
+                    &chat_session_id,
+                    &model_hint,
+                    Some(cwd),
+                    dirty_files,
+                    telemetry_payload,
+                ));
             }
+
+            let telemetry_payload = if telemetry_payload.is_empty() {
+                None
+            } else {
+                Some(telemetry_payload)
+            };
 
             return Ok(AgentRunResult {
                 agent_id: AgentId {
@@ -1920,19 +2455,28 @@ impl GithubCopilotPreset {
                 edited_filepaths: None,
                 will_edit_filepaths: Some(extracted_paths),
                 dirty_files,
+                hook_event_name: Some(hook_event_name.to_string()),
+                hook_source,
+                telemetry_payload,
             });
         }
 
-        let transcript_path = transcript_path.ok_or_else(|| {
-            GitAiError::PresetError(
-                "transcript_path not found in hook_input for PostToolUse".to_string(),
-            )
-        })?;
+        let Some(transcript_path) = transcript_path else {
+            return Ok(Self::telemetry_only_result(
+                hook_event_name,
+                hook_source,
+                &chat_session_id,
+                &model_hint,
+                Some(cwd),
+                dirty_files,
+                telemetry_payload,
+            ));
+        };
 
         let agent_id = AgentId {
             tool: "github-copilot".to_string(),
             id: chat_session_id,
-            model: detected_model.unwrap_or_else(|| "unknown".to_string()),
+            model: detected_model.unwrap_or(model_hint),
         };
 
         let agent_metadata = HashMap::from([
@@ -1941,11 +2485,22 @@ impl GithubCopilotPreset {
         ]);
 
         if extracted_paths.is_empty() {
-            return Err(GitAiError::PresetError(format!(
-                "No editable file paths found in VS Code PostToolUse hook input (tool_name: {}). Skipping checkpoint.",
-                tool_name
-            )));
+            return Ok(Self::telemetry_only_result(
+                hook_event_name,
+                hook_source,
+                &agent_id.id,
+                &agent_id.model,
+                Some(cwd),
+                dirty_files,
+                telemetry_payload,
+            ));
         }
+
+        let telemetry_payload = if telemetry_payload.is_empty() {
+            None
+        } else {
+            Some(telemetry_payload)
+        };
 
         Ok(AgentRunResult {
             agent_id,
@@ -1956,7 +2511,40 @@ impl GithubCopilotPreset {
             edited_filepaths: Some(extracted_paths),
             will_edit_filepaths: None,
             dirty_files,
+            hook_event_name: Some(hook_event_name.to_string()),
+            hook_source,
+            telemetry_payload,
         })
+    }
+
+    fn telemetry_only_result(
+        hook_event_name: &str,
+        hook_source: Option<String>,
+        chat_session_id: &str,
+        model: &str,
+        repo_working_dir: Option<String>,
+        dirty_files: Option<HashMap<String, String>>,
+        mut telemetry_payload: HashMap<String, String>,
+    ) -> AgentRunResult {
+        telemetry_payload.insert("telemetry_only".to_string(), "1".to_string());
+
+        AgentRunResult {
+            agent_id: AgentId {
+                tool: "github-copilot".to_string(),
+                id: chat_session_id.to_string(),
+                model: model.to_string(),
+            },
+            agent_metadata: None,
+            checkpoint_kind: CheckpointKind::AiAgent,
+            transcript: None,
+            repo_working_dir,
+            edited_filepaths: None,
+            will_edit_filepaths: None,
+            dirty_files,
+            hook_event_name: Some(hook_event_name.to_string()),
+            hook_source,
+            telemetry_payload: Some(telemetry_payload),
+        }
     }
 
     fn dirty_files_from_hook_data(
@@ -1979,12 +2567,8 @@ impl GithubCopilotPreset {
 
     fn is_likely_copilot_native_hook(transcript_path: Option<&str>) -> bool {
         let Some(path) = transcript_path else {
-            return false;
+            return true;
         };
-
-        if Self::looks_like_claude_transcript_path(path) {
-            return false;
-        }
 
         Self::looks_like_copilot_transcript_path(path)
     }
@@ -2568,6 +3152,9 @@ impl AgentCheckpointPreset for DroidPreset {
                 edited_filepaths: None,
                 will_edit_filepaths: file_path_as_vec,
                 dirty_files: None,
+                hook_event_name: None,
+                hook_source: None,
+                telemetry_payload: None,
             });
         }
 
@@ -2581,6 +3168,9 @@ impl AgentCheckpointPreset for DroidPreset {
             edited_filepaths: file_path_as_vec,
             will_edit_filepaths: None,
             dirty_files: None,
+            hook_event_name: None,
+            hook_source: None,
+            telemetry_payload: None,
         })
     }
 }
@@ -3338,6 +3928,9 @@ impl AgentCheckpointPreset for AiTabPreset {
                 edited_filepaths: None,
                 will_edit_filepaths,
                 dirty_files,
+                hook_event_name: None,
+                hook_source: None,
+                telemetry_payload: None,
             });
         }
 
@@ -3350,6 +3943,9 @@ impl AgentCheckpointPreset for AiTabPreset {
             edited_filepaths,
             will_edit_filepaths: None,
             dirty_files,
+            hook_event_name: None,
+            hook_source: None,
+            telemetry_payload: None,
         })
     }
 }

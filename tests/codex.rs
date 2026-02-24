@@ -96,6 +96,19 @@ fn test_codex_preset_legacy_hook_input() {
             .is_some(),
         "transcript_path should be persisted for commit-time resync"
     );
+    assert_eq!(result.hook_source.as_deref(), Some("codex_notify"));
+    assert_eq!(
+        result.hook_event_name.as_deref(),
+        Some("agent-turn-complete")
+    );
+    assert_eq!(
+        result
+            .telemetry_payload
+            .as_ref()
+            .and_then(|m| m.get("prompt_char_count"))
+            .map(String::as_str),
+        Some("20")
+    );
 }
 
 #[test]
@@ -140,6 +153,8 @@ fn test_codex_preset_structured_hook_input() {
         result.transcript.is_some(),
         "AI checkpoint should include transcript"
     );
+    assert_eq!(result.hook_source.as_deref(), Some("codex_notify"));
+    assert_eq!(result.hook_event_name.as_deref(), Some("after_agent"));
 }
 
 #[test]

@@ -325,6 +325,43 @@ fn test_cursor_preset_human_checkpoint_no_filepath() {
 }
 
 #[test]
+fn test_cursor_preset_session_start_telemetry_only() {
+    use git_ai::authorship::working_log::CheckpointKind;
+    use git_ai::commands::checkpoint_agent::agent_presets::{
+        AgentCheckpointFlags, AgentCheckpointPreset, CursorPreset,
+    };
+
+    let hook_input = r##"{
+        "conversation_id": "test-conversation-id",
+        "workspace_roots": ["/Users/test/workspace"],
+        "hook_event_name": "sessionStart",
+        "model": "gpt-5",
+        "composer_mode": "agent"
+    }"##;
+
+    let flags = AgentCheckpointFlags {
+        hook_input: Some(hook_input.to_string()),
+    };
+
+    let preset = CursorPreset;
+    let result = preset
+        .run(flags)
+        .expect("Should parse sessionStart hook payload");
+
+    assert_eq!(result.checkpoint_kind, CheckpointKind::AiAgent);
+    assert_eq!(result.hook_event_name.as_deref(), Some("sessionStart"));
+    assert_eq!(result.hook_source.as_deref(), Some("cursor_hook"));
+    assert_eq!(
+        result
+            .telemetry_payload
+            .as_ref()
+            .and_then(|m| m.get("telemetry_only"))
+            .map(String::as_str),
+        Some("1")
+    );
+}
+
+#[test]
 fn test_cursor_e2e_with_attribution() {
     use std::fs;
 

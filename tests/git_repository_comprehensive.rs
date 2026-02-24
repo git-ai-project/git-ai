@@ -781,11 +781,8 @@ fn test_git_supports_ignore_revs_file() {
 
     // Most modern git versions support this (added in 2.23.0)
     let supports = repo.git_supports_ignore_revs_file();
-    // Just verify it returns a boolean without error
-    assert!(
-        supports || !supports,
-        "Should return boolean for ignore-revs-file support"
-    );
+    // Ensure the method returns a concrete boolean value without panicking.
+    let _: bool = supports;
 }
 
 // ============================================================================

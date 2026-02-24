@@ -23,6 +23,12 @@ struct OpenCodeHookInput {
     hook_event_name: String,
     session_id: String,
     cwd: String,
+    #[serde(default)]
+    hook_source: Option<String>,
+    #[serde(default)]
+    telemetry_payload: Option<HashMap<String, String>>,
+    #[serde(default)]
+    tool_name: Option<String>,
     tool_input: Option<ToolInput>,
 }
 
@@ -164,6 +170,9 @@ impl AgentCheckpointPreset for OpenCodePreset {
             hook_event_name,
             session_id,
             cwd,
+            hook_source,
+            telemetry_payload,
+            tool_name,
             tool_input,
         } = hook_input;
 
@@ -171,6 +180,38 @@ impl AgentCheckpointPreset for OpenCodePreset {
         let file_path_as_vec = tool_input
             .and_then(|ti| ti.file_path)
             .map(|path| vec![path]);
+
+        let hook_source = hook_source.or_else(|| Some("opencode_plugin".to_string()));
+        let mut telemetry_payload = telemetry_payload.unwrap_or_default();
+        if let Some(name) = tool_name {
+            telemetry_payload.insert("tool_name".to_string(), name);
+        }
+
+        let is_edit_event = hook_event_name == "PreToolUse" || hook_event_name == "PostToolUse";
+        if !is_edit_event {
+            telemetry_payload.insert("telemetry_only".to_string(), "1".to_string());
+            let model = telemetry_payload
+                .get("model")
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_string());
+            return Ok(AgentRunResult {
+                agent_id: AgentId {
+                    tool: "opencode".to_string(),
+                    id: session_id,
+                    model,
+                },
+                agent_metadata: None,
+                checkpoint_kind: CheckpointKind::AiAgent,
+                transcript: None,
+                repo_working_dir: Some(cwd),
+                edited_filepaths: None,
+                will_edit_filepaths: None,
+                dirty_files: None,
+                hook_event_name: Some(hook_event_name),
+                hook_source,
+                telemetry_payload: Some(telemetry_payload),
+            });
+        }
 
         // Determine OpenCode path (test override can point to either root or legacy storage path)
         let opencode_path = if let Ok(test_path) = std::env::var("GIT_AI_OPENCODE_STORAGE_PATH") {
@@ -221,6 +262,13 @@ impl AgentCheckpointPreset for OpenCodePreset {
                 edited_filepaths: None,
                 will_edit_filepaths: file_path_as_vec,
                 dirty_files: None,
+                hook_event_name: Some(hook_event_name),
+                hook_source,
+                telemetry_payload: if telemetry_payload.is_empty() {
+                    None
+                } else {
+                    Some(telemetry_payload)
+                },
             });
         }
 
@@ -234,6 +282,13 @@ impl AgentCheckpointPreset for OpenCodePreset {
             edited_filepaths: file_path_as_vec,
             will_edit_filepaths: None,
             dirty_files: None,
+            hook_event_name: Some(hook_event_name),
+            hook_source,
+            telemetry_payload: if telemetry_payload.is_empty() {
+                None
+            } else {
+                Some(telemetry_payload)
+            },
         })
     }
 }

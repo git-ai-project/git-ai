@@ -413,6 +413,9 @@ impl TmpRepo {
             edited_filepaths: None,
             will_edit_filepaths: None,
             dirty_files: None,
+            hook_event_name: None,
+            hook_source: None,
+            telemetry_payload: None,
         };
 
         checkpoint(

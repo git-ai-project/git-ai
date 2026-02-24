@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 /// Current schema version (must match MIGRATIONS.len())
-const SCHEMA_VERSION: usize = 2;
+const SCHEMA_VERSION: usize = 3;
 
 /// Database migrations - each migration upgrades the schema by one version
 const MIGRATIONS: &[&str] = &[
@@ -25,6 +25,13 @@ const MIGRATIONS: &[&str] = &[
     CREATE TABLE agent_usage_throttle (
         prompt_id TEXT PRIMARY KEY,
         last_sent_ts INTEGER NOT NULL
+    );
+    "#,
+    // Migration 2 -> 3: Generic dedupe keys for inferred hook telemetry
+    r#"
+    CREATE TABLE event_dedupe (
+        event_key TEXT PRIMARY KEY,
+        last_emitted_ts INTEGER NOT NULL
     );
     "#,
 ];
@@ -264,6 +271,7 @@ impl MetricsDatabase {
     /// Returns whether an `agent_usage` event should be emitted for this prompt_id.
     ///
     /// If emitted, this method also updates the prompt's last-sent timestamp.
+    #[allow(dead_code)]
     pub fn should_emit_agent_usage(
         &mut self,
         prompt_id: &str,
@@ -295,6 +303,49 @@ impl MetricsDatabase {
                 ON CONFLICT(prompt_id) DO UPDATE SET last_sent_ts = excluded.last_sent_ts
                 "#,
                 params![prompt_id, now_ts as i64],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(should_emit)
+    }
+
+    /// Generic dedupe utility for inferred telemetry events.
+    ///
+    /// Returns true when the event should be emitted (and stores `now_ts`),
+    /// false when the event is still inside the dedupe window.
+    #[allow(dead_code)]
+    pub fn should_emit_once(
+        &mut self,
+        event_key: &str,
+        now_ts: u64,
+        ttl_secs: u64,
+    ) -> Result<bool, GitAiError> {
+        if event_key.is_empty() {
+            return Ok(true);
+        }
+
+        let tx = self.conn.transaction()?;
+        let existing_ts: Option<i64> = tx
+            .query_row(
+                "SELECT last_emitted_ts FROM event_dedupe WHERE event_key = ?1",
+                params![event_key],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let should_emit = existing_ts
+            .map(|prev_ts| now_ts.saturating_sub(prev_ts as u64) >= ttl_secs)
+            .unwrap_or(true);
+
+        if should_emit {
+            tx.execute(
+                r#"
+                INSERT INTO event_dedupe (event_key, last_emitted_ts)
+                VALUES (?1, ?2)
+                ON CONFLICT(event_key) DO UPDATE SET last_emitted_ts = excluded.last_emitted_ts
+                "#,
+                params![event_key, now_ts as i64],
             )?;
         }
 
@@ -345,7 +396,18 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "2");
+        assert_eq!(version, "3");
+
+        // Verify event_dedupe table exists in schema v3
+        let dedupe_count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='event_dedupe'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(dedupe_count, 1);
     }
 
     #[test]
@@ -460,5 +522,76 @@ mod tests {
             db.should_emit_agent_usage(prompt_id, 1_700_000_301, 300)
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn test_should_emit_once_dedupe() {
+        let (mut db, _temp_dir) = create_test_db();
+        let event_key = "cursor:thread-1:response-started";
+
+        assert!(
+            db.should_emit_once(event_key, 1_700_100_000, 86_400)
+                .unwrap()
+        );
+        assert!(
+            !db.should_emit_once(event_key, 1_700_100_100, 86_400)
+                .unwrap()
+        );
+        assert!(
+            db.should_emit_once(event_key, 1_700_186_401, 86_400)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_should_emit_once_empty_key_always_true() {
+        let (mut db, _temp_dir) = create_test_db();
+        assert!(db.should_emit_once("", 1_700_100_000, 10).unwrap());
+        assert!(db.should_emit_once("", 1_700_100_001, 10).unwrap());
+    }
+
+    #[test]
+    fn test_migration_from_v2_to_v3_adds_event_dedupe() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("legacy-v2.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE schema_metadata (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
+            INSERT INTO schema_metadata (key, value) VALUES ('version', '2');
+            CREATE TABLE metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_json TEXT NOT NULL
+            );
+            CREATE TABLE agent_usage_throttle (
+                prompt_id TEXT PRIMARY KEY,
+                last_sent_ts INTEGER NOT NULL
+            );
+            "#,
+        )
+        .unwrap();
+
+        let mut db = MetricsDatabase { conn };
+        db.initialize_schema().unwrap();
+
+        let version: String = db
+            .conn
+            .query_row(
+                "SELECT value FROM schema_metadata WHERE key = 'version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "3");
+
+        let dedupe_count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='event_dedupe'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(dedupe_count, 1);
     }
 }

@@ -524,6 +524,9 @@ fn handle_checkpoint(args: &[String]) {
                     edited_filepaths,
                     will_edit_filepaths: None,
                     dirty_files: None,
+                    hook_event_name: None,
+                    hook_source: None,
+                    telemetry_payload: None,
                 });
             }
             _ => {}
@@ -772,6 +775,9 @@ fn handle_checkpoint(args: &[String]) {
             edited_filepaths: None,
             repo_working_dir: Some(effective_working_dir),
             dirty_files: None,
+            hook_event_name: None,
+            hook_source: None,
+            telemetry_payload: None,
         });
     }
 
@@ -1124,15 +1130,8 @@ fn emit_no_repo_agent_metrics(agent_run_result: Option<&AgentRunResult>) {
     let Some(result) = agent_run_result else {
         return;
     };
-    if result.checkpoint_kind == CheckpointKind::Human {
-        return;
-    }
 
     let agent_id = &result.agent_id;
-    if !commands::checkpoint::should_emit_agent_usage(agent_id) {
-        return;
-    }
-
     let prompt_id = generate_short_hash(&agent_id.id, &agent_id.tool);
     let attrs = crate::metrics::EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
         .tool(&agent_id.tool)
@@ -1140,8 +1139,14 @@ fn emit_no_repo_agent_metrics(agent_run_result: Option<&AgentRunResult>) {
         .prompt_id(prompt_id)
         .external_prompt_id(&agent_id.id);
 
-    let values = crate::metrics::AgentUsageValues::new();
-    crate::metrics::record(values, attrs);
+    if result.checkpoint_kind != CheckpointKind::Human
+        && commands::checkpoint::should_emit_agent_usage(agent_id)
+    {
+        let values = crate::metrics::AgentUsageValues::new();
+        crate::metrics::record(values, attrs.clone());
+    }
+
+    commands::checkpoint::emit_agent_hook_telemetry(Some(result), attrs);
 
     observability::spawn_background_flush();
 }

@@ -101,6 +101,41 @@ fn test_claude_preset_no_filepath_when_tool_input_missing() {
 }
 
 #[test]
+fn test_claude_preset_session_start_without_transcript_is_telemetry_only() {
+    let hook_input = r##"{
+        "hook_event_name": "SessionStart",
+        "session_id": "session-123",
+        "model": "claude-sonnet-4-5-20250929"
+    }"##;
+
+    let flags = AgentCheckpointFlags {
+        hook_input: Some(hook_input.to_string()),
+    };
+
+    let preset = ClaudePreset;
+    let result = preset
+        .run(flags)
+        .expect("SessionStart should not require transcript_path");
+
+    assert_eq!(result.agent_id.tool, "claude");
+    assert_eq!(result.agent_id.id, "session-123");
+    assert_eq!(
+        result.hook_event_name.as_deref(),
+        Some("SessionStart"),
+        "hook event name should be normalized onto AgentRunResult"
+    );
+    assert_eq!(result.hook_source.as_deref(), Some("claude_hook"));
+    assert_eq!(
+        result
+            .telemetry_payload
+            .as_ref()
+            .and_then(|m| m.get("telemetry_only"))
+            .map(String::as_str),
+        Some("1")
+    );
+}
+
+#[test]
 fn test_claude_preset_ignores_vscode_copilot_payload() {
     let hook_input = json!({
         "hookEventName": "PreToolUse",

@@ -15,6 +15,8 @@ pub mod attr_pos {
     pub const MODEL: usize = 21;
     pub const PROMPT_ID: usize = 22;
     pub const EXTERNAL_PROMPT_ID: usize = 23;
+    pub const HOOK_EVENT_NAME: usize = 24;
+    pub const HOOK_SOURCE: usize = 25;
 }
 
 /// Common attributes for all events.
@@ -31,6 +33,8 @@ pub mod attr_pos {
 /// | 21 | model | String | No (nullable) |
 /// | 22 | prompt_id | String | No (nullable) |
 /// | 23 | external_prompt_id | String | No (nullable) |
+/// | 24 | hook_event_name | String | No (nullable) |
+/// | 25 | hook_source | String | No (nullable) |
 #[derive(Debug, Clone, Default)]
 pub struct EventAttributes {
     pub git_ai_version: PosField<String>,
@@ -43,6 +47,8 @@ pub struct EventAttributes {
     pub model: PosField<String>,
     pub prompt_id: PosField<String>,
     pub external_prompt_id: PosField<String>,
+    pub hook_event_name: PosField<String>,
+    pub hook_source: PosField<String>,
 }
 
 impl EventAttributes {
@@ -179,6 +185,30 @@ impl EventAttributes {
         self.external_prompt_id = Some(None);
         self
     }
+
+    // Builder methods for hook_event_name
+    pub fn hook_event_name(mut self, value: impl Into<String>) -> Self {
+        self.hook_event_name = Some(Some(value.into()));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn hook_event_name_null(mut self) -> Self {
+        self.hook_event_name = Some(None);
+        self
+    }
+
+    // Builder methods for hook_source
+    pub fn hook_source(mut self, value: impl Into<String>) -> Self {
+        self.hook_source = Some(Some(value.into()));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn hook_source_null(mut self) -> Self {
+        self.hook_source = Some(None);
+        self
+    }
 }
 
 impl PosEncoded for EventAttributes {
@@ -214,6 +244,16 @@ impl PosEncoded for EventAttributes {
             attr_pos::EXTERNAL_PROMPT_ID,
             string_to_json(&self.external_prompt_id),
         );
+        sparse_set(
+            &mut map,
+            attr_pos::HOOK_EVENT_NAME,
+            string_to_json(&self.hook_event_name),
+        );
+        sparse_set(
+            &mut map,
+            attr_pos::HOOK_SOURCE,
+            string_to_json(&self.hook_source),
+        );
         map
     }
 
@@ -229,6 +269,8 @@ impl PosEncoded for EventAttributes {
             model: sparse_get_string(arr, attr_pos::MODEL),
             prompt_id: sparse_get_string(arr, attr_pos::PROMPT_ID),
             external_prompt_id: sparse_get_string(arr, attr_pos::EXTERNAL_PROMPT_ID),
+            hook_event_name: sparse_get_string(arr, attr_pos::HOOK_EVENT_NAME),
+            hook_source: sparse_get_string(arr, attr_pos::HOOK_SOURCE),
         }
     }
 }
@@ -248,7 +290,9 @@ mod tests {
             .branch("main")
             .tool("claude-code")
             .model_null()
-            .prompt_id("prompt-123");
+            .prompt_id("prompt-123")
+            .hook_event_name("PreToolUse")
+            .hook_source("claude_hook");
 
         assert_eq!(attrs.git_ai_version, Some(Some("1.0.0".to_string())));
         assert_eq!(
@@ -265,6 +309,8 @@ mod tests {
         assert_eq!(attrs.tool, Some(Some("claude-code".to_string())));
         assert_eq!(attrs.model, Some(None)); // explicitly null
         assert_eq!(attrs.prompt_id, Some(Some("prompt-123".to_string())));
+        assert_eq!(attrs.hook_event_name, Some(Some("PreToolUse".to_string())));
+        assert_eq!(attrs.hook_source, Some(Some("claude_hook".to_string())));
     }
 
     #[test]
@@ -291,6 +337,8 @@ mod tests {
             sparse.get("22"),
             Some(&Value::String("prompt-123".to_string()))
         );
+        assert_eq!(sparse.get("24"), None); // not set
+        assert_eq!(sparse.get("25"), None); // not set
     }
 
     #[test]
@@ -300,6 +348,8 @@ mod tests {
         sparse.insert("1".to_string(), Value::Null);
         sparse.insert("20".to_string(), Value::String("my-tool".to_string()));
         sparse.insert("22".to_string(), Value::String("prompt-123".to_string()));
+        sparse.insert("24".to_string(), Value::String("PostToolUse".to_string()));
+        sparse.insert("25".to_string(), Value::String("cursor_hook".to_string()));
 
         let attrs = EventAttributes::from_sparse(&sparse);
 
@@ -309,6 +359,8 @@ mod tests {
         assert_eq!(attrs.tool, Some(Some("my-tool".to_string())));
         assert_eq!(attrs.model, None); // not set
         assert_eq!(attrs.prompt_id, Some(Some("prompt-123".to_string())));
+        assert_eq!(attrs.hook_event_name, Some(Some("PostToolUse".to_string())));
+        assert_eq!(attrs.hook_source, Some(Some("cursor_hook".to_string())));
     }
 
     #[test]
@@ -322,7 +374,9 @@ mod tests {
             .tool("cursor")
             .model("gpt-4")
             .prompt_id("prompt-456")
-            .external_prompt_id("ext-789");
+            .external_prompt_id("ext-789")
+            .hook_event_name("afterFileEdit")
+            .hook_source("cursor_hook");
 
         assert_eq!(attrs.git_ai_version, Some(Some("1.2.3".to_string())));
         assert_eq!(
@@ -337,6 +391,11 @@ mod tests {
         assert_eq!(attrs.model, Some(Some("gpt-4".to_string())));
         assert_eq!(attrs.prompt_id, Some(Some("prompt-456".to_string())));
         assert_eq!(attrs.external_prompt_id, Some(Some("ext-789".to_string())));
+        assert_eq!(
+            attrs.hook_event_name,
+            Some(Some("afterFileEdit".to_string()))
+        );
+        assert_eq!(attrs.hook_source, Some(Some("cursor_hook".to_string())));
     }
 
     #[test]
@@ -351,7 +410,9 @@ mod tests {
             .tool_null()
             .model_null()
             .prompt_id_null()
-            .external_prompt_id_null();
+            .external_prompt_id_null()
+            .hook_event_name_null()
+            .hook_source_null();
 
         assert_eq!(attrs.git_ai_version, Some(None));
         assert_eq!(attrs.repo_url, Some(None));
@@ -363,6 +424,8 @@ mod tests {
         assert_eq!(attrs.model, Some(None));
         assert_eq!(attrs.prompt_id, Some(None));
         assert_eq!(attrs.external_prompt_id, Some(None));
+        assert_eq!(attrs.hook_event_name, Some(None));
+        assert_eq!(attrs.hook_source, Some(None));
     }
 
     #[test]
@@ -376,7 +439,9 @@ mod tests {
             .tool("test-tool")
             .model("test-model")
             .prompt_id("prompt-id")
-            .external_prompt_id("ext-id");
+            .external_prompt_id("ext-id")
+            .hook_event_name("sessionStart")
+            .hook_source("cursor_hook");
 
         let sparse = attrs.to_sparse();
 
@@ -411,6 +476,14 @@ mod tests {
             Some(&Value::String("prompt-id".to_string()))
         );
         assert_eq!(sparse.get("23"), Some(&Value::String("ext-id".to_string())));
+        assert_eq!(
+            sparse.get("24"),
+            Some(&Value::String("sessionStart".to_string()))
+        );
+        assert_eq!(
+            sparse.get("25"),
+            Some(&Value::String("cursor_hook".to_string()))
+        );
     }
 
     #[test]
@@ -419,7 +492,8 @@ mod tests {
             .repo_url("https://gitlab.com/org/repo")
             .author_null()
             .commit_sha("sha123")
-            .tool("copilot");
+            .tool("copilot")
+            .hook_event_name("PostToolUse");
 
         let sparse = original.to_sparse();
         let restored = EventAttributes::from_sparse(&sparse);
@@ -432,6 +506,11 @@ mod tests {
         assert_eq!(restored.author, Some(None)); // explicitly null
         assert_eq!(restored.commit_sha, Some(Some("sha123".to_string())));
         assert_eq!(restored.tool, Some(Some("copilot".to_string())));
+        assert_eq!(
+            restored.hook_event_name,
+            Some(Some("PostToolUse".to_string()))
+        );
+        assert_eq!(restored.hook_source, None); // not set
         assert_eq!(restored.base_commit_sha, None); // not set
         assert_eq!(restored.model, None); // not set
     }
@@ -449,6 +528,7 @@ mod tests {
         assert_eq!(attrs.author, None); // not set
         assert_eq!(attrs.tool, Some(Some("windsurf".to_string())));
         assert_eq!(attrs.branch, None); // not set
+        assert_eq!(attrs.hook_event_name, None); // not set
     }
 
     #[test]
@@ -465,6 +545,8 @@ mod tests {
         assert_eq!(attrs.model, None);
         assert_eq!(attrs.prompt_id, None);
         assert_eq!(attrs.external_prompt_id, None);
+        assert_eq!(attrs.hook_event_name, None);
+        assert_eq!(attrs.hook_source, None);
     }
 
     #[test]
@@ -488,5 +570,7 @@ mod tests {
         assert_eq!(MODEL, 21);
         assert_eq!(PROMPT_ID, 22);
         assert_eq!(EXTERNAL_PROMPT_ID, 23);
+        assert_eq!(HOOK_EVENT_NAME, 24);
+        assert_eq!(HOOK_SOURCE, 25);
     }
 }

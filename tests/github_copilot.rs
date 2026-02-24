@@ -1299,19 +1299,150 @@ fn test_copilot_preset_vscode_non_edit_tool_is_filtered() {
     };
 
     let preset = GithubCopilotPreset;
-    let result = preset.run(flags);
+    let result = preset
+        .run(flags)
+        .expect("Non-edit tools should emit telemetry-only checkpoint");
 
-    assert!(result.is_err());
-    assert!(
+    assert_eq!(
+        result.checkpoint_kind,
+        git_ai::authorship::working_log::CheckpointKind::AiAgent
+    );
+    assert_eq!(result.will_edit_filepaths, None);
+    assert_eq!(result.edited_filepaths, None);
+    assert_eq!(result.hook_event_name.as_deref(), Some("PreToolUse"));
+    assert_eq!(
         result
-            .unwrap_err()
-            .to_string()
-            .contains("unsupported tool_name")
+            .telemetry_payload
+            .as_ref()
+            .and_then(|m| m.get("telemetry_only"))
+            .map(String::as_str),
+        Some("1")
     );
 }
 
 #[test]
-fn test_copilot_preset_vscode_claude_transcript_path_is_rejected() {
+fn test_copilot_preset_vscode_session_start_is_telemetry_only() {
+    use git_ai::commands::checkpoint_agent::agent_presets::{
+        AgentCheckpointFlags, AgentCheckpointPreset,
+    };
+
+    let hook_input = json!({
+        "hookEventName": "SessionStart",
+        "sessionId": "copilot-session-start",
+        "cwd": "/Users/test/project",
+        "source": "new",
+        "model": "copilot/claude-sonnet-4"
+    });
+
+    let preset = GithubCopilotPreset;
+    let result = preset
+        .run(AgentCheckpointFlags {
+            hook_input: Some(hook_input.to_string()),
+        })
+        .expect("SessionStart should be accepted");
+
+    assert_eq!(result.hook_event_name.as_deref(), Some("SessionStart"));
+    assert_eq!(result.agent_id.tool, "github-copilot");
+    assert_eq!(result.agent_id.id, "copilot-session-start");
+    assert_eq!(
+        result
+            .telemetry_payload
+            .as_ref()
+            .and_then(|m| m.get("telemetry_only"))
+            .map(String::as_str),
+        Some("1")
+    );
+}
+
+#[test]
+fn test_copilot_preset_vscode_user_prompt_submit_is_telemetry_only() {
+    use git_ai::commands::checkpoint_agent::agent_presets::{
+        AgentCheckpointFlags, AgentCheckpointPreset,
+    };
+
+    let hook_input = json!({
+        "hookEventName": "UserPromptSubmit",
+        "sessionId": "copilot-session-prompt",
+        "cwd": "/Users/test/project",
+        "prompt": "please refactor this function"
+    });
+
+    let preset = GithubCopilotPreset;
+    let result = preset
+        .run(AgentCheckpointFlags {
+            hook_input: Some(hook_input.to_string()),
+        })
+        .expect("UserPromptSubmit should be accepted");
+
+    assert_eq!(result.hook_event_name.as_deref(), Some("UserPromptSubmit"));
+    assert_eq!(
+        result
+            .telemetry_payload
+            .as_ref()
+            .and_then(|m| m.get("prompt_char_count"))
+            .map(String::as_str),
+        Some("29")
+    );
+    assert_eq!(
+        result
+            .telemetry_payload
+            .as_ref()
+            .and_then(|m| m.get("telemetry_only"))
+            .map(String::as_str),
+        Some("1")
+    );
+}
+
+#[test]
+fn test_copilot_preset_vscode_subagent_events_are_telemetry_only() {
+    use git_ai::commands::checkpoint_agent::agent_presets::{
+        AgentCheckpointFlags, AgentCheckpointPreset,
+    };
+
+    let hook_input = json!({
+        "hookEventName": "SubagentStart",
+        "sessionId": "copilot-session-subagent",
+        "cwd": "/Users/test/project",
+        "agent_id": "subagent-123",
+        "agent_type": "Plan"
+    });
+
+    let preset = GithubCopilotPreset;
+    let result = preset
+        .run(AgentCheckpointFlags {
+            hook_input: Some(hook_input.to_string()),
+        })
+        .expect("SubagentStart should be accepted");
+
+    assert_eq!(result.hook_event_name.as_deref(), Some("SubagentStart"));
+    assert_eq!(
+        result
+            .telemetry_payload
+            .as_ref()
+            .and_then(|m| m.get("subagent_id"))
+            .map(String::as_str),
+        Some("subagent-123")
+    );
+    assert_eq!(
+        result
+            .telemetry_payload
+            .as_ref()
+            .and_then(|m| m.get("subagent_type"))
+            .map(String::as_str),
+        Some("Plan")
+    );
+    assert_eq!(
+        result
+            .telemetry_payload
+            .as_ref()
+            .and_then(|m| m.get("telemetry_only"))
+            .map(String::as_str),
+        Some("1")
+    );
+}
+
+#[test]
+fn test_copilot_preset_vscode_claude_transcript_path_is_telemetry_only() {
     use git_ai::commands::checkpoint_agent::agent_presets::{
         AgentCheckpointFlags, AgentCheckpointPreset,
     };
@@ -1332,14 +1463,18 @@ fn test_copilot_preset_vscode_claude_transcript_path_is_rejected() {
     };
 
     let preset = GithubCopilotPreset;
-    let result = preset.run(flags);
+    let result = preset
+        .run(flags)
+        .expect("Claude-like transcript path should fall back to telemetry-only");
 
-    assert!(result.is_err());
+    assert_eq!(result.hook_event_name.as_deref(), Some("PostToolUse"));
     assert!(
         result
-            .unwrap_err()
-            .to_string()
-            .contains("Claude transcript path")
+            .telemetry_payload
+            .as_ref()
+            .and_then(|m| m.get("telemetry_only"))
+            .map(String::as_str)
+            == Some("1")
     );
 }
 

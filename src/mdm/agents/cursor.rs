@@ -16,6 +16,24 @@ use std::path::PathBuf;
 // Command patterns for hooks
 const CURSOR_BEFORE_SUBMIT_CMD: &str = "checkpoint cursor --hook-input stdin";
 const CURSOR_AFTER_EDIT_CMD: &str = "checkpoint cursor --hook-input stdin";
+const CURSOR_HOOK_EVENTS: &[&str] = &[
+    "sessionStart",
+    "sessionEnd",
+    "beforeSubmitPrompt",
+    "preToolUse",
+    "postToolUse",
+    "postToolUseFailure",
+    "subagentStart",
+    "subagentStop",
+    "beforeShellExecution",
+    "afterShellExecution",
+    "beforeMCPExecution",
+    "afterMCPExecution",
+    "afterFileEdit",
+    "afterAgentResponse",
+    "afterAgentThought",
+    "stop",
+];
 
 pub struct CursorInstaller;
 
@@ -84,24 +102,29 @@ impl HookInstaller for CursorInstaller {
         let content = fs::read_to_string(&hooks_path)?;
         let existing: Value = serde_json::from_str(&content).unwrap_or_else(|_| json!({}));
 
-        let has_hooks = existing
-            .get("hooks")
-            .and_then(|h| h.get("beforeSubmitPrompt"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter().any(|hook| {
-                    hook.get("command")
-                        .and_then(|c| c.as_str())
-                        .map(Self::is_cursor_checkpoint_command)
-                        .unwrap_or(false)
+        let has_hook_for = |hook_name: &&str| {
+            existing
+                .get("hooks")
+                .and_then(|h| h.get(*hook_name))
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter().any(|hook| {
+                        hook.get("command")
+                            .and_then(|c| c.as_str())
+                            .map(Self::is_cursor_checkpoint_command)
+                            .unwrap_or(false)
+                    })
                 })
-            })
-            .unwrap_or(false);
+                .unwrap_or(false)
+        };
+
+        let has_any = CURSOR_HOOK_EVENTS.iter().any(has_hook_for);
+        let has_all = CURSOR_HOOK_EVENTS.iter().all(has_hook_for);
 
         Ok(HookCheckResult {
             tool_installed: true,
-            hooks_installed: has_hooks,
-            hooks_up_to_date: has_hooks,
+            hooks_installed: has_any,
+            hooks_up_to_date: has_all,
         })
     }
 
@@ -131,30 +154,17 @@ impl HookInstaller for CursorInstaller {
             serde_json::from_str(&existing_content)?
         };
 
-        // Build commands with absolute path
         let before_submit_cmd = format!(
             "{} {}",
             params.binary_path.display(),
             CURSOR_BEFORE_SUBMIT_CMD
         );
         let after_edit_cmd = format!("{} {}", params.binary_path.display(), CURSOR_AFTER_EDIT_CMD);
-
-        // Desired hooks payload for Cursor
-        let desired: Value = json!({
-            "version": 1,
-            "hooks": {
-                "beforeSubmitPrompt": [
-                    {
-                        "command": before_submit_cmd
-                    }
-                ],
-                "afterFileEdit": [
-                    {
-                        "command": after_edit_cmd
-                    }
-                ]
-            }
-        });
+        let desired_cmd = if before_submit_cmd == after_edit_cmd {
+            before_submit_cmd
+        } else {
+            after_edit_cmd
+        };
 
         // Merge desired into existing
         let mut merged = existing.clone();
@@ -169,15 +179,7 @@ impl HookInstaller for CursorInstaller {
         // Merge hooks object
         let mut hooks_obj = merged.get("hooks").cloned().unwrap_or_else(|| json!({}));
 
-        // Process both hook types
-        for hook_name in &["beforeSubmitPrompt", "afterFileEdit"] {
-            let desired_hooks = desired
-                .get("hooks")
-                .and_then(|h| h.get(*hook_name))
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-
+        for hook_name in CURSOR_HOOK_EVENTS {
             // Get existing hooks array for this hook type
             let mut existing_hooks = hooks_obj
                 .get(*hook_name)
@@ -185,42 +187,42 @@ impl HookInstaller for CursorInstaller {
                 .cloned()
                 .unwrap_or_default();
 
-            // Update outdated git-ai checkpoint commands (or add if missing)
-            for desired_hook in desired_hooks {
-                let desired_cmd = desired_hook.get("command").and_then(|c| c.as_str());
-                if desired_cmd.is_none() {
-                    continue;
+            let mut found_idx = None;
+            let mut needs_update = false;
+
+            for (idx, existing_hook) in existing_hooks.iter().enumerate() {
+                if let Some(existing_cmd) = existing_hook.get("command").and_then(|c| c.as_str())
+                    && Self::is_cursor_checkpoint_command(existing_cmd)
+                {
+                    found_idx = Some(idx);
+                    if existing_cmd != desired_cmd {
+                        needs_update = true;
+                    }
+                    break;
                 }
-                let desired_cmd = desired_cmd.unwrap();
+            }
 
-                // Look for existing git-ai checkpoint cursor commands
-                let mut found_idx = None;
-                let mut needs_update = false;
-
-                for (idx, existing_hook) in existing_hooks.iter().enumerate() {
-                    if let Some(existing_cmd) =
-                        existing_hook.get("command").and_then(|c| c.as_str())
-                        && Self::is_cursor_checkpoint_command(existing_cmd)
-                    {
-                        found_idx = Some(idx);
-                        if existing_cmd != desired_cmd {
-                            needs_update = true;
-                        }
-                        break;
+            match found_idx {
+                Some(idx) => {
+                    if needs_update {
+                        existing_hooks[idx] = json!({ "command": desired_cmd.clone() });
                     }
+                    let keep_idx = idx;
+                    let mut current_idx = 0;
+                    existing_hooks.retain(|hook| {
+                        let keep = if current_idx == keep_idx {
+                            true
+                        } else if let Some(cmd) = hook.get("command").and_then(|c| c.as_str()) {
+                            !Self::is_cursor_checkpoint_command(cmd)
+                        } else {
+                            true
+                        };
+                        current_idx += 1;
+                        keep
+                    });
                 }
-
-                match found_idx {
-                    Some(idx) if needs_update => {
-                        existing_hooks[idx] = desired_hook.clone();
-                    }
-                    Some(_) => {
-                        // Already up to date, skip
-                    }
-                    None => {
-                        // No existing command, add new one
-                        existing_hooks.push(desired_hook.clone());
-                    }
+                None => {
+                    existing_hooks.push(json!({ "command": desired_cmd.clone() }));
                 }
             }
 
@@ -275,8 +277,8 @@ impl HookInstaller for CursorInstaller {
 
         let mut changed = false;
 
-        // Remove git-ai checkpoint cursor commands from both hook types
-        for hook_name in &["beforeSubmitPrompt", "afterFileEdit"] {
+        // Remove git-ai checkpoint cursor commands from managed hook types
+        for hook_name in CURSOR_HOOK_EVENTS {
             if let Some(hooks_array) = hooks_obj.get_mut(*hook_name).and_then(|v| v.as_array_mut())
             {
                 let original_len = hooks_array.len();

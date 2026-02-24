@@ -50,7 +50,11 @@ fn test_claude_preset_missing_transcript_path() {
     let preset = ClaudePreset;
     let hook_input = json!({
         "cwd": "/some/path",
-        "hook_event_name": "PostToolUse"
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": "/some/file.rs"
+        }
     })
     .to_string();
 
@@ -72,7 +76,11 @@ fn test_claude_preset_missing_cwd() {
     let preset = ClaudePreset;
     let hook_input = json!({
         "transcript_path": "tests/fixtures/example-claude-code.jsonl",
-        "hook_event_name": "PostToolUse"
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": "/some/file.rs"
+        }
     })
     .to_string();
 

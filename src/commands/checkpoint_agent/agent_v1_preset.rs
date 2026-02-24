@@ -71,6 +71,9 @@ impl AgentCheckpointPreset for AgentV1Preset {
                 repo_working_dir: Some(repo_working_dir),
                 edited_filepaths: None,
                 dirty_files,
+                hook_event_name: None,
+                hook_source: None,
+                telemetry_payload: None,
             }),
             AgentV1Input::AiAgent {
                 edited_filepaths,
@@ -93,6 +96,9 @@ impl AgentCheckpointPreset for AgentV1Preset {
                 edited_filepaths,
                 will_edit_filepaths: None,
                 dirty_files,
+                hook_event_name: None,
+                hook_source: None,
+                telemetry_payload: None,
             }),
         }
     }

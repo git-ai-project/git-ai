@@ -329,6 +329,44 @@ fn test_opencode_preset_posttooluse_returns_ai_checkpoint() {
 }
 
 #[test]
+fn test_opencode_preset_session_created_is_telemetry_only() {
+    let hook_input = json!({
+        "hook_event_name": "session.created",
+        "hook_source": "opencode_plugin",
+        "session_id": "test-session-123",
+        "cwd": "/Users/test/project",
+        "telemetry_payload": {
+            "source": "opencode"
+        }
+    })
+    .to_string();
+
+    let flags = AgentCheckpointFlags {
+        hook_input: Some(hook_input),
+    };
+
+    let result = OpenCodePreset
+        .run(flags)
+        .expect("Failed to run OpenCodePreset for session.created");
+
+    assert_eq!(result.checkpoint_kind, CheckpointKind::AiAgent);
+    assert!(
+        result.transcript.is_none(),
+        "Telemetry-only events should skip transcript parsing"
+    );
+    assert_eq!(result.hook_event_name.as_deref(), Some("session.created"));
+    assert_eq!(result.hook_source.as_deref(), Some("opencode_plugin"));
+    assert_eq!(
+        result
+            .telemetry_payload
+            .as_ref()
+            .and_then(|m| m.get("telemetry_only"))
+            .map(String::as_str),
+        Some("1")
+    );
+}
+
+#[test]
 #[serial_test::serial] // Run serially to avoid env var conflicts with other tests
 fn test_opencode_preset_stores_session_id_in_metadata() {
     let storage_path = opencode_storage_fixture_path();
