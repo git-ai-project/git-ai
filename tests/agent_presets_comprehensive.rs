@@ -195,7 +195,7 @@ fn test_claude_vscode_copilot_detection() {
         "toolName": "copilot",
         "sessionId": "test-session",
         "cwd": "/some/path",
-        "transcriptPath": "/path/to/copilot/transcript.jsonl"
+        "transcript_path": "/Users/test/Library/Application Support/Code/User/workspaceStorage/workspace-id/GitHub.copilot-chat/transcripts/test-session.jsonl"
     })
     .to_string();
 
@@ -203,9 +203,13 @@ fn test_claude_vscode_copilot_detection() {
         hook_input: Some(hook_input),
     });
 
-    // Should succeed but redirect to GithubCopilotPreset handling
-    // This tests the is_vscode_copilot_hook_payload detection
-    assert!(result.is_ok() || result.is_err()); // Depends on copilot handling
+    assert!(result.is_err());
+    match result {
+        Err(GitAiError::PresetError(msg)) => {
+            assert!(msg.contains("Skipping VS Code hook payload in Claude preset"));
+        }
+        _ => panic!("Expected PresetError for VS Code Copilot payload in Claude preset"),
+    }
 }
 
 // ==============================================================================

@@ -1134,6 +1134,7 @@ fn test_copilot_preset_vscode_pretooluse_human_checkpoint() {
         "hookEventName": "PreToolUse",
         "cwd": "/Users/test/project",
         "toolName": "copilot_replaceString",
+        "transcript_path": "/Users/test/Library/Application Support/Code/User/workspaceStorage/workspace-id/GitHub.copilot-chat/transcripts/copilot-session-pre.jsonl",
         "toolInput": {
             "file_path": "src/main.ts"
         },
@@ -1158,17 +1159,94 @@ fn test_copilot_preset_vscode_pretooluse_human_checkpoint() {
 }
 
 #[test]
+fn test_copilot_preset_vscode_create_file_tool_is_supported() {
+    use git_ai::commands::checkpoint_agent::agent_presets::{
+        AgentCheckpointFlags, AgentCheckpointPreset,
+    };
+
+    let hook_input = json!({
+        "hookEventName": "PreToolUse",
+        "cwd": "/Users/test/project",
+        "toolName": "create_file",
+        "transcript_path": "/Users/test/Library/Application Support/Code/User/workspaceStorage/workspace-id/GitHub.copilot-chat/transcripts/copilot-session-create.jsonl",
+        "toolInput": {
+            "filePath": "/Users/test/project/src/new-file.ts",
+            "content": "export const x = 1;\n"
+        },
+        "sessionId": "copilot-session-create"
+    });
+
+    let flags = AgentCheckpointFlags {
+        hook_input: Some(hook_input.to_string()),
+    };
+
+    let preset = GithubCopilotPreset;
+    let result = preset.run(flags).expect("Expected human checkpoint");
+
+    assert_eq!(
+        result.checkpoint_kind,
+        git_ai::authorship::working_log::CheckpointKind::Human
+    );
+    assert_eq!(
+        result.will_edit_filepaths,
+        Some(vec!["/Users/test/project/src/new-file.ts".to_string()])
+    );
+}
+
+#[test]
+fn test_copilot_preset_vscode_editfiles_files_array_is_supported() {
+    use git_ai::commands::checkpoint_agent::agent_presets::{
+        AgentCheckpointFlags, AgentCheckpointPreset,
+    };
+
+    let hook_input = json!({
+        "hookEventName": "PreToolUse",
+        "cwd": "/Users/test/project",
+        "toolName": "editFiles",
+        "transcript_path": "/Users/test/Library/Application Support/Code/User/workspaceStorage/workspace-id/GitHub.copilot-chat/transcripts/copilot-session-editfiles.jsonl",
+        "toolInput": {
+            "files": ["src/main.ts", "/Users/test/project/src/other.ts"]
+        },
+        "sessionId": "copilot-session-editfiles"
+    });
+
+    let flags = AgentCheckpointFlags {
+        hook_input: Some(hook_input.to_string()),
+    };
+
+    let preset = GithubCopilotPreset;
+    let result = preset.run(flags).expect("Expected human checkpoint");
+
+    assert_eq!(
+        result.checkpoint_kind,
+        git_ai::authorship::working_log::CheckpointKind::Human
+    );
+    assert_eq!(
+        result.will_edit_filepaths,
+        Some(vec![
+            "/Users/test/project/src/main.ts".to_string(),
+            "/Users/test/project/src/other.ts".to_string()
+        ])
+    );
+}
+
+#[test]
 fn test_copilot_preset_vscode_posttooluse_ai_checkpoint() {
     use git_ai::commands::checkpoint_agent::agent_presets::{
         AgentCheckpointFlags, AgentCheckpointPreset,
     };
-    use std::io::Write;
 
-    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
-    temp_file
-        .write_all(r#"{"requests": []}"#.as_bytes())
-        .unwrap();
-    let session_path = temp_file.path().to_string_lossy().to_string();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let transcripts_dir = temp_dir
+        .path()
+        .join("workspaceStorage")
+        .join("workspace-id")
+        .join("GitHub.copilot-chat")
+        .join("transcripts");
+    fs::create_dir_all(&transcripts_dir).unwrap();
+    let transcript_path = transcripts_dir.join("copilot-session-post.jsonl");
+    fs::write(&transcript_path, r#"{"requests": []}"#).unwrap();
+    let session_path = transcript_path.to_string_lossy().to_string();
 
     let hook_input = json!({
         "hookEventName": "PostToolUse",

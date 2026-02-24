@@ -101,11 +101,12 @@ fn test_claude_preset_no_filepath_when_tool_input_missing() {
 }
 
 #[test]
-fn test_claude_preset_redirects_vscode_copilot_payload() {
+fn test_claude_preset_ignores_vscode_copilot_payload() {
     let hook_input = json!({
         "hookEventName": "PreToolUse",
         "cwd": "/Users/test/project",
         "toolName": "copilot_replaceString",
+        "transcript_path": "/Users/test/Library/Application Support/Code/User/workspaceStorage/workspace-id/GitHub.copilot-chat/transcripts/copilot-session-1.jsonl",
         "toolInput": {
             "file_path": "/Users/test/project/src/main.ts"
         },
@@ -118,23 +119,18 @@ fn test_claude_preset_redirects_vscode_copilot_payload() {
     };
 
     let preset = ClaudePreset;
-    let result = preset
-        .run(flags)
-        .expect("Expected redirect to Copilot preset");
-
-    assert_eq!(
-        result.checkpoint_kind,
-        git_ai::authorship::working_log::CheckpointKind::Human
-    );
-    assert_eq!(result.agent_id.tool, "human");
-    assert_eq!(
-        result.will_edit_filepaths,
-        Some(vec!["/Users/test/project/src/main.ts".to_string()])
+    let result = preset.run(flags);
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Skipping VS Code hook payload in Claude preset")
     );
 }
 
 #[test]
-fn test_claude_preset_does_not_redirect_when_transcript_path_is_claude() {
+fn test_claude_preset_does_not_ignore_when_transcript_path_is_claude() {
     let temp = tempfile::tempdir().unwrap();
     let claude_dir = temp.path().join(".claude").join("projects");
     fs::create_dir_all(&claude_dir).unwrap();
