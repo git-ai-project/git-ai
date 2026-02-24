@@ -2010,20 +2010,21 @@ fn maybe_record_cherry_pick_post_commit(repo: &mut Repository) {
         return;
     };
 
-    let source_commit = fs::read_to_string(repo.path().join("CHERRY_PICK_HEAD"))
-        .ok()
-        .map(|contents| contents.trim().to_string())
-        .filter(|sha| !sha.is_empty())
-        .or_else(|| latest_cherry_pick_source_from_sequencer(repo))
+    let source_commit = load_cherry_pick_state(repo)
+        .and_then(|(source, base)| {
+            if base.is_empty() || base == original_head {
+                Some(source)
+            } else {
+                None
+            }
+        })
         .or_else(|| {
-            load_cherry_pick_state(repo).and_then(|(source, base)| {
-                if base.is_empty() || base == original_head {
-                    Some(source)
-                } else {
-                    None
-                }
-            })
-        });
+            fs::read_to_string(repo.path().join("CHERRY_PICK_HEAD"))
+                .ok()
+                .map(|contents| contents.trim().to_string())
+                .filter(|sha| !sha.is_empty())
+        })
+        .or_else(|| latest_cherry_pick_source_from_sequencer(repo));
 
     let Some(source_commit) = source_commit else {
         return;
