@@ -216,10 +216,10 @@ fn mcp_phase_from_hook(
     }
 }
 
-fn response_phases_from_hook(
-    hook: &str,
-    result: &AgentRunResult,
-) -> (Option<(&'static str, u32)>, Option<(&'static str, u32)>) {
+type ResponsePhase = (&'static str, u32);
+type ResponsePhases = (Option<ResponsePhase>, Option<ResponsePhase>);
+
+fn response_phases_from_hook(hook: &str, result: &AgentRunResult) -> ResponsePhases {
     if hook == "message.part.updated" {
         let is_human_role = payload_str(result, "role").is_some_and(is_human_like_role);
         if is_human_role || payload_u32(result, "response_char_count").is_none() {
