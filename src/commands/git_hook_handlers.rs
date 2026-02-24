@@ -1760,6 +1760,10 @@ fn cherry_pick_state_path(repo: &Repository) -> PathBuf {
     repo.path().join("ai").join("cherry_pick_hook_state")
 }
 
+fn cherry_pick_state_path_from_git_dir(git_dir: &Path) -> PathBuf {
+    git_dir.join("ai").join("cherry_pick_hook_state")
+}
+
 fn clear_cherry_pick_state(repo: &Repository) {
     let _ = fs::remove_file(cherry_pick_state_path(repo));
 }
@@ -1869,12 +1873,37 @@ fn maybe_capture_cherry_pick_pre_commit_state(repo: &Repository) {
     let _ = fs::write(state_path, format!("{}\n{}\n", source_commit, base_commit));
 }
 
+fn maybe_capture_cherry_pick_state_from_context() {
+    let Some(git_dir) = git_dir_from_context() else {
+        return;
+    };
+    let Ok(source_commit_raw) = fs::read_to_string(git_dir.join("CHERRY_PICK_HEAD")) else {
+        let _ = fs::remove_file(cherry_pick_state_path_from_git_dir(&git_dir));
+        return;
+    };
+    let source_commit = source_commit_raw.trim();
+    if source_commit.is_empty() {
+        let _ = fs::remove_file(cherry_pick_state_path_from_git_dir(&git_dir));
+        return;
+    }
+
+    let state_path = cherry_pick_state_path_from_git_dir(&git_dir);
+    if let Some(parent) = state_path.parent()
+        && fs::create_dir_all(parent).is_err()
+    {
+        return;
+    }
+
+    // Base commit is optional when captured from hook context without a repo.
+    let _ = fs::write(state_path, format!("{}\n\n", source_commit));
+}
+
 fn load_cherry_pick_state(repo: &Repository) -> Option<(String, String)> {
     let state = fs::read_to_string(cherry_pick_state_path(repo)).ok()?;
     let mut lines = state.lines();
     let source_commit = lines.next()?.trim().to_string();
-    let base_commit = lines.next()?.trim().to_string();
-    if source_commit.is_empty() || base_commit.is_empty() {
+    let base_commit = lines.next().unwrap_or_default().trim().to_string();
+    if source_commit.is_empty() {
         return None;
     }
     Some((source_commit, base_commit))
@@ -1990,7 +2019,7 @@ fn maybe_record_cherry_pick_post_commit(repo: &mut Repository) {
         .or_else(|| latest_cherry_pick_source_from_sequencer(repo))
         .or_else(|| {
             load_cherry_pick_state(repo).and_then(|(source, base)| {
-                if base == original_head {
+                if base.is_empty() || base == original_head {
                     Some(source)
                 } else {
                     None
@@ -2387,6 +2416,10 @@ pub fn handle_git_hook_invocation(hook_name: &str, hook_args: &[String]) -> i32 
 
     let mut stdin_data = Vec::new();
     let _ = std::io::stdin().read_to_end(&mut stdin_data);
+
+    if !skip_managed_hooks && hook_name == "prepare-commit-msg" {
+        maybe_capture_cherry_pick_state_from_context();
+    }
 
     let mut repo = None;
     let mut lookup_ms = 0u128;
