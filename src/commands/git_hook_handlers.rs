@@ -281,10 +281,12 @@ fn path_looks_like_git_ai_binary(path: &Path) -> bool {
         return false;
     };
 
-    matches!(
-        stem.to_ascii_lowercase().as_str(),
-        "git-ai" | "git_ai" | "git"
-    )
+    let stem = stem.to_ascii_lowercase();
+    stem == "git"
+        || stem == "git-ai"
+        || stem == "git_ai"
+        || stem.starts_with("git-ai-")
+        || stem.starts_with("git_ai-")
 }
 
 fn resolve_repo_hook_binary_path(
@@ -3225,14 +3227,14 @@ mod tests {
             .expect("locked update should be deferred, not failed");
         assert!(!deferred, "locked hook should be deferred");
 
-        let installed_while_locked =
-            fs::read(&hook_entry).expect("failed to read locked hook entry");
-        assert_eq!(
-            installed_while_locked, b"binary-v1",
-            "locked hook should keep previous contents"
-        );
-
         drop(lock);
+
+        let installed_after_unlock =
+            fs::read(&hook_entry).expect("failed to read hook entry after lock release");
+        assert_eq!(
+            installed_after_unlock, b"binary-v1",
+            "locked hook should keep previous contents until lock is released"
+        );
 
         let retried = ensure_hook_entry_installed(&hook_entry, &source_binary, false)
             .expect("retry after lock release should succeed");
@@ -3272,6 +3274,30 @@ mod tests {
             normalize_path(&resolved),
             normalize_path(&runtime_binary),
             "runtime binary should be preferred when it is an external, valid path"
+        );
+    }
+
+    #[test]
+    fn resolve_repo_hook_binary_path_accepts_prefixed_git_ai_runtime_binary() {
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let managed_hooks_dir = tmp.path().join(".git").join("ai").join("hooks");
+        fs::create_dir_all(&managed_hooks_dir).expect("failed to create managed hooks dir");
+
+        let runtime_binary = tmp
+            .path()
+            .join("target")
+            .join("debug")
+            .join("git_ai-abcdef");
+        fs::create_dir_all(runtime_binary.parent().expect("runtime binary parent"))
+            .expect("failed to create runtime binary parent");
+        fs::write(&runtime_binary, b"runtime-binary").expect("failed to write runtime binary");
+
+        let resolved =
+            resolve_repo_hook_binary_path(&managed_hooks_dir, None, Some(runtime_binary.clone()));
+        assert_eq!(
+            normalize_path(&resolved),
+            normalize_path(&runtime_binary),
+            "git_ai-* runtime binaries should be accepted as valid hook sources"
         );
     }
 
