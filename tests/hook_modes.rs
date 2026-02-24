@@ -1,6 +1,7 @@
 mod repos;
 
 use repos::test_repo::TestRepo;
+use serde_json::Value;
 use serial_test::serial;
 use std::fs;
 use std::io::Write;
@@ -419,6 +420,42 @@ fn hooks_mode_batches_multi_commit_cherry_pick_rewrite_event() {
             .join("cherry_pick_batch_state.json")
             .exists(),
         "cherry-pick batch state should be cleaned up after terminal event"
+    );
+
+    let rewrite_log = fs::read_to_string(repo.path().join(".git").join("ai").join("rewrite_log"))
+        .expect("rewrite log should exist");
+    let mut cherry_pick_complete_events = 0usize;
+    for line in rewrite_log.lines() {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(event) = value.get("cherry_pick_complete") else {
+            continue;
+        };
+        let source_len = event
+            .get("source_commits")
+            .and_then(|commits| commits.as_array())
+            .map(|commits| commits.len())
+            .unwrap_or(0);
+        let new_len = event
+            .get("new_commits")
+            .and_then(|commits| commits.as_array())
+            .map(|commits| commits.len())
+            .unwrap_or(0);
+        assert_eq!(
+            source_len, 3,
+            "cherry-pick complete event should include all source commits"
+        );
+        assert_eq!(
+            new_len, 3,
+            "cherry-pick complete event should include all new commits"
+        );
+        cherry_pick_complete_events += 1;
+    }
+
+    assert_eq!(
+        cherry_pick_complete_events, 1,
+        "hooks mode should emit exactly one cherry_pick_complete event for multi-commit cherry-pick"
     );
 }
 

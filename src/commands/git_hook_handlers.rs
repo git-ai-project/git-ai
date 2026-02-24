@@ -1810,6 +1810,14 @@ fn is_cherry_pick_in_progress(repo: &Repository) -> bool {
 }
 
 fn is_cherry_pick_terminal_step(repo: &Repository) -> bool {
+    // Match rebase's "terminal event owns heavy rewrite" model:
+    // only finalize once the sequence no longer has pending todo entries.
+    if repo.path().join("CHERRY_PICK_HEAD").is_file() {
+        return false;
+    }
+    if !repo.path().join("sequencer").is_dir() {
+        return true;
+    }
     !cherry_pick_todo_has_pending(repo)
 }
 
@@ -1998,9 +2006,7 @@ fn maybe_record_cherry_pick_post_commit(repo: &mut Repository) {
     batch_state.active = true;
     save_cherry_pick_batch_state(repo, &batch_state);
     clear_cherry_pick_state(repo);
-    // Finalize immediately per cherry-picked commit to avoid sequencer timing
-    // differences across Git versions/platforms.
-    maybe_finalize_cherry_pick_batch_state(repo, true);
+    maybe_finalize_cherry_pick_batch_state(repo, false);
 }
 
 fn is_post_commit_for_cherry_pick(repo: &Repository) -> bool {
@@ -2267,15 +2273,6 @@ pub fn is_git_hook_binary_name(binary_name: &str) -> bool {
     CORE_GIT_HOOK_NAMES.contains(&binary_name)
 }
 
-fn needs_prepare_commit_msg_handling() -> bool {
-    let Some(git_dir) = git_dir_from_context() else {
-        // Keep existing behavior if git did not provide GIT_DIR in env.
-        return true;
-    };
-
-    git_dir.join("CHERRY_PICK_HEAD").is_file()
-}
-
 fn is_rebase_in_progress_from_context() -> bool {
     let Some(git_dir) = git_dir_from_context() else {
         return false;
@@ -2295,12 +2292,7 @@ fn hook_requires_managed_repo_lookup(
     match hook_name {
         "pre-commit" | "post-commit" => !is_rebase_in_progress_from_context(),
         _ if hook_has_no_managed_behavior(hook_name) => false,
-        "prepare-commit-msg" => {
-            if is_rebase_in_progress_from_context() {
-                return false;
-            }
-            needs_prepare_commit_msg_handling()
-        }
+        "prepare-commit-msg" => false,
         "reference-transaction" => {
             let phase = hook_args.first().map(String::as_str).unwrap_or("");
             let git_dir = git_dir_from_context();
