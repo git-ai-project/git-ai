@@ -1214,6 +1214,20 @@ fn is_valid_git_oid_or_abbrev(value: &str) -> bool {
     value.len() >= 7 && value.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+fn git_oids_match_with_abbrev(a: &str, b: &str) -> bool {
+    let a = a.trim();
+    let b = b.trim();
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    if a == b {
+        return true;
+    }
+    is_valid_git_oid_or_abbrev(a)
+        && is_valid_git_oid_or_abbrev(b)
+        && (a.starts_with(b) || b.starts_with(a))
+}
+
 fn is_null_oid(value: &str) -> bool {
     !value.is_empty() && value.chars().all(|c| c == '0')
 }
@@ -1834,7 +1848,7 @@ fn is_cherry_pick_terminal_step(repo: &Repository, current_source_commit: Option
         }
         if let Some(source_commit) = current_source_commit
             && pending.len() == 1
-            && pending[0] == source_commit
+            && git_oids_match_with_abbrev(&pending[0], source_commit)
         {
             // On some Git versions, the final post-commit hook still sees a
             // single todo entry for the just-picked commit.
@@ -1923,6 +1937,21 @@ fn latest_cherry_pick_source_from_sequencer(repo: &Repository) -> Option<String>
         }
     }
     None
+}
+
+fn earliest_cherry_pick_source_from_todo(repo: &Repository) -> Option<String> {
+    cherry_pick_todo_pending_commits(repo).into_iter().next()
+}
+
+fn normalize_commit_oid_if_possible(repo: &Repository, oid: &str) -> String {
+    let oid = oid.trim();
+    if oid.is_empty() {
+        return String::new();
+    }
+
+    repo.find_commit(oid.to_string())
+        .map(|commit| commit.id())
+        .unwrap_or_else(|_| oid.to_string())
 }
 
 fn maybe_finalize_cherry_pick_batch_state(
@@ -2024,11 +2053,16 @@ fn maybe_record_cherry_pick_post_commit(repo: &mut Repository) {
                 .map(|contents| contents.trim().to_string())
                 .filter(|sha| !sha.is_empty())
         })
-        .or_else(|| latest_cherry_pick_source_from_sequencer(repo));
+        .or_else(|| latest_cherry_pick_source_from_sequencer(repo))
+        .or_else(|| earliest_cherry_pick_source_from_todo(repo));
 
-    let Some(source_commit) = source_commit else {
+    let Some(source_commit_raw) = source_commit else {
         return;
     };
+    let source_commit = normalize_commit_oid_if_possible(repo, &source_commit_raw);
+    if source_commit.is_empty() {
+        return;
+    }
 
     // In unusual states HEAD may still point at the source commit; skip self-maps.
     if source_commit == new_head {
@@ -2069,7 +2103,8 @@ fn is_post_commit_for_cherry_pick(repo: &Repository) -> bool {
     }
 
     if repo.path().join("sequencer").is_dir()
-        && latest_cherry_pick_source_from_sequencer(repo).is_some()
+        && (latest_cherry_pick_source_from_sequencer(repo).is_some()
+            || earliest_cherry_pick_source_from_todo(repo).is_some())
     {
         return true;
     }
@@ -2427,7 +2462,7 @@ pub fn handle_git_hook_invocation(hook_name: &str, hook_args: &[String]) -> i32 
     if !skip_managed_hooks
         && matches!(
             hook_name,
-            "prepare-commit-msg" | "commit-msg" | "pre-commit"
+            "prepare-commit-msg" | "commit-msg" | "pre-commit" | "post-commit"
         )
     {
         maybe_capture_cherry_pick_state_from_context();
@@ -3005,6 +3040,46 @@ mod tests {
         assert!(!is_valid_git_oid_or_abbrev("abcde"));
         assert!(!is_valid_git_oid_or_abbrev(""));
         assert!(!is_valid_git_oid_or_abbrev("zzzzzzz"));
+    }
+
+    #[test]
+    fn git_oids_match_with_abbrev_accepts_prefix_matches() {
+        let full = "a94a8fe5ccb19ba61c4c0873d391e987982fbbd3";
+        let abbrev = "a94a8fe";
+        assert!(git_oids_match_with_abbrev(full, abbrev));
+        assert!(git_oids_match_with_abbrev(abbrev, full));
+        assert!(!git_oids_match_with_abbrev(full, "deadbee"));
+        assert!(!git_oids_match_with_abbrev("", full));
+    }
+
+    #[test]
+    fn post_commit_cherry_pick_detects_todo_only_state() {
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let repo = init_repo(&tmp.path().join("repo"));
+        let sequencer = repo.path().join("sequencer");
+        fs::create_dir_all(&sequencer).expect("failed to create sequencer dir");
+        fs::write(sequencer.join("todo"), "pick a94a8fe commit-msg\n")
+            .expect("failed to write sequencer todo");
+
+        assert!(
+            is_post_commit_for_cherry_pick(&repo),
+            "sequencer todo should mark post-commit as cherry-pick"
+        );
+    }
+
+    #[test]
+    fn cherry_pick_terminal_step_handles_abbrev_todo_entries() {
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let repo = init_repo(&tmp.path().join("repo"));
+        let sequencer = repo.path().join("sequencer");
+        fs::create_dir_all(&sequencer).expect("failed to create sequencer dir");
+        fs::write(sequencer.join("todo"), "pick a94a8fe final\n")
+            .expect("failed to write sequencer todo");
+
+        assert!(
+            is_cherry_pick_terminal_step(&repo, Some("a94a8fe5ccb19ba61c4c0873d391e987982fbbd3")),
+            "final todo entry should match full source SHA by prefix"
+        );
     }
 
     #[test]
