@@ -527,7 +527,21 @@ fn ensure_hook_entry_installed(
         };
 
         #[cfg(windows)]
-        let should_replace = should_replace_windows_hook_entry(hook_path, binary_path)?;
+        let should_replace = match should_replace_windows_hook_entry(hook_path, binary_path) {
+            Ok(should_replace) => should_replace,
+            Err(err) => {
+                if let GitAiError::IoError(io_err) = &err
+                    && is_windows_lock_or_sharing_violation(io_err)
+                {
+                    debug_log(&format!(
+                        "Deferring repo hook refresh for {} because it is currently in use",
+                        hook_path.display()
+                    ));
+                    return Ok(false);
+                }
+                return Err(err);
+            }
+        };
 
         if should_replace {
             if !dry_run {
@@ -3226,7 +3240,7 @@ mod tests {
 
         fs::write(&source_binary, b"binary-v2").expect("failed to update source binary");
         let hook_mtime = FileTime::from_unix_time(1_700_000_000, 0);
-        let source_mtime = FileTime::from_unix_time(1_700_000_010, 0);
+        let source_mtime = FileTime::from_unix_time(1_700_000_000, 0);
         set_file_mtime(&hook_entry, hook_mtime).expect("failed to set hook mtime");
         set_file_mtime(&source_binary, source_mtime).expect("failed to set source mtime");
 
