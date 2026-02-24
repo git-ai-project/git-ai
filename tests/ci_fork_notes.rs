@@ -329,7 +329,9 @@ fn test_ci_fork_merge_commit_no_notes_skips_without_push_error() {
 
     file.set_contents(lines!["// Original code"]);
     upstream.git_og(&["add", "-A"]).unwrap();
-    upstream.git_og(&["commit", "-m", "Initial commit"]).unwrap();
+    upstream
+        .git_og(&["commit", "-m", "Initial commit"])
+        .unwrap();
     let base_sha = upstream
         .git_og(&["rev-parse", "HEAD"])
         .unwrap()

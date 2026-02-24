@@ -7,10 +7,15 @@ use crate::git::refs::{
     copy_ref, get_reference_as_authorship_log_v3, merge_notes_from_ref, ref_exists,
     show_authorship_note,
 };
-use crate::git::repository::{exec_git, CommitRange, Repository};
+use crate::git::repository::{CommitRange, Repository, exec_git};
 use crate::git::sync_authorship::fetch_authorship_notes;
 use std::fs;
 use std::path::PathBuf;
+
+#[cfg(windows)]
+const NULL_HOOKS: &str = "NUL";
+#[cfg(not(windows))]
+const NULL_HOOKS: &str = "/dev/null";
 
 #[derive(Debug)]
 pub enum CiEvent {
@@ -319,7 +324,7 @@ impl CiContext {
         let fetch_refspec = format!("+refs/notes/ai:{}", tracking_ref);
         let mut fetch_args = repo.global_args_for_exec();
         fetch_args.push("-c".to_string());
-        fetch_args.push("core.hooksPath=/dev/null".to_string());
+        fetch_args.push(format!("core.hooksPath={}", NULL_HOOKS));
         fetch_args.push("fetch".to_string());
         fetch_args.push("--no-tags".to_string());
         fetch_args.push("--recurse-submodules=no".to_string());
