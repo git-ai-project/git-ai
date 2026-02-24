@@ -13,7 +13,7 @@ use crate::error::GitAiError;
 use crate::git::refs::notes_add;
 use crate::git::repository::Repository;
 use crate::utils::debug_log;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::IsTerminal;
 
 /// Skip expensive post-commit stats when this threshold is exceeded.
@@ -35,6 +35,10 @@ fn checkpoint_entry_requires_post_processing(
     checkpoint: &Checkpoint,
     entry: &WorkingLogEntry,
 ) -> bool {
+    if entry.attributions.is_empty() && entry.line_attributions.is_empty() {
+        return false;
+    }
+
     if checkpoint.kind != CheckpointKind::Human {
         return true;
     }
@@ -47,6 +51,62 @@ fn checkpoint_entry_requires_post_processing(
             .attributions
             .iter()
             .any(|attr| attr.author_id != CheckpointKind::Human.to_str())
+}
+
+fn collect_fast_path_prompts(
+    checkpoints: &[Checkpoint],
+    initial_prompts: &HashMap<String, crate::authorship::authorship_log::PromptRecord>,
+    human_author: &str,
+) -> BTreeMap<String, crate::authorship::authorship_log::PromptRecord> {
+    let mut prompts: BTreeMap<String, crate::authorship::authorship_log::PromptRecord> =
+        initial_prompts
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+    for checkpoint in checkpoints {
+        let Some(agent_id) = checkpoint.agent_id.clone() else {
+            continue;
+        };
+
+        let prompt_id = crate::authorship::authorship_log_serialization::generate_short_hash(
+            &agent_id.id,
+            &agent_id.tool,
+        );
+        let entry = prompts.entry(prompt_id).or_insert_with(|| {
+            crate::authorship::authorship_log::PromptRecord {
+                agent_id: agent_id.clone(),
+                human_author: Some(human_author.to_string()),
+                messages: checkpoint
+                    .transcript
+                    .as_ref()
+                    .map(|t| t.messages().to_vec())
+                    .unwrap_or_default(),
+                total_additions: 0,
+                total_deletions: 0,
+                accepted_lines: 0,
+                overriden_lines: 0,
+                messages_url: None,
+            }
+        });
+
+        // Keep prompt metadata fresh with the latest checkpoint data while aggregating deltas.
+        entry.agent_id = agent_id;
+        entry.human_author = Some(human_author.to_string());
+        entry.messages = checkpoint
+            .transcript
+            .as_ref()
+            .map(|t| t.messages().to_vec())
+            .unwrap_or_default();
+        entry.total_additions = entry
+            .total_additions
+            .saturating_add(checkpoint.line_stats.additions);
+        entry.total_deletions = entry
+            .total_deletions
+            .saturating_add(checkpoint.line_stats.deletions);
+    }
+
+    prompts
 }
 
 pub fn post_commit(
@@ -94,15 +154,6 @@ pub fn post_commit(
 
     working_log.write_all_checkpoints(&parent_working_log)?;
 
-    // Create VirtualAttributions from working log (fast path - no blame)
-    // We don't need to run blame because we only care about the working log data
-    // that was accumulated since the parent commit
-    let working_va = VirtualAttributions::from_just_working_log(
-        repo.clone(),
-        parent_sha.clone(),
-        Some(human_author.clone()),
-    )?;
-
     // Build pathspecs from AI-relevant checkpoint entries only.
     // Human-only entries with no AI attribution do not affect authorship output and should not
     // trigger expensive post-commit diff work across large commits.
@@ -123,14 +174,34 @@ pub fn post_commit(
         pathspecs.insert(file_path.clone());
     }
 
-    // Split VirtualAttributions into committed (authorship log) and uncommitted (INITIAL)
-    let (mut authorship_log, initial_attributions) = working_va
-        .to_authorship_log_and_initial_working_log(
+    // Fast path: if there are no AI-relevant files, avoid expensive VA/diff work.
+    let (mut authorship_log, initial_attributions) = if pathspecs.is_empty() {
+        let mut log = AuthorshipLog::new();
+        log.metadata.prompts = collect_fast_path_prompts(
+            &parent_working_log,
+            &initial_attributions_for_pathspecs.prompts,
+            &human_author,
+        );
+        (
+            log,
+            crate::git::repo_storage::InitialAttributions::default(),
+        )
+    } else {
+        // Create VirtualAttributions from working log (fast path - no blame)
+        // We don't need to run blame because we only care about the working log data
+        // that was accumulated since the parent commit.
+        let working_va = VirtualAttributions::from_just_working_log(
+            repo.clone(),
+            parent_sha.clone(),
+            Some(human_author.clone()),
+        )?;
+        working_va.to_authorship_log_and_initial_working_log(
             repo,
             &parent_sha,
             &commit_sha,
             Some(&pathspecs),
-        )?;
+        )?
+    };
 
     authorship_log.metadata.base_commit_sha = commit_sha.clone();
 
@@ -199,12 +270,15 @@ pub fn post_commit(
     // Compute stats once (needed for both metrics and terminal output), unless preflight
     // estimate predicts this would be too expensive for the commit hook path.
     let mut stats: Option<crate::authorship::stats::CommitStats> = None;
+    let has_ai_relevant_changes = !pathspecs.is_empty() || !initial_attributions.files.is_empty();
     let is_merge_commit = repo
         .find_commit(commit_sha.clone())
         .map(|commit| commit.parent_count().unwrap_or(0) > 1)
         .unwrap_or(false);
     let ignore_patterns = effective_ignore_patterns(repo, &[], &[]);
-    let skip_reason = if is_merge_commit {
+    let skip_reason = if !has_ai_relevant_changes {
+        Some(StatsSkipReason::NoAiRelevantChanges)
+    } else if is_merge_commit {
         Some(StatsSkipReason::MergeCommit)
     } else {
         estimate_stats_cost(repo, &parent_sha, &commit_sha, &ignore_patterns)
@@ -236,6 +310,12 @@ pub fn post_commit(
             Some(StatsSkipReason::MergeCommit) => {
                 debug_log(&format!(
                     "Skipping post-commit stats for merge commit {}",
+                    commit_sha
+                ));
+            }
+            Some(StatsSkipReason::NoAiRelevantChanges) => {
+                debug_log(&format!(
+                    "Skipping post-commit stats for {} (no AI-relevant changes)",
                     commit_sha
                 ));
             }
@@ -275,6 +355,12 @@ pub fn post_commit(
                         commit_sha
                     );
                 }
+                Some(StatsSkipReason::NoAiRelevantChanges) => {
+                    eprintln!(
+                        "[git-ai] Skipped git-ai stats (no AI-relevant changes in commit {}).",
+                        commit_sha
+                    );
+                }
                 Some(StatsSkipReason::Expensive(estimate)) => {
                     eprintln!(
                         "[git-ai] Skipped git-ai stats for large commit (files_with_additions={}, added_lines={}, hunks={}). Run `git-ai stats {}` to compute stats on demand.",
@@ -293,6 +379,7 @@ pub fn post_commit(
 
 #[derive(Debug, Clone)]
 enum StatsSkipReason {
+    NoAiRelevantChanges,
     MergeCommit,
     Expensive(StatsCostEstimate),
 }
@@ -638,9 +725,177 @@ fn record_commit_metrics(
 mod tests {
     use super::{
         STATS_SKIP_MAX_ADDED_LINES, STATS_SKIP_MAX_FILES_WITH_ADDITIONS, STATS_SKIP_MAX_HUNKS,
-        StatsCostEstimate, count_line_ranges, should_skip_expensive_post_commit_stats,
+        StatsCostEstimate, checkpoint_entry_requires_post_processing, count_line_ranges,
+        should_skip_expensive_post_commit_stats,
     };
+    use crate::authorship::attribution_tracker::{Attribution, LineAttribution};
+    use crate::authorship::transcript::{AiTranscript, Message};
+    use crate::authorship::working_log::{Checkpoint, CheckpointKind, WorkingLogEntry};
     use crate::git::test_utils::TmpRepo;
+
+    fn make_entry(
+        attributions: Vec<Attribution>,
+        line_attributions: Vec<LineAttribution>,
+    ) -> WorkingLogEntry {
+        WorkingLogEntry::new(
+            "file.txt".to_string(),
+            "blob".to_string(),
+            attributions,
+            line_attributions,
+        )
+    }
+
+    #[test]
+    fn test_checkpoint_entry_requires_post_processing_skips_empty_ai_entry() {
+        let checkpoint = Checkpoint::new(
+            CheckpointKind::AiAgent,
+            String::new(),
+            "ai".to_string(),
+            vec![],
+        );
+        let entry = make_entry(Vec::new(), Vec::new());
+
+        assert!(!checkpoint_entry_requires_post_processing(
+            &checkpoint,
+            &entry
+        ));
+    }
+
+    #[test]
+    fn test_checkpoint_entry_requires_post_processing_keeps_non_empty_ai_entry() {
+        let checkpoint = Checkpoint::new(
+            CheckpointKind::AiAgent,
+            String::new(),
+            "ai".to_string(),
+            vec![],
+        );
+        let entry = make_entry(
+            Vec::new(),
+            vec![LineAttribution::new(
+                1,
+                1,
+                CheckpointKind::AiAgent.to_str(),
+                None,
+            )],
+        );
+
+        assert!(checkpoint_entry_requires_post_processing(
+            &checkpoint,
+            &entry
+        ));
+    }
+
+    #[test]
+    fn test_checkpoint_entry_requires_post_processing_human_only_entry_is_skipped() {
+        let checkpoint = Checkpoint::new(
+            CheckpointKind::Human,
+            String::new(),
+            "human".to_string(),
+            vec![],
+        );
+        let entry = make_entry(
+            vec![Attribution::new(0, 1, CheckpointKind::Human.to_str(), 1)],
+            vec![LineAttribution::new(
+                1,
+                1,
+                CheckpointKind::Human.to_str(),
+                None,
+            )],
+        );
+
+        assert!(!checkpoint_entry_requires_post_processing(
+            &checkpoint,
+            &entry
+        ));
+    }
+
+    #[test]
+    fn test_checkpoint_entry_requires_post_processing_human_overrode_entry_is_processed() {
+        let checkpoint = Checkpoint::new(
+            CheckpointKind::Human,
+            String::new(),
+            "human".to_string(),
+            vec![],
+        );
+        let entry = make_entry(
+            Vec::new(),
+            vec![LineAttribution::new(
+                1,
+                1,
+                CheckpointKind::Human.to_str(),
+                Some("ai_agent".to_string()),
+            )],
+        );
+
+        assert!(checkpoint_entry_requires_post_processing(
+            &checkpoint,
+            &entry
+        ));
+    }
+
+    #[test]
+    fn test_post_commit_fast_path_preserves_prompt_metrics_for_empty_ai_entries() {
+        use crate::authorship::working_log::{AgentId, CheckpointLineStats};
+
+        let (repo, mut lines_file, _) = TmpRepo::new_with_base_commit().unwrap();
+        let base_commit = repo.head_commit_sha().unwrap();
+        let working_log = repo
+            .gitai_repo()
+            .storage
+            .working_log_for_base_commit(&base_commit);
+
+        let mut transcript = AiTranscript::new();
+        transcript.add_message(Message::user("test prompt".to_string(), None));
+
+        let mut checkpoint = Checkpoint::new(
+            CheckpointKind::AiAgent,
+            "synthetic-fast-path".to_string(),
+            "ai".to_string(),
+            vec![WorkingLogEntry::new(
+                "lines.md".to_string(),
+                "synthetic-blob-sha".to_string(),
+                Vec::new(),
+                Vec::new(),
+            )],
+        );
+        checkpoint.agent_id = Some(AgentId {
+            tool: "codex".to_string(),
+            id: "fast-path-session".to_string(),
+            model: "gpt-5".to_string(),
+        });
+        checkpoint.transcript = Some(transcript);
+        checkpoint.line_stats = CheckpointLineStats {
+            additions: 7,
+            deletions: 2,
+            additions_sloc: 7,
+            deletions_sloc: 2,
+        };
+
+        working_log.append_checkpoint(&checkpoint).unwrap();
+
+        lines_file.append("human-only-change\n").unwrap();
+        let authorship_log = repo.commit_with_message("fast path commit").unwrap();
+
+        assert!(
+            authorship_log.attestations.is_empty(),
+            "Fast path should avoid AI attestations when all AI entries are attribution-empty"
+        );
+
+        let prompt_id = crate::authorship::authorship_log_serialization::generate_short_hash(
+            "fast-path-session",
+            "codex",
+        );
+        let prompt = authorship_log
+            .metadata
+            .prompts
+            .get(&prompt_id)
+            .expect("Fast path should preserve prompt metadata");
+
+        assert_eq!(prompt.total_additions, 7);
+        assert_eq!(prompt.total_deletions, 2);
+        assert_eq!(prompt.agent_id.tool, "codex");
+        assert_eq!(prompt.agent_id.id, "fast-path-session");
+    }
 
     #[test]
     fn test_count_line_ranges_handles_scattered_and_contiguous_lines() {

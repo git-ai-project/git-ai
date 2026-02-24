@@ -144,9 +144,6 @@ pub fn run(
 
     crate::commands::git_hook_handlers::ensure_repo_level_hooks_for_checkpoint(repo);
 
-    let ignore_patterns = effective_ignore_patterns(repo, &[], &[]);
-    let ignore_matcher = build_ignore_matcher(&ignore_patterns);
-
     // Initialize the new storage system
     let storage_start = Instant::now();
     let repo_storage = RepoStorage::for_repo_path(repo.path(), &repo.workdir()?);
@@ -177,6 +174,9 @@ pub fn run(
             return Ok((0, 0, 0));
         }
     }
+
+    let ignore_patterns = effective_ignore_patterns(repo, &[], &[]);
+    let ignore_matcher = build_ignore_matcher(&ignore_patterns);
 
     // Set dirty files if available
     if let Some(dirty_files) = agent_run_result

@@ -9,6 +9,7 @@
 use git_ai::authorship::diff_ai_accepted::diff_ai_accepted_stats;
 use git_ai::authorship::stats::{get_git_diff_stats, stats_for_commit_stats};
 use git_ai::git::find_repository_in_path;
+use serde_json::json;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -30,8 +31,32 @@ struct CommitPerfBreakdown {
     total_ms: u64,
 }
 
+fn plain_git_bin() -> String {
+    if let Ok(custom) = std::env::var("GIT_AI_BENCH_REAL_GIT_BIN")
+        && !custom.trim().is_empty()
+    {
+        return custom;
+    }
+
+    let candidates = [
+        "/usr/bin/git",
+        "/opt/homebrew/bin/git",
+        "/usr/local/bin/git",
+        "/bin/git",
+    ];
+    for candidate in candidates {
+        if Path::new(candidate).exists() {
+            return candidate.to_string();
+        }
+    }
+
+    panic!(
+        "Unable to locate a plain git binary. Set GIT_AI_BENCH_REAL_GIT_BIN to an absolute path."
+    )
+}
+
 fn run_git(repo_path: &Path, args: &[&str]) {
-    let output = Command::new("git")
+    let output = Command::new(plain_git_bin())
         .arg("-C")
         .arg(repo_path)
         .args(args)
@@ -47,11 +72,107 @@ fn run_git(repo_path: &Path, args: &[&str]) {
     );
 }
 
+fn run_git_output(repo_path: &Path, args: &[&str]) -> String {
+    let output = Command::new(plain_git_bin())
+        .arg("-C")
+        .arg(repo_path)
+        .args(args)
+        .output()
+        .expect("failed to execute git command");
+
+    assert!(
+        output.status.success(),
+        "git {:?} failed:\nstdout: {}\nstderr: {}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
 fn write_lines(path: &Path, line_count: usize) {
     let content = (1..=line_count)
         .map(|i| format!("line {}\n", i))
         .collect::<String>();
     fs::write(path, content).expect("failed to write file");
+}
+
+fn write_pathspec_heavy_ai_checkpoint(repo_path: &Path, base_sha: &str, files: &[String]) {
+    let working_log_dir = repo_path.join(".git/ai/working_logs").join(base_sha);
+    fs::create_dir_all(&working_log_dir).expect("failed to create working log directory");
+
+    let entries: Vec<serde_json::Value> = files
+        .iter()
+        .map(|file| {
+            json!({
+                "file": file,
+                "blob_sha": "benchmark",
+                "attributions": [],
+                "line_attributions": []
+            })
+        })
+        .collect();
+
+    let checkpoint = json!({
+        "kind": "AiAgent",
+        "diff": "benchmark-pathspec-hotspot",
+        "author": "Perf User",
+        "entries": entries,
+        "timestamp": 1_771_090_570u64,
+        "transcript": serde_json::Value::Null,
+        "agent_id": {
+            "tool": "codex",
+            "id": "benchmark-session",
+            "model": "gpt-5"
+        },
+        "agent_metadata": {},
+        "line_stats": {
+            "additions": 0,
+            "deletions": 0,
+            "additions_sloc": 0,
+            "deletions_sloc": 0
+        },
+        "api_version": "checkpoint/1.0.0",
+        "git_ai_version": "benchmark"
+    });
+
+    fs::write(
+        working_log_dir.join("checkpoints.jsonl"),
+        format!("{}\n", checkpoint),
+    )
+    .expect("failed to write checkpoints.jsonl");
+}
+
+fn setup_repo_for_ai_pathspec_post_commit_hotspot(
+    file_count: usize,
+    lines_per_file: usize,
+) -> TempDir {
+    let tmp = TempDir::new().expect("failed to create tempdir");
+    let repo = tmp.path();
+
+    run_git(repo, &["init", "-q"]);
+    run_git(repo, &["config", "user.name", "Perf User"]);
+    run_git(repo, &["config", "user.email", "perf@example.com"]);
+
+    fs::write(repo.join("README.md"), "seed\n").expect("failed to write seed file");
+    run_git(repo, &["add", "-A"]);
+    run_git(repo, &["commit", "-q", "-m", "initial"]);
+
+    let base_sha = run_git_output(repo, &["rev-parse", "HEAD"]);
+
+    let mut files = Vec::with_capacity(file_count);
+    for i in 1..=file_count {
+        let rel = format!("f{:05}.txt", i);
+        write_lines(&repo.join(&rel), lines_per_file);
+        files.push(rel);
+    }
+
+    // Seed AI checkpoint metadata so pre-commit tracks many AI-touched files.
+    write_pathspec_heavy_ai_checkpoint(repo, &base_sha, &files);
+
+    run_git(repo, &["add", "-A"]);
+    tmp
 }
 
 fn mutate_file_with_scattered_replacements(path: &Path, up_to_line: usize, every_n: usize) {
@@ -196,6 +317,17 @@ fn percentile_ms(durations: &[Duration], percentile: f64) -> f64 {
     sorted[rank].as_secs_f64() * 1000.0
 }
 
+fn percentile_f64(values: &[f64], percentile: f64) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let rank = ((sorted.len() as f64 - 1.0) * percentile).round() as usize;
+    sorted[rank]
+}
+
 fn git_ai_bin() -> String {
     std::env::var("CARGO_BIN_EXE_git-ai")
         .unwrap_or_else(|_| format!("{}/target/debug/git-ai", env!("CARGO_MANIFEST_DIR")))
@@ -243,6 +375,27 @@ fn benchmark_commit_with_git_ai(repo_path: &Path, message: &str) -> CommitPerfBr
         post_command_ms: perf_value["post_command_duration_ms"].as_u64().unwrap_or(0),
         total_ms: perf_value["total_duration_ms"].as_u64().unwrap_or(0),
     }
+}
+
+fn benchmark_commit_with_plain_git(repo_path: &Path, message: &str) -> u64 {
+    let start = Instant::now();
+    let output = Command::new(plain_git_bin())
+        .arg("-C")
+        .arg(repo_path)
+        .arg("commit")
+        .arg("-m")
+        .arg(message)
+        .output()
+        .expect("failed to execute git commit");
+
+    assert!(
+        output.status.success(),
+        "plain git commit failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    start.elapsed().as_millis() as u64
 }
 
 #[test]
@@ -427,5 +580,96 @@ fn benchmark_stats_thousands_changed_files_fast_path() {
         avg_ms,
         max_avg_ms,
         file_count
+    );
+}
+
+#[test]
+#[ignore] // Run manually or in CI benchmark workflow.
+fn benchmark_commit_post_command_ai_pathspec_hotspot() {
+    const DEFAULT_FILE_COUNT: usize = 136;
+    // Keep file fanout aligned with the regression case, but use enough per-file payload
+    // so plain git commit time is not dominated by process-launch noise.
+    const DEFAULT_LINES_PER_FILE: usize = 10_000;
+    const DEFAULT_RUNS: usize = 3;
+    const DEFAULT_MAX_SLOWDOWN_RATIO: f64 = 2.0;
+
+    let file_count = std::env::var("GIT_AI_BENCH_PATHSPEC_FILES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_FILE_COUNT);
+    let lines_per_file = std::env::var("GIT_AI_BENCH_PATHSPEC_LINES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_LINES_PER_FILE);
+    let runs = std::env::var("GIT_AI_BENCH_RATIO_RUNS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_RUNS);
+    let max_slowdown_ratio = std::env::var("GIT_AI_BENCH_MAX_SLOWDOWN_RATIO")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(DEFAULT_MAX_SLOWDOWN_RATIO);
+
+    assert!(runs > 0, "GIT_AI_BENCH_RATIO_RUNS must be >= 1");
+
+    let mut plain_git_runs_ms = Vec::with_capacity(runs);
+    let mut git_ai_runs_ms = Vec::with_capacity(runs);
+    let mut slowdown_ratios = Vec::with_capacity(runs);
+    let mut last_perf = None;
+
+    for idx in 0..runs {
+        let plain_repo = setup_repo_for_ai_pathspec_post_commit_hotspot(file_count, lines_per_file);
+        let git_ai_repo =
+            setup_repo_for_ai_pathspec_post_commit_hotspot(file_count, lines_per_file);
+
+        let plain_git_ms =
+            benchmark_commit_with_plain_git(plain_repo.path(), "pathspec hotspot plain");
+        let perf = benchmark_commit_with_git_ai(git_ai_repo.path(), "pathspec hotspot git-ai");
+
+        let slowdown_ratio = perf.total_ms as f64 / (plain_git_ms as f64).max(1.0);
+        println!(
+            "run {} -> plain={}ms git-ai={}ms ratio={:.3}x",
+            idx + 1,
+            plain_git_ms,
+            perf.total_ms,
+            slowdown_ratio
+        );
+
+        plain_git_runs_ms.push(plain_git_ms as f64);
+        git_ai_runs_ms.push(perf.total_ms as f64);
+        slowdown_ratios.push(slowdown_ratio);
+        last_perf = Some(perf);
+    }
+
+    let median_slowdown_ratio = percentile_f64(&slowdown_ratios, 0.50);
+    let p95_slowdown_ratio = percentile_f64(&slowdown_ratios, 0.95);
+    let median_plain_git_ms = percentile_f64(&plain_git_runs_ms, 0.50);
+    let median_git_ai_ms = percentile_f64(&git_ai_runs_ms, 0.50);
+    let perf = last_perf.expect("at least one benchmark run must execute");
+
+    println!("\n=== Commit Benchmark: AI Pathspec Hotspot ===");
+    println!("plain_git_bin:         {}", plain_git_bin());
+    println!("files:                 {}", file_count);
+    println!("lines_per_file:        {}", lines_per_file);
+    println!("runs:                  {}", runs);
+    println!("plain_git_median:      {:.0}ms", median_plain_git_ms);
+    println!("git_ai_median:         {:.0}ms", median_git_ai_ms);
+    println!("slowdown_ratio_median: {:.3}x", median_slowdown_ratio);
+    println!("slowdown_ratio_p95:    {:.3}x", p95_slowdown_ratio);
+    println!("last_pre_command:      {}ms", perf.pre_command_ms);
+    println!("last_git_command:      {}ms", perf.git_ms);
+    println!("last_post_command:     {}ms", perf.post_command_ms);
+    println!("last_total:            {}ms", perf.total_ms);
+    println!("max_slowdown_ratio:    {:.3}x", max_slowdown_ratio);
+
+    assert!(
+        median_slowdown_ratio <= max_slowdown_ratio,
+        "git-ai median slowdown {:.3}x exceeded max {:.3}x (median git-ai={:.0}ms, median plain={:.0}ms, p95 slowdown={:.3}x, runs={})",
+        median_slowdown_ratio,
+        max_slowdown_ratio,
+        median_git_ai_ms,
+        median_plain_git_ms,
+        p95_slowdown_ratio,
+        runs
     );
 }
