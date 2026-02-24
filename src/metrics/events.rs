@@ -716,7 +716,7 @@ impl AgentSessionValues {
     }
 
     #[allow(dead_code)]
-    pub fn is_inferred(mut self, value: u32) -> Self {
+    pub fn inferred(mut self, value: u32) -> Self {
         self.is_inferred = Some(Some(value));
         self
     }
@@ -906,7 +906,7 @@ impl AgentResponseValues {
         self
     }
 
-    pub fn is_inferred(mut self, value: u32) -> Self {
+    pub fn inferred(mut self, value: u32) -> Self {
         self.is_inferred = Some(Some(value));
         self
     }
@@ -1018,7 +1018,7 @@ impl AgentToolCallValues {
         self
     }
 
-    pub fn is_inferred(mut self, value: u32) -> Self {
+    pub fn inferred(mut self, value: u32) -> Self {
         self.is_inferred = Some(Some(value));
         self
     }
@@ -1143,7 +1143,7 @@ impl AgentMcpCallValues {
         self
     }
 
-    pub fn is_inferred(mut self, value: u32) -> Self {
+    pub fn inferred(mut self, value: u32) -> Self {
         self.is_inferred = Some(Some(value));
         self
     }
@@ -1246,7 +1246,7 @@ impl AgentSkillUsageValues {
         self
     }
 
-    pub fn is_inferred(mut self, value: u32) -> Self {
+    pub fn inferred(mut self, value: u32) -> Self {
         self.is_inferred = Some(Some(value));
         self
     }
@@ -1354,7 +1354,7 @@ impl AgentSubagentValues {
     }
 
     #[allow(dead_code)]
-    pub fn is_inferred(mut self, value: u32) -> Self {
+    pub fn inferred(mut self, value: u32) -> Self {
         self.is_inferred = Some(Some(value));
         self
     }
@@ -1806,7 +1806,7 @@ mod tests {
             .phase("started")
             .source("interactive")
             .mode("agent")
-            .is_inferred(0);
+            .inferred(0);
         let sparse = PosEncoded::to_sparse(&values);
         let restored = <AgentSessionValues as PosEncoded>::from_sparse(&sparse);
 
@@ -1842,7 +1842,7 @@ mod tests {
             .phase("ended")
             .status("completed")
             .response_char_count(300)
-            .is_inferred(1);
+            .inferred(1);
         let sparse = PosEncoded::to_sparse(&values);
         let restored = <AgentResponseValues as PosEncoded>::from_sparse(&sparse);
 
@@ -1902,7 +1902,7 @@ mod tests {
         let values = AgentSkillUsageValues::new()
             .skill_name("security-review")
             .detection_method("inferred_tool")
-            .is_inferred(1);
+            .inferred(1);
         let sparse = PosEncoded::to_sparse(&values);
         let restored = <AgentSkillUsageValues as PosEncoded>::from_sparse(&sparse);
 

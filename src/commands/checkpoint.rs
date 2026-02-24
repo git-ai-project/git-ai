@@ -366,7 +366,7 @@ pub(crate) fn emit_agent_hook_telemetry(
                     .unwrap_or("unknown"),
             )
             .mode(payload_str(result, "mode").unwrap_or("unknown"))
-            .is_inferred(0);
+            .inferred(0);
         crate::metrics::record(values, attrs.clone());
     } else if matches!(hook, "SessionEnd" | "sessionEnd" | "session.deleted") {
         let mut values = crate::metrics::AgentSessionValues::new()
@@ -378,7 +378,7 @@ pub(crate) fn emit_agent_hook_telemetry(
                     .unwrap_or("unknown"),
             )
             .mode(payload_str(result, "mode").unwrap_or("unknown"))
-            .is_inferred(0);
+            .inferred(0);
         if let Some(duration_ms) = payload_u64(result, "duration_ms") {
             values = values.duration_ms(duration_ms);
         }
@@ -393,7 +393,7 @@ pub(crate) fn emit_agent_hook_telemetry(
                 .phase("started")
                 .source("inferred")
                 .mode("agent")
-                .is_inferred(1);
+                .inferred(1);
             crate::metrics::record(values, attrs.clone());
         }
     }
@@ -426,7 +426,7 @@ pub(crate) fn emit_agent_hook_telemetry(
             values = values.failure_type(failure_type.to_string());
         }
         if payload_is_true(result, "inferred_tool") {
-            values = values.is_inferred(1);
+            values = values.inferred(1);
         }
         crate::metrics::record(values, attrs.clone());
     }
@@ -450,7 +450,7 @@ pub(crate) fn emit_agent_hook_telemetry(
             values = values.failure_type(failure_type.to_string());
         }
         if !matches!(hook, "beforeMCPExecution" | "afterMCPExecution") {
-            values = values.is_inferred(1);
+            values = values.inferred(1);
         }
         crate::metrics::record(values, attrs.clone());
     }
@@ -466,7 +466,7 @@ pub(crate) fn emit_agent_hook_telemetry(
             payload_str(result, "skill_detection_method"),
             Some("explicit")
         ) {
-            values = values.is_inferred(1);
+            values = values.inferred(1);
         }
         crate::metrics::record(values, attrs.clone());
     }
@@ -509,7 +509,7 @@ pub(crate) fn emit_agent_hook_telemetry(
         {
             let mut values = crate::metrics::AgentResponseValues::new()
                 .phase(phase)
-                .is_inferred(inferred);
+                .inferred(inferred);
             if let Some(reason) = payload_str(result, "reason") {
                 values = values.reason(reason);
             }
@@ -528,7 +528,7 @@ pub(crate) fn emit_agent_hook_telemetry(
         {
             let mut values = crate::metrics::AgentResponseValues::new()
                 .phase(phase)
-                .is_inferred(inferred);
+                .inferred(inferred);
             if let Some(status) = payload_str(result, "status") {
                 values = values.status(status);
             }
