@@ -964,6 +964,20 @@ fn hook_repository_lookup_paths() -> Vec<PathBuf> {
 }
 
 fn find_hook_repository_from_context() -> Option<Repository> {
+    // Fast path for standard non-bare repos: hooks typically execute with
+    // GIT_DIR=<repo>/.git. Avoid rev-parse based repo discovery on every hook.
+    if let Some(git_dir) = git_dir_from_context()
+        && git_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.eq_ignore_ascii_case(".git"))
+            .unwrap_or(false)
+        && let Some(workdir) = git_dir.parent()
+        && let Ok(repo) = crate::git::from_non_bare_repository(&git_dir, workdir)
+    {
+        return Some(repo);
+    }
+
     hook_repository_lookup_paths()
         .into_iter()
         .find_map(|path| crate::git::find_repository_in_path(&path.to_string_lossy()).ok())
@@ -1873,7 +1887,7 @@ fn maybe_capture_cherry_pick_pre_commit_state(repo: &Repository) {
         return;
     }
 
-    let Ok(base_commit) = repo.head().and_then(|head| head.target()) else {
+    let Some(base_commit) = revparse_oid(repo, "HEAD") else {
         return;
     };
 
@@ -1943,15 +1957,8 @@ fn earliest_cherry_pick_source_from_todo(repo: &Repository) -> Option<String> {
     cherry_pick_todo_pending_commits(repo).into_iter().next()
 }
 
-fn normalize_commit_oid_if_possible(repo: &Repository, oid: &str) -> String {
-    let oid = oid.trim();
-    if oid.is_empty() {
-        return String::new();
-    }
-
-    repo.find_commit(oid.to_string())
-        .map(|commit| commit.id())
-        .unwrap_or_else(|_| oid.to_string())
+fn revparse_oid(repo: &Repository, spec: &str) -> Option<String> {
+    repo.revparse_single(spec).ok().map(|object| object.id())
 }
 
 fn maybe_finalize_cherry_pick_batch_state(
@@ -1971,7 +1978,7 @@ fn maybe_finalize_cherry_pick_batch_state(
         return;
     }
 
-    let Ok(new_head) = repo.head().and_then(|head| head.target()) else {
+    let Some(new_head) = revparse_oid(repo, "HEAD") else {
         clear_cherry_pick_batch_state(repo);
         clear_cherry_pick_state(repo);
         return;
@@ -2024,16 +2031,12 @@ fn maybe_finalize_stale_cherry_pick_batch_state(repo: &mut Repository) {
 }
 
 fn maybe_record_cherry_pick_post_commit(repo: &mut Repository) {
-    let Ok(new_head) = repo.head().and_then(|head| head.target()) else {
+    let Some(new_head) = revparse_oid(repo, "HEAD") else {
         clear_cherry_pick_state(repo);
         clear_cherry_pick_batch_state(repo);
         return;
     };
-    let original_head = repo
-        .find_commit(new_head.clone())
-        .ok()
-        .and_then(|commit| commit.parent(0).ok())
-        .map(|parent| parent.id());
+    let original_head = revparse_oid(repo, "HEAD^");
     let Some(original_head) = original_head else {
         clear_cherry_pick_state(repo);
         return;
@@ -2041,7 +2044,9 @@ fn maybe_record_cherry_pick_post_commit(repo: &mut Repository) {
 
     let source_commit = load_cherry_pick_state(repo)
         .and_then(|(source, base)| {
-            if (base.is_empty() || base == original_head) && is_valid_git_oid_or_abbrev(&source) {
+            if (base.is_empty() || git_oids_match_with_abbrev(&base, &original_head))
+                && is_valid_git_oid_or_abbrev(&source)
+            {
                 Some(source)
             } else {
                 None
@@ -2059,7 +2064,7 @@ fn maybe_record_cherry_pick_post_commit(repo: &mut Repository) {
     let Some(source_commit_raw) = source_commit else {
         return;
     };
-    let source_commit = normalize_commit_oid_if_possible(repo, &source_commit_raw);
+    let source_commit = source_commit_raw.trim().to_string();
     if source_commit.is_empty() {
         return;
     }
@@ -2078,7 +2083,9 @@ fn maybe_record_cherry_pick_post_commit(repo: &mut Repository) {
     }
     if !matches!(
         batch_state.mappings.last(),
-        Some(last) if last.source_commit == source_commit && last.new_commit == new_head
+        Some(last)
+            if git_oids_match_with_abbrev(&last.source_commit, &source_commit)
+                && git_oids_match_with_abbrev(&last.new_commit, &new_head)
     ) {
         batch_state.mappings.push(CherryPickBatchMapping {
             source_commit: source_commit.clone(),
@@ -2115,18 +2122,11 @@ fn is_post_commit_for_cherry_pick(repo: &Repository) -> bool {
         return true;
     }
 
-    let Ok(new_head) = repo.head().and_then(|head| head.target()) else {
-        return false;
-    };
-    let Ok(parent) = repo
-        .find_commit(new_head)
-        .and_then(|commit| commit.parent(0))
-        .map(|parent| parent.id())
-    else {
+    let Some(parent) = revparse_oid(repo, "HEAD^") else {
         return false;
     };
 
-    parent == base_commit
+    git_oids_match_with_abbrev(&parent, &base_commit)
 }
 
 fn handle_rebase_post_rewrite_from_stdin(repo: &mut Repository, stdin: &[u8]) {
