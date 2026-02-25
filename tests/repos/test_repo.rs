@@ -1022,6 +1022,7 @@ fn find_gt_cli_binary() -> Option<PathBuf> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut candidates = Vec::new();
     for line in stdout.lines() {
         let path = line.trim();
         if path.is_empty() {
@@ -1030,11 +1031,28 @@ fn find_gt_cli_binary() -> Option<PathBuf> {
 
         let candidate = PathBuf::from(path);
         if candidate.exists() {
-            return Some(candidate);
+            candidates.push(candidate);
         }
     }
 
-    None
+    #[cfg(windows)]
+    {
+        // `where gt` often returns a `.ps1` shim first, which cannot be spawned
+        // directly via `std::process::Command`. Prefer runnable wrappers.
+        for ext in ["exe", "cmd", "bat", "com"] {
+            if let Some(candidate) = candidates.iter().find(|candidate| {
+                candidate
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .map(|actual| actual.eq_ignore_ascii_case(ext))
+                    .unwrap_or(false)
+            }) {
+                return Some(candidate.clone());
+            }
+        }
+    }
+
+    candidates.into_iter().next()
 }
 
 pub fn gt_cli_binary() -> Option<PathBuf> {
