@@ -855,11 +855,9 @@ impl TestRepo {
 
         let git_link = shim_dir.join("git");
         if !git_link.exists() {
-            let target_git = if self.git_mode.uses_wrapper() {
-                get_binary_path().clone()
-            } else {
-                find_real_git_binary()
-            };
+            // Route Graphite's internal git invocations through git-ai so attribution
+            // tracking remains deterministic across rewrite-heavy operations.
+            let target_git = get_binary_path().clone();
             create_file_symlink(&target_git, &git_link).map_err(|e| {
                 format!(
                     "failed to create gt shim link {} -> {}: {}",
@@ -870,18 +868,16 @@ impl TestRepo {
             })?;
         }
 
-        if self.git_mode.uses_wrapper() {
-            let git_ai_link = shim_dir.join("git-ai");
-            if !git_ai_link.exists() {
-                create_file_symlink(get_binary_path(), &git_ai_link).map_err(|e| {
-                    format!(
-                        "failed to create gt shim link {} -> {}: {}",
-                        git_ai_link.display(),
-                        get_binary_path().display(),
-                        e
-                    )
-                })?;
-            }
+        let git_ai_link = shim_dir.join("git-ai");
+        if !git_ai_link.exists() {
+            create_file_symlink(get_binary_path(), &git_ai_link).map_err(|e| {
+                format!(
+                    "failed to create gt shim link {} -> {}: {}",
+                    git_ai_link.display(),
+                    get_binary_path().display(),
+                    e
+                )
+            })?;
         }
 
         Ok(shim_dir)
