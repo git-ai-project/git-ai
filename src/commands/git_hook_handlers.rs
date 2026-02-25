@@ -240,6 +240,10 @@ fn repo_ai_dir(repo: &Repository) -> PathBuf {
     repo.common_dir().join("ai")
 }
 
+fn repo_worktree_ai_dir(repo: &Repository) -> PathBuf {
+    repo.path().join("ai")
+}
+
 fn repo_local_config_path(repo: &Repository) -> PathBuf {
     repo.common_dir().join("config")
 }
@@ -253,7 +257,7 @@ fn repo_enablement_path(repo: &Repository) -> PathBuf {
 }
 
 fn rebase_hook_mask_state_path(repo: &Repository) -> PathBuf {
-    repo_ai_dir(repo).join(REBASE_HOOK_MASK_STATE_FILE)
+    repo_worktree_ai_dir(repo).join(REBASE_HOOK_MASK_STATE_FILE)
 }
 
 fn managed_git_hooks_dir_for_repo(repo: &Repository) -> PathBuf {
@@ -268,11 +272,11 @@ fn managed_git_hooks_dir_from_context() -> Option<PathBuf> {
 }
 
 fn stash_reference_transaction_state_path(repo: &Repository) -> PathBuf {
-    repo_ai_dir(repo).join(STASH_REF_TX_STATE_FILE)
+    repo_worktree_ai_dir(repo).join(STASH_REF_TX_STATE_FILE)
 }
 
 fn cherry_pick_batch_state_path(repo: &Repository) -> PathBuf {
-    repo_ai_dir(repo).join(CHERRY_PICK_BATCH_STATE_FILE)
+    repo_worktree_ai_dir(repo).join(CHERRY_PICK_BATCH_STATE_FILE)
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
@@ -1398,7 +1402,7 @@ fn is_post_commit_amend(repo: &Repository) -> bool {
 }
 
 fn pull_hook_state_path(repo: &Repository) -> PathBuf {
-    repo_ai_dir(repo).join(PULL_HOOK_STATE_FILE)
+    repo_worktree_ai_dir(repo).join(PULL_HOOK_STATE_FILE)
 }
 
 fn clear_pull_hook_state(repo: &Repository) {
@@ -1832,7 +1836,7 @@ fn maybe_handle_pull_post_rewrite(repo: &mut Repository) {
 }
 
 fn cherry_pick_state_path(repo: &Repository) -> PathBuf {
-    repo_ai_dir(repo).join("cherry_pick_hook_state")
+    repo_worktree_ai_dir(repo).join("cherry_pick_hook_state")
 }
 
 fn clear_cherry_pick_state(repo: &Repository) {
@@ -2558,6 +2562,70 @@ mod tests {
             .expect("failed to open initialized repo")
     }
 
+    fn init_repo_with_linked_worktree(base: &Path) -> (Repository, Repository) {
+        let main = base.join("main");
+        let linked = base.join("linked");
+        fs::create_dir_all(&main).expect("failed to create main repo dir");
+
+        let init = Command::new("git")
+            .args(["init", "."])
+            .current_dir(&main)
+            .output()
+            .expect("failed to run git init");
+        assert!(init.status.success(), "git init should succeed");
+
+        let config_name = Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(&main)
+            .output()
+            .expect("failed to set user.name");
+        assert!(
+            config_name.status.success(),
+            "git config user.name should succeed"
+        );
+
+        let config_email = Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(&main)
+            .output()
+            .expect("failed to set user.email");
+        assert!(
+            config_email.status.success(),
+            "git config user.email should succeed"
+        );
+
+        fs::write(main.join("README.md"), "initial\n").expect("failed to write README");
+        let add = Command::new("git")
+            .args(["add", "."])
+            .current_dir(&main)
+            .output()
+            .expect("failed to add files");
+        assert!(add.status.success(), "git add should succeed");
+
+        let commit = Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&main)
+            .output()
+            .expect("failed to commit");
+        assert!(commit.status.success(), "git commit should succeed");
+
+        let worktree_add = Command::new("git")
+            .args(["worktree", "add", linked.to_string_lossy().as_ref()])
+            .current_dir(&main)
+            .output()
+            .expect("failed to add linked worktree");
+        assert!(
+            worktree_add.status.success(),
+            "git worktree add should succeed"
+        );
+
+        let main_repo = crate::git::find_repository_in_path(&main.to_string_lossy())
+            .expect("failed to open main repo");
+        let linked_repo = crate::git::find_repository_in_path(&linked.to_string_lossy())
+            .expect("failed to open linked repo");
+        (main_repo, linked_repo)
+    }
+
     #[test]
     fn ensure_repo_hooks_installed_uses_repo_local_forwarding() {
         let tmp = tempfile::tempdir().expect("failed to create tempdir");
@@ -2859,6 +2927,83 @@ mod tests {
             Some(&repo),
             Some(&managed_hooks)
         ));
+    }
+
+    #[test]
+    fn worktree_operational_state_paths_are_isolated_from_common_hook_state() {
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let (main_repo, linked_repo) = init_repo_with_linked_worktree(tmp.path());
+
+        // Hook installation state remains shared across worktrees.
+        assert_eq!(
+            normalize_path(&repo_ai_dir(&main_repo)),
+            normalize_path(&repo_ai_dir(&linked_repo))
+        );
+        let main_repo_state_path = repo_state_path(&main_repo);
+        let linked_repo_state_path = repo_state_path(&linked_repo);
+        assert_eq!(
+            main_repo_state_path.file_name(),
+            linked_repo_state_path.file_name()
+        );
+        assert_eq!(
+            normalize_path(
+                main_repo_state_path
+                    .parent()
+                    .expect("repo state path should have a parent")
+            ),
+            normalize_path(
+                linked_repo_state_path
+                    .parent()
+                    .expect("repo state path should have a parent")
+            )
+        );
+
+        let main_managed_hooks = managed_git_hooks_dir_for_repo(&main_repo);
+        let linked_managed_hooks = managed_git_hooks_dir_for_repo(&linked_repo);
+        assert_eq!(
+            main_managed_hooks.file_name(),
+            linked_managed_hooks.file_name()
+        );
+        assert_eq!(
+            normalize_path(
+                main_managed_hooks
+                    .parent()
+                    .expect("managed hooks path should have a parent")
+            ),
+            normalize_path(
+                linked_managed_hooks
+                    .parent()
+                    .expect("managed hooks path should have a parent")
+            )
+        );
+
+        // Operational state must be per-worktree to avoid cross-worktree interference.
+        assert_ne!(
+            rebase_hook_mask_state_path(&main_repo),
+            rebase_hook_mask_state_path(&linked_repo)
+        );
+        assert_ne!(
+            stash_reference_transaction_state_path(&main_repo),
+            stash_reference_transaction_state_path(&linked_repo)
+        );
+        assert_ne!(
+            pull_hook_state_path(&main_repo),
+            pull_hook_state_path(&linked_repo)
+        );
+        assert_ne!(
+            cherry_pick_state_path(&main_repo),
+            cherry_pick_state_path(&linked_repo)
+        );
+        assert_ne!(
+            cherry_pick_batch_state_path(&main_repo),
+            cherry_pick_batch_state_path(&linked_repo)
+        );
+
+        assert!(
+            normalize_path(&rebase_hook_mask_state_path(&linked_repo))
+                .starts_with(normalize_path(&linked_repo.path().join("ai"))),
+            "linked-worktree state should live under linked .git/worktrees/<name>/ai"
+        );
     }
 
     #[test]
