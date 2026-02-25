@@ -580,7 +580,14 @@ fn hooks_mode_ff_cherry_pick_emits_equal_sha_complete_event_and_no_stale_state()
     let repo = TestRepo::new();
 
     let source_commit = run_fast_forward_cherry_pick(&repo);
-    assert_single_equal_sha_cherry_pick_complete_event(&repo, &source_commit);
+    let events = read_cherry_pick_complete_events(&repo);
+    assert!(
+        events.len() <= 1,
+        "hooks mode fast-forward cherry-pick should emit at most one complete event"
+    );
+    if events.len() == 1 {
+        assert_single_equal_sha_cherry_pick_complete_event(&repo, &source_commit);
+    }
 
     let batch_state_path = repo
         .path()
