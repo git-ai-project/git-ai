@@ -2041,7 +2041,7 @@ fn maybe_record_cherry_pick_post_commit(repo: &mut Repository) {
 
     let source_commit = load_cherry_pick_state(repo)
         .and_then(|(source, base)| {
-            if base.is_empty() || base == original_head {
+            if (base.is_empty() || base == original_head) && is_valid_git_oid_or_abbrev(&source) {
                 Some(source)
             } else {
                 None
@@ -2051,7 +2051,7 @@ fn maybe_record_cherry_pick_post_commit(repo: &mut Repository) {
             fs::read_to_string(repo.path().join("CHERRY_PICK_HEAD"))
                 .ok()
                 .map(|contents| contents.trim().to_string())
-                .filter(|sha| !sha.is_empty())
+                .filter(|sha| is_valid_git_oid_or_abbrev(sha))
         })
         .or_else(|| latest_cherry_pick_source_from_sequencer(repo))
         .or_else(|| earliest_cherry_pick_source_from_todo(repo));
@@ -2587,6 +2587,171 @@ mod tests {
             .expect("failed to open initialized repo")
     }
 
+    fn run_git_success(repo_path: &Path, args: &[&str]) -> std::process::Output {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo_path)
+            .output()
+            .expect("failed to run git command");
+        assert!(
+            output.status.success(),
+            "git command should succeed: git {}",
+            args.join(" ")
+        );
+        output
+    }
+
+    fn git_stdout_trimmed(repo_path: &Path, args: &[&str]) -> String {
+        let output = run_git_success(repo_path, args);
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    #[cfg(unix)]
+    fn test_null_hooks_path() -> &'static str {
+        "/dev/null"
+    }
+
+    #[cfg(windows)]
+    fn test_null_hooks_path() -> &'static str {
+        "NUL"
+    }
+
+    fn setup_repo_with_base_and_source_commit() -> (tempfile::TempDir, Repository, String, String) {
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let repo_path = tmp.path().join("repo");
+        let repo = init_repo(&repo_path);
+
+        run_git_success(&repo_path, &["config", "user.name", "Test User"]);
+        run_git_success(&repo_path, &["config", "user.email", "test@example.com"]);
+        run_git_success(
+            &repo_path,
+            &["config", "core.hooksPath", test_null_hooks_path()],
+        );
+
+        fs::write(repo_path.join("file.txt"), "base line\n").expect("failed to write base file");
+        run_git_success(&repo_path, &["add", "file.txt"]);
+        run_git_success(&repo_path, &["commit", "-m", "base"]);
+
+        fs::write(repo_path.join("file.txt"), "base line\ncherry\n")
+            .expect("failed to update file");
+        run_git_success(&repo_path, &["add", "file.txt"]);
+        run_git_success(&repo_path, &["commit", "-m", "cherry source"]);
+
+        let source_commit = git_stdout_trimmed(&repo_path, &["rev-parse", "HEAD"]);
+        let base_commit = git_stdout_trimmed(&repo_path, &["rev-parse", "HEAD^"]);
+
+        (tmp, repo, source_commit, base_commit)
+    }
+
+    fn parse_cherry_pick_complete_events(repo: &Repository) -> Vec<serde_json::Value> {
+        let rewrite_log_path = repo.path().join("ai").join("rewrite_log");
+        let rewrite_log = fs::read_to_string(&rewrite_log_path)
+            .expect("rewrite log should exist after post-commit");
+        rewrite_log
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter_map(|value| value.get("cherry_pick_complete").cloned())
+            .collect()
+    }
+
+    fn write_cherry_pick_state(repo: &Repository, source: &str, base: &str) {
+        let state_path = cherry_pick_state_path(repo);
+        fs::create_dir_all(
+            state_path
+                .parent()
+                .expect("cherry-pick state path should have parent"),
+        )
+        .expect("failed to create cherry-pick state parent");
+        fs::write(state_path, format!("{}\n{}\n", source, base))
+            .expect("failed to write cherry-pick state");
+    }
+
+    fn write_cherry_pick_head(repo: &Repository, source: &str) {
+        fs::write(
+            repo.path().join("CHERRY_PICK_HEAD"),
+            format!("{}\n", source),
+        )
+        .expect("failed to write CHERRY_PICK_HEAD");
+    }
+
+    fn write_sequencer_done(repo: &Repository, line: &str) {
+        let sequencer_dir = repo.path().join("sequencer");
+        fs::create_dir_all(&sequencer_dir).expect("failed to create sequencer dir");
+        fs::write(sequencer_dir.join("done"), format!("{}\n", line))
+            .expect("failed to write sequencer done");
+    }
+
+    fn write_sequencer_todo(repo: &Repository, line: &str) {
+        let sequencer_dir = repo.path().join("sequencer");
+        fs::create_dir_all(&sequencer_dir).expect("failed to create sequencer dir");
+        fs::write(sequencer_dir.join("todo"), format!("{}\n", line))
+            .expect("failed to write sequencer todo");
+    }
+
+    fn assert_no_cherry_pick_complete_events(repo: &Repository) {
+        let events = parse_cherry_pick_complete_events(repo);
+        assert!(
+            events.is_empty(),
+            "expected no cherry_pick_complete events, got {}",
+            events.len()
+        );
+    }
+
+    fn assert_cherry_pick_state_cleared(repo: &Repository) {
+        assert!(
+            !cherry_pick_state_path(repo).exists(),
+            "cherry-pick state should be cleared after successful processing"
+        );
+        assert!(
+            !cherry_pick_batch_state_path(repo).exists(),
+            "cherry-pick batch state should be cleared after terminal processing"
+        );
+    }
+
+    fn assert_single_equal_sha_cherry_pick_event(repo: &Repository, expected_sha: &str) {
+        let events = parse_cherry_pick_complete_events(repo);
+        assert_eq!(
+            events.len(),
+            1,
+            "equal source/new commit IDs should emit exactly one cherry_pick_complete event"
+        );
+
+        let event = &events[0];
+        let source_commits: Vec<&str> = event
+            .get("source_commits")
+            .and_then(|value| value.as_array())
+            .expect("source_commits should be present")
+            .iter()
+            .map(|value| value.as_str().expect("source commit should be string"))
+            .collect();
+        let new_commits: Vec<&str> = event
+            .get("new_commits")
+            .and_then(|value| value.as_array())
+            .expect("new_commits should be present")
+            .iter()
+            .map(|value| value.as_str().expect("new commit should be string"))
+            .collect();
+
+        assert_eq!(source_commits.len(), 1);
+        assert_eq!(new_commits.len(), 1);
+        assert!(
+            git_oids_match_with_abbrev(source_commits[0], expected_sha),
+            "source commit should match expected SHA (supports abbreviated OIDs)"
+        );
+        assert!(
+            git_oids_match_with_abbrev(new_commits[0], expected_sha),
+            "new commit should match expected SHA"
+        );
+        let new_head = event
+            .get("new_head")
+            .and_then(|value| value.as_str())
+            .expect("new_head should be present");
+        assert!(
+            git_oids_match_with_abbrev(new_head, expected_sha),
+            "new_head should match expected SHA"
+        );
+    }
+
     #[test]
     fn ensure_repo_hooks_installed_uses_repo_local_forwarding() {
         let tmp = tempfile::tempdir().expect("failed to create tempdir");
@@ -3078,117 +3243,185 @@ mod tests {
 
     #[test]
     fn cherry_pick_post_commit_records_equal_source_and_new_commit() {
-        let tmp = tempfile::tempdir().expect("failed to create tempdir");
-        let repo_path = tmp.path().join("repo");
-        let mut repo = init_repo(&repo_path);
-
-        let configure_user = Command::new("git")
-            .args(["config", "user.name", "Test User"])
-            .current_dir(&repo_path)
-            .output()
-            .expect("failed to set user.name");
-        assert!(
-            configure_user.status.success(),
-            "setting user.name should succeed"
-        );
-        let configure_email = Command::new("git")
-            .args(["config", "user.email", "test@example.com"])
-            .current_dir(&repo_path)
-            .output()
-            .expect("failed to set user.email");
-        assert!(
-            configure_email.status.success(),
-            "setting user.email should succeed"
-        );
-
-        fs::write(repo_path.join("file.txt"), "base line\n").expect("failed to write base file");
-        let add_base = Command::new("git")
-            .args(["add", "file.txt"])
-            .current_dir(&repo_path)
-            .output()
-            .expect("failed to stage base file");
-        assert!(
-            add_base.status.success(),
-            "staging base file should succeed"
-        );
-        let commit_base = Command::new("git")
-            .args(["commit", "-m", "base"])
-            .current_dir(&repo_path)
-            .output()
-            .expect("failed to commit base");
-        assert!(commit_base.status.success(), "base commit should succeed");
-
-        fs::write(repo_path.join("file.txt"), "base line\ncherry\n")
-            .expect("failed to update file");
-        let add_cherry = Command::new("git")
-            .args(["add", "file.txt"])
-            .current_dir(&repo_path)
-            .output()
-            .expect("failed to stage cherry file");
-        assert!(
-            add_cherry.status.success(),
-            "staging cherry file should succeed"
-        );
-        let commit_cherry = Command::new("git")
-            .args(["commit", "-m", "cherry source"])
-            .current_dir(&repo_path)
-            .output()
-            .expect("failed to commit cherry source");
-        assert!(
-            commit_cherry.status.success(),
-            "cherry source commit should succeed"
-        );
-
-        let source_commit = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&repo_path)
-            .output()
-            .expect("failed to rev-parse source commit");
-        assert!(
-            source_commit.status.success(),
-            "source rev-parse should succeed"
-        );
-        let source_commit = String::from_utf8_lossy(&source_commit.stdout)
-            .trim()
-            .to_string();
-
-        let base_commit = Command::new("git")
-            .args(["rev-parse", "HEAD^"])
-            .current_dir(&repo_path)
-            .output()
-            .expect("failed to rev-parse base commit");
-        assert!(
-            base_commit.status.success(),
-            "base rev-parse should succeed"
-        );
-        let base_commit = String::from_utf8_lossy(&base_commit.stdout)
-            .trim()
-            .to_string();
+        let (_tmp, mut repo, source_commit, base_commit) = setup_repo_with_base_and_source_commit();
 
         // Simulate post-commit cherry-pick state where source and new commit IDs match.
-        let state_path = cherry_pick_state_path(&repo);
-        fs::create_dir_all(
-            state_path
-                .parent()
-                .expect("cherry-pick state path should have parent"),
-        )
-        .expect("failed to create cherry-pick state parent");
-        fs::write(state_path, format!("{}\n{}\n", source_commit, base_commit))
-            .expect("failed to write cherry-pick hook state");
+        write_cherry_pick_state(&repo, &source_commit, &base_commit);
 
         maybe_record_cherry_pick_post_commit(&mut repo);
+        assert_single_equal_sha_cherry_pick_event(&repo, &source_commit);
+        assert_cherry_pick_state_cleared(&repo);
+    }
 
-        let rewrite_log_path = repo.path().join("ai").join("rewrite_log");
-        let rewrite_log = fs::read_to_string(&rewrite_log_path)
-            .expect("rewrite log should exist after post-commit");
-        let cherry_pick_complete_events = rewrite_log
-            .lines()
-            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-            .filter(|value| value.get("cherry_pick_complete").is_some())
-            .count();
+    #[test]
+    fn cherry_pick_post_commit_records_equal_sha_via_cherry_pick_head_fallback() {
+        let (_tmp, mut repo, source_commit, _base_commit) =
+            setup_repo_with_base_and_source_commit();
+
+        // Force state mismatch so post-commit source resolution falls back to CHERRY_PICK_HEAD.
+        write_cherry_pick_state(&repo, &source_commit, "not-the-parent");
+        write_cherry_pick_head(&repo, &source_commit);
+
+        maybe_record_cherry_pick_post_commit(&mut repo);
+        assert_single_equal_sha_cherry_pick_event(&repo, &source_commit);
+        assert_cherry_pick_state_cleared(&repo);
+    }
+
+    #[test]
+    fn cherry_pick_post_commit_records_equal_sha_via_sequencer_done_fallback() {
+        let (_tmp, mut repo, source_commit, _base_commit) =
+            setup_repo_with_base_and_source_commit();
+        let source_abbrev = &source_commit[..12];
+        write_sequencer_done(&repo, &format!("pick {} final-pick", source_abbrev));
+
+        maybe_record_cherry_pick_post_commit(&mut repo);
+        assert_single_equal_sha_cherry_pick_event(&repo, &source_commit);
+        assert_cherry_pick_state_cleared(&repo);
+    }
+
+    #[test]
+    fn cherry_pick_post_commit_records_equal_sha_via_todo_fallback() {
+        let (_tmp, mut repo, source_commit, _base_commit) =
+            setup_repo_with_base_and_source_commit();
+        let source_abbrev = &source_commit[..12];
+        write_sequencer_todo(&repo, &format!("pick {} final-pick", source_abbrev));
+
+        maybe_record_cherry_pick_post_commit(&mut repo);
+        assert_single_equal_sha_cherry_pick_event(&repo, &source_commit);
+        assert_cherry_pick_state_cleared(&repo);
+    }
+
+    #[test]
+    fn cherry_pick_post_commit_records_equal_sha_with_abbrev_state_source() {
+        let (_tmp, mut repo, source_commit, base_commit) = setup_repo_with_base_and_source_commit();
+        let source_abbrev = &source_commit[..12];
+        write_cherry_pick_state(&repo, source_abbrev, &base_commit);
+
+        maybe_record_cherry_pick_post_commit(&mut repo);
+        assert_single_equal_sha_cherry_pick_event(&repo, &source_commit);
+        assert_cherry_pick_state_cleared(&repo);
+    }
+
+    #[test]
+    fn cherry_pick_post_commit_records_equal_sha_with_empty_state_base() {
+        let (_tmp, mut repo, source_commit, _base_commit) =
+            setup_repo_with_base_and_source_commit();
+        write_cherry_pick_state(&repo, &source_commit, "");
+
+        maybe_record_cherry_pick_post_commit(&mut repo);
+        assert_single_equal_sha_cherry_pick_event(&repo, &source_commit);
+        assert_cherry_pick_state_cleared(&repo);
+    }
+
+    #[test]
+    fn cherry_pick_post_commit_equal_sha_is_idempotent_on_duplicate_invocation() {
+        let (_tmp, mut repo, source_commit, base_commit) = setup_repo_with_base_and_source_commit();
+        write_cherry_pick_state(&repo, &source_commit, &base_commit);
+
+        maybe_record_cherry_pick_post_commit(&mut repo);
+        // Wrapper+hooks mode safeguards should make this effectively idempotent.
+        maybe_record_cherry_pick_post_commit(&mut repo);
+        assert_single_equal_sha_cherry_pick_event(&repo, &source_commit);
+        assert_cherry_pick_state_cleared(&repo);
+    }
+
+    #[test]
+    fn cherry_pick_post_commit_prefers_valid_state_over_all_fallback_sources() {
+        let (_tmp, mut repo, source_commit, base_commit) = setup_repo_with_base_and_source_commit();
+        let competing_commit = base_commit.clone();
+
+        write_cherry_pick_state(&repo, &source_commit, &base_commit);
+        write_cherry_pick_head(&repo, &competing_commit);
+        write_sequencer_done(
+            &repo,
+            &format!("pick {} competing", &competing_commit[..12]),
+        );
+
+        maybe_record_cherry_pick_post_commit(&mut repo);
+        assert_single_equal_sha_cherry_pick_event(&repo, &source_commit);
+        assert_cherry_pick_state_cleared(&repo);
+    }
+
+    #[test]
+    fn cherry_pick_post_commit_prefers_cherry_pick_head_over_sequencer_when_state_mismatch() {
+        let (_tmp, mut repo, source_commit, base_commit) = setup_repo_with_base_and_source_commit();
+
+        write_cherry_pick_state(&repo, &base_commit, "not-the-parent");
+        write_cherry_pick_head(&repo, &source_commit);
+        write_sequencer_done(&repo, &format!("pick {} base", &base_commit[..12]));
+
+        maybe_record_cherry_pick_post_commit(&mut repo);
+        assert_single_equal_sha_cherry_pick_event(&repo, &source_commit);
+        assert_cherry_pick_state_cleared(&repo);
+    }
+
+    #[test]
+    fn cherry_pick_post_commit_prefers_sequencer_done_over_todo_when_head_missing() {
+        let (_tmp, mut repo, source_commit, base_commit) = setup_repo_with_base_and_source_commit();
+
+        write_sequencer_done(&repo, &format!("pick {} source", &source_commit[..12]));
+        write_sequencer_todo(&repo, &format!("pick {} todo", &base_commit[..12]));
+
+        maybe_record_cherry_pick_post_commit(&mut repo);
+        maybe_finalize_cherry_pick_batch_state(&mut repo, true, None);
+        assert_single_equal_sha_cherry_pick_event(&repo, &source_commit);
+        assert_cherry_pick_state_cleared(&repo);
+    }
+
+    #[test]
+    fn cherry_pick_post_commit_with_no_valid_source_emits_no_event() {
+        let (_tmp, mut repo, _source_commit, _base_commit) =
+            setup_repo_with_base_and_source_commit();
+
+        write_cherry_pick_head(&repo, "not-a-sha");
+        write_sequencer_done(&repo, "pick not-a-sha invalid");
+        write_sequencer_todo(&repo, "pick also-not-a-sha invalid");
+
+        maybe_record_cherry_pick_post_commit(&mut repo);
+        assert_no_cherry_pick_complete_events(&repo);
+    }
+
+    #[test]
+    fn cherry_pick_post_commit_ignores_invalid_head_and_uses_done_fallback() {
+        let (_tmp, mut repo, source_commit, _base_commit) =
+            setup_repo_with_base_and_source_commit();
+
+        write_cherry_pick_head(&repo, "not-a-sha");
+        write_sequencer_done(&repo, &format!("pick {} source", &source_commit[..12]));
+
+        maybe_record_cherry_pick_post_commit(&mut repo);
+        assert_single_equal_sha_cherry_pick_event(&repo, &source_commit);
+        assert_cherry_pick_state_cleared(&repo);
+    }
+
+    #[test]
+    fn cherry_pick_post_commit_ignores_invalid_state_source_and_uses_head_fallback() {
+        let (_tmp, mut repo, source_commit, base_commit) = setup_repo_with_base_and_source_commit();
+
+        write_cherry_pick_state(&repo, "not-a-sha", &base_commit);
+        write_cherry_pick_head(&repo, &source_commit);
+
+        maybe_record_cherry_pick_post_commit(&mut repo);
+        assert_single_equal_sha_cherry_pick_event(&repo, &source_commit);
+        assert_cherry_pick_state_cleared(&repo);
+    }
+
+    #[test]
+    fn cherry_pick_post_commit_equal_sha_records_parent_as_original_head() {
+        let (_tmp, mut repo, source_commit, base_commit) = setup_repo_with_base_and_source_commit();
+        write_cherry_pick_state(&repo, &source_commit, &base_commit);
+
+        maybe_record_cherry_pick_post_commit(&mut repo);
+        let events = parse_cherry_pick_complete_events(&repo);
+        assert_eq!(events.len(), 1, "expected exactly one event");
+        let event = &events[0];
+        let original_head = event
+            .get("original_head")
+            .and_then(|value| value.as_str())
+            .expect("original_head should be present");
         assert_eq!(
-            cherry_pick_complete_events, 1,
-            "equal source/new commit IDs should still emit one cherry_pick_complete event"
+            original_head, base_commit,
+            "original_head should be the new commit's parent even when source == new"
         );
     }
 
