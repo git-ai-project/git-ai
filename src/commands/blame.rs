@@ -7,8 +7,7 @@ use crate::error::GitAiError;
 use crate::git::refs::get_reference_as_authorship_log_v3;
 use crate::git::repository::Repository;
 use crate::git::repository::{exec_git, exec_git_stdin};
-#[cfg(windows)]
-use crate::utils::normalize_to_posix;
+use crate::utils::{normalize_to_posix, unescape_git_path};
 use chrono::{DateTime, FixedOffset, TimeZone, Utc};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -571,7 +570,12 @@ impl Repository {
                 continue;
             }
             if let Some(rest) = line.strip_prefix("filename ") {
-                cur_meta.filename = rest.to_string();
+                let unescaped = unescape_git_path(rest);
+                let normalized = normalize_to_posix(&unescaped);
+                cur_meta.filename = normalized
+                    .strip_prefix("./")
+                    .unwrap_or(&normalized)
+                    .to_string();
                 continue;
             }
 
