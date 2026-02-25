@@ -923,6 +923,7 @@ impl<'a> Iterator for References<'a> {
 pub struct Repository {
     global_args: Vec<String>,
     git_dir: PathBuf,
+    git_common_dir: PathBuf,
     pub storage: RepoStorage,
     pub pre_command_base_commit: Option<String>,
     pub pre_command_refname: Option<String>,
@@ -1031,6 +1032,12 @@ impl Repository {
     // TODO Test on bare repositories.
     pub fn path(&self) -> &Path {
         self.git_dir.as_path()
+    }
+
+    /// Returns the common git directory shared by linked worktrees.
+    /// For non-worktree repositories, this is the same as `path()`.
+    pub fn common_dir(&self) -> &Path {
+        self.git_common_dir.as_path()
     }
 
     // Get the path of the working directory for this repository.
@@ -2001,6 +2008,7 @@ pub fn find_repository(global_args: &[String]) -> Result<Repository, GitAiError>
     // string "absolute-git-dir" instead of the resolved path).
     rev_parse_args.push("--is-bare-repository".to_string());
     rev_parse_args.push("--git-dir".to_string());
+    rev_parse_args.push("--git-common-dir".to_string());
 
     let rev_parse_output = exec_git(&rev_parse_args)?;
     let rev_parse_stdout = String::from_utf8(rev_parse_output.stdout)?;
@@ -2028,17 +2036,31 @@ pub fn find_repository(global_args: &[String]) -> Result<Repository, GitAiError>
     let git_dir_str = lines.next().ok_or_else(|| {
         GitAiError::Generic("Missing --git-dir output from git rev-parse".to_string())
     })?;
+    let git_common_dir_str = lines.next().ok_or_else(|| {
+        GitAiError::Generic("Missing --git-common-dir output from git rev-parse".to_string())
+    })?;
     let command_base_dir = resolve_command_base_dir(global_args)?;
     let git_dir = if Path::new(git_dir_str).is_relative() {
         command_base_dir.join(git_dir_str)
     } else {
         PathBuf::from(git_dir_str)
     };
+    let git_common_dir = if Path::new(git_common_dir_str).is_relative() {
+        command_base_dir.join(git_common_dir_str)
+    } else {
+        PathBuf::from(git_common_dir_str)
+    };
 
     if !git_dir.is_dir() {
         return Err(GitAiError::Generic(format!(
             "Git directory does not exist: {}",
             git_dir.display()
+        )));
+    }
+    if !git_common_dir.is_dir() {
+        return Err(GitAiError::Generic(format!(
+            "Git common directory does not exist: {}",
+            git_common_dir.display()
         )));
     }
 
@@ -2092,10 +2114,18 @@ pub fn find_repository(global_args: &[String]) -> Result<Repository, GitAiError>
         ))
     })?;
 
+    let worktree_ai_dir = worktree_storage_ai_dir(&git_dir, &git_common_dir);
+    let storage = if worktree_ai_dir == git_dir.join("ai") {
+        RepoStorage::for_repo_path(&git_dir, &workdir)
+    } else {
+        RepoStorage::for_isolated_worktree_storage(&worktree_ai_dir, &workdir)
+    };
+
     Ok(Repository {
         global_args: normalized_global_args,
-        storage: RepoStorage::for_repo_path(&git_dir, &workdir),
+        storage,
         git_dir,
+        git_common_dir,
         pre_command_base_commit: None,
         pre_command_refname: None,
         pre_reset_target_commit: None,
@@ -2129,6 +2159,39 @@ fn resolve_command_base_dir(global_args: &[String]) -> Result<PathBuf, GitAiErro
     Ok(base)
 }
 
+fn worktree_storage_ai_dir(git_dir: &Path, git_common_dir: &Path) -> PathBuf {
+    let canonical_git_dir = git_dir
+        .canonicalize()
+        .unwrap_or_else(|_| git_dir.to_path_buf());
+    let canonical_common_dir = git_common_dir
+        .canonicalize()
+        .unwrap_or_else(|_| git_common_dir.to_path_buf());
+
+    if canonical_git_dir == canonical_common_dir {
+        return git_common_dir.join("ai");
+    }
+
+    let canonical_worktrees_root = canonical_common_dir.join("worktrees");
+    if let Ok(relative_worktree_path) = canonical_git_dir.strip_prefix(&canonical_worktrees_root)
+        && !relative_worktree_path.as_os_str().is_empty()
+    {
+        return git_common_dir
+            .join("ai")
+            .join("worktrees")
+            .join(relative_worktree_path);
+    }
+
+    let fallback_name = canonical_git_dir
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "default".to_string());
+    git_common_dir
+        .join("ai")
+        .join("worktrees")
+        .join(fallback_name)
+}
+
 #[allow(dead_code)]
 pub fn from_bare_repository(git_dir: &Path) -> Result<Repository, GitAiError> {
     let workdir = git_dir
@@ -2139,10 +2202,18 @@ pub fn from_bare_repository(git_dir: &Path) -> Result<Repository, GitAiError> {
 
     let canonical_workdir = workdir.canonicalize().unwrap_or_else(|_| workdir.clone());
 
+    let worktree_ai_dir = worktree_storage_ai_dir(git_dir, git_dir);
+    let storage = if worktree_ai_dir == git_dir.join("ai") {
+        RepoStorage::for_repo_path(git_dir, &workdir)
+    } else {
+        RepoStorage::for_isolated_worktree_storage(&worktree_ai_dir, &workdir)
+    };
+
     Ok(Repository {
         global_args,
-        storage: RepoStorage::for_repo_path(git_dir, &workdir),
+        storage,
         git_dir: git_dir.to_path_buf(),
+        git_common_dir: git_dir.to_path_buf(),
         pre_command_base_commit: None,
         pre_command_refname: None,
         pre_reset_target_commit: None,
@@ -2638,7 +2709,7 @@ fn parse_hunk_header(line: &str) -> Option<(Vec<u32>, bool)> {
 mod tests {
     use super::*;
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
 
     fn run_git(cwd: &Path, args: &[&str]) {
@@ -2654,6 +2725,22 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    fn run_git_stdout(cwd: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git command should run");
+        assert!(
+            output.status.success(),
+            "git {:?} failed:\nstdout: {}\nstderr: {}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
     #[test]
@@ -2887,5 +2974,40 @@ index 0000000..abc1234 100644
             .expect("read attrs from HEAD");
         let content = String::from_utf8(content).expect("utf8 attrs");
         assert!(content.contains("generated/** linguist-generated=true"));
+    }
+
+    #[test]
+    fn find_repository_in_path_worktree_uses_common_dir_for_isolated_storage() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let main_repo = temp.path().join("main");
+        let worktree = temp.path().join("linked");
+
+        fs::create_dir_all(&main_repo).expect("create main repo dir");
+        run_git(&main_repo, &["init"]);
+        run_git(&main_repo, &["config", "user.name", "Test User"]);
+        run_git(&main_repo, &["config", "user.email", "test@example.com"]);
+        run_git(&main_repo, &["worktree", "add", worktree.to_str().unwrap()]);
+
+        let repo = find_repository_in_path(worktree.to_str().unwrap()).expect("find worktree repo");
+        let common_dir = PathBuf::from(run_git_stdout(
+            &worktree,
+            &["rev-parse", "--git-common-dir"],
+        ));
+
+        assert_eq!(
+            repo.common_dir()
+                .canonicalize()
+                .expect("canonical common dir"),
+            common_dir
+                .canonicalize()
+                .expect("canonical expected common dir")
+        );
+        assert!(
+            repo.storage
+                .working_logs
+                .starts_with(common_dir.join("ai").join("worktrees")),
+            "worktree storage should be isolated under common-dir/ai/worktrees: {}",
+            repo.storage.working_logs.display()
+        );
     }
 }

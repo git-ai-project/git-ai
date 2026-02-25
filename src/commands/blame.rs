@@ -1386,15 +1386,17 @@ fn output_default_format(
                     &hunk.commit_sha
                 };
 
-                // Add boundary marker if this is a boundary commit
-                let boundary_marker = if hunk.is_boundary && options.blank_boundary {
-                    "^"
+                // Match git blame boundary formatting:
+                // - default boundary: prefix abbreviated hash with '^'
+                // - -b/--blank-boundary: print a blank hash column
+                let full_sha = if hunk.is_boundary && options.blank_boundary && !options.show_root {
+                    " ".repeat(hash_len + 1)
                 } else {
-                    ""
-                };
-                let full_sha = if hunk.is_boundary && options.blank_boundary {
-                    format!("{}{}", boundary_marker, "        ") // Empty hash for boundary
-                } else {
+                    let boundary_marker = if hunk.is_boundary && !options.show_root {
+                        "^"
+                    } else {
+                        ""
+                    };
                     format!("{}{}", boundary_marker, sha)
                 };
 

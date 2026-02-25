@@ -19,7 +19,7 @@ use std::time::Duration;
 use super::test_file::TestFile;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum GitTestMode {
+pub enum GitTestMode {
     Wrapper,
     Hooks,
     Both,
@@ -30,7 +30,11 @@ impl GitTestMode {
         let mode = std::env::var("GIT_AI_TEST_GIT_MODE")
             .unwrap_or_else(|_| "wrapper".to_string())
             .to_lowercase();
-        match mode.as_str() {
+        Self::from_mode_name(&mode)
+    }
+
+    pub fn from_mode_name(mode: &str) -> Self {
+        match mode.to_lowercase().as_str() {
             "hooks" => Self::Hooks,
             "both" | "wrapper+hooks" | "hooks+wrapper" => Self::Both,
             _ => Self::Wrapper,
@@ -57,6 +61,19 @@ fn create_file_symlink(target: &PathBuf, link: &PathBuf) -> std::io::Result<()> 
         .or_else(|_| std::fs::copy(target, link).map(|_| ()))
 }
 
+fn resolve_test_db_path(
+    base: &std::path::Path,
+    id: u64,
+    test_home: &std::path::Path,
+    git_mode: GitTestMode,
+) -> PathBuf {
+    if git_mode.uses_hooks() {
+        test_home.join(".git-ai").join("internal").join("db")
+    } else {
+        base.join(format!("{}-db", id))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct TestRepo {
     path: PathBuf,
@@ -75,6 +92,60 @@ impl Default for TestRepo {
 }
 
 impl TestRepo {
+    fn sync_test_home_config_for_hooks(&self) {
+        if !self.git_mode.uses_hooks() {
+            return;
+        }
+
+        let Some(patch) = &self.config_patch else {
+            return;
+        };
+
+        let mut config = serde_json::Map::new();
+
+        if let Some(exclude) = &patch.exclude_prompts_in_repositories {
+            let values = exclude
+                .iter()
+                .map(|pattern| serde_json::Value::String(pattern.clone()))
+                .collect();
+            config.insert(
+                "exclude_prompts_in_repositories".to_string(),
+                serde_json::Value::Array(values),
+            );
+        }
+        if let Some(telemetry_oss_disabled) = patch.telemetry_oss_disabled {
+            let value = if telemetry_oss_disabled { "off" } else { "on" };
+            config.insert(
+                "telemetry_oss".to_string(),
+                serde_json::Value::String(value.to_string()),
+            );
+        }
+        if let Some(disable_version_checks) = patch.disable_version_checks {
+            config.insert(
+                "disable_version_checks".to_string(),
+                serde_json::Value::Bool(disable_version_checks),
+            );
+        }
+        if let Some(disable_auto_updates) = patch.disable_auto_updates {
+            config.insert(
+                "disable_auto_updates".to_string(),
+                serde_json::Value::Bool(disable_auto_updates),
+            );
+        }
+        if let Some(prompt_storage) = &patch.prompt_storage {
+            config.insert(
+                "prompt_storage".to_string(),
+                serde_json::Value::String(prompt_storage.clone()),
+            );
+        }
+
+        let config_dir = self.test_home.join(".git-ai");
+        fs::create_dir_all(&config_dir).expect("failed to create test HOME config directory");
+        let config_path = config_dir.join("config.json");
+        let serialized = serde_json::to_string(&config).expect("failed to serialize test config");
+        fs::write(&config_path, serialized).expect("failed to write test HOME config");
+    }
+
     fn apply_default_config_patch(&mut self) {
         self.patch_git_ai_config(|patch| {
             patch.exclude_prompts_in_repositories = Some(vec![]); // No exclusions = share everywhere
@@ -83,14 +154,16 @@ impl TestRepo {
     }
 
     pub fn new() -> Self {
+        Self::new_with_mode(GitTestMode::from_env())
+    }
+
+    pub fn new_with_mode(git_mode: GitTestMode) -> Self {
         let mut rng = rand::thread_rng();
         let n: u64 = rng.gen_range(0..10000000000);
         let base = std::env::temp_dir();
         let path = base.join(n.to_string());
-        // Create DB path as sibling to repo (not inside) to avoid git conflicts with WAL files
-        let test_db_path = base.join(format!("{}-db", n));
         let test_home = base.join(format!("{}-home", n));
-        let git_mode = GitTestMode::from_env();
+        let test_db_path = resolve_test_db_path(&base, n, &test_home, git_mode);
         let repo = Repository::init(&path).expect("failed to initialize git2 repository");
         let mut config = Repository::config(&repo).expect("failed to initialize git2 repository");
         config
@@ -119,15 +192,85 @@ impl TestRepo {
         repo
     }
 
+    pub fn new_worktree() -> Self {
+        Self::new_worktree_with_mode(GitTestMode::from_env())
+    }
+
+    pub fn new_worktree_with_mode(git_mode: GitTestMode) -> Self {
+        let mut rng = rand::thread_rng();
+        let n: u64 = rng.gen_range(0..10000000000);
+        let base = std::env::temp_dir();
+        let main_path = base.join(format!("{}-main", n));
+        let worktree_path = base.join(format!("{}-wt", n));
+        let test_home = base.join(format!("{}-home", n));
+        let test_db_path = resolve_test_db_path(&base, n, &test_home, git_mode);
+
+        let main_repo = Repository::init(&main_path).expect("failed to initialize main repository");
+        let mut main_config =
+            Repository::config(&main_repo).expect("failed to initialize main repository config");
+        main_config
+            .set_str("user.name", "Test User")
+            .expect("failed to set main user.name");
+        main_config
+            .set_str("user.email", "test@example.com")
+            .expect("failed to set main user.email");
+
+        let _ = Command::new("git")
+            .args([
+                "-C",
+                main_path.to_str().unwrap(),
+                "symbolic-ref",
+                "HEAD",
+                "refs/heads/main",
+            ])
+            .output();
+
+        let worktree_output = Command::new("git")
+            .args([
+                "-C",
+                main_path.to_str().unwrap(),
+                "worktree",
+                "add",
+                worktree_path.to_str().unwrap(),
+            ])
+            .output()
+            .expect("failed to create linked worktree");
+
+        if !worktree_output.status.success() {
+            panic!(
+                "failed to create linked worktree:\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&worktree_output.stdout),
+                String::from_utf8_lossy(&worktree_output.stderr)
+            );
+        }
+
+        let mut repo = Self {
+            path: worktree_path,
+            feature_flags: FeatureFlags::default(),
+            config_patch: None,
+            test_db_path,
+            test_home,
+            git_mode,
+        };
+
+        repo.apply_default_config_patch();
+        repo.setup_git_hooks_mode();
+        repo
+    }
+
     /// Create a standalone bare repository for testing
     pub fn new_bare() -> Self {
+        Self::new_bare_with_mode(GitTestMode::from_env())
+    }
+
+    /// Create a standalone bare repository for testing
+    pub fn new_bare_with_mode(git_mode: GitTestMode) -> Self {
         let mut rng = rand::thread_rng();
         let n: u64 = rng.gen_range(0..10000000000);
         let base = std::env::temp_dir();
         let path = base.join(n.to_string());
-        let test_db_path = base.join(format!("{}-db", n));
         let test_home = base.join(format!("{}-home", n));
-        let git_mode = GitTestMode::from_env();
+        let test_db_path = resolve_test_db_path(&base, n, &test_home, git_mode);
 
         Repository::init_bare(&path).expect("failed to init bare repository");
 
@@ -160,16 +303,19 @@ impl TestRepo {
     /// mirror.git(&["push", "origin", "main"]);
     /// ```
     pub fn new_with_remote() -> (Self, Self) {
+        Self::new_with_remote_with_mode(GitTestMode::from_env())
+    }
+
+    pub fn new_with_remote_with_mode(git_mode: GitTestMode) -> (Self, Self) {
         let mut rng = rand::thread_rng();
         let base = std::env::temp_dir();
 
         // Create bare upstream repository (acts as the remote server)
         let upstream_n: u64 = rng.gen_range(0..10000000000);
         let upstream_path = base.join(upstream_n.to_string());
-        // Create DB path as sibling to repo (not inside) to avoid git conflicts with WAL files
-        let upstream_test_db_path = base.join(format!("{}-db", upstream_n));
         let upstream_test_home = base.join(format!("{}-home", upstream_n));
-        let git_mode = GitTestMode::from_env();
+        let upstream_test_db_path =
+            resolve_test_db_path(&base, upstream_n, &upstream_test_home, git_mode);
         Repository::init_bare(&upstream_path).expect("failed to init bare upstream repository");
 
         let mut upstream = Self {
@@ -187,9 +333,9 @@ impl TestRepo {
         // Clone upstream to create mirror with origin configured
         let mirror_n: u64 = rng.gen_range(0..10000000000);
         let mirror_path = base.join(mirror_n.to_string());
-        // Create DB path as sibling to repo (not inside) to avoid git conflicts with WAL files
-        let mirror_test_db_path = base.join(format!("{}-db", mirror_n));
         let mirror_test_home = base.join(format!("{}-home", mirror_n));
+        let mirror_test_db_path =
+            resolve_test_db_path(&base, mirror_n, &mirror_test_home, git_mode);
 
         let clone_output = Command::new("git")
             .args([
@@ -240,12 +386,14 @@ impl TestRepo {
     }
 
     pub fn new_at_path(path: &PathBuf) -> Self {
-        // Create DB path as sibling to repo (not inside) to avoid git conflicts with WAL files
+        Self::new_at_path_with_mode(path, GitTestMode::from_env())
+    }
+
+    pub fn new_at_path_with_mode(path: &PathBuf, git_mode: GitTestMode) -> Self {
         let mut rng = rand::thread_rng();
         let db_n: u64 = rng.gen_range(0..10000000000);
-        let test_db_path = std::env::temp_dir().join(format!("{}-db", db_n));
         let test_home = std::env::temp_dir().join(format!("{}-home", db_n));
-        let git_mode = GitTestMode::from_env();
+        let test_db_path = resolve_test_db_path(&std::env::temp_dir(), db_n, &test_home, git_mode);
         let repo = Repository::init(path).expect("failed to initialize git2 repository");
         let mut config = Repository::config(&repo).expect("failed to initialize git2 repository");
         config
@@ -280,6 +428,8 @@ impl TestRepo {
             return;
         }
 
+        self.sync_test_home_config_for_hooks();
+
         let binary_path = get_binary_path();
         let mut command = Command::new(binary_path);
         command
@@ -287,6 +437,7 @@ impl TestRepo {
             .args(["git-hooks", "ensure"]);
         self.configure_git_ai_env(&mut command);
         command.env("GIT_AI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
+        command.env("GITAI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
 
         let output = command
             .output()
@@ -339,6 +490,7 @@ impl TestRepo {
         let mut patch = self.config_patch.take().unwrap_or_default();
         f(&mut patch);
         self.config_patch = Some(patch);
+        self.sync_test_home_config_for_hooks();
     }
 
     pub fn path(&self) -> &PathBuf {
@@ -360,9 +512,35 @@ impl TestRepo {
     }
 
     pub fn stats(&self) -> Result<CommitStats, String> {
-        let mut stats = self.git_ai(&["stats", "--json"]).unwrap();
-        stats = stats.split("}}}").next().unwrap().to_string() + "}}}";
-        let stats: CommitStats = serde_json::from_str(&stats).unwrap();
+        let output = self.git_ai(&["stats", "--json"])?;
+        let start = output
+            .find('{')
+            .ok_or_else(|| format!("stats output does not contain JSON: {}", output))?;
+
+        let mut depth = 0usize;
+        let mut end_index = None;
+        for (offset, ch) in output[start..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    if depth == 0 {
+                        return Err(format!("malformed stats JSON output: {}", output));
+                    }
+                    depth -= 1;
+                    if depth == 0 {
+                        end_index = Some(start + offset);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let end_index =
+            end_index.ok_or_else(|| format!("incomplete stats JSON output: {}", output))?;
+        let json = &output[start..=end_index];
+        let stats: CommitStats =
+            serde_json::from_str(json).map_err(|e| format!("invalid stats JSON: {}", e))?;
         Ok(stats)
     }
 
@@ -504,6 +682,7 @@ impl TestRepo {
             command.env("GIT_AI_TEST_CONFIG_PATCH", patch_json);
         }
         command.env("GIT_AI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
+        command.env("GITAI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
 
         // Add custom environment variables
         for (key, value) in envs {
@@ -558,6 +737,7 @@ impl TestRepo {
         }
 
         command.env("GIT_AI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
+        command.env("GITAI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
 
         let output = command
             .output()
@@ -596,6 +776,7 @@ impl TestRepo {
 
         // Add test database path for isolation
         command.env("GIT_AI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
+        command.env("GITAI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
 
         // Add custom environment variables
         for (key, value) in envs {

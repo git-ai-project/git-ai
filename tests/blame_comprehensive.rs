@@ -976,9 +976,10 @@ fn test_blame_abbrev_custom_length() {
         .git_ai(&["blame", "--abbrev", "10", "test.txt"])
         .unwrap();
 
-    // First field should be 10-character hash
+    // Boundary commits may be prefixed with '^' in default format.
     let first_field = output.split_whitespace().next().unwrap();
-    assert_eq!(first_field.len(), 10);
+    let hash = first_field.trim_start_matches('^');
+    assert_eq!(hash.len(), 10);
 }
 
 #[test]
@@ -992,9 +993,10 @@ fn test_blame_long_rev() {
 
     let output = repo.git_ai(&["blame", "-l", "test.txt"]).unwrap();
 
-    // First field should be 40-character hash
+    // Boundary commits may be prefixed with '^' in default format.
     let first_field = output.split_whitespace().next().unwrap();
-    assert_eq!(first_field.len(), 40);
+    let hash = first_field.trim_start_matches('^');
+    assert_eq!(hash.len(), 40);
 }
 
 // =============================================================================

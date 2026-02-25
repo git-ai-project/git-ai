@@ -236,32 +236,43 @@ fn cherry_pick_batch_state_schema_version() -> String {
     CHERRY_PICK_BATCH_STATE_SCHEMA_VERSION.to_string()
 }
 
+fn repo_ai_dir(repo: &Repository) -> PathBuf {
+    repo.common_dir().join("ai")
+}
+
+fn repo_local_config_path(repo: &Repository) -> PathBuf {
+    repo.common_dir().join("config")
+}
+
 fn repo_state_path(repo: &Repository) -> PathBuf {
-    repo.path().join("ai").join(REPO_HOOK_STATE_FILE)
+    repo_ai_dir(repo).join(REPO_HOOK_STATE_FILE)
 }
 
 fn repo_enablement_path(repo: &Repository) -> PathBuf {
-    repo.path().join("ai").join(REPO_HOOK_ENABLEMENT_FILE)
+    repo_ai_dir(repo).join(REPO_HOOK_ENABLEMENT_FILE)
 }
 
 fn rebase_hook_mask_state_path(repo: &Repository) -> PathBuf {
-    repo.path().join("ai").join(REBASE_HOOK_MASK_STATE_FILE)
+    repo_ai_dir(repo).join(REBASE_HOOK_MASK_STATE_FILE)
 }
 
 fn managed_git_hooks_dir_for_repo(repo: &Repository) -> PathBuf {
-    repo.path().join("ai").join(GIT_HOOKS_DIR_NAME)
+    repo_ai_dir(repo).join(GIT_HOOKS_DIR_NAME)
 }
 
 fn managed_git_hooks_dir_from_context() -> Option<PathBuf> {
+    if let Some(repo) = find_hook_repository_from_context() {
+        return Some(managed_git_hooks_dir_for_repo(&repo));
+    }
     git_dir_from_context().map(|git_dir| git_dir.join("ai").join(GIT_HOOKS_DIR_NAME))
 }
 
 fn stash_reference_transaction_state_path(repo: &Repository) -> PathBuf {
-    repo.path().join("ai").join(STASH_REF_TX_STATE_FILE)
+    repo_ai_dir(repo).join(STASH_REF_TX_STATE_FILE)
 }
 
 fn cherry_pick_batch_state_path(repo: &Repository) -> PathBuf {
-    repo.path().join("ai").join(CHERRY_PICK_BATCH_STATE_FILE)
+    repo_ai_dir(repo).join(CHERRY_PICK_BATCH_STATE_FILE)
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
@@ -328,12 +339,42 @@ fn hook_perf_json_logging_enabled() -> bool {
 }
 
 fn global_git_config_path() -> PathBuf {
+    #[cfg(test)]
+    if let Some(path) = test_global_git_config_override_path() {
+        return path;
+    }
+
     if let Ok(path) = std::env::var("GIT_CONFIG_GLOBAL")
         && !path.trim().is_empty()
     {
         return PathBuf::from(path);
     }
     crate::mdm::utils::home_dir().join(".gitconfig")
+}
+
+#[cfg(test)]
+fn test_global_git_config_override_path() -> Option<PathBuf> {
+    test_global_git_config_override()
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+}
+
+#[cfg(test)]
+fn set_test_global_git_config_override_path(path: Option<PathBuf>) -> Option<PathBuf> {
+    let mut guard = test_global_git_config_override()
+        .lock()
+        .expect("test global config override mutex poisoned");
+    std::mem::replace(&mut *guard, path)
+}
+
+#[cfg(test)]
+fn test_global_git_config_override() -> &'static std::sync::Mutex<Option<PathBuf>> {
+    use std::sync::OnceLock;
+
+    static TEST_GLOBAL_CONFIG_OVERRIDE: OnceLock<std::sync::Mutex<Option<PathBuf>>> =
+        OnceLock::new();
+    TEST_GLOBAL_CONFIG_OVERRIDE.get_or_init(|| std::sync::Mutex::new(None))
 }
 
 fn load_config(
@@ -387,7 +428,7 @@ fn set_hooks_path_in_config(
 }
 
 fn unset_hooks_path_in_local_config(repo: &Repository, dry_run: bool) -> Result<bool, GitAiError> {
-    let local_config_path = repo.path().join("config");
+    let local_config_path = repo_local_config_path(repo);
     if read_hooks_path_from_config(&local_config_path, gix_config::Source::Local).is_none() {
         return Ok(false);
     }
@@ -611,7 +652,7 @@ fn is_disallowed_forward_hooks_path(
     }
 
     if let Some(repo) = repo {
-        let repo_ai_dir = repo.path().join("ai");
+        let repo_ai_dir = repo_ai_dir(repo);
         if normalize_path(path).starts_with(normalize_path(&repo_ai_dir)) {
             return true;
         }
@@ -706,7 +747,7 @@ pub fn ensure_repo_hooks_installed(
 ) -> Result<EnsureRepoHooksReport, GitAiError> {
     let managed_hooks_dir = managed_git_hooks_dir_for_repo(repo);
     let state_path = repo_state_path(repo);
-    let local_config_path = repo.path().join("config");
+    let local_config_path = repo_local_config_path(repo);
     let prior_state = read_repo_hook_state(&state_path)?;
 
     let binary_path = resolve_repo_hook_binary_path(
@@ -772,7 +813,7 @@ pub fn remove_repo_hooks(
     let state_path = repo_state_path(repo);
     let enablement_path = repo_enablement_path(repo);
     let rebase_state_path = rebase_hook_mask_state_path(repo);
-    let local_config_path = repo.path().join("config");
+    let local_config_path = repo_local_config_path(repo);
     let prior_state = read_repo_hook_state(&state_path)?;
 
     let current_local_hooks =
@@ -860,7 +901,7 @@ pub fn maybe_spawn_repo_hook_self_heal(repo: &Repository) {
     }
 
     // Keep tests deterministic and avoid touching developer hook config during tests.
-    if std::env::var("GIT_AI_TEST_DB_PATH").is_ok() {
+    if std::env::var("GIT_AI_TEST_DB_PATH").is_ok() || std::env::var("GITAI_TEST_DB_PATH").is_ok() {
         return;
     }
 
@@ -898,6 +939,9 @@ pub fn maybe_spawn_repo_hook_self_heal(repo: &Repository) {
 }
 
 fn repo_state_path_from_env() -> Option<PathBuf> {
+    if let Some(repo) = find_hook_repository_from_context() {
+        return Some(repo_state_path(&repo));
+    }
     git_dir_from_context().map(|git_dir| git_dir.join("ai").join(REPO_HOOK_STATE_FILE))
 }
 
@@ -932,6 +976,25 @@ fn git_dir_from_context() -> Option<PathBuf> {
     }
 }
 
+fn worktree_root_from_git_dir(git_dir: &Path) -> Option<PathBuf> {
+    let gitdir_file = git_dir.join("gitdir");
+    let gitdir_target = fs::read_to_string(gitdir_file).ok()?;
+    let gitdir_target = gitdir_target.trim();
+    if gitdir_target.is_empty() {
+        return None;
+    }
+
+    let gitdir_path = PathBuf::from(gitdir_target);
+    let gitdir_path = if gitdir_path.is_absolute() {
+        gitdir_path
+    } else {
+        git_dir.join(gitdir_path)
+    };
+
+    let gitdir_path = canonicalize_if_possible(gitdir_path);
+    gitdir_path.parent().map(Path::to_path_buf)
+}
+
 fn hook_repository_lookup_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Ok(current_dir) = std::env::current_dir() {
@@ -944,6 +1007,15 @@ fn hook_repository_lookup_paths() -> Vec<PathBuf> {
         {
             paths.push(git_dir.clone());
         }
+
+        if let Some(worktree_root) = worktree_root_from_git_dir(&git_dir)
+            && !paths
+                .iter()
+                .any(|existing| normalize_path(existing) == normalize_path(&worktree_root))
+        {
+            paths.push(worktree_root);
+        }
+
         if git_dir
             .file_name()
             .and_then(|name| name.to_str())
@@ -970,6 +1042,9 @@ fn find_hook_repository_from_context() -> Option<Repository> {
 }
 
 fn context_repo_ai_dir() -> Option<PathBuf> {
+    if let Some(repo) = find_hook_repository_from_context() {
+        return Some(repo_ai_dir(&repo));
+    }
     git_dir_from_context().map(|git_dir| git_dir.join("ai"))
 }
 
@@ -1096,7 +1171,7 @@ fn maybe_enable_rebase_hook_mask(repo: &Repository) {
 
     let managed_hooks_dir = managed_git_hooks_dir_for_repo(repo);
     let local_hooks_path =
-        read_hooks_path_from_config(&repo.path().join("config"), gix_config::Source::Local)
+        read_hooks_path_from_config(&repo_local_config_path(repo), gix_config::Source::Local)
             .map(|value| value.trim().to_string());
     if let Some(local_hooks_path) = local_hooks_path
         && normalize_path(Path::new(&local_hooks_path)) != normalize_path(&managed_hooks_dir)
@@ -1323,7 +1398,7 @@ fn is_post_commit_amend(repo: &Repository) -> bool {
 }
 
 fn pull_hook_state_path(repo: &Repository) -> PathBuf {
-    repo.path().join("ai").join(PULL_HOOK_STATE_FILE)
+    repo_ai_dir(repo).join(PULL_HOOK_STATE_FILE)
 }
 
 fn clear_pull_hook_state(repo: &Repository) {
@@ -1757,7 +1832,7 @@ fn maybe_handle_pull_post_rewrite(repo: &mut Repository) {
 }
 
 fn cherry_pick_state_path(repo: &Repository) -> PathBuf {
-    repo.path().join("ai").join("cherry_pick_hook_state")
+    repo_ai_dir(repo).join("cherry_pick_hook_state")
 }
 
 fn clear_cherry_pick_state(repo: &Repository) {
@@ -2438,32 +2513,20 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
-    struct EnvVarGuard {
-        key: &'static str,
-        old: Option<String>,
+    struct GlobalConfigOverrideGuard {
+        old: Option<PathBuf>,
     }
 
-    impl EnvVarGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let old = std::env::var(key).ok();
-            // SAFETY: tests below are marked serial to avoid concurrent env mutation.
-            unsafe {
-                std::env::set_var(key, value);
-            }
-            Self { key, old }
+    impl GlobalConfigOverrideGuard {
+        fn set(path: &Path) -> Self {
+            let old = set_test_global_git_config_override_path(Some(path.to_path_buf()));
+            Self { old }
         }
     }
 
-    impl Drop for EnvVarGuard {
+    impl Drop for GlobalConfigOverrideGuard {
         fn drop(&mut self) {
-            // SAFETY: tests below are marked serial to avoid concurrent env mutation.
-            unsafe {
-                if let Some(old) = &self.old {
-                    std::env::set_var(self.key, old);
-                } else {
-                    std::env::remove_var(self.key);
-                }
-            }
+            let _ = set_test_global_git_config_override_path(self.old.clone());
         }
     }
 
@@ -2502,7 +2565,7 @@ mod tests {
         let user_hooks = tmp.path().join("repo-user-hooks");
         fs::create_dir_all(&user_hooks).expect("failed to create user hooks dir");
 
-        let local_config = repo.path().join("config");
+        let local_config = repo_local_config_path(&repo);
         set_hooks_path_in_config(
             &local_config,
             gix_config::Source::Local,
@@ -2583,11 +2646,7 @@ mod tests {
         )
         .expect("failed to write global config");
 
-        let _home = EnvVarGuard::set("HOME", home.to_string_lossy().as_ref());
-        let _global = EnvVarGuard::set(
-            "GIT_CONFIG_GLOBAL",
-            global_config.to_string_lossy().as_ref(),
-        );
+        let _global = GlobalConfigOverrideGuard::set(&global_config);
 
         let repo = init_repo(&tmp.path().join("repo"));
         let _ =
@@ -2615,7 +2674,7 @@ mod tests {
         let user_hooks = tmp.path().join("user-hooks");
         fs::create_dir_all(&user_hooks).expect("failed to create user hooks dir");
 
-        let local_config = repo.path().join("config");
+        let local_config = repo_local_config_path(&repo);
         set_hooks_path_in_config(
             &local_config,
             gix_config::Source::Local,
@@ -2662,7 +2721,7 @@ mod tests {
     fn remove_repo_hooks_unsets_local_hooks_path_when_no_original_value() {
         let tmp = tempfile::tempdir().expect("failed to create tempdir");
         let repo = init_repo(&tmp.path().join("repo"));
-        let local_config = repo.path().join("config");
+        let local_config = repo_local_config_path(&repo);
 
         ensure_repo_hooks_installed(&repo, false).expect("ensure should succeed");
         assert!(
@@ -2688,7 +2747,7 @@ mod tests {
         fs::create_dir_all(&original_hooks).expect("failed to create original hooks dir");
         fs::create_dir_all(&replacement_hooks).expect("failed to create replacement hooks dir");
 
-        let local_config = repo.path().join("config");
+        let local_config = repo_local_config_path(&repo);
         set_hooks_path_in_config(
             &local_config,
             gix_config::Source::Local,
@@ -2721,7 +2780,7 @@ mod tests {
     fn remove_repo_hooks_ignores_unexpected_managed_path_from_state() {
         let tmp = tempfile::tempdir().expect("failed to create tempdir");
         let repo = init_repo(&tmp.path().join("repo"));
-        let repo_ai_dir = repo.path().join("ai");
+        let repo_ai_dir = repo_ai_dir(&repo);
         let survivor_file = repo_ai_dir.join("working_logs").join("survivor.json");
         fs::create_dir_all(
             survivor_file
@@ -2762,8 +2821,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("failed to create tempdir");
         let repo = init_repo(&tmp.path().join("repo"));
         let managed_hooks = managed_git_hooks_dir_for_repo(&repo);
-        fs::create_dir_all(repo.path().join("ai")).expect("failed to create repo .git/ai dir");
-        let repo_ai_path = repo.path().join("ai").join("other-hooks");
+        fs::create_dir_all(repo_ai_dir(&repo)).expect("failed to create repo .git/ai dir");
+        let repo_ai_path = repo_ai_dir(&repo).join("other-hooks");
         fs::create_dir_all(&repo_ai_path).expect("failed to create repo-managed hooks candidate");
         let nested_git_ai = tmp.path().join(".git-ai").join("hooks");
         let foreign_git_ai = tmp
@@ -3218,9 +3277,7 @@ mod tests {
         fs::create_dir_all(&isolated_home).expect("failed to create isolated home");
         let empty_global = isolated_home.join(".gitconfig");
         fs::write(&empty_global, "").expect("failed to write empty global config");
-        let _home = EnvVarGuard::set("HOME", isolated_home.to_string_lossy().as_ref());
-        let _global =
-            EnvVarGuard::set("GIT_CONFIG_GLOBAL", empty_global.to_string_lossy().as_ref());
+        let _global = GlobalConfigOverrideGuard::set(&empty_global);
 
         let repo = init_repo(&tmp.path().join("repo"));
 
@@ -3254,7 +3311,7 @@ mod tests {
         fs::write(user_hooks.join("pre-merge-commit"), "#!/bin/sh\nexit 0\n")
             .expect("failed to write pre-merge-commit hook");
 
-        let local_config = repo.path().join("config");
+        let local_config = repo_local_config_path(&repo);
         set_hooks_path_in_config(
             &local_config,
             gix_config::Source::Local,

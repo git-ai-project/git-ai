@@ -350,11 +350,15 @@ impl InternalDatabase {
     }
 
     /// Get database path: ~/.git-ai/internal/db
-    /// In test mode, can be overridden via GIT_AI_TEST_DB_PATH environment variable
+    /// In test mode, can be overridden via GIT_AI_TEST_DB_PATH environment variable.
+    /// We also support GITAI_TEST_DB_PATH because some git hook execution paths
+    /// may scrub custom GIT_* variables.
     fn database_path() -> Result<PathBuf, GitAiError> {
         // Allow test override via environment variable
         #[cfg(any(test, feature = "test-support"))]
-        if let Ok(test_path) = std::env::var("GIT_AI_TEST_DB_PATH") {
+        if let Ok(test_path) =
+            std::env::var("GIT_AI_TEST_DB_PATH").or_else(|_| std::env::var("GITAI_TEST_DB_PATH"))
+        {
             return Ok(PathBuf::from(test_path));
         }
 
