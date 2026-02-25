@@ -408,8 +408,40 @@ impl TestRepo {
                 e
             )
         })?;
+        let xdg_data_home = self.test_home.join(".local").join("share");
+        fs::create_dir_all(&xdg_data_home).map_err(|e| {
+            format!(
+                "failed to create XDG data dir for gt command {}: {}",
+                xdg_data_home.display(),
+                e
+            )
+        })?;
         command.env("HOME", &self.test_home);
         command.env("XDG_CONFIG_HOME", &xdg_config_home);
+        command.env("XDG_DATA_HOME", &xdg_data_home);
+
+        #[cfg(windows)]
+        {
+            let local_app_data = self.test_home.join("AppData").join("Local");
+            let app_data = self.test_home.join("AppData").join("Roaming");
+            fs::create_dir_all(&local_app_data).map_err(|e| {
+                format!(
+                    "failed to create LOCALAPPDATA dir for gt command {}: {}",
+                    local_app_data.display(),
+                    e
+                )
+            })?;
+            fs::create_dir_all(&app_data).map_err(|e| {
+                format!(
+                    "failed to create APPDATA dir for gt command {}: {}",
+                    app_data.display(),
+                    e
+                )
+            })?;
+            command.env("USERPROFILE", &self.test_home);
+            command.env("LOCALAPPDATA", &local_app_data);
+            command.env("APPDATA", &app_data);
+        }
 
         if let Some(patch) = &self.config_patch
             && let Ok(patch_json) = serde_json::to_string(patch)
@@ -853,6 +885,9 @@ impl TestRepo {
         fs::create_dir_all(&shim_dir)
             .map_err(|e| format!("failed to create gt shim dir {}: {}", shim_dir.display(), e))?;
 
+        #[cfg(windows)]
+        let git_link = shim_dir.join("git.exe");
+        #[cfg(not(windows))]
         let git_link = shim_dir.join("git");
         if !git_link.exists() {
             // Route Graphite's internal git invocations through git-ai so attribution
@@ -868,6 +903,9 @@ impl TestRepo {
             })?;
         }
 
+        #[cfg(windows)]
+        let git_ai_link = shim_dir.join("git-ai.exe");
+        #[cfg(not(windows))]
         let git_ai_link = shim_dir.join("git-ai");
         if !git_ai_link.exists() {
             create_file_symlink(get_binary_path(), &git_ai_link).map_err(|e| {
