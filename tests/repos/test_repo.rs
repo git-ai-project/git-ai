@@ -14,10 +14,16 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
+use std::process::Output;
+use std::process::Stdio;
 use std::sync::OnceLock;
 use std::time::Duration;
+use std::time::Instant;
 
 use super::test_file::TestFile;
+
+const GT_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
+const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GitTestMode {
@@ -455,9 +461,7 @@ impl TestRepo {
             command.env(key, value);
         }
 
-        let output = command
-            .output()
-            .unwrap_or_else(|_| panic!("Failed to execute gt command: {:?}", args));
+        let output = run_command_with_timeout(&mut command, args, GT_COMMAND_TIMEOUT, "gt")?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -971,6 +975,60 @@ fn should_retry_remove_dir_error(err: &std::io::Error) -> bool {
     }
 
     false
+}
+
+fn run_command_with_timeout(
+    command: &mut Command,
+    args: &[&str],
+    timeout: Duration,
+    command_name: &str,
+) -> Result<Output, String> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            format!(
+                "failed to execute {} command {:?}: {}",
+                command_name, args, e
+            )
+        })?;
+
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "{} command timed out after {}s: {:?}",
+                        command_name,
+                        timeout.as_secs(),
+                        args
+                    ));
+                }
+                std::thread::sleep(COMMAND_POLL_INTERVAL);
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "failed while waiting for {} command {:?}: {}",
+                    command_name, args, e
+                ));
+            }
+        }
+    }
+
+    child.wait_with_output().map_err(|e| {
+        format!(
+            "failed to capture {} output {:?}: {}",
+            command_name, args, e
+        )
+    })
 }
 
 #[derive(Debug)]
