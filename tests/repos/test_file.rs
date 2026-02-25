@@ -101,6 +101,17 @@ pub struct TestFile<'a> {
 }
 
 impl<'a> TestFile<'a> {
+    fn git_path_for(repo: &super::test_repo::TestRepo, file_path: &std::path::Path) -> String {
+        file_path
+            .strip_prefix(repo.path())
+            .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| file_path.to_string_lossy().to_string())
+    }
+
+    fn git_path(&self) -> String {
+        Self::git_path_for(self.repo, &self.file_path)
+    }
+
     pub fn new_with_filename(
         file_path: PathBuf,
         lines: Vec<ExpectedLine>,
@@ -135,8 +146,8 @@ impl<'a> TestFile<'a> {
         }
 
         // Run blame to get authorship
-        let filename = file_path.to_str().expect("valid path");
-        let blame_result = repo.git_ai(&["blame", filename]);
+        let filename = Self::git_path_for(repo, &file_path);
+        let blame_result = repo.git_ai(&["blame", &filename]);
 
         let lines = if let Ok(blame_output) = blame_result {
             // Parse blame output to get authorship for each line
@@ -229,10 +240,9 @@ impl<'a> TestFile<'a> {
     }
 
     pub fn assert_blame_snapshot(&self) {
-        let filename = self.file_path.to_str().expect("valid path");
         let blame_output = self
             .repo
-            .git_ai(&["blame", filename])
+            .git_ai(&["blame", &self.git_path()])
             .expect("git-ai blame should succeed");
 
         let formatted = self.format_blame_for_snapshot(&blame_output);
@@ -243,10 +253,10 @@ impl<'a> TestFile<'a> {
         let expected_lines: Vec<ExpectedLine> = lines.into_iter().map(|l| l.into()).collect();
 
         // Get blame output
-        let filename = self.file_path.to_str().expect("valid path");
+        let git_path = self.git_path();
         let blame_output = self
             .repo
-            .git_ai(&["blame", filename])
+            .git_ai(&["blame", &git_path])
             .expect("git-ai blame should succeed");
 
         // Parse the blame output to get (author, content) for each line
@@ -317,10 +327,9 @@ impl<'a> TestFile<'a> {
         let expected_lines: Vec<ExpectedLine> = lines.into_iter().map(|l| l.into()).collect();
 
         // Get blame output
-        let filename = self.file_path.to_str().expect("valid path");
         let blame_output = self
             .repo
-            .git_ai(&["blame", filename])
+            .git_ai(&["blame", &self.git_path()])
             .expect("git-ai blame should succeed");
 
         // Parse the blame output and filter out uncommitted lines
@@ -447,10 +456,9 @@ impl<'a> TestFile<'a> {
     /// Assert that the file at the given path matches the expected contents and authorship
     pub fn assert_blame_contents_expected(&self) {
         // Get blame output
-        let filename = self.file_path.to_str().expect("valid path");
         let blame_output = self
             .repo
-            .git_ai(&["blame", filename])
+            .git_ai(&["blame", &self.git_path()])
             .expect("git-ai blame should succeed");
 
         // println!(

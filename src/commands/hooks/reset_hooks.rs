@@ -1,9 +1,16 @@
 use crate::{
+    authorship::authorship_log::LineRange,
     authorship::working_log::CheckpointKind,
     commands::hooks::commit_hooks,
-    git::{cli_parser::ParsedGitInvocation, repository::Repository, rewrite_log::ResetKind},
+    git::{
+        cli_parser::ParsedGitInvocation,
+        refs::{get_reference_as_authorship_log_v3, notes_add},
+        repository::Repository,
+        rewrite_log::ResetKind,
+    },
     utils::debug_log,
 };
+use std::collections::HashSet;
 
 pub fn pre_reset_hook(parsed_args: &ParsedGitInvocation, repository: &mut Repository) {
     // Get the human author for the checkpoint
@@ -112,6 +119,7 @@ pub fn post_reset_hook(
 
     let keep = parsed_args.has_command_flag("--keep");
     let merge = parsed_args.has_command_flag("--merge");
+    let is_hard_reset = reset_kind == ResetKind::Hard;
 
     // Handle different reset modes
     // Note: Git does not allow --soft or --hard with pathspecs
@@ -123,7 +131,8 @@ pub fn post_reset_hook(
         || !has_reset_mode_flag(parsed_args)
     // default is --mixed
     {
-        if !pathspecs.is_empty() {
+        let head_moved = old_head_sha != new_head_sha;
+        if !pathspecs.is_empty() && !head_moved {
             // Pathspec reset: HEAD doesn't move, but specific files are reset
             handle_reset_pathspec_preserve_working_dir(
                 repository,
@@ -151,13 +160,22 @@ pub fn post_reset_hook(
             .storage
             .append_rewrite_event(crate::git::rewrite_log::RewriteLogEvent::Reset {
                 reset: crate::git::rewrite_log::ResetEvent::new(
-                    reset_kind,
+                    reset_kind.clone(),
                     keep,
                     merge,
                     new_head_sha.to_string(),
                     old_head_sha.to_string(),
                 ),
             });
+
+    if pathspecs.is_empty() && !is_hard_reset {
+        maybe_remap_authorship_for_keep_reset(
+            repository,
+            &old_head_sha,
+            &new_head_sha,
+            &human_author,
+        );
+    }
 }
 
 /// Handle --hard reset: delete working log since all uncommitted work is discarded
@@ -181,22 +199,25 @@ fn handle_reset_preserve_working_dir(
     new_head_sha: &str,
     human_author: &str,
 ) {
-    // Sanity check: new HEAD should equal target after reset
+    // Use the actual post-reset HEAD as authoritative target.
+    // Some wrappers/porcelain tools can invoke reset with args that are hard to parse
+    // into the intended tree-ish; relying on new_head keeps reconstruction correct.
     if new_head_sha != target_commit_sha {
         debug_log(&format!(
             "Warning: new HEAD ({}) != target commit ({})",
             new_head_sha, target_commit_sha
         ));
     }
+    let effective_target_commit = new_head_sha;
 
     // No-op if resetting to same commit
-    if old_head_sha == target_commit_sha {
+    if old_head_sha == effective_target_commit {
         debug_log("Reset to same commit, no authorship changes needed");
         return;
     }
 
     // Check direction: are we resetting backward or forward?
-    let is_backward = is_ancestor(repository, target_commit_sha, old_head_sha);
+    let is_backward = is_ancestor(repository, effective_target_commit, old_head_sha);
 
     if !is_backward {
         // Forward reset or unrelated history - treat as no-op for authorship
@@ -214,7 +235,7 @@ fn handle_reset_preserve_working_dir(
     // Backward reset: need to reconstruct working log
     match crate::authorship::rebase_authorship::reconstruct_working_log_after_reset(
         repository,
-        target_commit_sha,
+        effective_target_commit,
         old_head_sha,
         human_author,
         None, // No user-specified pathspecs for regular resets
@@ -222,7 +243,7 @@ fn handle_reset_preserve_working_dir(
         Ok(_) => {
             debug_log(&format!(
                 "✓ Successfully reconstructed working log after reset to {}",
-                target_commit_sha
+                effective_target_commit
             ));
         }
         Err(e) => {
@@ -343,6 +364,211 @@ fn handle_reset_pathspec_preserve_working_dir(
         "✓ Updated working log for pathspec reset: {} pathspec checkpoints, {} non-pathspec checkpoints preserved",
         pathspec_count, non_pathspec_count
     ));
+}
+
+fn maybe_remap_authorship_for_keep_reset(
+    repository: &Repository,
+    old_head_sha: &str,
+    new_head_sha: &str,
+    human_author: &str,
+) {
+    if is_rebase_in_progress(repository) {
+        debug_log("Skipping reset keep remap during rebase (handled by rebase hooks)");
+        return;
+    }
+
+    if old_head_sha == new_head_sha {
+        return;
+    }
+
+    if get_reference_as_authorship_log_v3(repository, new_head_sha).is_ok() {
+        return;
+    }
+
+    let mut old_log = match get_reference_as_authorship_log_v3(repository, old_head_sha) {
+        Ok(log) => log,
+        Err(_) => return,
+    };
+
+    // Reset rewrites that land on a sibling commit (neither commit is ancestor of the other)
+    // behave like amend-style rewrites and need attribution transformation, not raw note copy.
+    let new_is_ancestor_of_old = is_ancestor(repository, new_head_sha, old_head_sha);
+    let old_is_ancestor_of_new = is_ancestor(repository, old_head_sha, new_head_sha);
+    let is_sibling_rewrite = !new_is_ancestor_of_old && !old_is_ancestor_of_new;
+    if is_sibling_rewrite {
+        if crate::authorship::rebase_authorship::rewrite_authorship_after_commit_amend(
+            repository,
+            old_head_sha,
+            new_head_sha,
+            human_author.to_string(),
+        )
+        .is_ok()
+        {
+            if let Err(err) =
+                strip_ai_attributions_for_changed_lines(repository, old_head_sha, new_head_sha)
+            {
+                debug_log(&format!(
+                    "Failed to strip changed-line AI attribution for reset rewrite {} -> {}: {}",
+                    old_head_sha, new_head_sha, err
+                ));
+            }
+            debug_log(&format!(
+                "Rewrote authorship for reset rewrite from {} to {} via amend flow",
+                old_head_sha, new_head_sha
+            ));
+            return;
+        }
+    }
+
+    if !commits_are_equivalent_for_authorship_remap(repository, old_head_sha, new_head_sha) {
+        debug_log(&format!(
+            "Skipping reset keep remap: {} and {} are not equivalent rewrites",
+            old_head_sha, new_head_sha
+        ));
+        return;
+    }
+
+    old_log.metadata.base_commit_sha = new_head_sha.to_string();
+    match old_log.serialize_to_string() {
+        Ok(content) => {
+            if let Err(err) = notes_add(repository, new_head_sha, &content) {
+                debug_log(&format!(
+                    "Failed to remap authorship note on reset keep from {} to {}: {}",
+                    old_head_sha, new_head_sha, err
+                ));
+            } else {
+                debug_log(&format!(
+                    "Remapped authorship note on reset keep from {} to {}",
+                    old_head_sha, new_head_sha
+                ));
+            }
+        }
+        Err(err) => {
+            debug_log(&format!(
+                "Failed to serialize remapped note for {} after reset keep: {}",
+                new_head_sha, err
+            ));
+        }
+    }
+}
+
+fn commits_are_equivalent_for_authorship_remap(
+    repository: &Repository,
+    old_commit_sha: &str,
+    new_commit_sha: &str,
+) -> bool {
+    let old_commit = match repository.find_commit(old_commit_sha.to_string()) {
+        Ok(commit) => commit,
+        Err(_) => return false,
+    };
+    let new_commit = match repository.find_commit(new_commit_sha.to_string()) {
+        Ok(commit) => commit,
+        Err(_) => return false,
+    };
+
+    if old_commit.summary().ok() != new_commit.summary().ok() {
+        return false;
+    }
+
+    let old_parent = match old_commit.parent(0) {
+        Ok(parent) => parent.id(),
+        Err(_) => return false,
+    };
+    let new_parent = match new_commit.parent(0) {
+        Ok(parent) => parent.id(),
+        Err(_) => return false,
+    };
+
+    let mut old_changed = match repository.diff_changed_files(&old_parent, old_commit_sha) {
+        Ok(files) => files,
+        Err(_) => return false,
+    };
+    let mut new_changed = match repository.diff_changed_files(&new_parent, new_commit_sha) {
+        Ok(files) => files,
+        Err(_) => return false,
+    };
+
+    old_changed.sort();
+    new_changed.sort();
+    if old_changed != new_changed || old_changed.is_empty() {
+        return false;
+    }
+
+    old_changed.into_iter().all(|path| {
+        blob_oid_at_commit_path(repository, old_commit_sha, &path)
+            == blob_oid_at_commit_path(repository, new_commit_sha, &path)
+    })
+}
+
+fn blob_oid_at_commit_path(
+    repository: &Repository,
+    commit_sha: &str,
+    file_path: &str,
+) -> Option<String> {
+    let commit = repository.find_commit(commit_sha.to_string()).ok()?;
+    let tree = commit.tree().ok()?;
+    tree.get_path(std::path::Path::new(file_path))
+        .ok()
+        .map(|entry| entry.id())
+}
+
+fn strip_ai_attributions_for_changed_lines(
+    repository: &Repository,
+    old_head_sha: &str,
+    new_head_sha: &str,
+) -> Result<(), crate::error::GitAiError> {
+    let changed_lines_by_file = repository.diff_added_lines(old_head_sha, new_head_sha, None)?;
+    if changed_lines_by_file.is_empty() {
+        return Ok(());
+    }
+
+    let mut new_log = match get_reference_as_authorship_log_v3(repository, new_head_sha) {
+        Ok(log) => log,
+        Err(_) => return Ok(()),
+    };
+
+    for file_attestation in &mut new_log.attestations {
+        let Some(lines) = changed_lines_by_file.get(&file_attestation.file_path) else {
+            continue;
+        };
+
+        let mut sorted_lines = lines.clone();
+        sorted_lines.sort_unstable();
+        sorted_lines.dedup();
+        let remove_ranges = LineRange::compress_lines(&sorted_lines);
+
+        for entry in &mut file_attestation.entries {
+            entry.remove_line_ranges(&remove_ranges);
+        }
+        file_attestation
+            .entries
+            .retain(|entry| !entry.line_ranges.is_empty());
+    }
+
+    new_log
+        .attestations
+        .retain(|file_attestation| !file_attestation.entries.is_empty());
+
+    let used_hashes: HashSet<String> = new_log
+        .attestations
+        .iter()
+        .flat_map(|file_attestation| {
+            file_attestation
+                .entries
+                .iter()
+                .map(|entry| entry.hash.clone())
+        })
+        .collect();
+    new_log
+        .metadata
+        .prompts
+        .retain(|prompt_hash, _| used_hashes.contains(prompt_hash));
+
+    let content = new_log.serialize_to_string().map_err(|_| {
+        crate::error::GitAiError::Generic("Failed to serialize authorship log".to_string())
+    })?;
+    notes_add(repository, new_head_sha, &content)?;
+    Ok(())
 }
 
 /// Resolve tree-ish to commit SHA
@@ -547,4 +773,9 @@ fn has_reset_mode_flag(parsed_args: &ParsedGitInvocation) -> bool {
 /// Check if pathspec-from-file is present
 fn has_pathspec_from_file(parsed_args: &ParsedGitInvocation) -> bool {
     get_pathspec_from_file_path(parsed_args).is_some()
+}
+
+fn is_rebase_in_progress(repository: &Repository) -> bool {
+    repository.path().join("rebase-merge").is_dir()
+        || repository.path().join("rebase-apply").is_dir()
 }

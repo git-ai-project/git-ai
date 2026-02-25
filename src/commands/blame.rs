@@ -32,6 +32,9 @@ pub struct BlameHunk {
     pub orig_range: (u32, u32),
     /// Commit SHA that introduced this hunk
     pub commit_sha: String,
+    /// File path at the blamed commit for this hunk.
+    /// Needed to resolve authorship notes across renames.
+    pub source_path: Option<String>,
     /// Abbreviated commit SHA
     #[allow(dead_code)]
     pub abbrev_sha: String,
@@ -497,6 +500,7 @@ impl Repository {
             committer_time: i64,
             committer_tz: String,
             boundary: bool,
+            filename: String,
         }
 
         let mut hunks: Vec<BlameHunk> = Vec::new();
@@ -566,6 +570,10 @@ impl Repository {
                 cur_meta.boundary = true;
                 continue;
             }
+            if let Some(rest) = line.strip_prefix("filename ") {
+                cur_meta.filename = rest.to_string();
+                continue;
+            }
 
             // Header line: either 4 fields (new hunk) or 3 fields (continuation)
             let mut parts = line.split_whitespace();
@@ -614,6 +622,11 @@ impl Repository {
                         range: (start, end),
                         orig_range: (orig_start, orig_end),
                         commit_sha: prev_sha,
+                        source_path: if cur_meta.filename.is_empty() {
+                            None
+                        } else {
+                            Some(cur_meta.filename.clone())
+                        },
                         abbrev_sha: abbrev,
                         original_author: cur_meta.author.clone(),
                         author_email: cur_meta.author_mail.clone(),
@@ -683,6 +696,11 @@ impl Repository {
                 range: (start, end),
                 orig_range: (orig_start, orig_end),
                 commit_sha: prev_sha,
+                source_path: if cur_meta.filename.is_empty() {
+                    None
+                } else {
+                    Some(cur_meta.filename.clone())
+                },
                 abbrev_sha: abbrev,
                 original_author: cur_meta.author.clone(),
                 author_email: cur_meta.author_mail.clone(),
@@ -722,6 +740,7 @@ impl Repository {
         let mut result_hunks: Vec<BlameHunk> = Vec::new();
 
         for hunk in hunks {
+            let lookup_file_path = hunk.source_path.as_deref().unwrap_or(file_path);
             // Get or fetch the authorship log for this commit
             let authorship_log = if let Some(cached) = commit_authorship_cache.get(&hunk.commit_sha)
             {
@@ -744,7 +763,7 @@ impl Repository {
                     let human_author = if let Some((_author, _prompt_hash, Some(prompt_record))) =
                         authorship_log.get_line_attribution(
                             self,
-                            file_path,
+                            lookup_file_path,
                             orig_line_num,
                             &mut foreign_prompts_cache,
                         ) {
@@ -834,6 +853,7 @@ fn overlay_ai_authorship(
     let mut foreign_prompts_cache: HashMap<String, Option<PromptRecord>> = HashMap::new();
 
     for hunk in blame_hunks {
+        let lookup_file_path = hunk.source_path.as_deref().unwrap_or(file_path);
         // Check if we've already looked up this commit's authorship
         let authorship_log = if let Some(cached) = commit_authorship_cache.get(&hunk.commit_sha) {
             cached.clone()
@@ -855,7 +875,7 @@ fn overlay_ai_authorship(
 
                 if let Some((author, prompt_hash, prompt)) = authorship_log.get_line_attribution(
                     repo,
-                    file_path,
+                    lookup_file_path,
                     orig_line_num,
                     &mut foreign_prompts_cache,
                 ) {

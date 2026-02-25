@@ -1627,7 +1627,14 @@ pub fn reconstruct_working_log_after_reset(
         None,
     )?;
     let commits_in_range = range.all_commits();
-    let pathspecs = filter_pathspecs_to_ai_touched_files(repo, &commits_in_range, &pathspecs)?;
+    // Detached-head/reset rewrite flows can produce an empty range here even when old_head
+    // itself carries the AI attributions we need to preserve.
+    let commits_for_ai_filter = if commits_in_range.is_empty() {
+        vec![old_head_sha.to_string()]
+    } else {
+        commits_in_range
+    };
+    let pathspecs = filter_pathspecs_to_ai_touched_files(repo, &commits_for_ai_filter, &pathspecs)?;
 
     if pathspecs.is_empty() {
         debug_log("No files changed between commits, nothing to reconstruct");

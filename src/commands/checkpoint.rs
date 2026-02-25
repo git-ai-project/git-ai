@@ -173,8 +173,20 @@ pub fn run(
             && !has_initial_attributions
             && !Config::get().get_feature_flags().inter_commit_move
         {
-            debug_log("No AI edits,in pre-commit checkpoint, skipping");
-            return Ok((0, 0, 0));
+            // If the staged diff touches files that already contain AI-authored lines in HEAD,
+            // we still need a checkpoint to preserve those attributions through human edits.
+            let staged_files = repo.get_staged_filenames().unwrap_or_default();
+            let base_commit_for_blame = (base_commit != "initial").then_some(base_commit.clone());
+            let has_ai_in_staged_head = staged_files.iter().any(|file| {
+                head_file_has_ai_attribution(repo, file, base_commit_for_blame.clone())
+            });
+
+            if !has_ai_in_staged_head {
+                debug_log("No AI edits,in pre-commit checkpoint, skipping");
+                return Ok((0, 0, 0));
+            }
+
+            debug_log("Pre-commit touched staged files with AI attribution in HEAD; continuing");
         }
     }
 
@@ -844,6 +856,30 @@ fn get_previous_content_from_head(
     }
 }
 
+fn head_file_has_ai_attribution(
+    repo: &Repository,
+    file_path: &str,
+    newest_commit: Option<String>,
+) -> bool {
+    let mut ai_blame_opts = GitAiBlameOptions::default();
+    #[allow(clippy::field_reassign_with_default)]
+    {
+        ai_blame_opts.no_output = true;
+        ai_blame_opts.return_human_authors_as_human = true;
+        ai_blame_opts.use_prompt_hashes_as_names = true;
+        ai_blame_opts.newest_commit = newest_commit;
+        ai_blame_opts.oldest_date = Some(*OLDEST_AI_BLAME_DATE);
+    }
+
+    repo.blame(file_path, &ai_blame_opts)
+        .map(|(line_authors, _)| {
+            line_authors
+                .values()
+                .any(|author| author != &CheckpointKind::Human.to_str())
+        })
+        .unwrap_or(false)
+}
+
 fn working_log_entry_has_non_human_attribution(entry: &WorkingLogEntry) -> bool {
     entry
         .line_attributions
@@ -909,7 +945,11 @@ fn get_checkpoint_entry_for_file(
         .unwrap_or_default();
 
     let previous_state = previous_file_state_by_file.get(&file_path).cloned();
-    let has_prior_ai_edits = ai_touched_files.contains(&file_path);
+    let mut has_prior_ai_edits = ai_touched_files.contains(&file_path);
+    if kind == CheckpointKind::Human && !has_prior_ai_edits && initial_attrs_for_file.is_empty() {
+        has_prior_ai_edits =
+            head_file_has_ai_attribution(&repo, &file_path, head_commit_sha.as_ref().clone());
+    }
 
     // Pre-commit fast path:
     // If this file has no prior AI attribution and no INITIAL attribution,
@@ -994,7 +1034,10 @@ fn get_checkpoint_entry_for_file(
             ai_blame_opts.newest_commit = head_commit_sha.as_ref().clone();
             ai_blame_opts.oldest_date = Some(*OLDEST_AI_BLAME_DATE);
         }
-        let ai_blame = if feature_flag_inter_commit_move {
+        let should_run_blame =
+            feature_flag_inter_commit_move || kind != CheckpointKind::Human || has_prior_ai_edits;
+
+        let ai_blame = if should_run_blame {
             repo.blame(&file_path, &ai_blame_opts).ok()
         } else {
             // When skipping blame, default all lines to "human"

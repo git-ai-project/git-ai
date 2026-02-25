@@ -11,6 +11,7 @@ use git2::Repository;
 use insta::assert_debug_snapshot;
 use rand::Rng;
 use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::OnceLock;
@@ -379,6 +380,68 @@ impl TestRepo {
 
     pub fn git(&self, args: &[&str]) -> Result<String, String> {
         self.git_with_env(args, &[], None)
+    }
+
+    pub fn gt(&self, args: &[&str]) -> Result<String, String> {
+        self.gt_with_env(args, &[])
+    }
+
+    pub fn gt_with_env(&self, args: &[&str], envs: &[(&str, &str)]) -> Result<String, String> {
+        let mut command = Command::new("gt");
+        command.args(args).current_dir(&self.path);
+        self.configure_command_env(&mut command);
+        self.configure_gt_path(&mut command)?;
+
+        // Keep Graphite config hermetic so local machine config does not affect tests.
+        fs::create_dir_all(&self.test_home).map_err(|e| {
+            format!(
+                "failed to create test home for gt command {}: {}",
+                self.test_home.display(),
+                e
+            )
+        })?;
+        let xdg_config_home = self.test_home.join(".config");
+        fs::create_dir_all(&xdg_config_home).map_err(|e| {
+            format!(
+                "failed to create XDG config dir for gt command {}: {}",
+                xdg_config_home.display(),
+                e
+            )
+        })?;
+        command.env("HOME", &self.test_home);
+        command.env("XDG_CONFIG_HOME", &xdg_config_home);
+
+        if let Some(patch) = &self.config_patch
+            && let Ok(patch_json) = serde_json::to_string(patch)
+        {
+            command.env("GIT_AI_TEST_CONFIG_PATCH", patch_json);
+        }
+
+        command.env("GIT_AI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
+
+        for (key, value) in envs {
+            command.env(key, value);
+        }
+
+        let output = command
+            .output()
+            .unwrap_or_else(|_| panic!("Failed to execute gt command: {:?}", args));
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let combined = if stdout.is_empty() {
+            stderr.clone()
+        } else if stderr.is_empty() {
+            stdout
+        } else {
+            format!("{}{}", stdout, stderr)
+        };
+
+        if output.status.success() {
+            Ok(combined)
+        } else {
+            Err(combined)
+        }
     }
 
     /// Run a git command from a working directory (without using -C flag)
@@ -772,6 +835,57 @@ impl TestRepo {
         let file_path = self.path.join(filename);
         fs::read_to_string(&file_path).ok()
     }
+
+    fn configure_gt_path(&self, command: &mut Command) -> Result<(), String> {
+        let shim_dir = self.ensure_gt_git_shim()?;
+        let mut path_entries = vec![shim_dir];
+        if let Some(existing_path) = std::env::var_os("PATH") {
+            path_entries.extend(std::env::split_paths(&existing_path));
+        }
+        let joined = std::env::join_paths(path_entries)
+            .map_err(|e| format!("failed to build PATH for gt command: {}", e))?;
+        command.env("PATH", joined);
+        Ok(())
+    }
+
+    fn ensure_gt_git_shim(&self) -> Result<PathBuf, String> {
+        let shim_dir = self.test_home.join("gt-shim-bin");
+        fs::create_dir_all(&shim_dir)
+            .map_err(|e| format!("failed to create gt shim dir {}: {}", shim_dir.display(), e))?;
+
+        let git_link = shim_dir.join("git");
+        if !git_link.exists() {
+            let target_git = if self.git_mode.uses_wrapper() {
+                get_binary_path().clone()
+            } else {
+                find_real_git_binary()
+            };
+            create_file_symlink(&target_git, &git_link).map_err(|e| {
+                format!(
+                    "failed to create gt shim link {} -> {}: {}",
+                    git_link.display(),
+                    target_git.display(),
+                    e
+                )
+            })?;
+        }
+
+        if self.git_mode.uses_wrapper() {
+            let git_ai_link = shim_dir.join("git-ai");
+            if !git_ai_link.exists() {
+                create_file_symlink(get_binary_path(), &git_ai_link).map_err(|e| {
+                    format!(
+                        "failed to create gt shim link {} -> {}: {}",
+                        git_ai_link.display(),
+                        get_binary_path().display(),
+                        e
+                    )
+                })?;
+            }
+        }
+
+        Ok(shim_dir)
+    }
 }
 
 impl Drop for TestRepo {
@@ -844,6 +958,8 @@ impl NewCommit {
 
 static COMPILED_BINARY: OnceLock<PathBuf> = OnceLock::new();
 static DEFAULT_BRANCH_NAME: OnceLock<String> = OnceLock::new();
+static GT_CLI_AVAILABLE: OnceLock<bool> = OnceLock::new();
+static REAL_GIT_BINARY: OnceLock<PathBuf> = OnceLock::new();
 
 fn get_default_branch_name() -> String {
     // Since TestRepo::new() explicitly sets the default branch to "main" via symbolic-ref,
@@ -894,4 +1010,102 @@ fn compile_binary() -> PathBuf {
 
 pub(crate) fn get_binary_path() -> &'static PathBuf {
     COMPILED_BINARY.get_or_init(compile_binary)
+}
+
+pub fn is_gt_cli_available() -> bool {
+    *GT_CLI_AVAILABLE.get_or_init(|| {
+        Command::new("gt")
+            .arg("--version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    })
+}
+
+pub fn require_gt_or_skip() -> Option<String> {
+    if is_gt_cli_available() {
+        return None;
+    }
+
+    if std::env::var("CI").is_ok() {
+        panic!("gt CLI is required in CI but was not found in PATH");
+    }
+
+    Some("gt CLI not available locally; skipping graphite tests".to_string())
+}
+
+fn find_real_git_binary() -> PathBuf {
+    REAL_GIT_BINARY
+        .get_or_init(|| {
+            if let Ok(override_path) = std::env::var("GIT_AI_TEST_REAL_GIT")
+                && !override_path.trim().is_empty()
+            {
+                return PathBuf::from(override_path);
+            }
+
+            let candidates = find_git_candidates();
+            for candidate in candidates {
+                if candidate_is_git_ai_wrapper(&candidate) {
+                    continue;
+                }
+                return candidate;
+            }
+
+            PathBuf::from("git")
+        })
+        .clone()
+}
+
+fn find_git_candidates() -> Vec<PathBuf> {
+    #[cfg(windows)]
+    let command_result = Command::new("where").arg("git").output();
+    #[cfg(not(windows))]
+    let command_result = Command::new("which").args(["-a", "git"]).output();
+
+    let Ok(output) = command_result else {
+        return vec![PathBuf::from("git")];
+    };
+    if !output.status.success() {
+        return vec![PathBuf::from("git")];
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut out = Vec::new();
+    for line in stdout.lines() {
+        let path = line.trim();
+        if path.is_empty() {
+            continue;
+        }
+        out.push(PathBuf::from(path));
+    }
+
+    if out.is_empty() {
+        out.push(PathBuf::from("git"));
+    }
+    out
+}
+
+fn candidate_is_git_ai_wrapper(candidate: &Path) -> bool {
+    let is_wrapper_path = candidate
+        .to_string_lossy()
+        .contains(".git-ai-local-dev/gitwrap")
+        || candidate
+            .file_name()
+            .map(|name| name.to_string_lossy().contains("git-ai"))
+            .unwrap_or(false);
+    if is_wrapper_path {
+        return true;
+    }
+
+    let Ok(canonical) = candidate.canonicalize() else {
+        return false;
+    };
+
+    canonical
+        .file_name()
+        .map(|name| name.to_string_lossy().starts_with("git-ai"))
+        .unwrap_or(false)
+        || canonical
+            .to_string_lossy()
+            .contains(".git-ai-local-dev/gitwrap")
 }

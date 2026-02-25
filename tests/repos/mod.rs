@@ -1,3 +1,4 @@
+pub mod graphite_test_harness;
 pub mod test_file;
 pub mod test_repo;
 
