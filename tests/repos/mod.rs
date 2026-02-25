@@ -323,3 +323,21 @@ macro_rules! worktree_test_wrappers {
         }
     };
 }
+
+#[macro_export]
+macro_rules! reuse_tests_in_worktree {
+    (
+        $( $test_name:ident ),+ $(,)?
+    ) => {
+        paste::paste! {
+            $(
+                #[test]
+                fn [<$test_name _in_worktree>]() {
+                    $crate::repos::test_repo::with_worktree_mode(|| {
+                        $test_name();
+                    })
+                }
+            )+
+        }
+    };
+}

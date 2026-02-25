@@ -997,3 +997,24 @@ fn test_stash_apply_reset_apply_again() {
         "Expected AI prompts in authorship log after multiple apply/reset cycles"
     );
 }
+
+reuse_tests_in_worktree!(
+    test_stash_pop_with_ai_attribution,
+    test_stash_apply_with_ai_attribution,
+    test_stash_apply_named_reference,
+    test_stash_pop_with_existing_stack_entries,
+    test_stash_multiple_files,
+    test_stash_with_existing_initial_attributions,
+    test_stash_pop_default_reference,
+    test_stash_pop_empty_repo,
+    test_stash_mixed_human_and_ai,
+    test_stash_push_with_pathspec_single_file,
+    test_stash_push_with_pathspec_directory,
+    test_stash_push_multiple_pathspecs,
+    test_stash_pop_with_conflict,
+    test_stash_mixed_staged_and_unstaged,
+    test_stash_pop_onto_head_with_ai_changes,
+    test_stash_pop_across_branches,
+    test_stash_pop_across_branches_with_conflict,
+    test_stash_apply_reset_apply_again,
+);

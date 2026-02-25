@@ -1271,3 +1271,16 @@ fn test_ai_edits_file_with_spaces_in_filename() {
         "Line 3".human(),
     ]);
 }
+
+reuse_tests_in_worktree!(
+    test_simple_additions_empty_repo,
+    test_simple_additions_with_base_commit,
+    test_simple_additions_on_top_of_ai_contributions,
+    test_simple_additions_new_file_not_git_added,
+    test_ai_human_interleaved_line_attribution,
+    test_simple_ai_then_human_deletion,
+    test_multiple_ai_checkpoints_with_human_deletions,
+    test_complex_mixed_additions_and_deletions,
+    test_partial_staging_filters_unstaged_lines,
+    test_human_stages_some_ai_lines,
+);

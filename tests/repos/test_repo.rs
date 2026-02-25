@@ -8,8 +8,9 @@ use git_ai::git::repo_storage::PersistedWorkingLog;
 use git_ai::git::repository as GitAiRepository;
 use git_ai::observability::wrapper_performance_targets::BenchmarkResult;
 use git2::Repository;
-use insta::assert_debug_snapshot;
+use insta::{Settings, assert_debug_snapshot};
 use rand::Rng;
+use std::cell::Cell;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -50,6 +51,34 @@ impl GitTestMode {
     }
 }
 
+thread_local! {
+    static WORKTREE_MODE: Cell<bool> = const { Cell::new(false) };
+}
+
+pub fn with_worktree_mode<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    WORKTREE_MODE.with(|flag| {
+        let previous = flag.replace(true);
+
+        struct Reset<'a> {
+            flag: &'a Cell<bool>,
+            previous: bool,
+        }
+        impl<'a> Drop for Reset<'a> {
+            fn drop(&mut self) {
+                self.flag.set(self.previous);
+            }
+        }
+        let _reset = Reset { flag, previous };
+
+        let mut settings = Settings::clone_current();
+        settings.set_snapshot_suffix("worktree");
+        settings.bind(f)
+    })
+}
+
 #[cfg(unix)]
 fn create_file_symlink(target: &PathBuf, link: &PathBuf) -> std::io::Result<()> {
     std::os::unix::fs::symlink(target, link)
@@ -82,6 +111,11 @@ pub struct TestRepo {
     test_db_path: PathBuf,
     test_home: PathBuf,
     git_mode: GitTestMode,
+    /// When this TestRepo is backed by a linked worktree, holds the base repo path
+    /// so we can clean it up on drop.
+    _base_repo_path: Option<PathBuf>,
+    /// Base repo's test DB path for cleanup.
+    _base_test_db_path: Option<PathBuf>,
 }
 
 #[allow(dead_code)]
@@ -154,7 +188,92 @@ impl TestRepo {
     }
 
     pub fn new() -> Self {
+        if WORKTREE_MODE.with(|flag| flag.get()) {
+            return Self::new_worktree_variant();
+        }
         Self::new_with_mode(GitTestMode::from_env())
+    }
+
+    /// Create a worktree-backed TestRepo.
+    /// This creates a normal base repo, ensures it has a HEAD commit,
+    /// moves the base off the default branch, then adds a linked worktree
+    /// on the default branch. The returned TestRepo points at the worktree.
+    fn new_worktree_variant() -> Self {
+        let base = Self::new_with_mode(GitTestMode::from_env());
+
+        // Worktrees require at least one commit
+        base.ensure_head_commit();
+
+        let default_branch = default_branchname();
+
+        // Move the base repo off the default branch so the worktree can use it
+        let base_branch = base.current_branch();
+        if base_branch == default_branch {
+            let mut rng = rand::thread_rng();
+            let n: u64 = rng.gen_range(0..10_000_000_000);
+            let temp_branch = format!("base-worktree-{}", n);
+            base.git_og(&["checkout", "-b", &temp_branch])
+                .expect("failed to create base worktree branch");
+        }
+
+        let mut rng = rand::thread_rng();
+        let wt_n: u64 = rng.gen_range(0..10_000_000_000);
+        let worktree_path = std::env::temp_dir().join(format!("{}-wt", wt_n));
+
+        let output = Command::new("git")
+            .args([
+                "-C",
+                base.path.to_str().unwrap(),
+                "worktree",
+                "add",
+                worktree_path.to_str().unwrap(),
+                default_branch,
+            ])
+            .output()
+            .expect("failed to add worktree");
+
+        if !output.status.success() {
+            panic!(
+                "failed to create linked worktree:\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let base_path = base.path.clone();
+        let base_test_home = base.test_home.clone();
+        let base_test_db_path = base.test_db_path.clone();
+        let feature_flags = base.feature_flags.clone();
+        let config_patch = base.config_patch.clone();
+        let git_mode = base.git_mode;
+
+        // Prevent base Drop from running - we manage cleanup in the worktree Drop
+        std::mem::forget(base);
+
+        let wt_db_n: u64 = rng.gen_range(0..10_000_000_000);
+        let wt_test_db_path = std::env::temp_dir().join(format!("{}-db", wt_db_n));
+
+        let mut repo = Self {
+            path: worktree_path,
+            feature_flags,
+            config_patch,
+            test_db_path: wt_test_db_path,
+            test_home: base_test_home,
+            git_mode,
+            _base_repo_path: Some(base_path),
+            _base_test_db_path: Some(base_test_db_path),
+        };
+
+        repo.apply_default_config_patch();
+        repo.setup_git_hooks_mode();
+        repo
+    }
+
+    fn ensure_head_commit(&self) {
+        if self.git_og(&["rev-parse", "--verify", "HEAD"]).is_err() {
+            self.git_og(&["commit", "--allow-empty", "-m", "initial"])
+                .expect("failed to create initial commit for worktree");
+        }
     }
 
     pub fn new_with_mode(git_mode: GitTestMode) -> Self {
@@ -180,6 +299,8 @@ impl TestRepo {
             test_db_path,
             test_home,
             git_mode,
+            _base_repo_path: None,
+            _base_test_db_path: None,
         };
 
         // Ensure the default branch is named "main" for consistency across Git versions
@@ -251,6 +372,8 @@ impl TestRepo {
             test_db_path,
             test_home,
             git_mode,
+            _base_repo_path: None,
+            _base_test_db_path: None,
         };
 
         repo.apply_default_config_patch();
@@ -281,6 +404,8 @@ impl TestRepo {
             test_db_path,
             test_home,
             git_mode,
+            _base_repo_path: None,
+            _base_test_db_path: None,
         };
 
         repo.setup_git_hooks_mode();
@@ -325,6 +450,8 @@ impl TestRepo {
             test_db_path: upstream_test_db_path,
             test_home: upstream_test_home,
             git_mode,
+            _base_repo_path: None,
+            _base_test_db_path: None,
         };
 
         // Ensure the upstream default branch is named "main" for consistency across Git versions
@@ -372,6 +499,8 @@ impl TestRepo {
             test_db_path: mirror_test_db_path,
             test_home: mirror_test_home,
             git_mode,
+            _base_repo_path: None,
+            _base_test_db_path: None,
         };
 
         // Ensure the default branch is named "main" for consistency across Git versions
@@ -409,6 +538,8 @@ impl TestRepo {
             test_db_path,
             test_home,
             git_mode,
+            _base_repo_path: None,
+            _base_test_db_path: None,
         };
 
         // Ensure the default branch is named "main" for consistency across Git versions
@@ -957,6 +1088,30 @@ impl TestRepo {
 
 impl Drop for TestRepo {
     fn drop(&mut self) {
+        if let Some(base_path) = &self._base_repo_path {
+            let _ = Command::new("git")
+                .args([
+                    "-C",
+                    base_path.to_str().unwrap(),
+                    "worktree",
+                    "remove",
+                    "--force",
+                    self.path.to_str().unwrap(),
+                ])
+                .output();
+
+            let _ = remove_dir_all_with_retry(&self.path, 80, Duration::from_millis(50));
+            let _ = remove_dir_all_with_retry(base_path, 80, Duration::from_millis(50));
+
+            if let Some(base_db_path) = &self._base_test_db_path {
+                let _ = remove_dir_all_with_retry(base_db_path, 40, Duration::from_millis(25));
+            }
+
+            let _ = remove_dir_all_with_retry(&self.test_db_path, 40, Duration::from_millis(25));
+            let _ = remove_dir_all_with_retry(&self.test_home, 40, Duration::from_millis(25));
+            return;
+        }
+
         remove_dir_all_with_retry(&self.path, 80, Duration::from_millis(50))
             .expect("failed to remove test repo");
         // Also clean up the test database directory (may not exist if no DB operations were done)
