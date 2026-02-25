@@ -87,7 +87,6 @@ fn build_checkpoint_attrs(
 }
 
 /// Persistent local rate limit keyed by prompt ID hash.
-#[cfg(not(any(test, feature = "test-support")))]
 pub(crate) fn should_emit_agent_usage(agent_id: &AgentId) -> bool {
     let prompt_id = generate_short_hash(&agent_id.id, &agent_id.tool);
     let now_ts = SystemTime::now()
@@ -95,40 +94,21 @@ pub(crate) fn should_emit_agent_usage(agent_id: &AgentId) -> bool {
         .unwrap_or_default()
         .as_secs();
 
-    let Ok(db) = crate::metrics::db::MetricsDatabase::global() else {
-        return true;
-    };
-    let Ok(mut db_lock) = db.lock() else {
-        return true;
-    };
-
-    db_lock
-        .should_emit_agent_usage(&prompt_id, now_ts, AGENT_USAGE_MIN_INTERVAL_SECS)
-        .unwrap_or(true)
+    crate::metrics::dedupe_fs::should_emit(
+        "agent_usage",
+        &prompt_id,
+        now_ts,
+        AGENT_USAGE_MIN_INTERVAL_SECS,
+    )
 }
 
-/// Always returns false in test mode — no metrics DB access needed.
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) fn should_emit_agent_usage(_agent_id: &AgentId) -> bool {
-    false
-}
-
-#[cfg(not(any(test, feature = "test-support")))]
-fn should_emit_telemetry_once(event_key: &str, now_ts: u64, ttl_secs: u64) -> bool {
-    let Ok(db) = crate::metrics::db::MetricsDatabase::global() else {
-        return true;
-    };
-    let Ok(mut db_lock) = db.lock() else {
-        return true;
-    };
-    db_lock
-        .should_emit_once(event_key, now_ts, ttl_secs)
-        .unwrap_or(true)
-}
-
-#[cfg(any(test, feature = "test-support"))]
-fn should_emit_telemetry_once(_event_key: &str, _now_ts: u64, _ttl_secs: u64) -> bool {
-    true
+fn should_emit_telemetry_once(
+    namespace: &str,
+    event_key: &str,
+    now_ts: u64,
+    ttl_secs: u64,
+) -> bool {
+    crate::metrics::dedupe_fs::should_emit(namespace, event_key, now_ts, ttl_secs)
 }
 
 fn payload_str<'a>(result: &'a AgentRunResult, key: &str) -> Option<&'a str> {
@@ -368,27 +348,17 @@ pub(crate) fn emit_agent_hook_telemetry(
             .mode(payload_str(result, "mode").unwrap_or("unknown"))
             .inferred(0);
         crate::metrics::record(values, attrs.clone());
-    } else if matches!(hook, "SessionEnd" | "sessionEnd" | "session.deleted") {
-        let mut values = crate::metrics::AgentSessionValues::new()
-            .phase("ended")
-            .reason(payload_str(result, "reason").unwrap_or("completed"))
-            .source(
-                payload_str(result, "source")
-                    .or(result.hook_source.as_deref())
-                    .unwrap_or("unknown"),
-            )
-            .mode(payload_str(result, "mode").unwrap_or("unknown"))
-            .inferred(0);
-        if let Some(duration_ms) = payload_u64(result, "duration_ms") {
-            values = values.duration_ms(duration_ms);
-        }
-        crate::metrics::record(values, attrs.clone());
     } else if result.agent_id.tool == "codex" && is_transcript_inferred_source(result) {
         let dedupe_key = format!(
             "session-start:{}:{}",
             result.agent_id.tool, result.agent_id.id
         );
-        if should_emit_telemetry_once(&dedupe_key, now_ts, SESSION_DEDUPE_TTL_SECS) {
+        if should_emit_telemetry_once(
+            "session_start",
+            &dedupe_key,
+            now_ts,
+            SESSION_DEDUPE_TTL_SECS,
+        ) {
             let values = crate::metrics::AgentSessionValues::new()
                 .phase("started")
                 .source("inferred")
@@ -503,10 +473,12 @@ pub(crate) fn emit_agent_hook_telemetry(
             "response-start:{}:{}:{}",
             result.agent_id.tool, result.agent_id.id, &dedupe_generation
         );
-        let should_dedupe = inferred == 1 && is_transcript_inferred_source(result);
-        if !should_dedupe
-            || should_emit_telemetry_once(&dedupe_key, now_ts, RESPONSE_DEDUPE_TTL_SECS)
-        {
+        if should_emit_telemetry_once(
+            "response_start",
+            &dedupe_key,
+            now_ts,
+            RESPONSE_DEDUPE_TTL_SECS,
+        ) {
             let mut values = crate::metrics::AgentResponseValues::new()
                 .phase(phase)
                 .inferred(inferred);
@@ -522,10 +494,12 @@ pub(crate) fn emit_agent_hook_telemetry(
             "response-end:{}:{}:{}",
             result.agent_id.tool, result.agent_id.id, &dedupe_generation
         );
-        let should_dedupe = inferred == 1 && is_transcript_inferred_source(result);
-        if !should_dedupe
-            || should_emit_telemetry_once(&dedupe_key, now_ts, RESPONSE_DEDUPE_TTL_SECS)
-        {
+        if should_emit_telemetry_once(
+            "response_end",
+            &dedupe_key,
+            now_ts,
+            RESPONSE_DEDUPE_TTL_SECS,
+        ) {
             let mut values = crate::metrics::AgentResponseValues::new()
                 .phase(phase)
                 .inferred(inferred);
@@ -1926,6 +1900,9 @@ fn upsert_checkpoint_prompt_to_db(
 mod tests {
     use super::*;
     use crate::git::test_utils::TmpRepo;
+    use serial_test::serial;
+    use std::ffi::OsString;
+    use tempfile::TempDir;
 
     #[test]
     fn test_checkpoint_with_staged_changes() {
@@ -2578,6 +2555,49 @@ mod tests {
         }
     }
 
+    struct EnvRestoreGuard {
+        previous: Option<OsString>,
+    }
+
+    impl Drop for EnvRestoreGuard {
+        fn drop(&mut self) {
+            // SAFETY: tests that mutate env are marked #[serial].
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var("GIT_AI_TEST_TELEMETRY_DEDUPE_DIR", value),
+                    None => std::env::remove_var("GIT_AI_TEST_TELEMETRY_DEDUPE_DIR"),
+                }
+            }
+        }
+    }
+
+    fn with_temp_dedupe_dir<F: FnOnce()>(f: F) {
+        let temp = TempDir::new().unwrap();
+        let dedupe_dir = temp.path().join("telemetry-dedupe");
+        crate::metrics::dedupe_fs::reset_for_tests();
+
+        let _restore_guard = EnvRestoreGuard {
+            previous: std::env::var_os("GIT_AI_TEST_TELEMETRY_DEDUPE_DIR"),
+        };
+
+        // SAFETY: tests that mutate env are marked #[serial].
+        unsafe {
+            std::env::set_var("GIT_AI_TEST_TELEMETRY_DEDUPE_DIR", &dedupe_dir);
+        }
+
+        f();
+        crate::metrics::dedupe_fs::reset_for_tests();
+    }
+
+    fn capture_hook_metrics(result: &AgentRunResult) -> Vec<crate::metrics::MetricEvent> {
+        crate::metrics::test_start_metric_capture();
+        emit_agent_hook_telemetry(
+            Some(result),
+            crate::metrics::EventAttributes::with_version("1.0.0"),
+        );
+        crate::metrics::test_take_captured_metrics()
+    }
+
     #[test]
     fn test_tool_phase_from_hook_supports_legacy_copilot_events() {
         assert_eq!(tool_phase_from_hook("before_edit"), Some("started"));
@@ -2686,5 +2706,153 @@ mod tests {
             Some(Some("copilot-session-123".to_string()))
         );
         assert_eq!(attrs.tool, Some(Some("github-copilot".to_string())));
+    }
+
+    #[test]
+    #[serial]
+    fn test_emit_agent_hook_telemetry_emits_session_start_only() {
+        with_temp_dedupe_dir(|| {
+            let mut start =
+                test_agent_run_result_for_telemetry(&[("source", "new"), ("mode", "agent")]);
+            start.agent_id.tool = "claude".to_string();
+            start.hook_source = Some("claude_hook".to_string());
+            start.hook_event_name = Some("SessionStart".to_string());
+
+            let start_events = capture_hook_metrics(&start);
+            assert!(start_events.iter().any(|event| event.event_id == 5));
+            let session_event = start_events
+                .iter()
+                .find(|event| event.event_id == 5)
+                .unwrap();
+            assert_eq!(
+                session_event.values.get("0").and_then(|v| v.as_str()),
+                Some("started")
+            );
+
+            let mut end = start.clone();
+            end.hook_event_name = Some("SessionEnd".to_string());
+            let end_events = capture_hook_metrics(&end);
+            assert!(
+                !end_events.iter().any(|event| event.event_id == 5),
+                "SessionEnd should not emit agent_session metrics"
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_emit_agent_hook_telemetry_dedupes_response_updates() {
+        with_temp_dedupe_dir(|| {
+            let mut result = test_agent_run_result_for_telemetry(&[
+                ("role", "assistant"),
+                ("message_id", "msg-123"),
+                ("response_char_count", "12"),
+            ]);
+            result.agent_id.tool = "opencode".to_string();
+            result.agent_id.id = "session-123".to_string();
+            result.hook_source = Some("opencode_plugin".to_string());
+            result.hook_event_name = Some("message.part.updated".to_string());
+
+            let first = capture_hook_metrics(&result);
+            let first_count = first.iter().filter(|event| event.event_id == 7).count();
+            assert_eq!(
+                first_count, 1,
+                "first update should emit one response event"
+            );
+
+            let second = capture_hook_metrics(&result);
+            let second_count = second.iter().filter(|event| event.event_id == 7).count();
+            assert_eq!(
+                second_count, 0,
+                "second update with same generation key should be deduped"
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_emit_agent_hook_telemetry_maps_tool_mcp_subagent_and_skill() {
+        with_temp_dedupe_dir(|| {
+            let mut result = test_agent_run_result_for_telemetry(&[
+                ("tool_name", "mcp__fs__read"),
+                ("tool_use_id", "tool-123"),
+                ("mcp_server", "fs"),
+                ("mcp_transport", "stdio"),
+                ("subagent_id", "subagent-1"),
+                ("subagent_type", "Plan"),
+                ("status", "completed"),
+                ("skill_name", "checks"),
+                ("skill_detection_method", "inferred_prompt"),
+                ("duration_ms", "45"),
+            ]);
+            result.agent_id.tool = "cursor".to_string();
+            result.agent_id.id = "cursor-session".to_string();
+            result.hook_source = Some("cursor_hook".to_string());
+            result.hook_event_name = Some("preToolUse".to_string());
+
+            let events = capture_hook_metrics(&result);
+
+            assert!(events.iter().any(|event| event.event_id == 8));
+            assert!(events.iter().any(|event| event.event_id == 9));
+            assert!(events.iter().any(|event| event.event_id == 10));
+            assert!(
+                !events.iter().any(|event| event.event_id == 11),
+                "subagent metrics should only come from subagent hooks"
+            );
+
+            let tool = events.iter().find(|event| event.event_id == 8).unwrap();
+            assert_eq!(
+                tool.values.get("0").and_then(|v| v.as_str()),
+                Some("started")
+            );
+            assert_eq!(
+                tool.values.get("1").and_then(|v| v.as_str()),
+                Some("mcp__fs__read")
+            );
+
+            let mcp = events.iter().find(|event| event.event_id == 9).unwrap();
+            assert_eq!(
+                mcp.values.get("0").and_then(|v| v.as_str()),
+                Some("started")
+            );
+            assert_eq!(mcp.values.get("1").and_then(|v| v.as_str()), Some("fs"));
+
+            let skill = events.iter().find(|event| event.event_id == 10).unwrap();
+            assert_eq!(
+                skill.values.get("0").and_then(|v| v.as_str()),
+                Some("checks")
+            );
+
+            let mut subagent_result = result.clone();
+            subagent_result.hook_event_name = Some("subagentStart".to_string());
+            let subagent_events = capture_hook_metrics(&subagent_result);
+            let subagent = subagent_events
+                .iter()
+                .find(|event| event.event_id == 11)
+                .unwrap();
+            assert_eq!(
+                subagent.values.get("0").and_then(|v| v.as_str()),
+                Some("started")
+            );
+            assert_eq!(
+                subagent.values.get("1").and_then(|v| v.as_str()),
+                Some("subagent-1")
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_should_emit_agent_usage_uses_filesystem_dedupe() {
+        with_temp_dedupe_dir(|| {
+            let agent = AgentId {
+                tool: "cursor".to_string(),
+                id: "session-usage".to_string(),
+                model: "gpt-5".to_string(),
+            };
+
+            assert!(should_emit_agent_usage(&agent));
+            assert!(!should_emit_agent_usage(&agent));
+        });
     }
 }

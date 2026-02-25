@@ -1545,6 +1545,7 @@ impl AgentCheckpointPreset for CursorPreset {
             "afterFileEdit",
             "afterAgentResponse",
             "afterAgentThought",
+            "preCompact",
             "stop",
         ];
         if !supported_events.contains(&hook_event_name.as_str()) {

@@ -710,6 +710,7 @@ impl AgentSessionValues {
         self
     }
 
+    #[allow(dead_code)]
     pub fn duration_ms(mut self, value: u64) -> Self {
         self.duration_ms = Some(Some(value));
         self

@@ -29,9 +29,11 @@ const CURSOR_HOOK_EVENTS: &[&str] = &[
     "afterShellExecution",
     "beforeMCPExecution",
     "afterMCPExecution",
+    "beforeReadFile",
     "afterFileEdit",
     "afterAgentResponse",
     "afterAgentThought",
+    "preCompact",
     "stop",
 ];
 
@@ -674,5 +676,11 @@ mod tests {
     fn test_cursor_settings_targets_returns_candidates() {
         let targets = CursorInstaller::settings_targets();
         assert!(!targets.is_empty());
+    }
+
+    #[test]
+    fn test_cursor_hook_event_list_includes_precompact_and_before_read_file() {
+        assert!(CURSOR_HOOK_EVENTS.contains(&"preCompact"));
+        assert!(CURSOR_HOOK_EVENTS.contains(&"beforeReadFile"));
     }
 }

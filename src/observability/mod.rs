@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::metrics::{METRICS_API_VERSION, MetricEvent};
+use crate::metrics::MetricEvent;
 
 pub mod flush;
 pub mod wrapper_performance_targets;
@@ -63,6 +63,7 @@ enum LogEnvelope {
     Performance(PerformanceEnvelope),
     #[allow(dead_code)]
     Message(MessageEnvelope),
+    #[allow(dead_code)]
     Metrics(MetricsEnvelope),
 }
 
@@ -248,7 +249,7 @@ pub fn log_metrics(
             let envelope = MetricsEnvelope {
                 event_type: "metrics".to_string(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
-                version: METRICS_API_VERSION,
+                version: crate::metrics::METRICS_API_VERSION,
                 events: chunk.to_vec(),
             };
 
