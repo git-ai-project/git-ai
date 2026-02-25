@@ -271,6 +271,19 @@ fn args_with_internal_git_profile(args: &[String], profile: InternalGitProfile) 
     out
 }
 
+fn sanitize_git_config_env(cmd: &mut Command) {
+    for key in ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"] {
+        let Ok(value) = std::env::var(key) else {
+            continue;
+        };
+
+        let trimmed = value.trim();
+        if trimmed.is_empty() || !Path::new(trimmed).exists() {
+            cmd.env_remove(key);
+        }
+    }
+}
+
 pub struct Object<'a> {
     repo: &'a Repository,
     oid: String,
@@ -2480,6 +2493,7 @@ pub fn exec_git_with_profile(
         args_with_internal_git_profile(&args_with_disabled_hooks_if_needed(args), profile);
     let mut cmd = Command::new(config::Config::get().git_cmd());
     cmd.args(&effective_args);
+    sanitize_git_config_env(&mut cmd);
     cmd.env_remove("GIT_EXTERNAL_DIFF");
     cmd.env_remove("GIT_DIFF_OPTS");
 
@@ -2524,6 +2538,7 @@ pub fn exec_git_stdin_with_profile(
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    sanitize_git_config_env(&mut cmd);
     cmd.env_remove("GIT_EXTERNAL_DIFF");
     cmd.env_remove("GIT_DIFF_OPTS");
 
@@ -2584,6 +2599,7 @@ pub fn exec_git_stdin_with_env_with_profile(
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    sanitize_git_config_env(&mut cmd);
 
     // Apply env overrides
     for (k, v) in env.iter() {
