@@ -395,29 +395,28 @@ fn maybe_remap_authorship_for_keep_reset(
     let new_is_ancestor_of_old = is_ancestor(repository, new_head_sha, old_head_sha);
     let old_is_ancestor_of_new = is_ancestor(repository, old_head_sha, new_head_sha);
     let is_sibling_rewrite = !new_is_ancestor_of_old && !old_is_ancestor_of_new;
-    if is_sibling_rewrite {
-        if crate::authorship::rebase_authorship::rewrite_authorship_after_commit_amend(
+    if is_sibling_rewrite
+        && crate::authorship::rebase_authorship::rewrite_authorship_after_commit_amend(
             repository,
             old_head_sha,
             new_head_sha,
             human_author.to_string(),
         )
         .is_ok()
+    {
+        if let Err(err) =
+            strip_ai_attributions_for_changed_lines(repository, old_head_sha, new_head_sha)
         {
-            if let Err(err) =
-                strip_ai_attributions_for_changed_lines(repository, old_head_sha, new_head_sha)
-            {
-                debug_log(&format!(
-                    "Failed to strip changed-line AI attribution for reset rewrite {} -> {}: {}",
-                    old_head_sha, new_head_sha, err
-                ));
-            }
             debug_log(&format!(
-                "Rewrote authorship for reset rewrite from {} to {} via amend flow",
-                old_head_sha, new_head_sha
+                "Failed to strip changed-line AI attribution for reset rewrite {} -> {}: {}",
+                old_head_sha, new_head_sha, err
             ));
-            return;
         }
+        debug_log(&format!(
+            "Rewrote authorship for reset rewrite from {} to {} via amend flow",
+            old_head_sha, new_head_sha
+        ));
+        return;
     }
 
     if !commits_are_equivalent_for_authorship_remap(repository, old_head_sha, new_head_sha) {
