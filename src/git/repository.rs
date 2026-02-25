@@ -3261,6 +3261,64 @@ index 0000000..abc1234 100644
     }
 
     #[test]
+    fn worktree_storage_ai_dir_keeps_full_relative_worktree_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let common_dir = temp.path().join("repo.git");
+        let linked_git_dir = common_dir.join("worktrees").join("feature").join("nested");
+
+        fs::create_dir_all(&linked_git_dir).expect("create linked git dir");
+
+        let ai_dir = worktree_storage_ai_dir(&linked_git_dir, &common_dir);
+        assert_eq!(
+            ai_dir,
+            common_dir
+                .join("ai")
+                .join("worktrees")
+                .join("feature")
+                .join("nested")
+        );
+    }
+
+    #[test]
+    fn worktree_storage_ai_dir_fallback_uses_git_dir_leaf_name() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let common_dir = temp.path().join("repo.git");
+        let detached_git_dir = temp.path().join("somewhere").join("linked-worktree");
+
+        fs::create_dir_all(&common_dir).expect("create common dir");
+        fs::create_dir_all(&detached_git_dir).expect("create detached git dir");
+
+        let ai_dir = worktree_storage_ai_dir(&detached_git_dir, &common_dir);
+        assert_eq!(
+            ai_dir,
+            common_dir
+                .join("ai")
+                .join("worktrees")
+                .join("linked-worktree")
+        );
+    }
+
+    #[test]
+    fn resolve_command_base_dir_applies_chained_c_arguments() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let base = temp.path().join("root");
+        let args = vec![
+            "-C".to_string(),
+            base.to_string_lossy().to_string(),
+            "-C".to_string(),
+            "nested".to_string(),
+            "-C".to_string(),
+            "..".to_string(),
+            "-C".to_string(),
+            "repo".to_string(),
+            "status".to_string(),
+        ];
+
+        let resolved = resolve_command_base_dir(&args).expect("resolve base dir");
+        assert_eq!(resolved, base.join("nested").join("..").join("repo"));
+    }
+
+    #[test]
     fn find_repository_in_path_supports_bare_repositories() {
         let temp = tempfile::tempdir().expect("tempdir");
         let source = temp.path().join("source");

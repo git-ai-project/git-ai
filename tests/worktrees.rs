@@ -43,6 +43,23 @@ fn normalize_blame_output(blame_output: &str) -> String {
         .to_string()
 }
 
+fn normalize_blame_for_format_parity(blame_output: &str) -> String {
+    blame_output
+        .lines()
+        .map(|line| {
+            if let Some(start_paren) = line.find('(')
+                && let Some(end_paren) = line.rfind(')')
+            {
+                let prefix = &line[..start_paren];
+                let suffix = &line[end_paren + 1..];
+                return format!("{prefix}(META){suffix}");
+            }
+            line.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn parse_blame_line(line: &str) -> (String, String) {
     if let Some(start_paren) = line.find('(')
         && let Some(end_paren) = line.find(')')
@@ -176,6 +193,44 @@ worktree_test_wrappers! {
             .git_ai(&["blame", abs_path.to_str().unwrap()])
             .expect("blame should work for absolute path in worktree");
         assert!(output.contains("fn ai() {}"));
+    }
+}
+
+worktree_test_wrappers! {
+    fn blame_boundary_and_abbrev_match_git_in_worktree() {
+        let repo = TestRepo::new();
+        let mut file = repo.filename("boundary.txt");
+        file.set_contents(lines!["root line".human(), "line to change".human()]);
+        repo.stage_all_and_commit("root commit").unwrap();
+
+        file.set_contents(lines!["root line".human(), "updated line".human()]);
+        repo.stage_all_and_commit("second commit").unwrap();
+
+        let git_output = repo
+            .git(&["blame", "--abbrev=12", "-b", "boundary.txt"])
+            .expect("git blame with boundary flags should succeed");
+        let git_ai_output = repo
+            .git_ai(&["blame", "--abbrev", "12", "-b", "boundary.txt"])
+            .expect("git-ai blame with boundary flags should succeed");
+
+        assert_eq!(
+            normalize_blame_for_format_parity(&git_ai_output),
+            normalize_blame_for_format_parity(&git_output),
+            "git-ai blame should match git formatting for boundary and abbrev in worktrees"
+        );
+
+        let git_root_output = repo
+            .git(&["blame", "--abbrev=12", "--root", "boundary.txt"])
+            .expect("git blame --root should succeed");
+        let git_ai_root_output = repo
+            .git_ai(&["blame", "--abbrev", "12", "--root", "boundary.txt"])
+            .expect("git-ai blame --root should succeed");
+
+        assert_eq!(
+            normalize_blame_for_format_parity(&git_ai_root_output),
+            normalize_blame_for_format_parity(&git_root_output),
+            "git-ai blame should match git formatting for --root and abbrev in worktrees"
+        );
     }
 }
 
