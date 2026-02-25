@@ -196,6 +196,51 @@ impl Default for GitAiBlameOptions {
 }
 
 impl Repository {
+    fn resolve_blame_abbrev_sha(
+        &self,
+        commit_sha: &str,
+        is_boundary: bool,
+        options: &GitAiBlameOptions,
+        cache: &mut HashMap<(String, usize), String>,
+    ) -> String {
+        if options.long_rev {
+            return commit_sha.to_string();
+        }
+
+        let base_len = options.abbrev.unwrap_or(7).max(1) as usize;
+        let requested_len = if is_boundary && !options.show_root {
+            base_len
+        } else {
+            (base_len + 1).min(40)
+        };
+        let cache_key = (commit_sha.to_string(), requested_len);
+
+        if let Some(cached) = cache.get(&cache_key) {
+            return cached.clone();
+        }
+
+        let mut args = self.global_args_for_exec();
+        args.push("rev-parse".to_string());
+        args.push(format!("--short={requested_len}"));
+        args.push(commit_sha.to_string());
+
+        let resolved = exec_git(&args)
+            .ok()
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|short| short.trim().to_string())
+            .filter(|short| !short.is_empty())
+            .unwrap_or_else(|| {
+                if requested_len < commit_sha.len() {
+                    commit_sha[..requested_len].to_string()
+                } else {
+                    commit_sha.to_string()
+                }
+            });
+
+        cache.insert(cache_key, resolved.clone());
+        resolved
+    }
+
     #[allow(clippy::type_complexity)]
     pub fn blame(
         &self,
@@ -505,6 +550,7 @@ impl Repository {
         let mut cur_orig_start: u32 = 0;
         let mut cur_group_size: u32 = 0;
         let mut cur_meta = CurMeta::default();
+        let mut abbrev_cache: HashMap<(String, usize), String> = HashMap::new();
 
         for line in stdout.lines() {
             if line.is_empty() {
@@ -599,16 +645,12 @@ impl Repository {
                         orig_start
                     };
 
-                    let abbrev_len = if options.long_rev {
-                        40
-                    } else {
-                        options.abbrev.unwrap_or(7) as usize
-                    };
-                    let abbrev = if abbrev_len < prev_sha.len() {
-                        prev_sha[..abbrev_len].to_string()
-                    } else {
-                        prev_sha.clone()
-                    };
+                    let abbrev = self.resolve_blame_abbrev_sha(
+                        &prev_sha,
+                        cur_meta.boundary,
+                        options,
+                        &mut abbrev_cache,
+                    );
 
                     hunks.push(BlameHunk {
                         range: (start, end),
@@ -668,16 +710,12 @@ impl Repository {
                 orig_start
             };
 
-            let abbrev_len = if options.long_rev {
-                40
-            } else {
-                options.abbrev.unwrap_or(7) as usize
-            };
-            let abbrev = if abbrev_len < prev_sha.len() {
-                prev_sha[..abbrev_len].to_string()
-            } else {
-                prev_sha.clone()
-            };
+            let abbrev = self.resolve_blame_abbrev_sha(
+                &prev_sha,
+                cur_meta.boundary,
+                options,
+                &mut abbrev_cache,
+            );
 
             hunks.push(BlameHunk {
                 range: (start, end),
@@ -1362,6 +1400,12 @@ fn output_default_format(
         }
     }
 
+    let blank_boundary_hash_width = if options.long_rev {
+        40
+    } else {
+        ((options.abbrev.unwrap_or(7).max(1) as usize) + 1).min(40)
+    };
+
     for (start_line, end_line) in line_ranges {
         for line_num in *start_line..=*end_line {
             let line_index = (line_num - 1) as usize;
@@ -1372,25 +1416,13 @@ fn output_default_format(
             };
 
             if let Some(hunk) = line_to_hunk.get(&line_num) {
-                // Determine hash length - match git blame default (7 chars)
-                let hash_len = if options.long_rev {
-                    40 // Full hash for long revision
-                } else if let Some(abbrev) = options.abbrev {
-                    abbrev as usize
-                } else {
-                    7 // Default 7 chars
-                };
-                let sha = if hash_len < hunk.commit_sha.len() {
-                    &hunk.commit_sha[..hash_len]
-                } else {
-                    &hunk.commit_sha
-                };
+                let sha = &hunk.abbrev_sha;
 
                 // Match git blame boundary formatting:
                 // - default boundary: prefix abbreviated hash with '^'
                 // - -b/--blank-boundary: print a blank hash column
                 let full_sha = if hunk.is_boundary && options.blank_boundary && !options.show_root {
-                    " ".repeat(hash_len + 1)
+                    " ".repeat(blank_boundary_hash_width)
                 } else {
                     let boundary_marker = if hunk.is_boundary && !options.show_root {
                         "^"
