@@ -5,9 +5,8 @@ use repos::graphite_test_harness::{
     assert_blame_is_unchanged, assert_exact_blame, capture_blame, init_graphite, skip_unless_gt,
 };
 use repos::test_file::ExpectedLineExt;
-use repos::test_repo::TestRepo;
+use repos::test_repo::{TestRepo, gt_command};
 use std::collections::BTreeSet;
-use std::process::Command;
 
 const REQUIRED_NATIVE_MUTATING_COMMANDS: &[&str] = &[
     "create",
@@ -84,7 +83,7 @@ fn assert_command_lists_have_no_duplicates() {
 }
 
 fn gt_help_all() -> String {
-    let output = Command::new("gt")
+    let output = gt_command()
         .args(["--help", "--all"])
         .output()
         .expect("gt --help --all should run");
@@ -107,7 +106,7 @@ fn test_gt_command_index_is_classified() {
             .split_whitespace()
             .next()
             .expect("command list cannot include empty entries");
-        let help_output = Command::new("gt")
+        let help_output = gt_command()
             .args([first, "--help"])
             .output()
             .expect("gt <command> --help should run");

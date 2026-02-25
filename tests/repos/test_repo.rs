@@ -387,7 +387,7 @@ impl TestRepo {
     }
 
     pub fn gt_with_env(&self, args: &[&str], envs: &[(&str, &str)]) -> Result<String, String> {
-        let mut command = Command::new("gt");
+        let mut command = gt_command();
         command.args(args).current_dir(&self.path);
         self.configure_command_env(&mut command);
         self.configure_gt_path(&mut command)?;
@@ -954,7 +954,7 @@ impl NewCommit {
 
 static COMPILED_BINARY: OnceLock<PathBuf> = OnceLock::new();
 static DEFAULT_BRANCH_NAME: OnceLock<String> = OnceLock::new();
-static GT_CLI_AVAILABLE: OnceLock<bool> = OnceLock::new();
+static GT_CLI_BINARY: OnceLock<Option<PathBuf>> = OnceLock::new();
 static REAL_GIT_BINARY: OnceLock<PathBuf> = OnceLock::new();
 
 fn get_default_branch_name() -> String {
@@ -1008,14 +1008,49 @@ pub(crate) fn get_binary_path() -> &'static PathBuf {
     COMPILED_BINARY.get_or_init(compile_binary)
 }
 
-pub fn is_gt_cli_available() -> bool {
-    *GT_CLI_AVAILABLE.get_or_init(|| {
+fn find_gt_cli_binary() -> Option<PathBuf> {
+    #[cfg(windows)]
+    let command_result = Command::new("where").arg("gt").output();
+    #[cfg(not(windows))]
+    let command_result = Command::new("which").arg("gt").output();
+
+    let Ok(output) = command_result else {
+        return None;
+    };
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let path = line.trim();
+        if path.is_empty() {
+            continue;
+        }
+
+        let candidate = PathBuf::from(path);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+pub fn gt_cli_binary() -> Option<PathBuf> {
+    GT_CLI_BINARY.get_or_init(find_gt_cli_binary).clone()
+}
+
+pub fn gt_command() -> Command {
+    if let Some(gt_binary) = gt_cli_binary() {
+        Command::new(gt_binary)
+    } else {
         Command::new("gt")
-            .arg("--version")
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
-    })
+    }
+}
+
+pub fn is_gt_cli_available() -> bool {
+    gt_cli_binary().is_some()
 }
 
 pub fn require_gt_or_skip() -> Option<String> {
