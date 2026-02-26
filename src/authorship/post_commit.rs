@@ -14,7 +14,6 @@ use crate::git::refs::notes_add;
 use crate::git::repository::Repository;
 use crate::utils::debug_log;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::IsTerminal;
 
 /// Skip expensive post-commit stats when this threshold is exceeded.
 /// High hunk density is the strongest predictor of slow diff_ai_accepted_stats.
@@ -270,15 +269,12 @@ pub fn post_commit(
     // Compute stats once (needed for both metrics and terminal output), unless preflight
     // estimate predicts this would be too expensive for the commit hook path.
     let mut stats: Option<crate::authorship::stats::CommitStats> = None;
-    let has_ai_relevant_changes = !pathspecs.is_empty() || !initial_attributions.files.is_empty();
     let is_merge_commit = repo
         .find_commit(commit_sha.clone())
         .map(|commit| commit.parent_count().unwrap_or(0) > 1)
         .unwrap_or(false);
     let ignore_patterns = effective_ignore_patterns(repo, &[], &[]);
-    let skip_reason = if !has_ai_relevant_changes {
-        Some(StatsSkipReason::NoAiRelevantChanges)
-    } else if is_merge_commit {
+    let skip_reason = if is_merge_commit {
         Some(StatsSkipReason::MergeCommit)
     } else {
         estimate_stats_cost(repo, &parent_sha, &commit_sha, &ignore_patterns)
@@ -313,12 +309,6 @@ pub fn post_commit(
                     commit_sha
                 ));
             }
-            Some(StatsSkipReason::NoAiRelevantChanges) => {
-                debug_log(&format!(
-                    "Skipping post-commit stats for {} (no AI-relevant changes)",
-                    commit_sha
-                ));
-            }
             Some(StatsSkipReason::Expensive(estimate)) => {
                 debug_log(&format!(
                     "Skipping expensive post-commit stats for {} (files_with_additions={}, added_lines={}, hunks={})",
@@ -343,21 +333,13 @@ pub fn post_commit(
     repo_storage.delete_working_log_for_base_commit(&parent_sha)?;
 
     if !supress_output && !Config::get().is_quiet() {
-        // Only print stats if we're in an interactive terminal and quiet mode is disabled
-        let is_interactive = std::io::stdout().is_terminal();
         if let Some(stats) = stats.as_ref() {
-            write_stats_to_terminal(stats, is_interactive);
+            write_stats_to_terminal(stats, true);
         } else {
             match skip_reason.as_ref() {
                 Some(StatsSkipReason::MergeCommit) => {
                     eprintln!(
                         "[git-ai] Skipped git-ai stats for merge commit {}.",
-                        commit_sha
-                    );
-                }
-                Some(StatsSkipReason::NoAiRelevantChanges) => {
-                    eprintln!(
-                        "[git-ai] Skipped git-ai stats (no AI-relevant changes in commit {}).",
                         commit_sha
                     );
                 }
@@ -379,7 +361,6 @@ pub fn post_commit(
 
 #[derive(Debug, Clone)]
 enum StatsSkipReason {
-    NoAiRelevantChanges,
     MergeCommit,
     Expensive(StatsCostEstimate),
 }

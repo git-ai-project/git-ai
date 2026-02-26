@@ -596,6 +596,37 @@ fn test_stats_range_uses_default_ignores() {
 }
 
 #[test]
+fn test_post_commit_human_only_commit_still_prints_stats_bar() {
+    let repo = TestRepo::new();
+    repo.filename("README.md").set_contents(lines!["# Repo"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    repo.filename("README.md")
+        .set_contents(lines!["# Repo", "Human-only change"]);
+    let commit = repo
+        .stage_all_and_commit("Human-only follow-up")
+        .expect("commit should succeed");
+
+    assert!(
+        !commit
+            .stdout
+            .contains("Skipped git-ai stats (no AI-relevant changes"),
+        "human-only commits should still show normal post-commit stats output: {}",
+        commit.stdout
+    );
+    assert!(
+        commit.stdout.contains("you  "),
+        "expected post-commit stats bar output for human-only commit: {}",
+        commit.stdout
+    );
+    assert!(
+        commit.stdout.contains(" ai"),
+        "expected post-commit stats bar output for human-only commit: {}",
+        commit.stdout
+    );
+}
+
+#[test]
 fn test_post_commit_large_ignored_files_do_not_trigger_skip_warning() {
     let repo = TestRepo::new();
     repo.filename("README.md").set_contents(lines!["# Repo"]);
