@@ -209,7 +209,10 @@ fn gt(repo: &TestRepo, args: &[&str]) -> Result<String, String> {
     // corruption of ~/.config/graphite/user_config (race condition in CI).
     command.env("XDG_CONFIG_HOME", repo.test_home_path().join(".config"));
     // Windows equivalent for Graphite config isolation
-    command.env("LOCALAPPDATA", repo.test_home_path().join("AppData").join("Local"));
+    command.env(
+        "LOCALAPPDATA",
+        repo.test_home_path().join("AppData").join("Local"),
+    );
 
     let output = command
         .output()
