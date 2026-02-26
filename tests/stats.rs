@@ -596,7 +596,7 @@ fn test_stats_range_uses_default_ignores() {
 }
 
 #[test]
-fn test_post_commit_human_only_commit_still_prints_stats_bar() {
+fn test_post_commit_human_only_non_interactive_does_not_print_stats_bar() {
     let repo = TestRepo::new();
     repo.filename("README.md").set_contents(lines!["# Repo"]);
     repo.stage_all_and_commit("Initial commit").unwrap();
@@ -615,13 +615,32 @@ fn test_post_commit_human_only_commit_still_prints_stats_bar() {
         commit.stdout
     );
     assert!(
+        !commit.stdout.contains("you  "),
+        "stats bar should not print in non-interactive commit output: {}",
+        commit.stdout
+    );
+}
+
+#[test]
+fn test_post_commit_human_only_interactive_tty_prints_stats_bar() {
+    let repo = TestRepo::new();
+    repo.filename("README.md").set_contents(lines!["# Repo"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    repo.filename("README.md")
+        .set_contents(lines!["# Repo", "Human-only change"]);
+    let commit = repo
+        .stage_all_and_commit_with_tty("Human-only follow-up")
+        .expect("tty commit should succeed");
+
+    assert!(
         commit.stdout.contains("you  "),
-        "expected post-commit stats bar output for human-only commit: {}",
+        "expected post-commit stats bar output for interactive tty commit: {}",
         commit.stdout
     );
     assert!(
         commit.stdout.contains(" ai"),
-        "expected post-commit stats bar output for human-only commit: {}",
+        "expected post-commit stats bar output for interactive tty commit: {}",
         commit.stdout
     );
 }

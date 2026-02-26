@@ -14,6 +14,7 @@ use crate::git::refs::notes_add;
 use crate::git::repository::Repository;
 use crate::utils::debug_log;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::IsTerminal;
 
 /// Skip expensive post-commit stats when this threshold is exceeded.
 /// High hunk density is the strongest predictor of slow diff_ai_accepted_stats.
@@ -333,8 +334,9 @@ pub fn post_commit(
     repo_storage.delete_working_log_for_base_commit(&parent_sha)?;
 
     if !supress_output && !Config::get().is_quiet() {
+        let is_interactive = std::io::stdout().is_terminal();
         if let Some(stats) = stats.as_ref() {
-            write_stats_to_terminal(stats, true);
+            write_stats_to_terminal(stats, is_interactive);
         } else {
             match skip_reason.as_ref() {
                 Some(StatsSkipReason::MergeCommit) => {
