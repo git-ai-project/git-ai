@@ -119,17 +119,28 @@ impl Repository {
         pathspecs: Option<&HashSet<String>>,
         skip_untracked: bool,
     ) -> Result<Vec<StatusEntry>, GitAiError> {
-        let staged_filenames = self.get_staged_filenames()?;
+        // When no pathspecs are provided, run a single full `git status
+        // --porcelain=v2` scan. Extract staged filenames from the porcelain v2
+        // output (the XY field already encodes staging state) instead of making
+        // a separate `git diff --cached` call. This saves 1 git exec call.
+        //
+        // When pathspecs ARE provided, we still need a separate staged-filenames
+        // call because staged files outside the pathspec set must be included.
+        let staged_filenames = if pathspecs.is_some() {
+            self.get_staged_filenames()?
+        } else {
+            HashSet::new()
+        };
 
         let combined_pathspecs: HashSet<String> = if let Some(paths) = pathspecs {
             staged_filenames.union(paths).cloned().collect()
         } else {
+            // No pathspecs — full scan will capture everything including staged.
             staged_filenames
         };
 
-        // When no explicit pathspecs are provided and nothing is staged,
-        // we still need a full status scan to capture unstaged changes.
-        let should_full_scan = pathspecs.is_none() && combined_pathspecs.is_empty();
+        // When no explicit pathspecs are provided we always do a full scan.
+        let should_full_scan = pathspecs.is_none();
         if combined_pathspecs.is_empty() && !should_full_scan {
             return Ok(Vec::new());
         }

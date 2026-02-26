@@ -138,16 +138,23 @@ pub fn execute_diff(
     // Resolve commits to get from/to SHAs
     let (from_commit, to_commit) = match spec {
         DiffSpec::TwoCommit(start, end) => {
-            // Resolve both commits
-            let from = resolve_commit(repo, &start)?;
-            let to = resolve_commit(repo, &end)?;
-            (from, to)
+            // Resolve both commits in a single git rev-parse call
+            resolve_two_revs(repo, &start, &end)?
         }
         DiffSpec::SingleCommit(commit) => {
-            // Resolve the commit and its parent
-            let to = resolve_commit(repo, &commit)?;
-            let from = resolve_parent(repo, &to)?;
-            (from, to)
+            // Resolve the commit and its parent in a single git rev-parse call
+            let parent_rev = format!("{}^", commit);
+            match resolve_two_revs(repo, &parent_rev, &commit) {
+                Ok(pair) => pair,
+                Err(_) => {
+                    // No parent (initial commit) - use empty tree hash
+                    let to = resolve_commit(repo, &commit)?;
+                    (
+                        "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string(),
+                        to,
+                    )
+                }
+            }
         }
     };
 
@@ -197,35 +204,31 @@ fn resolve_commit(repo: &Repository, rev: &str) -> Result<String, GitAiError> {
     Ok(sha)
 }
 
-fn resolve_parent(repo: &Repository, commit: &str) -> Result<String, GitAiError> {
-    let parent_rev = format!("{}^", commit);
-
-    // Try to resolve parent
+/// Resolve two revisions in a single `git rev-parse` call instead of two
+/// separate invocations, saving one subprocess spawn.
+fn resolve_two_revs(
+    repo: &Repository,
+    rev_a: &str,
+    rev_b: &str,
+) -> Result<(String, String), GitAiError> {
     let mut args = repo.global_args_for_exec();
     args.push("rev-parse".to_string());
-    args.push(parent_rev);
+    args.push(rev_a.to_string());
+    args.push(rev_b.to_string());
 
-    let output = exec_git(&args);
+    let output = exec_git(&args)?;
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|e| GitAiError::Generic(format!("Failed to parse rev-parse output: {}", e)))?;
+    let shas: Vec<&str> = stdout.trim().lines().collect();
 
-    match output {
-        Ok(out) => {
-            let sha = String::from_utf8(out.stdout)
-                .map_err(|e| GitAiError::Generic(format!("Failed to parse parent SHA: {}", e)))?
-                .trim()
-                .to_string();
-
-            if sha.is_empty() {
-                // No parent, this is initial commit - use empty tree
-                Ok("4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string())
-            } else {
-                Ok(sha)
-            }
-        }
-        Err(_) => {
-            // No parent, this is initial commit - use empty tree hash
-            Ok("4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string())
-        }
+    if shas.len() < 2 || shas[0].is_empty() || shas[1].is_empty() {
+        return Err(GitAiError::Generic(format!(
+            "Could not resolve revisions: {} and {}",
+            rev_a, rev_b
+        )));
     }
+
+    Ok((shas[0].to_string(), shas[1].to_string()))
 }
 
 // ============================================================================
@@ -948,9 +951,16 @@ pub fn get_diff_json_filtered(
     commit_sha: &str,
     options: DiffOptions,
 ) -> Result<DiffJson, GitAiError> {
-    // Resolve the commit to get from/to SHAs (parent -> commit)
+    // Resolve the commit and its parent in a single git rev-parse call
     let to_commit = resolve_commit(repo, commit_sha)?;
-    let from_commit = resolve_parent(repo, &to_commit)?;
+    let parent_rev = format!("{}^", to_commit);
+    let from_commit = match resolve_two_revs(repo, &parent_rev, &to_commit) {
+        Ok((from, _)) => from,
+        Err(_) => {
+            // No parent (initial commit) - use empty tree hash
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()
+        }
+    };
 
     // Get diff hunks with line numbers
     let hunks = get_diff_with_line_numbers(repo, &from_commit, &to_commit)?;

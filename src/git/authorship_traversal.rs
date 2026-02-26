@@ -90,7 +90,7 @@ fn get_notes_list(global_args: &[String]) -> Result<Vec<(String, String)>, GitAi
     Ok(mappings)
 }
 
-fn batch_read_blobs_with_oids(
+pub fn batch_read_blobs_with_oids(
     global_args: &[String],
     blob_oids: &[String],
 ) -> Result<std::collections::HashMap<String, String>, GitAiError> {

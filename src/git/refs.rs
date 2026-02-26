@@ -301,6 +301,21 @@ pub fn get_commits_with_notes_from_list(
         }
     }
 
+    // Batch-fetch all authorship notes in 2 git calls instead of N individual
+    // `git notes show` calls. Uses note_blob_oids_for_commits (1 batched
+    // cat-file --batch-check) + batch_read_blobs_with_oids (1 batched
+    // cat-file --batch) to read all note contents at once.
+    let note_blob_map = note_blob_oids_for_commits(repo, commit_shas)?;
+    let unique_blob_oids: Vec<String> = {
+        let mut oids: Vec<String> = note_blob_map.values().cloned().collect::<HashSet<_>>().into_iter().collect();
+        oids.sort();
+        oids
+    };
+    let blob_contents = crate::git::authorship_traversal::batch_read_blobs_with_oids(
+        &repo.global_args_for_exec(),
+        &unique_blob_oids,
+    )?;
+
     // Build the result Vec
     let mut result = Vec::new();
     for sha in commit_shas {
@@ -309,8 +324,17 @@ pub fn get_commits_with_notes_from_list(
             .cloned()
             .unwrap_or_else(|| "Unknown".to_string());
 
-        // Check if this commit has a note by trying to show it
-        if let Some(authorship_log) = get_authorship(repo, sha) {
+        // Look up the note content from the batch-fetched data
+        let authorship_log = note_blob_map
+            .get(sha)
+            .and_then(|blob_oid| blob_contents.get(blob_oid))
+            .and_then(|content| {
+                let mut log = AuthorshipLog::deserialize_from_string(content).ok()?;
+                log.metadata.base_commit_sha = sha.clone();
+                Some(log)
+            });
+
+        if let Some(authorship_log) = authorship_log {
             result.push(CommitAuthorship::Log {
                 sha: sha.clone(),
                 git_author,
@@ -376,6 +400,56 @@ pub fn get_reference_as_working_log(
         .ok_or_else(|| GitAiError::Generic("No authorship note found".to_string()))?;
     let working_log = serde_json::from_str(&content)?;
     Ok(working_log)
+}
+
+/// Batch-fetch authorship logs for multiple commits using 2 git calls
+/// instead of N individual `git notes show` calls.
+///
+/// Returns a map of commit SHA -> AuthorshipLog for commits that have valid v3 logs.
+pub fn batch_get_authorship_logs(
+    repo: &Repository,
+    commit_shas: &[String],
+) -> Result<HashMap<String, AuthorshipLog>, GitAiError> {
+    if commit_shas.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    // 1 batched cat-file --batch-check to resolve note blob OIDs
+    let note_blob_map = note_blob_oids_for_commits(repo, commit_shas)?;
+    if note_blob_map.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let unique_blob_oids: Vec<String> = {
+        let mut oids: Vec<String> = note_blob_map
+            .values()
+            .cloned()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        oids.sort();
+        oids
+    };
+
+    // 1 batched cat-file --batch to read all note contents
+    let blob_contents = crate::git::authorship_traversal::batch_read_blobs_with_oids(
+        &repo.global_args_for_exec(),
+        &unique_blob_oids,
+    )?;
+
+    let mut result = HashMap::new();
+    for sha in commit_shas {
+        if let Some(blob_oid) = note_blob_map.get(sha)
+            && let Some(content) = blob_contents.get(blob_oid)
+            && let Ok(mut log) = AuthorshipLog::deserialize_from_string(content)
+            && log.metadata.schema_version == AUTHORSHIP_LOG_VERSION
+        {
+            log.metadata.base_commit_sha = sha.clone();
+            result.insert(sha.clone(), log);
+        }
+    }
+
+    Ok(result)
 }
 
 pub fn get_reference_as_authorship_log_v3(

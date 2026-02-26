@@ -660,27 +660,28 @@ fn get_all_tracked_files(
     ));
 
     let checkpoints_read_start = Instant::now();
-    if let Ok(working_log_data) = working_log.read_all_checkpoints() {
-        for checkpoint in &working_log_data {
-            for entry in &checkpoint.entries {
-                // Normalize path separators to forward slashes
-                let normalized_path = normalize_to_posix(&entry.file);
-                // Filter out paths outside the repository to prevent git command failures
-                if !is_path_in_repo(&normalized_path) {
-                    debug_log(&format!(
-                        "Skipping checkpoint file outside repository: {}",
-                        normalized_path
-                    ));
-                    continue;
-                }
-                if should_ignore_file_with_matcher(&normalized_path, ignore_matcher) {
-                    continue;
-                }
-                if !files.contains(&normalized_path) {
-                    // Check if it's a text file before adding
-                    if is_text_file(working_log, &normalized_path) {
-                        files.insert(normalized_path);
-                    }
+    // Read checkpoints once and reuse the result for both file discovery and
+    // AI-checkpoint detection, avoiding a redundant second read_all_checkpoints() call.
+    let working_log_data = working_log.read_all_checkpoints().unwrap_or_default();
+    for checkpoint in &working_log_data {
+        for entry in &checkpoint.entries {
+            // Normalize path separators to forward slashes
+            let normalized_path = normalize_to_posix(&entry.file);
+            // Filter out paths outside the repository to prevent git command failures
+            if !is_path_in_repo(&normalized_path) {
+                debug_log(&format!(
+                    "Skipping checkpoint file outside repository: {}",
+                    normalized_path
+                ));
+                continue;
+            }
+            if should_ignore_file_with_matcher(&normalized_path, ignore_matcher) {
+                continue;
+            }
+            if !files.contains(&normalized_path) {
+                // Check if it's a text file before adding
+                if is_text_file(working_log, &normalized_path) {
+                    files.insert(normalized_path);
                 }
             }
         }
@@ -690,13 +691,9 @@ fn get_all_tracked_files(
         checkpoints_read_start.elapsed()
     ));
 
-    let has_ai_checkpoints = if let Ok(working_log_data) = working_log.read_all_checkpoints() {
-        working_log_data.iter().any(|checkpoint| {
-            checkpoint.kind == CheckpointKind::AiAgent || checkpoint.kind == CheckpointKind::AiTab
-        })
-    } else {
-        false
-    };
+    let has_ai_checkpoints = working_log_data.iter().any(|checkpoint| {
+        checkpoint.kind == CheckpointKind::AiAgent || checkpoint.kind == CheckpointKind::AiTab
+    });
 
     let status_files_start = Instant::now();
     let mut results_for_tracked_files = if is_pre_commit && !has_ai_checkpoints {
