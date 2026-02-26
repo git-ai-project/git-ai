@@ -1,5 +1,3 @@
-use regex::Regex;
-
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::rebase_authorship::rewrite_authorship_if_needed;
 use crate::config;

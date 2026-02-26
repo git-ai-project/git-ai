@@ -251,7 +251,12 @@ impl TestRepo {
         }
 
         let branch_name_output = Command::new(real_git_executable())
-            .args(["-C", worktree_path.to_str().unwrap(), "branch", "--show-current"])
+            .args([
+                "-C",
+                worktree_path.to_str().unwrap(),
+                "branch",
+                "--show-current",
+            ])
             .output()
             .expect("failed to inspect worktree branch");
         if !branch_name_output.status.success() {
