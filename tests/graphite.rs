@@ -70,21 +70,32 @@ use std::sync::OnceLock;
 // Helper utilities
 // ---------------------------------------------------------------------------
 
-/// Check if the `gt` CLI is available on this machine.
-/// Returns the path to the binary if found, or None.
-fn find_gt_binary() -> Option<String> {
-    #[cfg(windows)]
-    let which_cmd = "where";
-    #[cfg(not(windows))]
-    let which_cmd = "which";
+/// Resolve and cache the absolute path to the `gt` CLI binary.
+/// On Windows, npm installs `gt` as `gt.cmd` (a batch wrapper), which Rust's
+/// `Command::new("gt")` cannot find because it only searches for `.exe` files.
+/// By resolving the full path once via `where`/`which`, we can use the absolute
+/// path in all subsequent Command invocations.
+static GT_BINARY_PATH: OnceLock<Option<String>> = OnceLock::new();
 
-    let output = Command::new(which_cmd).arg("gt").output().ok()?;
-    if output.status.success() {
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if path.is_empty() { None } else { Some(path) }
-    } else {
-        None
-    }
+fn find_gt_binary() -> Option<&'static str> {
+    GT_BINARY_PATH
+        .get_or_init(|| {
+            #[cfg(windows)]
+            let which_cmd = "where";
+            #[cfg(not(windows))]
+            let which_cmd = "which";
+
+            let output = Command::new(which_cmd).arg("gt").output().ok()?;
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                // `where` on Windows may return multiple lines; take the first.
+                let first = path.lines().next().unwrap_or(&path).to_string();
+                if first.is_empty() { None } else { Some(first) }
+            } else {
+                None
+            }
+        })
+        .as_deref()
 }
 
 /// Guard that skips the test when `gt` is not installed (local dev),
@@ -160,7 +171,9 @@ fn wrapper_path() -> String {
 /// Passes `--no-interactive` to avoid prompts.
 /// Returns Ok(stdout+stderr) on success, Err(stderr) on failure.
 fn gt(repo: &TestRepo, args: &[&str]) -> Result<String, String> {
-    let mut command = Command::new("gt");
+    let gt_path =
+        find_gt_binary().expect("gt binary not found; require_gt! should have been called");
+    let mut command = Command::new(gt_path);
     command
         .current_dir(repo.path())
         .args(args)
