@@ -2820,7 +2820,7 @@ mod tests {
     use std::process::Command;
 
     fn run_git(cwd: &Path, args: &[&str]) {
-        let output = Command::new("git")
+        let output = Command::new(crate::config::Config::get().git_cmd())
             .args(args)
             .current_dir(cwd)
             .output()
