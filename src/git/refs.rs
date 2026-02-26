@@ -307,7 +307,12 @@ pub fn get_commits_with_notes_from_list(
     // cat-file --batch) to read all note contents at once.
     let note_blob_map = note_blob_oids_for_commits(repo, commit_shas)?;
     let unique_blob_oids: Vec<String> = {
-        let mut oids: Vec<String> = note_blob_map.values().cloned().collect::<HashSet<_>>().into_iter().collect();
+        let mut oids: Vec<String> = note_blob_map
+            .values()
+            .cloned()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
         oids.sort();
         oids
     };

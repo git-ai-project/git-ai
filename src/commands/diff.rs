@@ -149,10 +149,7 @@ pub fn execute_diff(
                 Err(_) => {
                     // No parent (initial commit) - use empty tree hash
                     let to = resolve_commit(repo, &commit)?;
-                    (
-                        "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string(),
-                        to,
-                    )
+                    ("4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string(), to)
                 }
             }
         }
