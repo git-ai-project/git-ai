@@ -1,7 +1,7 @@
 use crate::authorship::authorship_log::{LineRange, PromptRecord};
 use crate::commands::blame::GitAiBlameOptions;
 use crate::error::GitAiError;
-use crate::git::repository::{Repository, exec_git};
+use crate::git::repository::{InternalGitProfile, Repository, exec_git_with_profile};
 use serde::{Deserialize, Serialize, Serializer};
 use std::collections::{BTreeMap, HashMap};
 use std::io::IsTerminal;
@@ -181,7 +181,7 @@ fn resolve_commit(repo: &Repository, rev: &str) -> Result<String, GitAiError> {
     args.push("rev-parse".to_string());
     args.push(rev.to_string());
 
-    let output = exec_git(&args)?;
+    let output = exec_git_with_profile(&args, InternalGitProfile::General)?;
     let sha = String::from_utf8(output.stdout)
         .map_err(|e| GitAiError::Generic(format!("Failed to parse rev-parse output: {}", e)))?
         .trim()
@@ -205,7 +205,7 @@ fn resolve_parent(repo: &Repository, commit: &str) -> Result<String, GitAiError>
     args.push("rev-parse".to_string());
     args.push(parent_rev);
 
-    let output = exec_git(&args);
+    let output = exec_git_with_profile(&args, InternalGitProfile::General);
 
     match output {
         Ok(out) => {
@@ -241,10 +241,11 @@ pub fn get_diff_with_line_numbers(
     args.push("diff".to_string());
     args.push("-U0".to_string()); // No context lines, just changes
     args.push("--no-color".to_string());
+    args.push("--no-renames".to_string());
     args.push(from.to_string());
     args.push(to.to_string());
 
-    let output = exec_git(&args)?;
+    let output = exec_git_with_profile(&args, InternalGitProfile::PatchParse)?;
     let diff_text = String::from_utf8(output.stdout)
         .map_err(|e| GitAiError::Generic(format!("Failed to parse diff output: {}", e)))?;
 
@@ -256,24 +257,8 @@ fn parse_diff_hunks(diff_text: &str) -> Result<Vec<DiffHunk>, GitAiError> {
     let mut current_file = String::new();
 
     for line in diff_text.lines() {
-        // Git outputs paths in two formats:
-        // 1. Unquoted: +++ b/path/to/file.txt
-        // 2. Quoted (for non-ASCII): +++ "b/path/to/file.txt" (with octal escapes inside)
-        if let Some(raw_path) = line.strip_prefix("+++ b/") {
-            // Unquoted path (ASCII only)
-            // Note: Git adds trailing tab after filenames with spaces, so we trim_end
-            current_file = crate::utils::unescape_git_path(raw_path.trim_end());
-        } else if line.starts_with("+++ \"") {
-            // Quoted path (non-ASCII chars) - unescape the entire quoted portion after "+++ "
-            if let Some(quoted_suffix) = line.strip_prefix("+++ ") {
-                let unescaped = crate::utils::unescape_git_path(quoted_suffix);
-                // Now unescaped is "b/中文.txt", strip the "b/" prefix
-                current_file = if let Some(stripped) = unescaped.strip_prefix("b/") {
-                    stripped.to_string()
-                } else {
-                    unescaped
-                };
-            }
+        if let Some(path_opt) = parse_new_file_path_from_plus_header_line(line) {
+            current_file = path_opt.unwrap_or_default();
         } else if line.starts_with("@@ ") {
             // Hunk header
             if let Some(hunk) = parse_hunk_line(line, &current_file)? {
@@ -283,6 +268,25 @@ fn parse_diff_hunks(diff_text: &str) -> Result<Vec<DiffHunk>, GitAiError> {
     }
 
     Ok(hunks)
+}
+
+fn normalize_diff_path_token(path: &str) -> String {
+    let unescaped = crate::utils::unescape_git_path(path.trim_end());
+    let prefixes = ["a/", "b/", "c/", "w/", "i/", "o/"];
+    for prefix in prefixes {
+        if let Some(stripped) = unescaped.strip_prefix(prefix) {
+            return stripped.to_string();
+        }
+    }
+    unescaped
+}
+
+fn parse_new_file_path_from_plus_header_line(line: &str) -> Option<Option<String>> {
+    let raw = line.strip_prefix("+++ ")?;
+    if raw.trim_end() == "/dev/null" {
+        return Some(None);
+    }
+    Some(Some(normalize_diff_path_token(raw)))
 }
 
 fn parse_hunk_line(line: &str, file_path: &str) -> Result<Option<DiffHunk>, GitAiError> {
@@ -543,10 +547,11 @@ fn get_diff_split_by_file(
     let mut args = repo.global_args_for_exec();
     args.push("diff".to_string());
     args.push("--no-color".to_string());
+    args.push("--no-renames".to_string());
     args.push(from_commit.to_string());
     args.push(to_commit.to_string());
 
-    let output = exec_git(&args)?;
+    let output = exec_git_with_profile(&args, InternalGitProfile::PatchParse)?;
     let diff_text = String::from_utf8(output.stdout)
         .map_err(|e| GitAiError::Generic(format!("Failed to parse diff output: {}", e)))?;
 
@@ -562,23 +567,8 @@ fn get_diff_split_by_file(
             }
             current_diff = format!("{}\n", line);
             current_file.clear();
-        } else if let Some(raw_path) = line.strip_prefix("+++ b/") {
-            // Unquoted path (ASCII only)
-            // Note: Git adds trailing tab after filenames with spaces, so we trim_end
-            current_file = crate::utils::unescape_git_path(raw_path.trim_end());
-            current_diff.push_str(line);
-            current_diff.push('\n');
-        } else if line.starts_with("+++ \"") {
-            // Quoted path (non-ASCII chars) - unescape the entire quoted portion after "+++ "
-            if let Some(quoted_suffix) = line.strip_prefix("+++ ") {
-                let unescaped = crate::utils::unescape_git_path(quoted_suffix);
-                // Now unescaped is "b/中文.txt", strip the "b/" prefix
-                current_file = if let Some(stripped) = unescaped.strip_prefix("b/") {
-                    stripped.to_string()
-                } else {
-                    unescaped
-                };
-            }
+        } else if let Some(path_opt) = parse_new_file_path_from_plus_header_line(line) {
+            current_file = path_opt.unwrap_or_default();
             current_diff.push_str(line);
             current_diff.push('\n');
         } else {
@@ -699,10 +689,11 @@ pub fn format_annotated_diff(
     let mut args = repo.global_args_for_exec();
     args.push("diff".to_string());
     args.push("--no-color".to_string());
+    args.push("--no-renames".to_string());
     args.push(from_commit.to_string());
     args.push(to_commit.to_string());
 
-    let output = exec_git(&args)?;
+    let output = exec_git_with_profile(&args, InternalGitProfile::PatchParse)?;
     let diff_text = String::from_utf8(output.stdout)
         .map_err(|e| GitAiError::Generic(format!("Failed to parse diff output: {}", e)))?;
 
@@ -726,22 +717,8 @@ pub fn format_annotated_diff(
             result.push_str(&format_line(line, LineType::DiffHeader, use_color, None));
         } else if line.starts_with("--- ") {
             result.push_str(&format_line(line, LineType::DiffHeader, use_color, None));
-        } else if let Some(raw_path) = line.strip_prefix("+++ b/") {
-            // Unquoted path (ASCII only)
-            // Note: Git adds trailing tab after filenames with spaces, so we trim_end
-            current_file = crate::utils::unescape_git_path(raw_path.trim_end());
-            result.push_str(&format_line(line, LineType::DiffHeader, use_color, None));
-        } else if line.starts_with("+++ \"") {
-            // Quoted path (non-ASCII chars) - unescape the entire quoted portion after "+++ "
-            if let Some(quoted_suffix) = line.strip_prefix("+++ ") {
-                let unescaped = crate::utils::unescape_git_path(quoted_suffix);
-                // Now unescaped is "b/中文.txt", strip the "b/" prefix
-                current_file = if let Some(stripped) = unescaped.strip_prefix("b/") {
-                    stripped.to_string()
-                } else {
-                    unescaped
-                };
-            }
+        } else if let Some(path_opt) = parse_new_file_path_from_plus_header_line(line) {
+            current_file = path_opt.unwrap_or_default();
             result.push_str(&format_line(line, LineType::DiffHeader, use_color, None));
         } else if line.starts_with("@@ ") {
             // Hunk header - update line counters
@@ -1206,5 +1183,35 @@ index 111222..333444 100644
         let diff_text = "";
         let result = parse_diff_hunks(diff_text).unwrap();
         assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_diff_hunks_no_prefix_paths() {
+        let diff_text = r#"diff --git file1.rs file1.rs
+index abc123..def456 100644
+--- file1.rs
++++ file1.rs
+@@ -1,0 +1,1 @@
++fn added() {}
+"#;
+
+        let result = parse_diff_hunks(diff_text).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].file_path, "file1.rs");
+    }
+
+    #[test]
+    fn test_parse_diff_hunks_custom_prefix_paths() {
+        let diff_text = r#"diff --git SRC/file1.rs DST/file1.rs
+index abc123..def456 100644
+--- SRC/file1.rs
++++ DST/file1.rs
+@@ -1,0 +1,1 @@
++fn added() {}
+"#;
+
+        let result = parse_diff_hunks(diff_text).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].file_path, "DST/file1.rs");
     }
 }

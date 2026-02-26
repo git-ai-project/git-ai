@@ -218,6 +218,26 @@ fn configure_repo_external_diff_helper(repo: &TestRepo) -> String {
     marker.to_string()
 }
 
+fn configure_hostile_diff_settings(repo: &TestRepo) {
+    let settings = [
+        ("diff.noprefix", "true"),
+        ("diff.mnemonicprefix", "true"),
+        ("diff.srcPrefix", "SRC/"),
+        ("diff.dstPrefix", "DST/"),
+        ("diff.renames", "copies"),
+        ("diff.relative", "true"),
+        ("diff.algorithm", "histogram"),
+        ("diff.indentHeuristic", "false"),
+        ("diff.interHunkContext", "8"),
+        ("color.diff", "always"),
+        ("color.ui", "always"),
+    ];
+    for (key, value) in settings {
+        repo.git_og(&["config", key, value])
+            .unwrap_or_else(|err| panic!("setting {key}={value} should succeed: {err}"));
+    }
+}
+
 fn create_external_diff_helper_script(repo: &TestRepo, marker: &str) -> std::path::PathBuf {
     let helper_path = repo.path().join(format!("ext-env-helper-{marker}.sh"));
 
@@ -880,6 +900,32 @@ fn test_diff_ignores_repo_external_diff_helper_but_proxy_uses_it() {
         "git-ai diff should include hunk headers, got:\n{}",
         git_ai_diff
     );
+}
+
+#[test]
+fn test_diff_parsing_is_stable_under_hostile_diff_config() {
+    let repo = TestRepo::new();
+
+    let mut file = repo.filename("README.md");
+    file.set_contents(lines!["line one".human()]);
+    repo.stage_all_and_commit("initial").unwrap();
+
+    file.set_contents(lines![
+        "line one".human(),
+        "line two".ai(),
+        "line three".ai()
+    ]);
+    repo.stage_all_and_commit("second").unwrap();
+
+    configure_hostile_diff_settings(&repo);
+
+    let git_ai_diff = repo
+        .git_ai(&["diff", "HEAD"])
+        .expect("git-ai diff should succeed");
+    assert!(git_ai_diff.contains("diff --git"));
+    assert!(git_ai_diff.contains("@@"));
+    assert!(git_ai_diff.contains("+line two"));
+    assert!(git_ai_diff.contains("+line three"));
 }
 
 #[test]

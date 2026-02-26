@@ -117,39 +117,140 @@ fn first_git_subcommand_index(args: &[String]) -> Option<usize> {
     None
 }
 
-fn args_with_no_external_diff_for_internal_patch_commands(args: &[String]) -> Vec<String> {
-    let Some(command_index) = first_git_subcommand_index(args) else {
-        return args.to_vec();
-    };
-
-    let command = args[command_index].as_str();
-    let is_patch_command = matches!(command, "diff" | "show" | "log");
-
-    if !is_patch_command || args.iter().any(|arg| arg == "--no-ext-diff") {
-        return args.to_vec();
-    }
-
-    let mut out = Vec::with_capacity(args.len() + 1);
-    out.extend(args[..=command_index].iter().cloned());
-    out.push("--no-ext-diff".to_string());
-    out.extend(args[command_index + 1..].iter().cloned());
-    out
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InternalGitProfile {
+    General,
+    PatchParse,
+    NumstatParse,
+    RawDiffParse,
 }
 
-fn args_with_standard_diff_backend_for_internal_git(args: &[String]) -> Vec<String> {
-    let args = args_with_no_external_diff_for_internal_patch_commands(args);
+fn strip_profile_conflicts(args: Vec<String>, profile: InternalGitProfile) -> Vec<String> {
+    if profile == InternalGitProfile::General {
+        return args;
+    }
+
     let Some(command_index) = first_git_subcommand_index(&args) else {
         return args;
     };
 
-    let command = args[command_index].as_str();
-    let is_patch_command = matches!(command, "diff" | "show" | "log");
-    if !is_patch_command {
+    let should_drop = |arg: &str| -> bool {
+        match profile {
+            InternalGitProfile::General => false,
+            InternalGitProfile::PatchParse => {
+                arg == "--ext-diff"
+                    || arg == "--textconv"
+                    || arg == "--relative"
+                    || arg.starts_with("--relative=")
+                    || arg == "--color"
+                    || arg.starts_with("--color=")
+                    || arg == "--no-prefix"
+                    || arg.starts_with("--src-prefix=")
+                    || arg.starts_with("--dst-prefix=")
+                    || arg.starts_with("--diff-algorithm=")
+                    || arg == "--no-indent-heuristic"
+                    || arg.starts_with("--inter-hunk-context=")
+            }
+            InternalGitProfile::NumstatParse => {
+                arg == "--ext-diff"
+                    || arg == "--textconv"
+                    || arg == "--relative"
+                    || arg.starts_with("--relative=")
+                    || arg == "--color"
+                    || arg.starts_with("--color=")
+                    || arg == "--find-renames"
+                    || arg.starts_with("--find-renames=")
+                    || arg == "--find-copies"
+                    || arg.starts_with("--find-copies=")
+                    || arg == "--find-copies-harder"
+                    || arg == "-M"
+                    || arg.starts_with("-M")
+                    || arg == "-C"
+                    || arg.starts_with("-C")
+            }
+            InternalGitProfile::RawDiffParse => {
+                arg == "--ext-diff"
+                    || arg == "--textconv"
+                    || arg == "--relative"
+                    || arg.starts_with("--relative=")
+                    || arg == "--color"
+                    || arg.starts_with("--color=")
+            }
+        }
+    };
+
+    let mut out = Vec::with_capacity(args.len());
+    out.extend(args[..=command_index].iter().cloned());
+
+    let mut index = command_index + 1;
+    while index < args.len() {
+        if args[index] == "--" {
+            out.extend(args[index..].iter().cloned());
+            return out;
+        }
+
+        if !should_drop(&args[index]) {
+            out.push(args[index].clone());
+        }
+        index += 1;
+    }
+
+    out
+}
+
+fn profile_options(profile: InternalGitProfile) -> &'static [&'static str] {
+    match profile {
+        InternalGitProfile::General => &[],
+        InternalGitProfile::PatchParse => &[
+            "--no-ext-diff",
+            "--no-textconv",
+            "--default-prefix",
+            "--no-relative",
+            "--no-color",
+            "--diff-algorithm=default",
+            "--indent-heuristic",
+            "--inter-hunk-context=0",
+        ],
+        InternalGitProfile::NumstatParse => &[
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--no-relative",
+            "--no-renames",
+        ],
+        InternalGitProfile::RawDiffParse => &[
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--no-relative",
+        ],
+    }
+}
+
+fn args_with_internal_git_profile(args: &[String], profile: InternalGitProfile) -> Vec<String> {
+    if profile == InternalGitProfile::General {
+        return args.to_vec();
+    }
+
+    let args = strip_profile_conflicts(args.to_vec(), profile);
+    let Some(command_index) = first_git_subcommand_index(&args) else {
+        return args;
+    };
+
+    let options = profile_options(profile);
+    if options.is_empty() {
         return args;
     }
 
-    // Ensure explicit ext-diff opts cannot re-enable external diff after we add --no-ext-diff.
-    args.into_iter().filter(|arg| arg != "--ext-diff").collect()
+    let mut out = Vec::with_capacity(args.len() + options.len());
+    out.extend(args[..=command_index].iter().cloned());
+    for option in options {
+        if !args.iter().any(|arg| arg == option) {
+            out.push((*option).to_string());
+        }
+    }
+    out.extend(args[command_index + 1..].iter().cloned());
+    out
 }
 
 pub struct Object<'a> {
@@ -1545,15 +1646,11 @@ impl Repository {
             rp_args.push("--verify".to_string());
             rp_args.push(target_ref.clone());
 
-            let old_tip: Option<String> = match Command::new(config::Config::get().git_cmd())
-                .args(args_with_disabled_hooks_if_needed(&rp_args))
-                .output()
-            {
-                Ok(output) if output.status.success() => {
-                    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
-                }
-                _ => None,
-            };
+            let old_tip: Option<String> =
+                match exec_git_with_profile(&rp_args, InternalGitProfile::General) {
+                    Ok(output) => Some(String::from_utf8_lossy(&output.stdout).trim().to_string()),
+                    Err(_) => None,
+                };
 
             // Enforce first-parent matches current tip if ref exists
             if let Some(ref tip) = old_tip {
@@ -1883,6 +1980,7 @@ impl Repository {
         args.push("diff".to_string());
         args.push("-U0".to_string()); // Zero context lines
         args.push("--no-color".to_string());
+        args.push("--no-renames".to_string());
         args.push(from_ref.to_string());
         args.push(to_ref.to_string());
 
@@ -1906,7 +2004,7 @@ impl Repository {
             false
         };
 
-        let output = exec_git(&args)?;
+        let output = exec_git_with_profile(&args, InternalGitProfile::PatchParse)?;
         let diff_output = String::from_utf8_lossy(&output.stdout);
 
         let mut result = parse_diff_added_lines(&diff_output)?;
@@ -1929,10 +2027,11 @@ impl Repository {
         args.push("diff".to_string());
         args.push("--name-only".to_string());
         args.push("-z".to_string()); // NUL-separated output for proper UTF-8 handling
+        args.push("--no-renames".to_string());
         args.push(from_ref.to_string());
         args.push(to_ref.to_string());
 
-        let output = exec_git(&args)?;
+        let output = exec_git_with_profile(&args, InternalGitProfile::RawDiffParse)?;
 
         // With -z, output is NUL-separated. The output may contain a trailing NUL.
         let files: Vec<String> = output
@@ -1959,6 +2058,7 @@ impl Repository {
         args.push("diff".to_string());
         args.push("-U0".to_string()); // Zero context lines
         args.push("--no-color".to_string());
+        args.push("--no-renames".to_string());
         args.push(from_ref.to_string());
 
         // Add pathspecs if provided (only as CLI args when under threshold)
@@ -1981,7 +2081,7 @@ impl Repository {
             false
         };
 
-        let output = exec_git(&args)?;
+        let output = exec_git_with_profile(&args, InternalGitProfile::PatchParse)?;
         let diff_output = String::from_utf8_lossy(&output.stdout);
 
         let mut result = parse_diff_added_lines(&diff_output)?;
@@ -2008,6 +2108,7 @@ impl Repository {
         args.push("diff".to_string());
         args.push("-U0".to_string()); // Zero context lines
         args.push("--no-color".to_string());
+        args.push("--no-renames".to_string());
         args.push(from_ref.to_string());
 
         // Add pathspecs if provided (only as CLI args when under threshold)
@@ -2030,7 +2131,7 @@ impl Repository {
             false
         };
 
-        let output = exec_git(&args)?;
+        let output = exec_git_with_profile(&args, InternalGitProfile::PatchParse)?;
         let diff_output = String::from_utf8_lossy(&output.stdout);
 
         let (mut all_added, mut pure_insertions) =
@@ -2348,9 +2449,17 @@ pub fn group_files_by_repository(
 
 /// Helper to execute a git command
 pub fn exec_git(args: &[String]) -> Result<Output, GitAiError> {
+    exec_git_with_profile(args, InternalGitProfile::General)
+}
+
+/// Helper to execute a git command with an explicit internal profile.
+pub fn exec_git_with_profile(
+    args: &[String],
+    profile: InternalGitProfile,
+) -> Result<Output, GitAiError> {
     // TODO Make sure to handle process signals, etc.
     let effective_args =
-        args_with_standard_diff_backend_for_internal_git(&args_with_disabled_hooks_if_needed(args));
+        args_with_internal_git_profile(&args_with_disabled_hooks_if_needed(args), profile);
     let mut cmd = Command::new(config::Config::get().git_cmd());
     cmd.args(&effective_args);
     cmd.env_remove("GIT_EXTERNAL_DIFF");
@@ -2380,9 +2489,18 @@ pub fn exec_git(args: &[String]) -> Result<Output, GitAiError> {
 
 /// Helper to execute a git command with data provided on stdin
 pub fn exec_git_stdin(args: &[String], stdin_data: &[u8]) -> Result<Output, GitAiError> {
+    exec_git_stdin_with_profile(args, stdin_data, InternalGitProfile::General)
+}
+
+/// Helper to execute a git command with data provided on stdin and an explicit profile.
+pub fn exec_git_stdin_with_profile(
+    args: &[String],
+    stdin_data: &[u8],
+    profile: InternalGitProfile,
+) -> Result<Output, GitAiError> {
     // TODO Make sure to handle process signals, etc.
     let effective_args =
-        args_with_standard_diff_backend_for_internal_git(&args_with_disabled_hooks_if_needed(args));
+        args_with_internal_git_profile(&args_with_disabled_hooks_if_needed(args), profile);
     let mut cmd = Command::new(config::Config::get().git_cmd());
     cmd.args(&effective_args)
         .stdin(std::process::Stdio::piped())
@@ -2429,9 +2547,20 @@ pub fn exec_git_stdin_with_env(
     env: &[(String, String)],
     stdin_data: &[u8],
 ) -> Result<Output, GitAiError> {
+    exec_git_stdin_with_env_with_profile(args, env, stdin_data, InternalGitProfile::General)
+}
+
+/// Helper to execute a git command with data provided on stdin, env overrides, and profile.
+#[allow(dead_code)]
+pub fn exec_git_stdin_with_env_with_profile(
+    args: &[String],
+    env: &[(String, String)],
+    stdin_data: &[u8],
+    profile: InternalGitProfile,
+) -> Result<Output, GitAiError> {
     // TODO Make sure to handle process signals, etc.
     let effective_args =
-        args_with_standard_diff_backend_for_internal_git(&args_with_disabled_hooks_if_needed(args));
+        args_with_internal_git_profile(&args_with_disabled_hooks_if_needed(args), profile);
     let mut cmd = Command::new(config::Config::get().git_cmd());
     cmd.args(&effective_args)
         .stdin(std::process::Stdio::piped())
@@ -2514,37 +2643,8 @@ fn parse_diff_added_lines(diff_output: &str) -> Result<HashMap<String, Vec<u32>>
     let mut current_file: Option<String> = None;
 
     for line in diff_output.lines() {
-        // Track current file being diffed
-        // Git outputs paths in two formats:
-        // 1. Unquoted: +++ b/path/to/file.txt (or w/ for workdir diffs)
-        // 2. Quoted (for non-ASCII): +++ "b/path/to/file.txt" (with octal escapes inside)
-        if let Some(raw_path) = line.strip_prefix("+++ b/") {
-            // Unquoted path (ASCII only)
-            // Note: Git adds trailing tab after filenames with spaces, so we trim_end
-            let file_path = crate::utils::unescape_git_path(raw_path.trim_end());
-            current_file = Some(file_path);
-        } else if let Some(raw_path) = line.strip_prefix("+++ w/") {
-            // Workdir diff uses w/ prefix instead of b/
-            let file_path = crate::utils::unescape_git_path(raw_path.trim_end());
-            current_file = Some(file_path);
-        } else if line.starts_with("+++ \"") {
-            // Quoted path (non-ASCII chars) - unescape the entire quoted portion after "+++ "
-            if let Some(quoted_suffix) = line.strip_prefix("+++ ") {
-                let unescaped = crate::utils::unescape_git_path(quoted_suffix);
-                // Strip the prefix (b/ or w/) after unescaping
-                let file_path = if let Some(stripped) = unescaped
-                    .strip_prefix("b/")
-                    .or(unescaped.strip_prefix("w/"))
-                {
-                    stripped.to_string()
-                } else {
-                    unescaped
-                };
-                current_file = Some(file_path);
-            }
-        } else if line.starts_with("+++ /dev/null") {
-            // File was deleted
-            current_file = None;
+        if let Some(path_opt) = parse_new_file_path_from_plus_header_line(line) {
+            current_file = path_opt;
         } else if line.starts_with("@@ ") {
             // Parse hunk header: @@ -old_start,old_count +new_start,new_count @@
             if let Some(ref file) = current_file
@@ -2577,37 +2677,8 @@ fn parse_diff_added_lines_with_insertions(
     let mut current_file: Option<String> = None;
 
     for line in diff_output.lines() {
-        // Track current file being diffed
-        // Git outputs paths in two formats:
-        // 1. Unquoted: +++ b/path/to/file.txt (or w/ for workdir diffs)
-        // 2. Quoted (for non-ASCII): +++ "b/path/to/file.txt" (with octal escapes inside)
-        if let Some(raw_path) = line.strip_prefix("+++ b/") {
-            // Unquoted path (ASCII only)
-            // Note: Git adds trailing tab after filenames with spaces, so we trim_end
-            let file_path = crate::utils::unescape_git_path(raw_path.trim_end());
-            current_file = Some(file_path);
-        } else if let Some(raw_path) = line.strip_prefix("+++ w/") {
-            // Workdir diff uses w/ prefix instead of b/
-            let file_path = crate::utils::unescape_git_path(raw_path.trim_end());
-            current_file = Some(file_path);
-        } else if line.starts_with("+++ \"") {
-            // Quoted path (non-ASCII chars) - unescape the entire quoted portion after "+++ "
-            if let Some(quoted_suffix) = line.strip_prefix("+++ ") {
-                let unescaped = crate::utils::unescape_git_path(quoted_suffix);
-                // Strip the prefix (b/ or w/) after unescaping
-                let file_path = if let Some(stripped) = unescaped
-                    .strip_prefix("b/")
-                    .or(unescaped.strip_prefix("w/"))
-                {
-                    stripped.to_string()
-                } else {
-                    unescaped
-                };
-                current_file = Some(file_path);
-            }
-        } else if line.starts_with("+++ /dev/null") {
-            // File was deleted
-            current_file = None;
+        if let Some(path_opt) = parse_new_file_path_from_plus_header_line(line) {
+            current_file = path_opt;
         } else if line.starts_with("@@ ") {
             // Parse hunk header: @@ -old_start,old_count +new_start,new_count @@
             if let Some(ref file) = current_file
@@ -2639,6 +2710,25 @@ fn parse_diff_added_lines_with_insertions(
     }
 
     Ok((all_lines, insertion_lines))
+}
+
+fn normalize_diff_path_token(path: &str) -> String {
+    let unescaped = crate::utils::unescape_git_path(path.trim_end());
+    let prefixes = ["a/", "b/", "c/", "w/", "i/", "o/"];
+    for prefix in prefixes {
+        if let Some(stripped) = unescaped.strip_prefix(prefix) {
+            return stripped.to_string();
+        }
+    }
+    unescaped
+}
+
+fn parse_new_file_path_from_plus_header_line(line: &str) -> Option<Option<String>> {
+    let raw = line.strip_prefix("+++ ")?;
+    if raw.trim_end() == "/dev/null" {
+        return Some(None);
+    }
+    Some(Some(normalize_diff_path_token(raw)))
 }
 
 /// Parse a hunk header line to extract added line numbers and whether it's a pure insertion
@@ -2789,76 +2879,124 @@ mod tests {
     }
 
     #[test]
-    fn internal_git_diff_commands_disable_external_diff_by_default() {
+    fn patch_profile_applies_canonical_machine_parse_flags() {
         let args = vec!["diff".to_string(), "HEAD^".to_string(), "HEAD".to_string()];
-        let rewritten = args_with_no_external_diff_for_internal_patch_commands(&args);
+        let rewritten = args_with_internal_git_profile(&args, InternalGitProfile::PatchParse);
 
-        assert_eq!(rewritten[0], "diff");
-        assert_eq!(rewritten[1], "--no-ext-diff");
-        assert_eq!(rewritten[2], "HEAD^");
+        assert!(rewritten.iter().any(|arg| arg == "--no-ext-diff"));
+        assert!(rewritten.iter().any(|arg| arg == "--no-textconv"));
+        assert!(rewritten.iter().any(|arg| arg == "--default-prefix"));
+        assert!(rewritten.iter().any(|arg| arg == "--no-relative"));
+        assert!(rewritten.iter().any(|arg| arg == "--no-color"));
+        assert!(
+            rewritten
+                .iter()
+                .any(|arg| arg == "--diff-algorithm=default")
+        );
+        assert!(rewritten.iter().any(|arg| arg == "--indent-heuristic"));
+        assert!(rewritten.iter().any(|arg| arg == "--inter-hunk-context=0"));
     }
 
     #[test]
-    fn internal_git_show_and_log_commands_disable_external_diff_by_default() {
-        let show_args = vec!["show".to_string(), "HEAD".to_string()];
-        let show_rewritten = args_with_no_external_diff_for_internal_patch_commands(&show_args);
-        assert_eq!(
-            show_rewritten,
-            vec![
-                "show".to_string(),
-                "--no-ext-diff".to_string(),
-                "HEAD".to_string()
-            ]
-        );
-
-        let log_args = vec!["log".to_string(), "-p".to_string(), "-1".to_string()];
-        let log_rewritten = args_with_no_external_diff_for_internal_patch_commands(&log_args);
-        assert_eq!(
-            log_rewritten,
-            vec![
-                "log".to_string(),
-                "--no-ext-diff".to_string(),
-                "-p".to_string(),
-                "-1".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn non_patch_commands_are_unchanged_by_no_external_diff_rewrite() {
+    fn numstat_profile_disables_renames_and_external_renderers() {
         let args = vec![
-            "status".to_string(),
-            "--porcelain=v2".to_string(),
+            "diff".to_string(),
+            "--numstat".to_string(),
+            "HEAD^".to_string(),
             "HEAD".to_string(),
         ];
-        let rewritten = args_with_no_external_diff_for_internal_patch_commands(&args);
+        let rewritten = args_with_internal_git_profile(&args, InternalGitProfile::NumstatParse);
+        assert!(rewritten.iter().any(|arg| arg == "--no-ext-diff"));
+        assert!(rewritten.iter().any(|arg| arg == "--no-textconv"));
+        assert!(rewritten.iter().any(|arg| arg == "--no-color"));
+        assert!(rewritten.iter().any(|arg| arg == "--no-relative"));
+        assert!(rewritten.iter().any(|arg| arg == "--no-renames"));
+    }
+
+    #[test]
+    fn numstat_profile_strips_short_rename_and_copy_flags() {
+        let args = vec![
+            "diff".to_string(),
+            "--numstat".to_string(),
+            "-M90%".to_string(),
+            "-C".to_string(),
+            "-C75%".to_string(),
+            "HEAD^".to_string(),
+            "HEAD".to_string(),
+        ];
+        let rewritten = args_with_internal_git_profile(&args, InternalGitProfile::NumstatParse);
+        assert!(!rewritten.iter().any(|arg| arg == "-C"));
+        assert!(!rewritten.iter().any(|arg| arg.starts_with("-M")));
+        assert!(!rewritten.iter().any(|arg| arg.starts_with("-C")));
+        assert!(rewritten.iter().any(|arg| arg == "--no-renames"));
+    }
+
+    #[test]
+    fn general_profile_is_noop() {
+        let args = vec!["status".to_string(), "--porcelain=v2".to_string()];
+        let rewritten = args_with_internal_git_profile(&args, InternalGitProfile::General);
         assert_eq!(rewritten, args);
     }
 
     #[test]
-    fn internal_git_patch_commands_strip_ext_diff_flag() {
+    fn patch_profile_strips_conflicting_ext_diff_and_color_flags() {
         let args = vec![
-            "-C".to_string(),
-            "/tmp/repo".to_string(),
             "diff".to_string(),
             "--ext-diff".to_string(),
+            "--color=always".to_string(),
             "HEAD".to_string(),
         ];
-        let rewritten = args_with_standard_diff_backend_for_internal_git(&args);
+        let rewritten = args_with_internal_git_profile(&args, InternalGitProfile::PatchParse);
 
-        // Patch commands also get --no-ext-diff.
         assert!(rewritten.iter().any(|arg| arg == "--no-ext-diff"));
-        // Explicit enabling flags are removed.
         assert!(!rewritten.iter().any(|arg| arg == "--ext-diff"));
-        assert!(rewritten.iter().any(|arg| arg == "diff"));
+        assert!(!rewritten.iter().any(|arg| arg.starts_with("--color")));
+        assert!(rewritten.iter().any(|arg| arg == "--no-color"));
     }
 
     #[test]
-    fn non_patch_internal_commands_are_unchanged_by_standard_diff_rewrite() {
-        let args = vec!["status".to_string(), "--porcelain=v2".to_string()];
-        let rewritten = args_with_standard_diff_backend_for_internal_git(&args);
+    fn profile_rewrite_does_not_strip_pathspec_tokens_after_double_dash() {
+        let args = vec![
+            "diff".to_string(),
+            "--color=always".to_string(),
+            "HEAD^".to_string(),
+            "HEAD".to_string(),
+            "--".to_string(),
+            "--color".to_string(),
+            "--relative".to_string(),
+            "file.txt".to_string(),
+        ];
+        let rewritten = args_with_internal_git_profile(&args, InternalGitProfile::PatchParse);
+        let separator = rewritten
+            .iter()
+            .position(|arg| arg == "--")
+            .expect("rewritten args should keep pathspec separator");
+        assert_eq!(
+            rewritten[separator + 1..],
+            [
+                "--color".to_string(),
+                "--relative".to_string(),
+                "file.txt".to_string()
+            ]
+        );
+    }
 
-        assert_eq!(rewritten, args);
+    #[test]
+    fn raw_diff_profile_keeps_rename_flags_untouched() {
+        let args = vec![
+            "diff".to_string(),
+            "--raw".to_string(),
+            "-z".to_string(),
+            "-M".to_string(),
+            "HEAD^".to_string(),
+            "HEAD".to_string(),
+        ];
+        let rewritten = args_with_internal_git_profile(&args, InternalGitProfile::RawDiffParse);
+        assert!(rewritten.iter().any(|arg| arg == "-M"));
+        assert!(rewritten.iter().any(|arg| arg == "--no-ext-diff"));
+        assert!(rewritten.iter().any(|arg| arg == "--no-textconv"));
+        assert!(rewritten.iter().any(|arg| arg == "--no-color"));
+        assert!(rewritten.iter().any(|arg| arg == "--no-relative"));
     }
 
     #[test]
@@ -2963,6 +3101,36 @@ index 0000000..abc1234 100644
         let (added_lines, insertion_lines) = parse_diff_added_lines_with_insertions(diff).unwrap();
         assert_eq!(added_lines.get("my file.txt"), Some(&vec![1, 2]));
         assert_eq!(insertion_lines.get("my file.txt"), Some(&vec![1, 2]));
+    }
+
+    #[test]
+    fn test_parse_diff_added_lines_with_insertions_no_prefix_paths() {
+        let diff = r#"diff --git my-file.txt my-file.txt
+index 0000000..abc1234 100644
+--- my-file.txt
++++ my-file.txt
+@@ -0,0 +1,2 @@
++line 1
++line 2"#;
+
+        let (added_lines, insertion_lines) = parse_diff_added_lines_with_insertions(diff).unwrap();
+        assert_eq!(added_lines.get("my-file.txt"), Some(&vec![1, 2]));
+        assert_eq!(insertion_lines.get("my-file.txt"), Some(&vec![1, 2]));
+    }
+
+    #[test]
+    fn test_parse_diff_added_lines_with_insertions_custom_prefix_paths() {
+        let diff = r#"diff --git SRC/my-file.txt DST/my-file.txt
+index 0000000..abc1234 100644
+--- SRC/my-file.txt
++++ DST/my-file.txt
+@@ -0,0 +1,2 @@
++line 1
++line 2"#;
+
+        let (added_lines, insertion_lines) = parse_diff_added_lines_with_insertions(diff).unwrap();
+        assert_eq!(added_lines.get("DST/my-file.txt"), Some(&vec![1, 2]));
+        assert_eq!(insertion_lines.get("DST/my-file.txt"), Some(&vec![1, 2]));
     }
 
     #[test]

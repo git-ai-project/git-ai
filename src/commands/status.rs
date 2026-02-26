@@ -8,7 +8,7 @@ use crate::commands::checkpoint;
 use crate::error::GitAiError;
 use crate::git::find_repository;
 use crate::git::repo_storage::InitialAttributions;
-use crate::git::repository::Repository;
+use crate::git::repository::{InternalGitProfile, Repository, exec_git_with_profile};
 use crate::git::status::MAX_PATHSPEC_ARGS;
 use serde::Serialize;
 use std::collections::{BTreeMap, HashSet};
@@ -260,7 +260,7 @@ fn get_working_dir_diff_stats(
         false
     };
 
-    let output = crate::git::repository::exec_git(&args)?;
+    let output = exec_git_with_profile(&args, InternalGitProfile::NumstatParse)?;
     let stdout = String::from_utf8(output.stdout)?;
 
     let mut added_lines = 0u32;

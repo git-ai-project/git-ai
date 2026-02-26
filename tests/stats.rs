@@ -62,6 +62,26 @@ fn configure_repo_external_diff_helper(repo: &TestRepo) -> String {
     marker.to_string()
 }
 
+fn configure_hostile_diff_settings(repo: &TestRepo) {
+    let settings = [
+        ("diff.noprefix", "true"),
+        ("diff.mnemonicprefix", "true"),
+        ("diff.srcPrefix", "SRC/"),
+        ("diff.dstPrefix", "DST/"),
+        ("diff.renames", "copies"),
+        ("diff.relative", "true"),
+        ("diff.algorithm", "histogram"),
+        ("diff.indentHeuristic", "false"),
+        ("diff.interHunkContext", "8"),
+        ("color.diff", "always"),
+        ("color.ui", "always"),
+    ];
+    for (key, value) in settings {
+        repo.git_og(&["config", key, value])
+            .unwrap_or_else(|err| panic!("setting {key}={value} should succeed: {err}"));
+    }
+}
+
 #[test]
 fn test_authorship_log_stats() {
     let repo = TestRepo::new();
@@ -254,6 +274,32 @@ fn test_stats_cli_range_ignores_repo_external_diff_helper() {
         "expected at least one added line in range, got {}",
         stats.range_stats.git_diff_added_lines
     );
+    assert!(stats.range_stats.ai_additions >= 1);
+}
+
+#[test]
+fn test_stats_cli_range_with_hostile_diff_config() {
+    let repo = TestRepo::new();
+
+    let mut file = repo.filename("stats-range-hostile.txt");
+    file.set_contents(lines!["base".human()]);
+    let first = repo.stage_all_and_commit("initial").unwrap();
+
+    file.set_contents(lines!["base".human(), "ai line".ai()]);
+    let second = repo.stage_all_and_commit("ai second").unwrap();
+
+    configure_hostile_diff_settings(&repo);
+
+    let range = format!("{}..{}", first.commit_sha, second.commit_sha);
+    let raw = repo
+        .git_ai(&["stats", &range, "--json"])
+        .expect("git-ai stats range should succeed with hostile diff config");
+    let output = extract_json_object(&raw);
+    let stats: git_ai::authorship::range_authorship::RangeAuthorshipStats =
+        serde_json::from_str(&output).unwrap();
+
+    assert_eq!(stats.authorship_stats.total_commits, 1);
+    assert!(stats.range_stats.git_diff_added_lines >= 1);
     assert!(stats.range_stats.ai_additions >= 1);
 }
 
