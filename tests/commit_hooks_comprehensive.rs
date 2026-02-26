@@ -738,3 +738,31 @@ fn test_commit_amend_full_flow() {
 
     assert!(has_amend);
 }
+
+reuse_tests_in_worktree!(
+    test_pre_commit_hook_success,
+    test_pre_commit_hook_dry_run,
+    test_pre_commit_hook_captures_head,
+    test_post_commit_hook_success,
+    test_post_commit_hook_amend,
+    test_post_commit_hook_dry_run,
+    test_post_commit_hook_failed_status,
+    test_post_commit_hook_pre_hook_failed,
+    test_post_commit_hook_porcelain_suppresses_output,
+    test_post_commit_hook_quiet_suppresses_output,
+    test_get_commit_default_author_from_config,
+    test_commit_event_creation,
+    test_commit_amend_event_creation,
+    test_commit_event_no_original,
+    test_amend_flag_detection,
+    test_porcelain_flag_detection,
+    test_quiet_flag_detection,
+    test_quiet_short_flag_detection,
+    test_no_status_flag_detection,
+    test_dry_run_flag_detection,
+    test_extract_author_with_equals,
+    test_extract_author_separate_arg,
+    test_extract_author_not_present,
+    test_commit_full_flow,
+    test_commit_amend_full_flow,
+);

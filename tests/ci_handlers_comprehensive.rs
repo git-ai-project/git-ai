@@ -380,3 +380,24 @@ fn test_github_workflow_path_structure() {
             .contains("git-ai-authorship.yml")
     );
 }
+
+reuse_tests_in_worktree!(
+    test_ci_handlers_module_exists,
+    test_ci_result_types_coverage,
+    test_ci_event_merge_structure,
+    test_ci_local_flag_parsing_structure,
+    test_ci_local_flag_values,
+    test_no_cleanup_flag_detection,
+    test_ci_missing_flag_value_detection,
+    test_ci_required_flags_for_merge,
+    test_ci_subcommand_classification,
+    test_ci_github_subcommands,
+    test_ci_gitlab_subcommands,
+    test_ci_local_events,
+    test_github_ci_env_detection,
+    test_gitlab_ci_env_detection,
+    test_ci_requires_valid_repository,
+    test_ci_context_with_temp_dir,
+    test_github_workflow_file_creation,
+    test_github_workflow_path_structure,
+);

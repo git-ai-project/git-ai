@@ -1305,21 +1305,28 @@ impl Repository {
         Ok(remotes)
     }
 
-    /// Get the git config file for this repository and fallback to global config if not found.
-    fn get_git_config_file(&self) -> Result<gix_config::File<'static>, GitAiError> {
-        match gix_config::File::from_git_dir(self.path().to_path_buf()) {
-            Ok(git_config_file) => Ok(git_config_file),
-            Err(e) => match gix_config::File::from_globals() {
-                Ok(system_config) => Ok(system_config),
-                Err(_) => Err(GitAiError::GixError(e.to_string())),
-            },
-        }
-    }
     /// Get config value for a given key as a String.
+    ///
+    /// Uses `git config --get` so linked worktrees resolve against the same
+    /// config sources Git itself uses (worktree config + common config + global).
     pub fn config_get_str(&self, key: &str) -> Result<Option<String>, GitAiError> {
-        match self.get_git_config_file() {
-            Ok(git_config_file) => Ok(git_config_file.string(key).map(|cow| cow.to_string())),
-            Err(e) => Err(e),
+        let mut args = self.global_args_for_exec();
+        args.push("config".to_string());
+        args.push("--get".to_string());
+        args.push(key.to_string());
+
+        match exec_git(&args) {
+            Ok(output) => {
+                let value = String::from_utf8(output.stdout)?;
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(trimmed.to_string()))
+                }
+            }
+            Err(GitAiError::GitCliError { code: Some(1), .. }) => Ok(None),
+            Err(err) => Err(err),
         }
     }
 
@@ -1334,38 +1341,26 @@ impl Repository {
         &self,
         pattern: &str,
     ) -> Result<std::collections::HashMap<String, String>, GitAiError> {
-        match self.get_git_config_file() {
-            Ok(git_config_file) => {
+        let mut args = self.global_args_for_exec();
+        args.push("config".to_string());
+        args.push("--get-regexp".to_string());
+        args.push(pattern.to_string());
+
+        match exec_git(&args) {
+            Ok(output) => {
+                let stdout = String::from_utf8(output.stdout)?;
                 let mut matches: HashMap<String, String> = HashMap::new();
-
-                let re = Regex::new(pattern)
-                    .map_err(|e| GitAiError::Generic(format!("Invalid regex pattern: {}", e)))?;
-
-                // iterate over all sections
-                for section in git_config_file.sections() {
-                    // Support subsections in the key
-                    let section_name = section.header().name().to_string().to_lowercase();
-                    let subsection = section.header().subsection_name();
-
-                    for value_name in section.body().value_names() {
-                        let value_name_str = value_name.to_string().to_lowercase();
-                        let full_key = if let Some(sub) = subsection {
-                            format!("{}.{}.{}", section_name, sub, value_name_str)
-                        } else {
-                            format!("{}.{}", section_name, value_name_str)
-                        };
-
-                        if re.is_match(&full_key)
-                            && let Some(value) =
-                                section.body().value(value_name).map(|c| c.to_string())
-                        {
-                            matches.insert(full_key, value);
-                        }
+                for line in stdout.lines() {
+                    if let Some((key, value)) = line.split_once(' ') {
+                        matches.insert(key.to_string(), value.to_string());
+                    } else if !line.trim().is_empty() {
+                        matches.insert(line.trim().to_string(), String::new());
                     }
                 }
                 Ok(matches)
             }
-            Err(e) => Err(e),
+            Err(GitAiError::GitCliError { code: Some(1), .. }) => Ok(HashMap::new()),
+            Err(err) => Err(err),
         }
     }
 

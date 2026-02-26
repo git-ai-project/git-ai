@@ -669,3 +669,23 @@ fn test_empty_pathspec_early_return() {
         "empty pathspec should return empty result"
     );
 }
+
+reuse_tests_in_worktree!(
+    test_status_post_filter_equivalence,
+    test_status_post_filter_excludes_unmatched_files,
+    test_status_post_filter_rename_matched_by_new_path,
+    test_status_post_filter_rename_matched_by_orig_path,
+    test_status_post_filter_rename_excluded_when_neither_matches,
+    test_list_commit_files_post_filter_equivalence,
+    test_list_commit_files_post_filter_exclusion,
+    test_list_commit_files_post_filter_no_matches,
+    test_diff_added_lines_post_filter_equivalence,
+    test_diff_added_lines_post_filter_exclusion,
+    test_diff_added_lines_post_filter_correct_line_numbers,
+    test_diff_workdir_insertions_post_filter_equivalence,
+    test_diff_workdir_insertions_both_maps_filtered,
+    test_diff_tree_to_tree_post_filter_equivalence,
+    test_diff_tree_to_tree_post_filter_exclusion,
+    test_threshold_boundary_1000_vs_1001,
+    test_empty_pathspec_early_return,
+);

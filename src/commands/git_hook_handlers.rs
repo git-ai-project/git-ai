@@ -1109,24 +1109,22 @@ fn worktree_root_from_git_dir(git_dir: &Path) -> Option<PathBuf> {
 }
 
 fn hook_repository_lookup_paths() -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    if let Ok(current_dir) = std::env::current_dir() {
-        paths.push(current_dir);
-    }
-    if let Some(git_dir) = git_dir_from_context() {
-        if !paths
-            .iter()
-            .any(|existing| normalize_path(existing) == normalize_path(&git_dir))
-        {
-            paths.push(git_dir.clone());
-        }
+    let mut paths: Vec<PathBuf> = Vec::new();
 
+    if let Some(git_dir) = git_dir_from_context() {
         if let Some(worktree_root) = worktree_root_from_git_dir(&git_dir)
             && !paths
                 .iter()
                 .any(|existing| normalize_path(existing) == normalize_path(&worktree_root))
         {
             paths.push(worktree_root);
+        }
+
+        if !paths
+            .iter()
+            .any(|existing| normalize_path(existing) == normalize_path(&git_dir))
+        {
+            paths.push(git_dir.clone());
         }
 
         if git_dir
@@ -1145,6 +1143,15 @@ fn hook_repository_lookup_paths() -> Vec<PathBuf> {
             }
         }
     }
+
+    if let Ok(current_dir) = std::env::current_dir()
+        && !paths
+            .iter()
+            .any(|existing| normalize_path(existing) == normalize_path(&current_dir))
+    {
+        paths.push(current_dir);
+    }
+
     paths
 }
 

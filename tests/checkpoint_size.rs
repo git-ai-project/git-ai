@@ -88,3 +88,7 @@ fn test_checkpoint_size_logging_large_ai_rewrites() {
         );
     }
 }
+
+reuse_tests_in_worktree!(
+    test_checkpoint_size_logging_large_ai_rewrites,
+);

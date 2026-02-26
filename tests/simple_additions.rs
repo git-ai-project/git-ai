@@ -40,7 +40,6 @@ fn test_simple_additions_empty_repo() {
     let mut file = repo.filename("test.txt");
 
     file.set_contents(lines!["Line1", "Line 2".ai(), "Line 3".ai(),]);
-
     repo.stage_all_and_commit("Initial commit").unwrap();
 
     file.assert_lines_and_blame(lines!["Line1".human(), "Line 2".ai(), "Line 3".ai(),]);

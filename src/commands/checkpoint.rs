@@ -173,7 +173,7 @@ pub fn run(
             && !has_initial_attributions
             && !Config::get().get_feature_flags().inter_commit_move
         {
-            debug_log("No AI edits,in pre-commit checkpoint, skipping");
+            debug_log("No AI edits in pre-commit checkpoint, skipping");
             return Ok((0, 0, 0));
         }
     }

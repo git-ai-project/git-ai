@@ -21,6 +21,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[macro_use]
 mod repos;
 use repos::test_repo::TestRepo;
 
@@ -1163,3 +1164,5 @@ fn test_collect_metrics_flattens_events_from_multiple_envelopes() {
     // Should flatten all events from all metrics envelopes into single list
     // Result: (2 envelopes, 3 events)
 }
+
+reuse_tests_in_worktree!(test_flush_logs_command_with_no_logs,);

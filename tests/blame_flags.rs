@@ -1185,3 +1185,34 @@ fn test_blame_ai_human_author() {
         ]
     );
 }
+
+reuse_tests_in_worktree!(
+    test_blame_basic_format,
+    test_blame_line_range,
+    test_blame_porcelain_format,
+    test_blame_show_email,
+    test_blame_show_name,
+    test_blame_show_number,
+    test_blame_suppress_author,
+    test_blame_long_rev,
+    test_blame_raw_timestamp,
+    test_blame_abbrev,
+    test_blame_blank_boundary,
+    test_blame_show_root,
+    test_blame_date_format,
+    test_blame_multiple_flags,
+    test_blame_incremental_format,
+    test_blame_line_porcelain,
+    test_blame_with_ai_authorship,
+    test_blame_contents_from_stdin,
+    test_blame_mark_unknown_without_authorship_log,
+    test_blame_mark_unknown_mixed_commits,
+    test_blame_mark_unknown_backward_compatible,
+    test_blame_auto_detects_git_blame_ignore_revs_file,
+    test_blame_no_ignore_revs_file_flag_disables_auto_detection,
+    test_blame_explicit_ignore_revs_file_takes_precedence,
+    test_blame_respects_git_config_blame_ignore_revs_file,
+    test_blame_without_ignore_revs_file_works_normally,
+    test_blame_ignore_revs_with_multiple_commits,
+    test_blame_ai_human_author,
+);

@@ -737,3 +737,30 @@ fn test_switch_between_multiple_branches() {
 
     post_switch_hook(&parsed_args, &mut repository, exit_status, &mut context);
 }
+
+reuse_tests_in_worktree!(
+    test_pre_switch_hook_normal,
+    test_pre_switch_hook_with_merge_flag,
+    test_pre_switch_hook_merge_without_changes,
+    test_pre_switch_hook_merge_short_flag,
+    test_post_switch_hook_success,
+    test_post_switch_hook_failed,
+    test_post_switch_hook_head_unchanged,
+    test_post_switch_hook_force_switch,
+    test_post_switch_hook_force_short_flag,
+    test_post_switch_hook_discard_changes_flag,
+    test_post_switch_hook_with_merge,
+    test_force_flag_detection,
+    test_force_short_flag_detection,
+    test_discard_changes_flag_detection,
+    test_merge_flag_detection,
+    test_merge_short_flag_detection,
+    test_detect_uncommitted_changes_staged,
+    test_detect_uncommitted_changes_unstaged,
+    test_no_uncommitted_changes,
+    test_working_log_rename,
+    test_switch_normal_flow,
+    test_switch_force_flow,
+    test_switch_new_branch_creation,
+    test_switch_between_multiple_branches,
+);

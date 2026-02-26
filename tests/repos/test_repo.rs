@@ -195,39 +195,49 @@ impl TestRepo {
     }
 
     /// Create a worktree-backed TestRepo.
-    /// This creates a normal base repo, ensures it has a HEAD commit,
-    /// moves the base off the default branch, then adds a linked worktree
-    /// on the default branch. The returned TestRepo points at the worktree.
+    /// This creates a normal base repo and then adds an orphan linked worktree
+    /// so tests keep empty-repo semantics (the first real commit is still a root commit).
     fn new_worktree_variant() -> Self {
         let base = Self::new_with_mode(GitTestMode::from_env());
 
-        // Worktrees require at least one commit
-        base.ensure_head_commit();
-
         let default_branch = default_branchname();
-
-        // Move the base repo off the default branch so the worktree can use it
         let base_branch = base.current_branch();
         if base_branch == default_branch {
             let mut rng = rand::thread_rng();
             let n: u64 = rng.gen_range(0..10_000_000_000);
             let temp_branch = format!("base-worktree-{}", n);
-            base.git_og(&["checkout", "-b", &temp_branch])
-                .expect("failed to create base worktree branch");
+            let temp_ref = format!("refs/heads/{}", temp_branch);
+            let switch_output = Command::new(real_git_executable())
+                .args([
+                    "-C",
+                    base.path.to_str().unwrap(),
+                    "symbolic-ref",
+                    "HEAD",
+                    &temp_ref,
+                ])
+                .output()
+                .expect("failed to move base repo off default branch");
+            if !switch_output.status.success() {
+                panic!(
+                    "failed to move base repo off default branch:\nstdout: {}\nstderr: {}",
+                    String::from_utf8_lossy(&switch_output.stdout),
+                    String::from_utf8_lossy(&switch_output.stderr)
+                );
+            }
         }
 
         let mut rng = rand::thread_rng();
         let wt_n: u64 = rng.gen_range(0..10_000_000_000);
         let worktree_path = std::env::temp_dir().join(format!("{}-wt", wt_n));
 
-        let output = Command::new("git")
+        let output = Command::new(real_git_executable())
             .args([
                 "-C",
                 base.path.to_str().unwrap(),
                 "worktree",
                 "add",
+                "--orphan",
                 worktree_path.to_str().unwrap(),
-                default_branch,
             ])
             .output()
             .expect("failed to add worktree");
@@ -238,6 +248,40 @@ impl TestRepo {
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
+        }
+
+        let branch_name_output = Command::new(real_git_executable())
+            .args(["-C", worktree_path.to_str().unwrap(), "branch", "--show-current"])
+            .output()
+            .expect("failed to inspect worktree branch");
+        if !branch_name_output.status.success() {
+            panic!(
+                "failed to inspect linked worktree branch:\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&branch_name_output.stdout),
+                String::from_utf8_lossy(&branch_name_output.stderr)
+            );
+        }
+        let current_branch = String::from_utf8_lossy(&branch_name_output.stdout)
+            .trim()
+            .to_string();
+        if current_branch != default_branch {
+            let rename_output = Command::new(real_git_executable())
+                .args([
+                    "-C",
+                    worktree_path.to_str().unwrap(),
+                    "branch",
+                    "-m",
+                    &default_branch,
+                ])
+                .output()
+                .expect("failed to rename worktree branch");
+            if !rename_output.status.success() {
+                panic!(
+                    "failed to rename linked worktree branch:\nstdout: {}\nstderr: {}",
+                    String::from_utf8_lossy(&rename_output.stdout),
+                    String::from_utf8_lossy(&rename_output.stderr)
+                );
+            }
         }
 
         let base_path = base.path.clone();
@@ -267,13 +311,6 @@ impl TestRepo {
         repo.apply_default_config_patch();
         repo.setup_git_hooks_mode();
         repo
-    }
-
-    fn ensure_head_commit(&self) {
-        if self.git_og(&["rev-parse", "--verify", "HEAD"]).is_err() {
-            self.git_og(&["commit", "--allow-empty", "-m", "initial"])
-                .expect("failed to create initial commit for worktree");
-        }
     }
 
     pub fn new_with_mode(git_mode: GitTestMode) -> Self {
@@ -336,7 +373,7 @@ impl TestRepo {
             .set_str("user.email", "test@example.com")
             .expect("failed to set main user.email");
 
-        let _ = Command::new("git")
+        let _ = Command::new(real_git_executable())
             .args([
                 "-C",
                 main_path.to_str().unwrap(),
@@ -346,7 +383,7 @@ impl TestRepo {
             ])
             .output();
 
-        let worktree_output = Command::new("git")
+        let worktree_output = Command::new(real_git_executable())
             .args([
                 "-C",
                 main_path.to_str().unwrap(),
@@ -464,7 +501,7 @@ impl TestRepo {
         let mirror_test_db_path =
             resolve_test_db_path(&base, mirror_n, &mirror_test_home, git_mode);
 
-        let clone_output = Command::new("git")
+        let clone_output = Command::new(real_git_executable())
             .args([
                 "clone",
                 upstream_path.to_str().unwrap(),
@@ -782,7 +819,7 @@ impl TestRepo {
         let mut command = if self.git_mode.uses_wrapper() {
             Command::new(get_binary_path())
         } else {
-            Command::new("git")
+            Command::new(real_git_executable())
         };
 
         // If working_dir is provided, use current_dir instead of -C flag
@@ -1089,7 +1126,7 @@ impl TestRepo {
 impl Drop for TestRepo {
     fn drop(&mut self) {
         if let Some(base_path) = &self._base_repo_path {
-            let _ = Command::new("git")
+            let _ = Command::new(real_git_executable())
                 .args([
                     "-C",
                     base_path.to_str().unwrap(),
@@ -1180,6 +1217,10 @@ impl NewCommit {
 
 static COMPILED_BINARY: OnceLock<PathBuf> = OnceLock::new();
 static DEFAULT_BRANCH_NAME: OnceLock<String> = OnceLock::new();
+
+pub(crate) fn real_git_executable() -> &'static str {
+    git_ai::config::Config::get().git_cmd()
+}
 
 fn get_default_branch_name() -> String {
     // Since TestRepo::new() explicitly sets the default branch to "main" via symbolic-ref,

@@ -4,6 +4,20 @@ mod test_utils;
 
 use crate::repos::test_repo::TestRepo;
 use git_ai::git::rewrite_log::RewriteLogEvent;
+use std::path::PathBuf;
+
+fn resolve_git_dir(repo: &TestRepo) -> PathBuf {
+    let git_dir = PathBuf::from(
+        repo.git(&["rev-parse", "--git-dir"])
+            .expect("failed to resolve git dir")
+            .trim(),
+    );
+    if git_dir.is_absolute() {
+        git_dir
+    } else {
+        repo.path().join(git_dir)
+    }
+}
 
 // ==============================================================================
 // Cherry-Pick Hook State Detection Tests
@@ -14,7 +28,7 @@ fn test_cherry_pick_head_file_detection() {
     let repo = TestRepo::new();
 
     // Initially CHERRY_PICK_HEAD should not exist
-    let cherry_pick_head = repo.path().join(".git").join("CHERRY_PICK_HEAD");
+    let cherry_pick_head = resolve_git_dir(&repo).join("CHERRY_PICK_HEAD");
     assert!(!cherry_pick_head.exists());
 }
 
@@ -23,7 +37,7 @@ fn test_cherry_pick_sequencer_detection() {
     let repo = TestRepo::new();
 
     // Initially sequencer directory should not exist
-    let sequencer_dir = repo.path().join(".git").join("sequencer");
+    let sequencer_dir = resolve_git_dir(&repo).join("sequencer");
     assert!(!sequencer_dir.exists());
 }
 
@@ -31,8 +45,9 @@ fn test_cherry_pick_sequencer_detection() {
 fn test_cherry_pick_not_in_progress() {
     let repo = TestRepo::new();
 
-    let cherry_pick_head = repo.path().join(".git").join("CHERRY_PICK_HEAD");
-    let sequencer_dir = repo.path().join(".git").join("sequencer");
+    let git_dir = resolve_git_dir(&repo);
+    let cherry_pick_head = git_dir.join("CHERRY_PICK_HEAD");
+    let sequencer_dir = git_dir.join("sequencer");
 
     let in_progress = cherry_pick_head.exists() || sequencer_dir.exists();
 
@@ -391,7 +406,7 @@ fn test_pre_hook_new_cherry_pick() {
     let commit = repo.commit("test commit").unwrap();
 
     // In a new cherry-pick, CHERRY_PICK_HEAD doesn't exist
-    let cherry_pick_head = repo.path().join(".git").join("CHERRY_PICK_HEAD");
+    let cherry_pick_head = resolve_git_dir(&repo).join("CHERRY_PICK_HEAD");
     assert!(!cherry_pick_head.exists());
 
     // Pre-hook should capture HEAD
@@ -409,7 +424,7 @@ fn test_pre_hook_continuing_cherry_pick() {
     repo.commit("test commit").unwrap();
 
     // Simulate continuing state by creating CHERRY_PICK_HEAD
-    let cherry_pick_head = repo.path().join(".git").join("CHERRY_PICK_HEAD");
+    let cherry_pick_head = resolve_git_dir(&repo).join("CHERRY_PICK_HEAD");
     std::fs::write(&cherry_pick_head, "abc123\n").expect("Failed to create CHERRY_PICK_HEAD");
 
     // Now it's in progress
@@ -425,7 +440,7 @@ fn test_post_hook_still_in_progress() {
     let repo = TestRepo::new();
 
     // Create CHERRY_PICK_HEAD to simulate in-progress state
-    let cherry_pick_head = repo.path().join(".git").join("CHERRY_PICK_HEAD");
+    let cherry_pick_head = resolve_git_dir(&repo).join("CHERRY_PICK_HEAD");
     std::fs::write(&cherry_pick_head, "abc123\n").expect("Failed to create CHERRY_PICK_HEAD");
 
     // Check if in progress
@@ -440,8 +455,9 @@ fn test_post_hook_conflict_state() {
     let repo = TestRepo::new();
 
     // Create both CHERRY_PICK_HEAD and sequencer to simulate conflict
-    let cherry_pick_head = repo.path().join(".git").join("CHERRY_PICK_HEAD");
-    let sequencer_dir = repo.path().join(".git").join("sequencer");
+    let git_dir = resolve_git_dir(&repo);
+    let cherry_pick_head = git_dir.join("CHERRY_PICK_HEAD");
+    let sequencer_dir = git_dir.join("sequencer");
 
     std::fs::write(&cherry_pick_head, "abc123\n").expect("Failed to create CHERRY_PICK_HEAD");
     std::fs::create_dir_all(&sequencer_dir).expect("Failed to create sequencer");
@@ -456,8 +472,9 @@ fn test_post_hook_completed() {
     let repo = TestRepo::new();
 
     // Neither CHERRY_PICK_HEAD nor sequencer exist
-    let cherry_pick_head = repo.path().join(".git").join("CHERRY_PICK_HEAD");
-    let sequencer_dir = repo.path().join(".git").join("sequencer");
+    let git_dir = resolve_git_dir(&repo);
+    let cherry_pick_head = git_dir.join("CHERRY_PICK_HEAD");
+    let sequencer_dir = git_dir.join("sequencer");
 
     let is_in_progress = cherry_pick_head.exists() || sequencer_dir.exists();
 
@@ -870,3 +887,48 @@ fn test_event_sequence_start_abort() {
         _ => panic!("Expected Abort second"),
     }
 }
+
+reuse_tests_in_worktree!(
+    test_cherry_pick_head_file_detection,
+    test_cherry_pick_sequencer_detection,
+    test_cherry_pick_not_in_progress,
+    test_cherry_pick_start_event_creation,
+    test_cherry_pick_complete_event_creation,
+    test_cherry_pick_abort_event_creation,
+    test_cherry_pick_event_variants,
+    test_parse_single_commit,
+    test_parse_multiple_commits,
+    test_parse_commits_with_flags,
+    test_filter_flag_with_value,
+    test_filter_special_keywords,
+    test_detect_commit_range,
+    test_range_expansion_format,
+    test_active_cherry_pick_with_start_event,
+    test_no_active_cherry_pick_with_complete_first,
+    test_no_active_cherry_pick_with_abort_first,
+    test_no_cherry_pick_events,
+    test_pre_hook_new_cherry_pick,
+    test_pre_hook_continuing_cherry_pick,
+    test_post_hook_still_in_progress,
+    test_post_hook_conflict_state,
+    test_post_hook_completed,
+    test_post_hook_with_failure_status,
+    test_build_commit_mappings,
+    test_commit_mapping_reversal,
+    test_empty_commit_mapping,
+    test_find_original_head_from_start_event,
+    test_find_source_commits_from_start_event,
+    test_no_start_event_found,
+    test_dry_run_detection,
+    test_dry_run_skips_post_hook,
+    test_head_unchanged_detection,
+    test_head_changed_detection,
+    test_cherry_pick_complete_flow,
+    test_cherry_pick_abort_flow,
+    test_strategy_flag_filtering,
+    test_mainline_flag_filtering,
+    test_resolve_commit_sha_format,
+    test_resolve_symbolic_refs,
+    test_event_sequence_start_complete,
+    test_event_sequence_start_abort,
+);

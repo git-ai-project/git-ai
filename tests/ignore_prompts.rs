@@ -307,3 +307,10 @@ fn test_prompt_sharing_disabled_with_empty_transcript() {
     // The key thing is the checkpoint should succeed
     assert!(!commit.commit_sha.is_empty());
 }
+
+reuse_tests_in_worktree!(
+    test_checkpoint_with_prompt_sharing_enabled,
+    test_checkpoint_with_prompt_sharing_disabled_strips_messages,
+    test_multiple_checkpoints_with_messages,
+    test_prompt_sharing_disabled_with_empty_transcript,
+);

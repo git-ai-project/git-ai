@@ -534,3 +534,15 @@ fn test_pull_rebase_skip_commit_does_not_map_entire_upstream_history() {
         "HEAD should have moved to upstream history after skipped rebase"
     );
 }
+
+reuse_tests_in_worktree!(
+    test_fast_forward_pull_preserves_ai_attribution,
+    test_fast_forward_pull_without_local_changes,
+    test_pull_rebase_preserves_committed_ai_authorship,
+    test_pull_rebase_via_git_config_preserves_committed_ai_authorship,
+    test_pull_rebase_autostash_preserves_uncommitted_ai_attribution,
+    test_pull_rebase_autostash_with_mixed_attribution,
+    test_pull_rebase_autostash_via_git_config,
+    test_pull_rebase_committed_and_autostash_preserves_all_authorship,
+    test_pull_rebase_skip_commit_does_not_map_entire_upstream_history,
+);

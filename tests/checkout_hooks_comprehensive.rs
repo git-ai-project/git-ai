@@ -880,3 +880,36 @@ fn test_checkout_detached_head() {
 
     post_checkout_hook(&parsed_args, &mut repository, exit_status, &mut context);
 }
+
+reuse_tests_in_worktree!(
+    test_pre_checkout_hook_normal,
+    test_pre_checkout_hook_with_merge_flag,
+    test_pre_checkout_hook_merge_without_changes,
+    test_pre_checkout_hook_merge_short_flag,
+    test_post_checkout_hook_success,
+    test_post_checkout_hook_failed,
+    test_post_checkout_hook_head_unchanged,
+    test_post_checkout_hook_pathspec,
+    test_post_checkout_hook_multiple_pathspecs,
+    test_post_checkout_hook_force_checkout,
+    test_post_checkout_hook_force_short_flag,
+    test_post_checkout_hook_with_merge,
+    test_force_flag_detection,
+    test_force_short_flag_detection,
+    test_merge_flag_detection,
+    test_merge_short_flag_detection,
+    test_pathspec_detection_single,
+    test_pathspec_detection_multiple,
+    test_pathspec_detection_none,
+    test_pathspec_exact_match,
+    test_pathspec_directory_match,
+    test_pathspec_directory_without_slash,
+    test_detect_uncommitted_changes_staged,
+    test_detect_uncommitted_changes_unstaged,
+    test_no_uncommitted_changes,
+    test_checkout_normal_flow,
+    test_checkout_force_flow,
+    test_checkout_pathspec_flow,
+    test_checkout_new_branch_creation,
+    test_checkout_detached_head,
+);

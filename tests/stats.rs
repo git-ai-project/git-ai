@@ -736,3 +736,24 @@ fn test_post_commit_large_ignored_files_do_not_trigger_skip_warning() {
     assert_eq!(stats.ai_additions, 0);
     assert_eq!(stats.human_additions, 0);
 }
+
+reuse_tests_in_worktree!(
+    test_authorship_log_stats,
+    test_stats_cli_range,
+    test_stats_cli_empty_tree_range,
+    test_markdown_stats_deletion_only,
+    test_markdown_stats_all_human,
+    test_markdown_stats_all_ai,
+    test_markdown_stats_mixed,
+    test_markdown_stats_no_mixed,
+    test_markdown_stats_minimal_human,
+    test_markdown_stats_formatting,
+    test_stats_default_ignores_snapshot_files,
+    test_stats_default_ignores_lockfiles_and_generated_files,
+    test_stats_ignores_linguist_generated_patterns,
+    test_stats_keeps_negative_linguist_patterns_counted,
+    test_stats_in_bare_clone_uses_root_gitattributes_linguist_generated,
+    test_stats_ignore_flag_is_additive_to_defaults,
+    test_stats_range_uses_default_ignores,
+    test_post_commit_large_ignored_files_do_not_trigger_skip_warning,
+);

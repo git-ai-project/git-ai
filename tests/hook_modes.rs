@@ -1,10 +1,11 @@
+#[macro_use]
 mod repos;
 
 use repos::test_repo::TestRepo;
 use serial_test::serial;
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 struct EnvVarGuard {
     key: &'static str,
@@ -70,16 +71,67 @@ fn set_executable(path: &Path) {
     fs::set_permissions(path, perms).expect("failed to set executable bit");
 }
 
+fn git_dir(repo: &TestRepo) -> PathBuf {
+    PathBuf::from(
+        repo.git(&["rev-parse", "--absolute-git-dir"])
+            .expect("failed to resolve git dir")
+            .trim(),
+    )
+}
+
+fn git_common_dir(repo: &TestRepo) -> PathBuf {
+    let common_dir = PathBuf::from(
+        repo.git(&["rev-parse", "--git-common-dir"])
+            .expect("failed to resolve git common dir")
+            .trim(),
+    );
+    if common_dir.is_absolute() {
+        common_dir
+    } else {
+        repo.path().join(common_dir)
+    }
+}
+
+fn git_hooks_ai_dir(repo: &TestRepo) -> PathBuf {
+    git_common_dir(repo).join("ai")
+}
+
+fn git_storage_ai_dir(repo: &TestRepo) -> PathBuf {
+    let git_dir = git_dir(repo);
+    let common_dir = git_common_dir(repo);
+    let canonical_git_dir = git_dir.canonicalize().unwrap_or_else(|_| git_dir.clone());
+    let canonical_common_dir = common_dir
+        .canonicalize()
+        .unwrap_or_else(|_| common_dir.clone());
+
+    if canonical_git_dir == canonical_common_dir {
+        return common_dir.join("ai");
+    }
+
+    let canonical_worktrees_root = canonical_common_dir.join("worktrees");
+    if let Ok(relative_worktree_path) = canonical_git_dir.strip_prefix(&canonical_worktrees_root)
+        && !relative_worktree_path.as_os_str().is_empty()
+    {
+        return common_dir
+            .join("ai")
+            .join("worktrees")
+            .join(relative_worktree_path);
+    }
+
+    let fallback_name = canonical_git_dir
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "default".to_string());
+    common_dir.join("ai").join("worktrees").join(fallback_name)
+}
+
 #[test]
 #[serial]
 fn git_hooks_ensure_records_repo_opt_in_marker() {
     let _mode = EnvVarGuard::set("GIT_AI_TEST_GIT_MODE", "wrapper");
     let repo = TestRepo::new();
-    let marker_path = repo
-        .path()
-        .join(".git")
-        .join("ai")
-        .join("git_hooks_enabled");
+    let marker_path = git_hooks_ai_dir(&repo).join("git_hooks_enabled");
 
     assert!(
         !marker_path.exists(),
@@ -100,12 +152,8 @@ fn git_hooks_ensure_records_repo_opt_in_marker() {
 fn git_hooks_remove_removes_repo_opt_in_marker() {
     let _mode = EnvVarGuard::set("GIT_AI_TEST_GIT_MODE", "wrapper");
     let repo = TestRepo::new();
-    let marker_path = repo
-        .path()
-        .join(".git")
-        .join("ai")
-        .join("git_hooks_enabled");
-    let managed_hooks_dir = repo.path().join(".git").join("ai").join("hooks");
+    let marker_path = git_hooks_ai_dir(&repo).join("git_hooks_enabled");
+    let managed_hooks_dir = git_hooks_ai_dir(&repo).join("hooks");
 
     repo.git_ai(&["git-hooks", "ensure"])
         .expect("git-hooks ensure should succeed");
@@ -137,7 +185,7 @@ fn git_hooks_remove_restores_preexisting_hooks_path_end_to_end() {
     let _mode = EnvVarGuard::set("GIT_AI_TEST_GIT_MODE", "wrapper");
     let repo = TestRepo::new();
 
-    let original_hooks_dir = repo.path().join(".git").join("custom-hooks");
+    let original_hooks_dir = git_common_dir(&repo).join("custom-hooks");
     fs::create_dir_all(&original_hooks_dir).expect("failed to create custom hooks dir");
     repo.git(&[
         "config",
@@ -161,7 +209,7 @@ fn git_hooks_remove_restores_preexisting_hooks_path_end_to_end() {
     repo.git_ai(&["git-hooks", "ensure"])
         .expect("git-hooks ensure should succeed");
 
-    let managed_hooks_dir = repo.path().join(".git").join("ai").join("hooks");
+    let managed_hooks_dir = git_hooks_ai_dir(&repo).join("hooks");
     let after_ensure = repo
         .git(&["config", "--local", "--get", "core.hooksPath"])
         .expect("reading hooksPath after ensure should succeed")
@@ -188,16 +236,8 @@ fn git_hooks_remove_restores_preexisting_hooks_path_end_to_end() {
         "remove should restore the original local hooksPath"
     );
 
-    let marker = repo
-        .path()
-        .join(".git")
-        .join("ai")
-        .join("git_hooks_enabled");
-    let state = repo
-        .path()
-        .join(".git")
-        .join("ai")
-        .join("git_hooks_state.json");
+    let marker = git_hooks_ai_dir(&repo).join("git_hooks_enabled");
+    let state = git_hooks_ai_dir(&repo).join("git_hooks_state.json");
     assert!(
         !managed_hooks_dir.exists() && managed_hooks_dir.symlink_metadata().is_err(),
         "remove should delete managed hooks dir"
@@ -217,7 +257,7 @@ fn git_hooks_remove_restores_preexisting_hooks_path_end_to_end() {
 fn git_hooks_uninstall_alias_works_end_to_end() {
     let _mode = EnvVarGuard::set("GIT_AI_TEST_GIT_MODE", "wrapper");
     let repo = TestRepo::new();
-    let managed_hooks_dir = repo.path().join(".git").join("ai").join("hooks");
+    let managed_hooks_dir = git_hooks_ai_dir(&repo).join("hooks");
 
     repo.git_ai(&["git-hooks", "ensure"])
         .expect("git-hooks ensure should succeed");
@@ -270,10 +310,10 @@ fn wrapper_and_hooks_do_not_double_run_managed_logic() {
 
     let repo = TestRepo::new();
 
-    let user_hooks_dir = repo.path().join(".git").join("custom-hooks");
+    let user_hooks_dir = git_common_dir(&repo).join("custom-hooks");
     fs::create_dir_all(&user_hooks_dir).expect("failed to create user hooks dir");
 
-    let marker_path = repo.path().join(".git").join("hook-marker.txt");
+    let marker_path = git_common_dir(&repo).join("hook-marker.txt");
     let pre_commit_path = user_hooks_dir.join("pre-commit");
     let commit_msg_path = user_hooks_dir.join("commit-msg");
     fs::write(
@@ -295,11 +335,7 @@ fn wrapper_and_hooks_do_not_double_run_managed_logic() {
     set_executable(&pre_commit_path);
     set_executable(&commit_msg_path);
 
-    let repo_state_path = repo
-        .path()
-        .join(".git")
-        .join("ai")
-        .join("git_hooks_state.json");
+    let repo_state_path = git_hooks_ai_dir(&repo).join("git_hooks_state.json");
     fs::create_dir_all(
         repo_state_path
             .parent()
@@ -310,9 +346,7 @@ fn wrapper_and_hooks_do_not_double_run_managed_logic() {
         &repo_state_path,
         format!(
             "{{\n  \"schema_version\": \"repo_hooks/2\",\n  \"managed_hooks_path\": \"{}\",\n  \"original_local_hooks_path\": null,\n  \"forward_mode\": \"repo_local\",\n  \"forward_hooks_path\": \"{}\",\n  \"binary_path\": \"test-binary\"\n}}\n",
-            repo.path()
-                .join(".git")
-                .join("ai")
+            git_hooks_ai_dir(&repo)
                 .join("hooks")
                 .to_string_lossy()
                 .replace('\\', "\\\\"),
@@ -351,7 +385,7 @@ fn wrapper_and_hooks_do_not_double_run_managed_logic() {
         "forwarded commit-msg hook should run exactly once"
     );
 
-    let rewrite_log = fs::read_to_string(repo.path().join(".git").join("ai").join("rewrite_log"))
+    let rewrite_log = fs::read_to_string(git_storage_ai_dir(&repo).join("rewrite_log"))
         .expect("rewrite log should exist");
     let commit_events = rewrite_log
         .lines()
@@ -412,10 +446,7 @@ fn hooks_mode_batches_multi_commit_cherry_pick_rewrite_event() {
         .expect("cherry-pick sequence should succeed");
 
     assert!(
-        !repo
-            .path()
-            .join(".git")
-            .join("ai")
+        !git_storage_ai_dir(&repo)
             .join("cherry_pick_batch_state.json")
             .exists(),
         "cherry-pick batch state should be cleaned up after terminal event"
@@ -442,7 +473,7 @@ fn hooks_mode_amend_uses_single_amend_rewrite_event() {
     repo.git(&["commit", "--amend", "-m", "initial commit amended"])
         .expect("amend commit should succeed");
 
-    let rewrite_log = fs::read_to_string(repo.path().join(".git").join("ai").join("rewrite_log"))
+    let rewrite_log = fs::read_to_string(git_storage_ai_dir(&repo).join("rewrite_log"))
         .expect("rewrite log should exist");
     let amend_events = rewrite_log
         .lines()
@@ -555,3 +586,22 @@ fn both_mode_amend_preserves_ai_authorship_parity() {
         .expect("blame should succeed");
     assert_blame_line_author_contains(&blame, "both mode ai line", "mock_ai");
 }
+
+reuse_tests_in_worktree_with_attrs!(
+    (#[serial_test::serial])
+    git_hooks_ensure_records_repo_opt_in_marker,
+    git_hooks_remove_removes_repo_opt_in_marker,
+    git_hooks_remove_restores_preexisting_hooks_path_end_to_end,
+    git_hooks_uninstall_alias_works_end_to_end,
+    hook_mode_runs_without_wrapper,
+    hooks_mode_batches_multi_commit_cherry_pick_rewrite_event,
+    hooks_mode_amend_uses_single_amend_rewrite_event,
+    hooks_mode_non_root_amend_preserves_ai_authorship,
+    hooks_mode_root_amend_preserves_ai_authorship,
+    both_mode_amend_preserves_ai_authorship_parity,
+);
+
+reuse_tests_in_worktree_with_attrs!(
+    (#[cfg(unix)] #[serial_test::serial])
+    wrapper_and_hooks_do_not_double_run_managed_logic,
+);

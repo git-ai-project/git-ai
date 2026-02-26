@@ -375,3 +375,20 @@ fn test_blame_from_deep_subdir_preserves_ai_authorship_with_dotdot() {
         "blame output from root and via .. traversal should be identical"
     );
 }
+
+reuse_tests_in_worktree!(
+    test_blame_from_subdirectory_with_relative_path,
+    test_blame_from_nested_subdirectory_with_relative_path,
+    test_blame_from_subdirectory_with_subpath,
+    test_blame_from_repo_root_still_works,
+    test_blame_from_repo_root_with_subdir_path,
+    test_blame_from_subdirectory_preserves_ai_authorship,
+    test_blame_from_subdirectory_nonexistent_file_errors,
+    test_blame_from_subdirectory_with_line_range,
+    test_blame_from_deep_subdir_dotdot_into_sibling_dir,
+    test_blame_from_deep_subdir_dotdot_up_one_level,
+    test_blame_from_deep_subdir_dotdot_multiple_levels,
+    test_blame_from_deep_subdir_file_in_repo_root,
+    test_blame_from_subdir_dotdot_into_different_subtree,
+    test_blame_from_deep_subdir_preserves_ai_authorship_with_dotdot,
+);

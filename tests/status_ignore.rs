@@ -373,3 +373,15 @@ fn test_status_numstat_is_stable_under_hostile_diff_config() {
     assert_eq!(status.stats.git_diff_deleted_lines, 0);
     assert_eq!(status.stats.ai_accepted, 1);
 }
+reuse_tests_in_worktree!(
+    test_checkpoint_ignores_default_lockfiles_integration,
+    test_checkpoint_honors_uncommitted_root_gitattributes_linguist_generated_integration,
+    test_status_default_ignores_affect_git_diff_and_ai_accepted,
+    test_status_honors_uncommitted_root_gitattributes_linguist_generated,
+    test_status_with_only_ignored_changes_reports_zero_diff,
+    test_checkpoint_honors_git_ai_ignore_file,
+    test_status_honors_git_ai_ignore_file,
+    test_status_git_ai_ignore_union_with_gitattributes,
+    test_status_ignores_repo_external_diff_helper_for_internal_numstat,
+    test_status_numstat_is_stable_under_hostile_diff_config,
+);

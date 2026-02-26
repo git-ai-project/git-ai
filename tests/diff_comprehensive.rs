@@ -580,3 +580,26 @@ fn test_diff_attribution_consistency() {
         "Multiple diff runs should produce identical output"
     );
 }
+
+reuse_tests_in_worktree!(
+    test_diff_json_structure,
+    test_diff_json_file_structure,
+    test_diff_json_annotations_format,
+    test_diff_json_base_content_accuracy,
+    test_diff_invalid_commit_ref,
+    test_diff_invalid_range_format,
+    test_diff_range_start_equals_end,
+    test_diff_new_file_from_empty,
+    test_diff_deleted_file,
+    test_diff_renamed_file,
+    test_diff_empty_file,
+    test_diff_with_very_long_lines,
+    test_diff_with_special_regex_chars,
+    test_diff_whitespace_only_changes,
+    test_diff_large_file,
+    test_diff_many_files,
+    test_diff_range_multiple_commits,
+    test_diff_range_shows_intermediate_changes,
+    test_diff_works_with_submodules,
+    test_diff_attribution_consistency,
+);
