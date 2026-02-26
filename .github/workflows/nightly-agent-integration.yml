@@ -3,6 +3,8 @@ name: Nightly Agent CLI Integration Tests
 on:
   schedule:
     - cron: '0 4 * * 1-5'  # 4 AM UTC, weekdays only
+  pull_request:
+    types: [labeled]
   workflow_dispatch:
     inputs:
       agents:
@@ -24,6 +26,11 @@ jobs:
   resolve-versions:
     name: Resolve agent CLI versions
     runs-on: ubuntu-latest
+    # Run on schedule, manual dispatch, or when the "Integration" label is applied to a PR
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && github.event.label.name == 'Integration')
     outputs:
       matrix: ${{ steps.build-matrix.outputs.matrix }}
     steps:
