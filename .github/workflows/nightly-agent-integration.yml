@@ -287,7 +287,7 @@ jobs:
   notify-on-failure:
     name: Notify on failure
     needs: [tier1-hook-wiring, tier2-live-integration]
-    if: failure()
+    if: ${{ always() && (needs.tier1-hook-wiring.result == 'failure' || needs.tier2-live-integration.result == 'failure') }}
     runs-on: ubuntu-latest
     steps:
       - name: Notify Slack

@@ -35,13 +35,12 @@ CHECKPOINT_JSON=$(printf '{
   "transcript": {
     "messages": [
       {
-        "role": "user",
-        "content": "Create %s for synthetic CI test"
+        "type": "user",
+        "text": "Create %s for synthetic CI test"
       },
       {
-        "role": "assistant",
-        "content": "Creating the file now.",
-        "tool_calls": []
+        "type": "assistant",
+        "text": "Creating the file now."
       }
     ]
   },
