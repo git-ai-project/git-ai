@@ -148,28 +148,6 @@ fn wrapper_path() -> String {
     format!("{}{}{}", wrapper_dir.display(), sep, original_path)
 }
 
-/// Find the absolute path of the real `git` binary (before our wrapper).
-/// This is needed so that the git-ai wrapper knows which real git to delegate to.
-static REAL_GIT_PATH: OnceLock<String> = OnceLock::new();
-
-fn real_git_path() -> &'static str {
-    REAL_GIT_PATH.get_or_init(|| {
-        #[cfg(windows)]
-        let which_cmd = "where";
-        #[cfg(not(windows))]
-        let which_cmd = "which";
-
-        let output = Command::new(which_cmd)
-            .arg("git")
-            .output()
-            .expect("failed to find git binary");
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        assert!(!path.is_empty(), "git binary not found in PATH");
-        // On `which` returning multiple lines, take the first
-        path.lines().next().unwrap_or(&path).to_string()
-    })
-}
-
 /// Execute a `gt` command inside the given TestRepo directory.
 ///
 /// The key insight: `gt` calls `git` internally for commits, rebases, etc.
@@ -192,9 +170,9 @@ fn gt(repo: &TestRepo, args: &[&str]) -> Result<String, String> {
     // This is essential for attribution tracking during gt operations.
     command.env("PATH", wrapper_path());
 
-    // Tell the git-ai wrapper which real git binary to delegate to.
-    // Must use the absolute path to avoid infinite recursion through our wrapper.
-    command.env("GIT_AI", real_git_path());
+    // Note: the git-ai wrapper finds the real git binary via resolve_git_path()
+    // in src/config.rs, which probes well-known system paths (/usr/bin/git, etc.).
+    // No explicit env var is needed for delegation.
 
     // Set up environment for git-ai to work properly (both wrapper and hooks)
     command.env("HOME", repo.test_home_path());
