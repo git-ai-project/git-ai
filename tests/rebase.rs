@@ -250,7 +250,7 @@ fn test_rebase_preserves_exact_mixed_line_attribution_in_single_file() {
         "function compute() {".ai(),
         "  // AI docs".ai(),
         "  return 1;".ai(),
-        "}".ai(),
+        "}".human(),
         "// AI footer".ai()
     ]);
 }

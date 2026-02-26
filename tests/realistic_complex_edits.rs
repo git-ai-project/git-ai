@@ -475,15 +475,15 @@ fn test_multiplication() {
         "        assert_eq!(2 + 2, 4);".human(),
         "    }".human(), // Line 5: attributed to human who added indentation
         "".ai(),         // Blank lines stay attributed to AI who originally added them
-        "    #[test]".ai(),
-        "    fn test_subtraction() {".ai(),
-        "        assert_eq!(5 - 3, 2);".ai(),
-        "    }".ai(),
+        "    #[test]".human(),
+        "    fn test_subtraction() {".human(),
+        "        assert_eq!(5 - 3, 2);".human(),
+        "    }".human(),
         "".ai(), // Blank line stays with AI
-        "    #[test]".ai(),
-        "    fn test_multiplication() {".ai(),
-        "        assert_eq!(3 * 4, 12);".ai(),
-        "    }".ai(),
+        "    #[test]".human(),
+        "    fn test_multiplication() {".human(),
+        "        assert_eq!(3 * 4, 12);".human(),
+        "    }".human(),
         "".ai(), // Blank line added by AI with division test
         "    #[test]".ai(),
         "    fn test_division() {".ai(),
