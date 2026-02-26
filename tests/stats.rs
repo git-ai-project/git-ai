@@ -3,6 +3,9 @@ use git_ai::authorship::stats::CommitStats;
 use insta::assert_debug_snapshot;
 use repos::test_file::ExpectedLineExt;
 use repos::test_repo::TestRepo;
+use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
@@ -32,6 +35,31 @@ fn run_git(cwd: &Path, args: &[&str]) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn configure_repo_external_diff_helper(repo: &TestRepo) -> String {
+    let marker = "STATS_EXTERNAL_DIFF_MARKER";
+    let helper_path = repo.path().join("stats-ext-diff-helper.sh");
+    let helper_path_posix = helper_path
+        .to_str()
+        .expect("helper path must be valid UTF-8")
+        .replace('\\', "/");
+
+    fs::write(&helper_path, format!("#!/bin/sh\necho {marker}\nexit 0\n"))
+        .expect("should write external diff helper");
+    #[cfg(unix)]
+    {
+        let mut perms = fs::metadata(&helper_path)
+            .expect("helper metadata should exist")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&helper_path, perms).expect("helper should be executable");
+    }
+
+    repo.git_og(&["config", "diff.external", &helper_path_posix])
+        .expect("configuring diff.external should succeed");
+
+    marker.to_string()
 }
 
 #[test]
@@ -185,6 +213,48 @@ fn test_stats_cli_range() {
         stats.range_stats.git_diff_added_lines,
         stats.range_stats.ai_additions
     );
+}
+
+#[test]
+fn test_stats_cli_range_ignores_repo_external_diff_helper() {
+    let repo = TestRepo::new();
+
+    let mut file = repo.filename("stats-range-ext.txt");
+    file.set_contents(lines!["base".human()]);
+    let first = repo.stage_all_and_commit("initial").unwrap();
+
+    file.set_contents(lines!["base".human(), "ai line".ai()]);
+    let second = repo.stage_all_and_commit("ai second").unwrap();
+
+    let marker = configure_repo_external_diff_helper(&repo);
+    let proxied_diff = repo
+        .git(&["diff", &first.commit_sha, &second.commit_sha])
+        .expect("proxied git diff should succeed");
+    assert!(
+        proxied_diff.contains(&marker),
+        "sanity check: proxied git diff should use configured external helper"
+    );
+
+    let range = format!("{}..{}", first.commit_sha, second.commit_sha);
+    let raw = repo
+        .git_ai(&["stats", &range, "--json"])
+        .expect("git-ai stats range should succeed with external diff configured");
+    assert!(
+        !raw.contains(&marker),
+        "git-ai stats output should not include external helper output, got:\n{}",
+        raw
+    );
+
+    let output = extract_json_object(&raw);
+    let stats: git_ai::authorship::range_authorship::RangeAuthorshipStats =
+        serde_json::from_str(&output).unwrap();
+    assert_eq!(stats.authorship_stats.total_commits, 1);
+    assert!(
+        stats.range_stats.git_diff_added_lines >= 1,
+        "expected at least one added line in range, got {}",
+        stats.range_stats.git_diff_added_lines
+    );
+    assert!(stats.range_stats.ai_additions >= 1);
 }
 
 #[test]

@@ -15,6 +15,8 @@ use repos::test_repo::TestRepo;
 use serde_json::json;
 use std::fs;
 use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use test_utils::fixture_path;
 
 // ============================================================================
@@ -62,6 +64,21 @@ fn create_ai_commit_with_transcript(
     let commit = repo.stage_all_and_commit("Add AI edits").unwrap();
 
     (commit.commit_sha, file_path)
+}
+
+fn create_external_diff_helper_script(repo: &TestRepo, marker: &str) -> std::path::PathBuf {
+    let helper_path = repo.path().join(format!("continue-ext-helper-{marker}.sh"));
+    fs::write(&helper_path, format!("#!/bin/sh\necho {marker}\nexit 0\n"))
+        .expect("should write external diff helper");
+    #[cfg(unix)]
+    {
+        let mut perms = fs::metadata(&helper_path)
+            .expect("helper metadata should exist")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&helper_path, perms).expect("helper should be executable");
+    }
+    helper_path
 }
 
 // ============================================================================
@@ -274,6 +291,54 @@ fn test_continue_includes_user_and_assistant() {
     assert!(
         output.contains("**Assistant**:"),
         "Output should contain Assistant messages"
+    );
+}
+
+#[test]
+fn test_continue_ignores_git_external_diff_env_for_internal_show() {
+    let repo = TestRepo::new();
+    let (commit_sha, _) =
+        create_ai_commit_with_transcript(&repo, "continue-cli-session-simple.json");
+
+    let marker = "CONTINUE_EXT_DIFF_MARKER";
+    let helper_path = create_external_diff_helper_script(&repo, marker);
+    let helper_path_str = helper_path
+        .to_str()
+        .expect("helper path must be valid UTF-8")
+        .replace('\\', "/")
+        .to_string();
+
+    // Sanity check: proxied git show honors external diff helper when explicitly enabled.
+    let proxied_show = repo
+        .git_with_env(
+            &["show", "--ext-diff", "--format=", &commit_sha],
+            &[("GIT_EXTERNAL_DIFF", helper_path_str.as_str())],
+            None,
+        )
+        .expect("proxied git show should succeed");
+    assert!(
+        proxied_show.contains(marker),
+        "proxied git show should honor GIT_EXTERNAL_DIFF, got:\n{}",
+        proxied_show
+    );
+
+    // Internal git show usage in `git-ai continue` must ignore external diff override.
+    let output = repo
+        .git_ai_with_env(
+            &["continue", "--commit", &commit_sha],
+            &[("GIT_EXTERNAL_DIFF", helper_path_str.as_str())],
+        )
+        .expect("git-ai continue should succeed with external diff env configured");
+
+    assert!(
+        !output.contains(marker),
+        "git-ai continue should ignore GIT_EXTERNAL_DIFF for internal show calls, got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("diff --git"),
+        "git-ai continue should still include normal patch output, got:\n{}",
+        output
     );
 }
 

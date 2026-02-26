@@ -3,6 +3,9 @@ mod repos;
 use git_ai::authorship::stats::CommitStats;
 use repos::test_repo::TestRepo;
 use serde::Deserialize;
+use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 #[derive(Debug, Deserialize)]
 struct StatusOutput {
@@ -28,6 +31,31 @@ fn write_file(repo: &TestRepo, path: &str, contents: &str) {
         std::fs::create_dir_all(parent).expect("parent directory should be creatable");
     }
     std::fs::write(abs_path, contents).expect("file write should succeed");
+}
+
+fn configure_repo_external_diff_helper(repo: &TestRepo) -> String {
+    let marker = "STATUS_EXTERNAL_DIFF_MARKER";
+    let helper_path = repo.path().join("status-ext-diff-helper.sh");
+    let helper_path_posix = helper_path
+        .to_str()
+        .expect("helper path must be valid UTF-8")
+        .replace('\\', "/");
+
+    fs::write(&helper_path, format!("#!/bin/sh\necho {marker}\nexit 0\n"))
+        .expect("should write external diff helper");
+    #[cfg(unix)]
+    {
+        let mut perms = fs::metadata(&helper_path)
+            .expect("helper metadata should exist")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&helper_path, perms).expect("helper should be executable");
+    }
+
+    repo.git_og(&["config", "diff.external", &helper_path_posix])
+        .expect("configuring diff.external should succeed");
+
+    marker.to_string()
 }
 
 #[test]
@@ -279,6 +307,31 @@ fn test_status_git_ai_ignore_union_with_gitattributes() {
     // Only src/app.ts addition should be counted (1 line)
     // generated/out.ts ignored by .gitattributes linguist-generated
     // docs/api.md ignored by .git-ai-ignore
+    assert_eq!(status.stats.git_diff_added_lines, 1);
+    assert_eq!(status.stats.git_diff_deleted_lines, 0);
+    assert_eq!(status.stats.ai_accepted, 1);
+}
+
+#[test]
+fn test_status_ignores_repo_external_diff_helper_for_internal_numstat() {
+    let repo = TestRepo::new();
+
+    write_file(&repo, "app.txt", "line1\n");
+    repo.stage_all_and_commit("initial").unwrap();
+
+    write_file(&repo, "app.txt", "line1\nline2\n");
+    repo.git_ai(&["checkpoint", "mock_ai"]).unwrap();
+
+    let marker = configure_repo_external_diff_helper(&repo);
+    let proxied_diff = repo
+        .git(&["diff", "HEAD"])
+        .expect("proxied git diff should succeed");
+    assert!(
+        proxied_diff.contains(&marker),
+        "sanity check: proxied git diff should use configured external helper"
+    );
+
+    let status = status_from_args(&repo, &["status", "--json"]);
     assert_eq!(status.stats.git_diff_added_lines, 1);
     assert_eq!(status.stats.git_diff_deleted_lines, 0);
     assert_eq!(status.stats.ai_accepted, 1);
