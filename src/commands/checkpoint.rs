@@ -45,7 +45,7 @@ use crate::authorship::working_log::AgentId;
 /// This is half of the server-side bucketing window.
 const AGENT_USAGE_MIN_INTERVAL_SECS: u64 = 150;
 const RESPONSE_DEDUPE_TTL_SECS: u64 = 60 * 60 * 24;
-const SESSION_DEDUPE_TTL_SECS: u64 = 60 * 60 * 24 * 7;
+const SESSION_DEDUPE_TTL_SECS: u64 = 60 * 60 * 24 * 5;
 
 /// Build EventAttributes with repo metadata.
 /// Reused for both AgentUsage and Checkpoint events.
