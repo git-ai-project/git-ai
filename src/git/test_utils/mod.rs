@@ -269,14 +269,19 @@ impl TmpFile {
 /// otherwise-mysterious "fatal: unknown error occurred while reading the
 /// configuration files" failure.
 ///
-/// We deliberately do NOT set GIT_CONFIG_NOSYSTEM: the system gitconfig on
-/// Windows typically contains core.autocrlf=true, and skipping it causes git
-/// to detect spurious line-ending differences as "local changes", which then
-/// aborts cherry-pick operations in tests.
+/// On Windows we do NOT set GIT_CONFIG_NOSYSTEM because the system gitconfig
+/// typically contains core.autocrlf=true; skipping it causes git to detect
+/// spurious line-ending differences as "local changes" which then aborts
+/// cherry-pick operations in tests.  On Linux/macOS the system gitconfig has
+/// no autocrlf settings, so we skip it to avoid any CI-runner-specific system
+/// config that could be temporarily locked or contain unexpected settings.
 ///
-/// The path is canonicalised before being stored so that macOS CI (where
-/// std::env::temp_dir returns a symlinked /var/folders/… path) hands git a
-/// real /private/var/folders/… path it can open without issue.
+/// On macOS the path is canonicalised so that git receives a real
+/// /private/var/folders/… path rather than the symlinked /var/folders/… path
+/// that temp_dir() returns.  On Windows we intentionally skip canonicalization
+/// because std::fs::canonicalize prepends the \\?\ extended-length path
+/// prefix, which git cannot open when the value is read from an environment
+/// variable.
 ///
 /// Using OnceLock means the env var is written exactly once; no concurrent
 /// writes can race, satisfying the safety requirement of set_var in tests.
@@ -288,14 +293,26 @@ pub fn init_test_git_config() {
             &path,
             "[user]\n\tname = Test User\n\temail = test@example.com\n",
         );
-        // Resolve symlinks so that git (on macOS) receives a real path rather
+        // On macOS, resolve symlinks so that git receives a real path rather
         // than a /var/folders/… symlink that some git versions cannot open.
+        // On Windows, skip canonicalization: std::fs::canonicalize adds a
+        // \\?\ extended-length path prefix that git cannot open from env vars.
+        #[cfg(not(windows))]
         let canonical = path.canonicalize().unwrap_or(path);
+        #[cfg(windows)]
+        let canonical = path;
         // SAFETY: OnceLock guarantees this closure runs exactly once across all
         // parallel test threads, so no concurrent mutations of the env var are
         // possible here.
         unsafe {
             std::env::set_var("GIT_CONFIG_GLOBAL", &canonical);
+            // On Linux/macOS, skip the system gitconfig to avoid being affected
+            // by runner-specific settings that may be temporarily locked.
+            // On Windows we must NOT skip the system gitconfig because it
+            // contains core.autocrlf=true which is needed for correct line-
+            // ending handling in cherry-pick tests.
+            #[cfg(not(windows))]
+            std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
         }
     });
 }
