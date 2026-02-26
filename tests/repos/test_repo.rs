@@ -892,6 +892,6 @@ fn compile_binary() -> PathBuf {
     }
 }
 
-pub(crate) fn get_binary_path() -> &'static PathBuf {
+pub fn get_binary_path() -> &'static PathBuf {
     COMPILED_BINARY.get_or_init(compile_binary)
 }
