@@ -431,20 +431,17 @@ impl InternalDatabase {
             // Apply the migration (FATAL on error)
             self.apply_migration(target_version)?;
 
-            // Update version in database
-            if target_version == 0 {
-                // First migration (0->1) - insert version
-                self.conn.execute(
-                    "INSERT INTO schema_metadata (key, value) VALUES ('version', ?1)",
-                    params![(target_version + 1).to_string()],
-                )?;
-            } else {
-                // Subsequent migrations (1->2, etc.) - update version
-                self.conn.execute(
-                    "UPDATE schema_metadata SET value = ?1 WHERE key = 'version'",
-                    params![(target_version + 1).to_string()],
-                )?;
-            }
+            // Use an upsert so concurrent initializers do not race on version row creation.
+            self.conn.execute(
+                r#"
+                INSERT INTO schema_metadata (key, value)
+                VALUES ('version', ?1)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value
+                WHERE CAST(schema_metadata.value AS INTEGER) < CAST(excluded.value AS INTEGER)
+                "#,
+                params![(target_version + 1).to_string()],
+            )?;
 
             debug_log(&format!(
                 "[Migration] Successfully upgraded to version {}",
@@ -1127,6 +1124,47 @@ mod tests {
         assert_eq!(count, 1);
 
         // Verify schema_metadata exists
+        let version: String = db
+            .conn
+            .query_row(
+                "SELECT value FROM schema_metadata WHERE key = 'version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "3");
+    }
+
+    #[test]
+    fn test_initialize_schema_handles_preexisting_cas_cache_table() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("concurrent-init.db");
+        let conn = Connection::open(&db_path).unwrap();
+
+        // Simulate a partial migration state from a concurrent process:
+        // schema version indicates cas_cache is missing, but the table already exists.
+        conn.execute_batch(
+            r#"
+            CREATE TABLE schema_metadata (
+                key TEXT PRIMARY KEY NOT NULL,
+                value TEXT NOT NULL
+            );
+            INSERT INTO schema_metadata (key, value) VALUES ('version', '2');
+            CREATE TABLE cas_cache (
+                hash TEXT PRIMARY KEY NOT NULL,
+                messages TEXT NOT NULL,
+                cached_at INTEGER NOT NULL
+            );
+            "#,
+        )
+        .unwrap();
+
+        let mut db = InternalDatabase {
+            conn,
+            _db_path: db_path,
+        };
+        db.initialize_schema().unwrap();
+
         let version: String = db
             .conn
             .query_row(
