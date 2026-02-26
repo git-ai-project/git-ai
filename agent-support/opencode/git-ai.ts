@@ -67,7 +67,7 @@ export const GitAiPlugin: Plugin = async (ctx) => {
   }
 
   const getSessionId = (event: any): string | null => {
-    return event?.sessionID ?? event?.sessionId ?? event?.session?.id ?? event?.id ?? null
+    return event?.sessionID ?? event?.sessionId ?? event?.session?.id ?? null
   }
 
   const getCwd = (event: any): string => {
