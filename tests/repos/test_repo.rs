@@ -388,6 +388,25 @@ impl TestRepo {
             ])
             .output();
 
+        let initial_commit_output = Command::new(real_git_executable())
+            .args([
+                "-C",
+                main_path.to_str().unwrap(),
+                "commit",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ])
+            .output()
+            .expect("failed to create initial commit for worktree base");
+        if !initial_commit_output.status.success() {
+            panic!(
+                "failed to create initial worktree base commit:\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&initial_commit_output.stdout),
+                String::from_utf8_lossy(&initial_commit_output.stderr)
+            );
+        }
+
         let worktree_output = Command::new(real_git_executable())
             .args([
                 "-C",
@@ -414,7 +433,7 @@ impl TestRepo {
             test_db_path,
             test_home,
             git_mode,
-            _base_repo_path: None,
+            _base_repo_path: Some(main_path),
             _base_test_db_path: None,
         };
 
