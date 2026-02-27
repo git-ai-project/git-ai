@@ -1148,7 +1148,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "3");
+        assert_eq!(version, "4");
     }
 
     #[test]
@@ -1159,6 +1159,7 @@ mod tests {
 
         // Simulate a partial migration state from a concurrent process:
         // schema version indicates cas_cache is missing, but the table already exists.
+        // The prompts and cas_sync_queue tables already exist (from migrations 0->1 and 1->2).
         conn.execute_batch(
             r#"
             CREATE TABLE schema_metadata (
@@ -1166,6 +1167,36 @@ mod tests {
                 value TEXT NOT NULL
             );
             INSERT INTO schema_metadata (key, value) VALUES ('version', '2');
+            CREATE TABLE prompts (
+                id TEXT PRIMARY KEY NOT NULL,
+                workdir TEXT,
+                tool TEXT NOT NULL,
+                model TEXT NOT NULL,
+                external_thread_id TEXT NOT NULL,
+                messages TEXT NOT NULL,
+                commit_sha TEXT,
+                agent_metadata TEXT,
+                human_author TEXT,
+                total_additions INTEGER,
+                total_deletions INTEGER,
+                accepted_lines INTEGER,
+                overridden_lines INTEGER,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE cas_sync_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                hash TEXT NOT NULL UNIQUE,
+                data TEXT NOT NULL,
+                metadata TEXT NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_sync_error TEXT,
+                last_sync_at INTEGER,
+                next_retry_at INTEGER NOT NULL,
+                processing_started_at INTEGER,
+                created_at INTEGER NOT NULL
+            );
             CREATE TABLE cas_cache (
                 hash TEXT PRIMARY KEY NOT NULL,
                 messages TEXT NOT NULL,
