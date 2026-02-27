@@ -569,6 +569,35 @@ pub fn clean_path(path: PathBuf) -> PathBuf {
     path
 }
 
+/// Convert a Windows path to git bash (MSYS/MinGW) style path.
+/// e.g. `C:\Users\Administrator\.git-ai\bin\git-ai.exe` → `/c/Users/Administrator/.git-ai/bin/git-ai.exe`
+/// This is needed because Claude Code runs hooks in git bash shell on Windows.
+/// Non-Windows paths (or paths that don't match `X:\...` pattern) are returned unchanged.
+pub fn to_git_bash_path(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    // Match a Windows absolute path like "C:\..." or "D:\..."
+    let bytes = s.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+    {
+        let drive_letter = (bytes[0] as char).to_ascii_lowercase();
+        let rest = &s[2..]; // skip "C:"
+        let rest_unix = rest.replace('\\', "/");
+        return format!("/{}{}", drive_letter, rest_unix);
+    }
+    // Also handle the case where the path has forward slashes already but still has drive letter
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        let drive_letter = (bytes[0] as char).to_ascii_lowercase();
+        let rest = &s[2..];
+        let rest_unix = rest.replace('\\', "/");
+        return format!("/{}{}", drive_letter, rest_unix);
+    }
+    // For non-Windows paths, just return as-is
+    s.into_owned()
+}
+
 /// Get the absolute path to the currently running binary
 pub fn get_current_binary_path() -> Result<PathBuf, GitAiError> {
     let path = std::env::current_exe()?;
@@ -1314,6 +1343,48 @@ mod tests {
         // Unknown editor should return empty
         let unknown_candidates = get_editor_cli_candidates("unknown");
         assert!(unknown_candidates.is_empty());
+    }
+
+    #[test]
+    fn test_to_git_bash_path_converts_windows_path() {
+        let path = PathBuf::from(r"C:\Users\Administrator\.git-ai\bin\git-ai.exe");
+        let result = to_git_bash_path(&path);
+        assert_eq!(
+            result, "/c/Users/Administrator/.git-ai/bin/git-ai.exe",
+            "should convert Windows path to git bash format"
+        );
+    }
+
+    #[test]
+    fn test_to_git_bash_path_converts_different_drive_letter() {
+        let path = PathBuf::from(r"D:\Projects\code\app.exe");
+        let result = to_git_bash_path(&path);
+        assert_eq!(
+            result, "/d/Projects/code/app.exe",
+            "should convert D: drive path to git bash format"
+        );
+    }
+
+    #[test]
+    fn test_to_git_bash_path_preserves_unix_path() {
+        let path = PathBuf::from("/usr/local/bin/git-ai");
+        let result = to_git_bash_path(&path);
+        assert_eq!(
+            result, "/usr/local/bin/git-ai",
+            "should preserve unix paths unchanged"
+        );
+    }
+
+    #[test]
+    fn test_to_git_bash_path_handles_extended_prefix_after_clean() {
+        // After clean_path strips \\?\ prefix, the path looks like C:\...
+        let raw = PathBuf::from(r"\\?\C:\Users\USERNAME\.git-ai\bin\git-ai.exe");
+        let cleaned = clean_path(raw);
+        let result = to_git_bash_path(&cleaned);
+        assert_eq!(
+            result, "/c/Users/USERNAME/.git-ai/bin/git-ai.exe",
+            "should convert cleaned Windows path to git bash format"
+        );
     }
 
     #[test]
