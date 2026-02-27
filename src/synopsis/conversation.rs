@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 fn claude_project_hash(repo_path: &Path) -> String {
     let path_str = repo_path.to_string_lossy();
     #[cfg(windows)]
-    return path_str.replace('\\', "-").replace('/', "-");
+    return path_str.replace(['\\', '/'], "-");
     #[cfg(not(windows))]
     path_str.replace('/', "-")
 }
@@ -204,11 +204,11 @@ fn summarise_tool_input(tool_name: &str, input: &serde_json::Value) -> String {
         }
         _ => {
             // Generic fallback: show tool name and first string field if any
-            if let Some(obj) = input.as_object() {
-                if let Some(first_val) = obj.values().find_map(|v| v.as_str()) {
-                    let preview: String = first_val.chars().take(80).collect();
-                    return format!("[{}: {}]", tool_name, preview);
-                }
+            if let Some(obj) = input.as_object()
+                && let Some(first_val) = obj.values().find_map(|v| v.as_str())
+            {
+                let preview: String = first_val.chars().take(80).collect();
+                return format!("[{}: {}]", tool_name, preview);
             }
             format!("[{}]", tool_name)
         }
@@ -236,7 +236,7 @@ pub fn filter_by_time_window(log: &ConversationLog, window_minutes: u64) -> Conv
         .filter(|e| {
             // Keep exchanges that either have no timestamp or fall within the window
             e.timestamp
-                .map_or(true, |ts| ts >= start_time && ts <= end_time)
+                .is_none_or(|ts| ts >= start_time && ts <= end_time)
         })
         .cloned()
         .collect();
