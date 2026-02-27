@@ -58,7 +58,7 @@ pass "Authorship note found on HEAD ($(wc -l < "$NOTE_RAW") lines)"
 
 # ── 4. Parse JSON metadata from note ─────────────────────────────────────────
 # The note format has file attestations (plain text) above the JSON metadata block.
-python3 - "$NOTE_RAW" "$META_JSON" <<'PYEOF'
+if ! python3 - "$NOTE_RAW" "$META_JSON" <<'PYEOF'
 import json, sys
 
 with open(sys.argv[1]) as f:
@@ -79,7 +79,9 @@ print(f"ERROR: No JSON object found in authorship note. Note content:\n{content[
       file=sys.stderr)
 sys.exit(1)
 PYEOF
-[ $? -eq 0 ] || fail "Could not extract JSON metadata from authorship note — unexpected note format"
+then
+  fail "Could not extract JSON metadata from authorship note — unexpected note format"
+fi
 
 pass "Authorship note contains parseable JSON metadata"
 
