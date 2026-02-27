@@ -1,6 +1,6 @@
 use crate::error::GitAiError;
 use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerParams};
-use crate::mdm::utils::{binary_exists, generate_diff, home_dir, write_atomic};
+use crate::mdm::utils::{binary_exists, generate_diff, home_dir, to_git_bash_path, write_atomic};
 use std::fs;
 use std::path::{Path, PathBuf};
 use toml::Value;
@@ -15,7 +15,7 @@ impl CodexInstaller {
 
     fn desired_notify_args(binary_path: &Path) -> Vec<String> {
         vec![
-            binary_path.display().to_string(),
+            to_git_bash_path(binary_path),
             "checkpoint".to_string(),
             "codex".to_string(),
             "--hook-input".to_string(),
@@ -597,6 +597,48 @@ notify = ["/tmp/git-ai", "checkpoint", "codex", "--hook-input", "--verbose"]
                 ]
             );
         });
+    }
+
+    #[test]
+    fn test_codex_hook_commands_use_git_bash_path_on_windows() {
+        use crate::mdm::utils::to_git_bash_path;
+
+        let binary_path = PathBuf::from(r"C:\Users\Administrator\.git-ai\bin\git-ai.exe");
+        let notify_args = CodexInstaller::desired_notify_args(&binary_path);
+
+        assert_eq!(
+            notify_args[0],
+            "/c/Users/Administrator/.git-ai/bin/git-ai.exe",
+            "notify binary path should use git bash path format"
+        );
+        assert_eq!(notify_args[1], "checkpoint");
+        assert_eq!(notify_args[2], "codex");
+    }
+
+    #[test]
+    fn test_codex_hook_commands_preserve_unix_path() {
+        let binary_path = PathBuf::from("/usr/local/bin/git-ai");
+        let notify_args = CodexInstaller::desired_notify_args(&binary_path);
+
+        assert_eq!(
+            notify_args[0], "/usr/local/bin/git-ai",
+            "Unix paths should be preserved unchanged"
+        );
+    }
+
+    #[test]
+    fn test_codex_hook_commands_no_windows_extended_path_prefix() {
+        use crate::mdm::utils::clean_path;
+
+        let raw_path = PathBuf::from(r"\\?\C:\Users\USERNAME\.git-ai\bin\git-ai.exe");
+        let binary_path = clean_path(raw_path);
+        let notify_args = CodexInstaller::desired_notify_args(&binary_path);
+
+        assert!(
+            !notify_args[0].contains(r"\\?\"),
+            "notify binary path should not contain \\\\?\\ prefix, got: {}",
+            notify_args[0]
+        );
     }
 
     #[test]

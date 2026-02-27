@@ -1,7 +1,8 @@
 use crate::error::GitAiError;
 use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerParams};
 use crate::mdm::utils::{
-    binary_exists, generate_diff, home_dir, is_git_ai_checkpoint_command, write_atomic,
+    binary_exists, generate_diff, home_dir, is_git_ai_checkpoint_command, to_git_bash_path,
+    write_atomic,
 };
 use serde_json::{Value, json};
 use std::fs;
@@ -107,13 +108,10 @@ impl HookInstaller for GeminiInstaller {
             serde_json::from_str(&existing_content)?
         };
 
-        // Build commands with absolute path
-        let before_tool_cmd = format!(
-            "{} {}",
-            params.binary_path.display(),
-            GEMINI_BEFORE_TOOL_CMD
-        );
-        let after_tool_cmd = format!("{} {}", params.binary_path.display(), GEMINI_AFTER_TOOL_CMD);
+        // Build commands with absolute path (use git bash style paths for Windows compatibility)
+        let binary_path_str = to_git_bash_path(&params.binary_path);
+        let before_tool_cmd = format!("{} {}", binary_path_str, GEMINI_BEFORE_TOOL_CMD);
+        let after_tool_cmd = format!("{} {}", binary_path_str, GEMINI_AFTER_TOOL_CMD);
 
         let desired_hooks = json!({
             "BeforeTool": {
@@ -559,5 +557,61 @@ mod tests {
                 hook_type
             );
         }
+    }
+
+    #[test]
+    fn test_gemini_hook_commands_use_git_bash_path_on_windows() {
+        use crate::mdm::utils::to_git_bash_path;
+
+        let binary_path = PathBuf::from(r"C:\Users\Administrator\.git-ai\bin\git-ai.exe");
+        let binary_path_str = to_git_bash_path(&binary_path);
+        let before_tool_cmd = format!("{} {}", binary_path_str, GEMINI_BEFORE_TOOL_CMD);
+        let after_tool_cmd = format!("{} {}", binary_path_str, GEMINI_AFTER_TOOL_CMD);
+
+        assert_eq!(
+            before_tool_cmd,
+            "/c/Users/Administrator/.git-ai/bin/git-ai.exe checkpoint gemini --hook-input stdin",
+            "BeforeTool command should use git bash path format"
+        );
+        assert_eq!(
+            after_tool_cmd,
+            "/c/Users/Administrator/.git-ai/bin/git-ai.exe checkpoint gemini --hook-input stdin",
+            "AfterTool command should use git bash path format"
+        );
+    }
+
+    #[test]
+    fn test_gemini_hook_commands_preserve_unix_path() {
+        use crate::mdm::utils::to_git_bash_path;
+
+        let binary_path = PathBuf::from("/usr/local/bin/git-ai");
+        let binary_path_str = to_git_bash_path(&binary_path);
+        let before_tool_cmd = format!("{} {}", binary_path_str, GEMINI_BEFORE_TOOL_CMD);
+
+        assert_eq!(
+            before_tool_cmd,
+            "/usr/local/bin/git-ai checkpoint gemini --hook-input stdin",
+            "Unix paths should be preserved unchanged"
+        );
+    }
+
+    #[test]
+    fn test_gemini_hook_commands_no_windows_extended_path_prefix() {
+        use crate::mdm::utils::{clean_path, to_git_bash_path};
+
+        let raw_path = PathBuf::from(r"\\?\C:\Users\USERNAME\.git-ai\bin\git-ai.exe");
+        let binary_path = clean_path(raw_path);
+        let binary_path_str = to_git_bash_path(&binary_path);
+        let before_tool_cmd = format!("{} {}", binary_path_str, GEMINI_BEFORE_TOOL_CMD);
+
+        assert!(
+            !before_tool_cmd.contains(r"\\?\"),
+            "BeforeTool command should not contain \\\\?\\ prefix, got: {}",
+            before_tool_cmd
+        );
+        assert!(
+            before_tool_cmd.contains("checkpoint gemini"),
+            "command should still contain checkpoint args"
+        );
     }
 }

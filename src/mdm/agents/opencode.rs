@@ -1,6 +1,6 @@
 use crate::error::GitAiError;
 use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerParams};
-use crate::mdm::utils::{binary_exists, generate_diff, home_dir, write_atomic};
+use crate::mdm::utils::{binary_exists, generate_diff, home_dir, to_git_bash_path, write_atomic};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -23,8 +23,9 @@ impl OpenCodeInstaller {
 
     /// Generate plugin content with the absolute binary path substituted in
     fn generate_plugin_content(binary_path: &Path) -> String {
-        // Escape backslashes for the TypeScript string literal (needed for Windows paths)
-        let path_str = binary_path.display().to_string().replace('\\', "\\\\");
+        // Use git bash style path for Windows compatibility, then escape backslashes
+        // for the TypeScript string literal (needed if any remain)
+        let path_str = to_git_bash_path(binary_path).replace('\\', "\\\\");
         OPENCODE_PLUGIN_CONTENT.replace("__GIT_AI_BINARY_PATH__", &path_str)
     }
 }
@@ -260,14 +261,41 @@ mod tests {
     }
 
     #[test]
-    fn test_opencode_plugin_windows_path_escaping() {
+    fn test_opencode_plugin_windows_path_uses_git_bash_format() {
         let binary_path = PathBuf::from(r"C:\Users\foo\.git-ai\bin\git-ai.exe");
         let content = OpenCodeInstaller::generate_plugin_content(&binary_path);
 
         assert!(!content.contains("__GIT_AI_BINARY_PATH__"));
-        // Backslashes should be doubled for the TS string literal
+        // Windows paths should be converted to git bash style (forward slashes)
         assert!(
-            content.contains(r#"const GIT_AI_BIN = "C:\\Users\\foo\\.git-ai\\bin\\git-ai.exe""#)
+            content.contains(r#"const GIT_AI_BIN = "/c/Users/foo/.git-ai/bin/git-ai.exe""#),
+            "Windows path should be converted to git bash format, got: {}",
+            content
+        );
+    }
+
+    #[test]
+    fn test_opencode_plugin_preserves_unix_path() {
+        let binary_path = PathBuf::from("/usr/local/bin/git-ai");
+        let content = OpenCodeInstaller::generate_plugin_content(&binary_path);
+
+        assert!(
+            content.contains(r#"const GIT_AI_BIN = "/usr/local/bin/git-ai""#),
+            "Unix paths should be preserved unchanged"
+        );
+    }
+
+    #[test]
+    fn test_opencode_plugin_no_windows_extended_path_prefix() {
+        use crate::mdm::utils::clean_path;
+
+        let raw_path = PathBuf::from(r"\\?\C:\Users\USERNAME\.git-ai\bin\git-ai.exe");
+        let binary_path = clean_path(raw_path);
+        let content = OpenCodeInstaller::generate_plugin_content(&binary_path);
+
+        assert!(
+            !content.contains(r"\\?\"),
+            "plugin content should not contain \\\\?\\ prefix"
         );
     }
 

@@ -3,7 +3,7 @@ use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerPa
 use crate::mdm::utils::{
     MIN_CODE_VERSION, generate_diff, get_editor_version, home_dir, parse_version,
     resolve_editor_cli, settings_paths_for_products, should_process_settings_target,
-    version_meets_requirement, write_atomic,
+    to_git_bash_path, version_meets_requirement, write_atomic,
 };
 use serde_json::{Value, json};
 use std::fs;
@@ -81,14 +81,15 @@ impl HookInstaller for GitHubCopilotInstaller {
         let content = fs::read_to_string(&hooks_path)?;
         let existing: Value = serde_json::from_str(&content).unwrap_or_else(|_| json!({}));
 
+        let binary_path_str = to_git_bash_path(&params.binary_path);
         let pre_desired = format!(
             "{} {}",
-            params.binary_path.display(),
+            binary_path_str,
             GITHUB_COPILOT_PRE_TOOL_CMD
         );
         let post_desired = format!(
             "{} {}",
-            params.binary_path.display(),
+            binary_path_str,
             GITHUB_COPILOT_POST_TOOL_CMD
         );
 
@@ -178,14 +179,15 @@ impl HookInstaller for GitHubCopilotInstaller {
             serde_json::from_str(&existing_content)?
         };
 
+        let binary_path_str = to_git_bash_path(&params.binary_path);
         let pre_tool_cmd = format!(
             "{} {}",
-            params.binary_path.display(),
+            binary_path_str,
             GITHUB_COPILOT_PRE_TOOL_CMD
         );
         let post_tool_cmd = format!(
             "{} {}",
-            params.binary_path.display(),
+            binary_path_str,
             GITHUB_COPILOT_POST_TOOL_CMD
         );
 
@@ -615,6 +617,62 @@ mod tests {
             assert!(result.hooks_installed);
             assert!(!result.hooks_up_to_date);
         });
+    }
+
+    #[test]
+    fn test_github_copilot_hook_commands_use_git_bash_path_on_windows() {
+        use crate::mdm::utils::to_git_bash_path;
+
+        let binary_path = PathBuf::from(r"C:\Users\Administrator\.git-ai\bin\git-ai.exe");
+        let binary_path_str = to_git_bash_path(&binary_path);
+        let pre_tool_cmd = format!("{} {}", binary_path_str, GITHUB_COPILOT_PRE_TOOL_CMD);
+        let post_tool_cmd = format!("{} {}", binary_path_str, GITHUB_COPILOT_POST_TOOL_CMD);
+
+        assert_eq!(
+            pre_tool_cmd,
+            "/c/Users/Administrator/.git-ai/bin/git-ai.exe checkpoint github-copilot --hook-input stdin",
+            "PreToolUse command should use git bash path format"
+        );
+        assert_eq!(
+            post_tool_cmd,
+            "/c/Users/Administrator/.git-ai/bin/git-ai.exe checkpoint github-copilot --hook-input stdin",
+            "PostToolUse command should use git bash path format"
+        );
+    }
+
+    #[test]
+    fn test_github_copilot_hook_commands_preserve_unix_path() {
+        use crate::mdm::utils::to_git_bash_path;
+
+        let binary_path = PathBuf::from("/usr/local/bin/git-ai");
+        let binary_path_str = to_git_bash_path(&binary_path);
+        let pre_tool_cmd = format!("{} {}", binary_path_str, GITHUB_COPILOT_PRE_TOOL_CMD);
+
+        assert_eq!(
+            pre_tool_cmd,
+            "/usr/local/bin/git-ai checkpoint github-copilot --hook-input stdin",
+            "Unix paths should be preserved unchanged"
+        );
+    }
+
+    #[test]
+    fn test_github_copilot_hook_commands_no_windows_extended_path_prefix() {
+        use crate::mdm::utils::{clean_path, to_git_bash_path};
+
+        let raw_path = PathBuf::from(r"\\?\C:\Users\USERNAME\.git-ai\bin\git-ai.exe");
+        let binary_path = clean_path(raw_path);
+        let binary_path_str = to_git_bash_path(&binary_path);
+        let pre_tool_cmd = format!("{} {}", binary_path_str, GITHUB_COPILOT_PRE_TOOL_CMD);
+
+        assert!(
+            !pre_tool_cmd.contains(r"\\?\"),
+            "PreToolUse command should not contain \\\\?\\ prefix, got: {}",
+            pre_tool_cmd
+        );
+        assert!(
+            pre_tool_cmd.contains("checkpoint github-copilot"),
+            "command should still contain checkpoint args"
+        );
     }
 
     #[test]

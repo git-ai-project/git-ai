@@ -1,6 +1,8 @@
 use crate::error::GitAiError;
 use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerParams};
-use crate::mdm::utils::{generate_diff, home_dir, is_git_ai_checkpoint_command, write_atomic};
+use crate::mdm::utils::{
+    generate_diff, home_dir, is_git_ai_checkpoint_command, to_git_bash_path, write_atomic,
+};
 use serde_json::{Value, json};
 use std::fs;
 use std::path::PathBuf;
@@ -99,9 +101,9 @@ impl HookInstaller for DroidInstaller {
             serde_json::from_str(&existing_content)?
         };
 
-        let binary_path = params.binary_path.to_string_lossy().to_string();
-        let pre_tool_cmd = format!("{} {}", binary_path, DROID_PRE_TOOL_CMD);
-        let post_tool_cmd = format!("{} {}", binary_path, DROID_POST_TOOL_CMD);
+        let binary_path_str = to_git_bash_path(&params.binary_path);
+        let pre_tool_cmd = format!("{} {}", binary_path_str, DROID_PRE_TOOL_CMD);
+        let post_tool_cmd = format!("{} {}", binary_path_str, DROID_POST_TOOL_CMD);
 
         let desired_hooks = json!({
             "PreToolUse": {
@@ -480,6 +482,62 @@ mod tests {
         assert_eq!(
             post_hooks[0].get("command").unwrap().as_str().unwrap(),
             "prettier --write"
+        );
+    }
+
+    #[test]
+    fn test_droid_hook_commands_use_git_bash_path_on_windows() {
+        use crate::mdm::utils::to_git_bash_path;
+
+        let binary_path = PathBuf::from(r"C:\Users\Administrator\.git-ai\bin\git-ai.exe");
+        let binary_path_str = to_git_bash_path(&binary_path);
+        let pre_tool_cmd = format!("{} {}", binary_path_str, DROID_PRE_TOOL_CMD);
+        let post_tool_cmd = format!("{} {}", binary_path_str, DROID_POST_TOOL_CMD);
+
+        assert_eq!(
+            pre_tool_cmd,
+            "/c/Users/Administrator/.git-ai/bin/git-ai.exe checkpoint droid --hook-input stdin",
+            "PreToolUse command should use git bash path format"
+        );
+        assert_eq!(
+            post_tool_cmd,
+            "/c/Users/Administrator/.git-ai/bin/git-ai.exe checkpoint droid --hook-input stdin",
+            "PostToolUse command should use git bash path format"
+        );
+    }
+
+    #[test]
+    fn test_droid_hook_commands_preserve_unix_path() {
+        use crate::mdm::utils::to_git_bash_path;
+
+        let binary_path = PathBuf::from("/usr/local/bin/git-ai");
+        let binary_path_str = to_git_bash_path(&binary_path);
+        let pre_tool_cmd = format!("{} {}", binary_path_str, DROID_PRE_TOOL_CMD);
+
+        assert_eq!(
+            pre_tool_cmd,
+            "/usr/local/bin/git-ai checkpoint droid --hook-input stdin",
+            "Unix paths should be preserved unchanged"
+        );
+    }
+
+    #[test]
+    fn test_droid_hook_commands_no_windows_extended_path_prefix() {
+        use crate::mdm::utils::{clean_path, to_git_bash_path};
+
+        let raw_path = PathBuf::from(r"\\?\C:\Users\USERNAME\.git-ai\bin\git-ai.exe");
+        let binary_path = clean_path(raw_path);
+        let binary_path_str = to_git_bash_path(&binary_path);
+        let pre_tool_cmd = format!("{} {}", binary_path_str, DROID_PRE_TOOL_CMD);
+
+        assert!(
+            !pre_tool_cmd.contains(r"\\?\"),
+            "PreToolUse command should not contain \\\\?\\ prefix, got: {}",
+            pre_tool_cmd
+        );
+        assert!(
+            pre_tool_cmd.contains("checkpoint droid"),
+            "command should still contain checkpoint args"
         );
     }
 }

@@ -5,8 +5,8 @@ use crate::mdm::hook_installer::{
 use crate::mdm::utils::{
     MIN_CURSOR_VERSION, generate_diff, get_editor_version, home_dir, install_vsc_editor_extension,
     is_vsc_editor_extension_installed, parse_version, resolve_editor_cli,
-    settings_paths_for_products, should_process_settings_target, version_meets_requirement,
-    write_atomic,
+    settings_paths_for_products, should_process_settings_target, to_git_bash_path,
+    version_meets_requirement, write_atomic,
 };
 use crate::utils::debug_log;
 use serde_json::{Value, json};
@@ -131,13 +131,10 @@ impl HookInstaller for CursorInstaller {
             serde_json::from_str(&existing_content)?
         };
 
-        // Build commands with absolute path
-        let before_submit_cmd = format!(
-            "{} {}",
-            params.binary_path.display(),
-            CURSOR_BEFORE_SUBMIT_CMD
-        );
-        let after_edit_cmd = format!("{} {}", params.binary_path.display(), CURSOR_AFTER_EDIT_CMD);
+        // Build commands with absolute path (use git bash style paths for Windows compatibility)
+        let binary_path_str = to_git_bash_path(&params.binary_path);
+        let before_submit_cmd = format!("{} {}", binary_path_str, CURSOR_BEFORE_SUBMIT_CMD);
+        let after_edit_cmd = format!("{} {}", binary_path_str, CURSOR_AFTER_EDIT_CMD);
 
         // Desired hooks payload for Cursor
         let desired: Value = json!({
@@ -426,7 +423,7 @@ impl HookInstaller for CursorInstaller {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mdm::utils::clean_path;
+    use crate::mdm::utils::{clean_path, to_git_bash_path};
     use std::fs;
     use tempfile::TempDir;
 
@@ -649,8 +646,9 @@ mod tests {
         let raw_path = PathBuf::from(r"\\?\C:\Users\USERNAME\.git-ai\bin\git-ai.exe");
         let binary_path = clean_path(raw_path);
 
-        let before_submit_cmd = format!("{} {}", binary_path.display(), CURSOR_BEFORE_SUBMIT_CMD);
-        let after_edit_cmd = format!("{} {}", binary_path.display(), CURSOR_AFTER_EDIT_CMD);
+        let binary_path_str = to_git_bash_path(&binary_path);
+        let before_submit_cmd = format!("{} {}", binary_path_str, CURSOR_BEFORE_SUBMIT_CMD);
+        let after_edit_cmd = format!("{} {}", binary_path_str, CURSOR_AFTER_EDIT_CMD);
 
         assert!(
             !before_submit_cmd.contains(r"\\?\"),
@@ -665,6 +663,37 @@ mod tests {
         assert!(
             before_submit_cmd.contains("checkpoint cursor"),
             "command should still contain checkpoint args"
+        );
+    }
+
+    #[test]
+    fn test_cursor_hook_commands_use_git_bash_path_on_windows() {
+        let binary_path = PathBuf::from(r"C:\Users\Administrator\.git-ai\bin\git-ai.exe");
+        let binary_path_str = to_git_bash_path(&binary_path);
+        let before_submit_cmd = format!("{} {}", binary_path_str, CURSOR_BEFORE_SUBMIT_CMD);
+        let after_edit_cmd = format!("{} {}", binary_path_str, CURSOR_AFTER_EDIT_CMD);
+
+        assert_eq!(
+            before_submit_cmd,
+            "/c/Users/Administrator/.git-ai/bin/git-ai.exe checkpoint cursor --hook-input stdin",
+            "beforeSubmitPrompt command should use git bash path format"
+        );
+        assert_eq!(
+            after_edit_cmd,
+            "/c/Users/Administrator/.git-ai/bin/git-ai.exe checkpoint cursor --hook-input stdin",
+            "afterFileEdit command should use git bash path format"
+        );
+    }
+
+    #[test]
+    fn test_cursor_hook_commands_preserve_unix_path() {
+        let binary_path = PathBuf::from("/usr/local/bin/git-ai");
+        let binary_path_str = to_git_bash_path(&binary_path);
+        let before_submit_cmd = format!("{} {}", binary_path_str, CURSOR_BEFORE_SUBMIT_CMD);
+
+        assert_eq!(
+            before_submit_cmd, "/usr/local/bin/git-ai checkpoint cursor --hook-input stdin",
+            "Unix paths should be preserved unchanged"
         );
     }
 
