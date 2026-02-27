@@ -24,7 +24,7 @@ jobs:
           - name: gemini
             npm_pkg: "@google/gemini-cli"
           - name: opencode
-            npm_pkg: "opencode"
+            npm_pkg: "opencode-ai"
 
     steps:
       - name: Checkout code
@@ -85,7 +85,7 @@ jobs:
           - name: gemini
             npm_pkg: "@google/gemini-cli"
           - name: opencode
-            npm_pkg: "opencode"
+            npm_pkg: "opencode-ai"
 
     steps:
       - name: Checkout code

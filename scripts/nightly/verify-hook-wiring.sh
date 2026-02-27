@@ -28,7 +28,9 @@ case "$AGENT" in
   codex)
     CONFIG="$HOME/.codex/config.toml"
     [ -f "$CONFIG" ] || fail "config.toml not found at $CONFIG"
-    grep -q "checkpoint codex" "$CONFIG" \
+    # Codex stores hooks as a TOML array: notify = ["<binary>", "checkpoint", "codex", ...]
+    # so we grep for the word "checkpoint" rather than "checkpoint codex"
+    grep -q 'checkpoint' "$CONFIG" \
       || fail "checkpoint codex hook not found in $CONFIG"
     pass "Codex hooks configured in $CONFIG"
     ;;

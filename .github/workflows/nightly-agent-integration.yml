@@ -48,7 +48,7 @@ jobs:
               "claude":   {"pkg": "@anthropic-ai/claude-code", "key": "ANTHROPIC_API_KEY"},
               "codex":    {"pkg": "@openai/codex",             "key": "OPENAI_API_KEY"},
               "gemini":   {"pkg": "@google/gemini-cli",        "key": "GEMINI_API_KEY"},
-              "opencode": {"pkg": "opencode",                  "key": "ANTHROPIC_API_KEY"},
+              "opencode": {"pkg": "opencode-ai",               "key": "ANTHROPIC_API_KEY"},
           }
 
           headless_cmds = {
