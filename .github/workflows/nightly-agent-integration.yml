@@ -30,7 +30,7 @@ jobs:
     if: >-
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' && github.event.label.name == 'Integration')
+      (github.event_name == 'pull_request' && github.event.label.name == 'integration')
     outputs:
       matrix: ${{ steps.build-matrix.outputs.matrix }}
     steps:
