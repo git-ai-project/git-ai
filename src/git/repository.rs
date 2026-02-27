@@ -2331,6 +2331,37 @@ pub fn from_bare_repository(git_dir: &Path) -> Result<Repository, GitAiError> {
     })
 }
 
+pub fn from_non_bare_repository(git_dir: &Path, workdir: &Path) -> Result<Repository, GitAiError> {
+    if !git_dir.is_dir() {
+        return Err(GitAiError::Generic(format!(
+            "Git directory does not exist: {}",
+            git_dir.display()
+        )));
+    }
+    if !workdir.is_dir() {
+        return Err(GitAiError::Generic(format!(
+            "Work directory does not exist: {}",
+            workdir.display()
+        )));
+    }
+
+    let canonical_workdir = workdir
+        .canonicalize()
+        .unwrap_or_else(|_| workdir.to_path_buf());
+    let global_args = vec!["-C".to_string(), workdir.to_string_lossy().to_string()];
+
+    Ok(Repository {
+        global_args,
+        storage: RepoStorage::for_repo_path(git_dir, workdir),
+        git_dir: git_dir.to_path_buf(),
+        pre_command_base_commit: None,
+        pre_command_refname: None,
+        pre_reset_target_commit: None,
+        workdir: workdir.to_path_buf(),
+        canonical_workdir,
+    })
+}
+
 pub fn find_repository_in_path(path: &str) -> Result<Repository, GitAiError> {
     let global_args = vec!["-C".to_string(), path.to_string()];
     find_repository(&global_args)
@@ -3202,6 +3233,37 @@ index 0000000..abc1234 100644
         assert_eq!(
             repo.path().canonicalize().expect("canonical bare"),
             bare.canonicalize().expect("canonical path")
+        );
+    }
+
+    #[test]
+    fn from_non_bare_repository_supports_standard_git_dir_layout() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workdir = temp.path().join("repo");
+        fs::create_dir_all(&workdir).expect("create repo dir");
+
+        run_git(&workdir, &["init"]);
+        run_git(&workdir, &["config", "user.name", "Test User"]);
+        run_git(&workdir, &["config", "user.email", "test@example.com"]);
+        fs::write(workdir.join("README.md"), "hello\n").expect("write readme");
+        run_git(&workdir, &["add", "."]);
+        run_git(&workdir, &["commit", "-m", "initial"]);
+
+        let git_dir = workdir.join(".git");
+        let repo = from_non_bare_repository(&git_dir, &workdir).expect("open non-bare repo");
+
+        assert!(
+            !repo.is_bare_repository().expect("bare check"),
+            "non-bare constructor should report a non-bare repository"
+        );
+        assert_eq!(
+            repo.path().canonicalize().expect("canonical git dir"),
+            git_dir.canonicalize().expect("canonical input git dir")
+        );
+        assert_eq!(
+            repo.workdir().expect("workdir"),
+            workdir,
+            "constructor should preserve working directory"
         );
     }
 

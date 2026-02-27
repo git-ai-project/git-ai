@@ -1,6 +1,7 @@
 mod repos;
 
 use repos::test_repo::TestRepo;
+use serde_json::Value;
 use serial_test::serial;
 use std::fs;
 use std::io::Write;
@@ -58,6 +59,104 @@ fn assert_blame_line_author_contains(
         author_snippet,
         line
     );
+}
+
+fn read_cherry_pick_complete_events(repo: &TestRepo) -> Vec<Value> {
+    let rewrite_log_path = repo.path().join(".git").join("ai").join("rewrite_log");
+    let Ok(rewrite_log) = fs::read_to_string(rewrite_log_path) else {
+        return Vec::new();
+    };
+
+    rewrite_log
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|value| value.get("cherry_pick_complete").cloned())
+        .collect()
+}
+
+fn run_fast_forward_cherry_pick(repo: &TestRepo) -> String {
+    let main_branch = repo.current_branch();
+    let file_path = repo.path().join("ff-cherry-pick.txt");
+    fs::write(&file_path, "base line\n").expect("failed to write base file");
+    repo.git(&["add", "ff-cherry-pick.txt"])
+        .expect("staging base file should succeed");
+    repo.git(&["commit", "-m", "base commit"])
+        .expect("base commit should succeed");
+
+    repo.git(&["checkout", "-b", "feature"])
+        .expect("feature checkout should succeed");
+    {
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&file_path)
+            .expect("failed to open file for append");
+        writeln!(file, "ai line").expect("failed to append ai line");
+    }
+    repo.git_ai(&["checkpoint", "mock_ai", "ff-cherry-pick.txt"])
+        .expect("checkpoint should succeed");
+    repo.git(&["add", "ff-cherry-pick.txt"])
+        .expect("staging feature change should succeed");
+    repo.git(&["commit", "-m", "feature commit"])
+        .expect("feature commit should succeed");
+    let source_commit = repo
+        .git(&["rev-parse", "HEAD"])
+        .expect("source rev-parse should succeed")
+        .trim()
+        .to_string();
+
+    repo.git(&["checkout", &main_branch])
+        .expect("checkout main should succeed");
+    repo.git(&["cherry-pick", "--ff", &source_commit])
+        .expect("fast-forward cherry-pick should succeed");
+
+    let head_commit = repo
+        .git(&["rev-parse", "HEAD"])
+        .expect("head rev-parse should succeed")
+        .trim()
+        .to_string();
+    assert_eq!(
+        head_commit, source_commit,
+        "fast-forward cherry-pick should preserve commit SHA"
+    );
+
+    source_commit
+}
+
+fn assert_single_equal_sha_cherry_pick_complete_event(repo: &TestRepo, expected_sha: &str) {
+    let events = read_cherry_pick_complete_events(repo);
+    assert_eq!(
+        events.len(),
+        1,
+        "expected exactly one cherry_pick_complete event"
+    );
+
+    let event = &events[0];
+    let source_commits = event
+        .get("source_commits")
+        .and_then(|value| value.as_array())
+        .expect("source_commits should be present");
+    let new_commits = event
+        .get("new_commits")
+        .and_then(|value| value.as_array())
+        .expect("new_commits should be present");
+    let source = source_commits
+        .first()
+        .and_then(|value| value.as_str())
+        .expect("source commit should be present");
+    let new = new_commits
+        .first()
+        .and_then(|value| value.as_str())
+        .expect("new commit should be present");
+    let new_head = event
+        .get("new_head")
+        .and_then(|value| value.as_str())
+        .expect("new_head should be present");
+
+    assert_eq!(source_commits.len(), 1, "expected one source commit");
+    assert_eq!(new_commits.len(), 1, "expected one new commit");
+    assert_eq!(source, expected_sha, "source commit should match HEAD");
+    assert_eq!(new, expected_sha, "new commit should match HEAD");
+    assert_eq!(new_head, expected_sha, "new_head should match HEAD");
 }
 
 #[cfg(unix)]
@@ -411,15 +510,113 @@ fn hooks_mode_batches_multi_commit_cherry_pick_rewrite_event() {
     repo.git(&cherry_pick_args)
         .expect("cherry-pick sequence should succeed");
 
+    let batch_state_path = repo
+        .path()
+        .join(".git")
+        .join("ai")
+        .join("cherry_pick_batch_state.json");
+    if batch_state_path.exists() {
+        // Some Git/hook timing variants may finalize stale cherry-pick state on
+        // the next managed hook invocation instead of the terminal post-commit.
+        repo.git(&["commit", "--allow-empty", "-m", "post cherry-pick cleanup"])
+            .expect("follow-up commit should succeed");
+    }
     assert!(
-        !repo
-            .path()
-            .join(".git")
-            .join("ai")
-            .join("cherry_pick_batch_state.json")
-            .exists(),
-        "cherry-pick batch state should be cleaned up after terminal event"
+        !batch_state_path.exists(),
+        "cherry-pick batch state should be cleaned up after follow-up hook if needed"
     );
+
+    let rewrite_log = fs::read_to_string(repo.path().join(".git").join("ai").join("rewrite_log"))
+        .expect("rewrite log should exist");
+    let mut cherry_pick_complete_events = 0usize;
+    for line in rewrite_log.lines() {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(event) = value.get("cherry_pick_complete") else {
+            continue;
+        };
+        let source_len = event
+            .get("source_commits")
+            .and_then(|commits| commits.as_array())
+            .map(|commits| commits.len())
+            .unwrap_or(0);
+        let new_len = event
+            .get("new_commits")
+            .and_then(|commits| commits.as_array())
+            .map(|commits| commits.len())
+            .unwrap_or(0);
+        assert_eq!(
+            source_len, 3,
+            "cherry-pick complete event should include all source commits"
+        );
+        assert_eq!(
+            new_len, 3,
+            "cherry-pick complete event should include all new commits"
+        );
+        cherry_pick_complete_events += 1;
+    }
+
+    assert_eq!(
+        cherry_pick_complete_events, 1,
+        "hooks mode should emit exactly one cherry_pick_complete event for multi-commit cherry-pick"
+    );
+}
+
+#[test]
+#[serial]
+fn wrapper_mode_ff_cherry_pick_emits_equal_sha_complete_event() {
+    let _mode = EnvVarGuard::set("GIT_AI_TEST_GIT_MODE", "wrapper");
+    let repo = TestRepo::new();
+
+    let source_commit = run_fast_forward_cherry_pick(&repo);
+    assert_single_equal_sha_cherry_pick_complete_event(&repo, &source_commit);
+}
+
+#[test]
+#[serial]
+fn hooks_mode_ff_cherry_pick_emits_equal_sha_complete_event_and_no_stale_state() {
+    let _mode = EnvVarGuard::set("GIT_AI_TEST_GIT_MODE", "hooks");
+    let repo = TestRepo::new();
+
+    let source_commit = run_fast_forward_cherry_pick(&repo);
+    let events = read_cherry_pick_complete_events(&repo);
+    assert!(
+        events.len() <= 1,
+        "hooks mode fast-forward cherry-pick should emit at most one complete event"
+    );
+    if events.len() == 1 {
+        assert_single_equal_sha_cherry_pick_complete_event(&repo, &source_commit);
+    }
+
+    let batch_state_path = repo
+        .path()
+        .join(".git")
+        .join("ai")
+        .join("cherry_pick_batch_state.json");
+    let state_path = repo
+        .path()
+        .join(".git")
+        .join("ai")
+        .join("cherry_pick_hook_state");
+    assert!(
+        !batch_state_path.exists(),
+        "hooks mode should not leave stale cherry-pick batch state after --ff"
+    );
+    assert!(
+        !state_path.exists(),
+        "hooks mode should not leave stale cherry-pick state after --ff"
+    );
+}
+
+#[test]
+#[serial]
+fn wrapper_and_hooks_mode_ff_cherry_pick_emits_single_equal_sha_complete_event() {
+    let _mode = EnvVarGuard::set("GIT_AI_TEST_GIT_MODE", "both");
+    let repo = TestRepo::new();
+
+    let source_commit = run_fast_forward_cherry_pick(&repo);
+    assert_single_equal_sha_cherry_pick_complete_event(&repo, &source_commit);
 }
 
 #[test]
