@@ -1,4 +1,4 @@
-name: Install Scripts (Local Build)
+name: End-to-End Tests
 
 on:
   pull_request:
@@ -10,7 +10,7 @@ on:
 
 jobs:
   install-local-unix:
-    name: Local install.sh on ${{ matrix.os }}
+    name: E2E install.sh on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -65,7 +65,7 @@ jobs:
           grep -F "checkpoint claude" "$HOME/.claude/settings.json"
 
   install-local-windows:
-    name: Local install.ps1 on windows-latest
+    name: E2E install.ps1 on windows-latest
     runs-on: windows-latest
 
     steps:
