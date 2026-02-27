@@ -587,12 +587,12 @@ pub fn to_git_bash_path(path: &Path) -> String {
         let rest_unix = rest.replace('\\', "/");
         return format!("/{}{}", drive_letter, rest_unix);
     }
-    // Also handle the case where the path has forward slashes already but still has drive letter
+    // Also handle the case where the path has no separator after the drive letter (e.g. C:foo)
     if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
         let drive_letter = (bytes[0] as char).to_ascii_lowercase();
         let rest = &s[2..];
         let rest_unix = rest.replace('\\', "/");
-        return format!("/{}{}", drive_letter, rest_unix);
+        return format!("/{}/{}", drive_letter, rest_unix);
     }
     // For non-Windows paths, just return as-is
     s.into_owned()
@@ -1384,6 +1384,17 @@ mod tests {
         assert_eq!(
             result, "/c/Users/USERNAME/.git-ai/bin/git-ai.exe",
             "should convert cleaned Windows path to git bash format"
+        );
+    }
+
+    #[test]
+    fn test_to_git_bash_path_handles_drive_relative_path() {
+        // Drive-relative path like C:foo (no separator after colon)
+        let path = PathBuf::from("C:foo");
+        let result = to_git_bash_path(&path);
+        assert_eq!(
+            result, "/c/foo",
+            "should insert separator between drive letter and relative path"
         );
     }
 
