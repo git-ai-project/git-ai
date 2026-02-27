@@ -92,7 +92,7 @@ fn generate_via_api(prompt: &str, config: &SynopsisConfig) -> Result<String, Git
         GitAiError::Generic(format!("Failed to read Anthropic API response: {}", e))
     })?;
 
-    if status < 200 || status >= 300 {
+    if !(200..300).contains(&status) {
         return Err(GitAiError::Generic(format!(
             "Anthropic API returned HTTP {}: {}",
             status, body
@@ -141,7 +141,7 @@ relevant. Avoid generic filler phrases.\n\n",
     // Commit metadata
     prompt.push_str(&format!("**Commit SHA**: `{}`\n", input.commit_sha));
     prompt.push_str(&format!("**Author**: {}\n", input.author));
-    prompt.push_str("\n");
+    prompt.push('\n');
 
     // Commit message
     prompt.push_str("## Commit Message\n\n```\n");
@@ -226,7 +226,7 @@ fn parse_response(body: &str) -> Result<String, GitAiError> {
 
 /// Estimate input token count as a rough approximation (4 chars per token).
 pub fn estimate_input_tokens(prompt: &str) -> usize {
-    (prompt.len() + 3) / 4
+    prompt.len().div_ceil(4)
 }
 
 fn truncate_to_chars(s: &str, max_chars: usize) -> String {
