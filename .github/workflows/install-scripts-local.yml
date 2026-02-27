@@ -149,7 +149,8 @@ jobs:
             }
             "codex" {
               $config = Join-Path $env:USERPROFILE ".codex\config.toml"
-              if (-not (Select-String -Path $config -Pattern "checkpoint codex")) { throw "Codex hooks not configured" }
+              # Codex uses TOML array format: notify = ["<bin>", "checkpoint", "codex", ...]
+              if (-not (Select-String -Path $config -Pattern "checkpoint")) { throw "Codex hooks not configured" }
             }
             "gemini" {
               $settings = Join-Path $env:USERPROFILE ".gemini\settings.json"
