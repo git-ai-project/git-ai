@@ -10,12 +10,21 @@ on:
 
 jobs:
   install-local-unix:
-    name: E2E install.sh on ${{ matrix.os }}
+    name: E2E ${{ matrix.agent.name }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        agent:
+          - name: claude
+            npm_pkg: "@anthropic-ai/claude-code"
+          - name: codex
+            npm_pkg: "@openai/codex"
+          - name: gemini
+            npm_pkg: "@google/gemini-cli"
+          - name: opencode
+            npm_pkg: "opencode"
 
     steps:
       - name: Checkout code
@@ -32,21 +41,19 @@ jobs:
       - name: Build git-ai
         run: cargo build --release --bin git-ai
 
-      - name: Prepare test home and fake Claude Code
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install agent CLI — ${{ matrix.agent.name }}
+        run: npm install -g "${{ matrix.agent.npm_pkg }}"
+
+      - name: Prepare test home
         run: |
           TEST_HOME="$RUNNER_TEMP/git-ai-home"
-          mkdir -p "$TEST_HOME/.config/fish" "$TEST_HOME/.claude"
+          mkdir -p "$TEST_HOME/.config/fish"
           touch "$TEST_HOME/.bashrc" "$TEST_HOME/.zshrc" "$TEST_HOME/.config/fish/config.fish"
           echo "HOME=$TEST_HOME" >> "$GITHUB_ENV"
-
-          BIN_DIR="$RUNNER_TEMP/fake-bin"
-          mkdir -p "$BIN_DIR"
-          cat > "$BIN_DIR/claude" <<'EOF'
-          #!/bin/sh
-          echo "2.0.0 (Claude Code)"
-          EOF
-          chmod +x "$BIN_DIR/claude"
-          echo "$BIN_DIR" >> "$GITHUB_PATH"
 
       - name: Run install.sh with local binary
         env:
@@ -55,18 +62,30 @@ jobs:
           chmod +x ./install.sh
           ./install.sh
 
-      - name: Verify shell configs and Claude hooks
+      - name: Verify shell configs and agent hooks
         run: |
           INSTALL_DIR="$HOME/.git-ai/bin"
           test -x "$INSTALL_DIR/git-ai"
           grep -F "$INSTALL_DIR" "$HOME/.bashrc"
           grep -F "$INSTALL_DIR" "$HOME/.zshrc"
           grep -F "fish_add_path -g \"$INSTALL_DIR\"" "$HOME/.config/fish/config.fish"
-          grep -F "checkpoint claude" "$HOME/.claude/settings.json"
+          bash "$GITHUB_WORKSPACE/scripts/nightly/verify-hook-wiring.sh" "${{ matrix.agent.name }}"
 
   install-local-windows:
-    name: E2E install.ps1 on windows-latest
+    name: E2E ${{ matrix.agent.name }} on windows-latest
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        agent:
+          - name: claude
+            npm_pkg: "@anthropic-ai/claude-code"
+          - name: codex
+            npm_pkg: "@openai/codex"
+          - name: gemini
+            npm_pkg: "@google/gemini-cli"
+          - name: opencode
+            npm_pkg: "opencode"
 
     steps:
       - name: Checkout code
@@ -83,7 +102,14 @@ jobs:
       - name: Build git-ai
         run: cargo build --release --bin git-ai
 
-      - name: Prepare test home and fake Claude Code
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install agent CLI — ${{ matrix.agent.name }}
+        run: npm install -g "${{ matrix.agent.npm_pkg }}"
+
+      - name: Prepare test home
         shell: pwsh
         run: |
           $testHome = Join-Path $env:RUNNER_TEMP "git-ai-home"
@@ -93,15 +119,6 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value "TEST_HOME=$testHome"
           Add-Content -Path $env:GITHUB_ENV -Value "TEST_HOME_DRIVE=$homeDrive"
           Add-Content -Path $env:GITHUB_ENV -Value "TEST_HOME_PATH=$homePath"
-
-          $claudeDir = Join-Path $testHome ".claude"
-          New-Item -ItemType Directory -Force -Path $claudeDir | Out-Null
-
-          $binDir = Join-Path $env:RUNNER_TEMP "fake-bin"
-          New-Item -ItemType Directory -Force -Path $binDir | Out-Null
-          $claudeCmd = Join-Path $binDir "claude.cmd"
-          "@echo 2.0.0 (Claude Code)" | Out-File -FilePath $claudeCmd -Encoding ASCII -Force
-          Add-Content -Path $env:GITHUB_PATH -Value $binDir
 
       - name: Run install.ps1 with local binary
         shell: pwsh
@@ -115,7 +132,7 @@ jobs:
           Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
           ./install.ps1
 
-      - name: Verify Claude hooks
+      - name: Verify agent hooks
         shell: pwsh
         env:
           HOME: ${{ env.TEST_HOME }}
@@ -125,5 +142,21 @@ jobs:
         run: |
           $installDir = Join-Path $env:USERPROFILE ".git-ai\bin"
           if (-not (Test-Path -LiteralPath (Join-Path $installDir "git-ai.exe"))) { throw "git-ai.exe not installed" }
-          $settings = Join-Path $env:USERPROFILE ".claude\settings.json"
-          if (-not (Select-String -Path $settings -Pattern "checkpoint claude")) { throw "Claude hooks not configured" }
+          switch ("${{ matrix.agent.name }}") {
+            "claude" {
+              $settings = Join-Path $env:USERPROFILE ".claude\settings.json"
+              if (-not (Select-String -Path $settings -Pattern "checkpoint claude")) { throw "Claude hooks not configured" }
+            }
+            "codex" {
+              $config = Join-Path $env:USERPROFILE ".codex\config.toml"
+              if (-not (Select-String -Path $config -Pattern "checkpoint codex")) { throw "Codex hooks not configured" }
+            }
+            "gemini" {
+              $settings = Join-Path $env:USERPROFILE ".gemini\settings.json"
+              if (-not (Select-String -Path $settings -Pattern "checkpoint gemini")) { throw "Gemini hooks not configured" }
+            }
+            "opencode" {
+              $plugin = Join-Path $env:USERPROFILE ".config\opencode\plugin\git-ai.ts"
+              if (-not (Test-Path -LiteralPath $plugin)) { throw "OpenCode plugin not installed" }
+            }
+          }
