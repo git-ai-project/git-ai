@@ -171,6 +171,8 @@ jobs:
       - name: Install git-ai hooks in test repo
         run: |
           export PATH="$GITHUB_WORKSPACE/target/release:$PATH"
+          # Symlink git-ai as "git" so the proxy intercepts commits and fires hooks
+          ln -sf "$GITHUB_WORKSPACE/target/release/git-ai" "$GITHUB_WORKSPACE/target/release/git"
           cd /tmp/test-repo
           git-ai install
 
@@ -256,6 +258,8 @@ jobs:
       - name: Install git-ai hooks in test repo
         run: |
           export PATH="$GITHUB_WORKSPACE/target/release:$PATH"
+          # Symlink git-ai as "git" so the proxy intercepts commits and fires hooks
+          ln -sf "$GITHUB_WORKSPACE/target/release/git-ai" "$GITHUB_WORKSPACE/target/release/git"
           cd /tmp/test-repo
           git-ai install
 
