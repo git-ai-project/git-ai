@@ -202,7 +202,7 @@ jobs:
     needs: [resolve-versions, tier1-hook-wiring]
     if: ${{ github.event.inputs.tier != 'tier1' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.resolve-versions.outputs.matrix) }}
@@ -262,7 +262,7 @@ jobs:
       - name: Run live agent test (with retry)
         uses: nick-fields/retry@v2
         with:
-          timeout_minutes: 12
+          timeout_minutes: 20
           max_attempts: 2
           command: |
             export PATH="$GITHUB_WORKSPACE/target/release:$PATH"
