@@ -716,8 +716,7 @@ mod tests {
         let pre_tool_cmd = format!("{} {}", binary_path_str, CLAUDE_PRE_TOOL_CMD);
 
         assert_eq!(
-            pre_tool_cmd,
-            "/usr/local/bin/git-ai checkpoint claude --hook-input stdin",
+            pre_tool_cmd, "/usr/local/bin/git-ai checkpoint claude --hook-input stdin",
             "Unix paths should be preserved unchanged"
         );
     }
