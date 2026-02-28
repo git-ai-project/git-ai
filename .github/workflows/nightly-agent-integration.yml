@@ -1,0 +1,358 @@
+name: Nightly Agent CLI Integration Tests
+
+on:
+  schedule:
+    - cron: '0 4 * * 1-5'  # 4 AM UTC, weekdays only
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      agents:
+        description: 'Comma-separated agents to test (or "all")'
+        default: 'all'
+        required: false
+      tier:
+        description: 'Test tier to run'
+        type: choice
+        default: 'both'
+        options: [tier1, tier2, both]
+
+env:
+  GIT_AI_DEBUG: "1"
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  # ── Version Resolution ─────────────────────────────────────────────────────
+  resolve-versions:
+    name: Resolve agent CLI versions
+    runs-on: ubuntu-latest
+    # Run on schedule, manual dispatch, or when the "Integration" label is applied to a PR
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && github.event.label.name == 'integration')
+    outputs:
+      matrix: ${{ steps.build-matrix.outputs.matrix }}
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - id: build-matrix
+        name: Build dynamic test matrix
+        run: |
+          python3 - <<'PY'
+          import json, subprocess, os
+
+          agents = {
+              "claude":   {"pkg": "@anthropic-ai/claude-code", "key": "ANTHROPIC_API_KEY"},
+              "codex":    {"pkg": "@openai/codex",             "key": "OPENAI_API_KEY"},
+              "gemini":   {"pkg": "@google/gemini-cli",        "key": "GEMINI_API_KEY"},
+              "opencode": {"pkg": "opencode-ai",               "key": "ANTHROPIC_API_KEY"},
+          }
+
+          headless_cmds = {
+              "claude":   "claude -p --dangerously-skip-permissions --max-turns 3",
+              "codex":    "codex exec --full-auto",
+              "gemini":   "gemini --approval-mode=yolo",
+              "opencode": "opencode run --command",
+          }
+
+          matrix = {"include": []}
+          for agent, info in agents.items():
+              try:
+                  stable_ver = subprocess.check_output(
+                      ["npm", "view", info["pkg"], "version"],
+                      text=True, stderr=subprocess.DEVNULL
+                  ).strip()
+                  # Try the "next" dist-tag for a pre-release; fall back to stable
+                  # to avoid doubling CI cost when no canary exists
+                  try:
+                      latest_ver = subprocess.check_output(
+                          ["npm", "view", info["pkg"], "dist-tags.next"],
+                          text=True, stderr=subprocess.DEVNULL
+                      ).strip()
+                      # npm 10+ exits 0 with empty output or "undefined" when the
+                      # dist-tag doesn't exist, so CalledProcessError is not raised
+                      if not latest_ver or latest_ver == "undefined":
+                          latest_ver = stable_ver
+                  except subprocess.CalledProcessError:
+                      latest_ver = stable_ver  # No pre-release; skip duplicate
+              except subprocess.CalledProcessError:
+                  print(f"Warning: Could not resolve versions for {info['pkg']}", flush=True)
+                  stable_ver = "latest"
+                  latest_ver = "latest"
+
+              for channel in ["stable", "latest"]:
+                  ver = stable_ver if channel == "stable" else latest_ver
+                  # Skip the latest channel when it resolves to the same version as
+                  # stable — no additional coverage, just wastes CI resources
+                  if channel == "latest" and latest_ver == stable_ver:
+                      continue
+                  npm_pkg = f"{info['pkg']}@{ver}" if channel == "stable" else f"{info['pkg']}@next"
+                  matrix["include"].append({
+                      "agent":       agent,
+                      "channel":     channel,
+                      "npm_pkg":     npm_pkg,
+                      "version":     ver,
+                      "api_key_var": info["key"],
+                      "headless_cmd": headless_cmds[agent],
+                  })
+
+          # Droid uses curl installer (latest only, no npm version pinning)
+          matrix["include"].append({
+              "agent":       "droid",
+              "channel":     "latest",
+              "npm_pkg":     "",
+              "version":     "latest",
+              "api_key_var": "FACTORY_API_KEY",
+              "headless_cmd": "droid exec --auto high",
+          })
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"matrix={json.dumps(matrix)}\n")
+
+          print(f"Matrix built: {len(matrix['include'])} entries", flush=True)
+          PY
+
+  # ── Tier 1: Hook Wiring Verification ──────────────────────────────────────
+  tier1-hook-wiring:
+    name: 'Tier 1: ${{ matrix.agent }} ${{ matrix.channel }}'
+    needs: resolve-versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.resolve-versions.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93.0"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-
+            ${{ runner.os }}-cargo-
+
+      - name: Build git-ai (release)
+        run: cargo build --release
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install agent CLI — ${{ matrix.agent }} (${{ matrix.channel }})
+        run: |
+          if [ "${{ matrix.agent }}" = "droid" ]; then
+            curl -fsSL https://app.factory.ai/cli | sh
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          else
+            npm install -g "${{ matrix.npm_pkg }}"
+          fi
+
+      - name: Verify agent binary is present
+        run: |
+          case "${{ matrix.agent }}" in
+            claude)   claude --version ;;
+            codex)    codex --version ;;
+            gemini)   gemini --help 2>&1 | head -3 || true ;;
+            droid)    droid --version ;;
+            opencode) opencode --version ;;
+          esac
+
+      - name: Create test repository
+        run: |
+          mkdir -p /tmp/test-repo
+          cd /tmp/test-repo
+          git init
+          git config user.email "ci@git-ai.test"
+          git config user.name "CI Test"
+          echo "# Integration Test Repo" > README.md
+          git add README.md
+          git commit -m "Initial commit"
+
+      - name: Install git-ai hooks in test repo
+        run: |
+          export PATH="$GITHUB_WORKSPACE/target/release:$PATH"
+          # Symlink git-ai as "git" so the proxy intercepts commits and fires hooks
+          ln -sf "$GITHUB_WORKSPACE/target/release/git-ai" "$GITHUB_WORKSPACE/target/release/git"
+          cd /tmp/test-repo
+          git-ai install
+
+      - name: Verify hook wiring
+        run: |
+          export PATH="$GITHUB_WORKSPACE/target/release:$PATH"
+          bash "$GITHUB_WORKSPACE/scripts/nightly/verify-hook-wiring.sh" "${{ matrix.agent }}"
+
+      - name: Synthetic checkpoint test
+        run: |
+          export PATH="$GITHUB_WORKSPACE/target/release:$PATH"
+          cd /tmp/test-repo
+          bash "$GITHUB_WORKSPACE/scripts/nightly/test-synthetic-checkpoint.sh" \
+            "${{ matrix.agent }}" \
+            /tmp/test-repo
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tier1-${{ matrix.agent }}-${{ matrix.channel }}
+          path: /tmp/test-results/
+          retention-days: 7
+          if-no-files-found: warn
+
+  # ── Tier 2: Live Agent Integration ────────────────────────────────────────
+  tier2-live-integration:
+    name: 'Tier 2 (live): ${{ matrix.agent }} ${{ matrix.channel }}'
+    needs: [resolve-versions, tier1-hook-wiring]
+    if: ${{ github.event.inputs.tier != 'tier1' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.resolve-versions.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93.0"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-
+            ${{ runner.os }}-cargo-
+
+      - name: Build git-ai (release)
+        run: cargo build --release
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install agent CLI — ${{ matrix.agent }} (${{ matrix.channel }})
+        run: |
+          if [ "${{ matrix.agent }}" = "droid" ]; then
+            curl -fsSL https://app.factory.ai/cli | sh
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          else
+            npm install -g "${{ matrix.npm_pkg }}"
+          fi
+
+      - name: Create test repository
+        run: |
+          mkdir -p /tmp/test-repo
+          cd /tmp/test-repo
+          git init
+          git config user.email "ci@git-ai.test"
+          git config user.name "CI Test"
+          echo "# Integration Test Repo" > README.md
+          git add README.md
+          git commit -m "Initial commit"
+
+      - name: Install git-ai hooks in test repo
+        run: |
+          export PATH="$GITHUB_WORKSPACE/target/release:$PATH"
+          # Symlink git-ai as "git" so the proxy intercepts commits and fires hooks
+          ln -sf "$GITHUB_WORKSPACE/target/release/git-ai" "$GITHUB_WORKSPACE/target/release/git"
+          cd /tmp/test-repo
+          git-ai install
+
+      - name: Run live agent test (with retry)
+        uses: nick-fields/retry@v2
+        with:
+          timeout_minutes: 20
+          max_attempts: 2
+          command: |
+            export PATH="$GITHUB_WORKSPACE/target/release:$PATH"
+            export ${{ matrix.api_key_var }}="${{ secrets[matrix.api_key_var] }}"
+            bash "$GITHUB_WORKSPACE/scripts/nightly/test-live-agent.sh" "${{ matrix.agent }}"
+        continue-on-error: ${{ matrix.channel == 'latest' }}
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
+
+      - name: Verify attribution pipeline
+        run: |
+          export PATH="$GITHUB_WORKSPACE/target/release:$PATH"
+          bash "$GITHUB_WORKSPACE/scripts/nightly/verify-attribution.sh" "${{ matrix.agent }}"
+        continue-on-error: ${{ matrix.channel == 'latest' }}
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tier2-${{ matrix.agent }}-${{ matrix.channel }}
+          path: /tmp/test-results/
+          retention-days: 7
+          if-no-files-found: warn
+
+  # ── Failure Notification ──────────────────────────────────────────────────
+  notify-on-failure:
+    name: Notify on failure
+    needs: [tier1-hook-wiring, tier2-live-integration]
+    if: ${{ always() && (needs.tier1-hook-wiring.result == 'failure' || needs.tier2-live-integration.result == 'failure') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify Slack
+        uses: slackapi/slack-github-action@v1
+        with:
+          channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
+          payload: |
+            {
+              "text": ":red_circle: Nightly agent integration tests FAILED",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Nightly Agent CLI Integration* failed on `${{ github.ref_name }}`\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run>"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+
+      - name: Create tracking issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const date = new Date().toISOString().split('T')[0];
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Nightly agent integration failure: ${date}`,
+              labels: ['nightly', 'integration', 'triage'],
+              body: [
+                '## Nightly Agent CLI Integration Test Failure',
+                '',
+                `[View workflow run](${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
+                '',
+                '### Checklist',
+                '- [ ] Identify which agent(s) failed',
+                '- [ ] Check if agent CLI released a new version',
+                '- [ ] Reproduce locally',
+                '- [ ] Determine if git-ai needs a fix or if it is an agent regression',
+              ].join('\n'),
+            });
