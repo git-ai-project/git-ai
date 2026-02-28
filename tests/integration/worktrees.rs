@@ -448,6 +448,7 @@ crate::worktree_test_wrappers! {
                 overriden_lines: 0,
                 messages_url: None,
                 custom_attributes: None,
+                parent_id: None,
             },
         );
         working_log
