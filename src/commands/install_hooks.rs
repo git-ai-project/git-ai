@@ -101,6 +101,12 @@ pub fn to_hashmap(statuses: HashMap<String, InstallStatus>) -> HashMap<String, S
         .collect()
 }
 
+fn print_amp_plugins_note(installer_id: &str) {
+    if installer_id == "amp" {
+        println!("  Note: Amp plugins are experimental. Run amp with `PLUGINS=all amp`.");
+    }
+}
+
 /// Main entry point for install-hooks command
 pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
     // Parse flags
@@ -207,6 +213,7 @@ async fn async_run_install(
                                 spinner.pending(&format!("{}: Pending updates", name));
                             } else {
                                 spinner.success(&format!("{}: Hooks updated", name));
+                                print_amp_plugins_note(id);
                             }
                             if verbose {
                                 println!();
@@ -218,6 +225,7 @@ async fn async_run_install(
                         }
                         Ok(None) => {
                             spinner.success(&format!("{}: Hooks already up to date", name));
+                            print_amp_plugins_note(id);
                             statuses.insert(id.to_string(), InstallStatus::AlreadyInstalled);
                             detailed_results
                                 .push((id.to_string(), InstallResult::already_installed()));

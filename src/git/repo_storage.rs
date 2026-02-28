@@ -329,7 +329,6 @@ impl PersistedWorkingLog {
         // using tool-specific sources (transcript_path for Claude, cursor_db_path for Cursor, etc.)
         //
         // Tools that DON'T support refetch (transcript must be kept):
-        // - "opencode" - uses agent-v1 format, transcript provided inline
         // - "mock_ai" - test preset, transcript not stored externally
         // - Any other agent-v1 custom tools (detected by lack of tool-specific metadata)
         let mut storage_checkpoint = checkpoint.clone();
@@ -342,14 +341,14 @@ impl PersistedWorkingLog {
 
         // Blacklist: tools that cannot refetch transcripts
         let cannot_refetch = match tool {
-            "opencode" | "mock_ai" => true,
+            "mock_ai" => true,
             // human checkpoints have no transcript anyway
             "human" => false,
             // For other tools, check if they have the necessary metadata for refetching
             // cursor can always refetch from its database
             "cursor" => false,
-            // claude, codex, gemini, continue-cli need transcript_path
-            "claude" | "codex" | "gemini" | "continue-cli" => metadata
+            // claude, codex, gemini, continue-cli, amp need transcript_path
+            "claude" | "codex" | "gemini" | "continue-cli" | "amp" => metadata
                 .as_ref()
                 .and_then(|m| m.get("transcript_path"))
                 .is_none(),
