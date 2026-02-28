@@ -280,6 +280,11 @@ if [ "$OS" = "macos" ]; then
     xattr -d com.apple.quarantine "${INSTALL_DIR}/git-ai" 2>/dev/null || true
 fi
 
+# Create ~/.local/bin/git-ai symlink for systems where ~/.local/bin is already on PATH
+LOCAL_BIN_DIR="$HOME/.local/bin"
+mkdir -p "$LOCAL_BIN_DIR"
+ln -sf "${INSTALL_DIR}/git-ai" "${LOCAL_BIN_DIR}/git-ai"
+
 success "Successfully installed git-ai into ${INSTALL_DIR}"
 success "You can now run 'git-ai' from your terminal"
 

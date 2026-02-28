@@ -500,6 +500,18 @@ if ($gitBashConfigured) {
     Write-Success "Git Bash already configured ($targetBashConfig)"
 }
 
+# Create ~/.local/bin/git-ai.cmd shim for systems where ~/.local/bin is already on PATH
+try {
+    $localBinDir = Join-Path $HOME '.local\bin'
+    New-Item -ItemType Directory -Force -Path $localBinDir | Out-Null
+    $localBinShim = Join-Path $localBinDir 'git-ai.cmd'
+    $localBinShimContent = "@echo off$([Environment]::NewLine)`"$finalExe`" %*$([Environment]::NewLine)"
+    Set-Content -Path $localBinShim -Value $localBinShimContent -Encoding ASCII -Force
+    try { Unblock-File -Path $localBinShim -ErrorAction SilentlyContinue } catch { }
+} catch {
+    Write-Host "Warning: Failed to create ~/.local/bin/git-ai.cmd shim: $($_.Exception.Message)" -ForegroundColor Yellow
+}
+
 # Write JSON config at %USERPROFILE%\.git-ai\config.json (only if it doesn't exist)
 try {
     $configDir = Join-Path $HOME '.git-ai'
