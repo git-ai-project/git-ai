@@ -109,7 +109,7 @@ agent = sys.argv[2].lower()
 for record in meta.get("prompts", {}).values():
     tool = str(record.get("agent_id", {}).get("tool", "")).lower()
     # Fuzzy match: "claude" matches "claude_code", "gemini" matches "gemini_cli", etc.
-    if agent in tool or tool in agent:
+    if tool and (agent in tool or tool in agent):
         print("found")
         sys.exit(0)
 

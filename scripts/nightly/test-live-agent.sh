@@ -81,7 +81,7 @@ case "$AGENT" in
 
   gemini)
     # Pre-install ripgrep to avoid Gemini CLI initialization hang on headless Linux
-    which rg 2>/dev/null || apt-get install -y ripgrep 2>/dev/null || true
+    which rg 2>/dev/null || sudo apt-get install -y ripgrep 2>/dev/null || true
     timeout 300 gemini --approval-mode=yolo "$PROMPT" 2>&1 | tee -a "$LOG" \
       || warn "gemini exited with non-zero status"
     ;;

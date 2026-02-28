@@ -65,10 +65,15 @@ jobs:
                       ["npm", "view", info["pkg"], "version"],
                       text=True, stderr=subprocess.DEVNULL
                   ).strip()
-                  latest_ver = subprocess.check_output(
-                      ["npm", "view", info["pkg"], "dist-tags.latest"],
-                      text=True, stderr=subprocess.DEVNULL
-                  ).strip()
+                  # Try the "next" dist-tag for a pre-release; fall back to stable
+                  # to avoid doubling CI cost when no canary exists
+                  try:
+                      latest_ver = subprocess.check_output(
+                          ["npm", "view", info["pkg"], "dist-tags.next"],
+                          text=True, stderr=subprocess.DEVNULL
+                      ).strip()
+                  except subprocess.CalledProcessError:
+                      latest_ver = stable_ver  # No pre-release; skip duplicate
               except subprocess.CalledProcessError:
                   print(f"Warning: Could not resolve versions for {info['pkg']}", flush=True)
                   stable_ver = "latest"
@@ -76,6 +81,10 @@ jobs:
 
               for channel in ["stable", "latest"]:
                   ver = stable_ver if channel == "stable" else latest_ver
+                  # Skip the latest channel when it resolves to the same version as
+                  # stable — no additional coverage, just wastes CI resources
+                  if channel == "latest" and latest_ver == stable_ver:
+                      continue
                   npm_pkg = f"{info['pkg']}@{ver}" if channel == "stable" else f"{info['pkg']}@latest"
                   matrix["include"].append({
                       "agent":       agent,
