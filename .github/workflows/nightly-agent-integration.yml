@@ -72,6 +72,10 @@ jobs:
                           ["npm", "view", info["pkg"], "dist-tags.next"],
                           text=True, stderr=subprocess.DEVNULL
                       ).strip()
+                      # npm 10+ exits 0 with empty output or "undefined" when the
+                      # dist-tag doesn't exist, so CalledProcessError is not raised
+                      if not latest_ver or latest_ver == "undefined":
+                          latest_ver = stable_ver
                   except subprocess.CalledProcessError:
                       latest_ver = stable_ver  # No pre-release; skip duplicate
               except subprocess.CalledProcessError:
