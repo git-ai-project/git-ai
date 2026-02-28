@@ -147,7 +147,7 @@ fn test_claude_transcript_parsing_empty_file() {
         ClaudePreset::transcript_and_model_from_claude_code_jsonl(temp_file.to_str().unwrap());
 
     assert!(result.is_ok());
-    let (transcript, model) = result.unwrap();
+    let (transcript, model, _subagents) = result.unwrap();
     assert!(transcript.messages().is_empty());
     assert!(model.is_none());
 
@@ -162,7 +162,11 @@ fn test_claude_transcript_parsing_malformed_json() {
     let result =
         ClaudePreset::transcript_and_model_from_claude_code_jsonl(temp_file.to_str().unwrap());
 
-    assert!(result.is_err());
+    // Malformed JSON lines are silently skipped (not fatal), so we get Ok with empty transcript
+    let (transcript, model, subagents) = result.expect("File read should succeed");
+    assert!(transcript.messages().is_empty());
+    assert!(model.is_none());
+    assert!(subagents.is_empty());
     fs::remove_file(temp_file).ok();
 }
 
@@ -180,7 +184,7 @@ fn test_claude_transcript_parsing_with_empty_lines() {
         ClaudePreset::transcript_and_model_from_claude_code_jsonl(temp_file.to_str().unwrap());
 
     assert!(result.is_ok());
-    let (transcript, model) = result.unwrap();
+    let (transcript, model, _subagents) = result.unwrap();
     assert_eq!(transcript.messages().len(), 2);
     assert_eq!(model, Some("claude-3".to_string()));
 
@@ -1148,7 +1152,7 @@ fn test_claude_transcript_with_tool_result_in_user_content() {
         ClaudePreset::transcript_and_model_from_claude_code_jsonl(temp_file.to_str().unwrap())
             .expect("Should parse successfully");
 
-    let (transcript, _) = result;
+    let (transcript, _, _subagents) = result;
     // Should skip tool_result but include the text content
     let user_messages: Vec<_> = transcript
         .messages()

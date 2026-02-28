@@ -3,7 +3,7 @@ use crate::authorship::internal_db::InternalDatabase;
 use crate::authorship::transcript::AiTranscript;
 use crate::commands::checkpoint_agent::agent_presets::{
     ClaudePreset, CodexPreset, ContinueCliPreset, CursorPreset, DroidPreset, GeminiPreset,
-    GithubCopilotPreset,
+    GithubCopilotPreset, SubagentInfo,
 };
 use crate::commands::checkpoint_agent::opencode_preset::OpenCodePreset;
 use crate::error::GitAiError;
@@ -152,9 +152,9 @@ pub fn find_prompt_with_db_fallback(
 
 /// Result of attempting to update a prompt from a tool
 pub enum PromptUpdateResult {
-    Updated(AiTranscript, String), // (new_transcript, new_model)
-    Unchanged,                     // No update available or needed
-    Failed(GitAiError),            // Error occurred but not fatal
+    Updated(AiTranscript, String, Vec<SubagentInfo>), // (new_transcript, new_model, subagents)
+    Unchanged,                                        // No update available or needed
+    Failed(GitAiError),                               // Error occurred but not fatal
 }
 
 /// Update a prompt by fetching latest transcript from the tool
@@ -194,6 +194,7 @@ fn update_codex_prompt(
                 Ok((transcript, model)) => PromptUpdateResult::Updated(
                     transcript,
                     model.unwrap_or_else(|| current_model.to_string()),
+                    vec![],
                 ),
                 Err(e) => {
                     debug_log(&format!(
@@ -247,7 +248,7 @@ fn update_cursor_prompt(
         Ok(Some((latest_transcript, _db_model))) => {
             // For Cursor, preserve the model from the checkpoint (which came from hook input)
             // rather than using the database model
-            PromptUpdateResult::Updated(latest_transcript, current_model.to_string())
+            PromptUpdateResult::Updated(latest_transcript, current_model.to_string(), vec![])
         }
         Ok(None) => PromptUpdateResult::Unchanged,
         Err(e) => {
@@ -277,12 +278,13 @@ fn update_claude_prompt(
         if let Some(transcript_path) = metadata.get("transcript_path") {
             // Try to read and parse the transcript JSONL
             match ClaudePreset::transcript_and_model_from_claude_code_jsonl(transcript_path) {
-                Ok((transcript, model)) => {
+                Ok((transcript, model, subagents)) => {
                     // Update to the latest transcript (similar to Cursor behavior)
                     // This handles both cases: initial load failure and getting latest version
                     PromptUpdateResult::Updated(
                         transcript,
                         model.unwrap_or_else(|| current_model.to_string()),
+                        subagents,
                     )
                 }
                 Err(e) => {
@@ -326,6 +328,7 @@ fn update_gemini_prompt(
                     PromptUpdateResult::Updated(
                         transcript,
                         model.unwrap_or_else(|| current_model.to_string()),
+                        vec![],
                     )
                 }
                 Err(e) => {
@@ -371,6 +374,7 @@ fn update_github_copilot_prompt(
                     PromptUpdateResult::Updated(
                         transcript,
                         model.unwrap_or_else(|| current_model.to_string()),
+                        vec![],
                     )
                 }
                 Err(e) => {
@@ -412,7 +416,7 @@ fn update_continue_cli_prompt(
                     // Update to the latest transcript (similar to Cursor behavior)
                     // This handles both cases: initial load failure and getting latest version
                     // IMPORTANT: Always preserve the original model from agent_id (don't overwrite)
-                    PromptUpdateResult::Updated(transcript, current_model.to_string())
+                    PromptUpdateResult::Updated(transcript, current_model.to_string(), vec![])
                 }
                 Err(e) => {
                     debug_log(&format!(
@@ -483,7 +487,7 @@ fn update_droid_prompt(
                 current_model.to_string()
             };
 
-            PromptUpdateResult::Updated(transcript, model)
+            PromptUpdateResult::Updated(transcript, model, vec![])
         } else {
             // No transcript_path in metadata
             PromptUpdateResult::Unchanged
@@ -519,6 +523,7 @@ fn update_opencode_prompt(
         Ok((transcript, model)) => PromptUpdateResult::Updated(
             transcript,
             model.unwrap_or_else(|| current_model.to_string()),
+            vec![],
         ),
         Err(e) => {
             debug_log(&format!(
@@ -636,6 +641,7 @@ mod tests {
             accepted_lines: 8,
             overriden_lines: 2,
             messages_url: None,
+            parent_id: None,
         }
     }
 
@@ -1146,7 +1152,7 @@ mod tests {
         match result {
             PromptUpdateResult::Unchanged
             | PromptUpdateResult::Failed(_)
-            | PromptUpdateResult::Updated(_, _) => {}
+            | PromptUpdateResult::Updated(_, _, _) => {}
         }
     }
 

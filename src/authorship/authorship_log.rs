@@ -203,6 +203,9 @@ pub struct PromptRecord {
     /// Full URL to CAS-stored messages (format: {api_base_url}/cas/{hash})
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub messages_url: Option<String>,
+    /// Hash of the parent prompt record (for subagent transcripts)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
 }
 
 impl Eq for PromptRecord {}
@@ -249,6 +252,7 @@ mod tests {
             accepted_lines: 0,
             overriden_lines: 0,
             messages_url: None,
+            parent_id: None,
         }
     }
 

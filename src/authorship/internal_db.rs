@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 /// Current schema version (must match MIGRATIONS.len())
-const SCHEMA_VERSION: usize = 3;
+const SCHEMA_VERSION: usize = 4;
 
 /// Database migrations - each migration upgrades the schema by one version
 /// Migration at index N upgrades from version N to version N+1
@@ -77,6 +77,10 @@ const MIGRATIONS: &[&str] = &[
         cached_at INTEGER NOT NULL
     );
     "#,
+    // Migration 3 -> 4: Add parent_id for subagent prompt records
+    r#"
+    ALTER TABLE prompts ADD COLUMN parent_id TEXT;
+    "#,
 ];
 
 /// Global database singleton
@@ -98,8 +102,9 @@ pub struct PromptDbRecord {
     pub total_deletions: Option<u32>,                    // Line deletions from checkpoint stats
     pub accepted_lines: Option<u32>,                     // Lines accepted in commit (future)
     pub overridden_lines: Option<u32>,                   // Lines overridden in commit (future)
-    pub created_at: i64,                                 // Unix timestamp
-    pub updated_at: i64,                                 // Unix timestamp
+    pub parent_id: Option<String>, // Parent prompt hash (for subagent records)
+    pub created_at: i64,           // Unix timestamp
+    pub updated_at: i64,           // Unix timestamp
 }
 
 impl PromptDbRecord {
@@ -138,6 +143,7 @@ impl PromptDbRecord {
             total_deletions: Some(checkpoint.line_stats.deletions),
             accepted_lines: None,   // Not yet calculated
             overridden_lines: None, // Not yet calculated
+            parent_id: None,
             created_at,
             updated_at,
         })
@@ -161,6 +167,7 @@ impl PromptDbRecord {
             accepted_lines: self.accepted_lines.unwrap_or(0),
             overriden_lines: self.overridden_lines.unwrap_or(0),
             messages_url: None,
+            parent_id: self.parent_id.clone(),
         }
     }
 
@@ -477,6 +484,10 @@ impl InternalDatabase {
 
     /// Apply a single migration
     /// Migration failures are FATAL - the program cannot continue with a partially migrated database
+    ///
+    /// ALTER TABLE ADD COLUMN migrations are idempotent: if the column already exists
+    /// (e.g. from a previous run that crashed before updating the version), the
+    /// "duplicate column name" error is silently ignored.
     fn apply_migration(&mut self, from_version: usize) -> Result<(), GitAiError> {
         if from_version >= MIGRATIONS.len() {
             return Err(GitAiError::Generic(format!(
@@ -490,8 +501,26 @@ impl InternalDatabase {
 
         // Execute migration in a transaction for atomicity
         let tx = self.conn.transaction()?;
-        tx.execute_batch(migration_sql)?;
-        tx.commit()?;
+        match tx.execute_batch(migration_sql) {
+            Ok(()) => {
+                tx.commit()?;
+            }
+            Err(ref e) if e.to_string().contains("duplicate column name") => {
+                // Column already exists — the migration was partially applied previously
+                // (e.g. ALTER TABLE succeeded but version update didn't persist).
+                // This is safe to skip since the schema change is already in place.
+                debug_log(&format!(
+                    "[Migration] Column already exists, skipping v{} -> v{}: {}",
+                    from_version,
+                    from_version + 1,
+                    e
+                ));
+                // Transaction is rolled back on drop (no-op since ALTER TABLE failed)
+            }
+            Err(e) => {
+                return Err(e.into());
+            }
+        }
 
         Ok(())
     }
@@ -510,8 +539,8 @@ impl InternalDatabase {
                 id, workdir, tool, model, external_thread_id,
                 messages, commit_sha, agent_metadata, human_author,
                 total_additions, total_deletions, accepted_lines,
-                overridden_lines, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                overridden_lines, created_at, updated_at, parent_id
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
             ON CONFLICT(id) DO UPDATE SET
                 workdir = excluded.workdir,
                 model = excluded.model,
@@ -523,7 +552,8 @@ impl InternalDatabase {
                 total_deletions = excluded.total_deletions,
                 accepted_lines = excluded.accepted_lines,
                 overridden_lines = excluded.overridden_lines,
-                updated_at = excluded.updated_at
+                updated_at = excluded.updated_at,
+                parent_id = excluded.parent_id
             "#,
             params![
                 record.id,
@@ -541,6 +571,7 @@ impl InternalDatabase {
                 record.overridden_lines,
                 record.created_at,
                 record.updated_at,
+                record.parent_id,
             ],
         )?;
 
@@ -563,8 +594,8 @@ impl InternalDatabase {
                     id, workdir, tool, model, external_thread_id,
                     messages, commit_sha, agent_metadata, human_author,
                     total_additions, total_deletions, accepted_lines,
-                    overridden_lines, created_at, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                    overridden_lines, created_at, updated_at, parent_id
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
                 ON CONFLICT(id) DO UPDATE SET
                     workdir = excluded.workdir,
                     model = excluded.model,
@@ -576,7 +607,8 @@ impl InternalDatabase {
                     total_deletions = excluded.total_deletions,
                     accepted_lines = excluded.accepted_lines,
                     overridden_lines = excluded.overridden_lines,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at,
+                    parent_id = excluded.parent_id
                 "#,
             )?;
 
@@ -603,6 +635,7 @@ impl InternalDatabase {
                     record.overridden_lines,
                     record.created_at,
                     record.updated_at,
+                    record.parent_id,
                 ])?;
             }
         }
@@ -617,7 +650,7 @@ impl InternalDatabase {
             "SELECT id, workdir, tool, model, external_thread_id, messages,
                     commit_sha, agent_metadata, human_author,
                     total_additions, total_deletions, accepted_lines,
-                    overridden_lines, created_at, updated_at
+                    overridden_lines, created_at, updated_at, parent_id
              FROM prompts WHERE id = ?1",
         )?;
 
@@ -649,6 +682,7 @@ impl InternalDatabase {
                 total_deletions: row.get(10)?,
                 accepted_lines: row.get(11)?,
                 overridden_lines: row.get(12)?,
+                parent_id: row.get(15)?,
                 created_at: row.get(13)?,
                 updated_at: row.get(14)?,
             })
@@ -671,7 +705,7 @@ impl InternalDatabase {
             "SELECT id, workdir, tool, model, external_thread_id, messages,
                     commit_sha, agent_metadata, human_author,
                     total_additions, total_deletions, accepted_lines,
-                    overridden_lines, created_at, updated_at
+                    overridden_lines, created_at, updated_at, parent_id
              FROM prompts WHERE commit_sha = ?1",
         )?;
 
@@ -703,6 +737,7 @@ impl InternalDatabase {
                 total_deletions: row.get(10)?,
                 accepted_lines: row.get(11)?,
                 overridden_lines: row.get(12)?,
+                parent_id: row.get(15)?,
                 created_at: row.get(13)?,
                 updated_at: row.get(14)?,
             })
@@ -729,7 +764,7 @@ impl InternalDatabase {
                 "SELECT id, workdir, tool, model, external_thread_id, messages,
                         commit_sha, agent_metadata, human_author,
                         total_additions, total_deletions, accepted_lines,
-                        overridden_lines, created_at, updated_at
+                        overridden_lines, created_at, updated_at, parent_id
                  FROM prompts WHERE workdir = ?1 AND updated_at >= ?2 ORDER BY updated_at DESC LIMIT ?3 OFFSET ?4".to_string(),
                 vec![Box::new(wd.to_string()), Box::new(ts), Box::new(limit as i64), Box::new(offset as i64)],
             ),
@@ -737,7 +772,7 @@ impl InternalDatabase {
                 "SELECT id, workdir, tool, model, external_thread_id, messages,
                         commit_sha, agent_metadata, human_author,
                         total_additions, total_deletions, accepted_lines,
-                        overridden_lines, created_at, updated_at
+                        overridden_lines, created_at, updated_at, parent_id
                  FROM prompts WHERE workdir = ?1 ORDER BY updated_at DESC LIMIT ?2 OFFSET ?3".to_string(),
                 vec![Box::new(wd.to_string()), Box::new(limit as i64), Box::new(offset as i64)],
             ),
@@ -745,7 +780,7 @@ impl InternalDatabase {
                 "SELECT id, workdir, tool, model, external_thread_id, messages,
                         commit_sha, agent_metadata, human_author,
                         total_additions, total_deletions, accepted_lines,
-                        overridden_lines, created_at, updated_at
+                        overridden_lines, created_at, updated_at, parent_id
                  FROM prompts WHERE updated_at >= ?1 ORDER BY updated_at DESC LIMIT ?2 OFFSET ?3".to_string(),
                 vec![Box::new(ts), Box::new(limit as i64), Box::new(offset as i64)],
             ),
@@ -753,7 +788,7 @@ impl InternalDatabase {
                 "SELECT id, workdir, tool, model, external_thread_id, messages,
                         commit_sha, agent_metadata, human_author,
                         total_additions, total_deletions, accepted_lines,
-                        overridden_lines, created_at, updated_at
+                        overridden_lines, created_at, updated_at, parent_id
                  FROM prompts ORDER BY updated_at DESC LIMIT ?1 OFFSET ?2".to_string(),
                 vec![Box::new(limit as i64), Box::new(offset as i64)],
             ),
@@ -790,6 +825,7 @@ impl InternalDatabase {
                 total_deletions: row.get(10)?,
                 accepted_lines: row.get(11)?,
                 overridden_lines: row.get(12)?,
+                parent_id: row.get(15)?,
                 created_at: row.get(13)?,
                 updated_at: row.get(14)?,
             })
@@ -818,7 +854,7 @@ impl InternalDatabase {
                 "SELECT id, workdir, tool, model, external_thread_id, messages,
                         commit_sha, agent_metadata, human_author,
                         total_additions, total_deletions, accepted_lines,
-                        overridden_lines, created_at, updated_at
+                        overridden_lines, created_at, updated_at, parent_id
                  FROM prompts WHERE messages LIKE ?1 AND workdir = ?2 ORDER BY updated_at DESC LIMIT ?3 OFFSET ?4".to_string(),
                 vec![Box::new(search_pattern), Box::new(wd.to_string()), Box::new(limit as i64), Box::new(offset as i64)],
             ),
@@ -826,7 +862,7 @@ impl InternalDatabase {
                 "SELECT id, workdir, tool, model, external_thread_id, messages,
                         commit_sha, agent_metadata, human_author,
                         total_additions, total_deletions, accepted_lines,
-                        overridden_lines, created_at, updated_at
+                        overridden_lines, created_at, updated_at, parent_id
                  FROM prompts WHERE messages LIKE ?1 ORDER BY updated_at DESC LIMIT ?2 OFFSET ?3".to_string(),
                 vec![Box::new(search_pattern), Box::new(limit as i64), Box::new(offset as i64)],
             ),
@@ -863,6 +899,7 @@ impl InternalDatabase {
                 total_deletions: row.get(10)?,
                 accepted_lines: row.get(11)?,
                 overridden_lines: row.get(12)?,
+                parent_id: row.get(15)?,
                 created_at: row.get(13)?,
                 updated_at: row.get(14)?,
             })
@@ -1107,6 +1144,7 @@ mod tests {
             total_deletions: Some(5),
             accepted_lines: None,
             overridden_lines: None,
+            parent_id: None,
             created_at: 1234567890,
             updated_at: 1234567890,
         }
@@ -1136,7 +1174,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "3");
+        assert_eq!(version, "4");
     }
 
     #[test]
@@ -1147,6 +1185,7 @@ mod tests {
 
         // Simulate a partial migration state from a concurrent process:
         // schema version indicates cas_cache is missing, but the table already exists.
+        // The prompts and cas_sync_queue tables already exist (from migrations 0->1 and 1->2).
         conn.execute_batch(
             r#"
             CREATE TABLE schema_metadata (
@@ -1154,6 +1193,36 @@ mod tests {
                 value TEXT NOT NULL
             );
             INSERT INTO schema_metadata (key, value) VALUES ('version', '2');
+            CREATE TABLE prompts (
+                id TEXT PRIMARY KEY NOT NULL,
+                workdir TEXT,
+                tool TEXT NOT NULL,
+                model TEXT NOT NULL,
+                external_thread_id TEXT NOT NULL,
+                messages TEXT NOT NULL,
+                commit_sha TEXT,
+                agent_metadata TEXT,
+                human_author TEXT,
+                total_additions INTEGER,
+                total_deletions INTEGER,
+                accepted_lines INTEGER,
+                overridden_lines INTEGER,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE cas_sync_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                hash TEXT NOT NULL UNIQUE,
+                data TEXT NOT NULL,
+                metadata TEXT NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_sync_error TEXT,
+                last_sync_at INTEGER,
+                next_retry_at INTEGER NOT NULL,
+                processing_started_at INTEGER,
+                created_at INTEGER NOT NULL
+            );
             CREATE TABLE cas_cache (
                 hash TEXT PRIMARY KEY NOT NULL,
                 messages TEXT NOT NULL,
@@ -1177,7 +1246,98 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "3");
+        assert_eq!(version, "4");
+    }
+
+    #[test]
+    fn test_initialize_schema_handles_preexisting_parent_id_column() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("idempotent-parent-id.db");
+        let conn = Connection::open(&db_path).unwrap();
+
+        // Simulate a partial migration state: version stuck at 3 but the
+        // parent_id column was already added (e.g. ALTER TABLE succeeded
+        // but the version update didn't persist due to a crash).
+        conn.execute_batch(
+            r#"
+            CREATE TABLE schema_metadata (
+                key TEXT PRIMARY KEY NOT NULL,
+                value TEXT NOT NULL
+            );
+            INSERT INTO schema_metadata (key, value) VALUES ('version', '3');
+            CREATE TABLE prompts (
+                id TEXT PRIMARY KEY NOT NULL,
+                workdir TEXT,
+                tool TEXT NOT NULL,
+                model TEXT NOT NULL,
+                external_thread_id TEXT NOT NULL,
+                messages TEXT NOT NULL,
+                commit_sha TEXT,
+                agent_metadata TEXT,
+                human_author TEXT,
+                total_additions INTEGER,
+                total_deletions INTEGER,
+                accepted_lines INTEGER,
+                overridden_lines INTEGER,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                parent_id TEXT
+            );
+            CREATE TABLE cas_sync_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                hash TEXT NOT NULL UNIQUE,
+                data TEXT NOT NULL,
+                metadata TEXT NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_sync_error TEXT,
+                last_sync_at INTEGER,
+                next_retry_at INTEGER NOT NULL,
+                processing_started_at INTEGER,
+                created_at INTEGER NOT NULL
+            );
+            CREATE TABLE cas_cache (
+                hash TEXT PRIMARY KEY NOT NULL,
+                messages TEXT NOT NULL,
+                cached_at INTEGER NOT NULL
+            );
+            "#,
+        )
+        .unwrap();
+
+        let mut db = InternalDatabase {
+            conn,
+            _db_path: db_path,
+        };
+        // This should NOT fail even though parent_id already exists
+        db.initialize_schema().unwrap();
+
+        let version: String = db
+            .conn
+            .query_row(
+                "SELECT value FROM schema_metadata WHERE key = 'version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "4");
+
+        // Verify the parent_id column is usable
+        db.conn
+            .execute(
+                "INSERT INTO prompts (id, tool, model, external_thread_id, messages, created_at, updated_at, parent_id) VALUES ('test', 'claude', 'model', 'thread', '[]', 0, 0, 'parent123')",
+                [],
+            )
+            .unwrap();
+        let parent_id: Option<String> = db
+            .conn
+            .query_row(
+                "SELECT parent_id FROM prompts WHERE id = 'test'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(parent_id, Some("parent123".to_string()));
     }
 
     #[test]

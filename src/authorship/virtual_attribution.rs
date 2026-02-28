@@ -362,12 +362,66 @@ impl VirtualAttributions {
                     accepted_lines: 0,
                     overriden_lines: 0,
                     messages_url: None,
+                    parent_id: None,
                 };
 
                 prompts
                     .entry(author_id.clone())
                     .or_insert_with(BTreeMap::new)
                     .insert(String::new(), prompt_record);
+
+                // Expand subagent metadata into separate prompt entries
+                if let Some(metadata) = &checkpoint.agent_metadata
+                    && let Some(subagents_json) = metadata.get("__subagents")
+                    && let Ok(subagents) =
+                        serde_json::from_str::<Vec<serde_json::Value>>(subagents_json)
+                {
+                    for subagent in subagents {
+                        if let (Some(agent_id_str), Some(transcript_value)) = (
+                            subagent.get("agent_id").and_then(|v| v.as_str()),
+                            subagent.get("transcript"),
+                        ) {
+                            let subagent_hash = crate::authorship::authorship_log_serialization::generate_short_hash(
+                                agent_id_str, "claude",
+                            );
+                            let subagent_model = subagent
+                                .get("model")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown")
+                                .to_string();
+                            let subagent_messages = transcript_value
+                                .get("messages")
+                                .and_then(|v| {
+                                    serde_json::from_value::<
+                                        Vec<crate::authorship::transcript::Message>,
+                                    >(v.clone())
+                                    .ok()
+                                })
+                                .unwrap_or_default();
+
+                            let subagent_prompt = crate::authorship::authorship_log::PromptRecord {
+                                agent_id: crate::authorship::working_log::AgentId {
+                                    tool: "claude".to_string(),
+                                    id: agent_id_str.to_string(),
+                                    model: subagent_model,
+                                },
+                                human_author: human_author.clone(),
+                                messages: subagent_messages,
+                                total_additions: 0,
+                                total_deletions: 0,
+                                accepted_lines: 0,
+                                overriden_lines: 0,
+                                messages_url: None,
+                                parent_id: Some(author_id.clone()),
+                            };
+
+                            prompts
+                                .entry(subagent_hash)
+                                .or_insert_with(BTreeMap::new)
+                                .insert(String::new(), subagent_prompt);
+                        }
+                    }
+                }
 
                 // Track additions and deletions from checkpoint line_stats
                 *session_additions.entry(author_id.clone()).or_insert(0) +=
