@@ -1,0 +1,28 @@
+src/commands/checkpoint_agent/agent_presets.rs
+  2e6ecf6f5a5d1924 59-63,169-177,180-184
+tests/agent_presets_comprehensive.rs
+  2e6ecf6f5a5d1924 215-243
+tests/claude_code.rs
+  2e6ecf6f5a5d1924 133-161,870
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.1.7",
+  "base_commit_sha": "ea4dd33dcf1a7769d74c2b51550f4e999baf14b4",
+  "prompts": {
+    "2e6ecf6f5a5d1924": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ca295-4bb9-7e41-88b7-bff84252556c",
+        "model": "gpt-5.3-codex"
+      },
+      "human_author": "Sasha Varlamov <sasha@sashavarlamov.com>",
+      "messages": [],
+      "total_additions": 95,
+      "total_deletions": 12,
+      "accepted_lines": 83,
+      "overriden_lines": 0,
+      "messages_url": "http://localhost:4000/cas/d102d8eb817bac7d5a82bbbed31254f79055451a9d9cbf3bb114f4262f59d184"
+    }
+  }
+}
