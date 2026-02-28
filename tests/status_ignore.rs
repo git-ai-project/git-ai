@@ -58,6 +58,26 @@ fn configure_repo_external_diff_helper(repo: &TestRepo) -> String {
     marker.to_string()
 }
 
+fn configure_hostile_diff_settings(repo: &TestRepo) {
+    let settings = [
+        ("diff.noprefix", "true"),
+        ("diff.mnemonicprefix", "true"),
+        ("diff.srcPrefix", "SRC/"),
+        ("diff.dstPrefix", "DST/"),
+        ("diff.renames", "copies"),
+        ("diff.relative", "true"),
+        ("diff.algorithm", "histogram"),
+        ("diff.indentHeuristic", "false"),
+        ("diff.interHunkContext", "8"),
+        ("color.diff", "always"),
+        ("color.ui", "always"),
+    ];
+    for (key, value) in settings {
+        repo.git_og(&["config", key, value])
+            .unwrap_or_else(|err| panic!("setting {key}={value} should succeed: {err}"));
+    }
+}
+
 #[test]
 fn test_checkpoint_ignores_default_lockfiles_integration() {
     let repo = TestRepo::new();
@@ -336,3 +356,32 @@ fn test_status_ignores_repo_external_diff_helper_for_internal_numstat() {
     assert_eq!(status.stats.git_diff_deleted_lines, 0);
     assert_eq!(status.stats.ai_accepted, 1);
 }
+
+#[test]
+fn test_status_numstat_is_stable_under_hostile_diff_config() {
+    let repo = TestRepo::new();
+
+    write_file(&repo, "app.txt", "line1\n");
+    repo.stage_all_and_commit("initial").unwrap();
+
+    write_file(&repo, "app.txt", "line1\nline2\n");
+    repo.git_ai(&["checkpoint", "mock_ai"]).unwrap();
+    configure_hostile_diff_settings(&repo);
+
+    let status = status_from_args(&repo, &["status", "--json"]);
+    assert_eq!(status.stats.git_diff_added_lines, 1);
+    assert_eq!(status.stats.git_diff_deleted_lines, 0);
+    assert_eq!(status.stats.ai_accepted, 1);
+}
+reuse_tests_in_worktree!(
+    test_checkpoint_ignores_default_lockfiles_integration,
+    test_checkpoint_honors_uncommitted_root_gitattributes_linguist_generated_integration,
+    test_status_default_ignores_affect_git_diff_and_ai_accepted,
+    test_status_honors_uncommitted_root_gitattributes_linguist_generated,
+    test_status_with_only_ignored_changes_reports_zero_diff,
+    test_checkpoint_honors_git_ai_ignore_file,
+    test_status_honors_git_ai_ignore_file,
+    test_status_git_ai_ignore_union_with_gitattributes,
+    test_status_ignores_repo_external_diff_helper_for_internal_numstat,
+    test_status_numstat_is_stable_under_hostile_diff_config,
+);

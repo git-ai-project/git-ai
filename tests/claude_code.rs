@@ -831,3 +831,28 @@ fn test_mixed_plan_and_code_edits_in_single_assistant_message() {
         "Second tool_use should remain ToolUse"
     );
 }
+
+reuse_tests_in_worktree!(
+    test_parse_example_claude_code_jsonl_with_model,
+    test_claude_preset_extracts_edited_filepath,
+    test_claude_preset_no_filepath_when_tool_input_missing,
+    test_claude_preset_ignores_vscode_copilot_payload,
+    test_claude_preset_does_not_ignore_when_transcript_path_is_claude,
+    test_claude_e2e_prefers_latest_checkpoint_for_prompts,
+    test_parse_claude_code_jsonl_with_thinking,
+    test_tool_results_are_not_parsed_as_user_messages,
+    test_user_text_content_blocks_are_parsed_correctly,
+    test_is_plan_file_path_detects_plan_files,
+    test_extract_plan_from_write_tool,
+    test_extract_plan_from_edit_tool_with_prior_state,
+    test_extract_plan_from_edit_tool_without_prior_state,
+    test_extract_plan_returns_none_for_non_plan_files,
+    test_extract_plan_returns_none_for_non_write_edit_tools,
+    test_extract_plan_returns_none_for_empty_content,
+    test_parse_claude_code_jsonl_with_plan,
+    test_plan_write_with_inline_jsonl,
+    test_plan_edit_with_inline_jsonl,
+    test_non_plan_edit_remains_tool_use,
+    test_plan_message_serialization_roundtrip,
+    test_mixed_plan_and_code_edits_in_single_assistant_message,
+);

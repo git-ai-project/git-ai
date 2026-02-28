@@ -76,14 +76,22 @@ impl CodexInstaller {
             .as_table_mut()
             .ok_or_else(|| GitAiError::Generic("Codex config root must be a table".to_string()))?;
 
+        let merged_notify = match Self::notify_args_from_config(config) {
+            Some(existing_notify) if Self::is_git_ai_codex_notify_args(&existing_notify) => {
+                let mut merged_notify = existing_notify;
+                if let Some(binary_path) = merged_notify.first_mut()
+                    && *binary_path != notify_args[0]
+                {
+                    *binary_path = notify_args[0].clone();
+                }
+                merged_notify
+            }
+            _ => notify_args.to_vec(),
+        };
+
         root.insert(
             "notify".to_string(),
-            Value::Array(
-                notify_args
-                    .iter()
-                    .map(|s| Value::String(s.clone()))
-                    .collect(),
-            ),
+            Value::Array(merged_notify.into_iter().map(Value::String).collect()),
         );
 
         Ok(merged)
@@ -146,9 +154,11 @@ impl HookInstaller for CodexInstaller {
             .as_ref()
             .map(|args| Self::is_git_ai_codex_notify_args(args))
             .unwrap_or(false);
-        let hooks_up_to_date = notify_args
-            .map(|args| args == desired_notify)
-            .unwrap_or(false);
+        let hooks_up_to_date = if hooks_installed {
+            Self::apply_notify(&config, &desired_notify)? == config
+        } else {
+            false
+        };
 
         Ok(HookCheckResult {
             tool_installed: true,
@@ -304,6 +314,58 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_notify_preserves_existing_git_ai_notify_extra_args() {
+        let existing = CodexInstaller::parse_config_toml(
+            r#"
+notify = ["/usr/local/bin/git-ai", "checkpoint", "codex", "--hook-input", "afplay ~/Documents/celebration.wav"]
+"#,
+        )
+        .unwrap();
+        let desired = CodexInstaller::desired_notify_args(&test_binary_path());
+        let merged = CodexInstaller::apply_notify(&existing, &desired).unwrap();
+
+        let notify = CodexInstaller::notify_args_from_config(&merged).unwrap();
+        assert_eq!(
+            notify,
+            vec![
+                "/usr/local/bin/git-ai".to_string(),
+                "checkpoint".to_string(),
+                "codex".to_string(),
+                "--hook-input".to_string(),
+                "afplay ~/Documents/celebration.wav".to_string(),
+            ]
+        );
+        assert_eq!(
+            merged, existing,
+            "already-merged notify should remain unchanged"
+        );
+    }
+
+    #[test]
+    fn test_apply_notify_updates_binary_path_and_preserves_extra_args() {
+        let existing = CodexInstaller::parse_config_toml(
+            r#"
+notify = ["/tmp/git-ai", "checkpoint", "codex", "--hook-input", "--verbose"]
+"#,
+        )
+        .unwrap();
+        let desired = CodexInstaller::desired_notify_args(&test_binary_path());
+        let merged = CodexInstaller::apply_notify(&existing, &desired).unwrap();
+
+        let notify = CodexInstaller::notify_args_from_config(&merged).unwrap();
+        assert_eq!(
+            notify,
+            vec![
+                "/usr/local/bin/git-ai".to_string(),
+                "checkpoint".to_string(),
+                "codex".to_string(),
+                "--hook-input".to_string(),
+                "--verbose".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn test_remove_notify_if_git_ai_removes_only_git_ai_notify() {
         let config = CodexInstaller::parse_config_toml(
             r#"
@@ -443,6 +505,96 @@ notify = ["notify-send", "Codex"]
             assert!(
                 second.is_none(),
                 "second install should return None (no changes needed)"
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_install_hooks_preserves_git_ai_notify_extra_args() {
+        with_temp_home(|home| {
+            let codex_dir = home.join(".codex");
+            fs::create_dir_all(&codex_dir).unwrap();
+            let config_path = codex_dir.join("config.toml");
+            fs::write(
+                &config_path,
+                r#"
+model = "gpt-5"
+notify = ["/usr/local/bin/git-ai", "checkpoint", "codex", "--hook-input", "afplay ~/Documents/celebration.wav"]
+"#,
+            )
+            .unwrap();
+
+            let installer = CodexInstaller;
+            let params = HookInstallerParams {
+                binary_path: test_binary_path(),
+            };
+
+            let result = installer
+                .install_hooks(&params, false)
+                .expect("install should succeed");
+            assert!(
+                result.is_none(),
+                "install should not overwrite user notify extras when already up to date"
+            );
+
+            let content = fs::read_to_string(&config_path).unwrap();
+            let parsed = CodexInstaller::parse_config_toml(&content).unwrap();
+            let notify = CodexInstaller::notify_args_from_config(&parsed).unwrap();
+            assert_eq!(
+                notify,
+                vec![
+                    "/usr/local/bin/git-ai".to_string(),
+                    "checkpoint".to_string(),
+                    "codex".to_string(),
+                    "--hook-input".to_string(),
+                    "afplay ~/Documents/celebration.wav".to_string(),
+                ]
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_install_hooks_updates_binary_path_and_preserves_notify_extra_args() {
+        with_temp_home(|home| {
+            let codex_dir = home.join(".codex");
+            fs::create_dir_all(&codex_dir).unwrap();
+            let config_path = codex_dir.join("config.toml");
+            fs::write(
+                &config_path,
+                r#"
+model = "gpt-5"
+notify = ["/tmp/git-ai", "checkpoint", "codex", "--hook-input", "--verbose"]
+"#,
+            )
+            .unwrap();
+
+            let installer = CodexInstaller;
+            let params = HookInstallerParams {
+                binary_path: test_binary_path(),
+            };
+
+            let result = installer
+                .install_hooks(&params, false)
+                .expect("install should succeed");
+            assert!(
+                result.is_some(),
+                "install should update stale binary path while preserving user extras"
+            );
+
+            let content = fs::read_to_string(&config_path).unwrap();
+            let parsed = CodexInstaller::parse_config_toml(&content).unwrap();
+            let notify = CodexInstaller::notify_args_from_config(&parsed).unwrap();
+            assert_eq!(
+                notify,
+                vec![
+                    "/usr/local/bin/git-ai".to_string(),
+                    "checkpoint".to_string(),
+                    "codex".to_string(),
+                    "--hook-input".to_string(),
+                    "--verbose".to_string(),
+                ]
             );
         });
     }

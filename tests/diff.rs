@@ -218,6 +218,26 @@ fn configure_repo_external_diff_helper(repo: &TestRepo) -> String {
     marker.to_string()
 }
 
+fn configure_hostile_diff_settings(repo: &TestRepo) {
+    let settings = [
+        ("diff.noprefix", "true"),
+        ("diff.mnemonicprefix", "true"),
+        ("diff.srcPrefix", "SRC/"),
+        ("diff.dstPrefix", "DST/"),
+        ("diff.renames", "copies"),
+        ("diff.relative", "true"),
+        ("diff.algorithm", "histogram"),
+        ("diff.indentHeuristic", "false"),
+        ("diff.interHunkContext", "8"),
+        ("color.diff", "always"),
+        ("color.ui", "always"),
+    ];
+    for (key, value) in settings {
+        repo.git_og(&["config", key, value])
+            .unwrap_or_else(|err| panic!("setting {key}={value} should succeed: {err}"));
+    }
+}
+
 fn create_external_diff_helper_script(repo: &TestRepo, marker: &str) -> std::path::PathBuf {
     let helper_path = repo.path().join(format!("ext-env-helper-{marker}.sh"));
 
@@ -883,6 +903,32 @@ fn test_diff_ignores_repo_external_diff_helper_but_proxy_uses_it() {
 }
 
 #[test]
+fn test_diff_parsing_is_stable_under_hostile_diff_config() {
+    let repo = TestRepo::new();
+
+    let mut file = repo.filename("README.md");
+    file.set_contents(lines!["line one".human()]);
+    repo.stage_all_and_commit("initial").unwrap();
+
+    file.set_contents(lines![
+        "line one".human(),
+        "line two".ai(),
+        "line three".ai()
+    ]);
+    repo.stage_all_and_commit("second").unwrap();
+
+    configure_hostile_diff_settings(&repo);
+
+    let git_ai_diff = repo
+        .git_ai(&["diff", "HEAD"])
+        .expect("git-ai diff should succeed");
+    assert!(git_ai_diff.contains("diff --git"));
+    assert!(git_ai_diff.contains("@@"));
+    assert!(git_ai_diff.contains("+line two"));
+    assert!(git_ai_diff.contains("+line three"));
+}
+
+#[test]
 fn test_checkpoint_and_commit_ignore_repo_external_diff_helper() {
     let repo = TestRepo::new();
 
@@ -1019,3 +1065,26 @@ fn test_diff_ignores_git_diff_opts_env_for_internal_diff() {
         ai_diff
     );
 }
+reuse_tests_in_worktree!(
+    test_diff_single_commit,
+    test_diff_commit_range,
+    test_diff_shows_ai_attribution,
+    test_diff_shows_human_attribution,
+    test_diff_multiple_files,
+    test_diff_initial_commit,
+    test_diff_pure_additions,
+    test_diff_pure_deletions,
+    test_diff_mixed_ai_and_human,
+    test_diff_with_head_ref,
+    test_diff_output_format,
+    test_diff_error_on_no_args,
+    test_diff_json_output_with_escaped_newlines,
+    test_diff_preserves_context_lines,
+    test_diff_exact_sequence_verification,
+    test_diff_range_multiple_commits,
+    test_diff_ignores_repo_external_diff_helper_but_proxy_uses_it,
+    test_diff_parsing_is_stable_under_hostile_diff_config,
+    test_checkpoint_and_commit_ignore_repo_external_diff_helper,
+    test_diff_ignores_git_external_diff_env_but_proxy_uses_it,
+    test_diff_ignores_git_diff_opts_env_for_internal_diff,
+);

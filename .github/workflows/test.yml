@@ -42,6 +42,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Graphite CLI
+        run: npm install -g @withgraphite/graphite-cli@stable
+
       - name: Run tests
         run: cargo test -- --test-threads=8
         env:

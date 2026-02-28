@@ -1,0 +1,6 @@
+---
+source: tests/initial_attributions.rs
+assertion_line: 345
+expression: normalized_a
+---
+"COMMIT_SHA (toolA TIMESTAMP 1) line 1 in A\nCOMMIT_SHA (toolA TIMESTAMP 2) line 2 in A\n"

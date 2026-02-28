@@ -158,17 +158,17 @@ impl MetricsDatabase {
         for target_version in current_version..SCHEMA_VERSION {
             self.apply_migration(target_version)?;
 
-            if target_version == 0 {
-                self.conn.execute(
-                    "INSERT INTO schema_metadata (key, value) VALUES ('version', ?1)",
-                    params![(target_version + 1).to_string()],
-                )?;
-            } else {
-                self.conn.execute(
-                    "UPDATE schema_metadata SET value = ?1 WHERE key = 'version'",
-                    params![(target_version + 1).to_string()],
-                )?;
-            }
+            // Use an upsert so concurrent initializers do not race on version row creation.
+            self.conn.execute(
+                r#"
+                INSERT INTO schema_metadata (key, value)
+                VALUES ('version', ?1)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value
+                WHERE CAST(schema_metadata.value AS INTEGER) < CAST(excluded.value AS INTEGER)
+                "#,
+                params![(target_version + 1).to_string()],
+            )?;
         }
 
         Ok(())
@@ -337,6 +337,44 @@ mod tests {
         assert_eq!(count, 1);
 
         // Verify schema_metadata exists with correct version
+        let version: String = db
+            .conn
+            .query_row(
+                "SELECT value FROM schema_metadata WHERE key = 'version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "2");
+    }
+
+    #[test]
+    fn test_initialize_schema_handles_preexisting_agent_usage_table() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("concurrent-init.db");
+        let conn = Connection::open(&db_path).unwrap();
+
+        // Simulate a partial migration state from a concurrent process:
+        // schema version indicates agent_usage_throttle is missing, but it already exists.
+        conn.execute_batch(
+            r#"
+            CREATE TABLE schema_metadata (
+                key TEXT PRIMARY KEY NOT NULL,
+                value TEXT NOT NULL
+            );
+            INSERT INTO schema_metadata (key, value) VALUES ('version', '1');
+            CREATE TABLE agent_usage_throttle (
+                tool TEXT PRIMARY KEY NOT NULL,
+                agent_last_seen_at INTEGER NOT NULL,
+                command_last_seen_at INTEGER NOT NULL
+            );
+            "#,
+        )
+        .unwrap();
+
+        let mut db = MetricsDatabase { conn };
+        db.initialize_schema().unwrap();
+
         let version: String = db
             .conn
             .query_row(

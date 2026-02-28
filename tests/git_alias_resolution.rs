@@ -261,3 +261,20 @@ fn aliased_push_succeeds_with_hooks() {
     // Verify authorship is intact after aliased push
     file.assert_lines_and_blame(lines!["def ai_func():".ai(), "    return True".ai(),]);
 }
+
+reuse_tests_in_worktree!(
+    alias_with_args_resolves_command_for_hooks,
+    alias_chain_resolves_to_final_command,
+    alias_cycle_returns_none,
+    alias_self_recursive_with_args_returns_none,
+    shell_alias_returns_none,
+    alias_parsing_respects_quotes,
+    non_alias_passthrough,
+    global_args_preserved_after_alias_resolution,
+    alias_to_non_hooked_command,
+    alias_with_no_extra_args,
+    alias_with_double_quotes,
+    aliased_commit_triggers_authorship_hooks,
+    aliased_commit_with_extra_flags_triggers_authorship_hooks,
+    aliased_push_succeeds_with_hooks,
+);

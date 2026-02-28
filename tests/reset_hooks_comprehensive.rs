@@ -448,3 +448,24 @@ fn test_reset_with_file_additions_and_deletions() {
     // The new file should have AI attribution
     assert!(!new_commit.authorship_log.attestations.is_empty());
 }
+
+reuse_tests_in_worktree!(
+    test_extract_tree_ish_no_args_defaults_to_head,
+    test_extract_tree_ish_with_hard_flag,
+    test_extract_tree_ish_with_soft_flag,
+    test_extract_tree_ish_with_mixed_flag,
+    test_extract_tree_ish_head_tilde_notation,
+    test_extract_tree_ish_head_caret_notation,
+    test_reset_with_keep_flag,
+    test_reset_with_merge_flag,
+    test_reset_to_nonexistent_commit_fails,
+    test_reset_backward_multiple_commits,
+    test_reset_forward_after_backward,
+    test_reset_preserves_non_pathspec_working_log,
+    test_reset_creates_checkpoint_before_reset,
+    test_reset_preserves_interleaved_ai_human_changes,
+    test_reset_with_head_at_notation,
+    test_reset_to_current_head_is_noop,
+    test_reset_hard_deletes_uncommitted_work,
+    test_reset_with_file_additions_and_deletions,
+);

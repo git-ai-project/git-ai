@@ -13,7 +13,7 @@ use crate::commands::search::{
 };
 use crate::error::GitAiError;
 use crate::git::find_repository_in_path;
-use crate::git::repository::{Repository, exec_git};
+use crate::git::repository::{InternalGitProfile, Repository, exec_git, exec_git_with_profile};
 use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::io::{BufRead, IsTerminal, Write};
@@ -146,7 +146,7 @@ fn get_commit_diff(repo: &Repository, sha: &str) -> Result<String, GitAiError> {
     args.push("--no-color".to_string());
     args.push(sha.to_string());
 
-    let output = exec_git(&args)?;
+    let output = exec_git_with_profile(&args, InternalGitProfile::PatchParse)?;
     let stdout = String::from_utf8(output.stdout)
         .map_err(|e| GitAiError::Generic(format!("Invalid UTF-8 in git show output: {}", e)))?;
 

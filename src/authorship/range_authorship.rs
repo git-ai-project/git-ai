@@ -9,7 +9,7 @@ use crate::authorship::ignore::{build_ignore_matcher, should_ignore_file_with_ma
 use crate::authorship::stats::{CommitStats, stats_for_commit_stats, stats_from_authorship_log};
 use crate::error::GitAiError;
 use crate::git::refs::{CommitAuthorship, get_commits_with_notes_from_list};
-use crate::git::repository::{CommitRange, Repository};
+use crate::git::repository::{CommitRange, InternalGitProfile, Repository, exec_git_with_profile};
 use crate::utils::debug_log;
 
 use std::io::IsTerminal;
@@ -88,7 +88,7 @@ pub fn range_authorship(
         args.push(remote.clone());
         args.push(fetch_refspec.clone());
 
-        let output = crate::git::repository::exec_git(&args)?;
+        let output = exec_git_with_profile(&args, InternalGitProfile::General)?;
 
         if !output.status.success() {
             return Err(GitAiError::Generic(format!(
@@ -350,7 +350,7 @@ fn get_git_diff_stats_for_range(
     args.push("--numstat".to_string());
     args.push(format!("{}..{}", start_sha, end_sha));
 
-    let output = crate::git::repository::exec_git(&args)?;
+    let output = exec_git_with_profile(&args, InternalGitProfile::NumstatParse)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     let mut added_lines = 0u32;

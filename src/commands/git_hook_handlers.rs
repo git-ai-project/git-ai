@@ -236,32 +236,47 @@ fn cherry_pick_batch_state_schema_version() -> String {
     CHERRY_PICK_BATCH_STATE_SCHEMA_VERSION.to_string()
 }
 
+fn repo_ai_dir(repo: &Repository) -> PathBuf {
+    repo.common_dir().join("ai")
+}
+
+fn repo_worktree_ai_dir(repo: &Repository) -> PathBuf {
+    repo.path().join("ai")
+}
+
+fn repo_local_config_path(repo: &Repository) -> PathBuf {
+    repo.common_dir().join("config")
+}
+
 fn repo_state_path(repo: &Repository) -> PathBuf {
-    repo.path().join("ai").join(REPO_HOOK_STATE_FILE)
+    repo_ai_dir(repo).join(REPO_HOOK_STATE_FILE)
 }
 
 fn repo_enablement_path(repo: &Repository) -> PathBuf {
-    repo.path().join("ai").join(REPO_HOOK_ENABLEMENT_FILE)
+    repo_ai_dir(repo).join(REPO_HOOK_ENABLEMENT_FILE)
 }
 
 fn rebase_hook_mask_state_path(repo: &Repository) -> PathBuf {
-    repo.path().join("ai").join(REBASE_HOOK_MASK_STATE_FILE)
+    repo_worktree_ai_dir(repo).join(REBASE_HOOK_MASK_STATE_FILE)
 }
 
 fn managed_git_hooks_dir_for_repo(repo: &Repository) -> PathBuf {
-    repo.path().join("ai").join(GIT_HOOKS_DIR_NAME)
+    repo_ai_dir(repo).join(GIT_HOOKS_DIR_NAME)
 }
 
 fn managed_git_hooks_dir_from_context() -> Option<PathBuf> {
+    if let Some(repo) = find_hook_repository_from_context() {
+        return Some(managed_git_hooks_dir_for_repo(&repo));
+    }
     git_dir_from_context().map(|git_dir| git_dir.join("ai").join(GIT_HOOKS_DIR_NAME))
 }
 
 fn stash_reference_transaction_state_path(repo: &Repository) -> PathBuf {
-    repo.path().join("ai").join(STASH_REF_TX_STATE_FILE)
+    repo_worktree_ai_dir(repo).join(STASH_REF_TX_STATE_FILE)
 }
 
 fn cherry_pick_batch_state_path(repo: &Repository) -> PathBuf {
-    repo.path().join("ai").join(CHERRY_PICK_BATCH_STATE_FILE)
+    repo_worktree_ai_dir(repo).join(CHERRY_PICK_BATCH_STATE_FILE)
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
@@ -276,11 +291,32 @@ fn path_is_inside_managed_hooks(path: &Path, managed_hooks_dir: &Path) -> bool {
     normalize_path(path).starts_with(normalize_path(managed_hooks_dir))
 }
 
+fn path_looks_like_git_ai_binary(path: &Path) -> bool {
+    let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+        return false;
+    };
+
+    let stem = stem.to_ascii_lowercase();
+    stem == "git"
+        || stem == "git-ai"
+        || stem == "git_ai"
+        || stem.starts_with("git-ai-")
+        || stem.starts_with("git_ai-")
+}
+
 fn resolve_repo_hook_binary_path(
     managed_hooks_dir: &Path,
     prior_state: Option<&RepoHookState>,
     current_exe_path: Option<PathBuf>,
 ) -> PathBuf {
+    if let Some(current_exe) = current_exe_path.as_ref()
+        && current_exe.exists()
+        && !path_is_inside_managed_hooks(current_exe, managed_hooks_dir)
+        && path_looks_like_git_ai_binary(current_exe)
+    {
+        return current_exe.clone();
+    }
+
     if let Some(saved_path) = prior_state
         .map(|state| state.binary_path.trim())
         .filter(|path| !path.is_empty())
@@ -291,14 +327,9 @@ fn resolve_repo_hook_binary_path(
         }
     }
 
-    if let Some(current_exe) = current_exe_path.as_ref()
-        && current_exe.exists()
-        && !path_is_inside_managed_hooks(current_exe, managed_hooks_dir)
+    if let Some(current_exe) = current_exe_path
+        && path_looks_like_git_ai_binary(&current_exe)
     {
-        return current_exe.clone();
-    }
-
-    if let Some(current_exe) = current_exe_path {
         return current_exe;
     }
 
@@ -328,12 +359,42 @@ fn hook_perf_json_logging_enabled() -> bool {
 }
 
 fn global_git_config_path() -> PathBuf {
+    #[cfg(test)]
+    if let Some(path) = test_global_git_config_override_path() {
+        return path;
+    }
+
     if let Ok(path) = std::env::var("GIT_CONFIG_GLOBAL")
         && !path.trim().is_empty()
     {
         return PathBuf::from(path);
     }
     crate::mdm::utils::home_dir().join(".gitconfig")
+}
+
+#[cfg(test)]
+fn test_global_git_config_override_path() -> Option<PathBuf> {
+    test_global_git_config_override()
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+}
+
+#[cfg(test)]
+fn set_test_global_git_config_override_path(path: Option<PathBuf>) -> Option<PathBuf> {
+    let mut guard = test_global_git_config_override()
+        .lock()
+        .expect("test global config override mutex poisoned");
+    std::mem::replace(&mut *guard, path)
+}
+
+#[cfg(test)]
+fn test_global_git_config_override() -> &'static std::sync::Mutex<Option<PathBuf>> {
+    use std::sync::OnceLock;
+
+    static TEST_GLOBAL_CONFIG_OVERRIDE: OnceLock<std::sync::Mutex<Option<PathBuf>>> =
+        OnceLock::new();
+    TEST_GLOBAL_CONFIG_OVERRIDE.get_or_init(|| std::sync::Mutex::new(None))
 }
 
 fn load_config(
@@ -387,24 +448,17 @@ fn set_hooks_path_in_config(
 }
 
 fn unset_hooks_path_in_local_config(repo: &Repository, dry_run: bool) -> Result<bool, GitAiError> {
-    let local_config_path = repo.path().join("config");
+    let local_config_path = repo_local_config_path(repo);
     if read_hooks_path_from_config(&local_config_path, gix_config::Source::Local).is_none() {
         return Ok(false);
     }
 
     if !dry_run {
-        let mut args = repo.global_args_for_exec();
-        args.extend(
-            [
-                "config",
-                "--local",
-                "--unset-all",
-                CONFIG_KEY_CORE_HOOKS_PATH,
-            ]
-            .iter()
-            .map(|value| value.to_string()),
-        );
-        crate::git::repository::exec_git(&args)?;
+        let mut cfg = load_config(&local_config_path, gix_config::Source::Local)?;
+        if let Ok(mut hooks_path_values) = cfg.raw_values_mut_by("core", None, "hooksPath") {
+            hooks_path_values.delete_all();
+        }
+        write_config(&local_config_path, &cfg)?;
     }
 
     Ok(true)
@@ -511,18 +565,44 @@ fn ensure_hook_entry_installed(
         };
 
         #[cfg(windows)]
-        let should_replace = {
-            let metadata = hook_path.symlink_metadata()?;
-            if metadata.file_type().is_file() {
-                !files_match_by_content(hook_path, binary_path)?
-            } else {
-                true
+        let should_replace = match should_replace_windows_hook_entry(hook_path, binary_path) {
+            Ok(should_replace) => should_replace,
+            Err(err) => {
+                if let GitAiError::IoError(io_err) = &err
+                    && is_windows_lock_or_sharing_violation(io_err)
+                {
+                    debug_log(&format!(
+                        "Deferring repo hook refresh for {} because it is currently in use",
+                        hook_path.display()
+                    ));
+                    return Ok(false);
+                }
+                return Err(err);
             }
         };
 
         if should_replace {
             if !dry_run {
-                remove_hook_entry(hook_path)?;
+                #[cfg(windows)]
+                {
+                    if let Err(err) = remove_hook_entry(hook_path) {
+                        if let GitAiError::IoError(io_err) = &err
+                            && is_windows_lock_or_sharing_violation(io_err)
+                        {
+                            debug_log(&format!(
+                                "Deferring repo hook refresh for {} because it is currently in use",
+                                hook_path.display()
+                            ));
+                            return Ok(false);
+                        }
+                        return Err(err);
+                    }
+                }
+
+                #[cfg(not(windows))]
+                {
+                    remove_hook_entry(hook_path)?;
+                }
             }
         } else {
             return Ok(false);
@@ -530,10 +610,77 @@ fn ensure_hook_entry_installed(
     }
 
     if !dry_run {
-        install_hook_entry(binary_path, hook_path)?;
+        #[cfg(windows)]
+        {
+            if let Err(err) = install_hook_entry(binary_path, hook_path) {
+                if let GitAiError::IoError(io_err) = &err
+                    && is_windows_lock_or_sharing_violation(io_err)
+                {
+                    // Defer only when an existing destination is still present/locked.
+                    // If no hook file exists here, surfacing the error is safer than silently
+                    // leaving the hook missing.
+                    if hook_path.exists() || hook_path.symlink_metadata().is_ok() {
+                        debug_log(&format!(
+                            "Deferring repo hook refresh for {} because it is currently in use",
+                            hook_path.display()
+                        ));
+                        return Ok(false);
+                    }
+                }
+                return Err(err);
+            }
+        }
+
+        #[cfg(not(windows))]
+        {
+            install_hook_entry(binary_path, hook_path)?;
+        }
     }
 
     Ok(true)
+}
+
+#[cfg(windows)]
+fn should_replace_windows_hook_entry(
+    hook_path: &Path,
+    binary_path: &Path,
+) -> Result<bool, GitAiError> {
+    let hook_metadata = hook_path.symlink_metadata()?;
+    if !hook_metadata.file_type().is_file() {
+        return Ok(true);
+    }
+
+    let source_metadata = fs::metadata(binary_path)?;
+    if !source_metadata.file_type().is_file() {
+        return Ok(true);
+    }
+
+    // Length mismatch is always stale.
+    if hook_metadata.len() != source_metadata.len() {
+        return Ok(true);
+    }
+
+    let hook_modified = hook_metadata.modified().ok();
+    let source_modified = source_metadata.modified().ok();
+
+    match (hook_modified, source_modified) {
+        (Some(hook_ts), Some(source_ts)) if hook_ts < source_ts => Ok(true),
+        // If hook appears newer (clock skew, timestamp granularity), verify bytes before skipping.
+        (Some(hook_ts), Some(source_ts)) if hook_ts > source_ts => {
+            Ok(!files_match_by_content(hook_path, binary_path)?)
+        }
+        // Equal timestamps are ambiguous on filesystems with coarse timestamp precision.
+        _ => Ok(!files_match_by_content(hook_path, binary_path)?),
+    }
+}
+
+#[cfg(windows)]
+fn is_windows_lock_or_sharing_violation(io_err: &std::io::Error) -> bool {
+    if let Some(code) = io_err.raw_os_error() {
+        return matches!(code, 5 | 32 | 33);
+    }
+
+    io_err.kind() == std::io::ErrorKind::PermissionDenied
 }
 
 fn remove_hook_entry(hook_path: &Path) -> Result<(), GitAiError> {
@@ -611,7 +758,7 @@ fn is_disallowed_forward_hooks_path(
     }
 
     if let Some(repo) = repo {
-        let repo_ai_dir = repo.path().join("ai");
+        let repo_ai_dir = repo_ai_dir(repo);
         if normalize_path(path).starts_with(normalize_path(&repo_ai_dir)) {
             return true;
         }
@@ -706,7 +853,7 @@ pub fn ensure_repo_hooks_installed(
 ) -> Result<EnsureRepoHooksReport, GitAiError> {
     let managed_hooks_dir = managed_git_hooks_dir_for_repo(repo);
     let state_path = repo_state_path(repo);
-    let local_config_path = repo.path().join("config");
+    let local_config_path = repo_local_config_path(repo);
     let prior_state = read_repo_hook_state(&state_path)?;
 
     let binary_path = resolve_repo_hook_binary_path(
@@ -772,7 +919,7 @@ pub fn remove_repo_hooks(
     let state_path = repo_state_path(repo);
     let enablement_path = repo_enablement_path(repo);
     let rebase_state_path = rebase_hook_mask_state_path(repo);
-    let local_config_path = repo.path().join("config");
+    let local_config_path = repo_local_config_path(repo);
     let prior_state = read_repo_hook_state(&state_path)?;
 
     let current_local_hooks =
@@ -860,7 +1007,7 @@ pub fn maybe_spawn_repo_hook_self_heal(repo: &Repository) {
     }
 
     // Keep tests deterministic and avoid touching developer hook config during tests.
-    if std::env::var("GIT_AI_TEST_DB_PATH").is_ok() {
+    if std::env::var("GIT_AI_TEST_DB_PATH").is_ok() || std::env::var("GITAI_TEST_DB_PATH").is_ok() {
         return;
     }
 
@@ -898,6 +1045,9 @@ pub fn maybe_spawn_repo_hook_self_heal(repo: &Repository) {
 }
 
 fn repo_state_path_from_env() -> Option<PathBuf> {
+    if let Some(repo) = find_hook_repository_from_context() {
+        return Some(repo_state_path(&repo));
+    }
     git_dir_from_context().map(|git_dir| git_dir.join("ai").join(REPO_HOOK_STATE_FILE))
 }
 
@@ -932,18 +1082,44 @@ fn git_dir_from_context() -> Option<PathBuf> {
     }
 }
 
-fn hook_repository_lookup_paths() -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    if let Ok(current_dir) = std::env::current_dir() {
-        paths.push(current_dir);
+fn worktree_root_from_git_dir(git_dir: &Path) -> Option<PathBuf> {
+    let gitdir_file = git_dir.join("gitdir");
+    let gitdir_target = fs::read_to_string(gitdir_file).ok()?;
+    let gitdir_target = gitdir_target.trim();
+    if gitdir_target.is_empty() {
+        return None;
     }
+
+    let gitdir_path = PathBuf::from(gitdir_target);
+    let gitdir_path = if gitdir_path.is_absolute() {
+        gitdir_path
+    } else {
+        git_dir.join(gitdir_path)
+    };
+
+    let gitdir_path = canonicalize_if_possible(gitdir_path);
+    gitdir_path.parent().map(Path::to_path_buf)
+}
+
+fn hook_repository_lookup_paths() -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = Vec::new();
+
     if let Some(git_dir) = git_dir_from_context() {
+        if let Some(worktree_root) = worktree_root_from_git_dir(&git_dir)
+            && !paths
+                .iter()
+                .any(|existing| normalize_path(existing) == normalize_path(&worktree_root))
+        {
+            paths.push(worktree_root);
+        }
+
         if !paths
             .iter()
             .any(|existing| normalize_path(existing) == normalize_path(&git_dir))
         {
             paths.push(git_dir.clone());
         }
+
         if git_dir
             .file_name()
             .and_then(|name| name.to_str())
@@ -960,6 +1136,15 @@ fn hook_repository_lookup_paths() -> Vec<PathBuf> {
             }
         }
     }
+
+    if let Ok(current_dir) = std::env::current_dir()
+        && !paths
+            .iter()
+            .any(|existing| normalize_path(existing) == normalize_path(&current_dir))
+    {
+        paths.push(current_dir);
+    }
+
     paths
 }
 
@@ -970,6 +1155,9 @@ fn find_hook_repository_from_context() -> Option<Repository> {
 }
 
 fn context_repo_ai_dir() -> Option<PathBuf> {
+    if let Some(repo) = find_hook_repository_from_context() {
+        return Some(repo_ai_dir(&repo));
+    }
     git_dir_from_context().map(|git_dir| git_dir.join("ai"))
 }
 
@@ -1096,7 +1284,7 @@ fn maybe_enable_rebase_hook_mask(repo: &Repository) {
 
     let managed_hooks_dir = managed_git_hooks_dir_for_repo(repo);
     let local_hooks_path =
-        read_hooks_path_from_config(&repo.path().join("config"), gix_config::Source::Local)
+        read_hooks_path_from_config(&repo_local_config_path(repo), gix_config::Source::Local)
             .map(|value| value.trim().to_string());
     if let Some(local_hooks_path) = local_hooks_path
         && normalize_path(Path::new(&local_hooks_path)) != normalize_path(&managed_hooks_dir)
@@ -1323,7 +1511,7 @@ fn is_post_commit_amend(repo: &Repository) -> bool {
 }
 
 fn pull_hook_state_path(repo: &Repository) -> PathBuf {
-    repo.path().join("ai").join(PULL_HOOK_STATE_FILE)
+    repo_worktree_ai_dir(repo).join(PULL_HOOK_STATE_FILE)
 }
 
 fn clear_pull_hook_state(repo: &Repository) {
@@ -1757,7 +1945,7 @@ fn maybe_handle_pull_post_rewrite(repo: &mut Repository) {
 }
 
 fn cherry_pick_state_path(repo: &Repository) -> PathBuf {
-    repo.path().join("ai").join("cherry_pick_hook_state")
+    repo_worktree_ai_dir(repo).join("cherry_pick_hook_state")
 }
 
 fn clear_cherry_pick_state(repo: &Repository) {
@@ -2438,32 +2626,20 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
-    struct EnvVarGuard {
-        key: &'static str,
-        old: Option<String>,
+    struct GlobalConfigOverrideGuard {
+        old: Option<PathBuf>,
     }
 
-    impl EnvVarGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let old = std::env::var(key).ok();
-            // SAFETY: tests below are marked serial to avoid concurrent env mutation.
-            unsafe {
-                std::env::set_var(key, value);
-            }
-            Self { key, old }
+    impl GlobalConfigOverrideGuard {
+        fn set(path: &Path) -> Self {
+            let old = set_test_global_git_config_override_path(Some(path.to_path_buf()));
+            Self { old }
         }
     }
 
-    impl Drop for EnvVarGuard {
+    impl Drop for GlobalConfigOverrideGuard {
         fn drop(&mut self) {
-            // SAFETY: tests below are marked serial to avoid concurrent env mutation.
-            unsafe {
-                if let Some(old) = &self.old {
-                    std::env::set_var(self.key, old);
-                } else {
-                    std::env::remove_var(self.key);
-                }
-            }
+            let _ = set_test_global_git_config_override_path(self.old.clone());
         }
     }
 
@@ -2485,14 +2661,92 @@ mod tests {
 
     fn init_repo(path: &Path) -> Repository {
         fs::create_dir_all(path).expect("failed to create repo dir");
+        let isolated_home = path.join(".git-ai-test-home");
+        fs::create_dir_all(&isolated_home).expect("failed to create isolated HOME for git init");
+        let isolated_global_config = isolated_home.join(".gitconfig");
+        fs::write(&isolated_global_config, "").expect("failed to create isolated global config");
+
         let init = Command::new("git")
             .args(["init", "."])
             .current_dir(path)
+            .env("HOME", &isolated_home)
+            .env("USERPROFILE", &isolated_home)
+            .env("GIT_CONFIG_GLOBAL", &isolated_global_config)
+            .output()
+            .expect("failed to run git init");
+        assert!(
+            init.status.success(),
+            "git init should succeed (status={:?}, stdout={}, stderr={})",
+            init.status.code(),
+            String::from_utf8_lossy(&init.stdout),
+            String::from_utf8_lossy(&init.stderr)
+        );
+        crate::git::find_repository_in_path(&path.to_string_lossy())
+            .expect("failed to open initialized repo")
+    }
+
+    fn init_repo_with_linked_worktree(base: &Path) -> (Repository, Repository) {
+        let main = base.join("main");
+        let linked = base.join("linked");
+        fs::create_dir_all(&main).expect("failed to create main repo dir");
+
+        let init = Command::new("git")
+            .args(["init", "."])
+            .current_dir(&main)
             .output()
             .expect("failed to run git init");
         assert!(init.status.success(), "git init should succeed");
-        crate::git::find_repository_in_path(&path.to_string_lossy())
-            .expect("failed to open initialized repo")
+
+        let config_name = Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(&main)
+            .output()
+            .expect("failed to set user.name");
+        assert!(
+            config_name.status.success(),
+            "git config user.name should succeed"
+        );
+
+        let config_email = Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(&main)
+            .output()
+            .expect("failed to set user.email");
+        assert!(
+            config_email.status.success(),
+            "git config user.email should succeed"
+        );
+
+        fs::write(main.join("README.md"), "initial\n").expect("failed to write README");
+        let add = Command::new("git")
+            .args(["add", "."])
+            .current_dir(&main)
+            .output()
+            .expect("failed to add files");
+        assert!(add.status.success(), "git add should succeed");
+
+        let commit = Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&main)
+            .output()
+            .expect("failed to commit");
+        assert!(commit.status.success(), "git commit should succeed");
+
+        let worktree_add = Command::new("git")
+            .args(["worktree", "add", linked.to_string_lossy().as_ref()])
+            .current_dir(&main)
+            .output()
+            .expect("failed to add linked worktree");
+        assert!(
+            worktree_add.status.success(),
+            "git worktree add should succeed"
+        );
+
+        let main_repo = crate::git::find_repository_in_path(&main.to_string_lossy())
+            .expect("failed to open main repo");
+        let linked_repo = crate::git::find_repository_in_path(&linked.to_string_lossy())
+            .expect("failed to open linked repo");
+        (main_repo, linked_repo)
     }
 
     #[test]
@@ -2502,7 +2756,7 @@ mod tests {
         let user_hooks = tmp.path().join("repo-user-hooks");
         fs::create_dir_all(&user_hooks).expect("failed to create user hooks dir");
 
-        let local_config = repo.path().join("config");
+        let local_config = repo_local_config_path(&repo);
         set_hooks_path_in_config(
             &local_config,
             gix_config::Source::Local,
@@ -2583,11 +2837,7 @@ mod tests {
         )
         .expect("failed to write global config");
 
-        let _home = EnvVarGuard::set("HOME", home.to_string_lossy().as_ref());
-        let _global = EnvVarGuard::set(
-            "GIT_CONFIG_GLOBAL",
-            global_config.to_string_lossy().as_ref(),
-        );
+        let _global = GlobalConfigOverrideGuard::set(&global_config);
 
         let repo = init_repo(&tmp.path().join("repo"));
         let _ =
@@ -2615,7 +2865,7 @@ mod tests {
         let user_hooks = tmp.path().join("user-hooks");
         fs::create_dir_all(&user_hooks).expect("failed to create user hooks dir");
 
-        let local_config = repo.path().join("config");
+        let local_config = repo_local_config_path(&repo);
         set_hooks_path_in_config(
             &local_config,
             gix_config::Source::Local,
@@ -2662,7 +2912,7 @@ mod tests {
     fn remove_repo_hooks_unsets_local_hooks_path_when_no_original_value() {
         let tmp = tempfile::tempdir().expect("failed to create tempdir");
         let repo = init_repo(&tmp.path().join("repo"));
-        let local_config = repo.path().join("config");
+        let local_config = repo_local_config_path(&repo);
 
         ensure_repo_hooks_installed(&repo, false).expect("ensure should succeed");
         assert!(
@@ -2688,7 +2938,7 @@ mod tests {
         fs::create_dir_all(&original_hooks).expect("failed to create original hooks dir");
         fs::create_dir_all(&replacement_hooks).expect("failed to create replacement hooks dir");
 
-        let local_config = repo.path().join("config");
+        let local_config = repo_local_config_path(&repo);
         set_hooks_path_in_config(
             &local_config,
             gix_config::Source::Local,
@@ -2721,7 +2971,7 @@ mod tests {
     fn remove_repo_hooks_ignores_unexpected_managed_path_from_state() {
         let tmp = tempfile::tempdir().expect("failed to create tempdir");
         let repo = init_repo(&tmp.path().join("repo"));
-        let repo_ai_dir = repo.path().join("ai");
+        let repo_ai_dir = repo_ai_dir(&repo);
         let survivor_file = repo_ai_dir.join("working_logs").join("survivor.json");
         fs::create_dir_all(
             survivor_file
@@ -2762,8 +3012,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("failed to create tempdir");
         let repo = init_repo(&tmp.path().join("repo"));
         let managed_hooks = managed_git_hooks_dir_for_repo(&repo);
-        fs::create_dir_all(repo.path().join("ai")).expect("failed to create repo .git/ai dir");
-        let repo_ai_path = repo.path().join("ai").join("other-hooks");
+        fs::create_dir_all(repo_ai_dir(&repo)).expect("failed to create repo .git/ai dir");
+        let repo_ai_path = repo_ai_dir(&repo).join("other-hooks");
         fs::create_dir_all(&repo_ai_path).expect("failed to create repo-managed hooks candidate");
         let nested_git_ai = tmp.path().join(".git-ai").join("hooks");
         let foreign_git_ai = tmp
@@ -2800,6 +3050,83 @@ mod tests {
             Some(&repo),
             Some(&managed_hooks)
         ));
+    }
+
+    #[test]
+    fn worktree_operational_state_paths_are_isolated_from_common_hook_state() {
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let (main_repo, linked_repo) = init_repo_with_linked_worktree(tmp.path());
+
+        // Hook installation state remains shared across worktrees.
+        assert_eq!(
+            normalize_path(&repo_ai_dir(&main_repo)),
+            normalize_path(&repo_ai_dir(&linked_repo))
+        );
+        let main_repo_state_path = repo_state_path(&main_repo);
+        let linked_repo_state_path = repo_state_path(&linked_repo);
+        assert_eq!(
+            main_repo_state_path.file_name(),
+            linked_repo_state_path.file_name()
+        );
+        assert_eq!(
+            normalize_path(
+                main_repo_state_path
+                    .parent()
+                    .expect("repo state path should have a parent")
+            ),
+            normalize_path(
+                linked_repo_state_path
+                    .parent()
+                    .expect("repo state path should have a parent")
+            )
+        );
+
+        let main_managed_hooks = managed_git_hooks_dir_for_repo(&main_repo);
+        let linked_managed_hooks = managed_git_hooks_dir_for_repo(&linked_repo);
+        assert_eq!(
+            main_managed_hooks.file_name(),
+            linked_managed_hooks.file_name()
+        );
+        assert_eq!(
+            normalize_path(
+                main_managed_hooks
+                    .parent()
+                    .expect("managed hooks path should have a parent")
+            ),
+            normalize_path(
+                linked_managed_hooks
+                    .parent()
+                    .expect("managed hooks path should have a parent")
+            )
+        );
+
+        // Operational state must be per-worktree to avoid cross-worktree interference.
+        assert_ne!(
+            rebase_hook_mask_state_path(&main_repo),
+            rebase_hook_mask_state_path(&linked_repo)
+        );
+        assert_ne!(
+            stash_reference_transaction_state_path(&main_repo),
+            stash_reference_transaction_state_path(&linked_repo)
+        );
+        assert_ne!(
+            pull_hook_state_path(&main_repo),
+            pull_hook_state_path(&linked_repo)
+        );
+        assert_ne!(
+            cherry_pick_state_path(&main_repo),
+            cherry_pick_state_path(&linked_repo)
+        );
+        assert_ne!(
+            cherry_pick_batch_state_path(&main_repo),
+            cherry_pick_batch_state_path(&linked_repo)
+        );
+
+        assert!(
+            normalize_path(&rebase_hook_mask_state_path(&linked_repo))
+                .starts_with(normalize_path(&linked_repo.path().join("ai"))),
+            "linked-worktree state should live under linked .git/worktrees/<name>/ai"
+        );
     }
 
     #[test]
@@ -3074,7 +3401,9 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn ensure_hook_entry_install_updates_copied_binary_when_source_changes() {
+    fn ensure_hook_entry_install_updates_copied_binary_when_source_is_newer() {
+        use filetime::{FileTime, set_file_mtime};
+
         let tmp = tempfile::tempdir().expect("failed to create tempdir");
         let source_binary = tmp.path().join("source.exe");
         let hook_entry = tmp.path().join("pre-commit");
@@ -3085,12 +3414,156 @@ mod tests {
         assert!(first, "initial install should report change");
 
         fs::write(&source_binary, b"binary-v2").expect("failed to update source binary");
+        let hook_mtime = FileTime::from_unix_time(1_700_000_000, 0);
+        let source_mtime = FileTime::from_unix_time(1_700_000_010, 0);
+        set_file_mtime(&hook_entry, hook_mtime).expect("failed to set hook mtime");
+        set_file_mtime(&source_binary, source_mtime).expect("failed to set source mtime");
+
         let second = ensure_hook_entry_installed(&hook_entry, &source_binary, false)
             .expect("second install should succeed");
-        assert!(second, "updated source should trigger replacement");
+        assert!(second, "newer source should trigger replacement");
 
         let installed = fs::read(&hook_entry).expect("failed to read installed hook entry");
         assert_eq!(installed, b"binary-v2");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ensure_hook_entry_install_defers_when_hook_binary_is_locked() {
+        use filetime::{FileTime, set_file_mtime};
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let source_binary = tmp.path().join("source.exe");
+        let hook_entry = tmp.path().join("pre-commit");
+
+        fs::write(&source_binary, b"binary-v1").expect("failed to write source binary");
+        let first = ensure_hook_entry_installed(&hook_entry, &source_binary, false)
+            .expect("first install should succeed");
+        assert!(first, "initial install should report change");
+
+        fs::write(&source_binary, b"binary-v2").expect("failed to update source binary");
+        let hook_mtime = FileTime::from_unix_time(1_700_000_000, 0);
+        let source_mtime = FileTime::from_unix_time(1_700_000_000, 0);
+        set_file_mtime(&hook_entry, hook_mtime).expect("failed to set hook mtime");
+        set_file_mtime(&source_binary, source_mtime).expect("failed to set source mtime");
+
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .open(&hook_entry)
+            .expect("failed to lock hook entry");
+
+        let deferred = ensure_hook_entry_installed(&hook_entry, &source_binary, false)
+            .expect("locked update should be deferred, not failed");
+        assert!(!deferred, "locked hook should be deferred");
+
+        drop(lock);
+
+        let installed_after_unlock =
+            fs::read(&hook_entry).expect("failed to read hook entry after lock release");
+        assert_eq!(
+            installed_after_unlock, b"binary-v1",
+            "locked hook should keep previous contents until lock is released"
+        );
+
+        let retried = ensure_hook_entry_installed(&hook_entry, &source_binary, false)
+            .expect("retry after lock release should succeed");
+        assert!(retried, "update should apply after lock release");
+
+        let installed_after_retry = fs::read(&hook_entry).expect("failed to read updated hook");
+        assert_eq!(installed_after_retry, b"binary-v2");
+    }
+
+    #[test]
+    fn resolve_repo_hook_binary_path_prefers_runtime_binary_over_saved_external_binary() {
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let managed_hooks_dir = tmp.path().join(".git").join("ai").join("hooks");
+        fs::create_dir_all(&managed_hooks_dir).expect("failed to create managed hooks dir");
+
+        let saved_binary = tmp.path().join("bin").join("saved-git-ai");
+        fs::create_dir_all(saved_binary.parent().expect("saved binary parent"))
+            .expect("failed to create saved binary parent");
+        fs::write(&saved_binary, b"saved-binary").expect("failed to write saved binary");
+
+        let runtime_binary = tmp.path().join("runtime").join("git-ai");
+        fs::create_dir_all(runtime_binary.parent().expect("runtime binary parent"))
+            .expect("failed to create runtime binary parent");
+        fs::write(&runtime_binary, b"runtime-binary").expect("failed to write runtime binary");
+
+        let state = RepoHookState {
+            binary_path: saved_binary.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+
+        let resolved = resolve_repo_hook_binary_path(
+            &managed_hooks_dir,
+            Some(&state),
+            Some(runtime_binary.clone()),
+        );
+        assert_eq!(
+            normalize_path(&resolved),
+            normalize_path(&runtime_binary),
+            "runtime binary should be preferred when it is an external, valid path"
+        );
+    }
+
+    #[test]
+    fn resolve_repo_hook_binary_path_accepts_prefixed_git_ai_runtime_binary() {
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let managed_hooks_dir = tmp.path().join(".git").join("ai").join("hooks");
+        fs::create_dir_all(&managed_hooks_dir).expect("failed to create managed hooks dir");
+
+        let runtime_binary = tmp
+            .path()
+            .join("target")
+            .join("debug")
+            .join("git_ai-abcdef");
+        fs::create_dir_all(runtime_binary.parent().expect("runtime binary parent"))
+            .expect("failed to create runtime binary parent");
+        fs::write(&runtime_binary, b"runtime-binary").expect("failed to write runtime binary");
+
+        let resolved =
+            resolve_repo_hook_binary_path(&managed_hooks_dir, None, Some(runtime_binary.clone()));
+        assert_eq!(
+            normalize_path(&resolved),
+            normalize_path(&runtime_binary),
+            "git_ai-* runtime binaries should be accepted as valid hook sources"
+        );
+    }
+
+    #[test]
+    fn resolve_repo_hook_binary_path_ignores_non_git_ai_runtime_binary() {
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let managed_hooks_dir = tmp.path().join(".git").join("ai").join("hooks");
+        fs::create_dir_all(&managed_hooks_dir).expect("failed to create managed hooks dir");
+
+        let saved_binary = tmp.path().join("bin").join("git-ai");
+        fs::create_dir_all(saved_binary.parent().expect("saved binary parent"))
+            .expect("failed to create saved binary parent");
+        fs::write(&saved_binary, b"saved-binary").expect("failed to write saved binary");
+
+        let runtime_binary = tmp.path().join("runtime").join("test-runner-binary");
+        fs::create_dir_all(runtime_binary.parent().expect("runtime binary parent"))
+            .expect("failed to create runtime binary parent");
+        fs::write(&runtime_binary, b"runtime-binary").expect("failed to write runtime binary");
+
+        let state = RepoHookState {
+            binary_path: saved_binary.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+
+        let resolved = resolve_repo_hook_binary_path(
+            &managed_hooks_dir,
+            Some(&state),
+            Some(runtime_binary.clone()),
+        );
+        assert_eq!(
+            normalize_path(&resolved),
+            normalize_path(&saved_binary),
+            "non git-ai runtime binary should not override saved source binary"
+        );
     }
 
     #[test]
@@ -3218,9 +3691,7 @@ mod tests {
         fs::create_dir_all(&isolated_home).expect("failed to create isolated home");
         let empty_global = isolated_home.join(".gitconfig");
         fs::write(&empty_global, "").expect("failed to write empty global config");
-        let _home = EnvVarGuard::set("HOME", isolated_home.to_string_lossy().as_ref());
-        let _global =
-            EnvVarGuard::set("GIT_CONFIG_GLOBAL", empty_global.to_string_lossy().as_ref());
+        let _global = GlobalConfigOverrideGuard::set(&empty_global);
 
         let repo = init_repo(&tmp.path().join("repo"));
 
@@ -3254,7 +3725,7 @@ mod tests {
         fs::write(user_hooks.join("pre-merge-commit"), "#!/bin/sh\nexit 0\n")
             .expect("failed to write pre-merge-commit hook");
 
-        let local_config = repo.path().join("config");
+        let local_config = repo_local_config_path(&repo);
         set_hooks_path_in_config(
             &local_config,
             gix_config::Source::Local,

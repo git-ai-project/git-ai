@@ -953,3 +953,35 @@ fn test_first_message_snippet_off_by_one() {
     assert!(snippet.len() <= 23); // 20 + "..."
     assert!(snippet.ends_with("..."));
 }
+
+reuse_tests_in_worktree!(
+    test_prompt_record_first_message_snippet_user_message,
+    test_prompt_record_first_message_snippet_truncation,
+    test_prompt_record_first_message_snippet_unicode_boundary,
+    test_prompt_record_first_message_snippet_no_user_message,
+    test_prompt_record_first_message_snippet_empty_transcript,
+    test_prompt_record_message_count,
+    test_prompt_record_message_count_empty,
+    test_prompt_record_relative_time_seconds,
+    test_prompt_record_relative_time_minutes,
+    test_prompt_record_relative_time_hours,
+    test_prompt_record_relative_time_days,
+    test_prompt_record_relative_time_weeks,
+    test_prompt_record_relative_time_months,
+    test_prompt_record_relative_time_years,
+    test_prompt_record_relative_time_singular,
+    test_database_list_prompts_no_filter,
+    test_database_list_prompts_with_workdir_filter,
+    test_database_list_prompts_pagination,
+    test_database_search_prompts_finds_matches,
+    test_database_search_prompts_case_insensitive,
+    test_database_search_prompts_no_matches,
+    test_database_search_prompts_with_workdir_filter,
+    test_database_search_prompts_pagination,
+    test_prompt_record_with_all_message_types,
+    test_prompt_record_snippet_prefers_user_over_assistant,
+    test_prompt_record_fields_populated,
+    test_prompt_record_optional_fields_none,
+    test_first_message_snippet_exact_boundary,
+    test_first_message_snippet_off_by_one,
+);

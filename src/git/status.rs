@@ -1,5 +1,5 @@
 use crate::error::GitAiError;
-use crate::git::repository::{Repository, exec_git};
+use crate::git::repository::{InternalGitProfile, Repository, exec_git_with_profile};
 use std::collections::HashSet;
 use std::str;
 
@@ -66,8 +66,9 @@ impl Repository {
         args.push("--cached".to_string());
         args.push("--name-only".to_string());
         args.push("-z".to_string()); // NUL-separated output for proper UTF-8 handling
+        args.push("--no-renames".to_string());
 
-        let output = exec_git(&args)?;
+        let output = exec_git_with_profile(&args, InternalGitProfile::RawDiffParse)?;
 
         if !output.status.success() {
             return Err(GitAiError::Generic(format!(
@@ -94,7 +95,7 @@ impl Repository {
         args.push("--porcelain=v2".to_string());
         args.push("-z".to_string());
 
-        let output = exec_git(&args)?;
+        let output = exec_git_with_profile(&args, InternalGitProfile::General)?;
 
         if !output.status.success() {
             return Err(GitAiError::Generic(format!(
@@ -164,7 +165,7 @@ impl Repository {
             }
         }
 
-        let output = exec_git(&args)?;
+        let output = exec_git_with_profile(&args, InternalGitProfile::General)?;
 
         if !output.status.success() {
             return Err(GitAiError::Generic(format!(

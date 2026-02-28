@@ -8,8 +8,9 @@ use git_ai::git::repo_storage::PersistedWorkingLog;
 use git_ai::git::repository as GitAiRepository;
 use git_ai::observability::wrapper_performance_targets::BenchmarkResult;
 use git2::Repository;
-use insta::assert_debug_snapshot;
+use insta::{Settings, assert_debug_snapshot};
 use rand::Rng;
+use std::cell::Cell;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -19,7 +20,7 @@ use std::time::Duration;
 use super::test_file::TestFile;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum GitTestMode {
+pub enum GitTestMode {
     Wrapper,
     Hooks,
     Both,
@@ -30,7 +31,11 @@ impl GitTestMode {
         let mode = std::env::var("GIT_AI_TEST_GIT_MODE")
             .unwrap_or_else(|_| "wrapper".to_string())
             .to_lowercase();
-        match mode.as_str() {
+        Self::from_mode_name(&mode)
+    }
+
+    pub fn from_mode_name(mode: &str) -> Self {
+        match mode.to_lowercase().as_str() {
             "hooks" => Self::Hooks,
             "both" | "wrapper+hooks" | "hooks+wrapper" => Self::Both,
             _ => Self::Wrapper,
@@ -46,6 +51,34 @@ impl GitTestMode {
     }
 }
 
+thread_local! {
+    static WORKTREE_MODE: Cell<bool> = const { Cell::new(false) };
+}
+
+pub fn with_worktree_mode<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    WORKTREE_MODE.with(|flag| {
+        let previous = flag.replace(true);
+
+        struct Reset<'a> {
+            flag: &'a Cell<bool>,
+            previous: bool,
+        }
+        impl<'a> Drop for Reset<'a> {
+            fn drop(&mut self) {
+                self.flag.set(self.previous);
+            }
+        }
+        let _reset = Reset { flag, previous };
+
+        let mut settings = Settings::clone_current();
+        settings.set_snapshot_suffix("worktree");
+        settings.bind(f)
+    })
+}
+
 #[cfg(unix)]
 fn create_file_symlink(target: &PathBuf, link: &PathBuf) -> std::io::Result<()> {
     std::os::unix::fs::symlink(target, link)
@@ -57,6 +90,19 @@ fn create_file_symlink(target: &PathBuf, link: &PathBuf) -> std::io::Result<()> 
         .or_else(|_| std::fs::copy(target, link).map(|_| ()))
 }
 
+fn resolve_test_db_path(
+    base: &std::path::Path,
+    id: u64,
+    test_home: &std::path::Path,
+    git_mode: GitTestMode,
+) -> PathBuf {
+    if git_mode.uses_hooks() {
+        test_home.join(".git-ai").join("internal").join("db")
+    } else {
+        base.join(format!("{}-db", id))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct TestRepo {
     path: PathBuf,
@@ -65,6 +111,11 @@ pub struct TestRepo {
     test_db_path: PathBuf,
     test_home: PathBuf,
     git_mode: GitTestMode,
+    /// When this TestRepo is backed by a linked worktree, holds the base repo path
+    /// so we can clean it up on drop.
+    _base_repo_path: Option<PathBuf>,
+    /// Base repo's test DB path for cleanup.
+    _base_test_db_path: Option<PathBuf>,
 }
 
 #[allow(dead_code)]
@@ -75,6 +126,60 @@ impl Default for TestRepo {
 }
 
 impl TestRepo {
+    fn sync_test_home_config_for_hooks(&self) {
+        if !self.git_mode.uses_hooks() {
+            return;
+        }
+
+        let Some(patch) = &self.config_patch else {
+            return;
+        };
+
+        let mut config = serde_json::Map::new();
+
+        if let Some(exclude) = &patch.exclude_prompts_in_repositories {
+            let values = exclude
+                .iter()
+                .map(|pattern| serde_json::Value::String(pattern.clone()))
+                .collect();
+            config.insert(
+                "exclude_prompts_in_repositories".to_string(),
+                serde_json::Value::Array(values),
+            );
+        }
+        if let Some(telemetry_oss_disabled) = patch.telemetry_oss_disabled {
+            let value = if telemetry_oss_disabled { "off" } else { "on" };
+            config.insert(
+                "telemetry_oss".to_string(),
+                serde_json::Value::String(value.to_string()),
+            );
+        }
+        if let Some(disable_version_checks) = patch.disable_version_checks {
+            config.insert(
+                "disable_version_checks".to_string(),
+                serde_json::Value::Bool(disable_version_checks),
+            );
+        }
+        if let Some(disable_auto_updates) = patch.disable_auto_updates {
+            config.insert(
+                "disable_auto_updates".to_string(),
+                serde_json::Value::Bool(disable_auto_updates),
+            );
+        }
+        if let Some(prompt_storage) = &patch.prompt_storage {
+            config.insert(
+                "prompt_storage".to_string(),
+                serde_json::Value::String(prompt_storage.clone()),
+            );
+        }
+
+        let config_dir = self.test_home.join(".git-ai");
+        fs::create_dir_all(&config_dir).expect("failed to create test HOME config directory");
+        let config_path = config_dir.join("config.json");
+        let serialized = serde_json::to_string(&config).expect("failed to serialize test config");
+        fs::write(&config_path, serialized).expect("failed to write test HOME config");
+    }
+
     fn apply_default_config_patch(&mut self) {
         self.patch_git_ai_config(|patch| {
             patch.exclude_prompts_in_repositories = Some(vec![]); // No exclusions = share everywhere
@@ -83,14 +188,143 @@ impl TestRepo {
     }
 
     pub fn new() -> Self {
+        if WORKTREE_MODE.with(|flag| flag.get()) {
+            return Self::new_worktree_variant();
+        }
+        Self::new_with_mode(GitTestMode::from_env())
+    }
+
+    /// Create a worktree-backed TestRepo.
+    /// This creates a normal base repo and then adds an orphan linked worktree
+    /// so tests keep empty-repo semantics (the first real commit is still a root commit).
+    fn new_worktree_variant() -> Self {
+        let base = Self::new_with_mode(GitTestMode::from_env());
+
+        let default_branch = default_branchname();
+        let base_branch = base.current_branch();
+        if base_branch == default_branch {
+            let mut rng = rand::thread_rng();
+            let n: u64 = rng.gen_range(0..10_000_000_000);
+            let temp_branch = format!("base-worktree-{}", n);
+            let temp_ref = format!("refs/heads/{}", temp_branch);
+            let switch_output = Command::new(real_git_executable())
+                .args([
+                    "-C",
+                    base.path.to_str().unwrap(),
+                    "symbolic-ref",
+                    "HEAD",
+                    &temp_ref,
+                ])
+                .output()
+                .expect("failed to move base repo off default branch");
+            if !switch_output.status.success() {
+                panic!(
+                    "failed to move base repo off default branch:\nstdout: {}\nstderr: {}",
+                    String::from_utf8_lossy(&switch_output.stdout),
+                    String::from_utf8_lossy(&switch_output.stderr)
+                );
+            }
+        }
+
+        let mut rng = rand::thread_rng();
+        let wt_n: u64 = rng.gen_range(0..10_000_000_000);
+        let worktree_path = std::env::temp_dir().join(format!("{}-wt", wt_n));
+
+        let output = Command::new(real_git_executable())
+            .args([
+                "-C",
+                base.path.to_str().unwrap(),
+                "worktree",
+                "add",
+                "--orphan",
+                worktree_path.to_str().unwrap(),
+            ])
+            .output()
+            .expect("failed to add worktree");
+
+        if !output.status.success() {
+            panic!(
+                "failed to create linked worktree:\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let branch_name_output = Command::new(real_git_executable())
+            .args([
+                "-C",
+                worktree_path.to_str().unwrap(),
+                "branch",
+                "--show-current",
+            ])
+            .output()
+            .expect("failed to inspect worktree branch");
+        if !branch_name_output.status.success() {
+            panic!(
+                "failed to inspect linked worktree branch:\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&branch_name_output.stdout),
+                String::from_utf8_lossy(&branch_name_output.stderr)
+            );
+        }
+        let current_branch = String::from_utf8_lossy(&branch_name_output.stdout)
+            .trim()
+            .to_string();
+        if current_branch != default_branch {
+            let rename_output = Command::new(real_git_executable())
+                .args([
+                    "-C",
+                    worktree_path.to_str().unwrap(),
+                    "branch",
+                    "-m",
+                    &default_branch,
+                ])
+                .output()
+                .expect("failed to rename worktree branch");
+            if !rename_output.status.success() {
+                panic!(
+                    "failed to rename linked worktree branch:\nstdout: {}\nstderr: {}",
+                    String::from_utf8_lossy(&rename_output.stdout),
+                    String::from_utf8_lossy(&rename_output.stderr)
+                );
+            }
+        }
+
+        let base_path = base.path.clone();
+        let base_test_home = base.test_home.clone();
+        let base_test_db_path = base.test_db_path.clone();
+        let feature_flags = base.feature_flags.clone();
+        let config_patch = base.config_patch.clone();
+        let git_mode = base.git_mode;
+
+        // Prevent base Drop from running - we manage cleanup in the worktree Drop
+        std::mem::forget(base);
+
+        let wt_db_n: u64 = rng.gen_range(0..10_000_000_000);
+        let wt_test_db_path = std::env::temp_dir().join(format!("{}-db", wt_db_n));
+
+        let mut repo = Self {
+            path: worktree_path,
+            feature_flags,
+            config_patch,
+            test_db_path: wt_test_db_path,
+            test_home: base_test_home,
+            git_mode,
+            _base_repo_path: Some(base_path),
+            _base_test_db_path: Some(base_test_db_path),
+        };
+
+        repo.apply_default_config_patch();
+        repo.setup_git_hooks_mode();
+        repo
+    }
+
+    pub fn new_with_mode(git_mode: GitTestMode) -> Self {
         let mut rng = rand::thread_rng();
         let n: u64 = rng.gen_range(0..10000000000);
         let base = std::env::temp_dir();
         let path = base.join(n.to_string());
-        // Create DB path as sibling to repo (not inside) to avoid git conflicts with WAL files
-        let test_db_path = base.join(format!("{}-db", n));
         let test_home = base.join(format!("{}-home", n));
-        let git_mode = GitTestMode::from_env();
+        let test_db_path = resolve_test_db_path(&base, n, &test_home, git_mode);
         let repo = Repository::init(&path).expect("failed to initialize git2 repository");
         let mut config = Repository::config(&repo).expect("failed to initialize git2 repository");
         config
@@ -107,6 +341,8 @@ impl TestRepo {
             test_db_path,
             test_home,
             git_mode,
+            _base_repo_path: None,
+            _base_test_db_path: None,
         };
 
         // Ensure the default branch is named "main" for consistency across Git versions
@@ -119,15 +355,106 @@ impl TestRepo {
         repo
     }
 
+    pub fn new_worktree() -> Self {
+        Self::new_worktree_with_mode(GitTestMode::from_env())
+    }
+
+    pub fn new_worktree_with_mode(git_mode: GitTestMode) -> Self {
+        let mut rng = rand::thread_rng();
+        let n: u64 = rng.gen_range(0..10000000000);
+        let base = std::env::temp_dir();
+        let main_path = base.join(format!("{}-main", n));
+        let worktree_path = base.join(format!("{}-wt", n));
+        let test_home = base.join(format!("{}-home", n));
+        let test_db_path = resolve_test_db_path(&base, n, &test_home, git_mode);
+
+        let main_repo = Repository::init(&main_path).expect("failed to initialize main repository");
+        let mut main_config =
+            Repository::config(&main_repo).expect("failed to initialize main repository config");
+        main_config
+            .set_str("user.name", "Test User")
+            .expect("failed to set main user.name");
+        main_config
+            .set_str("user.email", "test@example.com")
+            .expect("failed to set main user.email");
+
+        let _ = Command::new(real_git_executable())
+            .args([
+                "-C",
+                main_path.to_str().unwrap(),
+                "symbolic-ref",
+                "HEAD",
+                "refs/heads/main",
+            ])
+            .output();
+
+        let initial_commit_output = Command::new(real_git_executable())
+            .args([
+                "-C",
+                main_path.to_str().unwrap(),
+                "commit",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ])
+            .output()
+            .expect("failed to create initial commit for worktree base");
+        if !initial_commit_output.status.success() {
+            panic!(
+                "failed to create initial worktree base commit:\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&initial_commit_output.stdout),
+                String::from_utf8_lossy(&initial_commit_output.stderr)
+            );
+        }
+
+        let worktree_output = Command::new(real_git_executable())
+            .args([
+                "-C",
+                main_path.to_str().unwrap(),
+                "worktree",
+                "add",
+                worktree_path.to_str().unwrap(),
+            ])
+            .output()
+            .expect("failed to create linked worktree");
+
+        if !worktree_output.status.success() {
+            panic!(
+                "failed to create linked worktree:\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&worktree_output.stdout),
+                String::from_utf8_lossy(&worktree_output.stderr)
+            );
+        }
+
+        let mut repo = Self {
+            path: worktree_path,
+            feature_flags: FeatureFlags::default(),
+            config_patch: None,
+            test_db_path,
+            test_home,
+            git_mode,
+            _base_repo_path: Some(main_path),
+            _base_test_db_path: None,
+        };
+
+        repo.apply_default_config_patch();
+        repo.setup_git_hooks_mode();
+        repo
+    }
+
     /// Create a standalone bare repository for testing
     pub fn new_bare() -> Self {
+        Self::new_bare_with_mode(GitTestMode::from_env())
+    }
+
+    /// Create a standalone bare repository for testing
+    pub fn new_bare_with_mode(git_mode: GitTestMode) -> Self {
         let mut rng = rand::thread_rng();
         let n: u64 = rng.gen_range(0..10000000000);
         let base = std::env::temp_dir();
         let path = base.join(n.to_string());
-        let test_db_path = base.join(format!("{}-db", n));
         let test_home = base.join(format!("{}-home", n));
-        let git_mode = GitTestMode::from_env();
+        let test_db_path = resolve_test_db_path(&base, n, &test_home, git_mode);
 
         Repository::init_bare(&path).expect("failed to init bare repository");
 
@@ -138,6 +465,8 @@ impl TestRepo {
             test_db_path,
             test_home,
             git_mode,
+            _base_repo_path: None,
+            _base_test_db_path: None,
         };
 
         repo.setup_git_hooks_mode();
@@ -160,16 +489,19 @@ impl TestRepo {
     /// mirror.git(&["push", "origin", "main"]);
     /// ```
     pub fn new_with_remote() -> (Self, Self) {
+        Self::new_with_remote_with_mode(GitTestMode::from_env())
+    }
+
+    pub fn new_with_remote_with_mode(git_mode: GitTestMode) -> (Self, Self) {
         let mut rng = rand::thread_rng();
         let base = std::env::temp_dir();
 
         // Create bare upstream repository (acts as the remote server)
         let upstream_n: u64 = rng.gen_range(0..10000000000);
         let upstream_path = base.join(upstream_n.to_string());
-        // Create DB path as sibling to repo (not inside) to avoid git conflicts with WAL files
-        let upstream_test_db_path = base.join(format!("{}-db", upstream_n));
         let upstream_test_home = base.join(format!("{}-home", upstream_n));
-        let git_mode = GitTestMode::from_env();
+        let upstream_test_db_path =
+            resolve_test_db_path(&base, upstream_n, &upstream_test_home, git_mode);
         Repository::init_bare(&upstream_path).expect("failed to init bare upstream repository");
 
         let mut upstream = Self {
@@ -179,6 +511,8 @@ impl TestRepo {
             test_db_path: upstream_test_db_path,
             test_home: upstream_test_home,
             git_mode,
+            _base_repo_path: None,
+            _base_test_db_path: None,
         };
 
         // Ensure the upstream default branch is named "main" for consistency across Git versions
@@ -187,11 +521,11 @@ impl TestRepo {
         // Clone upstream to create mirror with origin configured
         let mirror_n: u64 = rng.gen_range(0..10000000000);
         let mirror_path = base.join(mirror_n.to_string());
-        // Create DB path as sibling to repo (not inside) to avoid git conflicts with WAL files
-        let mirror_test_db_path = base.join(format!("{}-db", mirror_n));
         let mirror_test_home = base.join(format!("{}-home", mirror_n));
+        let mirror_test_db_path =
+            resolve_test_db_path(&base, mirror_n, &mirror_test_home, git_mode);
 
-        let clone_output = Command::new("git")
+        let clone_output = Command::new(real_git_executable())
             .args([
                 "clone",
                 upstream_path.to_str().unwrap(),
@@ -226,6 +560,8 @@ impl TestRepo {
             test_db_path: mirror_test_db_path,
             test_home: mirror_test_home,
             git_mode,
+            _base_repo_path: None,
+            _base_test_db_path: None,
         };
 
         // Ensure the default branch is named "main" for consistency across Git versions
@@ -240,12 +576,14 @@ impl TestRepo {
     }
 
     pub fn new_at_path(path: &PathBuf) -> Self {
-        // Create DB path as sibling to repo (not inside) to avoid git conflicts with WAL files
+        Self::new_at_path_with_mode(path, GitTestMode::from_env())
+    }
+
+    pub fn new_at_path_with_mode(path: &PathBuf, git_mode: GitTestMode) -> Self {
         let mut rng = rand::thread_rng();
         let db_n: u64 = rng.gen_range(0..10000000000);
-        let test_db_path = std::env::temp_dir().join(format!("{}-db", db_n));
         let test_home = std::env::temp_dir().join(format!("{}-home", db_n));
-        let git_mode = GitTestMode::from_env();
+        let test_db_path = resolve_test_db_path(&std::env::temp_dir(), db_n, &test_home, git_mode);
         let repo = Repository::init(path).expect("failed to initialize git2 repository");
         let mut config = Repository::config(&repo).expect("failed to initialize git2 repository");
         config
@@ -261,6 +599,8 @@ impl TestRepo {
             test_db_path,
             test_home,
             git_mode,
+            _base_repo_path: None,
+            _base_test_db_path: None,
         };
 
         // Ensure the default branch is named "main" for consistency across Git versions
@@ -280,6 +620,8 @@ impl TestRepo {
             return;
         }
 
+        self.sync_test_home_config_for_hooks();
+
         let binary_path = get_binary_path();
         let mut command = Command::new(binary_path);
         command
@@ -287,6 +629,7 @@ impl TestRepo {
             .args(["git-hooks", "ensure"]);
         self.configure_git_ai_env(&mut command);
         command.env("GIT_AI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
+        command.env("GITAI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
 
         let output = command
             .output()
@@ -339,6 +682,7 @@ impl TestRepo {
         let mut patch = self.config_patch.take().unwrap_or_default();
         f(&mut patch);
         self.config_patch = Some(patch);
+        self.sync_test_home_config_for_hooks();
     }
 
     pub fn path(&self) -> &PathBuf {
@@ -360,9 +704,35 @@ impl TestRepo {
     }
 
     pub fn stats(&self) -> Result<CommitStats, String> {
-        let mut stats = self.git_ai(&["stats", "--json"]).unwrap();
-        stats = stats.split("}}}").next().unwrap().to_string() + "}}}";
-        let stats: CommitStats = serde_json::from_str(&stats).unwrap();
+        let output = self.git_ai(&["stats", "--json"])?;
+        let start = output
+            .find('{')
+            .ok_or_else(|| format!("stats output does not contain JSON: {}", output))?;
+
+        let mut depth = 0usize;
+        let mut end_index = None;
+        for (offset, ch) in output[start..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    if depth == 0 {
+                        return Err(format!("malformed stats JSON output: {}", output));
+                    }
+                    depth -= 1;
+                    if depth == 0 {
+                        end_index = Some(start + offset);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let end_index =
+            end_index.ok_or_else(|| format!("incomplete stats JSON output: {}", output))?;
+        let json = &output[start..=end_index];
+        let stats: CommitStats =
+            serde_json::from_str(json).map_err(|e| format!("invalid stats JSON: {}", e))?;
         Ok(stats)
     }
 
@@ -473,7 +843,7 @@ impl TestRepo {
         let mut command = if self.git_mode.uses_wrapper() {
             Command::new(get_binary_path())
         } else {
-            Command::new("git")
+            Command::new(real_git_executable())
         };
 
         // If working_dir is provided, use current_dir instead of -C flag
@@ -504,6 +874,7 @@ impl TestRepo {
             command.env("GIT_AI_TEST_CONFIG_PATCH", patch_json);
         }
         command.env("GIT_AI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
+        command.env("GITAI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
 
         // Add custom environment variables
         for (key, value) in envs {
@@ -558,6 +929,7 @@ impl TestRepo {
         }
 
         command.env("GIT_AI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
+        command.env("GITAI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
 
         let output = command
             .output()
@@ -596,6 +968,7 @@ impl TestRepo {
 
         // Add test database path for isolation
         command.env("GIT_AI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
+        command.env("GITAI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
 
         // Add custom environment variables
         for (key, value) in envs {
@@ -776,6 +1149,30 @@ impl TestRepo {
 
 impl Drop for TestRepo {
     fn drop(&mut self) {
+        if let Some(base_path) = &self._base_repo_path {
+            let _ = Command::new(real_git_executable())
+                .args([
+                    "-C",
+                    base_path.to_str().unwrap(),
+                    "worktree",
+                    "remove",
+                    "--force",
+                    self.path.to_str().unwrap(),
+                ])
+                .output();
+
+            let _ = remove_dir_all_with_retry(&self.path, 80, Duration::from_millis(50));
+            let _ = remove_dir_all_with_retry(base_path, 80, Duration::from_millis(50));
+
+            if let Some(base_db_path) = &self._base_test_db_path {
+                let _ = remove_dir_all_with_retry(base_db_path, 40, Duration::from_millis(25));
+            }
+
+            let _ = remove_dir_all_with_retry(&self.test_db_path, 40, Duration::from_millis(25));
+            let _ = remove_dir_all_with_retry(&self.test_home, 40, Duration::from_millis(25));
+            return;
+        }
+
         remove_dir_all_with_retry(&self.path, 80, Duration::from_millis(50))
             .expect("failed to remove test repo");
         // Also clean up the test database directory (may not exist if no DB operations were done)
@@ -845,6 +1242,10 @@ impl NewCommit {
 static COMPILED_BINARY: OnceLock<PathBuf> = OnceLock::new();
 static DEFAULT_BRANCH_NAME: OnceLock<String> = OnceLock::new();
 
+pub(crate) fn real_git_executable() -> &'static str {
+    git_ai::config::Config::get().git_cmd()
+}
+
 fn get_default_branch_name() -> String {
     // Since TestRepo::new() explicitly sets the default branch to "main" via symbolic-ref,
     // we always return "main" to match that behavior and ensure test consistency across
@@ -892,6 +1293,6 @@ fn compile_binary() -> PathBuf {
     }
 }
 
-pub(crate) fn get_binary_path() -> &'static PathBuf {
+pub fn get_binary_path() -> &'static PathBuf {
     COMPILED_BINARY.get_or_init(compile_binary)
 }

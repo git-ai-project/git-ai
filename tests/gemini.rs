@@ -899,3 +899,28 @@ fn test_gemini_e2e_partial_staging() {
         // ai_line5 is not committed because it's unstaged
     ]);
 }
+
+reuse_tests_in_worktree!(
+    test_parse_example_gemini_json_with_model,
+    test_gemini_parses_user_messages,
+    test_gemini_parses_assistant_messages,
+    test_gemini_parses_tool_calls,
+    test_gemini_parses_tool_call_args,
+    test_gemini_handles_empty_content,
+    test_gemini_skips_unknown_message_types,
+    test_gemini_preset_extracts_edited_filepath,
+    test_gemini_preset_no_filepath_when_tool_input_missing,
+    test_gemini_preset_human_checkpoint,
+    test_gemini_preset_ai_checkpoint,
+    test_gemini_preset_extracts_model,
+    test_gemini_preset_stores_transcript_path_in_metadata,
+    test_gemini_preset_handles_missing_transcript_path,
+    test_gemini_preset_handles_invalid_json,
+    test_gemini_preset_handles_missing_session_id,
+    test_gemini_preset_handles_missing_file,
+    test_gemini_e2e_with_attribution,
+    test_gemini_e2e_human_checkpoint,
+    test_gemini_e2e_multiple_tool_calls,
+    test_gemini_e2e_with_resync,
+    test_gemini_e2e_partial_staging,
+);

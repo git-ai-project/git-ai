@@ -215,6 +215,14 @@ impl LockFile {
 }
 
 #[cfg(unix)]
+impl Drop for LockFile {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+        unsafe { libc::flock(self._file.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+#[cfg(unix)]
 #[allow(clippy::suspicious_open_options)]
 fn try_lock_exclusive(path: &std::path::Path) -> Option<std::fs::File> {
     use std::os::unix::io::AsRawFd;

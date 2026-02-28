@@ -41,6 +41,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-coverage-
 
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Graphite CLI
+        run: npm install -g @withgraphite/graphite-cli@stable
+
       - name: Install cargo-llvm-cov
         run: cargo install cargo-llvm-cov --locked
 

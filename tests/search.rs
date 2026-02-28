@@ -528,3 +528,25 @@ fn test_search_help() {
         "Should display help text"
     );
 }
+
+reuse_tests_in_worktree!(
+    test_search_by_commit_returns_prompts,
+    test_search_by_commit_no_results,
+    test_search_by_commit_abbreviated_sha,
+    test_search_by_commit_symbolic_ref,
+    test_search_by_commit_range,
+    test_search_by_file_basic,
+    test_search_by_file_and_lines,
+    test_search_by_file_no_ai_lines,
+    test_search_by_file_relative_path,
+    test_search_by_pattern,
+    test_search_by_prompt_id,
+    test_search_by_prompt_id_not_found,
+    test_search_output_json,
+    test_search_output_verbose,
+    test_search_output_porcelain,
+    test_search_output_count,
+    test_search_no_authorship_notes,
+    test_search_detached_head,
+    test_search_help,
+);
