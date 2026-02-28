@@ -85,7 +85,7 @@ jobs:
                   # stable — no additional coverage, just wastes CI resources
                   if channel == "latest" and latest_ver == stable_ver:
                       continue
-                  npm_pkg = f"{info['pkg']}@{ver}" if channel == "stable" else f"{info['pkg']}@latest"
+                  npm_pkg = f"{info['pkg']}@{ver}" if channel == "stable" else f"{info['pkg']}@next"
                   matrix["include"].append({
                       "agent":       agent,
                       "channel":     channel,
