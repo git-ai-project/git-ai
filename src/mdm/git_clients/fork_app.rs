@@ -7,13 +7,13 @@ use crate::mdm::git_client_installer::{
 use super::mac_prefs::{Preferences, find_app_by_bundle_id};
 
 #[cfg(windows)]
-use crate::mdm::utils::{home_dir, to_forward_slash_path, write_atomic};
+use crate::mdm::utils::{home_dir, to_windows_git_bash_style_path, write_atomic};
 #[cfg(windows)]
 use serde_json::{Value, json};
 
 #[cfg(windows)]
 fn fork_custom_git_instance_path(git_shim_path: &std::path::Path) -> String {
-    to_forward_slash_path(git_shim_path)
+    to_windows_git_bash_style_path(git_shim_path)
 }
 #[cfg(windows)]
 use std::fs;

@@ -575,7 +575,7 @@ pub fn clean_path(path: PathBuf) -> PathBuf {
 /// This is needed because native GUI apps like Fork and Sublime Merge store paths
 /// with forward slashes in their JSON settings files.
 /// Non-Windows paths are returned unchanged.
-pub fn to_forward_slash_path(path: &Path) -> String {
+pub fn to_windows_git_bash_style_path(path: &Path) -> String {
     clean_path(path.to_path_buf())
         .to_string_lossy()
         .replace('\\', "/")
@@ -1442,16 +1442,16 @@ mod tests {
     }
 
     #[test]
-    fn test_to_forward_slash_path_converts_backslashes() {
+    fn test_to_windows_git_bash_style_path_converts_backslashes() {
         let path = PathBuf::from(r"C:\Users\Administrator\.git-ai\bin\git.exe");
-        let result = to_forward_slash_path(&path);
+        let result = to_windows_git_bash_style_path(&path);
         assert_eq!(result, "C:/Users/Administrator/.git-ai/bin/git.exe");
     }
 
     #[test]
-    fn test_to_forward_slash_path_preserves_unix_path() {
+    fn test_to_windows_git_bash_style_path_preserves_unix_path() {
         let path = PathBuf::from("/usr/local/bin/git");
-        let result = to_forward_slash_path(&path);
+        let result = to_windows_git_bash_style_path(&path);
         assert_eq!(result, "/usr/local/bin/git");
     }
 }

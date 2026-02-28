@@ -2,7 +2,7 @@ use crate::error::GitAiError;
 use crate::mdm::git_client_installer::{
     GitClientCheckResult, GitClientInstaller, GitClientInstallerParams,
 };
-use crate::mdm::utils::{home_dir, to_forward_slash_path, write_atomic};
+use crate::mdm::utils::{home_dir, to_windows_git_bash_style_path, write_atomic};
 use jsonc_parser::ParseOptions;
 use jsonc_parser::cst::CstRootNode;
 use std::fs;
@@ -131,7 +131,7 @@ impl GitClientInstaller for SublimeMergeInstaller {
 
         let current_git_binary = Self::read_git_binary();
         // Use forward slashes for JSON compatibility on Windows
-        let desired_path = to_forward_slash_path(&params.git_shim_path);
+        let desired_path = to_windows_git_bash_style_path(&params.git_shim_path);
 
         let prefs_configured = current_git_binary.is_some();
         let prefs_up_to_date = current_git_binary
@@ -163,7 +163,7 @@ impl GitClientInstaller for SublimeMergeInstaller {
 
         let prefs_path = Self::prefs_path();
         // Use forward slashes for JSON compatibility on Windows
-        let git_wrapper_path = to_forward_slash_path(&params.git_shim_path);
+        let git_wrapper_path = to_windows_git_bash_style_path(&params.git_shim_path);
 
         // Read existing content
         let original = if prefs_path.exists() {
