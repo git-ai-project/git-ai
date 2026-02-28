@@ -9,6 +9,7 @@ use git_ai::commands::git_handlers::CommandHooksContext;
 use git_ai::commands::hooks::rebase_hooks::{handle_rebase_post_command, pre_rebase_hook};
 use git_ai::git::cli_parser::ParsedGitInvocation;
 use git_ai::git::rewrite_log::RewriteLogEvent;
+use std::path::PathBuf;
 
 // ==============================================================================
 // Test Helper Functions
@@ -21,6 +22,17 @@ fn make_rebase_invocation(args: &[&str]) -> ParsedGitInvocation {
         command_args: args.iter().map(|s| s.to_string()).collect(),
         saw_end_of_opts: false,
         is_help: false,
+    }
+}
+
+fn resolve_git_dir(repo: &TestRepo) -> PathBuf {
+    let git_dir = repo.git(&["rev-parse", "--git-dir"]).unwrap();
+    let git_dir = git_dir.trim();
+    let path = PathBuf::from(git_dir);
+    if path.is_absolute() {
+        path
+    } else {
+        repo.path().join(path)
     }
 }
 
@@ -84,7 +96,7 @@ fn test_pre_rebase_hook_continuing_rebase() {
     repo.commit("base commit").unwrap();
 
     // Simulate in-progress rebase by creating rebase-merge directory
-    let rebase_dir = repo.path().join(".git").join("rebase-merge");
+    let rebase_dir = resolve_git_dir(&repo).join("rebase-merge");
     std::fs::create_dir_all(&rebase_dir).unwrap();
 
     let mut repository =
@@ -201,7 +213,7 @@ fn test_post_rebase_hook_still_in_progress() {
     repo.commit("base commit").unwrap();
 
     // Simulate in-progress rebase
-    let rebase_dir = repo.path().join(".git").join("rebase-merge");
+    let rebase_dir = resolve_git_dir(&repo).join("rebase-merge");
     std::fs::create_dir_all(&rebase_dir).unwrap();
 
     let mut repository =
@@ -339,8 +351,9 @@ fn test_post_rebase_hook_dry_run() {
 fn test_rebase_directory_detection() {
     let repo = TestRepo::new();
 
-    let rebase_merge_dir = repo.path().join(".git").join("rebase-merge");
-    let rebase_apply_dir = repo.path().join(".git").join("rebase-apply");
+    let git_dir = resolve_git_dir(&repo);
+    let rebase_merge_dir = git_dir.join("rebase-merge");
+    let rebase_apply_dir = git_dir.join("rebase-apply");
 
     // Initially neither should exist
     assert!(!rebase_merge_dir.exists());
@@ -640,3 +653,31 @@ fn test_no_active_rebase_with_abort_first() {
 
     assert!(!has_active);
 }
+
+reuse_tests_in_worktree!(
+    test_pre_rebase_hook_starts_new_rebase,
+    test_pre_rebase_hook_continuing_rebase,
+    test_pre_rebase_hook_interactive_mode,
+    test_pre_rebase_hook_with_onto,
+    test_post_rebase_hook_still_in_progress,
+    test_post_rebase_hook_aborted,
+    test_post_rebase_hook_dry_run,
+    test_rebase_directory_detection,
+    test_rebase_event_sequence_start_complete,
+    test_rebase_event_sequence_start_abort,
+    test_rebase_start_event_creation,
+    test_rebase_complete_event_creation,
+    test_rebase_abort_event_creation,
+    test_rebase_continue_mode,
+    test_rebase_abort_mode,
+    test_rebase_skip_mode,
+    test_rebase_quit_mode,
+    test_rebase_root_flag,
+    test_rebase_onto_with_equals,
+    test_rebase_onto_separate_arg,
+    test_rebase_interactive_short_flag,
+    test_rebase_interactive_long_flag,
+    test_active_rebase_with_start_event,
+    test_no_active_rebase_with_complete_first,
+    test_no_active_rebase_with_abort_first,
+);

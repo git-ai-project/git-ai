@@ -1450,3 +1450,37 @@ cat {} > "$1"
         "function feature3() {}".ai()
     ]);
 }
+
+reuse_tests_in_worktree!(
+    test_rebase_no_conflicts_identical_trees,
+    test_rebase_with_different_trees,
+    test_rebase_multiple_commits,
+    test_rebase_mixed_authorship,
+    test_rebase_preserves_exact_mixed_line_attribution_in_single_file,
+    test_rebase_with_human_only_commit_between_ai_commits_preserves_exact_lines,
+    test_rebase_preserves_human_only_commit_note_metadata,
+    test_rebase_preserves_prompt_only_commit_note_metadata,
+    test_rebase_fast_forward,
+    test_rebase_with_explicit_branch_argument_preserves_authorship,
+    test_rebase_root_with_explicit_branch_argument_preserves_authorship,
+    test_rebase_interactive_reorder,
+    test_rebase_skip,
+    test_rebase_keep_empty,
+    test_rebase_rerere,
+    test_rebase_patch_stack,
+    test_rebase_already_up_to_date,
+    test_rebase_with_conflicts,
+    test_rebase_abort,
+    test_rebase_branch_switch_during,
+    test_rebase_autosquash,
+    test_rebase_autostash,
+    test_rebase_exec,
+    test_rebase_preserve_merges,
+    test_rebase_commit_splitting,
+);
+
+reuse_tests_in_worktree_with_attrs!(
+    (#[cfg(not(target_os = "windows"))])
+    test_rebase_squash_preserves_all_authorship,
+    test_rebase_reword_commit_with_children,
+);

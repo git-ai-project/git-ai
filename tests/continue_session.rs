@@ -913,3 +913,23 @@ fn test_continue_empty_transcript() {
         "Output should still have preamble"
     );
 }
+
+reuse_tests_in_worktree!(
+    test_continue_by_commit_outputs_context,
+    test_continue_by_file_outputs_context,
+    test_continue_by_prompt_id,
+    test_continue_context_preamble,
+    test_continue_context_ends_with_invitation,
+    test_continue_context_includes_source_info,
+    test_continue_excludes_tool_use_messages,
+    test_continue_includes_user_and_assistant,
+    test_continue_max_messages_truncation,
+    test_continue_truncation_notice,
+    test_continue_json_output,
+    test_continue_json_schema,
+    test_continue_no_results,
+    test_continue_redacts_secrets,
+    test_continue_redacts_before_format,
+    test_continue_unicode_content,
+    test_continue_empty_transcript,
+);

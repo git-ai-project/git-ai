@@ -538,3 +538,26 @@ fn test_merge_squash_detached_head() {
     // Should handle detached HEAD gracefully
     post_merge_hook(&parsed_args, exit_status, &mut repository);
 }
+
+reuse_tests_in_worktree!(
+    test_post_merge_hook_squash_success,
+    test_post_merge_hook_squash_failed,
+    test_post_merge_hook_normal_merge,
+    test_post_merge_hook_dry_run,
+    test_post_merge_hook_invalid_branch,
+    test_merge_squash_event_creation,
+    test_merge_squash_event_variant,
+    test_squash_flag_detection,
+    test_dry_run_flag_detection,
+    test_no_squash_flag,
+    test_parse_branch_name,
+    test_parse_branch_name_with_remote,
+    test_parse_branch_name_missing,
+    test_resolve_current_head,
+    test_resolve_branch_head,
+    test_merge_squash_full_flow,
+    test_merge_squash_with_commit,
+    test_merge_author_from_config,
+    test_merge_squash_empty_branch,
+    test_merge_squash_detached_head,
+);

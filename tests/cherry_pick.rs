@@ -572,3 +572,16 @@ fn test_cherry_pick_empty_commits() {
         "File content should be preserved after cherry-pick/abort"
     );
 }
+
+reuse_tests_in_worktree!(
+    test_single_commit_cherry_pick,
+    test_cherry_pick_preserves_human_only_commit_note_metadata,
+    test_cherry_pick_preserves_prompt_only_commit_note_metadata,
+    test_multiple_commits_cherry_pick,
+    test_cherry_pick_with_conflict_and_continue,
+    test_cherry_pick_abort,
+    test_cherry_pick_no_ai_authorship,
+    test_cherry_pick_multiple_ai_sessions,
+    test_cherry_pick_identical_trees,
+    test_cherry_pick_empty_commits,
+);

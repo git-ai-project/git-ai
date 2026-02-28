@@ -569,6 +569,47 @@ pub fn clean_path(path: PathBuf) -> PathBuf {
     path
 }
 
+/// Convert a Windows path to a forward-slash path suitable for native Windows apps.
+/// e.g. `C:\Users\Administrator\.git-ai\bin\git.exe` → `C:/Users/Administrator/.git-ai/bin/git.exe`
+/// Also strips the `\\?\` extended-length prefix if present (via `clean_path`).
+/// This is needed because native GUI apps like Fork and Sublime Merge store paths
+/// with forward slashes in their JSON settings files.
+/// Non-Windows paths are returned unchanged.
+pub fn to_windows_git_bash_style_path(path: &Path) -> String {
+    clean_path(path.to_path_buf())
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+/// Convert a Windows path to git bash (MSYS/MinGW) style path.
+/// e.g. `C:\Users\Administrator\.git-ai\bin\git-ai.exe` → `/c/Users/Administrator/.git-ai/bin/git-ai.exe`
+/// This is needed because Claude Code runs hooks in git bash shell on Windows.
+/// Non-Windows paths (or paths that don't match `X:\...` pattern) are returned unchanged.
+pub fn to_git_bash_path(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    // Match a Windows absolute path like "C:\..." or "D:\..."
+    let bytes = s.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+    {
+        let drive_letter = (bytes[0] as char).to_ascii_lowercase();
+        let rest = &s[2..]; // skip "C:"
+        let rest_unix = rest.replace('\\', "/");
+        return format!("/{}{}", drive_letter, rest_unix);
+    }
+    // Also handle the case where the path has no separator after the drive letter (e.g. C:foo)
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        let drive_letter = (bytes[0] as char).to_ascii_lowercase();
+        let rest = &s[2..];
+        let rest_unix = rest.replace('\\', "/");
+        return format!("/{}/{}", drive_letter, rest_unix);
+    }
+    // For non-Windows paths, just return as-is
+    s.into_owned()
+}
+
 /// Get the absolute path to the currently running binary
 pub fn get_current_binary_path() -> Result<PathBuf, GitAiError> {
     let path = std::env::current_exe()?;
@@ -1317,6 +1358,59 @@ mod tests {
     }
 
     #[test]
+    fn test_to_git_bash_path_converts_windows_path() {
+        let path = PathBuf::from(r"C:\Users\Administrator\.git-ai\bin\git-ai.exe");
+        let result = to_git_bash_path(&path);
+        assert_eq!(
+            result, "/c/Users/Administrator/.git-ai/bin/git-ai.exe",
+            "should convert Windows path to git bash format"
+        );
+    }
+
+    #[test]
+    fn test_to_git_bash_path_converts_different_drive_letter() {
+        let path = PathBuf::from(r"D:\Projects\code\app.exe");
+        let result = to_git_bash_path(&path);
+        assert_eq!(
+            result, "/d/Projects/code/app.exe",
+            "should convert D: drive path to git bash format"
+        );
+    }
+
+    #[test]
+    fn test_to_git_bash_path_preserves_unix_path() {
+        let path = PathBuf::from("/usr/local/bin/git-ai");
+        let result = to_git_bash_path(&path);
+        assert_eq!(
+            result, "/usr/local/bin/git-ai",
+            "should preserve unix paths unchanged"
+        );
+    }
+
+    #[test]
+    fn test_to_git_bash_path_handles_extended_prefix_after_clean() {
+        // After clean_path strips \\?\ prefix, the path looks like C:\...
+        let raw = PathBuf::from(r"\\?\C:\Users\USERNAME\.git-ai\bin\git-ai.exe");
+        let cleaned = clean_path(raw);
+        let result = to_git_bash_path(&cleaned);
+        assert_eq!(
+            result, "/c/Users/USERNAME/.git-ai/bin/git-ai.exe",
+            "should convert cleaned Windows path to git bash format"
+        );
+    }
+
+    #[test]
+    fn test_to_git_bash_path_handles_drive_relative_path() {
+        // Drive-relative path like C:foo (no separator after colon)
+        let path = PathBuf::from("C:foo");
+        let result = to_git_bash_path(&path);
+        assert_eq!(
+            result, "/c/foo",
+            "should insert separator between drive letter and relative path"
+        );
+    }
+
+    #[test]
     fn test_clean_path_strips_windows_prefix() {
         let path = PathBuf::from(r"\\?\C:\Users\test\.git-ai\bin\git-ai.exe");
         let cleaned = clean_path(path);
@@ -1345,5 +1439,19 @@ mod tests {
         let path = PathBuf::from("/usr/local/bin/git-ai");
         let cleaned = clean_path(path.clone());
         assert_eq!(cleaned, path);
+    }
+
+    #[test]
+    fn test_to_windows_git_bash_style_path_converts_backslashes() {
+        let path = PathBuf::from(r"C:\Users\Administrator\.git-ai\bin\git.exe");
+        let result = to_windows_git_bash_style_path(&path);
+        assert_eq!(result, "C:/Users/Administrator/.git-ai/bin/git.exe");
+    }
+
+    #[test]
+    fn test_to_windows_git_bash_style_path_preserves_unix_path() {
+        let path = PathBuf::from("/usr/local/bin/git");
+        let result = to_windows_git_bash_style_path(&path);
+        assert_eq!(result, "/usr/local/bin/git");
     }
 }

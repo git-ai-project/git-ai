@@ -265,3 +265,5 @@ fn test_blame_after_merge_conflict_resolution() {
         "Line 10".human(),
     ]);
 }
+
+reuse_tests_in_worktree!(test_blame_after_merge_conflict_resolution,);

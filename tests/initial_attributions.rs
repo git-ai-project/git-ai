@@ -448,3 +448,11 @@ fn test_initial_attributions_in_subsequent_checkpoint() {
 
     assert_debug_snapshot!(normalized_b);
 }
+
+reuse_tests_in_worktree!(
+    test_initial_only_no_blame_data,
+    test_initial_wins_overlaps,
+    test_initial_and_blame_merge,
+    test_partial_file_coverage,
+    test_initial_attributions_in_subsequent_checkpoint,
+);

@@ -1,3 +1,4 @@
+#[macro_use]
 mod repos;
 
 use repos::test_repo::TestRepo;
@@ -42,15 +43,33 @@ fn set_executable(path: &Path) {
     fs::set_permissions(path, perms).expect("failed to set executable bit");
 }
 
+fn git_dir(repo: &TestRepo) -> PathBuf {
+    PathBuf::from(
+        repo.git(&["rev-parse", "--absolute-git-dir"])
+            .expect("failed to resolve git dir")
+            .trim(),
+    )
+}
+
+fn git_common_dir(repo: &TestRepo) -> PathBuf {
+    let common_dir = PathBuf::from(
+        repo.git(&["rev-parse", "--git-common-dir"])
+            .expect("failed to resolve git common dir")
+            .trim(),
+    );
+    if common_dir.is_absolute() {
+        common_dir
+    } else {
+        repo.path().join(common_dir)
+    }
+}
+
 fn managed_hooks_dir(repo: &TestRepo) -> PathBuf {
-    repo.path().join(".git").join("ai").join("hooks")
+    git_common_dir(repo).join("ai").join("hooks")
 }
 
 fn hook_state_path(repo: &TestRepo) -> PathBuf {
-    repo.path()
-        .join(".git")
-        .join("ai")
-        .join("git_hooks_state.json")
+    git_common_dir(repo).join("ai").join("git_hooks_state.json")
 }
 
 fn configure_forward_target(repo: &TestRepo, forward_dir: &Path) {
@@ -95,7 +114,7 @@ fn hooks_mode_forwards_non_managed_commit_msg_hook() {
     let forward_dir = repo.path().join(".husky");
     fs::create_dir_all(&forward_dir).expect("failed to create forward dir");
 
-    let marker_path = repo.path().join(".git").join("commit-msg-marker.txt");
+    let marker_path = git_dir(&repo).join("commit-msg-marker.txt");
     let commit_msg_hook = forward_dir.join("commit-msg");
     fs::write(&commit_msg_hook, commit_msg_marker_script(&marker_path))
         .expect("failed to write commit-msg hook");
@@ -136,10 +155,10 @@ fn hooks_mode_commit_msg_receives_message_file_arg() {
 
     let repo = TestRepo::new();
 
-    let forward_dir = repo.path().join(".git").join("arg-hooks");
+    let forward_dir = git_dir(&repo).join("arg-hooks");
     fs::create_dir_all(&forward_dir).expect("failed to create forward dir");
 
-    let marker_path = repo.path().join(".git").join("arg-marker.txt");
+    let marker_path = git_dir(&repo).join("arg-marker.txt");
     let commit_msg_hook = forward_dir.join("commit-msg");
     fs::write(
         &commit_msg_hook,
@@ -178,7 +197,7 @@ fn hooks_mode_commit_msg_failure_propagates() {
 
     let repo = TestRepo::new();
 
-    let forward_dir = repo.path().join(".git").join("failing-hooks");
+    let forward_dir = git_dir(&repo).join("failing-hooks");
     fs::create_dir_all(&forward_dir).expect("failed to create forward dir");
 
     let commit_msg_hook = forward_dir.join("commit-msg");
@@ -208,7 +227,7 @@ fn hooks_mode_non_managed_hooks_not_provisioned_without_original() {
 
     let repo = TestRepo::new();
 
-    let forward_dir = repo.path().join(".git").join("empty-forward");
+    let forward_dir = git_dir(&repo).join("empty-forward");
     fs::create_dir_all(&forward_dir).expect("failed to create forward dir");
 
     configure_forward_target(&repo, &forward_dir);
@@ -237,7 +256,7 @@ fn hooks_mode_ensure_picks_up_new_hook_in_forward_dir() {
 
     let repo = TestRepo::new();
 
-    let forward_dir = repo.path().join(".git").join("dynamic-forward");
+    let forward_dir = git_dir(&repo).join("dynamic-forward");
     fs::create_dir_all(&forward_dir).expect("failed to create forward dir");
 
     configure_forward_target(&repo, &forward_dir);
@@ -273,7 +292,7 @@ fn hooks_mode_ensure_removes_stale_symlink() {
 
     let repo = TestRepo::new();
 
-    let forward_dir = repo.path().join(".git").join("stale-forward");
+    let forward_dir = git_dir(&repo).join("stale-forward");
     fs::create_dir_all(&forward_dir).expect("failed to create forward dir");
 
     let commit_msg_hook = forward_dir.join("commit-msg");
@@ -318,7 +337,7 @@ fn hooks_mode_husky_style_dirname_resolution() {
     fs::write(internal.join("husky.sh"), "#!/bin/sh\n").expect("failed to write husky.sh");
     set_executable(&internal.join("husky.sh"));
 
-    let marker_path = repo.path().join(".git").join("husky-marker.txt");
+    let marker_path = git_dir(&repo).join("husky-marker.txt");
     let commit_msg_hook = husky_dir.join("commit-msg");
     fs::write(
         &commit_msg_hook,
@@ -363,7 +382,7 @@ fn hooks_mode_directory_in_forward_dir_ignored() {
 
     let repo = TestRepo::new();
 
-    let forward_dir = repo.path().join(".git").join("dir-forward");
+    let forward_dir = git_dir(&repo).join("dir-forward");
     fs::create_dir_all(&forward_dir).expect("failed to create forward dir");
     fs::create_dir_all(forward_dir.join("commit-msg")).expect("failed to create hook directory");
 
@@ -390,10 +409,10 @@ fn hooks_mode_non_executable_forwarded_hook_skipped() {
 
     let repo = TestRepo::new();
 
-    let forward_dir = repo.path().join(".git").join("noexec-forward");
+    let forward_dir = git_dir(&repo).join("noexec-forward");
     fs::create_dir_all(&forward_dir).expect("failed to create forward dir");
 
-    let marker_path = repo.path().join(".git").join("noexec-marker.txt");
+    let marker_path = git_dir(&repo).join("noexec-marker.txt");
     let commit_msg_hook = forward_dir.join("commit-msg");
     fs::write(
         &commit_msg_hook,
@@ -429,10 +448,10 @@ fn both_mode_non_managed_hook_runs_exactly_once() {
 
     let repo = TestRepo::new();
 
-    let forward_dir = repo.path().join(".git").join("both-forward");
+    let forward_dir = git_dir(&repo).join("both-forward");
     fs::create_dir_all(&forward_dir).expect("failed to create forward dir");
 
-    let marker_path = repo.path().join(".git").join("both-marker.txt");
+    let marker_path = git_dir(&repo).join("both-marker.txt");
     let commit_msg_hook = forward_dir.join("commit-msg");
     fs::write(&commit_msg_hook, commit_msg_marker_script(&marker_path))
         .expect("failed to write commit-msg hook");
@@ -469,7 +488,7 @@ fn hooks_mode_non_managed_symlinks_point_to_git_ai_binary() {
 
     let repo = TestRepo::new();
 
-    let forward_dir = repo.path().join(".git").join("binary-target");
+    let forward_dir = git_dir(&repo).join("binary-target");
     fs::create_dir_all(&forward_dir).expect("failed to create forward dir");
 
     let commit_msg_hook = forward_dir.join("commit-msg");
@@ -509,7 +528,7 @@ fn hooks_mode_state_file_records_forward_target() {
 
     let repo = TestRepo::new();
 
-    let forward_dir = repo.path().join(".git").join("state-forward");
+    let forward_dir = git_dir(&repo).join("state-forward");
     fs::create_dir_all(&forward_dir).expect("failed to create forward dir");
 
     configure_forward_target(&repo, &forward_dir);
@@ -569,7 +588,7 @@ fn hooks_mode_managed_hooks_still_produce_authorship_with_forwarding() {
 
     let repo = TestRepo::new();
 
-    let forward_dir = repo.path().join(".git").join("authorship-forward");
+    let forward_dir = git_dir(&repo).join("authorship-forward");
     fs::create_dir_all(&forward_dir).expect("failed to create forward dir");
 
     let commit_msg_hook = forward_dir.join("commit-msg");
@@ -609,3 +628,26 @@ fn wrapper_mode_does_not_install_hook_symlinks() {
         "managed hooks dir should not exist in wrapper-only mode"
     );
 }
+
+reuse_tests_in_worktree_with_attrs!(
+    (#[cfg(unix)] #[serial_test::serial])
+    hooks_mode_forwards_non_managed_commit_msg_hook,
+    hooks_mode_commit_msg_receives_message_file_arg,
+    hooks_mode_commit_msg_failure_propagates,
+    hooks_mode_non_managed_hooks_not_provisioned_without_original,
+    hooks_mode_ensure_picks_up_new_hook_in_forward_dir,
+    hooks_mode_ensure_removes_stale_symlink,
+    hooks_mode_husky_style_dirname_resolution,
+    hooks_mode_directory_in_forward_dir_ignored,
+    hooks_mode_non_executable_forwarded_hook_skipped,
+    both_mode_non_managed_hook_runs_exactly_once,
+    hooks_mode_non_managed_symlinks_point_to_git_ai_binary,
+    hooks_mode_state_file_records_forward_target,
+    hooks_mode_managed_hooks_always_installed,
+    hooks_mode_managed_hooks_still_produce_authorship_with_forwarding,
+);
+
+reuse_tests_in_worktree_with_attrs!(
+    (#[serial_test::serial])
+    wrapper_mode_does_not_install_hook_symlinks,
+);

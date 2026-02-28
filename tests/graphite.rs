@@ -208,13 +208,24 @@ fn gt(repo: &TestRepo, args: &[&str]) -> Result<String, String> {
     command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
     command.env("GIT_AI_TEST_DB_PATH", repo.test_db_path().to_str().unwrap());
 
-    // Isolate Graphite's config directory per test to prevent parallel test
-    // corruption of ~/.config/graphite/user_config (race condition in CI).
+    // Isolate Graphite's config and data directories per test to prevent
+    // parallel test corruption of config files and the nuxes SQLite database
+    // (race condition in CI).
     command.env("XDG_CONFIG_HOME", repo.test_home_path().join(".config"));
-    // Windows equivalent for Graphite config isolation
+    command.env(
+        "XDG_DATA_HOME",
+        repo.test_home_path().join(".local").join("share"),
+    );
+    // Windows equivalents for Graphite config and data isolation.
+    // USERPROFILE is read by Node.js os.homedir() on Windows (not HOME).
+    command.env("USERPROFILE", repo.test_home_path());
     command.env(
         "LOCALAPPDATA",
         repo.test_home_path().join("AppData").join("Local"),
+    );
+    command.env(
+        "APPDATA",
+        repo.test_home_path().join("AppData").join("Roaming"),
     );
 
     let output = command

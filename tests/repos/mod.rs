@@ -11,6 +11,14 @@ macro_rules! subdir_test_variants {
             #[test]
             fn [<test_ $test_name _from_subdir>]() $body
 
+            // Variant 1b: Run from subdirectory with a worktree-backed repo
+            #[test]
+            fn [<test_ $test_name _from_subdir_in_worktree>]() {
+                $crate::repos::test_repo::with_worktree_mode(|| {
+                    [<test_ $test_name _from_subdir>]();
+                });
+            }
+
             // Variant 2: Run with -C flag from arbitrary directory
             #[test]
             fn [<test_ $test_name _with_c_flag>]() {
@@ -52,7 +60,7 @@ macro_rules! subdir_test_variants {
                         let mut command = if uses_wrapper {
                             Command::new(binary_path)
                         } else {
-                            Command::new("git")
+                            Command::new($crate::repos::test_repo::real_git_executable())
                         };
                         command.current_dir(&arbitrary_dir);
                         command.args(&full_args);
@@ -65,6 +73,7 @@ macro_rules! subdir_test_variants {
                                 "GIT_CONFIG_GLOBAL",
                                 self.inner.test_home_path().join(".gitconfig"),
                             );
+                            command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
                         }
 
                         // Add config patch if present
@@ -76,6 +85,7 @@ macro_rules! subdir_test_variants {
 
                         // Add test database path for isolation
                         command.env("GIT_AI_TEST_DB_PATH", self.inner.test_db_path().to_str().unwrap());
+                        command.env("GITAI_TEST_DB_PATH", self.inner.test_db_path().to_str().unwrap());
 
                         let output = command.output().expect(&format!(
                             "Failed to execute git command with -C flag: {:?}", args
@@ -120,7 +130,7 @@ macro_rules! subdir_test_variants {
                             let mut command = if uses_wrapper {
                                 Command::new(binary_path)
                             } else {
-                                Command::new("git")
+                                Command::new($crate::repos::test_repo::real_git_executable())
                             };
                             command.current_dir(&arbitrary_dir);
                             command.args(&full_args);
@@ -133,6 +143,7 @@ macro_rules! subdir_test_variants {
                                     "GIT_CONFIG_GLOBAL",
                                     self.inner.test_home_path().join(".gitconfig"),
                                 );
+                                command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
                             }
 
                             if let Some(patch) = &self.inner.config_patch {
@@ -143,6 +154,7 @@ macro_rules! subdir_test_variants {
 
                             // Add test database path for isolation
                             command.env("GIT_AI_TEST_DB_PATH", self.inner.test_db_path().to_str().unwrap());
+                            command.env("GITAI_TEST_DB_PATH", self.inner.test_db_path().to_str().unwrap());
 
                             // Apply custom env vars
                             for (key, value) in envs {
@@ -179,6 +191,197 @@ macro_rules! subdir_test_variants {
                 // Type alias to shadow TestRepo
                 type TestRepo = TestRepoWithCFlag;
                 $body
+            }
+
+            // Variant 2b: Run with -C flag from arbitrary directory in worktree mode
+            #[test]
+            fn [<test_ $test_name _with_c_flag_in_worktree>]() {
+                $crate::repos::test_repo::with_worktree_mode(|| {
+                    [<test_ $test_name _with_c_flag>]();
+                });
+            }
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! worktree_test_wrappers {
+    (
+        fn $test_name:ident() $body:block
+    ) => {
+        paste::paste! {
+            #[test]
+            fn [<test_ $test_name _in_worktree_wrapper_mode>]() {
+                struct WorktreeTestRepo {
+                    inner: $crate::repos::test_repo::TestRepo,
+                }
+
+                #[allow(dead_code)]
+                impl WorktreeTestRepo {
+                    fn new() -> Self {
+                        Self {
+                            inner: $crate::repos::test_repo::TestRepo::new_worktree_with_mode(
+                                $crate::repos::test_repo::GitTestMode::Wrapper,
+                            ),
+                        }
+                    }
+
+                    fn new_with_remote() -> (Self, Self) {
+                        let (local, upstream) =
+                            $crate::repos::test_repo::TestRepo::new_with_remote_with_mode(
+                                $crate::repos::test_repo::GitTestMode::Wrapper,
+                            );
+                        (
+                            Self { inner: local },
+                            Self { inner: upstream },
+                        )
+                    }
+
+                    fn git_mode() -> $crate::repos::test_repo::GitTestMode {
+                        $crate::repos::test_repo::GitTestMode::Wrapper
+                    }
+                }
+
+                impl std::ops::Deref for WorktreeTestRepo {
+                    type Target = $crate::repos::test_repo::TestRepo;
+                    fn deref(&self) -> &Self::Target {
+                        &self.inner
+                    }
+                }
+
+                type TestRepo = WorktreeTestRepo;
+                $body
+            }
+
+            #[test]
+            fn [<test_ $test_name _in_worktree_hooks_mode>]() {
+                struct WorktreeTestRepo {
+                    inner: $crate::repos::test_repo::TestRepo,
+                }
+
+                #[allow(dead_code)]
+                impl WorktreeTestRepo {
+                    fn new() -> Self {
+                        Self {
+                            inner: $crate::repos::test_repo::TestRepo::new_worktree_with_mode(
+                                $crate::repos::test_repo::GitTestMode::Hooks,
+                            ),
+                        }
+                    }
+
+                    fn new_with_remote() -> (Self, Self) {
+                        let (local, upstream) =
+                            $crate::repos::test_repo::TestRepo::new_with_remote_with_mode(
+                                $crate::repos::test_repo::GitTestMode::Hooks,
+                            );
+                        (
+                            Self { inner: local },
+                            Self { inner: upstream },
+                        )
+                    }
+
+                    fn git_mode() -> $crate::repos::test_repo::GitTestMode {
+                        $crate::repos::test_repo::GitTestMode::Hooks
+                    }
+                }
+
+                impl std::ops::Deref for WorktreeTestRepo {
+                    type Target = $crate::repos::test_repo::TestRepo;
+                    fn deref(&self) -> &Self::Target {
+                        &self.inner
+                    }
+                }
+
+                type TestRepo = WorktreeTestRepo;
+                $body
+            }
+
+            #[test]
+            fn [<test_ $test_name _in_worktree_both_mode>]() {
+                struct WorktreeTestRepo {
+                    inner: $crate::repos::test_repo::TestRepo,
+                }
+
+                #[allow(dead_code)]
+                impl WorktreeTestRepo {
+                    fn new() -> Self {
+                        Self {
+                            inner: $crate::repos::test_repo::TestRepo::new_worktree_with_mode(
+                                $crate::repos::test_repo::GitTestMode::Both,
+                            ),
+                        }
+                    }
+
+                    fn new_with_remote() -> (Self, Self) {
+                        let (local, upstream) =
+                            $crate::repos::test_repo::TestRepo::new_with_remote_with_mode(
+                                $crate::repos::test_repo::GitTestMode::Both,
+                            );
+                        (
+                            Self { inner: local },
+                            Self { inner: upstream },
+                        )
+                    }
+
+                    fn git_mode() -> $crate::repos::test_repo::GitTestMode {
+                        $crate::repos::test_repo::GitTestMode::Both
+                    }
+                }
+
+                impl std::ops::Deref for WorktreeTestRepo {
+                    type Target = $crate::repos::test_repo::TestRepo;
+                    fn deref(&self) -> &Self::Target {
+                        &self.inner
+                    }
+                }
+
+                type TestRepo = WorktreeTestRepo;
+                $body
+            }
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! reuse_tests_in_worktree {
+    (
+        $( $test_name:ident ),+ $(,)?
+    ) => {
+        paste::paste! {
+            $(
+                #[test]
+                fn [<$test_name _in_worktree>]() {
+                    $crate::repos::test_repo::with_worktree_mode(|| {
+                        $test_name();
+                    })
+                }
+            )+
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! reuse_tests_in_worktree_with_attrs {
+    (
+        ($($attrs:tt)*)
+        $test_name:ident
+        $(, $rest:ident)* $(,)?
+    ) => {
+        $crate::reuse_tests_in_worktree_with_attrs!(@one ($($attrs)*) $test_name);
+        $crate::reuse_tests_in_worktree_with_attrs!(($($attrs)*) $($rest),*);
+    };
+    (
+        ($($attrs:tt)*)
+    ) => {
+    };
+    (@one ($($attrs:tt)*) $test_name:ident) => {
+        paste::paste! {
+            $($attrs)*
+            #[test]
+            fn [<$test_name _in_worktree>]() {
+                $crate::repos::test_repo::with_worktree_mode(|| {
+                    $test_name();
+                })
             }
         }
     };

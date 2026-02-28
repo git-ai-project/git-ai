@@ -22,7 +22,7 @@ pub struct InitialAttributions {
 
 #[derive(Debug, Clone)]
 pub struct RepoStorage {
-    pub repo_path: PathBuf,
+    pub ai_dir: PathBuf,
     pub repo_workdir: PathBuf,
     pub working_logs: PathBuf,
     pub rewrite_log: PathBuf,
@@ -31,13 +31,20 @@ pub struct RepoStorage {
 
 impl RepoStorage {
     pub fn for_repo_path(repo_path: &Path, repo_workdir: &Path) -> RepoStorage {
-        let ai_dir = repo_path.join("ai");
+        Self::for_ai_dir(&repo_path.join("ai"), repo_workdir)
+    }
+
+    pub fn for_isolated_worktree_storage(ai_dir: &Path, repo_workdir: &Path) -> RepoStorage {
+        Self::for_ai_dir(ai_dir, repo_workdir)
+    }
+
+    fn for_ai_dir(ai_dir: &Path, repo_workdir: &Path) -> RepoStorage {
         let working_logs_dir = ai_dir.join("working_logs");
         let rewrite_log_file = ai_dir.join("rewrite_log");
         let logs_dir = ai_dir.join("logs");
 
         let config = RepoStorage {
-            repo_path: repo_path.to_path_buf(),
+            ai_dir: ai_dir.to_path_buf(),
             repo_workdir: repo_workdir.to_path_buf(),
             working_logs: working_logs_dir,
             rewrite_log: rewrite_log_file,
@@ -49,9 +56,7 @@ impl RepoStorage {
     }
 
     fn ensure_config_directory(&self) -> Result<(), GitAiError> {
-        let ai_dir = self.repo_path.join("ai");
-
-        fs::create_dir_all(ai_dir)?;
+        fs::create_dir_all(&self.ai_dir)?;
 
         // Create working_logs directory
         fs::create_dir_all(&self.working_logs)?;

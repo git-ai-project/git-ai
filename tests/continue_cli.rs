@@ -765,3 +765,27 @@ fn test_continue_cli_e2e_preserves_model_on_commit() {
     );
     assert_eq!(prompt_record.agent_id.tool, "continue-cli");
 }
+
+reuse_tests_in_worktree!(
+    test_parse_example_continue_cli_json,
+    test_continue_cli_parses_user_messages,
+    test_continue_cli_parses_assistant_messages,
+    test_continue_cli_parses_tool_calls,
+    test_continue_cli_parses_tool_call_args,
+    test_continue_cli_handles_empty_content,
+    test_continue_cli_preset_extracts_model_from_hook_input,
+    test_continue_cli_preset_defaults_to_unknown_model,
+    test_continue_cli_preset_extracts_edited_filepath,
+    test_continue_cli_preset_no_filepath_when_tool_input_missing,
+    test_continue_cli_preset_human_checkpoint,
+    test_continue_cli_preset_ai_checkpoint,
+    test_continue_cli_preset_stores_transcript_path_in_metadata,
+    test_continue_cli_preset_handles_missing_transcript_path,
+    test_continue_cli_preset_handles_invalid_json,
+    test_continue_cli_preset_handles_missing_session_id,
+    test_continue_cli_preset_handles_missing_file,
+    test_continue_cli_e2e_with_attribution,
+    test_continue_cli_e2e_human_checkpoint,
+    test_continue_cli_e2e_multiple_tool_calls,
+    test_continue_cli_e2e_preserves_model_on_commit,
+);

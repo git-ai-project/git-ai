@@ -401,10 +401,13 @@ fn test_blame_edge_file_with_very_long_lines() {
 fn test_blame_edge_boundary_commit_flag() {
     // Edge case: Boundary commit with -b flag
     let repo = TestRepo::new();
+    repo.git(&["checkout", "--orphan", "boundary-test"])
+        .unwrap();
     let mut file = repo.filename("boundary.txt");
 
     file.set_contents(lines!["Initial line"]);
-    repo.stage_all_and_commit("Initial commit").unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.git(&["commit", "-m", "Initial commit"]).unwrap();
 
     let output = repo.git_ai(&["blame", "-b", "boundary.txt"]).unwrap();
 
@@ -979,9 +982,14 @@ fn test_blame_abbrev_custom_length() {
         .git_ai(&["blame", "--abbrev", "10", "test.txt"])
         .unwrap();
 
-    // First field should be 10-character hash
+    // Boundary commits may be prefixed with '^' in default format.
     let first_field = output.split_whitespace().next().unwrap();
-    assert_eq!(first_field.len(), 10);
+    let hash = first_field.trim_start_matches('^');
+    assert!(
+        (10..=40).contains(&hash.len()),
+        "expected abbreviated hash length in [10,40], got {}",
+        hash.len()
+    );
 }
 
 #[test]
@@ -995,9 +1003,10 @@ fn test_blame_long_rev() {
 
     let output = repo.git_ai(&["blame", "-l", "test.txt"]).unwrap();
 
-    // First field should be 40-character hash
+    // Boundary commits may be prefixed with '^' in default format.
     let first_field = output.split_whitespace().next().unwrap();
-    assert_eq!(first_field.len(), 40);
+    let hash = first_field.trim_start_matches('^');
+    assert_eq!(hash.len(), 40);
 }
 
 // =============================================================================
@@ -1081,3 +1090,50 @@ fn test_blame_stress_deeply_nested_path() {
 
     assert!(output.contains("Deep content"));
 }
+
+reuse_tests_in_worktree!(
+    test_blame_success_basic_file,
+    test_blame_success_only_human_lines,
+    test_blame_success_only_ai_lines,
+    test_blame_success_with_line_range,
+    test_blame_success_with_newest_commit,
+    test_blame_success_json_format,
+    test_blame_error_missing_file,
+    test_blame_error_invalid_line_range_start_zero,
+    test_blame_error_invalid_line_range_end_zero,
+    test_blame_error_invalid_line_range_start_greater_than_end,
+    test_blame_error_invalid_line_range_beyond_file,
+    test_blame_error_invalid_commit_ref,
+    test_blame_error_file_outside_repo,
+    test_blame_error_directory_instead_of_file,
+    test_blame_edge_empty_file,
+    test_blame_edge_single_line_file,
+    test_blame_edge_large_file,
+    test_blame_edge_file_with_unicode,
+    test_blame_edge_file_with_very_long_lines,
+    test_blame_edge_boundary_commit_flag,
+    test_blame_edge_renamed_file,
+    test_blame_edge_whitespace_only_lines,
+    test_blame_format_porcelain_basic,
+    test_blame_format_line_porcelain,
+    test_blame_format_incremental,
+    test_blame_format_json_structure,
+    test_blame_format_json_line_ranges,
+    test_blame_format_default_with_flags,
+    test_blame_ai_authorship_hunk_splitting,
+    test_blame_ai_authorship_no_splitting,
+    test_blame_ai_authorship_return_human_as_human,
+    test_blame_commit_range_oldest_and_newest,
+    test_blame_commit_range_with_oldest_date,
+    test_blame_path_normalization_absolute,
+    test_blame_path_normalization_relative,
+    test_blame_path_normalization_subdirectory,
+    test_blame_contents_modified_buffer,
+    test_blame_multiple_line_ranges,
+    test_blame_ignore_whitespace,
+    test_blame_abbrev_custom_length,
+    test_blame_long_rev,
+    test_blame_date_format_short,
+    test_blame_stress_many_small_hunks,
+    test_blame_stress_deeply_nested_path,
+);

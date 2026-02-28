@@ -1,5 +1,3 @@
-use regex::Regex;
-
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::rebase_authorship::rewrite_authorship_if_needed;
 use crate::config;
@@ -12,6 +10,7 @@ use crate::git::sync_authorship::{fetch_authorship_notes, push_authorship_notes}
 #[cfg(windows)]
 use crate::utils::is_interactive_terminal;
 
+use regex::Regex;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1103,6 +1102,7 @@ impl<'a> Iterator for References<'a> {
 pub struct Repository {
     global_args: Vec<String>,
     git_dir: PathBuf,
+    git_common_dir: PathBuf,
     pub storage: RepoStorage,
     pub pre_command_base_commit: Option<String>,
     pub pre_command_refname: Option<String>,
@@ -1213,6 +1213,12 @@ impl Repository {
         self.git_dir.as_path()
     }
 
+    /// Returns the common git directory shared by linked worktrees.
+    /// For non-worktree repositories, this is the same as `path()`.
+    pub fn common_dir(&self) -> &Path {
+        self.git_common_dir.as_path()
+    }
+
     // Get the path of the working directory for this repository.
     // If this repository is bare, then None is returned.
     pub fn workdir(&self) -> Result<PathBuf, GitAiError> {
@@ -1298,22 +1304,82 @@ impl Repository {
         Ok(remotes)
     }
 
-    /// Get the git config file for this repository and fallback to global config if not found.
-    fn get_git_config_file(&self) -> Result<gix_config::File<'static>, GitAiError> {
-        match gix_config::File::from_git_dir(self.path().to_path_buf()) {
-            Ok(git_config_file) => Ok(git_config_file),
-            Err(e) => match gix_config::File::from_globals() {
-                Ok(system_config) => Ok(system_config),
-                Err(_) => Err(GitAiError::GixError(e.to_string())),
-            },
+    fn load_optional_config_file(
+        path: &Path,
+        source: gix_config::Source,
+    ) -> Result<Option<gix_config::File<'static>>, GitAiError> {
+        if !path.exists() {
+            return Ok(None);
         }
+        gix_config::File::from_path_no_includes(path.to_path_buf(), source)
+            .map(Some)
+            .map_err(|e| GitAiError::GixError(e.to_string()))
     }
+
+    fn get_git_config_file(&self) -> Result<gix_config::File<'static>, GitAiError> {
+        let mut config =
+            gix_config::File::from_globals().map_err(|e| GitAiError::GixError(e.to_string()))?;
+
+        let home = dirs::home_dir();
+        let options = gix_config::file::init::Options {
+            includes: gix_config::file::includes::Options::follow(
+                gix_config::path::interpolate::Context {
+                    home_dir: home.as_deref(),
+                    ..Default::default()
+                },
+                gix_config::file::includes::conditional::Context {
+                    git_dir: Some(self.path()),
+                    branch_name: None,
+                },
+            ),
+            ..Default::default()
+        };
+
+        config
+            .resolve_includes(options)
+            .map_err(|e| GitAiError::GixError(e.to_string()))?;
+
+        let local_config_path = self.common_dir().join("config");
+        let local_config =
+            Self::load_optional_config_file(&local_config_path, gix_config::Source::Local)?;
+        let worktree_config_enabled = local_config
+            .as_ref()
+            .and_then(|cfg| cfg.boolean("extensions.worktreeConfig"))
+            .and_then(Result::ok)
+            .unwrap_or(false);
+
+        if let Some(mut local_config) = local_config {
+            local_config
+                .resolve_includes(options)
+                .map_err(|e| GitAiError::GixError(e.to_string()))?;
+            config.append(local_config);
+        }
+
+        if worktree_config_enabled {
+            let worktree_config_path = self.path().join("config.worktree");
+            if let Some(mut worktree_config) = Self::load_optional_config_file(
+                &worktree_config_path,
+                gix_config::Source::Worktree,
+            )? {
+                worktree_config
+                    .resolve_includes(options)
+                    .map_err(|e| GitAiError::GixError(e.to_string()))?;
+                config.append(worktree_config);
+            }
+        }
+
+        config.append(
+            gix_config::File::from_environment_overrides()
+                .map_err(|e| GitAiError::GixError(e.to_string()))?,
+        );
+
+        Ok(config)
+    }
+
     /// Get config value for a given key as a String.
     pub fn config_get_str(&self, key: &str) -> Result<Option<String>, GitAiError> {
-        match self.get_git_config_file() {
-            Ok(git_config_file) => Ok(git_config_file.string(key).map(|cow| cow.to_string())),
-            Err(e) => Err(e),
-        }
+        self.get_git_config_file()
+            .map(|cfg| cfg.string(key).map(|cow| cow.to_string()))
     }
 
     /// Get all config values matching a regex pattern.
@@ -1327,39 +1393,33 @@ impl Repository {
         &self,
         pattern: &str,
     ) -> Result<std::collections::HashMap<String, String>, GitAiError> {
-        match self.get_git_config_file() {
-            Ok(git_config_file) => {
-                let mut matches: HashMap<String, String> = HashMap::new();
+        let re = Regex::new(pattern)
+            .map_err(|e| GitAiError::Generic(format!("Invalid regex pattern: {}", e)))?;
 
-                let re = Regex::new(pattern)
-                    .map_err(|e| GitAiError::Generic(format!("Invalid regex pattern: {}", e)))?;
+        let config = self.get_git_config_file()?;
+        let mut matches: HashMap<String, String> = HashMap::new();
 
-                // iterate over all sections
-                for section in git_config_file.sections() {
-                    // Support subsections in the key
-                    let section_name = section.header().name().to_string().to_lowercase();
-                    let subsection = section.header().subsection_name();
+        for section in config.sections() {
+            let section_name = section.header().name().to_string().to_lowercase();
+            let subsection = section.header().subsection_name();
 
-                    for value_name in section.body().value_names() {
-                        let value_name_str = value_name.to_string().to_lowercase();
-                        let full_key = if let Some(sub) = subsection {
-                            format!("{}.{}.{}", section_name, sub, value_name_str)
-                        } else {
-                            format!("{}.{}", section_name, value_name_str)
-                        };
+            for value_name in section.body().value_names() {
+                let value_name_str = value_name.to_string().to_lowercase();
+                let full_key = if let Some(sub) = subsection {
+                    format!("{}.{}.{}", section_name, sub, value_name_str)
+                } else {
+                    format!("{}.{}", section_name, value_name_str)
+                };
 
-                        if re.is_match(&full_key)
-                            && let Some(value) =
-                                section.body().value(value_name).map(|c| c.to_string())
-                        {
-                            matches.insert(full_key, value);
-                        }
-                    }
+                if re.is_match(&full_key)
+                    && let Some(value) = section.body().value(value_name).map(|c| c.to_string())
+                {
+                    matches.insert(full_key, value);
                 }
-                Ok(matches)
             }
-            Err(e) => Err(e),
         }
+
+        Ok(matches)
     }
 
     /// Get the git version as a tuple (major, minor, patch).
@@ -2181,6 +2241,7 @@ pub fn find_repository(global_args: &[String]) -> Result<Repository, GitAiError>
     // string "absolute-git-dir" instead of the resolved path).
     rev_parse_args.push("--is-bare-repository".to_string());
     rev_parse_args.push("--git-dir".to_string());
+    rev_parse_args.push("--git-common-dir".to_string());
 
     let rev_parse_output = exec_git(&rev_parse_args)?;
     let rev_parse_stdout = String::from_utf8(rev_parse_output.stdout)?;
@@ -2208,17 +2269,31 @@ pub fn find_repository(global_args: &[String]) -> Result<Repository, GitAiError>
     let git_dir_str = lines.next().ok_or_else(|| {
         GitAiError::Generic("Missing --git-dir output from git rev-parse".to_string())
     })?;
+    let git_common_dir_str = lines.next().ok_or_else(|| {
+        GitAiError::Generic("Missing --git-common-dir output from git rev-parse".to_string())
+    })?;
     let command_base_dir = resolve_command_base_dir(global_args)?;
     let git_dir = if Path::new(git_dir_str).is_relative() {
         command_base_dir.join(git_dir_str)
     } else {
         PathBuf::from(git_dir_str)
     };
+    let git_common_dir = if Path::new(git_common_dir_str).is_relative() {
+        command_base_dir.join(git_common_dir_str)
+    } else {
+        PathBuf::from(git_common_dir_str)
+    };
 
     if !git_dir.is_dir() {
         return Err(GitAiError::Generic(format!(
             "Git directory does not exist: {}",
             git_dir.display()
+        )));
+    }
+    if !git_common_dir.is_dir() {
+        return Err(GitAiError::Generic(format!(
+            "Git common directory does not exist: {}",
+            git_common_dir.display()
         )));
     }
 
@@ -2272,10 +2347,18 @@ pub fn find_repository(global_args: &[String]) -> Result<Repository, GitAiError>
         ))
     })?;
 
+    let worktree_ai_dir = worktree_storage_ai_dir(&git_dir, &git_common_dir);
+    let storage = if worktree_ai_dir == git_dir.join("ai") {
+        RepoStorage::for_repo_path(&git_dir, &workdir)
+    } else {
+        RepoStorage::for_isolated_worktree_storage(&worktree_ai_dir, &workdir)
+    };
+
     Ok(Repository {
         global_args: normalized_global_args,
-        storage: RepoStorage::for_repo_path(&git_dir, &workdir),
+        storage,
         git_dir,
+        git_common_dir,
         pre_command_base_commit: None,
         pre_command_refname: None,
         pre_reset_target_commit: None,
@@ -2309,6 +2392,39 @@ fn resolve_command_base_dir(global_args: &[String]) -> Result<PathBuf, GitAiErro
     Ok(base)
 }
 
+fn worktree_storage_ai_dir(git_dir: &Path, git_common_dir: &Path) -> PathBuf {
+    let canonical_git_dir = git_dir
+        .canonicalize()
+        .unwrap_or_else(|_| git_dir.to_path_buf());
+    let canonical_common_dir = git_common_dir
+        .canonicalize()
+        .unwrap_or_else(|_| git_common_dir.to_path_buf());
+
+    if canonical_git_dir == canonical_common_dir {
+        return git_common_dir.join("ai");
+    }
+
+    let canonical_worktrees_root = canonical_common_dir.join("worktrees");
+    if let Ok(relative_worktree_path) = canonical_git_dir.strip_prefix(&canonical_worktrees_root)
+        && !relative_worktree_path.as_os_str().is_empty()
+    {
+        return git_common_dir
+            .join("ai")
+            .join("worktrees")
+            .join(relative_worktree_path);
+    }
+
+    let fallback_name = canonical_git_dir
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "default".to_string());
+    git_common_dir
+        .join("ai")
+        .join("worktrees")
+        .join(fallback_name)
+}
+
 #[allow(dead_code)]
 pub fn from_bare_repository(git_dir: &Path) -> Result<Repository, GitAiError> {
     let workdir = git_dir
@@ -2319,10 +2435,18 @@ pub fn from_bare_repository(git_dir: &Path) -> Result<Repository, GitAiError> {
 
     let canonical_workdir = workdir.canonicalize().unwrap_or_else(|_| workdir.clone());
 
+    let worktree_ai_dir = worktree_storage_ai_dir(git_dir, git_dir);
+    let storage = if worktree_ai_dir == git_dir.join("ai") {
+        RepoStorage::for_repo_path(git_dir, &workdir)
+    } else {
+        RepoStorage::for_isolated_worktree_storage(&worktree_ai_dir, &workdir)
+    };
+
     Ok(Repository {
         global_args,
-        storage: RepoStorage::for_repo_path(git_dir, &workdir),
+        storage,
         git_dir: git_dir.to_path_buf(),
+        git_common_dir: git_dir.to_path_buf(),
         pre_command_base_commit: None,
         pre_command_refname: None,
         pre_reset_target_commit: None,
@@ -2816,7 +2940,7 @@ fn parse_hunk_header(line: &str) -> Option<(Vec<u32>, bool)> {
 mod tests {
     use super::*;
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
 
     fn run_git(cwd: &Path, args: &[&str]) {
@@ -2833,6 +2957,22 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    fn run_git_stdout(cwd: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git command should run");
+        assert!(
+            output.status.success(),
+            "git {:?} failed:\nstdout: {}\nstderr: {}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
     #[test]
@@ -3175,6 +3315,64 @@ index 0000000..abc1234 100644
     }
 
     #[test]
+    fn worktree_storage_ai_dir_keeps_full_relative_worktree_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let common_dir = temp.path().join("repo.git");
+        let linked_git_dir = common_dir.join("worktrees").join("feature").join("nested");
+
+        fs::create_dir_all(&linked_git_dir).expect("create linked git dir");
+
+        let ai_dir = worktree_storage_ai_dir(&linked_git_dir, &common_dir);
+        assert_eq!(
+            ai_dir,
+            common_dir
+                .join("ai")
+                .join("worktrees")
+                .join("feature")
+                .join("nested")
+        );
+    }
+
+    #[test]
+    fn worktree_storage_ai_dir_fallback_uses_git_dir_leaf_name() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let common_dir = temp.path().join("repo.git");
+        let detached_git_dir = temp.path().join("somewhere").join("linked-worktree");
+
+        fs::create_dir_all(&common_dir).expect("create common dir");
+        fs::create_dir_all(&detached_git_dir).expect("create detached git dir");
+
+        let ai_dir = worktree_storage_ai_dir(&detached_git_dir, &common_dir);
+        assert_eq!(
+            ai_dir,
+            common_dir
+                .join("ai")
+                .join("worktrees")
+                .join("linked-worktree")
+        );
+    }
+
+    #[test]
+    fn resolve_command_base_dir_applies_chained_c_arguments() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let base = temp.path().join("root");
+        let args = vec![
+            "-C".to_string(),
+            base.to_string_lossy().to_string(),
+            "-C".to_string(),
+            "nested".to_string(),
+            "-C".to_string(),
+            "..".to_string(),
+            "-C".to_string(),
+            "repo".to_string(),
+            "status".to_string(),
+        ];
+
+        let resolved = resolve_command_base_dir(&args).expect("resolve base dir");
+        assert_eq!(resolved, base.join("nested").join("..").join("repo"));
+    }
+
+    #[test]
     fn find_repository_in_path_supports_bare_repositories() {
         let temp = tempfile::tempdir().expect("tempdir");
         let source = temp.path().join("source");
@@ -3239,5 +3437,40 @@ index 0000000..abc1234 100644
             .expect("read attrs from HEAD");
         let content = String::from_utf8(content).expect("utf8 attrs");
         assert!(content.contains("generated/** linguist-generated=true"));
+    }
+
+    #[test]
+    fn find_repository_in_path_worktree_uses_common_dir_for_isolated_storage() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let main_repo = temp.path().join("main");
+        let worktree = temp.path().join("linked");
+
+        fs::create_dir_all(&main_repo).expect("create main repo dir");
+        run_git(&main_repo, &["init"]);
+        run_git(&main_repo, &["config", "user.name", "Test User"]);
+        run_git(&main_repo, &["config", "user.email", "test@example.com"]);
+        run_git(&main_repo, &["worktree", "add", worktree.to_str().unwrap()]);
+
+        let repo = find_repository_in_path(worktree.to_str().unwrap()).expect("find worktree repo");
+        let common_dir = PathBuf::from(run_git_stdout(
+            &worktree,
+            &["rev-parse", "--git-common-dir"],
+        ));
+
+        assert_eq!(
+            repo.common_dir()
+                .canonicalize()
+                .expect("canonical common dir"),
+            common_dir
+                .canonicalize()
+                .expect("canonical expected common dir")
+        );
+        assert!(
+            repo.storage
+                .working_logs
+                .starts_with(common_dir.join("ai").join("worktrees")),
+            "worktree storage should be isolated under common-dir/ai/worktrees: {}",
+            repo.storage.working_logs.display()
+        );
     }
 }

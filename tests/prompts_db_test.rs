@@ -1277,3 +1277,30 @@ fn test_unique_constraint_on_id() {
 
     assert_eq!(count, 1, "Should still have exactly one prompt");
 }
+
+reuse_tests_in_worktree!(
+    test_populate_creates_database_with_schema,
+    test_populate_with_since_filter,
+    test_populate_with_author_filter,
+    test_populate_with_all_authors_flag,
+    test_list_command_outputs_tsv,
+    test_list_command_with_custom_columns,
+    test_next_command_returns_json,
+    test_next_command_advances_pointer,
+    test_next_command_no_more_prompts,
+    test_reset_command,
+    test_count_command,
+    test_exec_command_select_query,
+    test_exec_command_update_query,
+    test_database_not_found_error,
+    test_upsert_deduplicates_prompts,
+    test_populate_aggregates_from_git_notes,
+    test_prompt_messages_field_contains_transcript,
+    test_accepted_rate_calculation,
+    test_timestamp_fields_populated,
+    test_exec_invalid_sql_error,
+    test_commit_sha_field_populated,
+    test_workdir_field_populated,
+    test_seq_id_auto_increments,
+    test_unique_constraint_on_id,
+);
