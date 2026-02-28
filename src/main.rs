@@ -11,6 +11,7 @@ mod mdm;
 mod metrics;
 mod observability;
 mod repo_url;
+mod synopsis;
 mod utils;
 
 use clap::Parser;

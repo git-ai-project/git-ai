@@ -648,6 +648,17 @@ impl TestRepo {
             command.env("HOME", &self.test_home);
             command.env("GIT_CONFIG_GLOBAL", self.test_home.join(".gitconfig"));
             command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
+            // In hooks mode the global gitconfig does not exist (test_home is a
+            // non-existent temp directory).  If a background self-heal thread
+            // rewrites .git/config concurrently with git reading it, git may
+            // momentarily see a zero-byte or truncated file and fail with
+            // "Author identity unknown".  Setting GIT_AUTHOR_* env vars gives
+            // git an authoritative, config-independent identity source, which
+            // eliminates the race without changing any production code path.
+            command.env("GIT_AUTHOR_NAME", "Test User");
+            command.env("GIT_AUTHOR_EMAIL", "test@example.com");
+            command.env("GIT_COMMITTER_NAME", "Test User");
+            command.env("GIT_COMMITTER_EMAIL", "test@example.com");
         }
 
         if self.git_mode.uses_wrapper() {

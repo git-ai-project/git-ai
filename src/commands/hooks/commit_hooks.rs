@@ -69,6 +69,8 @@ pub fn commit_post_command_hook(
     }
 
     let commit_author = get_commit_default_author(repository, &parsed_args.command_args);
+    // Save the SHA before it may be moved by unwrap() calls below.
+    let new_sha_for_synopsis = new_sha.clone();
     if parsed_args.has_command_flag("--amend") {
         if let (Some(orig), Some(sha)) = (original_commit.clone(), new_sha.clone()) {
             repository.handle_rewrite_log_event(
@@ -96,6 +98,64 @@ pub fn commit_post_command_hook(
 
     // Flush logs and metrics after commit
     crate::observability::spawn_background_flush();
+
+    // Auto-generate a synopsis if GIT_AI_SYNOPSIS=1 (or "true").
+    // We spawn a background child so the commit itself returns immediately.
+    if let Some(sha) = new_sha_for_synopsis {
+        maybe_spawn_synopsis_background(&sha);
+    }
+}
+
+/// If `GIT_AI_SYNOPSIS` is set to `1` or `true`, spawn `git-ai synopsis generate`
+/// as a detached background process for the newly created commit.
+///
+/// The child inherits stdin/stdout/stderr so any output appears in the terminal,
+/// but we don't wait for it — the commit completes immediately.
+fn maybe_spawn_synopsis_background(commit_sha: &str) {
+    let enabled = std::env::var("GIT_AI_SYNOPSIS")
+        .map(|v| v == "1" || v.to_lowercase() == "true")
+        .unwrap_or(false);
+
+    if !enabled {
+        return;
+    }
+
+    // Find this binary's own path so we can re-invoke `git-ai synopsis generate`.
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+
+    // Collect any backend / model / key env vars to forward.  We just inherit
+    // the whole environment, which is simplest and correct.
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.args(["synopsis", "generate", "--commit", commit_sha]);
+
+    // Detach: on Unix, double-fork is the cleanest approach, but simply
+    // spawning without waiting is sufficient for a short-lived helper.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Move the child into its own process group so it doesn't receive
+        // signals from the terminal session that owns the parent.
+        cmd.process_group(0);
+    }
+
+    match cmd.spawn() {
+        Ok(_child) => {
+            // Don't call child.wait() — we want background execution.
+            eprintln!(
+                "[synopsis] Generating synopsis for {} in the background...",
+                &commit_sha[..8.min(commit_sha.len())]
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "[synopsis] Warning: failed to launch background synopsis generation: {}",
+                e
+            );
+        }
+    }
 }
 
 pub fn get_commit_default_author(repo: &Repository, args: &[String]) -> String {

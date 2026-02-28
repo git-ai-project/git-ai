@@ -27,4 +27,5 @@ pub mod show_prompt;
 pub mod squash_authorship;
 pub mod status;
 pub mod sync_prompts;
+pub mod synopsis;
 pub mod upgrade;
