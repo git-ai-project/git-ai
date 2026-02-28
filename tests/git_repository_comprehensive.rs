@@ -781,10 +781,14 @@ fn test_git_supports_ignore_revs_file() {
 
     // Most modern git versions support this (added in 2.23.0)
     let supports = repo.git_supports_ignore_revs_file();
-    // Just verify it returns a boolean without error
-    assert!(
-        supports || !supports,
-        "Should return boolean for ignore-revs-file support"
+    let expected = if let Some((major, minor, _)) = repo.git_version() {
+        major > 2 || (major == 2 && minor >= 23)
+    } else {
+        true
+    };
+    assert_eq!(
+        supports, expected,
+        "ignore-revs-file support should match git version threshold"
     );
 }
 
