@@ -282,8 +282,11 @@ fi
 
 # Create ~/.local/bin/git-ai symlink for systems where ~/.local/bin is already on PATH
 LOCAL_BIN_DIR="$HOME/.local/bin"
-mkdir -p "$LOCAL_BIN_DIR"
-ln -sf "${INSTALL_DIR}/git-ai" "${LOCAL_BIN_DIR}/git-ai"
+if mkdir -p "$LOCAL_BIN_DIR" 2>/dev/null && ln -sf "${INSTALL_DIR}/git-ai" "${LOCAL_BIN_DIR}/git-ai" 2>/dev/null; then
+    success "Created symlink at ${LOCAL_BIN_DIR}/git-ai"
+else
+    warn "Warning: Failed to create ~/.local/bin/git-ai symlink. This is non-fatal."
+fi
 
 success "Successfully installed git-ai into ${INSTALL_DIR}"
 success "You can now run 'git-ai' from your terminal"
