@@ -484,6 +484,10 @@ impl InternalDatabase {
 
     /// Apply a single migration
     /// Migration failures are FATAL - the program cannot continue with a partially migrated database
+    ///
+    /// ALTER TABLE ADD COLUMN migrations are idempotent: if the column already exists
+    /// (e.g. from a previous run that crashed before updating the version), the
+    /// "duplicate column name" error is silently ignored.
     fn apply_migration(&mut self, from_version: usize) -> Result<(), GitAiError> {
         if from_version >= MIGRATIONS.len() {
             return Err(GitAiError::Generic(format!(
@@ -497,8 +501,26 @@ impl InternalDatabase {
 
         // Execute migration in a transaction for atomicity
         let tx = self.conn.transaction()?;
-        tx.execute_batch(migration_sql)?;
-        tx.commit()?;
+        match tx.execute_batch(migration_sql) {
+            Ok(()) => {
+                tx.commit()?;
+            }
+            Err(ref e) if e.to_string().contains("duplicate column name") => {
+                // Column already exists — the migration was partially applied previously
+                // (e.g. ALTER TABLE succeeded but version update didn't persist).
+                // This is safe to skip since the schema change is already in place.
+                debug_log(&format!(
+                    "[Migration] Column already exists, skipping v{} -> v{}: {}",
+                    from_version,
+                    from_version + 1,
+                    e
+                ));
+                // Transaction is rolled back on drop (no-op since ALTER TABLE failed)
+            }
+            Err(e) => {
+                return Err(e.into());
+            }
+        }
 
         Ok(())
     }
@@ -1225,6 +1247,97 @@ mod tests {
             )
             .unwrap();
         assert_eq!(version, "4");
+    }
+
+    #[test]
+    fn test_initialize_schema_handles_preexisting_parent_id_column() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("idempotent-parent-id.db");
+        let conn = Connection::open(&db_path).unwrap();
+
+        // Simulate a partial migration state: version stuck at 3 but the
+        // parent_id column was already added (e.g. ALTER TABLE succeeded
+        // but the version update didn't persist due to a crash).
+        conn.execute_batch(
+            r#"
+            CREATE TABLE schema_metadata (
+                key TEXT PRIMARY KEY NOT NULL,
+                value TEXT NOT NULL
+            );
+            INSERT INTO schema_metadata (key, value) VALUES ('version', '3');
+            CREATE TABLE prompts (
+                id TEXT PRIMARY KEY NOT NULL,
+                workdir TEXT,
+                tool TEXT NOT NULL,
+                model TEXT NOT NULL,
+                external_thread_id TEXT NOT NULL,
+                messages TEXT NOT NULL,
+                commit_sha TEXT,
+                agent_metadata TEXT,
+                human_author TEXT,
+                total_additions INTEGER,
+                total_deletions INTEGER,
+                accepted_lines INTEGER,
+                overridden_lines INTEGER,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                parent_id TEXT
+            );
+            CREATE TABLE cas_sync_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                hash TEXT NOT NULL UNIQUE,
+                data TEXT NOT NULL,
+                metadata TEXT NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_sync_error TEXT,
+                last_sync_at INTEGER,
+                next_retry_at INTEGER NOT NULL,
+                processing_started_at INTEGER,
+                created_at INTEGER NOT NULL
+            );
+            CREATE TABLE cas_cache (
+                hash TEXT PRIMARY KEY NOT NULL,
+                messages TEXT NOT NULL,
+                cached_at INTEGER NOT NULL
+            );
+            "#,
+        )
+        .unwrap();
+
+        let mut db = InternalDatabase {
+            conn,
+            _db_path: db_path,
+        };
+        // This should NOT fail even though parent_id already exists
+        db.initialize_schema().unwrap();
+
+        let version: String = db
+            .conn
+            .query_row(
+                "SELECT value FROM schema_metadata WHERE key = 'version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "4");
+
+        // Verify the parent_id column is usable
+        db.conn
+            .execute(
+                "INSERT INTO prompts (id, tool, model, external_thread_id, messages, created_at, updated_at, parent_id) VALUES ('test', 'claude', 'model', 'thread', '[]', 0, 0, 'parent123')",
+                [],
+            )
+            .unwrap();
+        let parent_id: Option<String> = db
+            .conn
+            .query_row(
+                "SELECT parent_id FROM prompts WHERE id = 'test'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(parent_id, Some("parent123".to_string()));
     }
 
     #[test]

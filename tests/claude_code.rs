@@ -834,7 +834,6 @@ fn test_mixed_plan_and_code_edits_in_single_assistant_message() {
     );
 }
 
-
 // ===== Subagent transcript tests =====
 
 #[test]
