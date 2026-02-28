@@ -130,6 +130,36 @@ fn test_claude_preset_ignores_vscode_copilot_payload() {
 }
 
 #[test]
+fn test_claude_preset_ignores_cursor_payload() {
+    let hook_input = json!({
+        "conversation_id": "dff2bf79-6a53-446c-be41-f33512532fb0",
+        "model": "default",
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": "/Users/test/project/jokes.csv"
+        },
+        "transcript_path": "/Users/test/.cursor/projects/Users-test-project/agent-transcripts/dff2bf79-6a53-446c-be41-f33512532fb0/dff2bf79-6a53-446c-be41-f33512532fb0.jsonl",
+        "hook_event_name": "postToolUse",
+        "cursor_version": "2.5.26",
+        "workspace_roots": ["/Users/test/project"]
+    });
+
+    let flags = AgentCheckpointFlags {
+        hook_input: Some(hook_input.to_string()),
+    };
+
+    let preset = ClaudePreset;
+    let result = preset.run(flags);
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Skipping Cursor hook payload in Claude preset")
+    );
+}
+
+#[test]
 fn test_claude_preset_does_not_ignore_when_transcript_path_is_claude() {
     let temp = tempfile::tempdir().unwrap();
     let claude_dir = temp.path().join(".claude").join("projects");
@@ -837,6 +867,7 @@ reuse_tests_in_worktree!(
     test_claude_preset_extracts_edited_filepath,
     test_claude_preset_no_filepath_when_tool_input_missing,
     test_claude_preset_ignores_vscode_copilot_payload,
+    test_claude_preset_ignores_cursor_payload,
     test_claude_preset_does_not_ignore_when_transcript_path_is_claude,
     test_claude_e2e_prefers_latest_checkpoint_for_prompts,
     test_parse_claude_code_jsonl_with_thinking,
