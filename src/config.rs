@@ -450,11 +450,15 @@ where
     S: Serializer,
 {
     let masked = api_key.as_ref().map(|key| {
-        if key.len() > 8 {
-            format!("{}...{}", &key[..4], &key[key.len() - 4..])
+        let chars: Vec<char> = key.chars().collect();
+        if chars.len() > 8 {
+            let prefix: String = chars[..4].iter().collect();
+            let suffix: String = chars[chars.len() - 4..].iter().collect();
+            format!("{}...{}", prefix, suffix)
         } else {
             "****".to_string()
         }
+    });
     });
     masked.serialize(serializer)
 }
