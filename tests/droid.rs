@@ -485,3 +485,19 @@ fn test_droid_jsonl_parses_thinking_blocks() {
         "Second message should be Assistant text"
     );
 }
+
+reuse_tests_in_worktree!(
+    test_parse_droid_jsonl_transcript,
+    test_parse_droid_settings_model,
+    test_droid_preset_extracts_edited_filepath,
+    test_droid_preset_extracts_applypatch_filepath,
+    test_droid_preset_stores_metadata_paths,
+    test_droid_preset_uses_raw_session_id,
+    test_droid_jsonl_skips_non_message_entries,
+    test_droid_tool_results_are_not_parsed_as_user_messages,
+    test_droid_e2e_prefers_latest_checkpoint_for_prompts,
+    test_droid_preset_pretooluse_returns_human_checkpoint,
+    test_droid_session_paths_derivation,
+    test_droid_settings_missing_model_field,
+    test_droid_jsonl_parses_thinking_blocks,
+);

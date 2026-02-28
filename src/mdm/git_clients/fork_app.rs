@@ -7,9 +7,14 @@ use crate::mdm::git_client_installer::{
 use super::mac_prefs::{Preferences, find_app_by_bundle_id};
 
 #[cfg(windows)]
-use crate::mdm::utils::{home_dir, write_atomic};
+use crate::mdm::utils::{home_dir, to_windows_git_bash_style_path, write_atomic};
 #[cfg(windows)]
 use serde_json::{Value, json};
+
+#[cfg(windows)]
+fn fork_custom_git_instance_path(git_shim_path: &std::path::Path) -> String {
+    to_windows_git_bash_style_path(git_shim_path)
+}
 #[cfg(windows)]
 use std::fs;
 #[cfg(windows)]
@@ -180,9 +185,10 @@ impl GitClientInstaller for ForkAppInstaller {
         let custom_path = Self::read_custom_git_path();
 
         let is_custom = git_type == Some(git_instance_type::CUSTOM);
+        let desired_path = fork_custom_git_instance_path(&params.git_shim_path);
         let path_matches = custom_path
             .as_ref()
-            .map(|p| p == params.git_shim_path.to_string_lossy().as_ref())
+            .map(|p| p == &desired_path)
             .unwrap_or(false);
 
         let prefs_configured = is_custom && custom_path.is_some();
@@ -212,7 +218,7 @@ impl GitClientInstaller for ForkAppInstaller {
         }
 
         let settings_path = Self::settings_path();
-        let git_wrapper_path = params.git_shim_path.to_string_lossy().into_owned();
+        let git_wrapper_path = fork_custom_git_instance_path(&params.git_shim_path);
 
         // Read existing settings
         let original = if settings_path.exists() {
@@ -410,5 +416,22 @@ impl ForkAppInstaller {
             .get("CustomGitInstancePath")?
             .as_str()
             .map(|s| s.to_string())
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_fork_custom_git_instance_path_uses_forward_slashes() {
+        let path = PathBuf::from(r"C:\Users\Administrator\.git-ai\bin\git.exe");
+        let result = fork_custom_git_instance_path(&path);
+        assert_eq!(result, "C:/Users/Administrator/.git-ai/bin/git.exe");
+        assert!(
+            !result.starts_with('/'),
+            "should be a Windows path, not MSYS"
+        );
     }
 }

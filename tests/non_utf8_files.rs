@@ -914,3 +914,36 @@ fn test_file_with_null_bytes_in_content() {
         result.err()
     );
 }
+
+reuse_tests_in_worktree!(
+    test_commit_gbk_encoded_file_succeeds,
+    test_commit_latin1_encoded_file_succeeds,
+    test_commit_shift_jis_encoded_file_succeeds,
+    test_commit_mixed_valid_invalid_utf8_file_succeeds,
+    test_stats_with_non_utf8_file_only,
+    test_stats_with_non_utf8_and_utf8_files_mixed,
+    test_stats_json_output_valid_with_non_utf8_file,
+    test_blame_non_utf8_file_does_not_crash,
+    test_blame_utf8_file_unaffected_by_non_utf8_neighbor,
+    test_edit_non_utf8_file_second_commit,
+    test_delete_non_utf8_file,
+    test_ai_attribution_preserved_with_non_utf8_in_same_commit,
+    test_human_and_ai_edits_with_non_utf8_file_present,
+    test_multiple_non_utf8_encodings_in_one_commit,
+    test_non_utf8_file_in_subdirectory,
+    test_checkpoint_with_non_utf8_file,
+    test_checkpoint_ai_with_non_utf8_file_present,
+    test_binary_file_does_not_crash_commit,
+    test_binary_and_non_utf8_with_ai_file,
+    test_line_attribution_ai_file_with_gbk_neighbor,
+    test_line_attribution_multi_commit_with_non_utf8_neighbor,
+    test_line_attribution_interleaved_ai_human_with_non_utf8,
+    test_line_attribution_ai_replaces_lines_with_non_utf8_present,
+    test_line_attribution_multiple_utf8_files_with_non_utf8_neighbors,
+    test_line_attribution_ai_across_multiple_commits_with_non_utf8,
+    test_file_changes_from_utf8_to_non_utf8,
+    test_file_changes_from_non_utf8_to_utf8,
+    test_stats_after_editing_non_utf8_file,
+    test_large_non_utf8_file,
+    test_file_with_null_bytes_in_content,
+);

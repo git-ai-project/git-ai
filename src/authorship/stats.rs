@@ -3,7 +3,7 @@ use crate::authorship::ignore::{build_ignore_matcher, should_ignore_file_with_ma
 use crate::authorship::transcript::Message;
 use crate::error::GitAiError;
 use crate::git::refs::get_authorship;
-use crate::git::repository::Repository;
+use crate::git::repository::{InternalGitProfile, Repository, exec_git_with_profile};
 use crate::utils::debug_log;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -654,7 +654,7 @@ pub fn get_git_diff_stats(
     args.push("--format=".to_string()); // No format, just the numstat
     args.push(commit_sha.to_string());
 
-    let output = crate::git::repository::exec_git(&args)?;
+    let output = exec_git_with_profile(&args, InternalGitProfile::NumstatParse)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     let mut added_lines = 0u32;

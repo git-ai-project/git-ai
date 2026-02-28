@@ -1,5 +1,5 @@
 use crate::error::GitAiError;
-use crate::git::repository::{Repository, Tree, exec_git};
+use crate::git::repository::{InternalGitProfile, Repository, Tree, exec_git_with_profile};
 use crate::git::status::MAX_PATHSPEC_ARGS;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -127,7 +127,7 @@ impl Repository {
             let mut args = self.global_args_for_exec();
             args.push("rev-parse".to_string());
             args.push("--empty-tree".to_string());
-            let output = exec_git(&args)?;
+            let output = exec_git_with_profile(&args, InternalGitProfile::General)?;
             Some(String::from_utf8(output.stdout)?.trim().to_string())
         } else {
             None
@@ -174,7 +174,7 @@ impl Repository {
             false
         };
 
-        let output = exec_git(&args)?;
+        let output = exec_git_with_profile(&args, InternalGitProfile::RawDiffParse)?;
         let mut deltas = parse_diff_raw(&output.stdout)?;
 
         if needs_post_filter && let Some(paths) = pathspecs {

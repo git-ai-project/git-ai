@@ -83,3 +83,8 @@ fn push_after_branch_set_upstream_pushes_authorship_notes() {
         "expected authorship notes to be pushed after setting upstream with git branch -u"
     );
 }
+
+reuse_tests_in_worktree!(
+    push_with_set_upstream_flag_pushes_authorship_notes,
+    push_after_branch_set_upstream_pushes_authorship_notes,
+);

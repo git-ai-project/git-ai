@@ -1,6 +1,9 @@
 mod repos;
 use repos::test_file::ExpectedLineExt;
 use repos::test_repo::TestRepo;
+use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 /// Helper to parse diff output and extract meaningful lines
 #[derive(Debug, PartialEq)]
@@ -188,6 +191,68 @@ fn assert_diff_lines_exact(lines: &[DiffLine], expected: &[(&str, &str, Option<&
             }
         }
     }
+}
+
+fn configure_repo_external_diff_helper(repo: &TestRepo) -> String {
+    let marker = "EXTERNAL_DIFF_MARKER";
+    let helper_path = repo.path().join("ext-diff-helper.sh");
+    let helper_path_posix = helper_path
+        .to_str()
+        .expect("helper path must be valid UTF-8")
+        .replace('\\', "/");
+
+    fs::write(&helper_path, format!("#!/bin/sh\necho {marker}\nexit 0\n"))
+        .expect("should write external diff helper");
+    #[cfg(unix)]
+    {
+        let mut perms = fs::metadata(&helper_path)
+            .expect("helper metadata should exist")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&helper_path, perms).expect("helper should be executable");
+    }
+
+    repo.git_og(&["config", "diff.external", &helper_path_posix])
+        .expect("configuring diff.external should succeed");
+
+    marker.to_string()
+}
+
+fn configure_hostile_diff_settings(repo: &TestRepo) {
+    let settings = [
+        ("diff.noprefix", "true"),
+        ("diff.mnemonicprefix", "true"),
+        ("diff.srcPrefix", "SRC/"),
+        ("diff.dstPrefix", "DST/"),
+        ("diff.renames", "copies"),
+        ("diff.relative", "true"),
+        ("diff.algorithm", "histogram"),
+        ("diff.indentHeuristic", "false"),
+        ("diff.interHunkContext", "8"),
+        ("color.diff", "always"),
+        ("color.ui", "always"),
+    ];
+    for (key, value) in settings {
+        repo.git_og(&["config", key, value])
+            .unwrap_or_else(|err| panic!("setting {key}={value} should succeed: {err}"));
+    }
+}
+
+fn create_external_diff_helper_script(repo: &TestRepo, marker: &str) -> std::path::PathBuf {
+    let helper_path = repo.path().join(format!("ext-env-helper-{marker}.sh"));
+
+    fs::write(&helper_path, format!("#!/bin/sh\necho {marker}\nexit 0\n"))
+        .expect("should write external diff helper");
+    #[cfg(unix)]
+    {
+        let mut perms = fs::metadata(&helper_path)
+            .expect("helper metadata should exist")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&helper_path, perms).expect("helper should be executable");
+    }
+
+    helper_path
 }
 
 #[test]
@@ -794,3 +859,232 @@ fn test_diff_range_multiple_commits() {
         "Should have attribution markers"
     );
 }
+
+#[test]
+fn test_diff_ignores_repo_external_diff_helper_but_proxy_uses_it() {
+    let repo = TestRepo::new();
+
+    let mut file = repo.filename("README.md");
+    file.set_contents(lines!["line one".human()]);
+    repo.stage_all_and_commit("initial").unwrap();
+
+    file.set_contents(lines!["line one".human(), "line two".ai()]);
+    repo.stage_all_and_commit("second").unwrap();
+
+    let marker = configure_repo_external_diff_helper(&repo);
+
+    let proxied_diff = repo
+        .git(&["diff", "HEAD^", "HEAD"])
+        .expect("proxied git diff should succeed");
+    assert!(
+        proxied_diff.contains(&marker),
+        "proxied git diff should honor diff.external helper output, got:\n{}",
+        proxied_diff
+    );
+
+    let git_ai_diff = repo
+        .git_ai(&["diff", "HEAD"])
+        .expect("git-ai diff should succeed");
+    assert!(
+        !git_ai_diff.contains(&marker),
+        "git-ai diff should not use external diff helper output, got:\n{}",
+        git_ai_diff
+    );
+    assert!(
+        git_ai_diff.contains("diff --git"),
+        "git-ai diff should emit standard unified diff output, got:\n{}",
+        git_ai_diff
+    );
+    assert!(
+        git_ai_diff.contains("@@"),
+        "git-ai diff should include hunk headers, got:\n{}",
+        git_ai_diff
+    );
+}
+
+#[test]
+fn test_diff_parsing_is_stable_under_hostile_diff_config() {
+    let repo = TestRepo::new();
+
+    let mut file = repo.filename("README.md");
+    file.set_contents(lines!["line one".human()]);
+    repo.stage_all_and_commit("initial").unwrap();
+
+    file.set_contents(lines![
+        "line one".human(),
+        "line two".ai(),
+        "line three".ai()
+    ]);
+    repo.stage_all_and_commit("second").unwrap();
+
+    configure_hostile_diff_settings(&repo);
+
+    let git_ai_diff = repo
+        .git_ai(&["diff", "HEAD"])
+        .expect("git-ai diff should succeed");
+    assert!(git_ai_diff.contains("diff --git"));
+    assert!(git_ai_diff.contains("@@"));
+    assert!(git_ai_diff.contains("+line two"));
+    assert!(git_ai_diff.contains("+line three"));
+}
+
+#[test]
+fn test_checkpoint_and_commit_ignore_repo_external_diff_helper() {
+    let repo = TestRepo::new();
+
+    let mut file = repo.filename("tracked.txt");
+    file.set_contents(lines!["base".human()]);
+    repo.stage_all_and_commit("initial").unwrap();
+
+    file.set_contents(lines!["base".human(), "added by ai".ai()]);
+    let marker = configure_repo_external_diff_helper(&repo);
+    let proxied_diff = repo
+        .git(&["diff", "HEAD"])
+        .expect("proxied git diff should succeed");
+    assert!(
+        proxied_diff.contains(&marker),
+        "sanity check: external diff helper should be active for proxied git diff"
+    );
+
+    repo.git_ai(&["checkpoint", "mock_ai"])
+        .expect("checkpoint should succeed with external diff configured");
+    repo.stage_all_and_commit("ai commit").unwrap();
+
+    file.assert_lines_and_blame(lines!["base".human(), "added by ai".ai()]);
+}
+
+#[test]
+fn test_diff_ignores_git_external_diff_env_but_proxy_uses_it() {
+    let repo = TestRepo::new();
+
+    let mut file = repo.filename("env-diff.txt");
+    file.set_contents(lines!["before".human()]);
+    repo.stage_all_and_commit("initial").unwrap();
+
+    file.set_contents(lines!["before".human(), "after".ai()]);
+    repo.stage_all_and_commit("second").unwrap();
+
+    let marker = "ENV_EXTERNAL_DIFF_MARKER";
+    let helper_path = create_external_diff_helper_script(&repo, marker);
+    let helper_path_str = helper_path
+        .to_str()
+        .expect("helper path must be valid UTF-8")
+        .replace('\\', "/")
+        .to_string();
+
+    let proxied = repo
+        .git_with_env(
+            &["diff", "HEAD^", "HEAD"],
+            &[("GIT_EXTERNAL_DIFF", helper_path_str.as_str())],
+            None,
+        )
+        .expect("proxied git diff should succeed");
+    assert!(
+        proxied.contains(marker),
+        "proxied git diff should honor GIT_EXTERNAL_DIFF, got:\n{}",
+        proxied
+    );
+
+    let ai_diff = repo
+        .git_ai_with_env(
+            &["diff", "HEAD"],
+            &[("GIT_EXTERNAL_DIFF", helper_path_str.as_str())],
+        )
+        .expect("git-ai diff should succeed with GIT_EXTERNAL_DIFF set");
+    assert!(
+        !ai_diff.contains(marker),
+        "git-ai diff should ignore GIT_EXTERNAL_DIFF for internal diff calls, got:\n{}",
+        ai_diff
+    );
+    assert!(
+        ai_diff.contains("diff --git"),
+        "git-ai diff should still emit normal unified diff output, got:\n{}",
+        ai_diff
+    );
+}
+
+#[test]
+fn test_diff_ignores_git_diff_opts_env_for_internal_diff() {
+    let repo = TestRepo::new();
+
+    let mut file = repo.filename("env-diff-opts.txt");
+    file.set_contents(lines![
+        "line 1".human(),
+        "line 2".human(),
+        "line 3".human(),
+        "line 4".human(),
+        "line 5".human()
+    ]);
+    repo.stage_all_and_commit("initial").unwrap();
+
+    file.set_contents(lines![
+        "line 1".human(),
+        "line 2".human(),
+        "line 3 changed".ai(),
+        "line 4".human(),
+        "line 5".human()
+    ]);
+    let commit = repo.stage_all_and_commit("change middle").unwrap();
+
+    // Proxied git should honor this env var and output 0 context lines.
+    let proxied = repo
+        .git_with_env(
+            &[
+                "diff",
+                &format!("{}^", commit.commit_sha),
+                &commit.commit_sha,
+            ],
+            &[("GIT_DIFF_OPTS", "--unified=0")],
+            None,
+        )
+        .expect("proxied git diff should succeed");
+    let proxied_context_count = proxied
+        .lines()
+        .filter(|l| l.starts_with(' ') && !l.starts_with("  "))
+        .count();
+    assert_eq!(
+        proxied_context_count, 0,
+        "proxied git diff should honor GIT_DIFF_OPTS=--unified=0, got:\n{}",
+        proxied
+    );
+
+    // git-ai diff should ignore GIT_DIFF_OPTS and keep normal context behavior.
+    let ai_diff = repo
+        .git_ai_with_env(
+            &["diff", &commit.commit_sha],
+            &[("GIT_DIFF_OPTS", "--unified=0")],
+        )
+        .expect("git-ai diff should succeed with GIT_DIFF_OPTS set");
+    let ai_context_count = ai_diff
+        .lines()
+        .filter(|l| l.starts_with(' ') && !l.starts_with("  "))
+        .count();
+    assert!(
+        ai_context_count >= 2,
+        "git-ai diff should ignore GIT_DIFF_OPTS and preserve context lines, got:\n{}",
+        ai_diff
+    );
+}
+reuse_tests_in_worktree!(
+    test_diff_single_commit,
+    test_diff_commit_range,
+    test_diff_shows_ai_attribution,
+    test_diff_shows_human_attribution,
+    test_diff_multiple_files,
+    test_diff_initial_commit,
+    test_diff_pure_additions,
+    test_diff_pure_deletions,
+    test_diff_mixed_ai_and_human,
+    test_diff_with_head_ref,
+    test_diff_output_format,
+    test_diff_error_on_no_args,
+    test_diff_json_output_with_escaped_newlines,
+    test_diff_preserves_context_lines,
+    test_diff_exact_sequence_verification,
+    test_diff_range_multiple_commits,
+    test_diff_ignores_repo_external_diff_helper_but_proxy_uses_it,
+    test_diff_parsing_is_stable_under_hostile_diff_config,
+    test_checkpoint_and_commit_ignore_repo_external_diff_helper,
+    test_diff_ignores_git_external_diff_env_but_proxy_uses_it,
+    test_diff_ignores_git_diff_opts_env_for_internal_diff,
+);

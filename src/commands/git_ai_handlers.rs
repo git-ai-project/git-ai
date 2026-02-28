@@ -294,7 +294,7 @@ fn handle_checkpoint(args: &[String]) {
             }
             "--hook-input" => {
                 if i + 1 < args.len() {
-                    hook_input = Some(args[i + 1].clone());
+                    hook_input = Some(strip_utf8_bom(args[i + 1].clone()));
                     if hook_input.as_ref().unwrap() == "stdin" {
                         let mut stdin = std::io::stdin();
                         let mut buffer = String::new();
@@ -303,7 +303,7 @@ fn handle_checkpoint(args: &[String]) {
                             std::process::exit(0);
                         }
                         if !buffer.trim().is_empty() {
-                            hook_input = Some(buffer);
+                            hook_input = Some(strip_utf8_bom(buffer));
                         } else {
                             eprintln!("No hook input provided (via --hook-input or stdin).");
                             std::process::exit(0);
@@ -792,6 +792,47 @@ fn handle_checkpoint(args: &[String]) {
 
     let checkpoint_start = std::time::Instant::now();
     let agent_tool = agent_run_result.as_ref().map(|r| r.agent_id.tool.clone());
+
+    let external_files: Vec<String> = agent_run_result
+        .as_ref()
+        .and_then(|r| {
+            let paths = if r.checkpoint_kind == CheckpointKind::Human {
+                r.will_edit_filepaths.as_ref()
+            } else {
+                r.edited_filepaths.as_ref()
+            };
+            paths.map(|p| {
+                let repo_workdir = repo.workdir().ok();
+                p.iter()
+                    .filter_map(|path| {
+                        let workdir = repo_workdir.as_ref()?;
+                        let path_buf = if std::path::Path::new(path).is_absolute() {
+                            std::path::PathBuf::from(path)
+                        } else {
+                            workdir.join(path)
+                        };
+                        if repo.path_is_in_workdir(&path_buf) {
+                            None
+                        } else {
+                            let abs = if std::path::Path::new(path).is_absolute() {
+                                path.clone()
+                            } else {
+                                workdir.join(path).to_string_lossy().to_string()
+                            };
+                            Some(abs)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })
+        .unwrap_or_default();
+
+    let external_agent_base = if !external_files.is_empty() {
+        agent_run_result.as_ref().cloned()
+    } else {
+        None
+    };
+
     commands::git_hook_handlers::ensure_repo_level_hooks_for_checkpoint(&repo);
     let checkpoint_result = commands::checkpoint::run(
         &repo,
@@ -803,29 +844,107 @@ fn handle_checkpoint(args: &[String]) {
         agent_run_result,
         false,
     );
+    let local_checkpoint_failed = checkpoint_result.is_err();
     match checkpoint_result {
         Ok((_, files_edited, _)) => {
             let elapsed = checkpoint_start.elapsed();
             log_performance_for_checkpoint(files_edited, elapsed, checkpoint_kind);
             eprintln!("Checkpoint completed in {:?}", elapsed);
-
-            // Flush logs and metrics after checkpoint (skip for human checkpoints)
-            if checkpoint_kind != CheckpointKind::Human {
-                observability::spawn_background_flush();
-            }
         }
         Err(e) => {
             let elapsed = checkpoint_start.elapsed();
             eprintln!("Checkpoint failed after {:?} with error {}", elapsed, e);
             let context = serde_json::json!({
                 "function": "checkpoint",
-                "agent": agent_tool.unwrap_or_default(),
+                "agent": agent_tool.clone().unwrap_or_default(),
                 "duration": elapsed.as_millis(),
                 "checkpoint_kind": format!("{:?}", checkpoint_kind)
             });
             observability::log_error(&e, Some(context));
-            std::process::exit(0);
         }
+    }
+
+    if !external_files.is_empty()
+        && let Some(base_result) = external_agent_base
+    {
+        let (repo_files, orphan_files) = group_files_by_repository(&external_files, None);
+
+        if !orphan_files.is_empty() {
+            eprintln!(
+                "Warning: {} cross-repo file(s) are not in any git repository and will be skipped",
+                orphan_files.len()
+            );
+        }
+
+        for (repo_workdir, (ext_repo, repo_file_paths)) in repo_files {
+            if !config.is_allowed_repository(&Some(ext_repo.clone())) {
+                continue;
+            }
+
+            let ext_user_name = match ext_repo.config_get_str("user.name") {
+                Ok(Some(name)) if !name.trim().is_empty() => name,
+                _ => "unknown".to_string(),
+            };
+
+            let mut modified = base_result.clone();
+            modified.repo_working_dir = Some(repo_workdir.to_string_lossy().to_string());
+            if base_result.checkpoint_kind == CheckpointKind::Human {
+                modified.will_edit_filepaths = Some(repo_file_paths);
+                modified.edited_filepaths = None;
+            } else {
+                modified.edited_filepaths = Some(repo_file_paths);
+                modified.will_edit_filepaths = None;
+            }
+
+            commands::git_hook_handlers::ensure_repo_level_hooks_for_checkpoint(&ext_repo);
+            match commands::checkpoint::run(
+                &ext_repo,
+                &ext_user_name,
+                checkpoint_kind,
+                false,
+                false,
+                false,
+                Some(modified),
+                false,
+            ) {
+                Ok((_, files_edited, _)) => {
+                    eprintln!(
+                        "Cross-repo checkpoint for {} completed ({} files)",
+                        repo_workdir.display(),
+                        files_edited
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "Cross-repo checkpoint for {} failed: {}",
+                        repo_workdir.display(),
+                        e
+                    );
+                    let context = serde_json::json!({
+                        "function": "checkpoint",
+                        "repo": repo_workdir.to_string_lossy(),
+                        "checkpoint_kind": format!("{:?}", checkpoint_kind)
+                    });
+                    observability::log_error(&e, Some(context));
+                }
+            }
+        }
+    }
+
+    if checkpoint_kind != CheckpointKind::Human {
+        observability::spawn_background_flush();
+    }
+
+    if local_checkpoint_failed {
+        std::process::exit(0);
+    }
+}
+
+fn strip_utf8_bom(input: String) -> String {
+    if let Some(stripped) = input.strip_prefix('\u{feff}') {
+        stripped.to_string()
+    } else {
+        input
     }
 }
 

@@ -434,6 +434,32 @@ fn test_cursor_preset_before_read_file_telemetry_only() {
 }
 
 #[test]
+fn test_cursor_checkpoint_stdin_with_utf8_bom() {
+    let repo = TestRepo::new();
+    let hook_input = format!(
+        "\u{feff}{}",
+        serde_json::json!({
+            "conversation_id": "test-conversation-id",
+            "workspace_roots": [repo.canonical_path().to_string_lossy().to_string()],
+            "hook_event_name": "beforeSubmitPrompt",
+            "model": "model-name-from-hook-test"
+        })
+    );
+
+    let output = repo
+        .git_ai_with_stdin(
+            &["checkpoint", "cursor", "--hook-input", "stdin"],
+            hook_input.as_bytes(),
+        )
+        .expect("checkpoint should parse stdin payload with UTF-8 BOM");
+
+    assert!(
+        !output.contains("Invalid JSON in hook_input"),
+        "Should not fail JSON parsing when stdin has UTF-8 BOM. Output: {output}"
+    );
+}
+
+#[test]
 fn test_cursor_e2e_with_attribution() {
     use std::fs;
 
@@ -681,3 +707,16 @@ fn test_cursor_e2e_with_resync() {
 
     // The temp directory and database will be automatically cleaned up when temp_dir goes out of scope
 }
+
+reuse_tests_in_worktree!(
+    test_can_open_cursor_test_database,
+    test_cursor_database_has_composer_data,
+    test_cursor_database_has_bubble_data,
+    test_fetch_composer_payload_from_test_db,
+    test_fetch_bubble_content_from_test_db,
+    test_extract_transcript_from_test_conversation,
+    test_cursor_preset_multi_root_workspace_detection,
+    test_cursor_preset_human_checkpoint_no_filepath,
+    test_cursor_e2e_with_attribution,
+    test_cursor_e2e_with_resync,
+);

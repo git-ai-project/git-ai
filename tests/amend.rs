@@ -489,3 +489,17 @@ fn test_amend_repeated_round_trips_preserve_exact_line_authorship() {
         "// AI trailing note".ai()
     ]);
 }
+
+reuse_tests_in_worktree!(
+    test_amend_add_lines_at_top,
+    test_amend_add_lines_in_middle,
+    test_amend_add_lines_at_bottom,
+    test_amend_multiple_changes,
+    test_amend_with_unstaged_ai_code_in_other_file,
+    test_amend_preserves_unstaged_ai_attribution,
+    test_amend_with_multiple_files_mixed_staging,
+    test_amend_with_partially_staged_ai_file,
+    test_amend_with_partially_staged_mixed_content,
+    test_amend_with_unstaged_middle_section,
+    test_amend_repeated_round_trips_preserve_exact_line_authorship,
+);

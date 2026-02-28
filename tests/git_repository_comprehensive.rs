@@ -103,12 +103,23 @@ fn test_repository_path_methods() {
     ])
     .unwrap();
 
-    // Test path() returns .git directory
+    // path() should always point at a valid git directory.
     let git_path = repo.path();
-    assert!(
-        git_path.ends_with(".git"),
-        "path() should return .git directory"
-    );
+    assert!(git_path.is_dir(), "path() should return a git directory");
+    if git_path == repo.common_dir() {
+        assert!(
+            git_path.ends_with(".git"),
+            "non-worktree path() should return .git directory"
+        );
+    } else {
+        assert!(
+            git_path.to_string_lossy().contains("/worktrees/")
+                || git_path
+                    .components()
+                    .any(|c| c.as_os_str() == std::ffi::OsStr::new("worktrees")),
+            "worktree path() should resolve to a linked worktree git dir"
+        );
+    }
 
     // Test workdir() returns repository root (use canonical paths for macOS /var vs /private/var)
     let workdir = repo.workdir().unwrap();
@@ -781,8 +792,15 @@ fn test_git_supports_ignore_revs_file() {
 
     // Most modern git versions support this (added in 2.23.0)
     let supports = repo.git_supports_ignore_revs_file();
-    // Ensure the method returns a concrete boolean value without panicking.
-    let _: bool = supports;
+    let expected = if let Some((major, minor, _)) = repo.git_version() {
+        major > 2 || (major == 2 && minor >= 23)
+    } else {
+        true
+    };
+    assert_eq!(
+        supports, expected,
+        "ignore-revs-file support should match git version threshold"
+    );
 }
 
 // ============================================================================
@@ -1691,3 +1709,74 @@ fn test_multiple_files_in_single_commit() {
     assert!(files.contains("file2.txt"), "Should contain file2.txt");
     assert!(files.contains("file3.txt"), "Should contain file3.txt");
 }
+
+reuse_tests_in_worktree!(
+    test_find_repository_in_valid_repo,
+    test_find_repository_in_subdirectory,
+    test_find_repository_in_nested_subdirectory,
+    test_find_repository_for_bare_repo,
+    test_repository_path_methods,
+    test_canonical_workdir,
+    test_path_is_in_workdir,
+    test_head_on_main_branch,
+    test_head_on_feature_branch,
+    test_head_target,
+    test_reference_is_branch,
+    test_find_reference,
+    test_find_commit,
+    test_commit_summary,
+    test_commit_body,
+    test_commit_parent,
+    test_commit_parents_iterator,
+    test_commit_parent_count,
+    test_commit_tree,
+    test_revparse_single,
+    test_revparse_single_with_relative_ref,
+    test_object_peel_to_commit,
+    test_tree_get_path,
+    test_tree_get_path_nested,
+    test_tree_get_path_nonexistent,
+    test_find_blob,
+    test_blob_content,
+    test_config_get_str,
+    test_config_get_str_nonexistent,
+    test_config_get_regexp,
+    test_git_version,
+    test_git_supports_ignore_revs_file,
+    test_remotes_empty,
+    test_remotes_with_origin,
+    test_remotes_with_urls,
+    test_get_default_remote,
+    test_get_default_remote_no_remotes,
+    test_commit_range_length,
+    test_commit_range_iteration,
+    test_commit_range_all_commits,
+    test_merge_base_linear_history,
+    test_merge_base_with_branches,
+    test_get_file_content,
+    test_get_file_content_nonexistent,
+    test_list_commit_files,
+    test_list_commit_files_with_pathspec,
+    test_diff_changed_files,
+    test_find_commit_invalid_sha,
+    test_find_blob_with_commit_sha,
+    test_find_tree_with_commit_sha,
+    test_revparse_invalid_ref,
+    test_is_bare_repository,
+    test_is_not_bare_repository,
+    test_commit_author,
+    test_commit_committer,
+    test_commit_time,
+    test_signature_when,
+    test_find_repository_in_path,
+    test_global_args_for_exec,
+    test_git_command_execution,
+    test_references_iterator,
+    test_resolve_author_spec,
+    test_resolve_author_spec_not_found,
+    test_empty_repository,
+    test_initial_commit_has_no_parent,
+    test_tree_clone,
+    test_commit_with_unicode_message,
+    test_multiple_files_in_single_commit,
+);

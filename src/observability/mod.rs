@@ -183,7 +183,7 @@ pub fn spawn_background_flush() {
     // to isolate their database, so we use that as the test detection mechanism.
     // This check is compiled out of release builds since tests only run in debug mode.
     #[cfg(debug_assertions)]
-    if std::env::var("GIT_AI_TEST_DB_PATH").is_ok() {
+    if std::env::var("GIT_AI_TEST_DB_PATH").is_ok() || std::env::var("GITAI_TEST_DB_PATH").is_ok() {
         return;
     }
 

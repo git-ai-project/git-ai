@@ -220,6 +220,35 @@ fn test_claude_vscode_copilot_detection() {
     }
 }
 
+#[test]
+fn test_claude_cursor_detection() {
+    let preset = ClaudePreset;
+    let hook_input = json!({
+        "conversation_id": "cursor-session-1",
+        "hook_event_name": "postToolUse",
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": "/Users/test/project/src/main.ts"
+        },
+        "workspace_roots": ["/Users/test/project"],
+        "transcript_path": "/Users/test/.cursor/projects/Users-test-project/agent-transcripts/cursor-session-1/cursor-session-1.jsonl",
+        "cursor_version": "2.5.26"
+    })
+    .to_string();
+
+    let result = preset.run(AgentCheckpointFlags {
+        hook_input: Some(hook_input),
+    });
+
+    assert!(result.is_err());
+    match result {
+        Err(GitAiError::PresetError(msg)) => {
+            assert!(msg.contains("Skipping Cursor hook payload in Claude preset"));
+        }
+        _ => panic!("Expected PresetError for Cursor payload in Claude preset"),
+    }
+}
+
 // ==============================================================================
 // GeminiPreset Error Cases
 // ==============================================================================

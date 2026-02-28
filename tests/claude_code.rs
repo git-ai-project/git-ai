@@ -165,6 +165,36 @@ fn test_claude_preset_ignores_vscode_copilot_payload() {
 }
 
 #[test]
+fn test_claude_preset_ignores_cursor_payload() {
+    let hook_input = json!({
+        "conversation_id": "dff2bf79-6a53-446c-be41-f33512532fb0",
+        "model": "default",
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": "/Users/test/project/jokes.csv"
+        },
+        "transcript_path": "/Users/test/.cursor/projects/Users-test-project/agent-transcripts/dff2bf79-6a53-446c-be41-f33512532fb0/dff2bf79-6a53-446c-be41-f33512532fb0.jsonl",
+        "hook_event_name": "postToolUse",
+        "cursor_version": "2.5.26",
+        "workspace_roots": ["/Users/test/project"]
+    });
+
+    let flags = AgentCheckpointFlags {
+        hook_input: Some(hook_input.to_string()),
+    };
+
+    let preset = ClaudePreset;
+    let result = preset.run(flags);
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Skipping Cursor hook payload in Claude preset")
+    );
+}
+
+#[test]
 fn test_claude_preset_does_not_ignore_when_transcript_path_is_claude() {
     let temp = tempfile::tempdir().unwrap();
     let claude_dir = temp.path().join(".claude").join("projects");
@@ -866,3 +896,29 @@ fn test_mixed_plan_and_code_edits_in_single_assistant_message() {
         "Second tool_use should remain ToolUse"
     );
 }
+
+reuse_tests_in_worktree!(
+    test_parse_example_claude_code_jsonl_with_model,
+    test_claude_preset_extracts_edited_filepath,
+    test_claude_preset_no_filepath_when_tool_input_missing,
+    test_claude_preset_ignores_vscode_copilot_payload,
+    test_claude_preset_ignores_cursor_payload,
+    test_claude_preset_does_not_ignore_when_transcript_path_is_claude,
+    test_claude_e2e_prefers_latest_checkpoint_for_prompts,
+    test_parse_claude_code_jsonl_with_thinking,
+    test_tool_results_are_not_parsed_as_user_messages,
+    test_user_text_content_blocks_are_parsed_correctly,
+    test_is_plan_file_path_detects_plan_files,
+    test_extract_plan_from_write_tool,
+    test_extract_plan_from_edit_tool_with_prior_state,
+    test_extract_plan_from_edit_tool_without_prior_state,
+    test_extract_plan_returns_none_for_non_plan_files,
+    test_extract_plan_returns_none_for_non_write_edit_tools,
+    test_extract_plan_returns_none_for_empty_content,
+    test_parse_claude_code_jsonl_with_plan,
+    test_plan_write_with_inline_jsonl,
+    test_plan_edit_with_inline_jsonl,
+    test_non_plan_edit_remains_tool_use,
+    test_plan_message_serialization_roundtrip,
+    test_mixed_plan_and_code_edits_in_single_assistant_message,
+);

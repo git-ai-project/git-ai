@@ -630,3 +630,15 @@ fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result
     }
     Ok(())
 }
+
+reuse_tests_in_worktree!(
+    test_parse_opencode_storage_transcript,
+    test_parse_opencode_sqlite_transcript,
+    test_opencode_sqlite_takes_precedence_over_legacy_storage,
+    test_opencode_sqlite_falls_back_to_legacy_storage_when_sqlite_empty,
+    test_opencode_transcript_message_order,
+    test_opencode_transcript_timestamps_are_rfc3339,
+    test_opencode_empty_session_returns_empty_transcript,
+    test_opencode_nonexistent_session_returns_empty_transcript,
+    test_opencode_tool_use_only_from_assistant,
+);

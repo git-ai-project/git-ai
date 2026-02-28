@@ -11,7 +11,7 @@ use crate::git::repository::{exec_git, exec_git_stdin};
 use crate::utils::normalize_to_posix;
 use chrono::{DateTime, FixedOffset, TimeZone, Utc};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::sync::LazyLock;
@@ -196,6 +196,111 @@ impl Default for GitAiBlameOptions {
 }
 
 impl Repository {
+    const BLAME_ABBREV_BATCH_SIZE: usize = 256;
+
+    fn blame_requested_abbrev_len(options: &GitAiBlameOptions, is_boundary: bool) -> usize {
+        let base_len = options.abbrev.unwrap_or(7).max(1) as usize;
+        if is_boundary && !options.show_root {
+            base_len
+        } else {
+            (base_len + 1).min(40)
+        }
+    }
+
+    fn fallback_blame_abbrev_sha(commit_sha: &str, requested_len: usize) -> String {
+        if requested_len < commit_sha.len() {
+            commit_sha[..requested_len].to_string()
+        } else {
+            commit_sha.to_string()
+        }
+    }
+
+    fn resolve_blame_abbrev_shas_batched(
+        &self,
+        requests_by_len: &HashMap<usize, Vec<String>>,
+    ) -> HashMap<(String, usize), String> {
+        let mut resolved: HashMap<(String, usize), String> = HashMap::new();
+
+        for (&requested_len, commit_shas) in requests_by_len {
+            if commit_shas.is_empty() {
+                continue;
+            }
+
+            for commit_sha_batch in commit_shas.chunks(Self::BLAME_ABBREV_BATCH_SIZE) {
+                let mut args = self.global_args_for_exec();
+                args.push("rev-parse".to_string());
+                args.push(format!("--short={requested_len}"));
+                args.extend(commit_sha_batch.iter().cloned());
+
+                let batched_result = exec_git(&args)
+                    .ok()
+                    .and_then(|output| String::from_utf8(output.stdout).ok())
+                    .map(|stdout| {
+                        stdout
+                            .lines()
+                            .map(str::trim)
+                            .filter(|line| !line.is_empty())
+                            .map(str::to_string)
+                            .collect::<Vec<_>>()
+                    });
+
+                if let Some(short_shas) = batched_result
+                    && short_shas.len() == commit_sha_batch.len()
+                {
+                    for (commit_sha, short_sha) in commit_sha_batch.iter().zip(short_shas) {
+                        resolved.insert((commit_sha.clone(), requested_len), short_sha);
+                    }
+                    continue;
+                }
+
+                for commit_sha in commit_sha_batch {
+                    resolved
+                        .entry((commit_sha.clone(), requested_len))
+                        .or_insert_with(|| {
+                            Self::fallback_blame_abbrev_sha(commit_sha, requested_len)
+                        });
+                }
+            }
+        }
+
+        resolved
+    }
+
+    fn populate_hunk_abbrev_shas(&self, hunks: &mut [BlameHunk], options: &GitAiBlameOptions) {
+        if options.long_rev {
+            for hunk in hunks {
+                hunk.abbrev_sha = hunk.commit_sha.clone();
+            }
+            return;
+        }
+
+        let mut requests_by_len: HashMap<usize, Vec<String>> = HashMap::new();
+        let mut seen_by_len: HashMap<usize, HashSet<String>> = HashMap::new();
+
+        for hunk in hunks.iter() {
+            let requested_len = Self::blame_requested_abbrev_len(options, hunk.is_boundary);
+            let seen = seen_by_len.entry(requested_len).or_default();
+            if seen.insert(hunk.commit_sha.clone()) {
+                requests_by_len
+                    .entry(requested_len)
+                    .or_default()
+                    .push(hunk.commit_sha.clone());
+            }
+        }
+
+        let resolved = self.resolve_blame_abbrev_shas_batched(&requests_by_len);
+
+        for hunk in hunks.iter_mut() {
+            let requested_len = Self::blame_requested_abbrev_len(options, hunk.is_boundary);
+            hunk.abbrev_sha = resolved
+                .get(&(hunk.commit_sha.clone(), requested_len))
+                .cloned()
+                .unwrap_or_else(|| {
+                    Self::fallback_blame_abbrev_sha(&hunk.commit_sha, requested_len)
+                });
+        }
+    }
+
     #[allow(clippy::type_complexity)]
     pub fn blame(
         &self,
@@ -351,12 +456,13 @@ impl Repository {
             }
         }
 
-        // Step 1: Get Git's native blame for all ranges
-        let mut all_blame_hunks = Vec::new();
-        for (start_line, end_line) in &line_ranges {
-            let hunks = self.blame_hunks(&relative_file_path, *start_line, *end_line, &options)?;
-            all_blame_hunks.extend(hunks);
-        }
+        // Step 1: Get Git's native blame for all ranges in one invocation.
+        let all_blame_hunks = if line_ranges.len() == 1 {
+            let (start_line, end_line) = line_ranges[0];
+            self.blame_hunks(&relative_file_path, start_line, end_line, &options)?
+        } else {
+            self.blame_hunks_for_ranges(&relative_file_path, &line_ranges, &options)?
+        };
 
         // Step 2: Overlay AI authorship information
         let (line_authors, prompt_records, authorship_logs, prompt_commits) =
@@ -416,6 +522,19 @@ impl Repository {
         end_line: u32,
         options: &GitAiBlameOptions,
     ) -> Result<Vec<BlameHunk>, GitAiError> {
+        self.blame_hunks_for_ranges(file_path, &[(start_line, end_line)], options)
+    }
+
+    pub fn blame_hunks_for_ranges(
+        &self,
+        file_path: &str,
+        line_ranges: &[(u32, u32)],
+        options: &GitAiBlameOptions,
+    ) -> Result<Vec<BlameHunk>, GitAiError> {
+        if line_ranges.is_empty() {
+            return Ok(Vec::new());
+        }
+
         // Build git blame --line-porcelain command
         let mut args = self.global_args_for_exec();
         args.push("blame".to_string());
@@ -436,9 +555,11 @@ impl Repository {
             args.push(file.clone());
         }
 
-        // Limit to specified range
-        args.push("-L".to_string());
-        args.push(format!("{},{}", start_line, end_line));
+        // Limit to the specified ranges (git blame supports multiple -L flags).
+        for (start_line, end_line) in line_ranges {
+            args.push("-L".to_string());
+            args.push(format!("{},{}", start_line, end_line));
+        }
 
         // Add --since flag if oldest_date is specified
         // This controls the absolute lower bound of how far back to look
@@ -599,22 +720,11 @@ impl Repository {
                         orig_start
                     };
 
-                    let abbrev_len = if options.long_rev {
-                        40
-                    } else {
-                        options.abbrev.unwrap_or(7) as usize
-                    };
-                    let abbrev = if abbrev_len < prev_sha.len() {
-                        prev_sha[..abbrev_len].to_string()
-                    } else {
-                        prev_sha.clone()
-                    };
-
                     hunks.push(BlameHunk {
                         range: (start, end),
                         orig_range: (orig_start, orig_end),
                         commit_sha: prev_sha,
-                        abbrev_sha: abbrev,
+                        abbrev_sha: String::new(),
                         original_author: cur_meta.author.clone(),
                         author_email: cur_meta.author_mail.clone(),
                         author_time: cur_meta.author_time,
@@ -668,22 +778,11 @@ impl Repository {
                 orig_start
             };
 
-            let abbrev_len = if options.long_rev {
-                40
-            } else {
-                options.abbrev.unwrap_or(7) as usize
-            };
-            let abbrev = if abbrev_len < prev_sha.len() {
-                prev_sha[..abbrev_len].to_string()
-            } else {
-                prev_sha.clone()
-            };
-
             hunks.push(BlameHunk {
                 range: (start, end),
                 orig_range: (orig_start, orig_end),
                 commit_sha: prev_sha,
-                abbrev_sha: abbrev,
+                abbrev_sha: String::new(),
                 original_author: cur_meta.author.clone(),
                 author_email: cur_meta.author_mail.clone(),
                 author_time: cur_meta.author_time,
@@ -696,6 +795,8 @@ impl Repository {
                 is_boundary: cur_meta.boundary,
             });
         }
+
+        self.populate_hunk_abbrev_shas(&mut hunks, options);
 
         // Post-process hunks to populate ai_human_author from authorship logs
         let hunks = self.populate_ai_human_authors(hunks, file_path, options)?;
@@ -1119,82 +1220,96 @@ fn output_porcelain_format(
 
     // Build a map from line number to BlameHunk for fast lookup
     let mut line_to_hunk: HashMap<u32, BlameHunk> = HashMap::new();
-    for (start_line, end_line) in line_ranges {
-        let h = repo.blame_hunks(file_path, *start_line, *end_line, &no_split_options)?;
-        for hunk in h {
-            for line_num in hunk.range.0..=hunk.range.1 {
-                line_to_hunk.insert(line_num, hunk.clone());
-            }
+    let hunks = repo.blame_hunks_for_ranges(file_path, line_ranges, &no_split_options)?;
+    for hunk in hunks {
+        for line_num in hunk.range.0..=hunk.range.1 {
+            line_to_hunk.insert(line_num, hunk.clone());
         }
     }
+    let mut requested_lines: Vec<u32> = line_to_hunk.keys().copied().collect();
+    requested_lines.sort_unstable();
 
     let mut last_hunk_id = None;
-    for (start_line, end_line) in line_ranges {
-        for line_num in *start_line..=*end_line {
-            let line_index = (line_num - 1) as usize;
-            let line_content = if line_index < lines.len() {
-                lines[line_index]
-            } else {
-                ""
-            };
+    let mut commit_summaries: HashMap<String, String> = HashMap::new();
+    let mut seen_commits: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for line_num in requested_lines {
+        let line_index = (line_num - 1) as usize;
+        let line_content = if line_index < lines.len() {
+            lines[line_index]
+        } else {
+            ""
+        };
 
-            if let Some(hunk) = line_to_hunk.get(&line_num) {
-                let author_name = &hunk.original_author;
-                let commit_sha = &hunk.commit_sha;
-                let author_email = &hunk.author_email;
-                let author_time = hunk.author_time;
-                let author_tz = &hunk.author_tz;
-                let committer_name = &hunk.committer;
-                let committer_email = &hunk.committer_email;
-                let committer_time = hunk.committer_time;
-                let committer_tz = &hunk.committer_tz;
-                let boundary = hunk.is_boundary;
-                let filename = file_path;
+        if let Some(hunk) = line_to_hunk.get(&line_num) {
+            let author_name = &hunk.original_author;
+            let commit_sha = &hunk.commit_sha;
+            let author_email = &hunk.author_email;
+            let author_time = hunk.author_time;
+            let author_tz = &hunk.author_tz;
+            let committer_name = &hunk.committer;
+            let committer_email = &hunk.committer_email;
+            let committer_time = hunk.committer_time;
+            let committer_tz = &hunk.committer_tz;
+            let boundary = hunk.is_boundary;
+            let filename = file_path;
 
-                // Retrieve the commit summary directly from the commit object
-                let commit = repo.find_commit(commit_sha.clone())?;
-                let summary = commit.summary()?;
-
-                let hunk_id = (commit_sha.clone(), hunk.range.0);
-                if options.line_porcelain {
-                    if last_hunk_id.as_ref() != Some(&hunk_id) {
-                        // First line of hunk: 4-field header
-                        println!(
-                            "{} {} {} {}",
-                            commit_sha,
-                            line_num,
-                            line_num,
-                            hunk.range.1 - hunk.range.0 + 1
-                        );
-                        last_hunk_id = Some(hunk_id);
-                    } else {
-                        // Subsequent lines: 3-field header
-                        println!("{} {} {}", commit_sha, line_num, line_num);
-                    }
-                    println!("author {}", author_name);
-                    println!("author-mail <{}>", author_email);
-                    println!("author-time {}", author_time);
-                    println!("author-tz {}", author_tz);
-                    println!("committer {}", committer_name);
-                    println!("committer-mail <{}>", committer_email);
-                    println!("committer-time {}", committer_time);
-                    println!("committer-tz {}", committer_tz);
-                    println!("summary {}", summary);
-                    if boundary {
-                        println!("boundary");
-                    }
-                    println!("filename {}", filename);
-                    println!("\t{}", line_content);
-                } else if options.porcelain {
-                    if last_hunk_id.as_ref() != Some(&hunk_id) {
-                        // Print full block for first line of hunk
-                        println!(
-                            "{} {} {} {}",
-                            commit_sha,
-                            line_num,
-                            line_num,
-                            hunk.range.1 - hunk.range.0 + 1
-                        );
+            let hunk_id = (commit_sha.clone(), hunk.range.0);
+            if options.line_porcelain {
+                let summary = if let Some(summary) = commit_summaries.get(commit_sha) {
+                    summary.clone()
+                } else {
+                    let commit = repo.find_commit(commit_sha.clone())?;
+                    let summary = commit.summary()?;
+                    commit_summaries.insert(commit_sha.clone(), summary.clone());
+                    summary
+                };
+                if last_hunk_id.as_ref() != Some(&hunk_id) {
+                    // First line of hunk: 4-field header
+                    println!(
+                        "{} {} {} {}",
+                        commit_sha,
+                        line_num,
+                        line_num,
+                        hunk.range.1 - hunk.range.0 + 1
+                    );
+                    last_hunk_id = Some(hunk_id);
+                } else {
+                    // Subsequent lines: 3-field header
+                    println!("{} {} {}", commit_sha, line_num, line_num);
+                }
+                println!("author {}", author_name);
+                println!("author-mail <{}>", author_email);
+                println!("author-time {}", author_time);
+                println!("author-tz {}", author_tz);
+                println!("committer {}", committer_name);
+                println!("committer-mail <{}>", committer_email);
+                println!("committer-time {}", committer_time);
+                println!("committer-tz {}", committer_tz);
+                println!("summary {}", summary);
+                if boundary {
+                    println!("boundary");
+                }
+                println!("filename {}", filename);
+                println!("\t{}", line_content);
+            } else if options.porcelain {
+                if last_hunk_id.as_ref() != Some(&hunk_id) {
+                    // First line of hunk.
+                    println!(
+                        "{} {} {} {}",
+                        commit_sha,
+                        line_num,
+                        line_num,
+                        hunk.range.1 - hunk.range.0 + 1
+                    );
+                    if !seen_commits.contains(commit_sha) {
+                        let summary = if let Some(summary) = commit_summaries.get(commit_sha) {
+                            summary.clone()
+                        } else {
+                            let commit = repo.find_commit(commit_sha.clone())?;
+                            let summary = commit.summary()?;
+                            commit_summaries.insert(commit_sha.clone(), summary.clone());
+                            summary
+                        };
                         println!("author {}", author_name);
                         println!("author-mail <{}>", author_email);
                         println!("author-time {}", author_time);
@@ -1208,13 +1323,14 @@ fn output_porcelain_format(
                             println!("boundary");
                         }
                         println!("filename {}", filename);
-                        println!("\t{}", line_content);
-                        last_hunk_id = Some(hunk_id);
-                    } else {
-                        // For subsequent lines, print only the header and content (no metadata block)
-                        println!("{} {} {}", commit_sha, line_num, line_num);
-                        println!("\t{}", line_content);
+                        seen_commits.insert(commit_sha.clone());
                     }
+                    println!("\t{}", line_content);
+                    last_hunk_id = Some(hunk_id);
+                } else {
+                    // For subsequent lines, print only the header and content (no metadata block)
+                    println!("{} {} {}", commit_sha, line_num, line_num);
+                    println!("\t{}", line_content);
                 }
             }
         }
@@ -1236,41 +1352,51 @@ fn output_incremental_format(
 
     // Build a map from line number to BlameHunk for fast lookup
     let mut line_to_hunk: HashMap<u32, BlameHunk> = HashMap::new();
-    for (start_line, end_line) in line_ranges {
-        let h = repo.blame_hunks(file_path, *start_line, *end_line, &no_split_options)?;
-        for hunk in h {
-            for line_num in hunk.range.0..=hunk.range.1 {
-                line_to_hunk.insert(line_num, hunk.clone());
-            }
+    let hunks = repo.blame_hunks_for_ranges(file_path, line_ranges, &no_split_options)?;
+    for hunk in hunks {
+        for line_num in hunk.range.0..=hunk.range.1 {
+            line_to_hunk.insert(line_num, hunk.clone());
         }
     }
+    let mut requested_lines: Vec<u32> = line_to_hunk.keys().copied().collect();
+    requested_lines.sort_unstable();
 
     let mut last_hunk_id = None;
-    for (start_line, end_line) in line_ranges {
-        for line_num in *start_line..=*end_line {
-            if let Some(hunk) = line_to_hunk.get(&line_num) {
-                // For incremental format, use the original git author, not AI authorship
-                let author_name = &hunk.original_author;
-                let commit_sha = &hunk.commit_sha;
-                let author_email = &hunk.author_email;
-                let author_time = hunk.author_time;
-                let author_tz = &hunk.author_tz;
-                let committer_name = &hunk.committer;
-                let committer_email = &hunk.committer_email;
-                let committer_time = hunk.committer_time;
-                let committer_tz = &hunk.committer_tz;
+    let mut commit_summaries: HashMap<String, String> = HashMap::new();
+    let mut seen_commits: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for line_num in requested_lines {
+        if let Some(hunk) = line_to_hunk.get(&line_num) {
+            // For incremental format, use the original git author, not AI authorship
+            let author_name = &hunk.original_author;
+            let commit_sha = &hunk.commit_sha;
+            let author_email = &hunk.author_email;
+            let author_time = hunk.author_time;
+            let author_tz = &hunk.author_tz;
+            let committer_name = &hunk.committer;
+            let committer_email = &hunk.committer_email;
+            let committer_time = hunk.committer_time;
+            let committer_tz = &hunk.committer_tz;
 
-                // Only print the full block for the first line of a hunk
-                let hunk_id = (hunk.commit_sha.clone(), hunk.range.0);
-                if last_hunk_id.as_ref() != Some(&hunk_id) {
-                    // Print full block - match git's format exactly
-                    println!(
-                        "{} {} {} {}",
-                        commit_sha,
-                        line_num,
-                        line_num,
-                        hunk.range.1 - hunk.range.0 + 1
-                    );
+            // Only print the full block for the first line of a hunk
+            let hunk_id = (hunk.commit_sha.clone(), hunk.range.0);
+            if last_hunk_id.as_ref() != Some(&hunk_id) {
+                // Print first line for this hunk.
+                println!(
+                    "{} {} {} {}",
+                    commit_sha,
+                    line_num,
+                    line_num,
+                    hunk.range.1 - hunk.range.0 + 1
+                );
+                if !seen_commits.contains(commit_sha) {
+                    let summary = if let Some(summary) = commit_summaries.get(commit_sha) {
+                        summary.clone()
+                    } else {
+                        let commit = repo.find_commit(commit_sha.clone())?;
+                        let summary = commit.summary()?;
+                        commit_summaries.insert(commit_sha.clone(), summary.clone());
+                        summary
+                    };
                     println!("author {}", author_name);
                     println!("author-mail <{}>", author_email);
                     println!("author-time {}", author_time);
@@ -1279,31 +1405,32 @@ fn output_incremental_format(
                     println!("committer-mail <{}>", committer_email);
                     println!("committer-time {}", committer_time);
                     println!("committer-tz {}", committer_tz);
-                    println!("summary Initial commit");
+                    println!("summary {}", summary);
                     if hunk.is_boundary {
                         println!("boundary");
                     }
-                    println!("filename {}", file_path);
-                    last_hunk_id = Some(hunk_id);
+                    seen_commits.insert(commit_sha.clone());
                 }
-                // For incremental, no content lines (no \tLine)
-            } else {
-                // Fallback for lines without blame info
-                println!(
-                    "0000000000000000000000000000000000000000 {} {} 1",
-                    line_num, line_num
-                );
-                println!("author unknown");
-                println!("author-mail <unknown@example.com>");
-                println!("author-time 0");
-                println!("author-tz +0000");
-                println!("committer unknown");
-                println!("committer-mail <unknown@example.com>");
-                println!("committer-time 0");
-                println!("committer-tz +0000");
-                println!("summary unknown");
                 println!("filename {}", file_path);
+                last_hunk_id = Some(hunk_id);
             }
+            // For incremental, no content lines (no \tLine)
+        } else {
+            // Fallback for lines without blame info
+            println!(
+                "0000000000000000000000000000000000000000 {} {} 1",
+                line_num, line_num
+            );
+            println!("author unknown");
+            println!("author-mail <unknown@example.com>");
+            println!("author-time 0");
+            println!("author-tz +0000");
+            println!("committer unknown");
+            println!("committer-mail <unknown@example.com>");
+            println!("committer-time 0");
+            println!("committer-tz +0000");
+            println!("summary unknown");
+            println!("filename {}", file_path);
         }
     }
     Ok(())
@@ -1324,16 +1451,17 @@ fn output_default_format(
     let mut no_split_options = options.clone();
     no_split_options.split_hunks_by_ai_author = false;
 
+    let hunks = repo.blame_hunks_for_ranges(file_path, line_ranges, &no_split_options)?;
+
     // Build a map from line number to BlameHunk for fast lookup
     let mut line_to_hunk: HashMap<u32, BlameHunk> = HashMap::new();
-    for (start_line, end_line) in line_ranges {
-        let h = repo.blame_hunks(file_path, *start_line, *end_line, &no_split_options)?;
-        for hunk in h {
-            for line_num in hunk.range.0..=hunk.range.1 {
-                line_to_hunk.insert(line_num, hunk.clone());
-            }
+    for hunk in &hunks {
+        for line_num in hunk.range.0..=hunk.range.1 {
+            line_to_hunk.insert(line_num, hunk.clone());
         }
     }
+    let mut requested_lines: Vec<u32> = line_to_hunk.keys().copied().collect();
+    requested_lines.sort_unstable();
 
     // Calculate the maximum line number width for proper padding
     let max_line_num = lines.len() as u32;
@@ -1341,12 +1469,62 @@ fn output_default_format(
 
     // Calculate the maximum author name width for proper padding
     let mut max_author_width = 0;
-    for (start_line, end_line) in line_ranges {
-        let h = repo.blame_hunks(file_path, *start_line, *end_line, &no_split_options)?;
-        for hunk in h {
-            let author = line_authors
-                .get(&hunk.range.0)
-                .unwrap_or(&hunk.original_author);
+    for hunk in &hunks {
+        let author = line_authors
+            .get(&hunk.range.0)
+            .unwrap_or(&hunk.original_author);
+        let author_display = if options.suppress_author {
+            "".to_string()
+        } else if options.show_prompt && prompt_records.contains_key(author) {
+            let prompt = &prompt_records[author];
+            let short_hash = &author[..7.min(author.len())];
+            format!("{} [{}]", prompt.agent_id.tool, short_hash)
+        } else if options.show_email {
+            format!("{} <{}>", author, &hunk.author_email)
+        } else {
+            author.to_string()
+        };
+        max_author_width = max_author_width.max(author_display.len());
+    }
+
+    let blank_boundary_hash_width = if options.long_rev {
+        40
+    } else {
+        ((options.abbrev.unwrap_or(7).max(1) as usize) + 1).min(40)
+    };
+
+    for line_num in requested_lines {
+        let line_index = (line_num - 1) as usize;
+        let line_content = if line_index < lines.len() {
+            lines[line_index]
+        } else {
+            ""
+        };
+
+        if let Some(hunk) = line_to_hunk.get(&line_num) {
+            let sha = &hunk.abbrev_sha;
+
+            // Match git blame boundary formatting:
+            // - default boundary: prefix abbreviated hash with '^'
+            // - -b/--blank-boundary: print a blank hash column
+            let full_sha = if hunk.is_boundary && options.blank_boundary && !options.show_root {
+                " ".repeat(blank_boundary_hash_width)
+            } else {
+                let boundary_marker = if hunk.is_boundary && !options.show_root {
+                    "^"
+                } else {
+                    ""
+                };
+                format!("{}{}", boundary_marker, sha)
+            };
+
+            // Get the author for this line (AI authorship or original)
+            let author = line_authors.get(&line_num).unwrap_or(&hunk.original_author);
+
+            // Format date according to options
+            let date_str = format_blame_date(hunk.author_time, &hunk.author_tz, options);
+
+            // Handle different output formats based on flags
             let author_display = if options.suppress_author {
                 "".to_string()
             } else if options.show_prompt && prompt_records.contains_key(author) {
@@ -1358,137 +1536,78 @@ fn output_default_format(
             } else {
                 author.to_string()
             };
-            max_author_width = max_author_width.max(author_display.len());
-        }
-    }
 
-    for (start_line, end_line) in line_ranges {
-        for line_num in *start_line..=*end_line {
-            let line_index = (line_num - 1) as usize;
-            let line_content = if line_index < lines.len() {
-                lines[line_index]
+            // Pad author name to consistent width
+            let padded_author = if max_author_width > 0 {
+                format!("{:<width$}", author_display, width = max_author_width)
             } else {
-                ""
+                author_display
             };
 
-            if let Some(hunk) = line_to_hunk.get(&line_num) {
-                // Determine hash length - match git blame default (7 chars)
-                let hash_len = if options.long_rev {
-                    40 // Full hash for long revision
-                } else if let Some(abbrev) = options.abbrev {
-                    abbrev as usize
-                } else {
-                    7 // Default 7 chars
-                };
-                let sha = if hash_len < hunk.commit_sha.len() {
-                    &hunk.commit_sha[..hash_len]
-                } else {
-                    &hunk.commit_sha
-                };
+            let _filename_display = if options.show_name {
+                format!("{} ", file_path)
+            } else {
+                "".to_string()
+            };
 
-                // Add boundary marker if this is a boundary commit
-                let boundary_marker = if hunk.is_boundary && options.blank_boundary {
-                    "^"
-                } else {
-                    ""
-                };
-                let full_sha = if hunk.is_boundary && options.blank_boundary {
-                    format!("{}{}", boundary_marker, "        ") // Empty hash for boundary
-                } else {
-                    format!("{}{}", boundary_marker, sha)
-                };
+            let _number_display = if options.show_number {
+                format!("{} ", line_num)
+            } else {
+                "".to_string()
+            };
 
-                // Get the author for this line (AI authorship or original)
-                let author = line_authors.get(&line_num).unwrap_or(&hunk.original_author);
-
-                // Format date according to options
-                let date_str = format_blame_date(hunk.author_time, &hunk.author_tz, options);
-
-                // Handle different output formats based on flags
-                let author_display = if options.suppress_author {
-                    "".to_string()
-                } else if options.show_prompt && prompt_records.contains_key(author) {
-                    let prompt = &prompt_records[author];
-                    let short_hash = &author[..7.min(author.len())];
-                    format!("{} [{}]", prompt.agent_id.tool, short_hash)
-                } else if options.show_email {
-                    format!("{} <{}>", author, &hunk.author_email)
-                } else {
-                    author.to_string()
-                };
-
-                // Pad author name to consistent width
-                let padded_author = if max_author_width > 0 {
-                    format!("{:<width$}", author_display, width = max_author_width)
-                } else {
-                    author_display
-                };
-
-                let _filename_display = if options.show_name {
-                    format!("{} ", file_path)
-                } else {
-                    "".to_string()
-                };
-
-                let _number_display = if options.show_number {
-                    format!("{} ", line_num)
-                } else {
-                    "".to_string()
-                };
-
-                // Format exactly like git blame: sha (author date line) code
-                if options.suppress_author {
-                    // Suppress author format: sha line_number) code
-                    output.push_str(&format!("{} {}) {}\n", full_sha, line_num, line_content));
+            // Format exactly like git blame: sha (author date line) code
+            if options.suppress_author {
+                // Suppress author format: sha line_number) code
+                output.push_str(&format!("{} {}) {}\n", full_sha, line_num, line_content));
+            } else {
+                // Normal format: sha (author date line) code
+                if options.show_name {
+                    // Show filename format: sha filename (author date line) code
+                    output.push_str(&format!(
+                        "{} {} ({} {} {:>width$}) {}\n",
+                        full_sha,
+                        file_path,
+                        padded_author,
+                        date_str,
+                        line_num,
+                        line_content,
+                        width = line_num_width
+                    ));
+                } else if options.show_number {
+                    // Show number format: sha line_number (author date line) code (matches git's -n output)
+                    output.push_str(&format!(
+                        "{} {} ({} {} {:>width$}) {}\n",
+                        full_sha,
+                        line_num,
+                        padded_author,
+                        date_str,
+                        line_num,
+                        line_content,
+                        width = line_num_width
+                    ));
                 } else {
                     // Normal format: sha (author date line) code
-                    if options.show_name {
-                        // Show filename format: sha filename (author date line) code
-                        output.push_str(&format!(
-                            "{} {} ({} {} {:>width$}) {}\n",
-                            full_sha,
-                            file_path,
-                            padded_author,
-                            date_str,
-                            line_num,
-                            line_content,
-                            width = line_num_width
-                        ));
-                    } else if options.show_number {
-                        // Show number format: sha line_number (author date line) code (matches git's -n output)
-                        output.push_str(&format!(
-                            "{} {} ({} {} {:>width$}) {}\n",
-                            full_sha,
-                            line_num,
-                            padded_author,
-                            date_str,
-                            line_num,
-                            line_content,
-                            width = line_num_width
-                        ));
-                    } else {
-                        // Normal format: sha (author date line) code
-                        output.push_str(&format!(
-                            "{} ({} {} {:>width$}) {}\n",
-                            full_sha,
-                            padded_author,
-                            date_str,
-                            line_num,
-                            line_content,
-                            width = line_num_width
-                        ));
-                    }
+                    output.push_str(&format!(
+                        "{} ({} {} {:>width$}) {}\n",
+                        full_sha,
+                        padded_author,
+                        date_str,
+                        line_num,
+                        line_content,
+                        width = line_num_width
+                    ));
                 }
-            } else {
-                // Fallback for lines without blame info
-                output.push_str(&format!(
-                    "{:<8} (unknown        1970-01-01 00:00:00 +0000    {:>width$}) {}\n",
-                    "????????",
-                    line_num,
-                    line_content,
-                    width = line_num_width
-                ));
             }
+        } else {
+            // Fallback for lines without blame info
+            output.push_str(&format!(
+                "{:<8} (unknown        1970-01-01 00:00:00 +0000    {:>width$}) {}\n",
+                "????????",
+                line_num,
+                line_content,
+                width = line_num_width
+            ));
         }
     }
 

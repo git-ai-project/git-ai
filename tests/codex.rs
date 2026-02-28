@@ -255,3 +255,11 @@ fn test_codex_e2e_commit_resync_uses_latest_rollout() {
         "Prompt transcript should be refreshed from latest rollout"
     );
 }
+
+reuse_tests_in_worktree!(
+    test_parse_codex_rollout_transcript,
+    test_codex_preset_legacy_hook_input,
+    test_codex_preset_structured_hook_input,
+    test_find_rollout_path_for_session_in_home,
+    test_codex_e2e_commit_resync_uses_latest_rollout,
+);

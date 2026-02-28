@@ -366,3 +366,12 @@ fn test_ai_tab_e2e_handles_dirty_files_map() {
         "}".ai(),
     ]);
 }
+
+reuse_tests_in_worktree!(
+    test_ai_tab_before_edit_checkpoint_includes_dirty_files,
+    test_ai_tab_after_edit_checkpoint_includes_dirty_files_and_paths,
+    test_ai_tab_rejects_invalid_hook_event,
+    test_ai_tab_requires_non_empty_tool_and_model,
+    test_ai_tab_e2e_marks_ai_lines,
+    test_ai_tab_e2e_handles_dirty_files_map,
+);

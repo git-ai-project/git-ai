@@ -13,7 +13,7 @@ use crate::commands::blame::{GitAiBlameOptions, OLDEST_AI_BLAME_DATE};
 use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
 use crate::config::Config;
 use crate::error::GitAiError;
-use crate::git::repo_storage::{PersistedWorkingLog, RepoStorage};
+use crate::git::repo_storage::PersistedWorkingLog;
 use crate::git::repository::Repository;
 use crate::git::status::{EntryKind, StatusCode};
 use crate::utils::{debug_log, normalize_to_posix};
@@ -555,7 +555,7 @@ pub fn run(
 
     // Initialize the new storage system
     let storage_start = Instant::now();
-    let repo_storage = RepoStorage::for_repo_path(repo.path(), &repo.workdir()?);
+    let repo_storage = repo.storage.clone();
     let mut working_log = repo_storage.working_log_for_base_commit(&base_commit);
     debug_log(&format!(
         "[BENCHMARK] Storage initialization took {:?}",
@@ -592,7 +592,7 @@ pub fn run(
             && !has_initial_attributions
             && !Config::get().get_feature_flags().inter_commit_move
         {
-            debug_log("No AI edits,in pre-commit checkpoint, skipping");
+            debug_log("No AI edits in pre-commit checkpoint, skipping");
             return Ok((0, 0, 0));
         }
     }

@@ -17,7 +17,7 @@ const SCHEMA_VERSION: usize = 3;
 const MIGRATIONS: &[&str] = &[
     // Migration 0 -> 1: Initial schema with prompts table
     r#"
-    CREATE TABLE prompts (
+    CREATE TABLE IF NOT EXISTS prompts (
         id TEXT PRIMARY KEY NOT NULL,
         workdir TEXT,
         tool TEXT NOT NULL,
@@ -35,20 +35,20 @@ const MIGRATIONS: &[&str] = &[
         updated_at INTEGER NOT NULL
     );
 
-    CREATE INDEX idx_prompts_tool
+    CREATE INDEX IF NOT EXISTS idx_prompts_tool
         ON prompts(tool);
-    CREATE INDEX idx_prompts_external_thread_id
+    CREATE INDEX IF NOT EXISTS idx_prompts_external_thread_id
         ON prompts(external_thread_id);
-    CREATE INDEX idx_prompts_workdir
+    CREATE INDEX IF NOT EXISTS idx_prompts_workdir
         ON prompts(workdir);
-    CREATE INDEX idx_prompts_commit_sha
+    CREATE INDEX IF NOT EXISTS idx_prompts_commit_sha
         ON prompts(commit_sha);
-    CREATE INDEX idx_prompts_updated_at
+    CREATE INDEX IF NOT EXISTS idx_prompts_updated_at
         ON prompts(updated_at);
     "#,
     // Migration 1 -> 2: Add CAS sync queue
     r#"
-    CREATE TABLE cas_sync_queue (
+    CREATE TABLE IF NOT EXISTS cas_sync_queue (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         hash TEXT NOT NULL UNIQUE,
         data TEXT NOT NULL,
@@ -62,16 +62,16 @@ const MIGRATIONS: &[&str] = &[
         created_at INTEGER NOT NULL
     );
 
-    CREATE INDEX idx_cas_sync_queue_status_retry
+    CREATE INDEX IF NOT EXISTS idx_cas_sync_queue_status_retry
         ON cas_sync_queue(status, next_retry_at);
-    CREATE INDEX idx_cas_sync_queue_hash
+    CREATE INDEX IF NOT EXISTS idx_cas_sync_queue_hash
         ON cas_sync_queue(hash);
-    CREATE INDEX idx_cas_sync_queue_stale_processing
+    CREATE INDEX IF NOT EXISTS idx_cas_sync_queue_stale_processing
         ON cas_sync_queue(processing_started_at) WHERE status = 'processing';
     "#,
     // Migration 2 -> 3: Add CAS cache for fetched prompts
     r#"
-    CREATE TABLE cas_cache (
+    CREATE TABLE IF NOT EXISTS cas_cache (
         hash TEXT PRIMARY KEY NOT NULL,
         messages TEXT NOT NULL,
         cached_at INTEGER NOT NULL
@@ -350,11 +350,15 @@ impl InternalDatabase {
     }
 
     /// Get database path: ~/.git-ai/internal/db
-    /// In test mode, can be overridden via GIT_AI_TEST_DB_PATH environment variable
+    /// In test mode, can be overridden via GIT_AI_TEST_DB_PATH environment variable.
+    /// We also support GITAI_TEST_DB_PATH because some git hook execution paths
+    /// may scrub custom GIT_* variables.
     fn database_path() -> Result<PathBuf, GitAiError> {
         // Allow test override via environment variable
         #[cfg(any(test, feature = "test-support"))]
-        if let Ok(test_path) = std::env::var("GIT_AI_TEST_DB_PATH") {
+        if let Ok(test_path) =
+            std::env::var("GIT_AI_TEST_DB_PATH").or_else(|_| std::env::var("GITAI_TEST_DB_PATH"))
+        {
             return Ok(PathBuf::from(test_path));
         }
 
@@ -431,20 +435,17 @@ impl InternalDatabase {
             // Apply the migration (FATAL on error)
             self.apply_migration(target_version)?;
 
-            // Update version in database
-            if target_version == 0 {
-                // First migration (0->1) - insert version
-                self.conn.execute(
-                    "INSERT INTO schema_metadata (key, value) VALUES ('version', ?1)",
-                    params![(target_version + 1).to_string()],
-                )?;
-            } else {
-                // Subsequent migrations (1->2, etc.) - update version
-                self.conn.execute(
-                    "UPDATE schema_metadata SET value = ?1 WHERE key = 'version'",
-                    params![(target_version + 1).to_string()],
-                )?;
-            }
+            // Use an upsert so concurrent initializers do not race on version row creation.
+            self.conn.execute(
+                r#"
+                INSERT INTO schema_metadata (key, value)
+                VALUES ('version', ?1)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value
+                WHERE CAST(schema_metadata.value AS INTEGER) < CAST(excluded.value AS INTEGER)
+                "#,
+                params![(target_version + 1).to_string()],
+            )?;
 
             debug_log(&format!(
                 "[Migration] Successfully upgraded to version {}",
@@ -1127,6 +1128,47 @@ mod tests {
         assert_eq!(count, 1);
 
         // Verify schema_metadata exists
+        let version: String = db
+            .conn
+            .query_row(
+                "SELECT value FROM schema_metadata WHERE key = 'version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "3");
+    }
+
+    #[test]
+    fn test_initialize_schema_handles_preexisting_cas_cache_table() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("concurrent-init.db");
+        let conn = Connection::open(&db_path).unwrap();
+
+        // Simulate a partial migration state from a concurrent process:
+        // schema version indicates cas_cache is missing, but the table already exists.
+        conn.execute_batch(
+            r#"
+            CREATE TABLE schema_metadata (
+                key TEXT PRIMARY KEY NOT NULL,
+                value TEXT NOT NULL
+            );
+            INSERT INTO schema_metadata (key, value) VALUES ('version', '2');
+            CREATE TABLE cas_cache (
+                hash TEXT PRIMARY KEY NOT NULL,
+                messages TEXT NOT NULL,
+                cached_at INTEGER NOT NULL
+            );
+            "#,
+        )
+        .unwrap();
+
+        let mut db = InternalDatabase {
+            conn,
+            _db_path: db_path,
+        };
+        db.initialize_schema().unwrap();
+
         let version: String = db
             .conn
             .query_row(
