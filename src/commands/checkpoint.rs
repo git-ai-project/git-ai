@@ -183,7 +183,6 @@ pub(crate) fn emit_agent_telemetry_events(
         return;
     }
 
-    let attrs = attrs;
     let now_ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
