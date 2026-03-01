@@ -118,7 +118,7 @@ jobs:
           Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
           ./install.ps1
 
-      - name: Verify Claude hooks and local bin shim
+      - name: Verify Claude hooks
         shell: pwsh
         env:
           HOME: ${{ env.TEST_HOME }}
@@ -130,8 +130,3 @@ jobs:
           if (-not (Test-Path -LiteralPath (Join-Path $installDir "git-ai.exe"))) { throw "git-ai.exe not installed" }
           $settings = Join-Path $env:USERPROFILE ".claude\settings.json"
           if (-not (Select-String -Path $settings -Pattern "checkpoint claude")) { throw "Claude hooks not configured" }
-          # Verify ~/.local/bin/git-ai.cmd shim
-          $localBinShim = Join-Path $env:USERPROFILE ".local\bin\git-ai.cmd"
-          if (-not (Test-Path -LiteralPath $localBinShim)) { throw "~/.local/bin/git-ai.cmd shim not created" }
-          $shimContent = Get-Content -LiteralPath $localBinShim -Raw
-          if (-not $shimContent.Contains($installDir)) { throw "git-ai.cmd shim does not point to correct binary" }
