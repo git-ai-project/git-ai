@@ -156,12 +156,24 @@ pub fn run(
         storage_start.elapsed()
     ));
 
-    // Early exit for human only
+    // Read checkpoints once and reuse throughout the function.
+    // This eliminates multiple redundant read_all_checkpoints() calls that were
+    // previously the #1 cause of memory overflow (each read deserializes the entire
+    // JSONL file into memory).
+    let read_checkpoints_start = Instant::now();
+    let mut checkpoints = working_log.read_all_checkpoints()?;
+    debug_log(&format!(
+        "[BENCHMARK] Reading {} checkpoints took {:?}",
+        checkpoints.len(),
+        read_checkpoints_start.elapsed()
+    ));
+
+    // Early exit for human only — must run BEFORE reset so we can inspect existing data.
     if is_pre_commit {
-        let has_no_ai_edits = working_log
-            .all_ai_touched_files()
-            .map(|files| files.is_empty())
-            .unwrap_or(true);
+        let has_no_ai_edits = checkpoints.iter().all(|cp| {
+            cp.entries.is_empty()
+                || (cp.kind != CheckpointKind::AiAgent && cp.kind != CheckpointKind::AiTab)
+        });
 
         // Also check for INITIAL attributions - these are AI attributions from previous
         // commits that weren't staged (e.g., after an amend). We must process these.
@@ -176,6 +188,12 @@ pub fn run(
             debug_log("No AI edits in pre-commit checkpoint, skipping");
             return Ok((0, 0, 0));
         }
+    }
+
+    // Reset working log after the early-exit check (so existing data is inspected first)
+    if reset {
+        working_log.reset_working_log()?;
+        checkpoints.clear();
     }
 
     // Set dirty files if available
@@ -262,6 +280,7 @@ pub fn run(
         pathspec_start.elapsed()
     ));
 
+    // Pass pre-loaded checkpoints to avoid redundant reads inside get_all_tracked_files
     let files_start = Instant::now();
     let files = get_all_tracked_files(
         repo,
@@ -270,25 +289,12 @@ pub fn run(
         pathspec_filter,
         is_pre_commit,
         &ignore_matcher,
+        Some(&checkpoints),
     )?;
     debug_log(&format!(
         "[BENCHMARK] get_all_tracked_files found {} files, took {:?}",
         files.len(),
         files_start.elapsed()
-    ));
-
-    let read_checkpoints_start = Instant::now();
-    let mut checkpoints = if reset {
-        // If reset flag is set, start with an empty working log
-        working_log.reset_working_log()?;
-        Vec::new()
-    } else {
-        working_log.read_all_checkpoints()?
-    };
-    debug_log(&format!(
-        "[BENCHMARK] Reading {} checkpoints took {:?}",
-        checkpoints.len(),
-        read_checkpoints_start.elapsed()
     ));
 
     if show_working_log {
@@ -607,6 +613,7 @@ fn get_all_tracked_files(
     edited_filepaths: Option<&Vec<String>>,
     is_pre_commit: bool,
     ignore_matcher: &IgnoreMatcher,
+    preloaded_checkpoints: Option<&[Checkpoint]>,
 ) -> Result<Vec<String>, GitAiError> {
     let mut files: HashSet<String> = edited_filepaths
         .map(|paths| {
@@ -659,28 +666,38 @@ fn get_all_tracked_files(
         initial_read_start.elapsed()
     ));
 
+    // Use pre-loaded checkpoints if available, otherwise read from disk.
+    // This eliminates redundant read_all_checkpoints() calls when the caller
+    // already has the data loaded (e.g., checkpoint::run reads once and passes it through).
+    let owned_checkpoints;
+    let checkpoint_data: &[Checkpoint] = match preloaded_checkpoints {
+        Some(data) => data,
+        None => {
+            owned_checkpoints = working_log.read_all_checkpoints().unwrap_or_default();
+            &owned_checkpoints
+        }
+    };
+
     let checkpoints_read_start = Instant::now();
-    if let Ok(working_log_data) = working_log.read_all_checkpoints() {
-        for checkpoint in &working_log_data {
-            for entry in &checkpoint.entries {
-                // Normalize path separators to forward slashes
-                let normalized_path = normalize_to_posix(&entry.file);
-                // Filter out paths outside the repository to prevent git command failures
-                if !is_path_in_repo(&normalized_path) {
-                    debug_log(&format!(
-                        "Skipping checkpoint file outside repository: {}",
-                        normalized_path
-                    ));
-                    continue;
-                }
-                if should_ignore_file_with_matcher(&normalized_path, ignore_matcher) {
-                    continue;
-                }
-                if !files.contains(&normalized_path) {
-                    // Check if it's a text file before adding
-                    if is_text_file(working_log, &normalized_path) {
-                        files.insert(normalized_path);
-                    }
+    for checkpoint in checkpoint_data {
+        for entry in &checkpoint.entries {
+            // Normalize path separators to forward slashes
+            let normalized_path = normalize_to_posix(&entry.file);
+            // Filter out paths outside the repository to prevent git command failures
+            if !is_path_in_repo(&normalized_path) {
+                debug_log(&format!(
+                    "Skipping checkpoint file outside repository: {}",
+                    normalized_path
+                ));
+                continue;
+            }
+            if should_ignore_file_with_matcher(&normalized_path, ignore_matcher) {
+                continue;
+            }
+            if !files.contains(&normalized_path) {
+                // Check if it's a text file before adding
+                if is_text_file(working_log, &normalized_path) {
+                    files.insert(normalized_path);
                 }
             }
         }
@@ -690,13 +707,10 @@ fn get_all_tracked_files(
         checkpoints_read_start.elapsed()
     ));
 
-    let has_ai_checkpoints = if let Ok(working_log_data) = working_log.read_all_checkpoints() {
-        working_log_data.iter().any(|checkpoint| {
-            checkpoint.kind == CheckpointKind::AiAgent || checkpoint.kind == CheckpointKind::AiTab
-        })
-    } else {
-        false
-    };
+    // Use same checkpoint data to check for AI checkpoints (no extra read)
+    let has_ai_checkpoints = checkpoint_data.iter().any(|checkpoint| {
+        checkpoint.kind == CheckpointKind::AiAgent || checkpoint.kind == CheckpointKind::AiTab
+    });
 
     let status_files_start = Instant::now();
     let mut results_for_tracked_files = if is_pre_commit && !has_ai_checkpoints {
