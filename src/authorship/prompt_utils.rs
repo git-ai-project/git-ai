@@ -5,6 +5,7 @@ use crate::commands::checkpoint_agent::agent_presets::{
     ClaudePreset, CodexPreset, ContinueCliPreset, CursorPreset, DroidPreset, GeminiPreset,
     GithubCopilotPreset,
 };
+use crate::commands::checkpoint_agent::amp_preset::AmpPreset;
 use crate::commands::checkpoint_agent::opencode_preset::OpenCodePreset;
 use crate::error::GitAiError;
 use crate::git::refs::{get_authorship, grep_ai_notes};
@@ -175,6 +176,7 @@ pub fn update_prompt_from_tool(
         "github-copilot" => update_github_copilot_prompt(agent_metadata, current_model),
         "continue-cli" => update_continue_cli_prompt(agent_metadata, current_model),
         "droid" => update_droid_prompt(agent_metadata, current_model),
+        "amp" => update_amp_prompt(external_thread_id, agent_metadata, current_model),
         "opencode" => update_opencode_prompt(external_thread_id, agent_metadata, current_model),
         _ => {
             debug_log(&format!("Unknown tool: {}", tool));
@@ -491,6 +493,46 @@ fn update_droid_prompt(
     } else {
         // No agent_metadata available
         PromptUpdateResult::Unchanged
+    }
+}
+
+/// Update Amp prompt by re-parsing the thread JSON file.
+fn update_amp_prompt(
+    thread_id: &str,
+    metadata: Option<&HashMap<String, String>>,
+    current_model: &str,
+) -> PromptUpdateResult {
+    let result = if let Some(transcript_path) = metadata
+        .and_then(|m| m.get("transcript_path"))
+        .filter(|p| !p.trim().is_empty())
+    {
+        AmpPreset::transcript_and_model_from_thread_path(std::path::Path::new(transcript_path))
+            .map(|(transcript, model, _)| (transcript, model))
+    } else if !thread_id.trim().is_empty() {
+        AmpPreset::transcript_and_model_from_thread_id(thread_id)
+    } else {
+        return PromptUpdateResult::Unchanged;
+    };
+
+    match result {
+        Ok((transcript, model)) => PromptUpdateResult::Updated(
+            transcript,
+            model.unwrap_or_else(|| current_model.to_string()),
+        ),
+        Err(e) => {
+            debug_log(&format!(
+                "Failed to fetch Amp transcript for thread {}: {}",
+                thread_id, e
+            ));
+            log_error(
+                &e,
+                Some(serde_json::json!({
+                    "agent_tool": "amp",
+                    "operation": "transcript_and_model_from_thread_path"
+                })),
+            );
+            PromptUpdateResult::Failed(e)
+        }
     }
 }
 
@@ -1139,6 +1181,13 @@ mod tests {
         // Test dispatch to droid
         let result = update_prompt_from_tool("droid", "thread-123", None, "model");
         assert!(matches!(result, PromptUpdateResult::Unchanged));
+
+        // Test dispatch to amp (without metadata, returns Unchanged or Failed depending on local state)
+        let result = update_prompt_from_tool("amp", "thread-123", None, "model");
+        assert!(matches!(
+            result,
+            PromptUpdateResult::Unchanged | PromptUpdateResult::Failed(_)
+        ));
 
         // Test dispatch to opencode (behavior depends on whether default storage exists)
         let result = update_prompt_from_tool("opencode", "session-123", None, "model");

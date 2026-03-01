@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 use uuid::Uuid;
 
 use glob::Pattern;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 
 use crate::feature_flags::FeatureFlags;
 use crate::git::repository::Repository;
@@ -57,11 +57,16 @@ impl std::fmt::Display for PromptStorageMode {
     }
 }
 
+#[derive(Serialize)]
 pub struct Config {
     git_path: String,
+    #[serde(serialize_with = "serialize_patterns")]
     exclude_prompts_in_repositories: Vec<Pattern>,
+    #[serde(serialize_with = "serialize_patterns")]
     include_prompts_in_repositories: Vec<Pattern>,
+    #[serde(serialize_with = "serialize_patterns")]
     allow_repositories: Vec<Pattern>,
+    #[serde(serialize_with = "serialize_patterns")]
     exclude_repositories: Vec<Pattern>,
     telemetry_oss_disabled: bool,
     telemetry_enterprise_dsn: Option<String>,
@@ -72,11 +77,13 @@ pub struct Config {
     api_base_url: String,
     prompt_storage: String,
     default_prompt_storage: Option<String>,
+    #[serde(serialize_with = "serialize_masked_api_key")]
     api_key: Option<String>,
     quiet: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum UpdateChannel {
     #[default]
     Latest,
@@ -380,6 +387,13 @@ impl Config {
         self.quiet
     }
 
+    /// Serialize the effective runtime config into pretty JSON.
+    /// Sensitive values are redacted via field serializers.
+    pub fn to_printable_json_pretty(&self) -> Result<String, String> {
+        serde_json::to_string_pretty(self)
+            .map_err(|e| format!("Failed to serialize runtime config: {}", e))
+    }
+
     /// Override feature flags for testing purposes.
     /// Only available when the `test-support` feature is enabled or in test mode.
     /// Must be `pub` to work with integration tests in the `tests/` directory.
@@ -421,6 +435,31 @@ impl Config {
     pub fn get_feature_flags(&self) -> &FeatureFlags {
         &self.feature_flags
     }
+}
+
+fn serialize_patterns<S>(patterns: &[Pattern], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let as_strings: Vec<&str> = patterns.iter().map(Pattern::as_str).collect();
+    as_strings.serialize(serializer)
+}
+
+fn serialize_masked_api_key<S>(api_key: &Option<String>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let masked = api_key.as_ref().map(|key| {
+        let chars: Vec<char> = key.chars().collect();
+        if chars.len() > 8 {
+            let prefix: String = chars[..4].iter().collect();
+            let suffix: String = chars[chars.len() - 4..].iter().collect();
+            format!("{}...{}", prefix, suffix)
+        } else {
+            "****".to_string()
+        }
+    });
+    masked.serialize(serializer)
 }
 
 fn build_config() -> Config {

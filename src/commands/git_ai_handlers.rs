@@ -11,6 +11,7 @@ use crate::commands::checkpoint_agent::agent_presets::{
     GithubCopilotPreset,
 };
 use crate::commands::checkpoint_agent::agent_v1_preset::AgentV1Preset;
+use crate::commands::checkpoint_agent::amp_preset::AmpPreset;
 use crate::commands::checkpoint_agent::opencode_preset::OpenCodePreset;
 use crate::config;
 use crate::git::find_repository;
@@ -56,6 +57,9 @@ pub fn handle_git_ai(args: &[String]) {
             if is_interactive_terminal() {
                 log_message("config", "info", None)
             }
+        }
+        "debug" => {
+            commands::debug::handle_debug(&args[1..]);
         }
         "stats" => {
             if is_interactive_terminal() {
@@ -138,6 +142,9 @@ pub fn handle_git_ai(args: &[String]) {
         "logout" => {
             commands::logout::handle_logout(&args[1..]);
         }
+        "whoami" => {
+            commands::whoami::handle_whoami(&args[1..]);
+        }
         "exchange-nonce" => {
             commands::exchange_nonce::handle_exchange_nonce(&args[1..]);
         }
@@ -181,7 +188,7 @@ fn print_help() {
     eprintln!("Commands:");
     eprintln!("  checkpoint         Checkpoint working changes and attribute author");
     eprintln!(
-        "    Presets: claude, codex, continue-cli, cursor, gemini, github-copilot, ai_tab, mock_ai"
+        "    Presets: claude, codex, continue-cli, cursor, gemini, github-copilot, amp, opencode, ai_tab, mock_ai"
     );
     eprintln!(
         "    --hook-input <json|stdin>   JSON payload required by presets, or 'stdin' to read from stdin"
@@ -217,6 +224,7 @@ fn print_help() {
     eprintln!("    set <key> <value>     Set a config value (arrays: single value = [value])");
     eprintln!("    --add <key> <value>   Add to array or upsert into object");
     eprintln!("    unset <key>           Remove config value (reverts to default)");
+    eprintln!("  debug              Print support/debug diagnostics");
     eprintln!("  install-hooks      Install git hooks for AI authorship tracking");
     eprintln!("  uninstall-hooks    Remove git-ai hooks from all detected tools");
     eprintln!("  git-hooks ensure   Ensure repo-local git-ai hooks are installed/healed");
@@ -265,6 +273,7 @@ fn print_help() {
     eprintln!("    --json                Output context as structured JSON");
     eprintln!("  login              Authenticate with Git AI");
     eprintln!("  logout             Clear stored credentials");
+    eprintln!("  whoami             Show auth state and login identity");
     eprintln!("  version, -v, --version     Print the git-ai version");
     eprintln!("  help, -h, --help           Show this help message");
     eprintln!();
@@ -419,6 +428,22 @@ fn handle_checkpoint(args: &[String]) {
                     }
                     Err(e) => {
                         eprintln!("Github Copilot preset error: {}", e);
+                        std::process::exit(0);
+                    }
+                }
+            }
+            "amp" => {
+                match AmpPreset.run(AgentCheckpointFlags {
+                    hook_input: hook_input.clone(),
+                }) {
+                    Ok(agent_run) => {
+                        if agent_run.repo_working_dir.is_some() {
+                            repository_working_dir = agent_run.repo_working_dir.clone().unwrap();
+                        }
+                        agent_run_result = Some(agent_run);
+                    }
+                    Err(e) => {
+                        eprintln!("Amp preset error: {}", e);
                         std::process::exit(0);
                     }
                 }
@@ -1289,8 +1314,8 @@ fn handle_show_transcript(args: &[String]) {
     if args.len() < 2 {
         eprintln!("Error: show-transcript requires agent name and path/id");
         eprintln!("Usage: git-ai show-transcript <agent> <path|id>");
-        eprintln!("  Agents: claude, codex, gemini, continue-cli, github-copilot, cursor");
-        eprintln!("  For cursor, provide conversation_id instead of path");
+        eprintln!("  Agents: claude, codex, gemini, continue-cli, github-copilot, cursor, amp");
+        eprintln!("  For cursor and amp, provide conversation/thread id instead of path");
         std::process::exit(1);
     }
 
@@ -1349,10 +1374,27 @@ fn handle_show_transcript(args: &[String]) {
                 std::process::exit(1);
             }
         },
+        "amp" => {
+            let path = std::path::Path::new(path_or_id);
+            let amp_result = if path.exists() {
+                AmpPreset::transcript_and_model_from_thread_path(path)
+                    .map(|(transcript, model, _thread_id)| (transcript, model))
+            } else {
+                AmpPreset::transcript_and_model_from_thread_id(path_or_id)
+            };
+
+            match amp_result {
+                Ok((transcript, model)) => Ok((transcript, model)),
+                Err(e) => {
+                    eprintln!("Error loading Amp transcript: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
         _ => {
             eprintln!("Error: Unknown agent '{}'", agent_name);
             eprintln!(
-                "Supported agents: claude, codex, gemini, continue-cli, github-copilot, cursor"
+                "Supported agents: claude, codex, gemini, continue-cli, github-copilot, cursor, amp"
             );
             std::process::exit(1);
         }

@@ -1,3 +1,4 @@
+mod amp;
 mod claude_code;
 mod codex;
 mod cursor;
@@ -8,6 +9,7 @@ mod jetbrains;
 mod opencode;
 mod vscode;
 
+pub use amp::AmpInstaller;
 pub use claude_code::ClaudeCodeInstaller;
 pub use codex::CodexInstaller;
 pub use cursor::CursorInstaller;
@@ -28,6 +30,7 @@ pub fn get_all_installers() -> Vec<Box<dyn HookInstaller>> {
         Box::new(CursorInstaller),
         Box::new(VSCodeInstaller),
         Box::new(GitHubCopilotInstaller),
+        Box::new(AmpInstaller),
         Box::new(OpenCodeInstaller),
         Box::new(GeminiInstaller),
         Box::new(DroidInstaller),

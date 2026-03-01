@@ -1,0 +1,61 @@
+name: Bug report
+description: Report a reproducible problem with git-ai
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting this. A short repro + diagnostics is usually enough for us to help quickly.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: What broke?
+      placeholder: Briefly describe the issue.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro_steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Run `...`
+        2. Run `...`
+        3. Observe `...`
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_vs_actual
+    attributes:
+      label: Expected vs actual behavior
+      placeholder: |
+        Expected: ...
+        Actual: ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: debug_output
+    attributes:
+      label: Diagnostics (`git-ai debug`)
+      description: Run `git-ai debug` and paste the output (feel free to redact private repo names/URLs).
+      render: shell
+      placeholder: |
+        $ git-ai debug
+        git-ai debug report
+        ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Extra context (optional)
+      description: Logs, screenshots, stack traces, or related links.
+      render: shell
+    validations:
+      required: false

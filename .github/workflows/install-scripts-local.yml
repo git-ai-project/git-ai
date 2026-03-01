@@ -63,6 +63,9 @@ jobs:
           grep -F "$INSTALL_DIR" "$HOME/.zshrc"
           grep -F "fish_add_path -g \"$INSTALL_DIR\"" "$HOME/.config/fish/config.fish"
           grep -F "checkpoint claude" "$HOME/.claude/settings.json"
+          # Verify ~/.local/bin/git-ai symlink
+          test -L "$HOME/.local/bin/git-ai"
+          readlink "$HOME/.local/bin/git-ai" | grep -qF "$INSTALL_DIR/git-ai"
 
   install-local-windows:
     name: Local install.ps1 on windows-latest

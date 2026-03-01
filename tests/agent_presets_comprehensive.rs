@@ -7,6 +7,7 @@ use git_ai::commands::checkpoint_agent::agent_presets::{
     AgentCheckpointFlags, AgentCheckpointPreset, AiTabPreset, ClaudePreset, CodexPreset,
     ContinueCliPreset, CursorPreset, DroidPreset, GeminiPreset, GithubCopilotPreset,
 };
+use git_ai::commands::checkpoint_agent::amp_preset::AmpPreset;
 use git_ai::error::GitAiError;
 use serde_json::json;
 use std::fs;
@@ -1016,6 +1017,7 @@ fn test_all_presets_handle_missing_hook_input_consistently() {
         Box::new(CodexPreset),
         Box::new(CursorPreset),
         Box::new(GithubCopilotPreset),
+        Box::new(AmpPreset),
         Box::new(DroidPreset),
         Box::new(AiTabPreset),
     ];
@@ -1044,6 +1046,7 @@ fn test_all_presets_handle_invalid_json_consistently() {
         Box::new(CodexPreset),
         Box::new(CursorPreset),
         Box::new(GithubCopilotPreset),
+        Box::new(AmpPreset),
         Box::new(DroidPreset),
         Box::new(AiTabPreset),
     ];
