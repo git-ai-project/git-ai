@@ -4,7 +4,7 @@ use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::prompt_utils::enrich_prompt_messages;
 use crate::authorship::working_log::CheckpointKind;
 use crate::error::GitAiError;
-use crate::git::refs::get_reference_as_authorship_log_v3;
+use crate::git::refs::batch_get_authorship_logs;
 use crate::git::repository::Repository;
 use crate::git::repository::{exec_git, exec_git_stdin};
 #[cfg(windows)]
@@ -896,23 +896,39 @@ impl Repository {
         file_path: &str,
         options: &GitAiBlameOptions,
     ) -> Result<Vec<BlameHunk>, GitAiError> {
-        // Cache authorship logs by commit SHA to avoid repeated lookups
-        let mut commit_authorship_cache: HashMap<String, Option<AuthorshipLog>> = HashMap::new();
+        // Batch-fetch all authorship logs upfront using 2 git calls instead of N
+        let unique_shas: Vec<String> = {
+            let mut seen = std::collections::HashSet::new();
+            hunks
+                .iter()
+                .filter_map(|h| {
+                    if seen.insert(h.commit_sha.clone()) {
+                        Some(h.commit_sha.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        let batch_logs = batch_get_authorship_logs(self, &unique_shas)?;
+        let commit_authorship_cache: HashMap<String, Option<AuthorshipLog>> = unique_shas
+            .into_iter()
+            .map(|sha| {
+                let log = batch_logs.get(&sha).cloned();
+                (sha, log)
+            })
+            .collect();
+
         // Cache for foreign prompts to avoid repeated grepping
         let mut foreign_prompts_cache: HashMap<String, Option<PromptRecord>> = HashMap::new();
 
         let mut result_hunks: Vec<BlameHunk> = Vec::new();
 
         for hunk in hunks {
-            // Get or fetch the authorship log for this commit
-            let authorship_log = if let Some(cached) = commit_authorship_cache.get(&hunk.commit_sha)
-            {
-                cached.clone()
-            } else {
-                let authorship = get_reference_as_authorship_log_v3(self, &hunk.commit_sha).ok();
-                commit_authorship_cache.insert(hunk.commit_sha.clone(), authorship.clone());
-                authorship
-            };
+            // Get the authorship log from the pre-populated batch cache
+            let authorship_log = commit_authorship_cache
+                .get(&hunk.commit_sha)
+                .and_then(|opt| opt.clone());
 
             // If we have an authorship log, look up human_author for each line
             if let Some(ref authorship_log) = authorship_log {
@@ -1010,21 +1026,37 @@ fn overlay_ai_authorship(
     // Track which commits contain each prompt hash
     let mut prompt_commits: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
 
-    // Group hunks by commit SHA to avoid repeated lookups
-    let mut commit_authorship_cache: HashMap<String, Option<AuthorshipLog>> = HashMap::new();
+    // Batch-fetch all authorship logs upfront using 2 git calls instead of N
+    let unique_shas: Vec<String> = {
+        let mut seen = std::collections::HashSet::new();
+        blame_hunks
+            .iter()
+            .filter_map(|h| {
+                if seen.insert(h.commit_sha.clone()) {
+                    Some(h.commit_sha.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
+    let batch_logs = batch_get_authorship_logs(repo, &unique_shas)?;
+    let commit_authorship_cache: HashMap<String, Option<AuthorshipLog>> = unique_shas
+        .into_iter()
+        .map(|sha| {
+            let log = batch_logs.get(&sha).cloned();
+            (sha, log)
+        })
+        .collect();
+
     // Cache for foreign prompts to avoid repeated grepping
     let mut foreign_prompts_cache: HashMap<String, Option<PromptRecord>> = HashMap::new();
 
     for hunk in blame_hunks {
-        // Check if we've already looked up this commit's authorship
-        let authorship_log = if let Some(cached) = commit_authorship_cache.get(&hunk.commit_sha) {
-            cached.clone()
-        } else {
-            // Try to get authorship log for this commit
-            let authorship = get_reference_as_authorship_log_v3(repo, &hunk.commit_sha).ok();
-            commit_authorship_cache.insert(hunk.commit_sha.clone(), authorship.clone());
-            authorship
-        };
+        // Get the authorship log from the pre-populated batch cache
+        let authorship_log = commit_authorship_cache
+            .get(&hunk.commit_sha)
+            .and_then(|opt| opt.clone());
 
         // If we have AI authorship data, look up the author for lines in this hunk
         if let Some(authorship_log) = authorship_log {
