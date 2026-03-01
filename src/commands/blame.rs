@@ -64,6 +64,13 @@ pub struct BlameAnalysisResult {
     pub blame_hunks: Vec<BlameHunk>,
 }
 
+struct PreparedBlameRequest {
+    relative_file_path: String,
+    file_content: String,
+    line_ranges: Vec<(u32, u32)>,
+    options: GitAiBlameOptions,
+}
+
 #[derive(Debug, Clone)]
 pub struct GitAiBlameOptions {
     // Line range options
@@ -343,7 +350,7 @@ impl Repository {
         &self,
         file_path: &str,
         options: &GitAiBlameOptions,
-    ) -> Result<(String, String, Vec<(u32, u32)>, GitAiBlameOptions), GitAiError> {
+    ) -> Result<PreparedBlameRequest, GitAiError> {
         let relative_file_path = self.normalize_blame_file_path(file_path)?;
         let options = Self::effective_blame_options(options);
         let file_content = self.read_blame_file_content(&relative_file_path, &options)?;
@@ -366,7 +373,12 @@ impl Repository {
             }
         }
 
-        Ok((relative_file_path, file_content, line_ranges, options))
+        Ok(PreparedBlameRequest {
+            relative_file_path,
+            file_content,
+            line_ranges,
+            options,
+        })
     }
 
     #[allow(clippy::type_complexity)]
@@ -510,18 +522,20 @@ impl Repository {
         file_path: &str,
         options: &GitAiBlameOptions,
     ) -> Result<(HashMap<u32, String>, HashMap<String, PromptRecord>), GitAiError> {
-        let (relative_file_path, file_content, line_ranges, options) =
-            self.prepare_blame_request(file_path, options)?;
-        let lines: Vec<&str> = file_content.lines().collect();
-        let (analysis, authorship_logs, prompt_commits) =
-            self.run_blame_analysis_pipeline(&relative_file_path, &line_ranges, &options)?;
+        let request = self.prepare_blame_request(file_path, options)?;
+        let lines: Vec<&str> = request.file_content.lines().collect();
+        let (analysis, authorship_logs, prompt_commits) = self.run_blame_analysis_pipeline(
+            &request.relative_file_path,
+            &request.line_ranges,
+            &request.options,
+        )?;
         let BlameAnalysisResult {
             line_authors,
             prompt_records,
             blame_hunks: _,
         } = analysis;
 
-        if options.no_output {
+        if request.options.no_output {
             return Ok((line_authors, prompt_records));
         }
 
@@ -533,35 +547,35 @@ impl Repository {
                 &prompt_records,
                 &authorship_logs,
                 &prompt_commits,
-                &relative_file_path,
+                &request.relative_file_path,
             )?;
-        } else if options.porcelain || options.line_porcelain {
+        } else if request.options.porcelain || request.options.line_porcelain {
             output_porcelain_format(
                 self,
                 &line_authors,
-                &relative_file_path,
+                &request.relative_file_path,
                 &lines,
-                &line_ranges,
-                &options,
+                &request.line_ranges,
+                &request.options,
             )?;
-        } else if options.incremental {
+        } else if request.options.incremental {
             output_incremental_format(
                 self,
                 &line_authors,
-                &relative_file_path,
+                &request.relative_file_path,
                 &lines,
-                &line_ranges,
-                &options,
+                &request.line_ranges,
+                &request.options,
             )?;
         } else {
             output_default_format(
                 self,
                 &line_authors,
                 &prompt_records,
-                &relative_file_path,
+                &request.relative_file_path,
                 &lines,
-                &line_ranges,
-                &options,
+                &request.line_ranges,
+                &request.options,
             )?;
         }
 
@@ -573,10 +587,12 @@ impl Repository {
         file_path: &str,
         options: &GitAiBlameOptions,
     ) -> Result<BlameAnalysisResult, GitAiError> {
-        let (relative_file_path, _file_content, line_ranges, options) =
-            self.prepare_blame_request(file_path, options)?;
-        let (analysis, _authorship_logs, _prompt_commits) =
-            self.run_blame_analysis_pipeline(&relative_file_path, &line_ranges, &options)?;
+        let request = self.prepare_blame_request(file_path, options)?;
+        let (analysis, _authorship_logs, _prompt_commits) = self.run_blame_analysis_pipeline(
+            &request.relative_file_path,
+            &request.line_ranges,
+            &request.options,
+        )?;
         Ok(analysis)
     }
 
