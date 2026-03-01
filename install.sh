@@ -186,6 +186,7 @@ STD_GIT_PATH=$(detect_std_git)
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
 
+
 # Map architecture to binary name
 case $ARCH in
     "x86_64")
