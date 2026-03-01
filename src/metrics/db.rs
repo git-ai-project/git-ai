@@ -4,7 +4,7 @@
 //! Server handles idempotency - no retry/queue logic needed.
 
 use crate::error::GitAiError;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
@@ -260,47 +260,6 @@ impl MetricsDatabase {
             .query_row("SELECT COUNT(*) FROM metrics", [], |row| row.get(0))?;
         Ok(count as usize)
     }
-
-    /// Returns whether an `agent_usage` event should be emitted for this prompt_id.
-    ///
-    /// If emitted, this method also updates the prompt's last-sent timestamp.
-    pub fn should_emit_agent_usage(
-        &mut self,
-        prompt_id: &str,
-        now_ts: u64,
-        min_interval_secs: u64,
-    ) -> Result<bool, GitAiError> {
-        if prompt_id.is_empty() {
-            return Ok(true);
-        }
-
-        let tx = self.conn.transaction()?;
-        let existing_ts: Option<i64> = tx
-            .query_row(
-                "SELECT last_sent_ts FROM agent_usage_throttle WHERE prompt_id = ?1",
-                params![prompt_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-
-        let should_emit = existing_ts
-            .map(|prev_ts| now_ts.saturating_sub(prev_ts as u64) >= min_interval_secs)
-            .unwrap_or(true);
-
-        if should_emit {
-            tx.execute(
-                r#"
-                INSERT INTO agent_usage_throttle (prompt_id, last_sent_ts)
-                VALUES (?1, ?2)
-                ON CONFLICT(prompt_id) DO UPDATE SET last_sent_ts = excluded.last_sent_ts
-                "#,
-                params![prompt_id, now_ts as i64],
-            )?;
-        }
-
-        tx.commit()?;
-        Ok(should_emit)
-    }
 }
 
 #[cfg(test)]
@@ -476,27 +435,5 @@ mod tests {
         assert!(path.to_string_lossy().contains(".git-ai"));
         assert!(path.to_string_lossy().contains("internal"));
         assert!(path.to_string_lossy().ends_with("metrics-db"));
-    }
-
-    #[test]
-    fn test_should_emit_agent_usage_rate_limit() {
-        let (mut db, _temp_dir) = create_test_db();
-        let prompt_id = "prompt-123";
-
-        // First event for a prompt should be allowed.
-        assert!(
-            db.should_emit_agent_usage(prompt_id, 1_700_000_000, 300)
-                .unwrap()
-        );
-        // Subsequent event inside the window should be throttled.
-        assert!(
-            !db.should_emit_agent_usage(prompt_id, 1_700_000_120, 300)
-                .unwrap()
-        );
-        // Event outside the window should be allowed again.
-        assert!(
-            db.should_emit_agent_usage(prompt_id, 1_700_000_301, 300)
-                .unwrap()
-        );
     }
 }

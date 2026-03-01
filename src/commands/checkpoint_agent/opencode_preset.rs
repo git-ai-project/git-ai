@@ -4,8 +4,15 @@ use crate::{
         working_log::{AgentId, CheckpointKind},
     },
     commands::checkpoint_agent::agent_presets::{
-        AgentCheckpointFlags, AgentCheckpointPreset, AgentRunResult,
+        AgentCheckpointFlags, AgentCheckpointPreset, AgentRunResult, CheckpointExecution,
+        NoOpReason,
     },
+    commands::checkpoint_agent::telemetry_events::{
+        AgentMessageTelemetry, AgentResponseTelemetry, AgentSessionTelemetry, AgentTelemetryEvent,
+        AgentToolCallTelemetry, MessageRole, ResponsePhase, SessionPhase, TelemetrySignal,
+        ToolCallPhase,
+    },
+    commands::checkpoint_agent::telemetry_payload::TelemetryPayloadView,
     error::GitAiError,
     observability::log_error,
 };
@@ -17,12 +24,49 @@ use std::path::{Path, PathBuf};
 
 pub struct OpenCodePreset;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum OpenCodeHookEvent {
+    PreToolUse,
+    PostToolUse,
+    SessionCreated,
+    SessionDeleted,
+    SessionIdle,
+    MessageUpdated,
+    MessagePartUpdated,
+    ToolExecuteBefore,
+    ToolExecuteAfter,
+    Unknown(String),
+}
+
+impl OpenCodeHookEvent {
+    fn parse(value: &str) -> Self {
+        match value {
+            "PreToolUse" => Self::PreToolUse,
+            "PostToolUse" => Self::PostToolUse,
+            "session.created" => Self::SessionCreated,
+            "session.deleted" => Self::SessionDeleted,
+            "session.idle" => Self::SessionIdle,
+            "message.updated" => Self::MessageUpdated,
+            "message.part.updated" => Self::MessagePartUpdated,
+            "tool.execute.before" => Self::ToolExecuteBefore,
+            "tool.execute.after" => Self::ToolExecuteAfter,
+            other => Self::Unknown(other.to_string()),
+        }
+    }
+}
+
 /// Hook input from OpenCode plugin
 #[derive(Debug, Deserialize)]
 struct OpenCodeHookInput {
     hook_event_name: String,
     session_id: String,
     cwd: String,
+    #[serde(default)]
+    hook_source: Option<String>,
+    #[serde(default)]
+    telemetry_payload: Option<HashMap<String, String>>,
+    #[serde(default)]
+    tool_name: Option<String>,
     tool_input: Option<ToolInput>,
 }
 
@@ -164,6 +208,9 @@ impl AgentCheckpointPreset for OpenCodePreset {
             hook_event_name,
             session_id,
             cwd,
+            hook_source,
+            telemetry_payload,
+            tool_name,
             tool_input,
         } = hook_input;
 
@@ -171,6 +218,161 @@ impl AgentCheckpointPreset for OpenCodePreset {
         let file_path_as_vec = tool_input
             .and_then(|ti| ti.file_path)
             .map(|path| vec![path]);
+
+        let hook_source = hook_source
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("opencode_plugin")
+            .to_string();
+        let hook_event = OpenCodeHookEvent::parse(&hook_event_name);
+        let mut telemetry_payload = telemetry_payload.unwrap_or_default();
+        if let Some(name) = tool_name {
+            telemetry_payload.insert("tool_name".to_string(), name);
+        }
+        let telemetry = TelemetryPayloadView::from_payload(&telemetry_payload);
+
+        let role = telemetry_payload.get("role").map(String::as_str);
+
+        let mut telemetry_events = Vec::new();
+        match hook_event {
+            OpenCodeHookEvent::SessionCreated => {
+                telemetry_events.push(AgentTelemetryEvent::Session(AgentSessionTelemetry {
+                    phase: SessionPhase::Started,
+                    reason: telemetry.reason.clone(),
+                    source: Some(hook_source.clone()),
+                    mode: telemetry.mode.clone(),
+                    duration_ms: telemetry.duration_ms,
+                    signal: TelemetrySignal::Explicit,
+                }));
+            }
+            OpenCodeHookEvent::SessionDeleted => {
+                telemetry_events.push(AgentTelemetryEvent::Session(AgentSessionTelemetry {
+                    phase: SessionPhase::Ended,
+                    reason: telemetry.reason.clone(),
+                    source: Some(hook_source.clone()),
+                    mode: telemetry.mode.clone(),
+                    duration_ms: telemetry.duration_ms,
+                    signal: TelemetrySignal::Explicit,
+                }));
+            }
+            OpenCodeHookEvent::SessionIdle => {
+                telemetry_events.push(AgentTelemetryEvent::Response(AgentResponseTelemetry {
+                    phase: ResponsePhase::Ended,
+                    reason: telemetry.reason.clone(),
+                    status: telemetry.status.clone(),
+                    response_char_count: telemetry.response_char_count,
+                    signal: TelemetrySignal::Explicit,
+                    dedupe_key: telemetry.dedupe_key.clone(),
+                }));
+            }
+            OpenCodeHookEvent::MessagePartUpdated => {
+                if !matches!(role, Some("user" | "human"))
+                    && telemetry.response_char_count.is_some()
+                {
+                    telemetry_events.push(AgentTelemetryEvent::Response(AgentResponseTelemetry {
+                        phase: ResponsePhase::Started,
+                        reason: telemetry.reason.clone(),
+                        status: telemetry.status.clone(),
+                        response_char_count: None,
+                        signal: TelemetrySignal::Explicit,
+                        dedupe_key: telemetry.dedupe_key.clone(),
+                    }));
+                }
+            }
+            OpenCodeHookEvent::MessageUpdated => {
+                if !matches!(role, Some("user" | "human"))
+                    && telemetry.response_char_count.is_some()
+                {
+                    telemetry_events.push(AgentTelemetryEvent::Response(AgentResponseTelemetry {
+                        phase: ResponsePhase::Ended,
+                        reason: telemetry.reason.clone(),
+                        status: telemetry.status.clone(),
+                        response_char_count: telemetry.response_char_count,
+                        signal: TelemetrySignal::Explicit,
+                        dedupe_key: telemetry.dedupe_key.clone(),
+                    }));
+                }
+            }
+            OpenCodeHookEvent::PreToolUse | OpenCodeHookEvent::ToolExecuteBefore => {
+                telemetry_events.push(AgentTelemetryEvent::ToolCall(AgentToolCallTelemetry {
+                    phase: ToolCallPhase::Started,
+                    tool_name: telemetry.tool_name.clone(),
+                    tool_use_id: telemetry.tool_use_id.clone(),
+                    duration_ms: telemetry.duration_ms,
+                    failure_type: None,
+                    signal: TelemetrySignal::Explicit,
+                }));
+                telemetry_events.push(AgentTelemetryEvent::Response(AgentResponseTelemetry {
+                    phase: ResponsePhase::Started,
+                    reason: telemetry.reason.clone(),
+                    status: None,
+                    response_char_count: None,
+                    signal: TelemetrySignal::Inferred,
+                    dedupe_key: telemetry.dedupe_key.clone(),
+                }));
+            }
+            OpenCodeHookEvent::PostToolUse | OpenCodeHookEvent::ToolExecuteAfter => {
+                telemetry_events.push(AgentTelemetryEvent::ToolCall(AgentToolCallTelemetry {
+                    phase: ToolCallPhase::Ended,
+                    tool_name: telemetry.tool_name.clone(),
+                    tool_use_id: telemetry.tool_use_id.clone(),
+                    duration_ms: telemetry.duration_ms,
+                    failure_type: telemetry.failure_type.clone(),
+                    signal: TelemetrySignal::Explicit,
+                }));
+                telemetry_events.push(AgentTelemetryEvent::Response(AgentResponseTelemetry {
+                    phase: ResponsePhase::Ended,
+                    reason: telemetry.reason.clone(),
+                    status: telemetry.status.clone(),
+                    response_char_count: telemetry.response_char_count,
+                    signal: TelemetrySignal::Inferred,
+                    dedupe_key: telemetry.dedupe_key.clone(),
+                }));
+            }
+            OpenCodeHookEvent::Unknown(_) => {}
+        }
+
+        if matches!(hook_event, OpenCodeHookEvent::MessageUpdated)
+            && matches!(role, Some("user" | "human"))
+            && telemetry.prompt_char_count.is_some()
+        {
+            telemetry_events.push(AgentTelemetryEvent::Message(AgentMessageTelemetry {
+                role: MessageRole::Human,
+                prompt_char_count: telemetry.prompt_char_count,
+                attachment_count: telemetry.attachment_count,
+                signal: TelemetrySignal::Explicit,
+            }));
+        }
+
+        let is_edit_event = matches!(
+            hook_event,
+            OpenCodeHookEvent::PreToolUse | OpenCodeHookEvent::PostToolUse
+        );
+        if !is_edit_event {
+            let model = telemetry_payload
+                .get("model")
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_string());
+            return Ok(AgentRunResult {
+                agent_id: AgentId {
+                    tool: "opencode".to_string(),
+                    id: session_id,
+                    model,
+                },
+                agent_metadata: None,
+                checkpoint_kind: CheckpointKind::AiAgent,
+                transcript: None,
+                repo_working_dir: Some(cwd),
+                edited_filepaths: None,
+                will_edit_filepaths: None,
+                dirty_files: None,
+                checkpoint_execution: CheckpointExecution::NoOp {
+                    reason: NoOpReason::TelemetryOnly,
+                },
+                telemetry_events,
+            });
+        }
 
         // Determine OpenCode path (test override can point to either root or legacy storage path)
         let opencode_path = if let Ok(test_path) = std::env::var("GIT_AI_OPENCODE_STORAGE_PATH") {
@@ -211,7 +413,7 @@ impl AgentCheckpointPreset for OpenCodePreset {
         }
 
         // Check if this is a PreToolUse event (human checkpoint)
-        if hook_event_name == "PreToolUse" {
+        if matches!(hook_event, OpenCodeHookEvent::PreToolUse) {
             return Ok(AgentRunResult {
                 agent_id,
                 agent_metadata: None,
@@ -221,6 +423,8 @@ impl AgentCheckpointPreset for OpenCodePreset {
                 edited_filepaths: None,
                 will_edit_filepaths: file_path_as_vec,
                 dirty_files: None,
+                checkpoint_execution: CheckpointExecution::Run,
+                telemetry_events,
             });
         }
 
@@ -234,6 +438,8 @@ impl AgentCheckpointPreset for OpenCodePreset {
             edited_filepaths: file_path_as_vec,
             will_edit_filepaths: None,
             dirty_files: None,
+            checkpoint_execution: CheckpointExecution::Run,
+            telemetry_events,
         })
     }
 }

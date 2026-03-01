@@ -4,8 +4,11 @@ mod test_utils;
 
 use git_ai::authorship::transcript::Message;
 use git_ai::commands::checkpoint_agent::agent_presets::{
-    AgentCheckpointFlags, AgentCheckpointPreset, ClaudePreset, extract_plan_from_tool_use,
-    is_plan_file_path,
+    AgentCheckpointFlags, AgentCheckpointPreset, CheckpointExecution, ClaudePreset, NoOpReason,
+    extract_plan_from_tool_use, is_plan_file_path,
+};
+use git_ai::commands::checkpoint_agent::telemetry_events::{
+    AgentTelemetryEvent, SessionPhase, TelemetrySignal,
 };
 use serde_json::json;
 use std::collections::HashMap;
@@ -98,6 +101,41 @@ fn test_claude_preset_no_filepath_when_tool_input_missing() {
 
     // Verify edited_filepaths is None when tool_input is missing
     assert!(result.edited_filepaths.is_none());
+}
+
+#[test]
+fn test_claude_preset_session_start_without_transcript_is_telemetry_only() {
+    let hook_input = r##"{
+        "hook_event_name": "SessionStart",
+        "session_id": "session-123",
+        "model": "claude-sonnet-4-5-20250929"
+    }"##;
+
+    let flags = AgentCheckpointFlags {
+        hook_input: Some(hook_input.to_string()),
+    };
+
+    let preset = ClaudePreset;
+    let result = preset
+        .run(flags)
+        .expect("SessionStart should not require transcript_path");
+
+    assert_eq!(result.agent_id.tool, "claude");
+    assert_eq!(result.agent_id.id, "session-123");
+    assert_eq!(
+        result.checkpoint_execution,
+        CheckpointExecution::NoOp {
+            reason: NoOpReason::TelemetryOnly
+        }
+    );
+    assert!(result.telemetry_events.iter().any(|event| {
+        matches!(
+            event,
+            AgentTelemetryEvent::Session(session)
+                if session.phase == SessionPhase::Started
+                    && session.signal == TelemetrySignal::Explicit
+        )
+    }));
 }
 
 #[test]

@@ -7,6 +7,106 @@ use git_ai::commands::install_hooks::{
     InstallResult, InstallStatus, run, run_uninstall, to_hashmap,
 };
 use std::collections::HashMap;
+use std::ffi::OsString;
+use std::fs;
+use std::path::Path;
+use tempfile::TempDir;
+
+struct EnvRestoreGuard {
+    prev_home: Option<OsString>,
+    prev_userprofile: Option<OsString>,
+    prev_path: Option<OsString>,
+}
+
+impl Drop for EnvRestoreGuard {
+    fn drop(&mut self) {
+        // SAFETY: tests using this guard are serialized via #[serial_test::serial],
+        // so mutating process env is safe.
+        unsafe {
+            match &self.prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match &self.prev_userprofile {
+                Some(v) => std::env::set_var("USERPROFILE", v),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+            match &self.prev_path {
+                Some(v) => std::env::set_var("PATH", v),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+    }
+}
+
+fn install_fake_editor_cli(bin_dir: &Path, cli_name: &str) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let cli_path = bin_dir.join(cli_name);
+        let script = r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "1.200.0"
+  exit 0
+fi
+if [ "$1" = "--list-extensions" ]; then
+  echo "git-ai.git-ai-vscode"
+  exit 0
+fi
+exit 0
+"#;
+        fs::write(&cli_path, script).expect("write fake cli");
+        let mut perms = fs::metadata(&cli_path)
+            .expect("stat fake cli")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&cli_path, perms).expect("chmod fake cli");
+    }
+
+    #[cfg(windows)]
+    {
+        let cli_path = bin_dir.join(format!("{}.cmd", cli_name));
+        let script = r#"@echo off
+if "%1"=="--version" (
+  echo 1.200.0
+  exit /b 0
+)
+if "%1"=="--list-extensions" (
+  echo git-ai.git-ai-vscode
+  exit /b 0
+)
+exit /b 0
+"#;
+        fs::write(&cli_path, script).expect("write fake cli");
+    }
+}
+
+fn with_temp_home<F: FnOnce(&Path)>(f: F) {
+    let temp_dir = TempDir::new().expect("temp home");
+    let home = temp_dir.path().to_path_buf();
+    let bin_dir = home.join("bin");
+    fs::create_dir_all(&bin_dir).expect("temp bin");
+    install_fake_editor_cli(&bin_dir, "code");
+    install_fake_editor_cli(&bin_dir, "cursor");
+
+    let _restore_guard = EnvRestoreGuard {
+        prev_home: std::env::var_os("HOME"),
+        prev_userprofile: std::env::var_os("USERPROFILE"),
+        prev_path: std::env::var_os("PATH"),
+    };
+
+    // SAFETY: tests using this helper are serialized via #[serial_test::serial],
+    // so mutating process env is safe.
+    unsafe {
+        std::env::set_var("HOME", &home);
+        std::env::set_var("USERPROFILE", &home);
+        // Keep PATH constrained to temp fake CLIs to avoid real tool discovery.
+        std::env::set_var("PATH", &bin_dir);
+    }
+
+    f(&home);
+}
 
 // ==============================================================================
 // InstallStatus Tests
@@ -219,139 +319,124 @@ fn test_to_hashmap_all_statuses() {
 // ==============================================================================
 
 #[test]
+#[serial_test::serial]
 fn test_run_install_hooks_no_args() {
-    // This will try to run against the actual system, but should not crash
-    // It may fail if binary path cannot be determined, which is acceptable
-    let result = run(&[]);
+    with_temp_home(|_| {
+        let result = run(&[]);
 
-    // We just ensure it returns a result (success or error)
-    // The actual behavior depends on the system state
-    match result {
-        Ok(_statuses) => {
-            // Should return a HashMap, possibly empty
-            // Success is valid
+        match result {
+            Ok(_statuses) => {}
+            Err(e) => {
+                let err_msg = e.to_string();
+                assert!(!err_msg.is_empty());
+            }
         }
-        Err(e) => {
-            // May fail if binary path is not available or other system issues
-            let err_msg = e.to_string();
-            // Just ensure we get a meaningful error
-            assert!(!err_msg.is_empty());
-        }
-    }
+    });
 }
 
 #[test]
+#[serial_test::serial]
 fn test_run_install_hooks_with_dry_run_flag() {
-    let args = vec!["--dry-run".to_string()];
-    let result = run(&args);
+    with_temp_home(|_| {
+        let args = vec!["--dry-run".to_string()];
+        let result = run(&args);
 
-    // Dry run should not modify anything
-    match result {
-        Ok(_statuses) => {
-            // Success is valid
+        match result {
+            Ok(_statuses) => {}
+            Err(e) => {
+                let err_msg = e.to_string();
+                assert!(!err_msg.is_empty());
+            }
         }
-        Err(e) => {
-            let err_msg = e.to_string();
-            assert!(!err_msg.is_empty());
-        }
-    }
+    });
 }
 
 #[test]
+#[serial_test::serial]
 fn test_run_install_hooks_with_dry_run_true() {
-    let args = vec!["--dry-run=true".to_string()];
-    let result = run(&args);
+    with_temp_home(|_| {
+        let args = vec!["--dry-run=true".to_string()];
+        let result = run(&args);
 
-    match result {
-        Ok(_statuses) => {
-            // Success is valid
+        match result {
+            Ok(_statuses) => {}
+            Err(_e) => {}
         }
-        Err(_e) => {
-            // May fail on CI or systems without binary path
-        }
-    }
+    });
 }
 
 #[test]
+#[serial_test::serial]
 fn test_run_install_hooks_with_verbose_flag() {
-    let args = vec!["--verbose".to_string()];
-    let result = run(&args);
+    with_temp_home(|_| {
+        let args = vec!["--verbose".to_string()];
+        let result = run(&args);
 
-    match result {
-        Ok(_statuses) => {
-            // Success is valid
+        match result {
+            Ok(_statuses) => {}
+            Err(_e) => {}
         }
-        Err(_e) => {
-            // May fail on CI or systems without binary path
-        }
-    }
+    });
 }
 
 #[test]
+#[serial_test::serial]
 fn test_run_install_hooks_with_verbose_short_flag() {
-    let args = vec!["-v".to_string()];
-    let result = run(&args);
+    with_temp_home(|_| {
+        let args = vec!["-v".to_string()];
+        let result = run(&args);
 
-    match result {
-        Ok(_statuses) => {
-            // Success is valid
+        match result {
+            Ok(_statuses) => {}
+            Err(_e) => {}
         }
-        Err(_e) => {
-            // May fail on CI or systems without binary path
-        }
-    }
+    });
 }
 
 #[test]
+#[serial_test::serial]
 fn test_run_install_hooks_with_multiple_flags() {
-    let args = vec!["--dry-run".to_string(), "--verbose".to_string()];
-    let result = run(&args);
+    with_temp_home(|_| {
+        let args = vec!["--dry-run".to_string(), "--verbose".to_string()];
+        let result = run(&args);
 
-    match result {
-        Ok(_statuses) => {
-            // Success is valid
+        match result {
+            Ok(_statuses) => {}
+            Err(_e) => {}
         }
-        Err(_e) => {
-            // May fail on CI or systems without binary path
-        }
-    }
+    });
 }
 
 #[test]
+#[serial_test::serial]
 fn test_run_install_hooks_with_dry_run_false() {
-    // Note: This could actually install hooks on the system
-    // In a real test environment, this should be run in isolation
-    let args = vec!["--dry-run=false".to_string()];
-    let result = run(&args);
+    with_temp_home(|_| {
+        let args = vec!["--dry-run=false".to_string()];
+        let result = run(&args);
 
-    match result {
-        Ok(_statuses) => {
-            // Success is valid
+        match result {
+            Ok(_statuses) => {}
+            Err(_e) => {}
         }
-        Err(_e) => {
-            // May fail on CI or systems without binary path
-        }
-    }
+    });
 }
 
 #[test]
+#[serial_test::serial]
 fn test_run_install_hooks_ignores_unknown_args() {
-    // Unknown arguments should be ignored
-    let args = vec![
-        "--unknown-flag".to_string(),
-        "random-arg".to_string(),
-        "--dry-run".to_string(),
-    ];
-    let result = run(&args);
+    with_temp_home(|_| {
+        let args = vec![
+            "--unknown-flag".to_string(),
+            "random-arg".to_string(),
+            "--dry-run".to_string(),
+        ];
+        let result = run(&args);
 
-    match result {
-        Ok(_statuses) => {
-            // Success is valid
+        match result {
+            Ok(_statuses) => {}
+            Err(_e) => {}
         }
-        Err(_e) => {
-            // May fail on CI or systems without binary path
-        }
-    }
+    });
 }
 
 // ==============================================================================
@@ -359,67 +444,65 @@ fn test_run_install_hooks_ignores_unknown_args() {
 // ==============================================================================
 
 #[test]
+#[serial_test::serial]
 fn test_run_uninstall_hooks_no_args() {
-    let result = run_uninstall(&[]);
+    with_temp_home(|_| {
+        let result = run_uninstall(&[]);
 
-    match result {
-        Ok(_statuses) => {
-            // Success is valid
+        match result {
+            Ok(_statuses) => {}
+            Err(e) => {
+                let err_msg = e.to_string();
+                assert!(!err_msg.is_empty());
+            }
         }
-        Err(e) => {
-            let err_msg = e.to_string();
-            assert!(!err_msg.is_empty());
-        }
-    }
+    });
 }
 
 #[test]
+#[serial_test::serial]
 fn test_run_uninstall_hooks_with_dry_run() {
-    let args = vec!["--dry-run".to_string()];
-    let result = run_uninstall(&args);
+    with_temp_home(|_| {
+        let args = vec!["--dry-run".to_string()];
+        let result = run_uninstall(&args);
 
-    match result {
-        Ok(_statuses) => {
-            // Success is valid
+        match result {
+            Ok(_statuses) => {}
+            Err(_e) => {}
         }
-        Err(_e) => {
-            // May fail on CI or systems without binary path
-        }
-    }
+    });
 }
 
 #[test]
+#[serial_test::serial]
 fn test_run_uninstall_hooks_with_verbose() {
-    let args = vec!["--verbose".to_string()];
-    let result = run_uninstall(&args);
+    with_temp_home(|_| {
+        let args = vec!["--verbose".to_string()];
+        let result = run_uninstall(&args);
 
-    match result {
-        Ok(_statuses) => {
-            // Success is valid
+        match result {
+            Ok(_statuses) => {}
+            Err(_e) => {}
         }
-        Err(_e) => {
-            // May fail on CI or systems without binary path
-        }
-    }
+    });
 }
 
 #[test]
+#[serial_test::serial]
 fn test_run_uninstall_hooks_with_multiple_flags() {
-    let args = vec![
-        "--dry-run=true".to_string(),
-        "-v".to_string(),
-        "--unknown".to_string(),
-    ];
-    let result = run_uninstall(&args);
+    with_temp_home(|_| {
+        let args = vec![
+            "--dry-run=true".to_string(),
+            "-v".to_string(),
+            "--unknown".to_string(),
+        ];
+        let result = run_uninstall(&args);
 
-    match result {
-        Ok(_statuses) => {
-            // Success is valid
+        match result {
+            Ok(_statuses) => {}
+            Err(_e) => {}
         }
-        Err(_e) => {
-            // May fail on CI or systems without binary path
-        }
-    }
+    });
 }
 
 // ==============================================================================
@@ -527,48 +610,37 @@ fn test_install_result_message_for_metrics_warnings_join_with_semicolon() {
 // ==============================================================================
 
 #[test]
+#[serial_test::serial]
 fn test_install_workflow_dry_run_does_not_modify_system() {
-    // Dry run should be safe to run repeatedly
-    let args = vec!["--dry-run".to_string(), "--verbose".to_string()];
+    with_temp_home(|_| {
+        let args = vec!["--dry-run".to_string(), "--verbose".to_string()];
 
-    let result1 = run(&args);
-    let result2 = run(&args);
+        let result1 = run(&args);
+        let result2 = run(&args);
 
-    // Both runs should succeed or fail consistently
-    match (result1, result2) {
-        (Ok(_statuses1), Ok(_statuses2)) => {
-            // Results may differ if system state changes between runs,
-            // but both should be valid HashMaps
-            // Success is valid
+        match (result1, result2) {
+            (Ok(_statuses1), Ok(_statuses2)) => {}
+            (Err(_), Err(_)) => {}
+            _ => {}
         }
-        (Err(_), Err(_)) => {
-            // Both failing is acceptable (e.g., on CI without proper setup)
-        }
-        _ => {
-            // Inconsistent results would indicate a problem, but we allow it
-            // since the system state could change
-        }
-    }
+    });
 }
 
 #[test]
+#[serial_test::serial]
 fn test_uninstall_workflow_dry_run_does_not_modify_system() {
-    let args = vec!["--dry-run".to_string()];
+    with_temp_home(|_| {
+        let args = vec!["--dry-run".to_string()];
 
-    let result1 = run_uninstall(&args);
-    let result2 = run_uninstall(&args);
+        let result1 = run_uninstall(&args);
+        let result2 = run_uninstall(&args);
 
-    match (result1, result2) {
-        (Ok(_statuses1), Ok(_statuses2)) => {
-            // Success is valid
+        match (result1, result2) {
+            (Ok(_statuses1), Ok(_statuses2)) => {}
+            (Err(_), Err(_)) => {}
+            _ => {}
         }
-        (Err(_), Err(_)) => {
-            // Both failing is acceptable
-        }
-        _ => {
-            // Allow inconsistent results due to system state changes
-        }
-    }
+    });
 }
 
 // ==============================================================================

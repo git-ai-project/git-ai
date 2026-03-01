@@ -6,8 +6,9 @@ use crate::authorship::stats::stats_command;
 use crate::authorship::working_log::{AgentId, CheckpointKind};
 use crate::commands;
 use crate::commands::checkpoint_agent::agent_presets::{
-    AgentCheckpointFlags, AgentCheckpointPreset, AgentRunResult, AiTabPreset, ClaudePreset,
-    CodexPreset, ContinueCliPreset, CursorPreset, DroidPreset, GeminiPreset, GithubCopilotPreset,
+    AgentCheckpointFlags, AgentCheckpointPreset, AgentRunResult, AiTabPreset, CheckpointExecution,
+    ClaudePreset, CodexPreset, ContinueCliPreset, CursorPreset, DroidPreset, GeminiPreset,
+    GithubCopilotPreset,
 };
 use crate::commands::checkpoint_agent::agent_v1_preset::AgentV1Preset;
 use crate::commands::checkpoint_agent::amp_preset::AmpPreset;
@@ -549,6 +550,8 @@ fn handle_checkpoint(args: &[String]) {
                     edited_filepaths,
                     will_edit_filepaths: None,
                     dirty_files: None,
+                    checkpoint_execution: CheckpointExecution::Run,
+                    telemetry_events: vec![],
                 });
             }
             _ => {}
@@ -797,6 +800,8 @@ fn handle_checkpoint(args: &[String]) {
             edited_filepaths: None,
             repo_working_dir: Some(effective_working_dir),
             dirty_files: None,
+            checkpoint_execution: CheckpointExecution::Run,
+            telemetry_events: vec![],
         });
     }
 
@@ -1268,15 +1273,8 @@ fn emit_no_repo_agent_metrics(agent_run_result: Option<&AgentRunResult>) {
     let Some(result) = agent_run_result else {
         return;
     };
-    if result.checkpoint_kind == CheckpointKind::Human {
-        return;
-    }
 
     let agent_id = &result.agent_id;
-    if !commands::checkpoint::should_emit_agent_usage(agent_id) {
-        return;
-    }
-
     let prompt_id = generate_short_hash(&agent_id.id, &agent_id.tool);
     let attrs = crate::metrics::EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
         .tool(&agent_id.tool)
@@ -1284,8 +1282,14 @@ fn emit_no_repo_agent_metrics(agent_run_result: Option<&AgentRunResult>) {
         .prompt_id(prompt_id)
         .external_prompt_id(&agent_id.id);
 
-    let values = crate::metrics::AgentUsageValues::new();
-    crate::metrics::record(values, attrs);
+    if result.checkpoint_kind != CheckpointKind::Human
+        && commands::checkpoint::should_emit_agent_usage(agent_id)
+    {
+        let values = crate::metrics::AgentUsageValues::new();
+        crate::metrics::record(values, attrs.clone());
+    }
+
+    commands::checkpoint::emit_agent_telemetry_events(Some(result), attrs);
 
     observability::spawn_background_flush();
 }

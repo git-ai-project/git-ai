@@ -665,6 +665,770 @@ impl EventValues for CheckpointValues {
     }
 }
 
+/// Value positions for "agent_session" event.
+pub mod agent_session_pos {
+    pub const PHASE: usize = 0; // String - started|ended
+    pub const REASON: usize = 1; // String
+    pub const SOURCE: usize = 2; // String
+    pub const MODE: usize = 3; // String
+    pub const DURATION_MS: usize = 4; // u64
+    pub const IS_INFERRED: usize = 5; // u32 (0|1)
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AgentSessionValues {
+    pub phase: PosField<String>,
+    pub reason: PosField<String>,
+    pub source: PosField<String>,
+    pub mode: PosField<String>,
+    pub duration_ms: PosField<u64>,
+    pub is_inferred: PosField<u32>,
+}
+
+impl AgentSessionValues {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn phase(mut self, value: impl Into<String>) -> Self {
+        self.phase = Some(Some(value.into()));
+        self
+    }
+
+    pub fn reason(mut self, value: impl Into<String>) -> Self {
+        self.reason = Some(Some(value.into()));
+        self
+    }
+
+    pub fn source(mut self, value: impl Into<String>) -> Self {
+        self.source = Some(Some(value.into()));
+        self
+    }
+
+    pub fn mode(mut self, value: impl Into<String>) -> Self {
+        self.mode = Some(Some(value.into()));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn duration_ms(mut self, value: u64) -> Self {
+        self.duration_ms = Some(Some(value));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn inferred(mut self, value: u32) -> Self {
+        self.is_inferred = Some(Some(value));
+        self
+    }
+}
+
+impl PosEncoded for AgentSessionValues {
+    fn to_sparse(&self) -> SparseArray {
+        let mut map = SparseArray::new();
+        sparse_set(
+            &mut map,
+            agent_session_pos::PHASE,
+            string_to_json(&self.phase),
+        );
+        sparse_set(
+            &mut map,
+            agent_session_pos::REASON,
+            string_to_json(&self.reason),
+        );
+        sparse_set(
+            &mut map,
+            agent_session_pos::SOURCE,
+            string_to_json(&self.source),
+        );
+        sparse_set(
+            &mut map,
+            agent_session_pos::MODE,
+            string_to_json(&self.mode),
+        );
+        sparse_set(
+            &mut map,
+            agent_session_pos::DURATION_MS,
+            u64_to_json(&self.duration_ms),
+        );
+        sparse_set(
+            &mut map,
+            agent_session_pos::IS_INFERRED,
+            u32_to_json(&self.is_inferred),
+        );
+        map
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        Self {
+            phase: sparse_get_string(arr, agent_session_pos::PHASE),
+            reason: sparse_get_string(arr, agent_session_pos::REASON),
+            source: sparse_get_string(arr, agent_session_pos::SOURCE),
+            mode: sparse_get_string(arr, agent_session_pos::MODE),
+            duration_ms: sparse_get_u64(arr, agent_session_pos::DURATION_MS),
+            is_inferred: sparse_get_u32(arr, agent_session_pos::IS_INFERRED),
+        }
+    }
+}
+
+impl EventValues for AgentSessionValues {
+    fn event_id() -> MetricEventId {
+        MetricEventId::AgentSession
+    }
+
+    fn to_sparse(&self) -> SparseArray {
+        PosEncoded::to_sparse(self)
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        PosEncoded::from_sparse(arr)
+    }
+}
+
+/// Value positions for "agent_message" event.
+pub mod agent_message_pos {
+    pub const ROLE: usize = 0; // String
+    pub const PROMPT_CHAR_COUNT: usize = 1; // u32
+    pub const ATTACHMENT_COUNT: usize = 2; // u32
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AgentMessageValues {
+    pub role: PosField<String>,
+    pub prompt_char_count: PosField<u32>,
+    pub attachment_count: PosField<u32>,
+}
+
+impl AgentMessageValues {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn role(mut self, value: impl Into<String>) -> Self {
+        self.role = Some(Some(value.into()));
+        self
+    }
+
+    pub fn prompt_char_count(mut self, value: u32) -> Self {
+        self.prompt_char_count = Some(Some(value));
+        self
+    }
+
+    pub fn attachment_count(mut self, value: u32) -> Self {
+        self.attachment_count = Some(Some(value));
+        self
+    }
+}
+
+impl PosEncoded for AgentMessageValues {
+    fn to_sparse(&self) -> SparseArray {
+        let mut map = SparseArray::new();
+        sparse_set(
+            &mut map,
+            agent_message_pos::ROLE,
+            string_to_json(&self.role),
+        );
+        sparse_set(
+            &mut map,
+            agent_message_pos::PROMPT_CHAR_COUNT,
+            u32_to_json(&self.prompt_char_count),
+        );
+        sparse_set(
+            &mut map,
+            agent_message_pos::ATTACHMENT_COUNT,
+            u32_to_json(&self.attachment_count),
+        );
+        map
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        Self {
+            role: sparse_get_string(arr, agent_message_pos::ROLE),
+            prompt_char_count: sparse_get_u32(arr, agent_message_pos::PROMPT_CHAR_COUNT),
+            attachment_count: sparse_get_u32(arr, agent_message_pos::ATTACHMENT_COUNT),
+        }
+    }
+}
+
+impl EventValues for AgentMessageValues {
+    fn event_id() -> MetricEventId {
+        MetricEventId::AgentMessage
+    }
+
+    fn to_sparse(&self) -> SparseArray {
+        PosEncoded::to_sparse(self)
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        PosEncoded::from_sparse(arr)
+    }
+}
+
+/// Value positions for "agent_response" event.
+pub mod agent_response_pos {
+    pub const PHASE: usize = 0; // String - started|ended
+    pub const REASON: usize = 1; // String
+    pub const STATUS: usize = 2; // String
+    pub const RESPONSE_CHAR_COUNT: usize = 3; // u32
+    pub const IS_INFERRED: usize = 4; // u32 (0|1)
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AgentResponseValues {
+    pub phase: PosField<String>,
+    pub reason: PosField<String>,
+    pub status: PosField<String>,
+    pub response_char_count: PosField<u32>,
+    pub is_inferred: PosField<u32>,
+}
+
+impl AgentResponseValues {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn phase(mut self, value: impl Into<String>) -> Self {
+        self.phase = Some(Some(value.into()));
+        self
+    }
+
+    pub fn reason(mut self, value: impl Into<String>) -> Self {
+        self.reason = Some(Some(value.into()));
+        self
+    }
+
+    pub fn status(mut self, value: impl Into<String>) -> Self {
+        self.status = Some(Some(value.into()));
+        self
+    }
+
+    pub fn response_char_count(mut self, value: u32) -> Self {
+        self.response_char_count = Some(Some(value));
+        self
+    }
+
+    pub fn inferred(mut self, value: u32) -> Self {
+        self.is_inferred = Some(Some(value));
+        self
+    }
+}
+
+impl PosEncoded for AgentResponseValues {
+    fn to_sparse(&self) -> SparseArray {
+        let mut map = SparseArray::new();
+        sparse_set(
+            &mut map,
+            agent_response_pos::PHASE,
+            string_to_json(&self.phase),
+        );
+        sparse_set(
+            &mut map,
+            agent_response_pos::REASON,
+            string_to_json(&self.reason),
+        );
+        sparse_set(
+            &mut map,
+            agent_response_pos::STATUS,
+            string_to_json(&self.status),
+        );
+        sparse_set(
+            &mut map,
+            agent_response_pos::RESPONSE_CHAR_COUNT,
+            u32_to_json(&self.response_char_count),
+        );
+        sparse_set(
+            &mut map,
+            agent_response_pos::IS_INFERRED,
+            u32_to_json(&self.is_inferred),
+        );
+        map
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        Self {
+            phase: sparse_get_string(arr, agent_response_pos::PHASE),
+            reason: sparse_get_string(arr, agent_response_pos::REASON),
+            status: sparse_get_string(arr, agent_response_pos::STATUS),
+            response_char_count: sparse_get_u32(arr, agent_response_pos::RESPONSE_CHAR_COUNT),
+            is_inferred: sparse_get_u32(arr, agent_response_pos::IS_INFERRED),
+        }
+    }
+}
+
+impl EventValues for AgentResponseValues {
+    fn event_id() -> MetricEventId {
+        MetricEventId::AgentResponse
+    }
+
+    fn to_sparse(&self) -> SparseArray {
+        PosEncoded::to_sparse(self)
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        PosEncoded::from_sparse(arr)
+    }
+}
+
+/// Value positions for "agent_tool_call" event.
+pub mod agent_tool_call_pos {
+    pub const PHASE: usize = 0; // String - started|ended|failed|permission_requested
+    pub const TOOL_NAME: usize = 1; // String
+    pub const TOOL_USE_ID: usize = 2; // String
+    pub const DURATION_MS: usize = 3; // u64
+    pub const FAILURE_TYPE: usize = 4; // String
+    pub const IS_INFERRED: usize = 5; // u32 (0|1)
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AgentToolCallValues {
+    pub phase: PosField<String>,
+    pub tool_name: PosField<String>,
+    pub tool_use_id: PosField<String>,
+    pub duration_ms: PosField<u64>,
+    pub failure_type: PosField<String>,
+    pub is_inferred: PosField<u32>,
+}
+
+impl AgentToolCallValues {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn phase(mut self, value: impl Into<String>) -> Self {
+        self.phase = Some(Some(value.into()));
+        self
+    }
+
+    pub fn tool_name(mut self, value: impl Into<String>) -> Self {
+        self.tool_name = Some(Some(value.into()));
+        self
+    }
+
+    pub fn tool_use_id(mut self, value: impl Into<String>) -> Self {
+        self.tool_use_id = Some(Some(value.into()));
+        self
+    }
+
+    pub fn duration_ms(mut self, value: u64) -> Self {
+        self.duration_ms = Some(Some(value));
+        self
+    }
+
+    pub fn failure_type(mut self, value: impl Into<String>) -> Self {
+        self.failure_type = Some(Some(value.into()));
+        self
+    }
+
+    pub fn inferred(mut self, value: u32) -> Self {
+        self.is_inferred = Some(Some(value));
+        self
+    }
+}
+
+impl PosEncoded for AgentToolCallValues {
+    fn to_sparse(&self) -> SparseArray {
+        let mut map = SparseArray::new();
+        sparse_set(
+            &mut map,
+            agent_tool_call_pos::PHASE,
+            string_to_json(&self.phase),
+        );
+        sparse_set(
+            &mut map,
+            agent_tool_call_pos::TOOL_NAME,
+            string_to_json(&self.tool_name),
+        );
+        sparse_set(
+            &mut map,
+            agent_tool_call_pos::TOOL_USE_ID,
+            string_to_json(&self.tool_use_id),
+        );
+        sparse_set(
+            &mut map,
+            agent_tool_call_pos::DURATION_MS,
+            u64_to_json(&self.duration_ms),
+        );
+        sparse_set(
+            &mut map,
+            agent_tool_call_pos::FAILURE_TYPE,
+            string_to_json(&self.failure_type),
+        );
+        sparse_set(
+            &mut map,
+            agent_tool_call_pos::IS_INFERRED,
+            u32_to_json(&self.is_inferred),
+        );
+        map
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        Self {
+            phase: sparse_get_string(arr, agent_tool_call_pos::PHASE),
+            tool_name: sparse_get_string(arr, agent_tool_call_pos::TOOL_NAME),
+            tool_use_id: sparse_get_string(arr, agent_tool_call_pos::TOOL_USE_ID),
+            duration_ms: sparse_get_u64(arr, agent_tool_call_pos::DURATION_MS),
+            failure_type: sparse_get_string(arr, agent_tool_call_pos::FAILURE_TYPE),
+            is_inferred: sparse_get_u32(arr, agent_tool_call_pos::IS_INFERRED),
+        }
+    }
+}
+
+impl EventValues for AgentToolCallValues {
+    fn event_id() -> MetricEventId {
+        MetricEventId::AgentToolCall
+    }
+
+    fn to_sparse(&self) -> SparseArray {
+        PosEncoded::to_sparse(self)
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        PosEncoded::from_sparse(arr)
+    }
+}
+
+/// Value positions for "agent_mcp_call" event.
+pub mod agent_mcp_call_pos {
+    pub const PHASE: usize = 0; // String - started|ended|failed|permission_requested
+    pub const MCP_SERVER: usize = 1; // String
+    pub const TOOL_NAME: usize = 2; // String
+    pub const TRANSPORT: usize = 3; // String
+    pub const DURATION_MS: usize = 4; // u64
+    pub const FAILURE_TYPE: usize = 5; // String
+    pub const IS_INFERRED: usize = 6; // u32 (0|1)
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AgentMcpCallValues {
+    pub phase: PosField<String>,
+    pub mcp_server: PosField<String>,
+    pub tool_name: PosField<String>,
+    pub transport: PosField<String>,
+    pub duration_ms: PosField<u64>,
+    pub failure_type: PosField<String>,
+    pub is_inferred: PosField<u32>,
+}
+
+impl AgentMcpCallValues {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn phase(mut self, value: impl Into<String>) -> Self {
+        self.phase = Some(Some(value.into()));
+        self
+    }
+
+    pub fn mcp_server(mut self, value: impl Into<String>) -> Self {
+        self.mcp_server = Some(Some(value.into()));
+        self
+    }
+
+    pub fn tool_name(mut self, value: impl Into<String>) -> Self {
+        self.tool_name = Some(Some(value.into()));
+        self
+    }
+
+    pub fn transport(mut self, value: impl Into<String>) -> Self {
+        self.transport = Some(Some(value.into()));
+        self
+    }
+
+    pub fn duration_ms(mut self, value: u64) -> Self {
+        self.duration_ms = Some(Some(value));
+        self
+    }
+
+    pub fn failure_type(mut self, value: impl Into<String>) -> Self {
+        self.failure_type = Some(Some(value.into()));
+        self
+    }
+
+    pub fn inferred(mut self, value: u32) -> Self {
+        self.is_inferred = Some(Some(value));
+        self
+    }
+}
+
+impl PosEncoded for AgentMcpCallValues {
+    fn to_sparse(&self) -> SparseArray {
+        let mut map = SparseArray::new();
+        sparse_set(
+            &mut map,
+            agent_mcp_call_pos::PHASE,
+            string_to_json(&self.phase),
+        );
+        sparse_set(
+            &mut map,
+            agent_mcp_call_pos::MCP_SERVER,
+            string_to_json(&self.mcp_server),
+        );
+        sparse_set(
+            &mut map,
+            agent_mcp_call_pos::TOOL_NAME,
+            string_to_json(&self.tool_name),
+        );
+        sparse_set(
+            &mut map,
+            agent_mcp_call_pos::TRANSPORT,
+            string_to_json(&self.transport),
+        );
+        sparse_set(
+            &mut map,
+            agent_mcp_call_pos::DURATION_MS,
+            u64_to_json(&self.duration_ms),
+        );
+        sparse_set(
+            &mut map,
+            agent_mcp_call_pos::FAILURE_TYPE,
+            string_to_json(&self.failure_type),
+        );
+        sparse_set(
+            &mut map,
+            agent_mcp_call_pos::IS_INFERRED,
+            u32_to_json(&self.is_inferred),
+        );
+        map
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        Self {
+            phase: sparse_get_string(arr, agent_mcp_call_pos::PHASE),
+            mcp_server: sparse_get_string(arr, agent_mcp_call_pos::MCP_SERVER),
+            tool_name: sparse_get_string(arr, agent_mcp_call_pos::TOOL_NAME),
+            transport: sparse_get_string(arr, agent_mcp_call_pos::TRANSPORT),
+            duration_ms: sparse_get_u64(arr, agent_mcp_call_pos::DURATION_MS),
+            failure_type: sparse_get_string(arr, agent_mcp_call_pos::FAILURE_TYPE),
+            is_inferred: sparse_get_u32(arr, agent_mcp_call_pos::IS_INFERRED),
+        }
+    }
+}
+
+impl EventValues for AgentMcpCallValues {
+    fn event_id() -> MetricEventId {
+        MetricEventId::AgentMcpCall
+    }
+
+    fn to_sparse(&self) -> SparseArray {
+        PosEncoded::to_sparse(self)
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        PosEncoded::from_sparse(arr)
+    }
+}
+
+/// Value positions for "agent_skill_usage" event.
+pub mod agent_skill_usage_pos {
+    pub const SKILL_NAME: usize = 0; // String
+    pub const DETECTION_METHOD: usize = 1; // String
+    pub const IS_INFERRED: usize = 2; // u32 (0|1)
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AgentSkillUsageValues {
+    pub skill_name: PosField<String>,
+    pub detection_method: PosField<String>,
+    pub is_inferred: PosField<u32>,
+}
+
+impl AgentSkillUsageValues {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn skill_name(mut self, value: impl Into<String>) -> Self {
+        self.skill_name = Some(Some(value.into()));
+        self
+    }
+
+    pub fn detection_method(mut self, value: impl Into<String>) -> Self {
+        self.detection_method = Some(Some(value.into()));
+        self
+    }
+
+    pub fn inferred(mut self, value: u32) -> Self {
+        self.is_inferred = Some(Some(value));
+        self
+    }
+}
+
+impl PosEncoded for AgentSkillUsageValues {
+    fn to_sparse(&self) -> SparseArray {
+        let mut map = SparseArray::new();
+        sparse_set(
+            &mut map,
+            agent_skill_usage_pos::SKILL_NAME,
+            string_to_json(&self.skill_name),
+        );
+        sparse_set(
+            &mut map,
+            agent_skill_usage_pos::DETECTION_METHOD,
+            string_to_json(&self.detection_method),
+        );
+        sparse_set(
+            &mut map,
+            agent_skill_usage_pos::IS_INFERRED,
+            u32_to_json(&self.is_inferred),
+        );
+        map
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        Self {
+            skill_name: sparse_get_string(arr, agent_skill_usage_pos::SKILL_NAME),
+            detection_method: sparse_get_string(arr, agent_skill_usage_pos::DETECTION_METHOD),
+            is_inferred: sparse_get_u32(arr, agent_skill_usage_pos::IS_INFERRED),
+        }
+    }
+}
+
+impl EventValues for AgentSkillUsageValues {
+    fn event_id() -> MetricEventId {
+        MetricEventId::AgentSkillUsage
+    }
+
+    fn to_sparse(&self) -> SparseArray {
+        PosEncoded::to_sparse(self)
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        PosEncoded::from_sparse(arr)
+    }
+}
+
+/// Value positions for "agent_subagent" event.
+pub mod agent_subagent_pos {
+    pub const PHASE: usize = 0; // String - started|ended
+    pub const SUBAGENT_ID: usize = 1; // String
+    pub const SUBAGENT_TYPE: usize = 2; // String
+    pub const STATUS: usize = 3; // String
+    pub const DURATION_MS: usize = 4; // u64
+    pub const RESULT_CHAR_COUNT: usize = 5; // u32
+    pub const IS_INFERRED: usize = 6; // u32 (0|1)
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AgentSubagentValues {
+    pub phase: PosField<String>,
+    pub subagent_id: PosField<String>,
+    pub subagent_type: PosField<String>,
+    pub status: PosField<String>,
+    pub duration_ms: PosField<u64>,
+    pub result_char_count: PosField<u32>,
+    pub is_inferred: PosField<u32>,
+}
+
+impl AgentSubagentValues {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn phase(mut self, value: impl Into<String>) -> Self {
+        self.phase = Some(Some(value.into()));
+        self
+    }
+
+    pub fn subagent_id(mut self, value: impl Into<String>) -> Self {
+        self.subagent_id = Some(Some(value.into()));
+        self
+    }
+
+    pub fn subagent_type(mut self, value: impl Into<String>) -> Self {
+        self.subagent_type = Some(Some(value.into()));
+        self
+    }
+
+    pub fn status(mut self, value: impl Into<String>) -> Self {
+        self.status = Some(Some(value.into()));
+        self
+    }
+
+    pub fn duration_ms(mut self, value: u64) -> Self {
+        self.duration_ms = Some(Some(value));
+        self
+    }
+
+    pub fn result_char_count(mut self, value: u32) -> Self {
+        self.result_char_count = Some(Some(value));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn inferred(mut self, value: u32) -> Self {
+        self.is_inferred = Some(Some(value));
+        self
+    }
+}
+
+impl PosEncoded for AgentSubagentValues {
+    fn to_sparse(&self) -> SparseArray {
+        let mut map = SparseArray::new();
+        sparse_set(
+            &mut map,
+            agent_subagent_pos::PHASE,
+            string_to_json(&self.phase),
+        );
+        sparse_set(
+            &mut map,
+            agent_subagent_pos::SUBAGENT_ID,
+            string_to_json(&self.subagent_id),
+        );
+        sparse_set(
+            &mut map,
+            agent_subagent_pos::SUBAGENT_TYPE,
+            string_to_json(&self.subagent_type),
+        );
+        sparse_set(
+            &mut map,
+            agent_subagent_pos::STATUS,
+            string_to_json(&self.status),
+        );
+        sparse_set(
+            &mut map,
+            agent_subagent_pos::DURATION_MS,
+            u64_to_json(&self.duration_ms),
+        );
+        sparse_set(
+            &mut map,
+            agent_subagent_pos::RESULT_CHAR_COUNT,
+            u32_to_json(&self.result_char_count),
+        );
+        sparse_set(
+            &mut map,
+            agent_subagent_pos::IS_INFERRED,
+            u32_to_json(&self.is_inferred),
+        );
+        map
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        Self {
+            phase: sparse_get_string(arr, agent_subagent_pos::PHASE),
+            subagent_id: sparse_get_string(arr, agent_subagent_pos::SUBAGENT_ID),
+            subagent_type: sparse_get_string(arr, agent_subagent_pos::SUBAGENT_TYPE),
+            status: sparse_get_string(arr, agent_subagent_pos::STATUS),
+            duration_ms: sparse_get_u64(arr, agent_subagent_pos::DURATION_MS),
+            result_char_count: sparse_get_u32(arr, agent_subagent_pos::RESULT_CHAR_COUNT),
+            is_inferred: sparse_get_u32(arr, agent_subagent_pos::IS_INFERRED),
+        }
+    }
+}
+
+impl EventValues for AgentSubagentValues {
+    fn event_id() -> MetricEventId {
+        MetricEventId::AgentSubagent
+    }
+
+    fn to_sparse(&self) -> SparseArray {
+        PosEncoded::to_sparse(self)
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        PosEncoded::from_sparse(arr)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1033,5 +1797,148 @@ mod tests {
         assert_eq!(values.total_ai_additions, Some(None));
         assert_eq!(values.total_ai_deletions, Some(None));
         assert_eq!(values.time_waiting_for_ai, Some(None));
+    }
+
+    #[test]
+    fn test_agent_session_values_roundtrip() {
+        use super::PosEncoded;
+
+        let values = AgentSessionValues::new()
+            .phase("started")
+            .source("interactive")
+            .mode("agent")
+            .inferred(0);
+        let sparse = PosEncoded::to_sparse(&values);
+        let restored = <AgentSessionValues as PosEncoded>::from_sparse(&sparse);
+
+        assert_eq!(restored.phase, Some(Some("started".to_string())));
+        assert_eq!(restored.source, Some(Some("interactive".to_string())));
+        assert_eq!(restored.mode, Some(Some("agent".to_string())));
+        assert_eq!(restored.is_inferred, Some(Some(0)));
+        assert_eq!(AgentSessionValues::event_id() as u16, 5);
+    }
+
+    #[test]
+    fn test_agent_message_values_roundtrip() {
+        use super::PosEncoded;
+
+        let values = AgentMessageValues::new()
+            .role("human")
+            .prompt_char_count(128)
+            .attachment_count(2);
+        let sparse = PosEncoded::to_sparse(&values);
+        let restored = <AgentMessageValues as PosEncoded>::from_sparse(&sparse);
+
+        assert_eq!(restored.role, Some(Some("human".to_string())));
+        assert_eq!(restored.prompt_char_count, Some(Some(128)));
+        assert_eq!(restored.attachment_count, Some(Some(2)));
+        assert_eq!(AgentMessageValues::event_id() as u16, 6);
+    }
+
+    #[test]
+    fn test_agent_response_values_roundtrip() {
+        use super::PosEncoded;
+
+        let values = AgentResponseValues::new()
+            .phase("ended")
+            .status("completed")
+            .response_char_count(300)
+            .inferred(1);
+        let sparse = PosEncoded::to_sparse(&values);
+        let restored = <AgentResponseValues as PosEncoded>::from_sparse(&sparse);
+
+        assert_eq!(restored.phase, Some(Some("ended".to_string())));
+        assert_eq!(restored.status, Some(Some("completed".to_string())));
+        assert_eq!(restored.response_char_count, Some(Some(300)));
+        assert_eq!(restored.is_inferred, Some(Some(1)));
+        assert_eq!(AgentResponseValues::event_id() as u16, 7);
+    }
+
+    #[test]
+    fn test_agent_tool_call_values_roundtrip() {
+        use super::PosEncoded;
+
+        let values = AgentToolCallValues::new()
+            .phase("failed")
+            .tool_name("Write")
+            .tool_use_id("call-1")
+            .duration_ms(500)
+            .failure_type("timeout");
+        let sparse = PosEncoded::to_sparse(&values);
+        let restored = <AgentToolCallValues as PosEncoded>::from_sparse(&sparse);
+
+        assert_eq!(restored.phase, Some(Some("failed".to_string())));
+        assert_eq!(restored.tool_name, Some(Some("Write".to_string())));
+        assert_eq!(restored.tool_use_id, Some(Some("call-1".to_string())));
+        assert_eq!(restored.duration_ms, Some(Some(500)));
+        assert_eq!(restored.failure_type, Some(Some("timeout".to_string())));
+        assert_eq!(AgentToolCallValues::event_id() as u16, 8);
+    }
+
+    #[test]
+    fn test_agent_mcp_call_values_roundtrip() {
+        use super::PosEncoded;
+
+        let values = AgentMcpCallValues::new()
+            .phase("ended")
+            .mcp_server("mintmcp")
+            .tool_name("mcp__tool")
+            .transport("stdio")
+            .duration_ms(1200);
+        let sparse = PosEncoded::to_sparse(&values);
+        let restored = <AgentMcpCallValues as PosEncoded>::from_sparse(&sparse);
+
+        assert_eq!(restored.phase, Some(Some("ended".to_string())));
+        assert_eq!(restored.mcp_server, Some(Some("mintmcp".to_string())));
+        assert_eq!(restored.tool_name, Some(Some("mcp__tool".to_string())));
+        assert_eq!(restored.transport, Some(Some("stdio".to_string())));
+        assert_eq!(restored.duration_ms, Some(Some(1200)));
+        assert_eq!(AgentMcpCallValues::event_id() as u16, 9);
+    }
+
+    #[test]
+    fn test_agent_skill_usage_values_roundtrip() {
+        use super::PosEncoded;
+
+        let values = AgentSkillUsageValues::new()
+            .skill_name("security-review")
+            .detection_method("inferred_tool")
+            .inferred(1);
+        let sparse = PosEncoded::to_sparse(&values);
+        let restored = <AgentSkillUsageValues as PosEncoded>::from_sparse(&sparse);
+
+        assert_eq!(
+            restored.skill_name,
+            Some(Some("security-review".to_string()))
+        );
+        assert_eq!(
+            restored.detection_method,
+            Some(Some("inferred_tool".to_string()))
+        );
+        assert_eq!(restored.is_inferred, Some(Some(1)));
+        assert_eq!(AgentSkillUsageValues::event_id() as u16, 10);
+    }
+
+    #[test]
+    fn test_agent_subagent_values_roundtrip() {
+        use super::PosEncoded;
+
+        let values = AgentSubagentValues::new()
+            .phase("ended")
+            .subagent_id("sub-1")
+            .subagent_type("explore")
+            .status("completed")
+            .duration_ms(4567)
+            .result_char_count(500);
+        let sparse = PosEncoded::to_sparse(&values);
+        let restored = <AgentSubagentValues as PosEncoded>::from_sparse(&sparse);
+
+        assert_eq!(restored.phase, Some(Some("ended".to_string())));
+        assert_eq!(restored.subagent_id, Some(Some("sub-1".to_string())));
+        assert_eq!(restored.subagent_type, Some(Some("explore".to_string())));
+        assert_eq!(restored.status, Some(Some("completed".to_string())));
+        assert_eq!(restored.duration_ms, Some(Some(4567)));
+        assert_eq!(restored.result_char_count, Some(Some(500)));
+        assert_eq!(AgentSubagentValues::event_id() as u16, 11);
     }
 }
