@@ -903,6 +903,120 @@ impl TestRepo {
         }
     }
 
+    pub fn git_with_env_tty(
+        &self,
+        args: &[&str],
+        envs: &[(&str, &str)],
+        working_dir: Option<&std::path::Path>,
+    ) -> Result<String, String> {
+        use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+        use std::io::Read;
+
+        let program = if self.git_mode.uses_wrapper() {
+            get_binary_path().to_string_lossy().to_string()
+        } else {
+            "git".to_string()
+        };
+        let mut cmd_builder = CommandBuilder::new(program);
+
+        if let Some(working_dir_path) = working_dir {
+            let absolute_working_dir = working_dir_path.canonicalize().map_err(|e| {
+                format!(
+                    "Failed to canonicalize working directory {}: {}",
+                    working_dir_path.display(),
+                    e
+                )
+            })?;
+            cmd_builder.cwd(absolute_working_dir);
+            for arg in args {
+                cmd_builder.arg(*arg);
+            }
+        } else {
+            cmd_builder.arg("-C");
+            cmd_builder.arg(self.path.to_str().unwrap());
+            for arg in args {
+                cmd_builder.arg(*arg);
+            }
+        }
+
+        if self.git_mode.uses_hooks() {
+            cmd_builder.env("HOME", self.test_home.to_string_lossy().to_string());
+            cmd_builder.env(
+                "GIT_CONFIG_GLOBAL",
+                self.test_home
+                    .join(".gitconfig")
+                    .to_string_lossy()
+                    .to_string(),
+            );
+            cmd_builder.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
+        }
+
+        if self.git_mode.uses_wrapper() {
+            cmd_builder.env("GIT_AI", "git");
+        }
+
+        if let Some(patch) = &self.config_patch
+            && let Ok(patch_json) = serde_json::to_string(patch)
+        {
+            cmd_builder.env("GIT_AI_TEST_CONFIG_PATCH", patch_json);
+        }
+        cmd_builder.env(
+            "GIT_AI_TEST_DB_PATH",
+            self.test_db_path.to_str().unwrap().to_string(),
+        );
+
+        for (key, value) in envs {
+            cmd_builder.env(*key, *value);
+        }
+
+        let pty_system = native_pty_system();
+        let pty_pair = pty_system
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|e| format!("Failed to open PTY: {}", e))?;
+
+        let mut child = pty_pair
+            .slave
+            .spawn_command(cmd_builder)
+            .map_err(|e| format!("Failed to spawn PTY command {:?}: {}", args, e))?;
+
+        drop(pty_pair.slave);
+
+        let mut reader = pty_pair
+            .master
+            .try_clone_reader()
+            .map_err(|e| format!("Failed to clone PTY reader: {}", e))?;
+
+        let output_handle = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let read_result = reader.read_to_end(&mut bytes);
+            (read_result, bytes)
+        });
+
+        let exit_status = child
+            .wait()
+            .map_err(|e| format!("Failed to wait for PTY command {:?}: {}", args, e))?;
+
+        drop(pty_pair.master);
+
+        let (read_result, bytes) = output_handle
+            .join()
+            .map_err(|_| "Failed to join PTY reader thread".to_string())?;
+        read_result.map_err(|e| format!("Failed reading PTY output: {}", e))?;
+
+        let combined = String::from_utf8_lossy(&bytes).to_string();
+
+        if exit_status.success() {
+            Ok(combined)
+        } else {
+            Err(combined)
+        }
+    }
+
     pub fn git_ai_from_working_dir(
         &self,
         working_dir: &std::path::Path,
@@ -1084,6 +1198,10 @@ impl TestRepo {
         self.commit_with_env(message, &[], None)
     }
 
+    pub fn commit_with_tty(&self, message: &str) -> Result<NewCommit, String> {
+        self.commit_with_env_tty(message, &[], None)
+    }
+
     /// Commit from a working directory (without using -C flag)
     /// This tests that git-ai correctly handles commits when run from a subdirectory
     /// The working_dir will be canonicalized to ensure it's an absolute path
@@ -1100,6 +1218,11 @@ impl TestRepo {
         self.commit(message)
     }
 
+    pub fn stage_all_and_commit_with_tty(&self, message: &str) -> Result<NewCommit, String> {
+        self.git(&["add", "-A"]).expect("add --all should succeed");
+        self.commit_with_tty(message)
+    }
+
     pub fn commit_with_env(
         &self,
         message: &str,
@@ -1108,37 +1231,51 @@ impl TestRepo {
     ) -> Result<NewCommit, String> {
         let output = self.git_with_env(&["commit", "-m", message], envs, working_dir);
 
-        // println!("commit output: {:?}", output);
         match output {
-            Ok(combined) => {
-                // Get the repository and HEAD commit SHA
-                let repo = GitAiRepository::find_repository_in_path(self.path.to_str().unwrap())
-                    .map_err(|e| format!("Failed to find repository: {}", e))?;
-
-                let head_commit = repo
-                    .head()
-                    .map_err(|e| format!("Failed to get HEAD: {}", e))?
-                    .target()
-                    .map_err(|e| format!("Failed to get HEAD target: {}", e))?;
-
-                // Get the authorship log for the new commit
-                let authorship_log =
-                    match git_ai::git::refs::show_authorship_note(&repo, &head_commit) {
-                        Some(content) => AuthorshipLog::deserialize_from_string(&content)
-                            .map_err(|e| format!("Failed to parse authorship log: {}", e))?,
-                        None => {
-                            return Err("No authorship log found for the new commit".to_string());
-                        }
-                    };
-
-                Ok(NewCommit {
-                    commit_sha: head_commit,
-                    authorship_log,
-                    stdout: combined,
-                })
-            }
+            Ok(combined) => self.new_commit_from_output(combined),
             Err(e) => Err(e),
         }
+    }
+
+    pub fn commit_with_env_tty(
+        &self,
+        message: &str,
+        envs: &[(&str, &str)],
+        working_dir: Option<&std::path::Path>,
+    ) -> Result<NewCommit, String> {
+        let output = self.git_with_env_tty(&["commit", "-m", message], envs, working_dir);
+
+        match output {
+            Ok(combined) => self.new_commit_from_output(combined),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn new_commit_from_output(&self, combined: String) -> Result<NewCommit, String> {
+        // Get the repository and HEAD commit SHA
+        let repo = GitAiRepository::find_repository_in_path(self.path.to_str().unwrap())
+            .map_err(|e| format!("Failed to find repository: {}", e))?;
+
+        let head_commit = repo
+            .head()
+            .map_err(|e| format!("Failed to get HEAD: {}", e))?
+            .target()
+            .map_err(|e| format!("Failed to get HEAD target: {}", e))?;
+
+        // Get the authorship log for the new commit
+        let authorship_log = match git_ai::git::refs::show_authorship_note(&repo, &head_commit) {
+            Some(content) => AuthorshipLog::deserialize_from_string(&content)
+                .map_err(|e| format!("Failed to parse authorship log: {}", e))?,
+            None => {
+                return Err("No authorship log found for the new commit".to_string());
+            }
+        };
+
+        Ok(NewCommit {
+            commit_sha: head_commit,
+            authorship_log,
+            stdout: combined,
+        })
     }
 
     pub fn read_file(&self, filename: &str) -> Option<String> {

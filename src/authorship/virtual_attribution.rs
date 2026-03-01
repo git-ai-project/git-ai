@@ -676,20 +676,27 @@ fn collect_unstaged_hunks(
         }
     }
 
-    // Check for untracked files in pathspecs that git diff didn't find
-    // These are files that exist in the working directory but aren't tracked by git
+    // Check for untracked files in pathspecs that git diff didn't find.
+    // Use a single batched status query instead of per-file tree lookups.
     if let Some(paths) = pathspecs
         && let Ok(workdir) = repo.workdir()
     {
+        let untracked_paths: HashSet<String> = repo
+            .status(Some(paths), false)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|entry| entry.kind == crate::git::status::EntryKind::Untracked)
+            .map(|entry| entry.path)
+            .collect();
+
         for pathspec in paths {
             // Skip if we already found this file in git diff
             if unstaged_hunks.contains_key(pathspec) {
                 continue;
             }
 
-            // Check if file exists in the commit - if it does, it's tracked and git diff should handle it
-            // Only process truly untracked files (files that don't exist in the commit tree)
-            if file_exists_in_commit(repo, commit_sha, pathspec).unwrap_or(false) {
+            // Only process truly untracked files.
+            if !untracked_paths.contains(pathspec) {
                 continue;
             }
 
@@ -1749,22 +1756,13 @@ fn get_file_content_at_commit(
     }
 }
 
-/// Check if a file exists in a commit's tree
-fn file_exists_in_commit(
-    repo: &Repository,
-    commit_sha: &str,
-    file_path: &str,
-) -> Result<bool, GitAiError> {
-    let commit = repo.find_commit(commit_sha.to_string())?;
-    let tree = commit.tree()?;
-    Ok(tree.get_path(std::path::Path::new(file_path)).is_ok())
-}
-
 #[cfg(test)]
 mod tests {
 
     use super::*;
     use crate::git::test_utils::TmpRepo;
+    use std::collections::HashSet;
+    use std::fs;
 
     #[test]
     fn test_virtual_attributions() {
@@ -1817,5 +1815,40 @@ mod tests {
         }
 
         assert!(!virtual_attributions.files().is_empty());
+    }
+
+    #[test]
+    fn test_collect_unstaged_hunks_includes_untracked_pathspec_file() {
+        let repo = TmpRepo::new().unwrap();
+        repo.write_file("tracked.txt", "base\n", true).unwrap();
+        repo.commit_with_message("initial").unwrap();
+
+        let commit_sha = repo.head_commit_sha().unwrap();
+        let untracked_file = "new/untracked.txt";
+        let untracked_path = repo.path().join(untracked_file);
+        fs::create_dir_all(untracked_path.parent().unwrap()).unwrap();
+        fs::write(&untracked_path, "one\ntwo\nthree\n").unwrap();
+
+        let mut pathspecs = HashSet::new();
+        pathspecs.insert(untracked_file.to_string());
+
+        let (unstaged_hunks, pure_insertion_hunks) =
+            collect_unstaged_hunks(repo.gitai_repo(), &commit_sha, Some(&pathspecs)).unwrap();
+
+        let unstaged_lines: Vec<u32> = unstaged_hunks
+            .get(untracked_file)
+            .unwrap()
+            .iter()
+            .flat_map(LineRange::expand)
+            .collect();
+        let insertion_lines: Vec<u32> = pure_insertion_hunks
+            .get(untracked_file)
+            .unwrap()
+            .iter()
+            .flat_map(LineRange::expand)
+            .collect();
+
+        assert_eq!(unstaged_lines, vec![1, 2, 3]);
+        assert_eq!(insertion_lines, vec![1, 2, 3]);
     }
 }

@@ -531,7 +531,9 @@ impl PersistedWorkingLog {
             match checkpoint.kind {
                 CheckpointKind::AiAgent | CheckpointKind::AiTab => {
                     for entry in checkpoint.entries {
-                        touched_files.insert(entry.file);
+                        if !entry.attributions.is_empty() || !entry.line_attributions.is_empty() {
+                            touched_files.insert(entry.file);
+                        }
                     }
                 }
                 CheckpointKind::Human => {
@@ -777,6 +779,58 @@ mod tests {
 
         assert_eq!(checkpoints.len(), 2, "Should have two checkpoints");
         assert_eq!(checkpoints[1].author, "test-author-2");
+    }
+
+    #[test]
+    fn test_all_ai_touched_files_ignores_empty_entries() {
+        // Create a temporary repository
+        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
+
+        // Create RepoStorage and PersistedWorkingLog
+        let repo_storage =
+            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap());
+        let working_log = repo_storage.working_log_for_base_commit("test-commit-sha");
+
+        // AI checkpoint with empty attribution payload should be ignored.
+        let empty_ai_checkpoint = Checkpoint::new(
+            CheckpointKind::AiAgent,
+            "empty".to_string(),
+            "ai".to_string(),
+            vec![crate::authorship::working_log::WorkingLogEntry::new(
+                "empty.txt".to_string(),
+                "sha-empty".to_string(),
+                vec![],
+                vec![],
+            )],
+        );
+        working_log
+            .append_checkpoint(&empty_ai_checkpoint)
+            .expect("Failed to append empty AI checkpoint");
+
+        // AI checkpoint with non-empty attribution payload should be included.
+        let non_empty_ai_checkpoint = Checkpoint::new(
+            CheckpointKind::AiAgent,
+            "non-empty".to_string(),
+            "ai".to_string(),
+            vec![crate::authorship::working_log::WorkingLogEntry::new(
+                "ai.txt".to_string(),
+                "sha-ai".to_string(),
+                vec![],
+                vec![LineAttribution::new(
+                    1,
+                    1,
+                    CheckpointKind::AiAgent.to_str(),
+                    None,
+                )],
+            )],
+        );
+        working_log
+            .append_checkpoint(&non_empty_ai_checkpoint)
+            .expect("Failed to append non-empty AI checkpoint");
+
+        let touched = working_log.all_ai_touched_files().unwrap();
+        assert!(!touched.contains("empty.txt"));
+        assert!(touched.contains("ai.txt"));
     }
 
     #[test]
