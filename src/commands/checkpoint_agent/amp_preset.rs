@@ -4,7 +4,7 @@ use crate::{
         working_log::{AgentId, CheckpointKind},
     },
     commands::checkpoint_agent::agent_presets::{
-        AgentCheckpointFlags, AgentCheckpointPreset, AgentRunResult,
+        AgentCheckpointFlags, AgentCheckpointPreset, AgentRunResult, CheckpointExecution,
     },
     error::GitAiError,
     observability::log_error,
@@ -151,6 +151,8 @@ impl AgentCheckpointPreset for AmpPreset {
                 edited_filepaths: None,
                 will_edit_filepaths: file_paths,
                 dirty_files: None,
+                checkpoint_execution: CheckpointExecution::Run,
+                telemetry_events: Vec::new(),
             });
         }
 
@@ -184,6 +186,8 @@ impl AgentCheckpointPreset for AmpPreset {
             edited_filepaths: file_paths,
             will_edit_filepaths: None,
             dirty_files: None,
+            checkpoint_execution: CheckpointExecution::Run,
+            telemetry_events: Vec::new(),
         })
     }
 }
