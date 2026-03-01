@@ -187,6 +187,7 @@ impl EventAttributes {
     }
 
     // Builder methods for hook_event_name
+    #[allow(dead_code)]
     pub fn hook_event_name(mut self, value: impl Into<String>) -> Self {
         self.hook_event_name = Some(Some(value.into()));
         self
@@ -199,6 +200,7 @@ impl EventAttributes {
     }
 
     // Builder methods for hook_source
+    #[allow(dead_code)]
     pub fn hook_source(mut self, value: impl Into<String>) -> Self {
         self.hook_source = Some(Some(value.into()));
         self

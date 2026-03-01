@@ -328,7 +328,10 @@ fn test_cursor_preset_human_checkpoint_no_filepath() {
 fn test_cursor_preset_session_start_telemetry_only() {
     use git_ai::authorship::working_log::CheckpointKind;
     use git_ai::commands::checkpoint_agent::agent_presets::{
-        AgentCheckpointFlags, AgentCheckpointPreset, CursorPreset,
+        AgentCheckpointFlags, AgentCheckpointPreset, CheckpointExecution, CursorPreset, NoOpReason,
+    };
+    use git_ai::commands::checkpoint_agent::telemetry_events::{
+        AgentTelemetryEvent, SessionPhase, TelemetrySignal,
     };
 
     let hook_input = r##"{
@@ -349,23 +352,30 @@ fn test_cursor_preset_session_start_telemetry_only() {
         .expect("Should parse sessionStart hook payload");
 
     assert_eq!(result.checkpoint_kind, CheckpointKind::AiAgent);
-    assert_eq!(result.hook_event_name.as_deref(), Some("sessionStart"));
-    assert_eq!(result.hook_source.as_deref(), Some("cursor_hook"));
     assert_eq!(
-        result
-            .telemetry_payload
-            .as_ref()
-            .and_then(|m| m.get("telemetry_only"))
-            .map(String::as_str),
-        Some("1")
+        result.checkpoint_execution,
+        CheckpointExecution::NoOp {
+            reason: NoOpReason::TelemetryOnly
+        }
     );
+    assert_eq!(
+        result.telemetry_events.len(),
+        1,
+        "sessionStart should emit exactly one telemetry event"
+    );
+    assert!(result.telemetry_events.iter().any(|event| matches!(
+        event,
+        AgentTelemetryEvent::Session(session)
+            if session.phase == SessionPhase::Started
+                && session.signal == TelemetrySignal::Explicit
+    )));
 }
 
 #[test]
 fn test_cursor_preset_precompact_telemetry_only() {
     use git_ai::authorship::working_log::CheckpointKind;
     use git_ai::commands::checkpoint_agent::agent_presets::{
-        AgentCheckpointFlags, AgentCheckpointPreset, CursorPreset,
+        AgentCheckpointFlags, AgentCheckpointPreset, CheckpointExecution, CursorPreset, NoOpReason,
     };
 
     let hook_input = r##"{
@@ -386,14 +396,15 @@ fn test_cursor_preset_precompact_telemetry_only() {
         .expect("Should parse preCompact hook payload");
 
     assert_eq!(result.checkpoint_kind, CheckpointKind::AiAgent);
-    assert_eq!(result.hook_event_name.as_deref(), Some("preCompact"));
     assert_eq!(
-        result
-            .telemetry_payload
-            .as_ref()
-            .and_then(|m| m.get("telemetry_only"))
-            .map(String::as_str),
-        Some("1")
+        result.checkpoint_execution,
+        CheckpointExecution::NoOp {
+            reason: NoOpReason::TelemetryOnly
+        }
+    );
+    assert!(
+        result.telemetry_events.is_empty(),
+        "preCompact currently emits no normalized telemetry events"
     );
 }
 
@@ -401,7 +412,7 @@ fn test_cursor_preset_precompact_telemetry_only() {
 fn test_cursor_preset_before_read_file_telemetry_only() {
     use git_ai::authorship::working_log::CheckpointKind;
     use git_ai::commands::checkpoint_agent::agent_presets::{
-        AgentCheckpointFlags, AgentCheckpointPreset, CursorPreset,
+        AgentCheckpointFlags, AgentCheckpointPreset, CheckpointExecution, CursorPreset, NoOpReason,
     };
 
     let hook_input = r##"{
@@ -422,14 +433,15 @@ fn test_cursor_preset_before_read_file_telemetry_only() {
         .expect("Should parse beforeReadFile hook payload");
 
     assert_eq!(result.checkpoint_kind, CheckpointKind::AiAgent);
-    assert_eq!(result.hook_event_name.as_deref(), Some("beforeReadFile"));
     assert_eq!(
-        result
-            .telemetry_payload
-            .as_ref()
-            .and_then(|m| m.get("telemetry_only"))
-            .map(String::as_str),
-        Some("1")
+        result.checkpoint_execution,
+        CheckpointExecution::NoOp {
+            reason: NoOpReason::TelemetryOnly
+        }
+    );
+    assert!(
+        result.telemetry_events.is_empty(),
+        "beforeReadFile should be telemetry-only without normalized events"
     );
 }
 

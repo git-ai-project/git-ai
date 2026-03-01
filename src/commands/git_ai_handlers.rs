@@ -6,8 +6,9 @@ use crate::authorship::stats::stats_command;
 use crate::authorship::working_log::{AgentId, CheckpointKind};
 use crate::commands;
 use crate::commands::checkpoint_agent::agent_presets::{
-    AgentCheckpointFlags, AgentCheckpointPreset, AgentRunResult, AiTabPreset, ClaudePreset,
-    CodexPreset, ContinueCliPreset, CursorPreset, DroidPreset, GeminiPreset, GithubCopilotPreset,
+    AgentCheckpointFlags, AgentCheckpointPreset, AgentRunResult, AiTabPreset, CheckpointExecution,
+    ClaudePreset, CodexPreset, ContinueCliPreset, CursorPreset, DroidPreset, GeminiPreset,
+    GithubCopilotPreset,
 };
 use crate::commands::checkpoint_agent::agent_v1_preset::AgentV1Preset;
 use crate::commands::checkpoint_agent::opencode_preset::OpenCodePreset;
@@ -524,9 +525,8 @@ fn handle_checkpoint(args: &[String]) {
                     edited_filepaths,
                     will_edit_filepaths: None,
                     dirty_files: None,
-                    hook_event_name: None,
-                    hook_source: None,
-                    telemetry_payload: None,
+                    checkpoint_execution: CheckpointExecution::Run,
+                    telemetry_events: vec![],
                 });
             }
             _ => {}
@@ -775,9 +775,8 @@ fn handle_checkpoint(args: &[String]) {
             edited_filepaths: None,
             repo_working_dir: Some(effective_working_dir),
             dirty_files: None,
-            hook_event_name: None,
-            hook_source: None,
-            telemetry_payload: None,
+            checkpoint_execution: CheckpointExecution::Run,
+            telemetry_events: vec![],
         });
     }
 
@@ -1265,7 +1264,7 @@ fn emit_no_repo_agent_metrics(agent_run_result: Option<&AgentRunResult>) {
         crate::metrics::record(values, attrs.clone());
     }
 
-    commands::checkpoint::emit_agent_hook_telemetry(Some(result), attrs);
+    commands::checkpoint::emit_agent_telemetry_events(Some(result), attrs);
 
     observability::spawn_background_flush();
 }

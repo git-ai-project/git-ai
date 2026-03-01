@@ -1,7 +1,12 @@
 mod test_utils;
 
 use git_ai::authorship::transcript::Message;
-use git_ai::commands::checkpoint_agent::agent_presets::GithubCopilotPreset;
+use git_ai::commands::checkpoint_agent::agent_presets::{
+    CheckpointExecution, GithubCopilotPreset, NoOpReason,
+};
+use git_ai::commands::checkpoint_agent::telemetry_events::{
+    AgentTelemetryEvent, MessageRole, SessionPhase, SubagentPhase, ToolCallPhase,
+};
 use serde_json::json;
 use std::{fs, io::Write};
 use test_utils::{fixture_path, load_fixture};
@@ -562,13 +567,18 @@ fn test_copilot_preset_invalid_hook_event_name() {
     let preset = GithubCopilotPreset;
     let result = preset.run(flags);
 
-    // Should fail with invalid hook event name
-    assert!(result.is_err());
+    // Unknown events should fail-open as telemetry-only no-op.
+    assert!(result.is_ok());
+    let run_result = result.unwrap();
+    assert_eq!(
+        run_result.checkpoint_execution,
+        CheckpointExecution::NoOp {
+            reason: NoOpReason::TelemetryOnly
+        }
+    );
     assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains("Invalid hook_event_name")
+        run_result.telemetry_events.is_empty(),
+        "Unknown hook events should not emit normalized telemetry"
     );
 }
 
@@ -1309,15 +1319,19 @@ fn test_copilot_preset_vscode_non_edit_tool_is_filtered() {
     );
     assert_eq!(result.will_edit_filepaths, None);
     assert_eq!(result.edited_filepaths, None);
-    assert_eq!(result.hook_event_name.as_deref(), Some("PreToolUse"));
     assert_eq!(
-        result
-            .telemetry_payload
-            .as_ref()
-            .and_then(|m| m.get("telemetry_only"))
-            .map(String::as_str),
-        Some("1")
+        result.checkpoint_execution,
+        CheckpointExecution::NoOp {
+            reason: NoOpReason::TelemetryOnly
+        }
     );
+    assert!(result.telemetry_events.iter().any(|event| {
+        matches!(
+            event,
+            AgentTelemetryEvent::ToolCall(tool)
+                if tool.phase == ToolCallPhase::Started
+        )
+    }));
 }
 
 #[test]
@@ -1341,17 +1355,21 @@ fn test_copilot_preset_vscode_session_start_is_telemetry_only() {
         })
         .expect("SessionStart should be accepted");
 
-    assert_eq!(result.hook_event_name.as_deref(), Some("SessionStart"));
     assert_eq!(result.agent_id.tool, "github-copilot");
     assert_eq!(result.agent_id.id, "copilot-session-start");
     assert_eq!(
-        result
-            .telemetry_payload
-            .as_ref()
-            .and_then(|m| m.get("telemetry_only"))
-            .map(String::as_str),
-        Some("1")
+        result.checkpoint_execution,
+        CheckpointExecution::NoOp {
+            reason: NoOpReason::TelemetryOnly
+        }
     );
+    assert!(result.telemetry_events.iter().any(|event| {
+        matches!(
+            event,
+            AgentTelemetryEvent::Session(session)
+                if session.phase == SessionPhase::Started
+        )
+    }));
 }
 
 #[test]
@@ -1374,23 +1392,20 @@ fn test_copilot_preset_vscode_user_prompt_submit_is_telemetry_only() {
         })
         .expect("UserPromptSubmit should be accepted");
 
-    assert_eq!(result.hook_event_name.as_deref(), Some("UserPromptSubmit"));
     assert_eq!(
-        result
-            .telemetry_payload
-            .as_ref()
-            .and_then(|m| m.get("prompt_char_count"))
-            .map(String::as_str),
-        Some("29")
+        result.checkpoint_execution,
+        CheckpointExecution::NoOp {
+            reason: NoOpReason::TelemetryOnly
+        }
     );
-    assert_eq!(
-        result
-            .telemetry_payload
-            .as_ref()
-            .and_then(|m| m.get("telemetry_only"))
-            .map(String::as_str),
-        Some("1")
-    );
+    assert!(result.telemetry_events.iter().any(|event| {
+        matches!(
+            event,
+            AgentTelemetryEvent::Message(message)
+                if message.role == MessageRole::Human
+                    && message.prompt_char_count == Some(29)
+        )
+    }));
 }
 
 #[test]
@@ -1414,31 +1429,21 @@ fn test_copilot_preset_vscode_subagent_events_are_telemetry_only() {
         })
         .expect("SubagentStart should be accepted");
 
-    assert_eq!(result.hook_event_name.as_deref(), Some("SubagentStart"));
     assert_eq!(
-        result
-            .telemetry_payload
-            .as_ref()
-            .and_then(|m| m.get("subagent_id"))
-            .map(String::as_str),
-        Some("subagent-123")
+        result.checkpoint_execution,
+        CheckpointExecution::NoOp {
+            reason: NoOpReason::TelemetryOnly
+        }
     );
-    assert_eq!(
-        result
-            .telemetry_payload
-            .as_ref()
-            .and_then(|m| m.get("subagent_type"))
-            .map(String::as_str),
-        Some("Plan")
-    );
-    assert_eq!(
-        result
-            .telemetry_payload
-            .as_ref()
-            .and_then(|m| m.get("telemetry_only"))
-            .map(String::as_str),
-        Some("1")
-    );
+    assert!(result.telemetry_events.iter().any(|event| {
+        matches!(
+            event,
+            AgentTelemetryEvent::Subagent(subagent)
+                if subagent.phase == SubagentPhase::Started
+                    && subagent.subagent_id.as_deref() == Some("subagent-123")
+                    && subagent.subagent_type.as_deref() == Some("Plan")
+        )
+    }));
 }
 
 #[test]
@@ -1467,15 +1472,19 @@ fn test_copilot_preset_vscode_claude_transcript_path_is_telemetry_only() {
         .run(flags)
         .expect("Claude-like transcript path should fall back to telemetry-only");
 
-    assert_eq!(result.hook_event_name.as_deref(), Some("PostToolUse"));
-    assert!(
-        result
-            .telemetry_payload
-            .as_ref()
-            .and_then(|m| m.get("telemetry_only"))
-            .map(String::as_str)
-            == Some("1")
+    assert_eq!(
+        result.checkpoint_execution,
+        CheckpointExecution::NoOp {
+            reason: NoOpReason::TelemetryOnly
+        }
     );
+    assert!(result.telemetry_events.iter().any(|event| {
+        matches!(
+            event,
+            AgentTelemetryEvent::ToolCall(tool)
+                if tool.phase == ToolCallPhase::Ended
+        )
+    }));
 }
 
 #[test]

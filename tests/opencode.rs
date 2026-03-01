@@ -5,9 +5,12 @@ mod test_utils;
 use git_ai::authorship::transcript::Message;
 use git_ai::authorship::working_log::CheckpointKind;
 use git_ai::commands::checkpoint_agent::agent_presets::{
-    AgentCheckpointFlags, AgentCheckpointPreset,
+    AgentCheckpointFlags, AgentCheckpointPreset, CheckpointExecution, NoOpReason,
 };
 use git_ai::commands::checkpoint_agent::opencode_preset::OpenCodePreset;
+use git_ai::commands::checkpoint_agent::telemetry_events::{
+    AgentTelemetryEvent, SessionPhase, TelemetrySignal,
+};
 use serde_json::json;
 use std::fs;
 use test_utils::fixture_path;
@@ -354,16 +357,26 @@ fn test_opencode_preset_session_created_is_telemetry_only() {
         result.transcript.is_none(),
         "Telemetry-only events should skip transcript parsing"
     );
-    assert_eq!(result.hook_event_name.as_deref(), Some("session.created"));
-    assert_eq!(result.hook_source.as_deref(), Some("opencode_plugin"));
     assert_eq!(
-        result
-            .telemetry_payload
-            .as_ref()
-            .and_then(|m| m.get("telemetry_only"))
-            .map(String::as_str),
-        Some("1")
+        result.checkpoint_execution,
+        CheckpointExecution::NoOp {
+            reason: NoOpReason::TelemetryOnly
+        }
     );
+    assert_eq!(result.telemetry_events.len(), 1);
+    assert!(result.telemetry_events.iter().any(|event| matches!(
+        event,
+        AgentTelemetryEvent::Session(session)
+            if session.phase == SessionPhase::Started
+                && session.signal == TelemetrySignal::Explicit
+    )));
+    assert_eq!(
+        result.repo_working_dir.as_deref(),
+        Some("/Users/test/project")
+    );
+    assert_eq!(result.agent_id.id, "test-session-123");
+    assert_eq!(result.agent_id.tool, "opencode");
+    assert_eq!(result.agent_id.model, "unknown");
 }
 
 #[test]

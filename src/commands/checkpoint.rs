@@ -10,7 +10,13 @@ use crate::authorship::imara_diff_utils::{LineChangeTag, compute_line_changes};
 use crate::authorship::working_log::CheckpointKind;
 use crate::authorship::working_log::{Checkpoint, WorkingLogEntry};
 use crate::commands::blame::{GitAiBlameOptions, OLDEST_AI_BLAME_DATE};
-use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
+use crate::commands::checkpoint_agent::agent_presets::{
+    AgentRunResult, CheckpointExecution, NoOpReason,
+};
+use crate::commands::checkpoint_agent::telemetry_events::{
+    AgentTelemetryEvent, McpCallPhase, ResponsePhase, SessionPhase, SkillDetectionMethod,
+    SubagentPhase, TelemetrySignal, ToolCallPhase,
+};
 use crate::config::Config;
 use crate::error::GitAiError;
 use crate::git::repo_storage::PersistedWorkingLog;
@@ -111,408 +117,235 @@ fn should_emit_telemetry_once(
     crate::metrics::dedupe_fs::should_emit(namespace, event_key, now_ts, ttl_secs)
 }
 
-fn payload_str<'a>(result: &'a AgentRunResult, key: &str) -> Option<&'a str> {
-    result
-        .telemetry_payload
-        .as_ref()
-        .and_then(|m| m.get(key))
-        .map(|s| s.as_str())
+fn signal_is_inferred(signal: &TelemetrySignal) -> bool {
+    matches!(signal, TelemetrySignal::Inferred)
 }
 
-fn payload_u32(result: &AgentRunResult, key: &str) -> Option<u32> {
-    payload_str(result, key).and_then(|s| s.parse::<u32>().ok())
-}
-
-fn payload_u64(result: &AgentRunResult, key: &str) -> Option<u64> {
-    payload_str(result, key).and_then(|s| s.parse::<u64>().ok())
-}
-
-fn payload_is_true(result: &AgentRunResult, key: &str) -> bool {
-    matches!(payload_str(result, key), Some("1" | "true" | "yes"))
-}
-
-fn is_human_like_role(role: &str) -> bool {
-    matches!(role.to_ascii_lowercase().as_str(), "human" | "user")
-}
-
-fn should_emit_human_message(result: &AgentRunResult, hook: &str) -> bool {
-    if matches!(hook, "UserPromptSubmit" | "beforeSubmitPrompt") {
-        return true;
-    }
-
-    if payload_u32(result, "prompt_char_count").is_none() {
-        return false;
-    }
-
-    match payload_str(result, "role") {
-        Some(role) => is_human_like_role(role),
-        None => true,
+fn tool_call_phase_str(phase: &ToolCallPhase) -> &'static str {
+    match phase {
+        ToolCallPhase::Started => "started",
+        ToolCallPhase::Ended => "ended",
+        ToolCallPhase::Failed => "failed",
+        ToolCallPhase::PermissionRequested => "permission_requested",
     }
 }
 
-fn is_transcript_inferred_source(result: &AgentRunResult) -> bool {
-    matches!(result.hook_source.as_deref(), Some("codex_notify"))
-}
-
-fn tool_phase_from_hook(hook: &str) -> Option<&'static str> {
-    match hook {
-        "PreToolUse" | "preToolUse" | "tool.execute.before" | "before_edit" => Some("started"),
-        "PostToolUse" | "postToolUse" | "tool.execute.after" | "after_edit" => Some("ended"),
-        "PostToolUseFailure" | "postToolUseFailure" => Some("failed"),
-        "PermissionRequest" => Some("permission_requested"),
-        _ => None,
+fn mcp_call_phase_str(phase: &McpCallPhase) -> &'static str {
+    match phase {
+        McpCallPhase::Started => "started",
+        McpCallPhase::Ended => "ended",
+        McpCallPhase::Failed => "failed",
+        McpCallPhase::PermissionRequested => "permission_requested",
     }
 }
 
-fn has_mcp_context(result: &AgentRunResult, tool_name: Option<&str>) -> bool {
-    payload_str(result, "mcp_tool_name").is_some()
-        || payload_str(result, "mcp_server").is_some()
-        || payload_str(result, "mcp_transport").is_some()
-        || tool_name.is_some_and(|name| name.starts_with("mcp__"))
-}
-
-fn mcp_phase_from_hook(
-    hook: &str,
-    result: &AgentRunResult,
-    tool_name: Option<&str>,
-) -> Option<&'static str> {
-    if matches!(hook, "beforeMCPExecution") {
-        return Some("started");
-    }
-    if matches!(hook, "afterMCPExecution") {
-        return Some("ended");
-    }
-
-    if !has_mcp_context(result, tool_name) {
-        return None;
-    }
-
-    match hook {
-        "PreToolUse" | "preToolUse" | "tool.execute.before" => Some("started"),
-        "PostToolUse" | "postToolUse" | "tool.execute.after" => Some("ended"),
-        "PostToolUseFailure" | "postToolUseFailure" => Some("failed"),
-        "PermissionRequest" => Some("permission_requested"),
-        _ => None,
+fn response_phase_str(phase: &ResponsePhase) -> &'static str {
+    match phase {
+        ResponsePhase::Started => "started",
+        ResponsePhase::Ended => "ended",
     }
 }
 
-type ResponsePhase = (&'static str, u32);
-type ResponsePhases = (Option<ResponsePhase>, Option<ResponsePhase>);
-
-fn response_phases_from_hook(hook: &str, result: &AgentRunResult) -> ResponsePhases {
-    if hook == "message.part.updated" {
-        let is_human_role = payload_str(result, "role").is_some_and(is_human_like_role);
-        if is_human_role || payload_u32(result, "response_char_count").is_none() {
-            return (None, None);
-        }
-        return (Some(("started", 0)), None);
+fn subagent_phase_str(phase: &SubagentPhase) -> &'static str {
+    match phase {
+        SubagentPhase::Started => "started",
+        SubagentPhase::Ended => "ended",
     }
-    if hook == "message.updated" {
-        let is_human_role = payload_str(result, "role").is_some_and(is_human_like_role);
-        if is_human_role || payload_u32(result, "response_char_count").is_none() {
-            return (None, None);
-        }
-        return (None, Some(("ended", 0)));
-    }
-    if matches!(
-        hook,
-        "afterAgentResponse" | "session.idle" | "Stop" | "stop"
-    ) {
-        return (None, Some(("ended", 0)));
-    }
-    if matches!(hook, "afterAgentThought") {
-        return (Some(("started", 1)), None);
-    }
-    if matches!(
-        hook,
-        "PreToolUse"
-            | "preToolUse"
-            | "SubagentStart"
-            | "subagentStart"
-            | "tool.execute.before"
-            | "before_edit"
-    ) {
-        return (Some(("started", 1)), None);
-    }
-    if matches!(
-        hook,
-        "PostToolUse"
-            | "postToolUse"
-            | "PostToolUseFailure"
-            | "postToolUseFailure"
-            | "tool.execute.after"
-            | "after_edit"
-    ) {
-        return (None, Some(("ended", 1)));
-    }
-
-    if result.agent_id.tool == "codex" {
-        return (Some(("started", 1)), Some(("ended", 0)));
-    }
-
-    (None, None)
 }
 
-fn response_dedupe_generation(result: &AgentRunResult, hook: &str, now_ts: u64) -> String {
-    if let Some(generation_id) = payload_str(result, "generation_id")
-        && !generation_id.trim().is_empty()
+fn session_phase_str(phase: &SessionPhase) -> &'static str {
+    match phase {
+        SessionPhase::Started => "started",
+        SessionPhase::Ended => "ended",
+    }
+}
+
+fn response_dedupe_key(
+    response: &crate::commands::checkpoint_agent::telemetry_events::AgentResponseTelemetry,
+    now_ts: u64,
+) -> String {
+    if let Some(key) = &response.dedupe_key
+        && !key.trim().is_empty()
     {
-        return generation_id.to_string();
+        return key.clone();
     }
-
-    for key in ["tool_use_id", "subagent_id", "message_id"] {
-        if let Some(value) = payload_str(result, key)
-            && !value.trim().is_empty()
-        {
-            return value.to_string();
-        }
-    }
-
-    let mut fallback_parts = Vec::new();
-    for key in [
-        "prompt_char_count",
-        "response_char_count",
-        "input_message_count",
-        "tool_name",
-        "status",
-        "reason",
-    ] {
-        if let Some(value) = payload_str(result, key)
-            && !value.trim().is_empty()
-        {
-            fallback_parts.push(format!("{key}={value}"));
-        }
-    }
-
-    if !fallback_parts.is_empty() {
-        return generate_short_hash(&fallback_parts.join("|"), hook);
-    }
-
-    // Last resort: per-second key avoids collapsing an entire session into one bucket.
     format!("ts-{now_ts}")
 }
 
-fn normalized_hook_attrs(
-    mut attrs: crate::metrics::EventAttributes,
-    result: &AgentRunResult,
-) -> crate::metrics::EventAttributes {
-    if let Some(override_tool) = payload_str(result, "agent_tool") {
-        attrs = attrs.tool(override_tool);
-    }
-
-    let prompt_tool = payload_str(result, "agent_tool").unwrap_or(&result.agent_id.tool);
-    if let Some(session_id) = payload_str(result, "session_id")
-        && !session_id.trim().is_empty()
-    {
-        let prompt_id = generate_short_hash(session_id, prompt_tool);
-        attrs = attrs.prompt_id(prompt_id).external_prompt_id(session_id);
-    }
-
-    if let Some(hook_event_name) = &result.hook_event_name {
-        attrs = attrs.hook_event_name(hook_event_name);
-    }
-    if let Some(hook_source) = &result.hook_source {
-        attrs = attrs.hook_source(hook_source);
-    }
-    attrs
-}
-
-pub(crate) fn emit_agent_hook_telemetry(
+pub(crate) fn emit_agent_telemetry_events(
     agent_run_result: Option<&AgentRunResult>,
     attrs: crate::metrics::EventAttributes,
 ) {
     let Some(result) = agent_run_result else {
         return;
     };
-    let Some(hook_event_name) = result.hook_event_name.as_deref() else {
+    if result.telemetry_events.is_empty() {
         return;
-    };
+    }
 
-    let attrs = normalized_hook_attrs(attrs, result);
-    let hook = hook_event_name;
+    let attrs = attrs;
     let now_ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let dedupe_generation = response_dedupe_generation(result, hook, now_ts);
 
-    if matches!(hook, "SessionStart" | "sessionStart" | "session.created") {
-        let values = crate::metrics::AgentSessionValues::new()
-            .phase("started")
-            .reason(payload_str(result, "reason").unwrap_or("started"))
-            .source(
-                payload_str(result, "source")
-                    .or(result.hook_source.as_deref())
-                    .unwrap_or("unknown"),
-            )
-            .mode(payload_str(result, "mode").unwrap_or("unknown"))
-            .inferred(0);
-        crate::metrics::record(values, attrs.clone());
-    } else if result.agent_id.tool == "codex" && is_transcript_inferred_source(result) {
-        let dedupe_key = format!(
-            "session-start:{}:{}",
-            result.agent_id.tool, result.agent_id.id
-        );
-        if should_emit_telemetry_once(
-            "session_start",
-            &dedupe_key,
-            now_ts,
-            SESSION_DEDUPE_TTL_SECS,
-        ) {
-            let values = crate::metrics::AgentSessionValues::new()
-                .phase("started")
-                .source("inferred")
-                .mode("agent")
-                .inferred(1);
-            crate::metrics::record(values, attrs.clone());
-        }
-    }
+    for event in &result.telemetry_events {
+        match event {
+            AgentTelemetryEvent::Session(session) => {
+                if signal_is_inferred(&session.signal) {
+                    let dedupe_key = format!(
+                        "session-{}:{}:{}",
+                        session_phase_str(&session.phase),
+                        result.agent_id.tool,
+                        result.agent_id.id
+                    );
+                    if !should_emit_telemetry_once(
+                        "session_event",
+                        &dedupe_key,
+                        now_ts,
+                        SESSION_DEDUPE_TTL_SECS,
+                    ) {
+                        continue;
+                    }
+                }
 
-    if should_emit_human_message(result, hook) {
-        let mut values = crate::metrics::AgentMessageValues::new().role("human");
-        if let Some(char_count) = payload_u32(result, "prompt_char_count") {
-            values = values.prompt_char_count(char_count);
-        }
-        if let Some(attachment_count) = payload_u32(result, "attachment_count") {
-            values = values.attachment_count(attachment_count);
-        }
-        crate::metrics::record(values, attrs.clone());
-    }
-
-    let tool_name = payload_str(result, "tool_name");
-    let phase = tool_phase_from_hook(hook);
-    if let Some(phase) = phase {
-        let mut values = crate::metrics::AgentToolCallValues::new().phase(phase);
-        if let Some(name) = tool_name {
-            values = values.tool_name(name.to_string());
-        }
-        if let Some(tool_use_id) = payload_str(result, "tool_use_id") {
-            values = values.tool_use_id(tool_use_id.to_string());
-        }
-        if let Some(duration_ms) = payload_u64(result, "duration_ms") {
-            values = values.duration_ms(duration_ms);
-        }
-        if let Some(failure_type) = payload_str(result, "failure_type") {
-            values = values.failure_type(failure_type.to_string());
-        }
-        if payload_is_true(result, "inferred_tool") {
-            values = values.inferred(1);
-        }
-        crate::metrics::record(values, attrs.clone());
-    }
-
-    let mcp_phase = mcp_phase_from_hook(hook, result, tool_name);
-    if let Some(phase) = mcp_phase {
-        let mut values = crate::metrics::AgentMcpCallValues::new().phase(phase);
-        if let Some(server) = payload_str(result, "mcp_server") {
-            values = values.mcp_server(server.to_string());
-        }
-        if let Some(name) = payload_str(result, "mcp_tool_name").or(tool_name) {
-            values = values.tool_name(name.to_string());
-        }
-        if let Some(transport) = payload_str(result, "mcp_transport") {
-            values = values.transport(transport.to_string());
-        }
-        if let Some(duration_ms) = payload_u64(result, "duration_ms") {
-            values = values.duration_ms(duration_ms);
-        }
-        if let Some(failure_type) = payload_str(result, "failure_type") {
-            values = values.failure_type(failure_type.to_string());
-        }
-        if !matches!(hook, "beforeMCPExecution" | "afterMCPExecution") {
-            values = values.inferred(1);
-        }
-        crate::metrics::record(values, attrs.clone());
-    }
-
-    if let Some(skill_name) = payload_str(result, "skill_name") {
-        let mut values = crate::metrics::AgentSkillUsageValues::new().skill_name(skill_name);
-        if let Some(method) = payload_str(result, "skill_detection_method") {
-            values = values.detection_method(method);
-        } else {
-            values = values.detection_method("inferred_prompt");
-        }
-        if !matches!(
-            payload_str(result, "skill_detection_method"),
-            Some("explicit")
-        ) {
-            values = values.inferred(1);
-        }
-        crate::metrics::record(values, attrs.clone());
-    }
-
-    let subagent_phase = match hook {
-        "SubagentStart" | "subagentStart" => Some("started"),
-        "SubagentStop" | "subagentStop" => Some("ended"),
-        _ => None,
-    };
-    if let Some(phase) = subagent_phase {
-        let mut values = crate::metrics::AgentSubagentValues::new().phase(phase);
-        if let Some(subagent_id) = payload_str(result, "subagent_id") {
-            values = values.subagent_id(subagent_id);
-        }
-        if let Some(subagent_type) = payload_str(result, "subagent_type") {
-            values = values.subagent_type(subagent_type);
-        }
-        if let Some(status) = payload_str(result, "status") {
-            values = values.status(status);
-        }
-        if let Some(duration_ms) = payload_u64(result, "duration_ms") {
-            values = values.duration_ms(duration_ms);
-        }
-        if let Some(result_char_count) = payload_u32(result, "result_char_count") {
-            values = values.result_char_count(result_char_count);
-        }
-        crate::metrics::record(values, attrs.clone());
-    }
-
-    let (response_start_phase, response_end_phase) = response_phases_from_hook(hook, result);
-
-    if let Some((phase, inferred)) = response_start_phase {
-        let dedupe_key = format!(
-            "response-start:{}:{}:{}",
-            result.agent_id.tool, result.agent_id.id, &dedupe_generation
-        );
-        if should_emit_telemetry_once(
-            "response_start",
-            &dedupe_key,
-            now_ts,
-            RESPONSE_DEDUPE_TTL_SECS,
-        ) {
-            let mut values = crate::metrics::AgentResponseValues::new()
-                .phase(phase)
-                .inferred(inferred);
-            if let Some(reason) = payload_str(result, "reason") {
-                values = values.reason(reason);
+                let mut values = crate::metrics::AgentSessionValues::new()
+                    .phase(session_phase_str(&session.phase))
+                    .inferred(u32::from(signal_is_inferred(&session.signal)));
+                if let Some(reason) = &session.reason {
+                    values = values.reason(reason);
+                }
+                if let Some(source) = &session.source {
+                    values = values.source(source);
+                }
+                if let Some(mode) = &session.mode {
+                    values = values.mode(mode);
+                }
+                if let Some(duration_ms) = session.duration_ms {
+                    values = values.duration_ms(duration_ms);
+                }
+                crate::metrics::record(values, attrs.clone());
             }
-            crate::metrics::record(values, attrs.clone());
-        }
-    }
+            AgentTelemetryEvent::Message(message) => {
+                let mut values =
+                    crate::metrics::AgentMessageValues::new().role(match message.role {
+                        crate::commands::checkpoint_agent::telemetry_events::MessageRole::Human => {
+                            "human"
+                        }
+                    });
+                if let Some(count) = message.prompt_char_count {
+                    values = values.prompt_char_count(count);
+                }
+                if let Some(count) = message.attachment_count {
+                    values = values.attachment_count(count);
+                }
+                crate::metrics::record(values, attrs.clone());
+            }
+            AgentTelemetryEvent::ToolCall(tool) => {
+                let mut values = crate::metrics::AgentToolCallValues::new()
+                    .phase(tool_call_phase_str(&tool.phase))
+                    .inferred(u32::from(signal_is_inferred(&tool.signal)));
+                if let Some(name) = &tool.tool_name {
+                    values = values.tool_name(name.clone());
+                }
+                if let Some(tool_use_id) = &tool.tool_use_id {
+                    values = values.tool_use_id(tool_use_id.clone());
+                }
+                if let Some(duration_ms) = tool.duration_ms {
+                    values = values.duration_ms(duration_ms);
+                }
+                if let Some(failure_type) = &tool.failure_type {
+                    values = values.failure_type(failure_type.clone());
+                }
+                crate::metrics::record(values, attrs.clone());
+            }
+            AgentTelemetryEvent::McpCall(mcp) => {
+                let mut values = crate::metrics::AgentMcpCallValues::new()
+                    .phase(mcp_call_phase_str(&mcp.phase))
+                    .inferred(u32::from(signal_is_inferred(&mcp.signal)));
+                if let Some(server) = &mcp.mcp_server {
+                    values = values.mcp_server(server.clone());
+                }
+                if let Some(name) = &mcp.tool_name {
+                    values = values.tool_name(name.clone());
+                }
+                if let Some(transport) = &mcp.transport {
+                    values = values.transport(transport.clone());
+                }
+                if let Some(duration_ms) = mcp.duration_ms {
+                    values = values.duration_ms(duration_ms);
+                }
+                if let Some(failure_type) = &mcp.failure_type {
+                    values = values.failure_type(failure_type.clone());
+                }
+                crate::metrics::record(values, attrs.clone());
+            }
+            AgentTelemetryEvent::SkillUsage(skill) => {
+                let mut values = crate::metrics::AgentSkillUsageValues::new()
+                    .skill_name(&skill.skill_name)
+                    .inferred(u32::from(signal_is_inferred(&skill.signal)));
+                values = values.detection_method(match skill.detection_method {
+                    SkillDetectionMethod::Explicit => "explicit",
+                    SkillDetectionMethod::InferredPrompt => "inferred_prompt",
+                    SkillDetectionMethod::InferredTool => "inferred_tool",
+                });
+                crate::metrics::record(values, attrs.clone());
+            }
+            AgentTelemetryEvent::Subagent(subagent) => {
+                let mut values = crate::metrics::AgentSubagentValues::new()
+                    .phase(subagent_phase_str(&subagent.phase))
+                    .inferred(u32::from(signal_is_inferred(&subagent.signal)));
+                if let Some(subagent_id) = &subagent.subagent_id {
+                    values = values.subagent_id(subagent_id);
+                }
+                if let Some(subagent_type) = &subagent.subagent_type {
+                    values = values.subagent_type(subagent_type);
+                }
+                if let Some(status) = &subagent.status {
+                    values = values.status(status);
+                }
+                if let Some(duration_ms) = subagent.duration_ms {
+                    values = values.duration_ms(duration_ms);
+                }
+                if let Some(result_char_count) = subagent.result_char_count {
+                    values = values.result_char_count(result_char_count);
+                }
+                crate::metrics::record(values, attrs.clone());
+            }
+            AgentTelemetryEvent::Response(response) => {
+                if signal_is_inferred(&response.signal) {
+                    let dedupe_key = response_dedupe_key(response, now_ts);
+                    let dedupe_key = format!(
+                        "response-{}:{}:{}:{}",
+                        response_phase_str(&response.phase),
+                        result.agent_id.tool,
+                        result.agent_id.id,
+                        dedupe_key
+                    );
+                    if !should_emit_telemetry_once(
+                        "response_event",
+                        &dedupe_key,
+                        now_ts,
+                        RESPONSE_DEDUPE_TTL_SECS,
+                    ) {
+                        continue;
+                    }
+                }
 
-    if let Some((phase, inferred)) = response_end_phase {
-        let dedupe_key = format!(
-            "response-end:{}:{}:{}",
-            result.agent_id.tool, result.agent_id.id, &dedupe_generation
-        );
-        if should_emit_telemetry_once(
-            "response_end",
-            &dedupe_key,
-            now_ts,
-            RESPONSE_DEDUPE_TTL_SECS,
-        ) {
-            let mut values = crate::metrics::AgentResponseValues::new()
-                .phase(phase)
-                .inferred(inferred);
-            if let Some(status) = payload_str(result, "status") {
-                values = values.status(status);
+                let mut values = crate::metrics::AgentResponseValues::new()
+                    .phase(response_phase_str(&response.phase))
+                    .inferred(u32::from(signal_is_inferred(&response.signal)));
+                if let Some(status) = &response.status {
+                    values = values.status(status);
+                }
+                if let Some(reason) = &response.reason {
+                    values = values.reason(reason);
+                }
+                if let Some(response_char_count) = response.response_char_count {
+                    values = values.response_char_count(response_char_count);
+                }
+                crate::metrics::record(values, attrs.clone());
             }
-            if let Some(reason) = payload_str(result, "reason") {
-                values = values.reason(reason);
-            }
-            if let Some(char_count) = payload_u32(result, "response_char_count") {
-                values = values.response_char_count(char_count);
-            }
-            crate::metrics::record(values, attrs);
         }
     }
 }
@@ -562,16 +395,20 @@ pub fn run(
         storage_start.elapsed()
     ));
 
-    if agent_run_result
-        .as_ref()
-        .is_some_and(|r| payload_is_true(r, "telemetry_only"))
+    let telemetry_attrs = build_checkpoint_attrs(
+        repo,
+        &base_commit,
+        agent_run_result.as_ref().map(|r| &r.agent_id),
+    );
+    emit_agent_telemetry_events(agent_run_result.as_ref(), telemetry_attrs);
+    if let Some(agent_run_result) = agent_run_result.as_ref()
+        && matches!(
+            agent_run_result.checkpoint_execution,
+            CheckpointExecution::NoOp {
+                reason: NoOpReason::TelemetryOnly | NoOpReason::NoEditedFiles
+            }
+        )
     {
-        let telemetry_attrs = build_checkpoint_attrs(
-            repo,
-            &base_commit,
-            agent_run_result.as_ref().map(|r| &r.agent_id),
-        );
-        emit_agent_hook_telemetry(agent_run_result.as_ref(), telemetry_attrs);
         return Ok((0, 0, 0));
     }
 
@@ -894,13 +731,6 @@ pub fn run(
             crate::metrics::record(values, file_attrs);
         }
     }
-
-    let telemetry_attrs = build_checkpoint_attrs(
-        repo,
-        &base_commit,
-        agent_run_result.as_ref().map(|r| &r.agent_id),
-    );
-    emit_agent_hook_telemetry(agent_run_result.as_ref(), telemetry_attrs);
 
     let agent_tool = if kind != CheckpointKind::Human
         && let Some(agent_run_result) = &agent_run_result
@@ -1899,6 +1729,10 @@ fn upsert_checkpoint_prompt_to_db(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::checkpoint_agent::telemetry_events::{
+        AgentMcpCallTelemetry, AgentResponseTelemetry, AgentSessionTelemetry,
+        AgentSkillUsageTelemetry, AgentSubagentTelemetry, AgentToolCallTelemetry,
+    };
     use crate::git::test_utils::TmpRepo;
     use serial_test::serial;
     use std::ffi::OsString;
@@ -2071,7 +1905,9 @@ mod tests {
     fn test_checkpoint_with_paths_outside_repo() {
         use crate::authorship::transcript::AiTranscript;
         use crate::authorship::working_log::AgentId;
-        use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
+        use crate::commands::checkpoint_agent::agent_presets::{
+            AgentRunResult, CheckpointExecution,
+        };
 
         // Create a repo with an initial commit
         let (tmp_repo, mut file, _) = TmpRepo::new_with_base_commit().unwrap();
@@ -2097,9 +1933,8 @@ mod tests {
             ]),
             will_edit_filepaths: None,
             dirty_files: None,
-            hook_event_name: None,
-            hook_source: None,
-            telemetry_payload: None,
+            checkpoint_execution: CheckpointExecution::Run,
+            telemetry_events: vec![],
         };
 
         // Run checkpoint - should not crash even with paths outside repo
@@ -2530,28 +2365,24 @@ mod tests {
         );
     }
 
-    fn test_agent_run_result_for_telemetry(payload: &[(&str, &str)]) -> AgentRunResult {
-        let telemetry_payload = payload
-            .iter()
-            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-            .collect::<std::collections::HashMap<_, _>>();
-
+    fn test_agent_run_result_for_telemetry(events: Vec<AgentTelemetryEvent>) -> AgentRunResult {
         AgentRunResult {
             agent_id: AgentId {
-                tool: "human".to_string(),
-                id: "human".to_string(),
-                model: "human".to_string(),
+                tool: "test-agent".to_string(),
+                id: "test-session".to_string(),
+                model: "test-model".to_string(),
             },
             agent_metadata: None,
-            checkpoint_kind: CheckpointKind::Human,
+            checkpoint_kind: CheckpointKind::AiAgent,
             transcript: None,
             repo_working_dir: None,
             edited_filepaths: None,
             will_edit_filepaths: None,
             dirty_files: None,
-            hook_event_name: None,
-            hook_source: Some("test".to_string()),
-            telemetry_payload: Some(telemetry_payload),
+            checkpoint_execution: CheckpointExecution::NoOp {
+                reason: NoOpReason::TelemetryOnly,
+            },
+            telemetry_events: events,
         }
     }
 
@@ -2591,7 +2422,7 @@ mod tests {
 
     fn capture_hook_metrics(result: &AgentRunResult) -> Vec<crate::metrics::MetricEvent> {
         crate::metrics::test_start_metric_capture();
-        emit_agent_hook_telemetry(
+        emit_agent_telemetry_events(
             Some(result),
             crate::metrics::EventAttributes::with_version("1.0.0"),
         );
@@ -2599,124 +2430,19 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_phase_from_hook_supports_legacy_copilot_events() {
-        assert_eq!(tool_phase_from_hook("before_edit"), Some("started"));
-        assert_eq!(tool_phase_from_hook("after_edit"), Some("ended"));
-    }
-
-    #[test]
-    fn test_mcp_phase_from_hook_supports_opencode_tool_execute_events() {
-        let result = test_agent_run_result_for_telemetry(&[
-            ("tool_name", "mcp__list_files"),
-            ("mcp_tool_name", "mcp__list_files"),
-        ]);
-
-        assert_eq!(
-            mcp_phase_from_hook("tool.execute.before", &result, Some("mcp__list_files")),
-            Some("started")
-        );
-        assert_eq!(
-            mcp_phase_from_hook("tool.execute.after", &result, Some("mcp__list_files")),
-            Some("ended")
-        );
-    }
-
-    #[test]
-    fn test_response_phases_from_hook_supports_opencode_message_hooks() {
-        let assistant = test_agent_run_result_for_telemetry(&[
-            ("role", "assistant"),
-            ("response_char_count", "12"),
-        ]);
-
-        assert_eq!(
-            response_phases_from_hook("message.part.updated", &assistant),
-            (Some(("started", 0)), None)
-        );
-        assert_eq!(
-            response_phases_from_hook("message.updated", &assistant),
-            (None, Some(("ended", 0)))
-        );
-
-        let human = test_agent_run_result_for_telemetry(&[
-            ("role", "human"),
-            ("response_char_count", "12"),
-        ]);
-        assert_eq!(
-            response_phases_from_hook("message.updated", &human),
-            (None, None)
-        );
-    }
-
-    #[test]
-    fn test_response_dedupe_generation_avoids_constant_na_when_generation_missing() {
-        let with_tool_use_id = test_agent_run_result_for_telemetry(&[
-            ("tool_use_id", "call-123"),
-            ("response_char_count", "8"),
-        ]);
-        assert_eq!(
-            response_dedupe_generation(&with_tool_use_id, "agent-turn-complete", 123),
-            "call-123"
-        );
-
-        let fallback = test_agent_run_result_for_telemetry(&[
-            ("prompt_char_count", "10"),
-            ("response_char_count", "8"),
-        ]);
-        let key = response_dedupe_generation(&fallback, "agent-turn-complete", 123);
-        assert_ne!(key, "na");
-        assert!(!key.is_empty());
-    }
-
-    #[test]
-    fn test_should_emit_human_message_ignores_assistant_roles() {
-        let assistant = test_agent_run_result_for_telemetry(&[
-            ("role", "assistant"),
-            ("prompt_char_count", "42"),
-        ]);
-        assert!(!should_emit_human_message(&assistant, "message.updated"));
-
-        let human =
-            test_agent_run_result_for_telemetry(&[("role", "user"), ("prompt_char_count", "42")]);
-        assert!(should_emit_human_message(&human, "message.updated"));
-    }
-
-    #[test]
-    fn test_normalized_hook_attrs_uses_session_id_for_prompt_identity() {
-        let result = test_agent_run_result_for_telemetry(&[
-            ("agent_tool", "github-copilot"),
-            ("session_id", "copilot-session-123"),
-        ]);
-
-        let attrs = normalized_hook_attrs(
-            crate::metrics::EventAttributes::with_version("1.0.0")
-                .tool("human")
-                .prompt_id("old")
-                .external_prompt_id("old"),
-            &result,
-        );
-
-        let expected_prompt_id = generate_short_hash("copilot-session-123", "github-copilot");
-        assert_eq!(
-            attrs.prompt_id,
-            Some(Some(expected_prompt_id)),
-            "prompt_id should be derived from session_id + agent_tool when available"
-        );
-        assert_eq!(
-            attrs.external_prompt_id,
-            Some(Some("copilot-session-123".to_string()))
-        );
-        assert_eq!(attrs.tool, Some(Some("github-copilot".to_string())));
-    }
-
-    #[test]
     #[serial]
-    fn test_emit_agent_hook_telemetry_emits_session_start_only() {
+    fn test_emit_agent_telemetry_events_emits_session_phases() {
         with_temp_dedupe_dir(|| {
-            let mut start =
-                test_agent_run_result_for_telemetry(&[("source", "new"), ("mode", "agent")]);
-            start.agent_id.tool = "claude".to_string();
-            start.hook_source = Some("claude_hook".to_string());
-            start.hook_event_name = Some("SessionStart".to_string());
+            let start = test_agent_run_result_for_telemetry(vec![AgentTelemetryEvent::Session(
+                AgentSessionTelemetry {
+                    phase: SessionPhase::Started,
+                    reason: None,
+                    source: Some("claude_hook".to_string()),
+                    mode: Some("agent".to_string()),
+                    duration_ms: None,
+                    signal: TelemetrySignal::Explicit,
+                },
+            )]);
 
             let start_events = capture_hook_metrics(&start);
             assert!(start_events.iter().any(|event| event.event_id == 5));
@@ -2729,29 +2455,45 @@ mod tests {
                 Some("started")
             );
 
-            let mut end = start.clone();
-            end.hook_event_name = Some("SessionEnd".to_string());
+            let end = test_agent_run_result_for_telemetry(vec![AgentTelemetryEvent::Session(
+                AgentSessionTelemetry {
+                    phase: SessionPhase::Ended,
+                    reason: Some("completed".to_string()),
+                    source: Some("claude_hook".to_string()),
+                    mode: Some("agent".to_string()),
+                    duration_ms: Some(50),
+                    signal: TelemetrySignal::Explicit,
+                },
+            )]);
             let end_events = capture_hook_metrics(&end);
-            assert!(
-                !end_events.iter().any(|event| event.event_id == 5),
-                "SessionEnd should not emit agent_session metrics"
+            let session_event = end_events
+                .iter()
+                .find(|event| event.event_id == 5)
+                .expect("expected an AgentSession metric for session end");
+            assert_eq!(
+                session_event.values.get("0").and_then(|v| v.as_str()),
+                Some("ended")
             );
         });
     }
 
     #[test]
     #[serial]
-    fn test_emit_agent_hook_telemetry_dedupes_response_updates() {
+    fn test_emit_agent_telemetry_events_dedupes_inferred_response_updates() {
         with_temp_dedupe_dir(|| {
-            let mut result = test_agent_run_result_for_telemetry(&[
-                ("role", "assistant"),
-                ("message_id", "msg-123"),
-                ("response_char_count", "12"),
-            ]);
+            let mut result =
+                test_agent_run_result_for_telemetry(vec![AgentTelemetryEvent::Response(
+                    AgentResponseTelemetry {
+                        phase: ResponsePhase::Started,
+                        reason: None,
+                        status: None,
+                        response_char_count: None,
+                        signal: TelemetrySignal::Inferred,
+                        dedupe_key: Some("msg-123".to_string()),
+                    },
+                )]);
             result.agent_id.tool = "opencode".to_string();
             result.agent_id.id = "session-123".to_string();
-            result.hook_source = Some("opencode_plugin".to_string());
-            result.hook_event_name = Some("message.part.updated".to_string());
 
             let first = capture_hook_metrics(&result);
             let first_count = first.iter().filter(|event| event.event_id == 7).count();
@@ -2766,29 +2508,68 @@ mod tests {
                 second_count, 0,
                 "second update with same generation key should be deduped"
             );
+
+            let explicit_result =
+                test_agent_run_result_for_telemetry(vec![AgentTelemetryEvent::Response(
+                    AgentResponseTelemetry {
+                        phase: ResponsePhase::Ended,
+                        reason: None,
+                        status: Some("completed".to_string()),
+                        response_char_count: Some(12),
+                        signal: TelemetrySignal::Explicit,
+                        dedupe_key: Some("msg-123".to_string()),
+                    },
+                )]);
+            let explicit_first = capture_hook_metrics(&explicit_result);
+            let explicit_second = capture_hook_metrics(&explicit_result);
+            assert_eq!(
+                explicit_first
+                    .iter()
+                    .filter(|event| event.event_id == 7)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                explicit_second
+                    .iter()
+                    .filter(|event| event.event_id == 7)
+                    .count(),
+                1,
+                "explicit response events must not be deduped"
+            );
         });
     }
 
     #[test]
     #[serial]
-    fn test_emit_agent_hook_telemetry_maps_tool_mcp_subagent_and_skill() {
+    fn test_emit_agent_telemetry_events_maps_tool_mcp_subagent_and_skill() {
         with_temp_dedupe_dir(|| {
-            let mut result = test_agent_run_result_for_telemetry(&[
-                ("tool_name", "mcp__fs__read"),
-                ("tool_use_id", "tool-123"),
-                ("mcp_server", "fs"),
-                ("mcp_transport", "stdio"),
-                ("subagent_id", "subagent-1"),
-                ("subagent_type", "Plan"),
-                ("status", "completed"),
-                ("skill_name", "checks"),
-                ("skill_detection_method", "inferred_prompt"),
-                ("duration_ms", "45"),
+            let mut result = test_agent_run_result_for_telemetry(vec![
+                AgentTelemetryEvent::ToolCall(AgentToolCallTelemetry {
+                    phase: ToolCallPhase::Started,
+                    tool_name: Some("mcp__fs__read".to_string()),
+                    tool_use_id: Some("tool-123".to_string()),
+                    duration_ms: Some(45),
+                    failure_type: None,
+                    signal: TelemetrySignal::Explicit,
+                }),
+                AgentTelemetryEvent::McpCall(AgentMcpCallTelemetry {
+                    phase: McpCallPhase::Started,
+                    mcp_server: Some("fs".to_string()),
+                    tool_name: Some("mcp__fs__read".to_string()),
+                    transport: Some("stdio".to_string()),
+                    duration_ms: Some(45),
+                    failure_type: None,
+                    signal: TelemetrySignal::Inferred,
+                }),
+                AgentTelemetryEvent::SkillUsage(AgentSkillUsageTelemetry {
+                    skill_name: "checks".to_string(),
+                    detection_method: SkillDetectionMethod::InferredPrompt,
+                    signal: TelemetrySignal::Inferred,
+                }),
             ]);
             result.agent_id.tool = "cursor".to_string();
             result.agent_id.id = "cursor-session".to_string();
-            result.hook_source = Some("cursor_hook".to_string());
-            result.hook_event_name = Some("preToolUse".to_string());
 
             let events = capture_hook_metrics(&result);
 
@@ -2823,8 +2604,20 @@ mod tests {
                 Some("checks")
             );
 
-            let mut subagent_result = result.clone();
-            subagent_result.hook_event_name = Some("subagentStart".to_string());
+            let mut subagent_result =
+                test_agent_run_result_for_telemetry(vec![AgentTelemetryEvent::Subagent(
+                    AgentSubagentTelemetry {
+                        phase: SubagentPhase::Started,
+                        subagent_id: Some("subagent-1".to_string()),
+                        subagent_type: Some("Plan".to_string()),
+                        status: Some("completed".to_string()),
+                        duration_ms: Some(45),
+                        result_char_count: Some(120),
+                        signal: TelemetrySignal::Explicit,
+                    },
+                )]);
+            subagent_result.agent_id.tool = "cursor".to_string();
+            subagent_result.agent_id.id = "cursor-session".to_string();
             let subagent_events = capture_hook_metrics(&subagent_result);
             let subagent = subagent_events
                 .iter()

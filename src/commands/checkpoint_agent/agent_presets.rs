@@ -3,6 +3,13 @@ use crate::{
         transcript::{AiTranscript, Message},
         working_log::{AgentId, CheckpointKind},
     },
+    commands::checkpoint_agent::telemetry_events::{
+        AgentMcpCallTelemetry, AgentMessageTelemetry, AgentResponseTelemetry,
+        AgentSessionTelemetry, AgentSkillUsageTelemetry, AgentSubagentTelemetry,
+        AgentTelemetryEvent, AgentToolCallTelemetry, McpCallPhase, MessageRole, ResponsePhase,
+        SessionPhase, SkillDetectionMethod, SubagentPhase, TelemetrySignal, ToolCallPhase,
+    },
+    commands::checkpoint_agent::telemetry_payload::TelemetryPayloadView,
     error::GitAiError,
     observability::log_error,
 };
@@ -29,9 +36,21 @@ pub struct AgentRunResult {
     pub edited_filepaths: Option<Vec<String>>,
     pub will_edit_filepaths: Option<Vec<String>>,
     pub dirty_files: Option<HashMap<String, String>>,
-    pub hook_event_name: Option<String>,
-    pub hook_source: Option<String>,
-    pub telemetry_payload: Option<HashMap<String, String>>,
+    pub checkpoint_execution: CheckpointExecution,
+    pub telemetry_events: Vec<AgentTelemetryEvent>,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NoOpReason {
+    TelemetryOnly,
+    NoEditedFiles,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CheckpointExecution {
+    Run,
+    NoOp { reason: NoOpReason },
 }
 
 pub trait AgentCheckpointPreset {
@@ -220,8 +239,76 @@ fn is_file_edit_tool_name(tool_name: &str) -> bool {
     matches!(tool_name, "Write" | "Edit" | "MultiEdit" | "NotebookEdit")
 }
 
+fn payload_get<'a>(payload: &'a HashMap<String, String>, key: &str) -> Option<&'a str> {
+    payload.get(key).map(String::as_str)
+}
+
+fn payload_has_mcp_context(payload: &HashMap<String, String>) -> bool {
+    payload_get(payload, "mcp_tool_name").is_some()
+        || payload_get(payload, "mcp_server").is_some()
+        || payload_get(payload, "mcp_transport").is_some()
+        || payload_get(payload, "tool_name").is_some_and(|name| name.starts_with("mcp__"))
+}
+
+fn maybe_skill_event(payload: &HashMap<String, String>) -> Option<AgentTelemetryEvent> {
+    let skill_name = payload_get(payload, "skill_name")?;
+    let detection_method = match payload_get(payload, "skill_detection_method") {
+        Some("explicit") => SkillDetectionMethod::Explicit,
+        Some("inferred_tool") => SkillDetectionMethod::InferredTool,
+        _ => SkillDetectionMethod::InferredPrompt,
+    };
+    let signal = if matches!(detection_method, SkillDetectionMethod::Explicit) {
+        TelemetrySignal::Explicit
+    } else {
+        TelemetrySignal::Inferred
+    };
+    Some(AgentTelemetryEvent::SkillUsage(AgentSkillUsageTelemetry {
+        skill_name: skill_name.to_string(),
+        detection_method,
+        signal,
+    }))
+}
+
 // Claude Code to checkpoint preset
 pub struct ClaudePreset;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ClaudeHookEvent {
+    SessionStart,
+    SessionEnd,
+    UserPromptSubmit,
+    PermissionRequest,
+    PreToolUse,
+    PostToolUse,
+    PostToolUseFailure,
+    SubagentStart,
+    SubagentStop,
+    Stop,
+    PreCompact,
+    Notification,
+    Unknown(String),
+}
+
+impl ClaudeHookEvent {
+    fn parse(value: Option<&str>) -> Self {
+        match value {
+            Some("SessionStart") => Self::SessionStart,
+            Some("SessionEnd") => Self::SessionEnd,
+            Some("UserPromptSubmit") => Self::UserPromptSubmit,
+            Some("PermissionRequest") => Self::PermissionRequest,
+            Some("PreToolUse") => Self::PreToolUse,
+            Some("PostToolUse") => Self::PostToolUse,
+            Some("PostToolUseFailure") => Self::PostToolUseFailure,
+            Some("SubagentStart") => Self::SubagentStart,
+            Some("SubagentStop") => Self::SubagentStop,
+            Some("Stop") => Self::Stop,
+            Some("PreCompact") => Self::PreCompact,
+            Some("Notification") => Self::Notification,
+            Some(other) => Self::Unknown(other.to_string()),
+            None => Self::Unknown("missing".to_string()),
+        }
+    }
+}
 
 impl AgentCheckpointPreset for ClaudePreset {
     fn run(&self, flags: AgentCheckpointFlags) -> Result<AgentRunResult, GitAiError> {
@@ -247,10 +334,8 @@ impl AgentCheckpointPreset for ClaudePreset {
             ));
         }
 
-        let hook_event_name = hook_data
-            .get("hook_event_name")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+        let hook_event_name = hook_data.get("hook_event_name").and_then(|v| v.as_str());
+        let hook_event = ClaudeHookEvent::parse(hook_event_name);
 
         let tool_name = hook_data
             .get("tool_name")
@@ -258,8 +343,10 @@ impl AgentCheckpointPreset for ClaudePreset {
             .or_else(|| hook_data.get("toolName").and_then(|v| v.as_str()));
 
         let is_tool_hook = matches!(
-            hook_event_name.as_deref(),
-            Some("PreToolUse" | "PostToolUse" | "PostToolUseFailure")
+            hook_event,
+            ClaudeHookEvent::PreToolUse
+                | ClaudeHookEvent::PostToolUse
+                | ClaudeHookEvent::PostToolUseFailure
         );
         let has_file_path_in_tool_input = hook_data
             .get("tool_input")
@@ -271,19 +358,18 @@ impl AgentCheckpointPreset for ClaudePreset {
                 || has_file_path_in_tool_input);
 
         let telemetry_only_hook = matches!(
-            hook_event_name.as_deref(),
-            Some(
-                "SessionStart"
-                    | "SessionEnd"
-                    | "UserPromptSubmit"
-                    | "PermissionRequest"
-                    | "SubagentStart"
-                    | "SubagentStop"
-                    | "Stop"
-                    | "PreCompact"
-                    | "Notification"
-                    | "PostToolUseFailure"
-            )
+            hook_event,
+            ClaudeHookEvent::SessionStart
+                | ClaudeHookEvent::SessionEnd
+                | ClaudeHookEvent::UserPromptSubmit
+                | ClaudeHookEvent::PermissionRequest
+                | ClaudeHookEvent::SubagentStart
+                | ClaudeHookEvent::SubagentStop
+                | ClaudeHookEvent::Stop
+                | ClaudeHookEvent::PreCompact
+                | ClaudeHookEvent::Notification
+                | ClaudeHookEvent::PostToolUseFailure
+                | ClaudeHookEvent::Unknown(_)
         ) || (is_tool_hook && !is_edit_tool_hook);
 
         let transcript_path = hook_data
@@ -380,8 +466,6 @@ impl AgentCheckpointPreset for ClaudePreset {
             .as_deref()
             .map(|path| HashMap::from([("transcript_path".to_string(), path.to_string())]));
 
-        let hook_source = Some("claude_hook".to_string());
-
         let mut telemetry_payload = collect_common_hook_telemetry_payload(&hook_data);
         if let Some(session_id) = hook_data.get("session_id").and_then(|v| v.as_str()) {
             telemetry_payload.insert("session_id".to_string(), session_id.to_string());
@@ -400,16 +484,196 @@ impl AgentCheckpointPreset for ClaudePreset {
                 "inferred_prompt".to_string(),
             );
         }
-        if telemetry_only_hook {
-            telemetry_payload.insert("telemetry_only".to_string(), "1".to_string());
-        }
-        let telemetry_payload = if telemetry_payload.is_empty() {
-            None
-        } else {
-            Some(telemetry_payload)
-        };
+        let telemetry = TelemetryPayloadView::from_payload(&telemetry_payload);
+        let mut telemetry_events = Vec::new();
 
-        if hook_event_name.as_deref() == Some("PreToolUse") {
+        match &hook_event {
+            ClaudeHookEvent::SessionStart => {
+                telemetry_events.push(AgentTelemetryEvent::Session(AgentSessionTelemetry {
+                    phase: SessionPhase::Started,
+                    reason: telemetry.reason.clone(),
+                    source: Some("claude_hook".to_string()),
+                    mode: telemetry.mode.clone(),
+                    duration_ms: telemetry.duration_ms,
+                    signal: TelemetrySignal::Explicit,
+                }))
+            }
+            ClaudeHookEvent::SessionEnd => {
+                telemetry_events.push(AgentTelemetryEvent::Session(AgentSessionTelemetry {
+                    phase: SessionPhase::Ended,
+                    reason: telemetry.reason.clone(),
+                    source: Some("claude_hook".to_string()),
+                    mode: telemetry.mode.clone(),
+                    duration_ms: telemetry.duration_ms,
+                    signal: TelemetrySignal::Explicit,
+                }))
+            }
+            ClaudeHookEvent::UserPromptSubmit => {
+                telemetry_events.push(AgentTelemetryEvent::Message(AgentMessageTelemetry {
+                    role: MessageRole::Human,
+                    prompt_char_count: telemetry.prompt_char_count,
+                    attachment_count: telemetry.attachment_count,
+                    signal: TelemetrySignal::Explicit,
+                }));
+            }
+            ClaudeHookEvent::PermissionRequest => {
+                telemetry_events.push(AgentTelemetryEvent::ToolCall(AgentToolCallTelemetry {
+                    phase: ToolCallPhase::PermissionRequested,
+                    tool_name: telemetry.tool_name.clone(),
+                    tool_use_id: telemetry.tool_use_id.clone(),
+                    duration_ms: telemetry.duration_ms,
+                    failure_type: telemetry.failure_type.clone(),
+                    signal: TelemetrySignal::Explicit,
+                }));
+                if payload_has_mcp_context(&telemetry_payload) {
+                    telemetry_events.push(AgentTelemetryEvent::McpCall(AgentMcpCallTelemetry {
+                        phase: McpCallPhase::PermissionRequested,
+                        mcp_server: telemetry.mcp_server.clone(),
+                        tool_name: telemetry.mcp_tool_name.clone(),
+                        transport: telemetry.mcp_transport.clone(),
+                        duration_ms: telemetry.duration_ms,
+                        failure_type: telemetry.failure_type.clone(),
+                        signal: TelemetrySignal::Inferred,
+                    }));
+                }
+            }
+            ClaudeHookEvent::PreToolUse => {
+                telemetry_events.push(AgentTelemetryEvent::ToolCall(AgentToolCallTelemetry {
+                    phase: ToolCallPhase::Started,
+                    tool_name: telemetry.tool_name.clone(),
+                    tool_use_id: telemetry.tool_use_id.clone(),
+                    duration_ms: telemetry.duration_ms,
+                    failure_type: None,
+                    signal: TelemetrySignal::Explicit,
+                }));
+                if payload_has_mcp_context(&telemetry_payload) {
+                    telemetry_events.push(AgentTelemetryEvent::McpCall(AgentMcpCallTelemetry {
+                        phase: McpCallPhase::Started,
+                        mcp_server: telemetry.mcp_server.clone(),
+                        tool_name: telemetry.mcp_tool_name.clone(),
+                        transport: telemetry.mcp_transport.clone(),
+                        duration_ms: telemetry.duration_ms,
+                        failure_type: None,
+                        signal: TelemetrySignal::Inferred,
+                    }));
+                }
+                telemetry_events.push(AgentTelemetryEvent::Response(AgentResponseTelemetry {
+                    phase: ResponsePhase::Started,
+                    reason: telemetry.reason.clone(),
+                    status: None,
+                    response_char_count: None,
+                    signal: TelemetrySignal::Inferred,
+                    dedupe_key: telemetry.dedupe_key.clone(),
+                }));
+            }
+            ClaudeHookEvent::PostToolUse => {
+                telemetry_events.push(AgentTelemetryEvent::ToolCall(AgentToolCallTelemetry {
+                    phase: ToolCallPhase::Ended,
+                    tool_name: telemetry.tool_name.clone(),
+                    tool_use_id: telemetry.tool_use_id.clone(),
+                    duration_ms: telemetry.duration_ms,
+                    failure_type: None,
+                    signal: TelemetrySignal::Explicit,
+                }));
+                if payload_has_mcp_context(&telemetry_payload) {
+                    telemetry_events.push(AgentTelemetryEvent::McpCall(AgentMcpCallTelemetry {
+                        phase: McpCallPhase::Ended,
+                        mcp_server: telemetry.mcp_server.clone(),
+                        tool_name: telemetry.mcp_tool_name.clone(),
+                        transport: telemetry.mcp_transport.clone(),
+                        duration_ms: telemetry.duration_ms,
+                        failure_type: None,
+                        signal: TelemetrySignal::Inferred,
+                    }));
+                }
+                telemetry_events.push(AgentTelemetryEvent::Response(AgentResponseTelemetry {
+                    phase: ResponsePhase::Ended,
+                    reason: telemetry.reason.clone(),
+                    status: telemetry.status.clone(),
+                    response_char_count: telemetry.response_char_count,
+                    signal: TelemetrySignal::Inferred,
+                    dedupe_key: telemetry.dedupe_key.clone(),
+                }));
+            }
+            ClaudeHookEvent::PostToolUseFailure => {
+                telemetry_events.push(AgentTelemetryEvent::ToolCall(AgentToolCallTelemetry {
+                    phase: ToolCallPhase::Failed,
+                    tool_name: telemetry.tool_name.clone(),
+                    tool_use_id: telemetry.tool_use_id.clone(),
+                    duration_ms: telemetry.duration_ms,
+                    failure_type: telemetry.failure_type.clone(),
+                    signal: TelemetrySignal::Explicit,
+                }));
+                if payload_has_mcp_context(&telemetry_payload) {
+                    telemetry_events.push(AgentTelemetryEvent::McpCall(AgentMcpCallTelemetry {
+                        phase: McpCallPhase::Failed,
+                        mcp_server: telemetry.mcp_server.clone(),
+                        tool_name: telemetry.mcp_tool_name.clone(),
+                        transport: telemetry.mcp_transport.clone(),
+                        duration_ms: telemetry.duration_ms,
+                        failure_type: telemetry.failure_type.clone(),
+                        signal: TelemetrySignal::Inferred,
+                    }));
+                }
+                telemetry_events.push(AgentTelemetryEvent::Response(AgentResponseTelemetry {
+                    phase: ResponsePhase::Ended,
+                    reason: telemetry.reason.clone(),
+                    status: telemetry.status.clone(),
+                    response_char_count: telemetry.response_char_count,
+                    signal: TelemetrySignal::Inferred,
+                    dedupe_key: telemetry.dedupe_key.clone(),
+                }));
+            }
+            ClaudeHookEvent::SubagentStart => {
+                telemetry_events.push(AgentTelemetryEvent::Subagent(AgentSubagentTelemetry {
+                    phase: SubagentPhase::Started,
+                    subagent_id: telemetry.subagent_id.clone(),
+                    subagent_type: telemetry.subagent_type.clone(),
+                    status: telemetry.status.clone(),
+                    duration_ms: telemetry.duration_ms,
+                    result_char_count: telemetry.result_char_count,
+                    signal: TelemetrySignal::Explicit,
+                }));
+                telemetry_events.push(AgentTelemetryEvent::Response(AgentResponseTelemetry {
+                    phase: ResponsePhase::Started,
+                    reason: telemetry.reason.clone(),
+                    status: None,
+                    response_char_count: None,
+                    signal: TelemetrySignal::Inferred,
+                    dedupe_key: telemetry.dedupe_key.clone(),
+                }));
+            }
+            ClaudeHookEvent::SubagentStop => {
+                telemetry_events.push(AgentTelemetryEvent::Subagent(AgentSubagentTelemetry {
+                    phase: SubagentPhase::Ended,
+                    subagent_id: telemetry.subagent_id.clone(),
+                    subagent_type: telemetry.subagent_type.clone(),
+                    status: telemetry.status.clone(),
+                    duration_ms: telemetry.duration_ms,
+                    result_char_count: telemetry.result_char_count,
+                    signal: TelemetrySignal::Explicit,
+                }))
+            }
+            ClaudeHookEvent::Stop => {
+                telemetry_events.push(AgentTelemetryEvent::Response(AgentResponseTelemetry {
+                    phase: ResponsePhase::Ended,
+                    reason: telemetry.reason.clone(),
+                    status: telemetry.status.clone(),
+                    response_char_count: telemetry.response_char_count,
+                    signal: TelemetrySignal::Explicit,
+                    dedupe_key: telemetry.dedupe_key.clone(),
+                }))
+            }
+            ClaudeHookEvent::PreCompact
+            | ClaudeHookEvent::Notification
+            | ClaudeHookEvent::Unknown(_) => {}
+        }
+
+        if let Some(skill_event) = maybe_skill_event(&telemetry_payload) {
+            telemetry_events.push(skill_event);
+        }
+
+        if matches!(hook_event, ClaudeHookEvent::PreToolUse) {
             // Early return for human checkpoint
             return Ok(AgentRunResult {
                 agent_id,
@@ -420,9 +684,8 @@ impl AgentCheckpointPreset for ClaudePreset {
                 edited_filepaths: None,
                 will_edit_filepaths: file_path_as_vec,
                 dirty_files: None,
-                hook_event_name,
-                hook_source,
-                telemetry_payload,
+                checkpoint_execution: CheckpointExecution::Run,
+                telemetry_events,
             });
         }
 
@@ -436,9 +699,14 @@ impl AgentCheckpointPreset for ClaudePreset {
             edited_filepaths: file_path_as_vec,
             will_edit_filepaths: None,
             dirty_files: None,
-            hook_event_name,
-            hook_source,
-            telemetry_payload,
+            checkpoint_execution: if telemetry_only_hook {
+                CheckpointExecution::NoOp {
+                    reason: NoOpReason::TelemetryOnly,
+                }
+            } else {
+                CheckpointExecution::Run
+            },
+            telemetry_events,
         })
     }
 }
@@ -760,9 +1028,8 @@ impl AgentCheckpointPreset for GeminiPreset {
                 edited_filepaths: None,
                 will_edit_filepaths: file_path_as_vec,
                 dirty_files: None,
-                hook_event_name: None,
-                hook_source: None,
-                telemetry_payload: None,
+                checkpoint_execution: CheckpointExecution::Run,
+                telemetry_events: vec![],
             });
         }
 
@@ -776,9 +1043,8 @@ impl AgentCheckpointPreset for GeminiPreset {
             edited_filepaths: file_path_as_vec,
             will_edit_filepaths: None,
             dirty_files: None,
-            hook_event_name: None,
-            hook_source: None,
-            telemetry_payload: None,
+            checkpoint_execution: CheckpointExecution::Run,
+            telemetry_events: vec![],
         })
     }
 }
@@ -974,9 +1240,8 @@ impl AgentCheckpointPreset for ContinueCliPreset {
                 edited_filepaths: None,
                 will_edit_filepaths: file_path_as_vec,
                 dirty_files: None,
-                hook_event_name: None,
-                hook_source: None,
-                telemetry_payload: None,
+                checkpoint_execution: CheckpointExecution::Run,
+                telemetry_events: vec![],
             });
         }
 
@@ -990,9 +1255,8 @@ impl AgentCheckpointPreset for ContinueCliPreset {
             edited_filepaths: file_path_as_vec,
             will_edit_filepaths: None,
             dirty_files: None,
-            hook_event_name: None,
-            hook_source: None,
-            telemetry_payload: None,
+            checkpoint_execution: CheckpointExecution::Run,
+            telemetry_events: vec![],
         })
     }
 }
@@ -1106,6 +1370,24 @@ impl ContinueCliPreset {
 
 pub struct CodexPreset;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CodexNotifyEvent {
+    AgentTurnComplete,
+    AfterAgent,
+    Unknown(String),
+}
+
+impl CodexNotifyEvent {
+    fn parse(value: Option<&str>) -> Self {
+        match value {
+            Some("agent-turn-complete") => Self::AgentTurnComplete,
+            Some("after_agent") => Self::AfterAgent,
+            Some(other) => Self::Unknown(other.to_string()),
+            None => Self::Unknown("missing".to_string()),
+        }
+    }
+}
+
 impl AgentCheckpointPreset for CodexPreset {
     fn run(&self, flags: AgentCheckpointFlags) -> Result<AgentRunResult, GitAiError> {
         let stdin_json = flags.hook_input.ok_or_else(|| {
@@ -1125,7 +1407,7 @@ impl AgentCheckpointPreset for CodexPreset {
                     .and_then(|v| v.as_str())
             })
             .map(|s| s.to_string());
-        let hook_source = Some("codex_notify".to_string());
+        let hook_event = CodexNotifyEvent::parse(hook_event_name.as_deref());
 
         let mut telemetry_payload = collect_common_hook_telemetry_payload(&hook_data);
         if let Some(input_messages) = hook_data
@@ -1171,11 +1453,56 @@ impl AgentCheckpointPreset for CodexPreset {
                 last_assistant.chars().count().to_string(),
             );
         }
-        let telemetry_payload = if telemetry_payload.is_empty() {
-            None
-        } else {
-            Some(telemetry_payload)
+        let telemetry = TelemetryPayloadView::from_payload_with_dedupe_fallback(
+            &telemetry_payload,
+            hook_event_name.as_deref(),
+        );
+
+        let mut telemetry_events = vec![AgentTelemetryEvent::Session(AgentSessionTelemetry {
+            phase: SessionPhase::Started,
+            reason: None,
+            source: Some("inferred".to_string()),
+            mode: Some("agent".to_string()),
+            duration_ms: None,
+            signal: TelemetrySignal::Inferred,
+        })];
+
+        if telemetry.prompt_char_count.is_some() {
+            telemetry_events.push(AgentTelemetryEvent::Message(AgentMessageTelemetry {
+                role: MessageRole::Human,
+                prompt_char_count: telemetry.prompt_char_count,
+                attachment_count: None,
+                signal: TelemetrySignal::Inferred,
+            }));
+        }
+
+        telemetry_events.push(AgentTelemetryEvent::Response(AgentResponseTelemetry {
+            phase: ResponsePhase::Started,
+            reason: None,
+            status: None,
+            response_char_count: None,
+            signal: TelemetrySignal::Inferred,
+            dedupe_key: telemetry.dedupe_key.clone(),
+        }));
+
+        let end_signal = match hook_event {
+            CodexNotifyEvent::AfterAgent | CodexNotifyEvent::AgentTurnComplete => {
+                TelemetrySignal::Explicit
+            }
+            CodexNotifyEvent::Unknown(_) => TelemetrySignal::Inferred,
         };
+        telemetry_events.push(AgentTelemetryEvent::Response(AgentResponseTelemetry {
+            phase: ResponsePhase::Ended,
+            reason: None,
+            status: None,
+            response_char_count: telemetry.response_char_count,
+            signal: end_signal,
+            dedupe_key: telemetry.dedupe_key.clone(),
+        }));
+
+        if let Some(skill_event) = maybe_skill_event(&telemetry_payload) {
+            telemetry_events.push(skill_event);
+        }
 
         let session_id = CodexPreset::session_id_from_hook_data(&hook_data).ok_or_else(|| {
             GitAiError::PresetError("session_id/thread_id not found in hook_input".to_string())
@@ -1250,9 +1577,8 @@ impl AgentCheckpointPreset for CodexPreset {
             edited_filepaths: None,
             will_edit_filepaths: None,
             dirty_files: None,
-            hook_event_name,
-            hook_source,
-            telemetry_payload,
+            checkpoint_execution: CheckpointExecution::Run,
+            telemetry_events,
         })
     }
 }
@@ -1507,6 +1833,55 @@ impl CodexPreset {
 // Cursor to checkpoint preset
 pub struct CursorPreset;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CursorHookEvent {
+    SessionStart,
+    SessionEnd,
+    BeforeSubmitPrompt,
+    PreToolUse,
+    PostToolUse,
+    PostToolUseFailure,
+    SubagentStart,
+    SubagentStop,
+    BeforeShellExecution,
+    AfterShellExecution,
+    BeforeMcpExecution,
+    AfterMcpExecution,
+    BeforeReadFile,
+    AfterFileEdit,
+    AfterAgentResponse,
+    AfterAgentThought,
+    PreCompact,
+    Stop,
+    Unknown(String),
+}
+
+impl CursorHookEvent {
+    fn parse(value: &str) -> Self {
+        match value {
+            "sessionStart" => Self::SessionStart,
+            "sessionEnd" => Self::SessionEnd,
+            "beforeSubmitPrompt" => Self::BeforeSubmitPrompt,
+            "preToolUse" => Self::PreToolUse,
+            "postToolUse" => Self::PostToolUse,
+            "postToolUseFailure" => Self::PostToolUseFailure,
+            "subagentStart" => Self::SubagentStart,
+            "subagentStop" => Self::SubagentStop,
+            "beforeShellExecution" => Self::BeforeShellExecution,
+            "afterShellExecution" => Self::AfterShellExecution,
+            "beforeMCPExecution" => Self::BeforeMcpExecution,
+            "afterMCPExecution" => Self::AfterMcpExecution,
+            "beforeReadFile" => Self::BeforeReadFile,
+            "afterFileEdit" => Self::AfterFileEdit,
+            "afterAgentResponse" => Self::AfterAgentResponse,
+            "afterAgentThought" => Self::AfterAgentThought,
+            "preCompact" => Self::PreCompact,
+            "stop" => Self::Stop,
+            other => Self::Unknown(other.to_string()),
+        }
+    }
+}
+
 impl AgentCheckpointPreset for CursorPreset {
     fn run(&self, flags: AgentCheckpointFlags) -> Result<AgentRunResult, GitAiError> {
         // Parse hook_input JSON to extract workspace_roots and conversation_id
@@ -1543,6 +1918,7 @@ impl AgentCheckpointPreset for CursorPreset {
                 GitAiError::PresetError("hook_event_name not found in hook_input".to_string())
             })?
             .to_string();
+        let hook_event = CursorHookEvent::parse(&hook_event_name);
 
         // Extract model from hook input (Cursor provides this directly)
         let model = hook_data
@@ -1551,34 +1927,6 @@ impl AgentCheckpointPreset for CursorPreset {
             .map(|s| s.to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
-        let supported_events = [
-            "sessionStart",
-            "sessionEnd",
-            "beforeSubmitPrompt",
-            "preToolUse",
-            "postToolUse",
-            "postToolUseFailure",
-            "subagentStart",
-            "subagentStop",
-            "beforeShellExecution",
-            "afterShellExecution",
-            "beforeMCPExecution",
-            "afterMCPExecution",
-            "beforeReadFile",
-            "afterFileEdit",
-            "afterAgentResponse",
-            "afterAgentThought",
-            "preCompact",
-            "stop",
-        ];
-        if !supported_events.contains(&hook_event_name.as_str()) {
-            return Err(GitAiError::PresetError(format!(
-                "Invalid hook_event_name: {} for Cursor preset",
-                hook_event_name
-            )));
-        }
-
-        let hook_source = Some("cursor_hook".to_string());
         let mut telemetry_payload = collect_common_hook_telemetry_payload(&hook_data);
         if let Some(prompt) = hook_data.get("prompt").and_then(|v| v.as_str()) {
             telemetry_payload.insert(
@@ -1613,14 +1961,218 @@ impl AgentCheckpointPreset for CursorPreset {
         {
             telemetry_payload.insert("mcp_tool_name".to_string(), tool_name.to_string());
         }
-        if hook_event_name != "beforeSubmitPrompt" && hook_event_name != "afterFileEdit" {
-            telemetry_payload.insert("telemetry_only".to_string(), "1".to_string());
+        let telemetry = TelemetryPayloadView::from_payload(&telemetry_payload);
+        let mut telemetry_events = Vec::new();
+
+        match &hook_event {
+            CursorHookEvent::SessionStart => {
+                telemetry_events.push(AgentTelemetryEvent::Session(AgentSessionTelemetry {
+                    phase: SessionPhase::Started,
+                    reason: telemetry.reason.clone(),
+                    source: Some("cursor_hook".to_string()),
+                    mode: telemetry.mode.clone(),
+                    duration_ms: telemetry.duration_ms,
+                    signal: TelemetrySignal::Explicit,
+                }))
+            }
+            CursorHookEvent::SessionEnd => {
+                telemetry_events.push(AgentTelemetryEvent::Session(AgentSessionTelemetry {
+                    phase: SessionPhase::Ended,
+                    reason: telemetry.reason.clone(),
+                    source: Some("cursor_hook".to_string()),
+                    mode: telemetry.mode.clone(),
+                    duration_ms: telemetry.duration_ms,
+                    signal: TelemetrySignal::Explicit,
+                }))
+            }
+            CursorHookEvent::BeforeSubmitPrompt => {
+                telemetry_events.push(AgentTelemetryEvent::Message(AgentMessageTelemetry {
+                    role: MessageRole::Human,
+                    prompt_char_count: telemetry.prompt_char_count,
+                    attachment_count: telemetry.attachment_count,
+                    signal: TelemetrySignal::Explicit,
+                }));
+            }
+            CursorHookEvent::PreToolUse => {
+                telemetry_events.push(AgentTelemetryEvent::ToolCall(AgentToolCallTelemetry {
+                    phase: ToolCallPhase::Started,
+                    tool_name: telemetry.tool_name.clone(),
+                    tool_use_id: telemetry.tool_use_id.clone(),
+                    duration_ms: telemetry.duration_ms,
+                    failure_type: None,
+                    signal: TelemetrySignal::Explicit,
+                }));
+                if payload_has_mcp_context(&telemetry_payload) {
+                    telemetry_events.push(AgentTelemetryEvent::McpCall(AgentMcpCallTelemetry {
+                        phase: McpCallPhase::Started,
+                        mcp_server: telemetry.mcp_server.clone(),
+                        tool_name: telemetry.mcp_tool_name.clone(),
+                        transport: telemetry.mcp_transport.clone(),
+                        duration_ms: telemetry.duration_ms,
+                        failure_type: None,
+                        signal: TelemetrySignal::Inferred,
+                    }));
+                }
+                telemetry_events.push(AgentTelemetryEvent::Response(AgentResponseTelemetry {
+                    phase: ResponsePhase::Started,
+                    reason: telemetry.reason.clone(),
+                    status: None,
+                    response_char_count: None,
+                    signal: TelemetrySignal::Inferred,
+                    dedupe_key: telemetry.dedupe_key.clone(),
+                }));
+            }
+            CursorHookEvent::PostToolUse => {
+                telemetry_events.push(AgentTelemetryEvent::ToolCall(AgentToolCallTelemetry {
+                    phase: ToolCallPhase::Ended,
+                    tool_name: telemetry.tool_name.clone(),
+                    tool_use_id: telemetry.tool_use_id.clone(),
+                    duration_ms: telemetry.duration_ms,
+                    failure_type: None,
+                    signal: TelemetrySignal::Explicit,
+                }));
+                if payload_has_mcp_context(&telemetry_payload) {
+                    telemetry_events.push(AgentTelemetryEvent::McpCall(AgentMcpCallTelemetry {
+                        phase: McpCallPhase::Ended,
+                        mcp_server: telemetry.mcp_server.clone(),
+                        tool_name: telemetry.mcp_tool_name.clone(),
+                        transport: telemetry.mcp_transport.clone(),
+                        duration_ms: telemetry.duration_ms,
+                        failure_type: None,
+                        signal: TelemetrySignal::Inferred,
+                    }));
+                }
+                telemetry_events.push(AgentTelemetryEvent::Response(AgentResponseTelemetry {
+                    phase: ResponsePhase::Ended,
+                    reason: telemetry.reason.clone(),
+                    status: telemetry.status.clone(),
+                    response_char_count: telemetry.response_char_count,
+                    signal: TelemetrySignal::Inferred,
+                    dedupe_key: telemetry.dedupe_key.clone(),
+                }));
+            }
+            CursorHookEvent::PostToolUseFailure => {
+                telemetry_events.push(AgentTelemetryEvent::ToolCall(AgentToolCallTelemetry {
+                    phase: ToolCallPhase::Failed,
+                    tool_name: telemetry.tool_name.clone(),
+                    tool_use_id: telemetry.tool_use_id.clone(),
+                    duration_ms: telemetry.duration_ms,
+                    failure_type: telemetry.failure_type.clone(),
+                    signal: TelemetrySignal::Explicit,
+                }));
+                if payload_has_mcp_context(&telemetry_payload) {
+                    telemetry_events.push(AgentTelemetryEvent::McpCall(AgentMcpCallTelemetry {
+                        phase: McpCallPhase::Failed,
+                        mcp_server: telemetry.mcp_server.clone(),
+                        tool_name: telemetry.mcp_tool_name.clone(),
+                        transport: telemetry.mcp_transport.clone(),
+                        duration_ms: telemetry.duration_ms,
+                        failure_type: telemetry.failure_type.clone(),
+                        signal: TelemetrySignal::Inferred,
+                    }));
+                }
+                telemetry_events.push(AgentTelemetryEvent::Response(AgentResponseTelemetry {
+                    phase: ResponsePhase::Ended,
+                    reason: telemetry.reason.clone(),
+                    status: telemetry.status.clone(),
+                    response_char_count: telemetry.response_char_count,
+                    signal: TelemetrySignal::Inferred,
+                    dedupe_key: telemetry.dedupe_key.clone(),
+                }));
+            }
+            CursorHookEvent::BeforeMcpExecution => {
+                telemetry_events.push(AgentTelemetryEvent::McpCall(AgentMcpCallTelemetry {
+                    phase: McpCallPhase::Started,
+                    mcp_server: telemetry.mcp_server.clone(),
+                    tool_name: telemetry.mcp_tool_name.clone(),
+                    transport: telemetry.mcp_transport.clone(),
+                    duration_ms: telemetry.duration_ms,
+                    failure_type: None,
+                    signal: TelemetrySignal::Explicit,
+                }));
+            }
+            CursorHookEvent::AfterMcpExecution => {
+                telemetry_events.push(AgentTelemetryEvent::McpCall(AgentMcpCallTelemetry {
+                    phase: McpCallPhase::Ended,
+                    mcp_server: telemetry.mcp_server.clone(),
+                    tool_name: telemetry.mcp_tool_name.clone(),
+                    transport: telemetry.mcp_transport.clone(),
+                    duration_ms: telemetry.duration_ms,
+                    failure_type: None,
+                    signal: TelemetrySignal::Explicit,
+                }));
+            }
+            CursorHookEvent::SubagentStart => {
+                telemetry_events.push(AgentTelemetryEvent::Subagent(AgentSubagentTelemetry {
+                    phase: SubagentPhase::Started,
+                    subagent_id: telemetry.subagent_id.clone(),
+                    subagent_type: telemetry.subagent_type.clone(),
+                    status: telemetry.status.clone(),
+                    duration_ms: telemetry.duration_ms,
+                    result_char_count: telemetry.result_char_count,
+                    signal: TelemetrySignal::Explicit,
+                }));
+                telemetry_events.push(AgentTelemetryEvent::Response(AgentResponseTelemetry {
+                    phase: ResponsePhase::Started,
+                    reason: telemetry.reason.clone(),
+                    status: None,
+                    response_char_count: None,
+                    signal: TelemetrySignal::Inferred,
+                    dedupe_key: telemetry.dedupe_key.clone(),
+                }));
+            }
+            CursorHookEvent::SubagentStop => {
+                telemetry_events.push(AgentTelemetryEvent::Subagent(AgentSubagentTelemetry {
+                    phase: SubagentPhase::Ended,
+                    subagent_id: telemetry.subagent_id.clone(),
+                    subagent_type: telemetry.subagent_type.clone(),
+                    status: telemetry.status.clone(),
+                    duration_ms: telemetry.duration_ms,
+                    result_char_count: telemetry.result_char_count,
+                    signal: TelemetrySignal::Explicit,
+                }));
+            }
+            CursorHookEvent::AfterAgentResponse => {
+                telemetry_events.push(AgentTelemetryEvent::Response(AgentResponseTelemetry {
+                    phase: ResponsePhase::Ended,
+                    reason: telemetry.reason.clone(),
+                    status: telemetry.status.clone(),
+                    response_char_count: telemetry.response_char_count,
+                    signal: TelemetrySignal::Explicit,
+                    dedupe_key: telemetry.dedupe_key.clone(),
+                }));
+            }
+            CursorHookEvent::AfterAgentThought => {
+                telemetry_events.push(AgentTelemetryEvent::Response(AgentResponseTelemetry {
+                    phase: ResponsePhase::Started,
+                    reason: telemetry.reason.clone(),
+                    status: None,
+                    response_char_count: None,
+                    signal: TelemetrySignal::Inferred,
+                    dedupe_key: telemetry.dedupe_key.clone(),
+                }));
+            }
+            CursorHookEvent::Stop => {
+                telemetry_events.push(AgentTelemetryEvent::Response(AgentResponseTelemetry {
+                    phase: ResponsePhase::Ended,
+                    reason: telemetry.reason.clone(),
+                    status: telemetry.status.clone(),
+                    response_char_count: telemetry.response_char_count,
+                    signal: TelemetrySignal::Explicit,
+                    dedupe_key: telemetry.dedupe_key.clone(),
+                }));
+            }
+            CursorHookEvent::BeforeShellExecution
+            | CursorHookEvent::AfterShellExecution
+            | CursorHookEvent::BeforeReadFile
+            | CursorHookEvent::AfterFileEdit
+            | CursorHookEvent::PreCompact
+            | CursorHookEvent::Unknown(_) => {}
         }
-        let telemetry_payload = if telemetry_payload.is_empty() {
-            None
-        } else {
-            Some(telemetry_payload)
-        };
+
+        if let Some(skill_event) = maybe_skill_event(&telemetry_payload) {
+            telemetry_events.push(skill_event);
+        }
 
         let file_path = hook_data
             .get("file_path")
@@ -1651,7 +2203,7 @@ impl AgentCheckpointPreset for CursorPreset {
             })?
         };
 
-        if hook_event_name == "beforeSubmitPrompt" {
+        if matches!(&hook_event, CursorHookEvent::BeforeSubmitPrompt) {
             // early return, we're just adding a human checkpoint.
             return Ok(AgentRunResult {
                 agent_id: AgentId {
@@ -1666,13 +2218,12 @@ impl AgentCheckpointPreset for CursorPreset {
                 edited_filepaths: None,
                 will_edit_filepaths: None,
                 dirty_files: None,
-                hook_event_name: Some(hook_event_name),
-                hook_source,
-                telemetry_payload,
+                checkpoint_execution: CheckpointExecution::Run,
+                telemetry_events,
             });
         }
 
-        if hook_event_name != "afterFileEdit" {
+        if !matches!(&hook_event, CursorHookEvent::AfterFileEdit) {
             return Ok(AgentRunResult {
                 agent_id: AgentId {
                     tool: "cursor".to_string(),
@@ -1686,9 +2237,10 @@ impl AgentCheckpointPreset for CursorPreset {
                 edited_filepaths: None,
                 will_edit_filepaths: None,
                 dirty_files: None,
-                hook_event_name: Some(hook_event_name),
-                hook_source,
-                telemetry_payload,
+                checkpoint_execution: CheckpointExecution::NoOp {
+                    reason: NoOpReason::TelemetryOnly,
+                },
+                telemetry_events,
             });
         }
 
@@ -1765,9 +2317,8 @@ impl AgentCheckpointPreset for CursorPreset {
             edited_filepaths,
             will_edit_filepaths: None,
             dirty_files: None,
-            hook_event_name: Some(hook_event_name),
-            hook_source,
-            telemetry_payload,
+            checkpoint_execution: CheckpointExecution::Run,
+            telemetry_events,
         })
     }
 }
@@ -2064,6 +2615,39 @@ impl CursorPreset {
 
 pub struct GithubCopilotPreset;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CopilotHookEvent {
+    BeforeEdit,
+    AfterEdit,
+    SessionStart,
+    UserPromptSubmit,
+    PreToolUse,
+    PostToolUse,
+    PreCompact,
+    SubagentStart,
+    SubagentStop,
+    Stop,
+    Unknown(String),
+}
+
+impl CopilotHookEvent {
+    fn parse(value: &str) -> Self {
+        match value {
+            "before_edit" => Self::BeforeEdit,
+            "after_edit" => Self::AfterEdit,
+            "SessionStart" => Self::SessionStart,
+            "UserPromptSubmit" => Self::UserPromptSubmit,
+            "PreToolUse" => Self::PreToolUse,
+            "PostToolUse" => Self::PostToolUse,
+            "PreCompact" => Self::PreCompact,
+            "SubagentStart" => Self::SubagentStart,
+            "SubagentStop" => Self::SubagentStop,
+            "Stop" => Self::Stop,
+            other => Self::Unknown(other.to_string()),
+        }
+    }
+}
+
 #[derive(Default)]
 struct CopilotModelCandidates {
     request_non_auto_model_id: Option<String>,
@@ -2095,42 +2679,49 @@ impl AgentCheckpointPreset for GithubCopilotPreset {
             .or_else(|| hook_data.get("hookEventName"))
             .and_then(|v| v.as_str())
             .unwrap_or("after_edit");
+        let hook_event = CopilotHookEvent::parse(hook_event_name);
 
-        if hook_event_name == "before_edit" || hook_event_name == "after_edit" {
-            return Self::run_legacy_extension_hooks(&hook_data, hook_event_name);
+        if matches!(
+            hook_event,
+            CopilotHookEvent::BeforeEdit | CopilotHookEvent::AfterEdit
+        ) {
+            return Self::run_legacy_extension_hooks(&hook_data, &hook_event);
         }
 
-        if Self::is_supported_vscode_hook_event(hook_event_name) {
-            return Self::run_vscode_native_hooks(&hook_data, hook_event_name);
+        if Self::is_supported_vscode_hook_event(&hook_event) {
+            return Self::run_vscode_native_hooks(&hook_data, &hook_event);
         }
 
-        Err(GitAiError::PresetError(format!(
-            "Invalid hook_event_name: {}. Expected one of 'before_edit', 'after_edit', 'SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PreCompact', 'SubagentStart', 'SubagentStop', or 'Stop'",
-            hook_event_name
-        )))
+        Ok(Self::telemetry_only_result(
+            &hook_event,
+            "unknown",
+            "unknown",
+            None,
+            Self::dirty_files_from_hook_data(&hook_data),
+            vec![],
+        ))
     }
 }
 
 impl GithubCopilotPreset {
-    fn is_supported_vscode_hook_event(hook_event_name: &str) -> bool {
+    fn is_supported_vscode_hook_event(hook_event: &CopilotHookEvent) -> bool {
         matches!(
-            hook_event_name,
-            "SessionStart"
-                | "UserPromptSubmit"
-                | "PreToolUse"
-                | "PostToolUse"
-                | "PreCompact"
-                | "SubagentStart"
-                | "SubagentStop"
-                | "Stop"
+            hook_event,
+            CopilotHookEvent::SessionStart
+                | CopilotHookEvent::UserPromptSubmit
+                | CopilotHookEvent::PreToolUse
+                | CopilotHookEvent::PostToolUse
+                | CopilotHookEvent::PreCompact
+                | CopilotHookEvent::SubagentStart
+                | CopilotHookEvent::SubagentStop
+                | CopilotHookEvent::Stop
         )
     }
 
     fn run_legacy_extension_hooks(
         hook_data: &serde_json::Value,
-        hook_event_name: &str,
+        hook_event: &CopilotHookEvent,
     ) -> Result<AgentRunResult, GitAiError> {
-        let hook_source = Some("github_copilot_hook".to_string());
         let telemetry_payload_common = collect_common_hook_telemetry_payload(hook_data);
 
         let repo_working_dir: String = hook_data
@@ -2146,7 +2737,7 @@ impl GithubCopilotPreset {
 
         let dirty_files = Self::dirty_files_from_hook_data(hook_data);
 
-        if hook_event_name == "before_edit" {
+        if matches!(hook_event, CopilotHookEvent::BeforeEdit) {
             let will_edit_filepaths = hook_data
                 .get("will_edit_filepaths")
                 .and_then(|v| v.as_array())
@@ -2172,11 +2763,28 @@ impl GithubCopilotPreset {
             let mut telemetry_payload = telemetry_payload_common.clone();
             telemetry_payload.insert("tool_name".to_string(), "edit_file".to_string());
             telemetry_payload.insert("agent_tool".to_string(), "github-copilot".to_string());
-            let telemetry_payload = if telemetry_payload.is_empty() {
-                None
-            } else {
-                Some(telemetry_payload)
-            };
+            let telemetry = TelemetryPayloadView::from_payload(&telemetry_payload);
+            let mut telemetry_events = vec![
+                AgentTelemetryEvent::ToolCall(AgentToolCallTelemetry {
+                    phase: ToolCallPhase::Started,
+                    tool_name: Some("edit_file".to_string()),
+                    tool_use_id: telemetry.tool_use_id.clone(),
+                    duration_ms: telemetry.duration_ms,
+                    failure_type: None,
+                    signal: TelemetrySignal::Explicit,
+                }),
+                AgentTelemetryEvent::Response(AgentResponseTelemetry {
+                    phase: ResponsePhase::Started,
+                    reason: telemetry.reason.clone(),
+                    status: None,
+                    response_char_count: None,
+                    signal: TelemetrySignal::Inferred,
+                    dedupe_key: telemetry.dedupe_key.clone(),
+                }),
+            ];
+            if let Some(skill_event) = maybe_skill_event(&telemetry_payload) {
+                telemetry_events.push(skill_event);
+            }
 
             return Ok(AgentRunResult {
                 agent_id: AgentId {
@@ -2191,9 +2799,8 @@ impl GithubCopilotPreset {
                 edited_filepaths: None,
                 will_edit_filepaths: Some(will_edit_filepaths),
                 dirty_files,
-                hook_event_name: Some(hook_event_name.to_string()),
-                hook_source,
-                telemetry_payload,
+                checkpoint_execution: CheckpointExecution::Run,
+                telemetry_events,
             });
         }
 
@@ -2260,11 +2867,28 @@ impl GithubCopilotPreset {
         let mut telemetry_payload = telemetry_payload_common;
         telemetry_payload.insert("tool_name".to_string(), "edit_file".to_string());
         telemetry_payload.insert("agent_tool".to_string(), "github-copilot".to_string());
-        let telemetry_payload = if telemetry_payload.is_empty() {
-            None
-        } else {
-            Some(telemetry_payload)
-        };
+        let telemetry = TelemetryPayloadView::from_payload(&telemetry_payload);
+        let mut telemetry_events = vec![
+            AgentTelemetryEvent::ToolCall(AgentToolCallTelemetry {
+                phase: ToolCallPhase::Ended,
+                tool_name: Some("edit_file".to_string()),
+                tool_use_id: telemetry.tool_use_id.clone(),
+                duration_ms: telemetry.duration_ms,
+                failure_type: telemetry.failure_type.clone(),
+                signal: TelemetrySignal::Explicit,
+            }),
+            AgentTelemetryEvent::Response(AgentResponseTelemetry {
+                phase: ResponsePhase::Ended,
+                reason: telemetry.reason.clone(),
+                status: telemetry.status.clone(),
+                response_char_count: telemetry.response_char_count,
+                signal: TelemetrySignal::Inferred,
+                dedupe_key: telemetry.dedupe_key.clone(),
+            }),
+        ];
+        if let Some(skill_event) = maybe_skill_event(&telemetry_payload) {
+            telemetry_events.push(skill_event);
+        }
 
         Ok(AgentRunResult {
             agent_id,
@@ -2276,17 +2900,15 @@ impl GithubCopilotPreset {
             edited_filepaths: edited_filepaths.or(detected_edited_filepaths),
             will_edit_filepaths: None,
             dirty_files,
-            hook_event_name: Some(hook_event_name.to_string()),
-            hook_source,
-            telemetry_payload,
+            checkpoint_execution: CheckpointExecution::Run,
+            telemetry_events,
         })
     }
 
     fn run_vscode_native_hooks(
         hook_data: &serde_json::Value,
-        hook_event_name: &str,
+        hook_event: &CopilotHookEvent,
     ) -> Result<AgentRunResult, GitAiError> {
-        let hook_source = Some("github_copilot_hook".to_string());
         let cwd = hook_data
             .get("cwd")
             .and_then(|v| v.as_str())
@@ -2317,15 +2939,17 @@ impl GithubCopilotPreset {
         telemetry_payload.insert("tool_name".to_string(), tool_name.to_string());
         telemetry_payload.insert("agent_tool".to_string(), "github-copilot".to_string());
 
-        if !matches!(hook_event_name, "PreToolUse" | "PostToolUse") {
+        if !matches!(
+            hook_event,
+            CopilotHookEvent::PreToolUse | CopilotHookEvent::PostToolUse
+        ) {
             return Ok(Self::telemetry_only_result(
-                hook_event_name,
-                hook_source,
+                hook_event,
                 &chat_session_id,
                 &model_hint,
                 cwd,
                 dirty_files,
-                telemetry_payload,
+                Self::telemetry_events_for_copilot_event(hook_event, &telemetry_payload),
             ));
         }
 
@@ -2333,25 +2957,23 @@ impl GithubCopilotPreset {
         // Keep telemetry for all tools; only create checkpoints for known edit tools.
         if !Self::is_supported_vscode_edit_tool_name(tool_name) {
             return Ok(Self::telemetry_only_result(
-                hook_event_name,
-                hook_source,
+                hook_event,
                 &chat_session_id,
                 &model_hint,
                 cwd,
                 dirty_files,
-                telemetry_payload,
+                Self::telemetry_events_for_copilot_event(hook_event, &telemetry_payload),
             ));
         }
 
         let Some(cwd) = cwd else {
             return Ok(Self::telemetry_only_result(
-                hook_event_name,
-                hook_source,
+                hook_event,
                 &chat_session_id,
                 &model_hint,
                 None,
                 dirty_files,
-                telemetry_payload,
+                Self::telemetry_events_for_copilot_event(hook_event, &telemetry_payload),
             ));
         };
 
@@ -2391,13 +3013,12 @@ impl GithubCopilotPreset {
 
         if !Self::is_likely_copilot_native_hook(transcript_path.as_deref()) {
             return Ok(Self::telemetry_only_result(
-                hook_event_name,
-                hook_source,
+                hook_event,
                 &chat_session_id,
                 &model_hint,
                 Some(cwd),
                 dirty_files,
-                telemetry_payload,
+                Self::telemetry_events_for_copilot_event(hook_event, &telemetry_payload),
             ));
         }
 
@@ -2447,24 +3068,17 @@ impl GithubCopilotPreset {
             }
         }
 
-        if hook_event_name == "PreToolUse" {
+        if matches!(hook_event, CopilotHookEvent::PreToolUse) {
             if extracted_paths.is_empty() {
                 return Ok(Self::telemetry_only_result(
-                    hook_event_name,
-                    hook_source,
+                    hook_event,
                     &chat_session_id,
                     &model_hint,
                     Some(cwd),
                     dirty_files,
-                    telemetry_payload,
+                    Self::telemetry_events_for_copilot_event(hook_event, &telemetry_payload),
                 ));
             }
-
-            let telemetry_payload = if telemetry_payload.is_empty() {
-                None
-            } else {
-                Some(telemetry_payload)
-            };
 
             return Ok(AgentRunResult {
                 agent_id: AgentId {
@@ -2479,21 +3093,22 @@ impl GithubCopilotPreset {
                 edited_filepaths: None,
                 will_edit_filepaths: Some(extracted_paths),
                 dirty_files,
-                hook_event_name: Some(hook_event_name.to_string()),
-                hook_source,
-                telemetry_payload,
+                checkpoint_execution: CheckpointExecution::Run,
+                telemetry_events: Self::telemetry_events_for_copilot_event(
+                    hook_event,
+                    &telemetry_payload,
+                ),
             });
         }
 
         let Some(transcript_path) = transcript_path else {
             return Ok(Self::telemetry_only_result(
-                hook_event_name,
-                hook_source,
+                hook_event,
                 &chat_session_id,
                 &model_hint,
                 Some(cwd),
                 dirty_files,
-                telemetry_payload,
+                Self::telemetry_events_for_copilot_event(hook_event, &telemetry_payload),
             ));
         };
 
@@ -2510,21 +3125,14 @@ impl GithubCopilotPreset {
 
         if extracted_paths.is_empty() {
             return Ok(Self::telemetry_only_result(
-                hook_event_name,
-                hook_source,
+                hook_event,
                 &agent_id.id,
                 &agent_id.model,
                 Some(cwd),
                 dirty_files,
-                telemetry_payload,
+                Self::telemetry_events_for_copilot_event(hook_event, &telemetry_payload),
             ));
         }
-
-        let telemetry_payload = if telemetry_payload.is_empty() {
-            None
-        } else {
-            Some(telemetry_payload)
-        };
 
         Ok(AgentRunResult {
             agent_id,
@@ -2535,23 +3143,22 @@ impl GithubCopilotPreset {
             edited_filepaths: Some(extracted_paths),
             will_edit_filepaths: None,
             dirty_files,
-            hook_event_name: Some(hook_event_name.to_string()),
-            hook_source,
-            telemetry_payload,
+            checkpoint_execution: CheckpointExecution::Run,
+            telemetry_events: Self::telemetry_events_for_copilot_event(
+                hook_event,
+                &telemetry_payload,
+            ),
         })
     }
 
     fn telemetry_only_result(
-        hook_event_name: &str,
-        hook_source: Option<String>,
+        hook_event: &CopilotHookEvent,
         chat_session_id: &str,
         model: &str,
         repo_working_dir: Option<String>,
         dirty_files: Option<HashMap<String, String>>,
-        mut telemetry_payload: HashMap<String, String>,
+        telemetry_events: Vec<AgentTelemetryEvent>,
     ) -> AgentRunResult {
-        telemetry_payload.insert("telemetry_only".to_string(), "1".to_string());
-
         AgentRunResult {
             agent_id: AgentId {
                 tool: "github-copilot".to_string(),
@@ -2565,10 +3172,119 @@ impl GithubCopilotPreset {
             edited_filepaths: None,
             will_edit_filepaths: None,
             dirty_files,
-            hook_event_name: Some(hook_event_name.to_string()),
-            hook_source,
-            telemetry_payload: Some(telemetry_payload),
+            checkpoint_execution: CheckpointExecution::NoOp {
+                reason: NoOpReason::TelemetryOnly,
+            },
+            telemetry_events: if telemetry_events.is_empty() {
+                Self::telemetry_events_for_copilot_event(hook_event, &HashMap::new())
+            } else {
+                telemetry_events
+            },
         }
+    }
+
+    fn telemetry_events_for_copilot_event(
+        event: &CopilotHookEvent,
+        payload: &HashMap<String, String>,
+    ) -> Vec<AgentTelemetryEvent> {
+        let telemetry = TelemetryPayloadView::from_payload(payload);
+        let mut events = Vec::new();
+
+        match event {
+            CopilotHookEvent::SessionStart => {
+                events.push(AgentTelemetryEvent::Session(AgentSessionTelemetry {
+                    phase: SessionPhase::Started,
+                    reason: telemetry.reason.clone(),
+                    source: Some("github_copilot_hook".to_string()),
+                    mode: telemetry.mode.clone(),
+                    duration_ms: telemetry.duration_ms,
+                    signal: TelemetrySignal::Explicit,
+                }))
+            }
+            CopilotHookEvent::UserPromptSubmit => {
+                events.push(AgentTelemetryEvent::Message(AgentMessageTelemetry {
+                    role: MessageRole::Human,
+                    prompt_char_count: telemetry.prompt_char_count,
+                    attachment_count: telemetry.attachment_count,
+                    signal: TelemetrySignal::Explicit,
+                }));
+            }
+            CopilotHookEvent::PreToolUse | CopilotHookEvent::BeforeEdit => {
+                events.push(AgentTelemetryEvent::ToolCall(AgentToolCallTelemetry {
+                    phase: ToolCallPhase::Started,
+                    tool_name: telemetry.tool_name.clone(),
+                    tool_use_id: telemetry.tool_use_id.clone(),
+                    duration_ms: telemetry.duration_ms,
+                    failure_type: None,
+                    signal: TelemetrySignal::Explicit,
+                }));
+                events.push(AgentTelemetryEvent::Response(AgentResponseTelemetry {
+                    phase: ResponsePhase::Started,
+                    reason: telemetry.reason.clone(),
+                    status: None,
+                    response_char_count: None,
+                    signal: TelemetrySignal::Inferred,
+                    dedupe_key: telemetry.dedupe_key.clone(),
+                }));
+            }
+            CopilotHookEvent::PostToolUse | CopilotHookEvent::AfterEdit => {
+                events.push(AgentTelemetryEvent::ToolCall(AgentToolCallTelemetry {
+                    phase: ToolCallPhase::Ended,
+                    tool_name: telemetry.tool_name.clone(),
+                    tool_use_id: telemetry.tool_use_id.clone(),
+                    duration_ms: telemetry.duration_ms,
+                    failure_type: telemetry.failure_type.clone(),
+                    signal: TelemetrySignal::Explicit,
+                }));
+                events.push(AgentTelemetryEvent::Response(AgentResponseTelemetry {
+                    phase: ResponsePhase::Ended,
+                    reason: telemetry.reason.clone(),
+                    status: telemetry.status.clone(),
+                    response_char_count: telemetry.response_char_count,
+                    signal: TelemetrySignal::Inferred,
+                    dedupe_key: telemetry.dedupe_key.clone(),
+                }));
+            }
+            CopilotHookEvent::SubagentStart => {
+                events.push(AgentTelemetryEvent::Subagent(AgentSubagentTelemetry {
+                    phase: SubagentPhase::Started,
+                    subagent_id: telemetry.subagent_id.clone(),
+                    subagent_type: telemetry.subagent_type.clone(),
+                    status: telemetry.status.clone(),
+                    duration_ms: telemetry.duration_ms,
+                    result_char_count: telemetry.result_char_count,
+                    signal: TelemetrySignal::Explicit,
+                }))
+            }
+            CopilotHookEvent::SubagentStop => {
+                events.push(AgentTelemetryEvent::Subagent(AgentSubagentTelemetry {
+                    phase: SubagentPhase::Ended,
+                    subagent_id: telemetry.subagent_id.clone(),
+                    subagent_type: telemetry.subagent_type.clone(),
+                    status: telemetry.status.clone(),
+                    duration_ms: telemetry.duration_ms,
+                    result_char_count: telemetry.result_char_count,
+                    signal: TelemetrySignal::Explicit,
+                }))
+            }
+            CopilotHookEvent::Stop => {
+                events.push(AgentTelemetryEvent::Response(AgentResponseTelemetry {
+                    phase: ResponsePhase::Ended,
+                    reason: telemetry.reason.clone(),
+                    status: telemetry.status.clone(),
+                    response_char_count: telemetry.response_char_count,
+                    signal: TelemetrySignal::Explicit,
+                    dedupe_key: telemetry.dedupe_key.clone(),
+                }))
+            }
+            CopilotHookEvent::PreCompact | CopilotHookEvent::Unknown(_) => {}
+        }
+
+        if let Some(skill_event) = maybe_skill_event(payload) {
+            events.push(skill_event);
+        }
+
+        events
     }
 
     fn dirty_files_from_hook_data(
@@ -3176,9 +3892,8 @@ impl AgentCheckpointPreset for DroidPreset {
                 edited_filepaths: None,
                 will_edit_filepaths: file_path_as_vec,
                 dirty_files: None,
-                hook_event_name: None,
-                hook_source: None,
-                telemetry_payload: None,
+                checkpoint_execution: CheckpointExecution::Run,
+                telemetry_events: vec![],
             });
         }
 
@@ -3192,9 +3907,8 @@ impl AgentCheckpointPreset for DroidPreset {
             edited_filepaths: file_path_as_vec,
             will_edit_filepaths: None,
             dirty_files: None,
-            hook_event_name: None,
-            hook_source: None,
-            telemetry_payload: None,
+            checkpoint_execution: CheckpointExecution::Run,
+            telemetry_events: vec![],
         })
     }
 }
@@ -3952,9 +4666,8 @@ impl AgentCheckpointPreset for AiTabPreset {
                 edited_filepaths: None,
                 will_edit_filepaths,
                 dirty_files,
-                hook_event_name: None,
-                hook_source: None,
-                telemetry_payload: None,
+                checkpoint_execution: CheckpointExecution::Run,
+                telemetry_events: vec![],
             });
         }
 
@@ -3967,9 +4680,8 @@ impl AgentCheckpointPreset for AiTabPreset {
             edited_filepaths,
             will_edit_filepaths: None,
             dirty_files,
-            hook_event_name: None,
-            hook_source: None,
-            telemetry_payload: None,
+            checkpoint_execution: CheckpointExecution::Run,
+            telemetry_events: vec![],
         })
     }
 }

@@ -7,7 +7,9 @@ use crate::{
         transcript::AiTranscript,
         working_log::{AgentId, CheckpointKind},
     },
-    commands::checkpoint_agent::agent_presets::{AgentCheckpointPreset, AgentRunResult},
+    commands::checkpoint_agent::agent_presets::{
+        AgentCheckpointPreset, AgentRunResult, CheckpointExecution,
+    },
 };
 
 pub struct AgentV1Preset;
@@ -71,9 +73,8 @@ impl AgentCheckpointPreset for AgentV1Preset {
                 repo_working_dir: Some(repo_working_dir),
                 edited_filepaths: None,
                 dirty_files,
-                hook_event_name: None,
-                hook_source: None,
-                telemetry_payload: None,
+                checkpoint_execution: CheckpointExecution::Run,
+                telemetry_events: vec![],
             }),
             AgentV1Input::AiAgent {
                 edited_filepaths,
@@ -96,9 +97,8 @@ impl AgentCheckpointPreset for AgentV1Preset {
                 edited_filepaths,
                 will_edit_filepaths: None,
                 dirty_files,
-                hook_event_name: None,
-                hook_source: None,
-                telemetry_payload: None,
+                checkpoint_execution: CheckpointExecution::Run,
+                telemetry_events: vec![],
             }),
         }
     }

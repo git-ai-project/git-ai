@@ -5,7 +5,10 @@ mod test_utils;
 use git_ai::authorship::transcript::Message;
 use git_ai::authorship::working_log::CheckpointKind;
 use git_ai::commands::checkpoint_agent::agent_presets::{
-    AgentCheckpointFlags, AgentCheckpointPreset, CodexPreset,
+    AgentCheckpointFlags, AgentCheckpointPreset, CheckpointExecution, CodexPreset,
+};
+use git_ai::commands::checkpoint_agent::telemetry_events::{
+    AgentTelemetryEvent, MessageRole, ResponsePhase, SessionPhase, TelemetrySignal,
 };
 use serde_json::json;
 use std::fs;
@@ -96,18 +99,37 @@ fn test_codex_preset_legacy_hook_input() {
             .is_some(),
         "transcript_path should be persisted for commit-time resync"
     );
-    assert_eq!(result.hook_source.as_deref(), Some("codex_notify"));
-    assert_eq!(
-        result.hook_event_name.as_deref(),
-        Some("agent-turn-complete")
+    assert_eq!(result.checkpoint_execution, CheckpointExecution::Run);
+    assert!(
+        result.telemetry_events.iter().any(|event| matches!(
+            event,
+            AgentTelemetryEvent::Session(session)
+                if session.phase == SessionPhase::Started
+                    && session.signal == TelemetrySignal::Inferred
+        )),
+        "Codex should emit inferred session-start telemetry"
     );
     assert_eq!(
         result
-            .telemetry_payload
-            .as_ref()
-            .and_then(|m| m.get("prompt_char_count"))
-            .map(String::as_str),
-        Some("20")
+            .telemetry_events
+            .iter()
+            .find_map(|event| match event {
+                AgentTelemetryEvent::Message(message) if message.role == MessageRole::Human => {
+                    message.prompt_char_count
+                }
+                _ => None,
+            }),
+        Some(20),
+        "Prompt char count should be reflected in human message telemetry"
+    );
+    assert!(
+        result.telemetry_events.iter().any(|event| matches!(
+            event,
+            AgentTelemetryEvent::Response(response)
+                if response.phase == ResponsePhase::Ended
+                    && response.signal == TelemetrySignal::Explicit
+        )),
+        "agent-turn-complete should emit explicit response-ended telemetry"
     );
 }
 
@@ -153,8 +175,16 @@ fn test_codex_preset_structured_hook_input() {
         result.transcript.is_some(),
         "AI checkpoint should include transcript"
     );
-    assert_eq!(result.hook_source.as_deref(), Some("codex_notify"));
-    assert_eq!(result.hook_event_name.as_deref(), Some("after_agent"));
+    assert_eq!(result.checkpoint_execution, CheckpointExecution::Run);
+    assert!(
+        result.telemetry_events.iter().any(|event| matches!(
+            event,
+            AgentTelemetryEvent::Response(response)
+                if response.phase == ResponsePhase::Ended
+                    && response.signal == TelemetrySignal::Explicit
+        )),
+        "after_agent should emit explicit response-ended telemetry"
+    );
 }
 
 #[test]

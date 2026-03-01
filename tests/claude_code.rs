@@ -4,8 +4,11 @@ mod test_utils;
 
 use git_ai::authorship::transcript::Message;
 use git_ai::commands::checkpoint_agent::agent_presets::{
-    AgentCheckpointFlags, AgentCheckpointPreset, ClaudePreset, extract_plan_from_tool_use,
-    is_plan_file_path,
+    AgentCheckpointFlags, AgentCheckpointPreset, CheckpointExecution, ClaudePreset, NoOpReason,
+    extract_plan_from_tool_use, is_plan_file_path,
+};
+use git_ai::commands::checkpoint_agent::telemetry_events::{
+    AgentTelemetryEvent, SessionPhase, TelemetrySignal,
 };
 use serde_json::json;
 use std::collections::HashMap;
@@ -120,19 +123,19 @@ fn test_claude_preset_session_start_without_transcript_is_telemetry_only() {
     assert_eq!(result.agent_id.tool, "claude");
     assert_eq!(result.agent_id.id, "session-123");
     assert_eq!(
-        result.hook_event_name.as_deref(),
-        Some("SessionStart"),
-        "hook event name should be normalized onto AgentRunResult"
+        result.checkpoint_execution,
+        CheckpointExecution::NoOp {
+            reason: NoOpReason::TelemetryOnly
+        }
     );
-    assert_eq!(result.hook_source.as_deref(), Some("claude_hook"));
-    assert_eq!(
-        result
-            .telemetry_payload
-            .as_ref()
-            .and_then(|m| m.get("telemetry_only"))
-            .map(String::as_str),
-        Some("1")
-    );
+    assert!(result.telemetry_events.iter().any(|event| {
+        matches!(
+            event,
+            AgentTelemetryEvent::Session(session)
+                if session.phase == SessionPhase::Started
+                    && session.signal == TelemetrySignal::Explicit
+        )
+    }));
 }
 
 #[test]
