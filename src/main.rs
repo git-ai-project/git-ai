@@ -1,19 +1,5 @@
-mod api;
-mod auth;
-mod authorship;
-mod ci;
-mod commands;
-mod config;
-mod error;
-mod feature_flags;
-mod git;
-mod mdm;
-mod metrics;
-mod observability;
-mod repo_url;
-mod utils;
-
 use clap::Parser;
+use git_ai::commands;
 
 #[derive(Parser)]
 #[command(name = "git-ai")]

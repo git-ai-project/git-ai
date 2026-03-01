@@ -934,6 +934,65 @@ fn test_blame_multiple_line_ranges() {
     assert!(!line_authors.contains_key(&3));
 }
 
+#[test]
+fn test_blame_analysis_matches_blame_no_output_multi_ranges() {
+    let repo = TestRepo::new();
+    let mut file = repo.filename("test.txt");
+
+    file.set_contents(lines![
+        "Line 1",
+        "Line 2".ai(),
+        "Line 3",
+        "Line 4",
+        "Line 5".ai()
+    ]);
+    repo.stage_all_and_commit("Five lines").unwrap();
+
+    let gitai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("Failed to find repository");
+
+    let mut options = GitAiBlameOptions::default();
+    options.line_ranges = vec![(1, 2), (4, 5)];
+    options.no_output = true;
+
+    let (line_authors, prompt_records) = gitai_repo.blame("test.txt", &options).unwrap();
+    let analysis = gitai_repo.blame_analysis("test.txt", &options).unwrap();
+
+    assert_eq!(line_authors, analysis.line_authors);
+    assert_eq!(prompt_records, analysis.prompt_records);
+}
+
+#[test]
+fn test_blame_analysis_returns_requested_ranges_only() {
+    let repo = TestRepo::new();
+    let mut file = repo.filename("test.txt");
+
+    file.set_contents(lines![
+        "Line 1", "Line 2", "Line 3", "Line 4", "Line 5", "Line 6"
+    ]);
+    repo.stage_all_and_commit("Six lines").unwrap();
+
+    let gitai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("Failed to find repository");
+
+    let mut options = GitAiBlameOptions::default();
+    options.line_ranges = vec![(1, 2), (5, 6)];
+
+    let analysis = gitai_repo.blame_analysis("test.txt", &options).unwrap();
+
+    let mut actual_lines = std::collections::BTreeSet::new();
+    for hunk in &analysis.blame_hunks {
+        for line in hunk.range.0..=hunk.range.1 {
+            actual_lines.insert(line);
+        }
+    }
+
+    let expected_lines = std::collections::BTreeSet::from([1u32, 2, 5, 6]);
+    assert_eq!(expected_lines, actual_lines);
+    assert!(!actual_lines.contains(&3));
+    assert!(!actual_lines.contains(&4));
+}
+
 // =============================================================================
 // Ignore Whitespace Tests
 // =============================================================================
