@@ -3207,6 +3207,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn mark_repo_hooks_enabled_is_idempotent() {
         let tmp = tempfile::tempdir().expect("failed to create tempdir");
         let repo = init_repo(&tmp.path().join("repo"));

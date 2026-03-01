@@ -76,6 +76,7 @@ fn test_ci_event_merge_structure() {
         head_sha: "def456".to_string(),
         base_ref: "main".to_string(),
         base_sha: "ghi789".to_string(),
+        fork_clone_url: Some("https://example.com/fork.git".to_string()),
     };
 
     match event {
@@ -85,12 +86,17 @@ fn test_ci_event_merge_structure() {
             head_sha,
             base_ref,
             base_sha,
+            fork_clone_url,
         } => {
             assert_eq!(merge_commit_sha, "abc123");
             assert_eq!(head_ref, "feature");
             assert_eq!(head_sha, "def456");
             assert_eq!(base_ref, "main");
             assert_eq!(base_sha, "ghi789");
+            assert_eq!(
+                fork_clone_url,
+                Some("https://example.com/fork.git".to_string())
+            );
         }
     }
 }
@@ -329,6 +335,7 @@ fn test_ci_context_with_temp_dir() {
         head_sha: sha.clone(),
         base_ref: "main".to_string(),
         base_sha: sha.clone(),
+        fork_clone_url: None,
     };
 
     let ctx = CiContext {
