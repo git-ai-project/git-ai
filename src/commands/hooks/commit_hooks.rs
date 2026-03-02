@@ -4,9 +4,10 @@ use crate::git::cli_parser::{ParsedGitInvocation, is_dry_run};
 use crate::git::repository::Repository;
 use crate::git::rewrite_log::RewriteLogEvent;
 use crate::utils::debug_log;
+use uuid::Uuid;
 
 pub fn commit_pre_command_hook(
-    parsed_args: &ParsedGitInvocation,
+    parsed_args: &mut ParsedGitInvocation,
     repository: &mut Repository,
 ) -> bool {
     if is_dry_run(&parsed_args.command_args) {
@@ -31,6 +32,18 @@ pub fn commit_pre_command_hook(
         eprintln!("Pre-commit failed: {}", e);
         std::process::exit(1);
     }
+
+    // Generate a UUID for this commit's authorship note and inject the Git-AI trailer.
+    // In wrapper mode the modified args are forwarded to `proxy_to_git`, so the trailer
+    // ends up in the actual commit message. In hooks mode these args are discarded
+    // (the trailer is instead written by the prepare-commit-msg handler).
+    let note_id = Uuid::new_v4().to_string();
+    repository.storage.write_pending_note_id(&note_id);
+    parsed_args.command_args.push("--trailer".to_string());
+    parsed_args
+        .command_args
+        .push(format!("Git-AI: {}", note_id));
+
     true
 }
 

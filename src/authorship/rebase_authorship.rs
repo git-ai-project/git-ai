@@ -1502,6 +1502,13 @@ pub fn rewrite_authorship_after_commit_amend(
     // Update base commit SHA
     authorship_log.metadata.base_commit_sha = amended_commit.to_string();
 
+    // Pick up the pending note UUID (written by the pre-commit hook) and stamp
+    // it into the authorship metadata so the Git-AI trailer matches this note.
+    if let Some(note_id) = repo.storage.read_pending_note_id() {
+        authorship_log.metadata.id = Some(note_id);
+        repo.storage.clear_pending_note_id();
+    }
+
     // Save authorship log
     let authorship_json = authorship_log
         .serialize_to_string()

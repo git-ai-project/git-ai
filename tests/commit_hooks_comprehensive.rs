@@ -47,9 +47,9 @@ fn test_pre_commit_hook_success() {
 
     let mut repository =
         repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let parsed_args = make_commit_invocation(&["-m", "test commit"]);
+    let mut parsed_args = make_commit_invocation(&["-m", "test commit"]);
 
-    let result = commit_pre_command_hook(&parsed_args, &mut repository);
+    let result = commit_pre_command_hook(&mut parsed_args, &mut repository);
 
     assert!(result, "Pre-commit hook should succeed");
     assert!(
@@ -68,9 +68,9 @@ fn test_pre_commit_hook_dry_run() {
 
     let mut repository =
         repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let parsed_args = make_commit_invocation(&["--dry-run", "-m", "test commit"]);
+    let mut parsed_args = make_commit_invocation(&["--dry-run", "-m", "test commit"]);
 
-    let result = commit_pre_command_hook(&parsed_args, &mut repository);
+    let result = commit_pre_command_hook(&mut parsed_args, &mut repository);
 
     assert!(!result, "Pre-commit hook should skip dry-run");
 }
@@ -92,9 +92,9 @@ fn test_pre_commit_hook_captures_head() {
 
     let mut repository =
         repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let parsed_args = make_commit_invocation(&["-m", "test commit"]);
+    let mut parsed_args = make_commit_invocation(&["-m", "test commit"]);
 
-    commit_pre_command_hook(&parsed_args, &mut repository);
+    commit_pre_command_hook(&mut parsed_args, &mut repository);
 
     assert!(
         repository.pre_command_base_commit.is_some(),
@@ -652,10 +652,10 @@ fn test_commit_full_flow() {
 
     let mut repository =
         repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let parsed_args = make_commit_invocation(&["-m", "test commit"]);
+    let mut parsed_args = make_commit_invocation(&["-m", "test commit"]);
 
     // Pre-hook
-    let pre_result = commit_pre_command_hook(&parsed_args, &mut repository);
+    let pre_result = commit_pre_command_hook(&mut parsed_args, &mut repository);
     assert!(pre_result);
 
     // Actual commit
@@ -704,10 +704,10 @@ fn test_commit_amend_full_flow() {
         repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     repository.pre_command_base_commit = Some(original_commit.commit_sha.clone());
 
-    let parsed_args = make_commit_invocation(&["--amend", "-m", "amended commit"]);
+    let mut parsed_args = make_commit_invocation(&["--amend", "-m", "amended commit"]);
 
     // Pre-hook
-    let pre_result = commit_pre_command_hook(&parsed_args, &mut repository);
+    let pre_result = commit_pre_command_hook(&mut parsed_args, &mut repository);
     assert!(pre_result);
 
     // Actual amend

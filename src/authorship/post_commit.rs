@@ -134,6 +134,14 @@ pub fn post_commit(
 
     authorship_log.metadata.base_commit_sha = commit_sha.clone();
 
+    // Pick up the pending note UUID (written by the pre-commit hook) and stamp
+    // it into the authorship metadata so that the Git-AI trailer in the commit
+    // message can be correlated with this note.
+    if let Some(note_id) = repo.storage.read_pending_note_id() {
+        authorship_log.metadata.id = Some(note_id);
+        repo.storage.clear_pending_note_id();
+    }
+
     // Handle prompts based on effective prompt storage mode for this repository
     // The effective mode considers include/exclude lists and fallback settings
     let effective_storage = Config::get().effective_prompt_storage(&Some(repo.clone()));

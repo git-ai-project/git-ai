@@ -1,5 +1,6 @@
 ---
 source: src/authorship/authorship_log_serialization.rs
+assertion_line: 816
 expression: log
 ---
 AuthorshipLogV3 {
@@ -51,6 +52,7 @@ AuthorshipLogV3 {
         git_ai_version: Some(
             "development",
         ),
+        id: None,
         base_commit_sha: "",
         prompts: {
             "c9883b05a2487d6d": PromptRecord {

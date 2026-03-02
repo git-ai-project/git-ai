@@ -1,5 +1,6 @@
 ---
 source: src/authorship/authorship_log_serialization.rs
+assertion_line: 702
 expression: deserialized
 ---
 AuthorshipLogV3 {
@@ -59,6 +60,7 @@ AuthorshipLogV3 {
         git_ai_version: Some(
             "development",
         ),
+        id: None,
         base_commit_sha: "abc123",
         prompts: {},
     },

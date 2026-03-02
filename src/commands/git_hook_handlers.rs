@@ -2288,8 +2288,8 @@ fn run_managed_hook(
                 return 0;
             }
             maybe_capture_cherry_pick_pre_commit_state(&repo);
-            let parsed = parsed_invocation("commit", vec![]);
-            let _ = commit_hooks::commit_pre_command_hook(&parsed, &mut repo);
+            let mut parsed = parsed_invocation("commit", vec![]);
+            let _ = commit_hooks::commit_pre_command_hook(&mut parsed, &mut repo);
             0
         }
         "post-commit" => {
@@ -2445,6 +2445,23 @@ fn run_managed_hook(
                 return 0;
             }
             maybe_capture_cherry_pick_pre_commit_state(&repo);
+
+            // In hooks mode, the pre-commit handler stored a pending note UUID.
+            // Append a Git-AI trailer to the commit-message file so the trailer
+            // appears in the final commit (mirrors --trailer injection in wrapper mode).
+            if let Some(note_id) = repo.storage.read_pending_note_id()
+                && let Some(msg_file) = hook_args.first()
+            {
+                let mut args = repo.global_args_for_exec();
+                args.extend([
+                    "interpret-trailers".to_string(),
+                    "--in-place".to_string(),
+                    "--trailer".to_string(),
+                    format!("Git-AI: {}", note_id),
+                    msg_file.clone(),
+                ]);
+                let _ = crate::git::repository::exec_git(&args);
+            }
             0
         }
         _ => 0,

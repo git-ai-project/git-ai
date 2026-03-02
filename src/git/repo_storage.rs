@@ -132,6 +132,31 @@ impl RepoStorage {
         Ok(())
     }
 
+    /* Pending Note ID (for Git-AI trailer) */
+
+    /// Path to the file storing the pending note UUID for the current commit
+    fn pending_note_id_path(&self) -> PathBuf {
+        self.ai_dir.join("pending_note_id")
+    }
+
+    /// Write a pending note ID (UUID) to be picked up by post-commit
+    pub fn write_pending_note_id(&self, id: &str) {
+        let _ = fs::write(self.pending_note_id_path(), id);
+    }
+
+    /// Read and return the pending note ID if it exists
+    pub fn read_pending_note_id(&self) -> Option<String> {
+        fs::read_to_string(self.pending_note_id_path())
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Remove the pending note ID file
+    pub fn clear_pending_note_id(&self) {
+        let _ = fs::remove_file(self.pending_note_id_path());
+    }
+
     /* Rewrite Log Persistance */
 
     /// Append a rewrite event to the rewrite log file and return the full log
