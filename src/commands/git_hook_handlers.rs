@@ -8,7 +8,7 @@ use crate::commands::hooks::stash_hooks;
 use crate::config;
 use crate::error::GitAiError;
 use crate::git::cli_parser::ParsedGitInvocation;
-use crate::git::repository::{Repository, disable_internal_git_hooks};
+use crate::git::repository::{Repository, disable_internal_git_hooks, worktree_storage_ai_dir};
 use crate::git::sync_authorship::fetch_authorship_notes;
 use crate::utils::{debug_log, debug_performance_log_structured};
 use serde::{Deserialize, Serialize};
@@ -2484,33 +2484,33 @@ fn needs_prepare_commit_msg_handling() -> bool {
 }
 
 /// Check whether a `pending_note_id` file exists in the storage directory
-/// corresponding to `git_dir`.  For the main worktree the file lives at
-/// `<git_dir>/ai/pending_note_id`, but for linked worktrees `git_dir` is
-/// `<common_dir>/worktrees/<name>` and the file is written by `RepoStorage`
-/// at `<common_dir>/ai/worktrees/<name>/pending_note_id`.
+/// corresponding to `git_dir`.  Delegates to `worktree_storage_ai_dir` (the
+/// canonical helper that resolves the correct ai directory for both the main
+/// worktree and linked worktrees) so that the path logic is not duplicated.
 fn pending_note_id_exists(git_dir: &Path) -> bool {
-    // Non-worktree path: <git_dir>/ai/pending_note_id
-    if git_dir.join("ai").join("pending_note_id").is_file() {
-        return true;
-    }
+    let git_common_dir = resolve_git_common_dir(git_dir);
+    let ai_dir = worktree_storage_ai_dir(git_dir, &git_common_dir);
+    ai_dir.join("pending_note_id").is_file()
+}
 
-    // Worktree path: git_dir is <common_dir>/worktrees/<name>.
-    // The pending file lives at <common_dir>/ai/worktrees/<name>/pending_note_id.
-    let parent = git_dir
-        .parent()
-        .filter(|p| p.file_name().map(|n| n == "worktrees").unwrap_or(false));
-    if let Some(worktrees_dir) = parent
-        && let (Some(common_dir), Some(wt_name)) = (worktrees_dir.parent(), git_dir.file_name())
-    {
-        return common_dir
-            .join("ai")
-            .join("worktrees")
-            .join(wt_name)
-            .join("pending_note_id")
-            .is_file();
+/// Resolve the git common directory from `git_dir`.  For linked worktrees git
+/// stores a `commondir` file inside the worktree-specific git directory that
+/// contains a (usually relative) path to the shared common directory.  When
+/// that file is absent the repository is not a linked worktree and
+/// `git_dir` itself is the common directory.
+fn resolve_git_common_dir(git_dir: &Path) -> PathBuf {
+    let commondir_file = git_dir.join("commondir");
+    if let Ok(contents) = fs::read_to_string(&commondir_file) {
+        let trimmed = contents.trim();
+        if !trimmed.is_empty() {
+            let candidate = Path::new(trimmed);
+            if candidate.is_relative() {
+                return git_dir.join(candidate);
+            }
+            return candidate.to_path_buf();
+        }
     }
-
-    false
+    git_dir.to_path_buf()
 }
 
 fn is_rebase_in_progress_from_context() -> bool {

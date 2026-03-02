@@ -2527,7 +2527,7 @@ fn resolve_command_base_dir(global_args: &[String]) -> Result<PathBuf, GitAiErro
     Ok(base)
 }
 
-fn worktree_storage_ai_dir(git_dir: &Path, git_common_dir: &Path) -> PathBuf {
+pub(crate) fn worktree_storage_ai_dir(git_dir: &Path, git_common_dir: &Path) -> PathBuf {
     let canonical_git_dir = git_dir
         .canonicalize()
         .unwrap_or_else(|_| git_dir.to_path_buf());
