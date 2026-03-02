@@ -2478,7 +2478,10 @@ fn needs_prepare_commit_msg_handling() -> bool {
         return true;
     };
 
+    // Also handle normal commits when a pending note UUID exists (written by
+    // the pre-commit hook) so the Git-AI trailer can be injected.
     git_dir.join("CHERRY_PICK_HEAD").is_file()
+        || git_dir.join("ai").join("pending_note_id").is_file()
 }
 
 fn is_rebase_in_progress_from_context() -> bool {

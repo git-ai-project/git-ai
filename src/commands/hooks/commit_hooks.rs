@@ -39,10 +39,19 @@ pub fn commit_pre_command_hook(
     // (the trailer is instead written by the prepare-commit-msg handler).
     let note_id = Uuid::new_v4().to_string();
     repository.storage.write_pending_note_id(&note_id);
-    parsed_args.command_args.push("--trailer".to_string());
+    // Insert --trailer before any "--" separator so that git treats it as
+    // an option rather than a pathspec.
+    let insert_pos = parsed_args
+        .command_args
+        .iter()
+        .position(|a| a == "--")
+        .unwrap_or(parsed_args.command_args.len());
     parsed_args
         .command_args
-        .push(format!("Git-AI: {}", note_id));
+        .insert(insert_pos, format!("Git-AI: {}", note_id));
+    parsed_args
+        .command_args
+        .insert(insert_pos, "--trailer".to_string());
 
     true
 }
