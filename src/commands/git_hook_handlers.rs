@@ -2496,25 +2496,21 @@ fn pending_note_id_exists(git_dir: &Path) -> bool {
 
     // Worktree path: git_dir is <common_dir>/worktrees/<name>.
     // The pending file lives at <common_dir>/ai/worktrees/<name>/pending_note_id.
-    if let Some(parent) = git_dir.parent() {
-        if parent
-            .file_name()
+    let parent = git_dir.parent().filter(|p| {
+        p.file_name()
             .map(|n| n == "worktrees")
             .unwrap_or(false)
-        {
-            if let Some(common_dir) = parent.parent() {
-                if let Some(wt_name) = git_dir.file_name() {
-                    let worktree_pending = common_dir
-                        .join("ai")
-                        .join("worktrees")
-                        .join(wt_name)
-                        .join("pending_note_id");
-                    if worktree_pending.is_file() {
-                        return true;
-                    }
-                }
-            }
-        }
+    });
+    if let Some(worktrees_dir) = parent
+        && let (Some(common_dir), Some(wt_name)) =
+            (worktrees_dir.parent(), git_dir.file_name())
+    {
+        return common_dir
+            .join("ai")
+            .join("worktrees")
+            .join(wt_name)
+            .join("pending_note_id")
+            .is_file();
     }
 
     false
