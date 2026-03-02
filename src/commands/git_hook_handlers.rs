@@ -2480,8 +2480,44 @@ fn needs_prepare_commit_msg_handling() -> bool {
 
     // Also handle normal commits when a pending note UUID exists (written by
     // the pre-commit hook) so the Git-AI trailer can be injected.
-    git_dir.join("CHERRY_PICK_HEAD").is_file()
-        || git_dir.join("ai").join("pending_note_id").is_file()
+    git_dir.join("CHERRY_PICK_HEAD").is_file() || pending_note_id_exists(&git_dir)
+}
+
+/// Check whether a `pending_note_id` file exists in the storage directory
+/// corresponding to `git_dir`.  For the main worktree the file lives at
+/// `<git_dir>/ai/pending_note_id`, but for linked worktrees `git_dir` is
+/// `<common_dir>/worktrees/<name>` and the file is written by `RepoStorage`
+/// at `<common_dir>/ai/worktrees/<name>/pending_note_id`.
+fn pending_note_id_exists(git_dir: &Path) -> bool {
+    // Non-worktree path: <git_dir>/ai/pending_note_id
+    if git_dir.join("ai").join("pending_note_id").is_file() {
+        return true;
+    }
+
+    // Worktree path: git_dir is <common_dir>/worktrees/<name>.
+    // The pending file lives at <common_dir>/ai/worktrees/<name>/pending_note_id.
+    if let Some(parent) = git_dir.parent() {
+        if parent
+            .file_name()
+            .map(|n| n == "worktrees")
+            .unwrap_or(false)
+        {
+            if let Some(common_dir) = parent.parent() {
+                if let Some(wt_name) = git_dir.file_name() {
+                    let worktree_pending = common_dir
+                        .join("ai")
+                        .join("worktrees")
+                        .join(wt_name)
+                        .join("pending_note_id");
+                    if worktree_pending.is_file() {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    false
 }
 
 fn is_rebase_in_progress_from_context() -> bool {
