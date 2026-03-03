@@ -55,8 +55,8 @@ impl HookInstaller for VSCodeInstaller {
             )));
         }
 
-        // VS Code hooks are installed via extension, not config files
-        // Check if extension is installed
+        // VS Code extension installation is managed here.
+        // Native GitHub Copilot agent hooks are managed by GitHubCopilotInstaller.
         if let Some(cli) = &resolved_cli {
             match is_vsc_editor_extension_installed(cli, "git-ai.git-ai-vscode") {
                 Ok(true) => {
@@ -88,8 +88,8 @@ impl HookInstaller for VSCodeInstaller {
         _params: &HookInstallerParams,
         _dry_run: bool,
     ) -> Result<Option<String>, GitAiError> {
-        // VS Code doesn't have config file hooks, only extension
-        // The install_extras method handles the extension installation
+        // VS Code extension install is handled by install_extras.
+        // Native GitHub Copilot agent hooks are handled by GitHubCopilotInstaller.
         Ok(None)
     }
 
@@ -98,8 +98,8 @@ impl HookInstaller for VSCodeInstaller {
         _params: &HookInstallerParams,
         _dry_run: bool,
     ) -> Result<Option<String>, GitAiError> {
-        // VS Code doesn't have config file hooks to uninstall
-        // The extension must be uninstalled manually through the editor
+        // VS Code extension uninstall remains manual through the editor.
+        // Native GitHub Copilot agent hook config is handled by GitHubCopilotInstaller.
         Ok(None)
     }
 

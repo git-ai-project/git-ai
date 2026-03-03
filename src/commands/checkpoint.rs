@@ -10,7 +10,13 @@ use crate::authorship::imara_diff_utils::{LineChangeTag, compute_line_changes};
 use crate::authorship::working_log::CheckpointKind;
 use crate::authorship::working_log::{Checkpoint, WorkingLogEntry};
 use crate::commands::blame::{GitAiBlameOptions, OLDEST_AI_BLAME_DATE};
-use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
+use crate::commands::checkpoint_agent::agent_presets::{
+    AgentRunResult, CheckpointExecution, NoOpReason,
+};
+use crate::commands::checkpoint_agent::telemetry_events::{
+    AgentTelemetryEvent, McpCallPhase, ResponsePhase, SessionPhase, SkillDetectionMethod,
+    SubagentPhase, TelemetrySignal, ToolCallPhase,
+};
 use crate::config::Config;
 use crate::error::GitAiError;
 use crate::git::repo_storage::PersistedWorkingLog;
@@ -44,6 +50,8 @@ use crate::authorship::working_log::AgentId;
 /// Emit at most one `agent_usage` metric per prompt every 2.5 minutes.
 /// This is half of the server-side bucketing window.
 const AGENT_USAGE_MIN_INTERVAL_SECS: u64 = 150;
+const RESPONSE_DEDUPE_TTL_SECS: u64 = 60 * 60 * 24;
+const SESSION_DEDUPE_TTL_SECS: u64 = 60 * 60 * 24 * 5;
 
 /// Build EventAttributes with repo metadata.
 /// Reused for both AgentUsage and Checkpoint events.
@@ -85,7 +93,6 @@ fn build_checkpoint_attrs(
 }
 
 /// Persistent local rate limit keyed by prompt ID hash.
-#[cfg(not(any(test, feature = "test-support")))]
 pub(crate) fn should_emit_agent_usage(agent_id: &AgentId) -> bool {
     let prompt_id = generate_short_hash(&agent_id.id, &agent_id.tool);
     let now_ts = SystemTime::now()
@@ -93,22 +100,253 @@ pub(crate) fn should_emit_agent_usage(agent_id: &AgentId) -> bool {
         .unwrap_or_default()
         .as_secs();
 
-    let Ok(db) = crate::metrics::db::MetricsDatabase::global() else {
-        return true;
-    };
-    let Ok(mut db_lock) = db.lock() else {
-        return true;
-    };
-
-    db_lock
-        .should_emit_agent_usage(&prompt_id, now_ts, AGENT_USAGE_MIN_INTERVAL_SECS)
-        .unwrap_or(true)
+    crate::metrics::dedupe_fs::should_emit(
+        "agent_usage",
+        &prompt_id,
+        now_ts,
+        AGENT_USAGE_MIN_INTERVAL_SECS,
+    )
 }
 
-/// Always returns false in test mode — no metrics DB access needed.
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) fn should_emit_agent_usage(_agent_id: &AgentId) -> bool {
-    false
+fn should_emit_telemetry_once(
+    namespace: &str,
+    event_key: &str,
+    now_ts: u64,
+    ttl_secs: u64,
+) -> bool {
+    crate::metrics::dedupe_fs::should_emit(namespace, event_key, now_ts, ttl_secs)
+}
+
+fn signal_is_inferred(signal: &TelemetrySignal) -> bool {
+    matches!(signal, TelemetrySignal::Inferred)
+}
+
+fn tool_call_phase_str(phase: &ToolCallPhase) -> &'static str {
+    match phase {
+        ToolCallPhase::Started => "started",
+        ToolCallPhase::Ended => "ended",
+        ToolCallPhase::Failed => "failed",
+        ToolCallPhase::PermissionRequested => "permission_requested",
+    }
+}
+
+fn mcp_call_phase_str(phase: &McpCallPhase) -> &'static str {
+    match phase {
+        McpCallPhase::Started => "started",
+        McpCallPhase::Ended => "ended",
+        McpCallPhase::Failed => "failed",
+        McpCallPhase::PermissionRequested => "permission_requested",
+    }
+}
+
+fn response_phase_str(phase: &ResponsePhase) -> &'static str {
+    match phase {
+        ResponsePhase::Started => "started",
+        ResponsePhase::Ended => "ended",
+    }
+}
+
+fn subagent_phase_str(phase: &SubagentPhase) -> &'static str {
+    match phase {
+        SubagentPhase::Started => "started",
+        SubagentPhase::Ended => "ended",
+    }
+}
+
+fn session_phase_str(phase: &SessionPhase) -> &'static str {
+    match phase {
+        SessionPhase::Started => "started",
+        SessionPhase::Ended => "ended",
+    }
+}
+
+fn response_dedupe_key(
+    response: &crate::commands::checkpoint_agent::telemetry_events::AgentResponseTelemetry,
+    now_ts: u64,
+) -> String {
+    if let Some(key) = &response.dedupe_key
+        && !key.trim().is_empty()
+    {
+        return key.clone();
+    }
+    format!("ts-{now_ts}")
+}
+
+pub(crate) fn emit_agent_telemetry_events(
+    agent_run_result: Option<&AgentRunResult>,
+    attrs: crate::metrics::EventAttributes,
+) {
+    let Some(result) = agent_run_result else {
+        return;
+    };
+    if result.telemetry_events.is_empty() {
+        return;
+    }
+
+    let now_ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    for event in &result.telemetry_events {
+        match event {
+            AgentTelemetryEvent::Session(session) => {
+                if signal_is_inferred(&session.signal) {
+                    let dedupe_key = format!(
+                        "session-{}:{}:{}",
+                        session_phase_str(&session.phase),
+                        result.agent_id.tool,
+                        result.agent_id.id
+                    );
+                    if !should_emit_telemetry_once(
+                        "session_event",
+                        &dedupe_key,
+                        now_ts,
+                        SESSION_DEDUPE_TTL_SECS,
+                    ) {
+                        continue;
+                    }
+                }
+
+                let mut values = crate::metrics::AgentSessionValues::new()
+                    .phase(session_phase_str(&session.phase))
+                    .inferred(u32::from(signal_is_inferred(&session.signal)));
+                if let Some(reason) = &session.reason {
+                    values = values.reason(reason);
+                }
+                if let Some(source) = &session.source {
+                    values = values.source(source);
+                }
+                if let Some(mode) = &session.mode {
+                    values = values.mode(mode);
+                }
+                if let Some(duration_ms) = session.duration_ms {
+                    values = values.duration_ms(duration_ms);
+                }
+                crate::metrics::record(values, attrs.clone());
+            }
+            AgentTelemetryEvent::Message(message) => {
+                let mut values =
+                    crate::metrics::AgentMessageValues::new().role(match message.role {
+                        crate::commands::checkpoint_agent::telemetry_events::MessageRole::Human => {
+                            "human"
+                        }
+                    });
+                if let Some(count) = message.prompt_char_count {
+                    values = values.prompt_char_count(count);
+                }
+                if let Some(count) = message.attachment_count {
+                    values = values.attachment_count(count);
+                }
+                crate::metrics::record(values, attrs.clone());
+            }
+            AgentTelemetryEvent::ToolCall(tool) => {
+                let mut values = crate::metrics::AgentToolCallValues::new()
+                    .phase(tool_call_phase_str(&tool.phase))
+                    .inferred(u32::from(signal_is_inferred(&tool.signal)));
+                if let Some(name) = &tool.tool_name {
+                    values = values.tool_name(name.clone());
+                }
+                if let Some(tool_use_id) = &tool.tool_use_id {
+                    values = values.tool_use_id(tool_use_id.clone());
+                }
+                if let Some(duration_ms) = tool.duration_ms {
+                    values = values.duration_ms(duration_ms);
+                }
+                if let Some(failure_type) = &tool.failure_type {
+                    values = values.failure_type(failure_type.clone());
+                }
+                crate::metrics::record(values, attrs.clone());
+            }
+            AgentTelemetryEvent::McpCall(mcp) => {
+                let mut values = crate::metrics::AgentMcpCallValues::new()
+                    .phase(mcp_call_phase_str(&mcp.phase))
+                    .inferred(u32::from(signal_is_inferred(&mcp.signal)));
+                if let Some(server) = &mcp.mcp_server {
+                    values = values.mcp_server(server.clone());
+                }
+                if let Some(name) = &mcp.tool_name {
+                    values = values.tool_name(name.clone());
+                }
+                if let Some(transport) = &mcp.transport {
+                    values = values.transport(transport.clone());
+                }
+                if let Some(duration_ms) = mcp.duration_ms {
+                    values = values.duration_ms(duration_ms);
+                }
+                if let Some(failure_type) = &mcp.failure_type {
+                    values = values.failure_type(failure_type.clone());
+                }
+                crate::metrics::record(values, attrs.clone());
+            }
+            AgentTelemetryEvent::SkillUsage(skill) => {
+                let mut values = crate::metrics::AgentSkillUsageValues::new()
+                    .skill_name(&skill.skill_name)
+                    .inferred(u32::from(signal_is_inferred(&skill.signal)));
+                values = values.detection_method(match skill.detection_method {
+                    SkillDetectionMethod::Explicit => "explicit",
+                    SkillDetectionMethod::InferredPrompt => "inferred_prompt",
+                    SkillDetectionMethod::InferredTool => "inferred_tool",
+                });
+                crate::metrics::record(values, attrs.clone());
+            }
+            AgentTelemetryEvent::Subagent(subagent) => {
+                let mut values = crate::metrics::AgentSubagentValues::new()
+                    .phase(subagent_phase_str(&subagent.phase))
+                    .inferred(u32::from(signal_is_inferred(&subagent.signal)));
+                if let Some(subagent_id) = &subagent.subagent_id {
+                    values = values.subagent_id(subagent_id);
+                }
+                if let Some(subagent_type) = &subagent.subagent_type {
+                    values = values.subagent_type(subagent_type);
+                }
+                if let Some(status) = &subagent.status {
+                    values = values.status(status);
+                }
+                if let Some(duration_ms) = subagent.duration_ms {
+                    values = values.duration_ms(duration_ms);
+                }
+                if let Some(result_char_count) = subagent.result_char_count {
+                    values = values.result_char_count(result_char_count);
+                }
+                crate::metrics::record(values, attrs.clone());
+            }
+            AgentTelemetryEvent::Response(response) => {
+                if signal_is_inferred(&response.signal) {
+                    let dedupe_key = response_dedupe_key(response, now_ts);
+                    let dedupe_key = format!(
+                        "response-{}:{}:{}:{}",
+                        response_phase_str(&response.phase),
+                        result.agent_id.tool,
+                        result.agent_id.id,
+                        dedupe_key
+                    );
+                    if !should_emit_telemetry_once(
+                        "response_event",
+                        &dedupe_key,
+                        now_ts,
+                        RESPONSE_DEDUPE_TTL_SECS,
+                    ) {
+                        continue;
+                    }
+                }
+
+                let mut values = crate::metrics::AgentResponseValues::new()
+                    .phase(response_phase_str(&response.phase))
+                    .inferred(u32::from(signal_is_inferred(&response.signal)));
+                if let Some(status) = &response.status {
+                    values = values.status(status);
+                }
+                if let Some(reason) = &response.reason {
+                    values = values.reason(reason);
+                }
+                if let Some(response_char_count) = response.response_char_count {
+                    values = values.response_char_count(response_char_count);
+                }
+                crate::metrics::record(values, attrs.clone());
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -155,6 +393,23 @@ pub fn run(
         "[BENCHMARK] Storage initialization took {:?}",
         storage_start.elapsed()
     ));
+
+    let telemetry_attrs = build_checkpoint_attrs(
+        repo,
+        &base_commit,
+        agent_run_result.as_ref().map(|r| &r.agent_id),
+    );
+    emit_agent_telemetry_events(agent_run_result.as_ref(), telemetry_attrs);
+    if let Some(agent_run_result) = agent_run_result.as_ref()
+        && matches!(
+            agent_run_result.checkpoint_execution,
+            CheckpointExecution::NoOp {
+                reason: NoOpReason::TelemetryOnly | NoOpReason::NoEditedFiles
+            }
+        )
+    {
+        return Ok((0, 0, 0));
+    }
 
     // Early exit for human only
     if is_pre_commit {
@@ -1473,7 +1728,14 @@ fn upsert_checkpoint_prompt_to_db(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::checkpoint_agent::telemetry_events::{
+        AgentMcpCallTelemetry, AgentResponseTelemetry, AgentSessionTelemetry,
+        AgentSkillUsageTelemetry, AgentSubagentTelemetry, AgentToolCallTelemetry,
+    };
     use crate::git::test_utils::TmpRepo;
+    use serial_test::serial;
+    use std::ffi::OsString;
+    use tempfile::TempDir;
 
     #[test]
     fn test_checkpoint_with_staged_changes() {
@@ -1642,7 +1904,9 @@ mod tests {
     fn test_checkpoint_with_paths_outside_repo() {
         use crate::authorship::transcript::AiTranscript;
         use crate::authorship::working_log::AgentId;
-        use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
+        use crate::commands::checkpoint_agent::agent_presets::{
+            AgentRunResult, CheckpointExecution,
+        };
 
         // Create a repo with an initial commit
         let (tmp_repo, mut file, _) = TmpRepo::new_with_base_commit().unwrap();
@@ -1668,6 +1932,8 @@ mod tests {
             ]),
             will_edit_filepaths: None,
             dirty_files: None,
+            checkpoint_execution: CheckpointExecution::Run,
+            telemetry_events: vec![],
         };
 
         // Run checkpoint - should not crash even with paths outside repo
@@ -2096,5 +2362,289 @@ mod tests {
             latest_stats.deletions_sloc, 0,
             "Whitespace deletions ignored"
         );
+    }
+
+    fn test_agent_run_result_for_telemetry(events: Vec<AgentTelemetryEvent>) -> AgentRunResult {
+        AgentRunResult {
+            agent_id: AgentId {
+                tool: "test-agent".to_string(),
+                id: "test-session".to_string(),
+                model: "test-model".to_string(),
+            },
+            agent_metadata: None,
+            checkpoint_kind: CheckpointKind::AiAgent,
+            transcript: None,
+            repo_working_dir: None,
+            edited_filepaths: None,
+            will_edit_filepaths: None,
+            dirty_files: None,
+            checkpoint_execution: CheckpointExecution::NoOp {
+                reason: NoOpReason::TelemetryOnly,
+            },
+            telemetry_events: events,
+        }
+    }
+
+    struct EnvRestoreGuard {
+        previous: Option<OsString>,
+    }
+
+    impl Drop for EnvRestoreGuard {
+        fn drop(&mut self) {
+            // SAFETY: tests that mutate env are marked #[serial].
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var("GIT_AI_TEST_TELEMETRY_DEDUPE_DIR", value),
+                    None => std::env::remove_var("GIT_AI_TEST_TELEMETRY_DEDUPE_DIR"),
+                }
+            }
+        }
+    }
+
+    fn with_temp_dedupe_dir<F: FnOnce()>(f: F) {
+        let temp = TempDir::new().unwrap();
+        let dedupe_dir = temp.path().join("telemetry-dedupe");
+        crate::metrics::dedupe_fs::reset_for_tests();
+
+        let _restore_guard = EnvRestoreGuard {
+            previous: std::env::var_os("GIT_AI_TEST_TELEMETRY_DEDUPE_DIR"),
+        };
+
+        // SAFETY: tests that mutate env are marked #[serial].
+        unsafe {
+            std::env::set_var("GIT_AI_TEST_TELEMETRY_DEDUPE_DIR", &dedupe_dir);
+        }
+
+        f();
+        crate::metrics::dedupe_fs::reset_for_tests();
+    }
+
+    fn capture_hook_metrics(result: &AgentRunResult) -> Vec<crate::metrics::MetricEvent> {
+        crate::metrics::test_start_metric_capture();
+        emit_agent_telemetry_events(
+            Some(result),
+            crate::metrics::EventAttributes::with_version("1.0.0"),
+        );
+        crate::metrics::test_take_captured_metrics()
+    }
+
+    #[test]
+    #[serial]
+    fn test_emit_agent_telemetry_events_emits_session_phases() {
+        with_temp_dedupe_dir(|| {
+            let start = test_agent_run_result_for_telemetry(vec![AgentTelemetryEvent::Session(
+                AgentSessionTelemetry {
+                    phase: SessionPhase::Started,
+                    reason: None,
+                    source: Some("claude_hook".to_string()),
+                    mode: Some("agent".to_string()),
+                    duration_ms: None,
+                    signal: TelemetrySignal::Explicit,
+                },
+            )]);
+
+            let start_events = capture_hook_metrics(&start);
+            assert!(start_events.iter().any(|event| event.event_id == 5));
+            let session_event = start_events
+                .iter()
+                .find(|event| event.event_id == 5)
+                .unwrap();
+            assert_eq!(
+                session_event.values.get("0").and_then(|v| v.as_str()),
+                Some("started")
+            );
+
+            let end = test_agent_run_result_for_telemetry(vec![AgentTelemetryEvent::Session(
+                AgentSessionTelemetry {
+                    phase: SessionPhase::Ended,
+                    reason: Some("completed".to_string()),
+                    source: Some("claude_hook".to_string()),
+                    mode: Some("agent".to_string()),
+                    duration_ms: Some(50),
+                    signal: TelemetrySignal::Explicit,
+                },
+            )]);
+            let end_events = capture_hook_metrics(&end);
+            let session_event = end_events
+                .iter()
+                .find(|event| event.event_id == 5)
+                .expect("expected an AgentSession metric for session end");
+            assert_eq!(
+                session_event.values.get("0").and_then(|v| v.as_str()),
+                Some("ended")
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_emit_agent_telemetry_events_dedupes_inferred_response_updates() {
+        with_temp_dedupe_dir(|| {
+            let mut result =
+                test_agent_run_result_for_telemetry(vec![AgentTelemetryEvent::Response(
+                    AgentResponseTelemetry {
+                        phase: ResponsePhase::Started,
+                        reason: None,
+                        status: None,
+                        response_char_count: None,
+                        signal: TelemetrySignal::Inferred,
+                        dedupe_key: Some("msg-123".to_string()),
+                    },
+                )]);
+            result.agent_id.tool = "opencode".to_string();
+            result.agent_id.id = "session-123".to_string();
+
+            let first = capture_hook_metrics(&result);
+            let first_count = first.iter().filter(|event| event.event_id == 7).count();
+            assert_eq!(
+                first_count, 1,
+                "first update should emit one response event"
+            );
+
+            let second = capture_hook_metrics(&result);
+            let second_count = second.iter().filter(|event| event.event_id == 7).count();
+            assert_eq!(
+                second_count, 0,
+                "second update with same generation key should be deduped"
+            );
+
+            let explicit_result =
+                test_agent_run_result_for_telemetry(vec![AgentTelemetryEvent::Response(
+                    AgentResponseTelemetry {
+                        phase: ResponsePhase::Ended,
+                        reason: None,
+                        status: Some("completed".to_string()),
+                        response_char_count: Some(12),
+                        signal: TelemetrySignal::Explicit,
+                        dedupe_key: Some("msg-123".to_string()),
+                    },
+                )]);
+            let explicit_first = capture_hook_metrics(&explicit_result);
+            let explicit_second = capture_hook_metrics(&explicit_result);
+            assert_eq!(
+                explicit_first
+                    .iter()
+                    .filter(|event| event.event_id == 7)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                explicit_second
+                    .iter()
+                    .filter(|event| event.event_id == 7)
+                    .count(),
+                1,
+                "explicit response events must not be deduped"
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_emit_agent_telemetry_events_maps_tool_mcp_subagent_and_skill() {
+        with_temp_dedupe_dir(|| {
+            let mut result = test_agent_run_result_for_telemetry(vec![
+                AgentTelemetryEvent::ToolCall(AgentToolCallTelemetry {
+                    phase: ToolCallPhase::Started,
+                    tool_name: Some("mcp__fs__read".to_string()),
+                    tool_use_id: Some("tool-123".to_string()),
+                    duration_ms: Some(45),
+                    failure_type: None,
+                    signal: TelemetrySignal::Explicit,
+                }),
+                AgentTelemetryEvent::McpCall(AgentMcpCallTelemetry {
+                    phase: McpCallPhase::Started,
+                    mcp_server: Some("fs".to_string()),
+                    tool_name: Some("mcp__fs__read".to_string()),
+                    transport: Some("stdio".to_string()),
+                    duration_ms: Some(45),
+                    failure_type: None,
+                    signal: TelemetrySignal::Inferred,
+                }),
+                AgentTelemetryEvent::SkillUsage(AgentSkillUsageTelemetry {
+                    skill_name: "checks".to_string(),
+                    detection_method: SkillDetectionMethod::InferredPrompt,
+                    signal: TelemetrySignal::Inferred,
+                }),
+            ]);
+            result.agent_id.tool = "cursor".to_string();
+            result.agent_id.id = "cursor-session".to_string();
+
+            let events = capture_hook_metrics(&result);
+
+            assert!(events.iter().any(|event| event.event_id == 8));
+            assert!(events.iter().any(|event| event.event_id == 9));
+            assert!(events.iter().any(|event| event.event_id == 10));
+            assert!(
+                !events.iter().any(|event| event.event_id == 11),
+                "subagent metrics should only come from subagent hooks"
+            );
+
+            let tool = events.iter().find(|event| event.event_id == 8).unwrap();
+            assert_eq!(
+                tool.values.get("0").and_then(|v| v.as_str()),
+                Some("started")
+            );
+            assert_eq!(
+                tool.values.get("1").and_then(|v| v.as_str()),
+                Some("mcp__fs__read")
+            );
+
+            let mcp = events.iter().find(|event| event.event_id == 9).unwrap();
+            assert_eq!(
+                mcp.values.get("0").and_then(|v| v.as_str()),
+                Some("started")
+            );
+            assert_eq!(mcp.values.get("1").and_then(|v| v.as_str()), Some("fs"));
+
+            let skill = events.iter().find(|event| event.event_id == 10).unwrap();
+            assert_eq!(
+                skill.values.get("0").and_then(|v| v.as_str()),
+                Some("checks")
+            );
+
+            let mut subagent_result =
+                test_agent_run_result_for_telemetry(vec![AgentTelemetryEvent::Subagent(
+                    AgentSubagentTelemetry {
+                        phase: SubagentPhase::Started,
+                        subagent_id: Some("subagent-1".to_string()),
+                        subagent_type: Some("Plan".to_string()),
+                        status: Some("completed".to_string()),
+                        duration_ms: Some(45),
+                        result_char_count: Some(120),
+                        signal: TelemetrySignal::Explicit,
+                    },
+                )]);
+            subagent_result.agent_id.tool = "cursor".to_string();
+            subagent_result.agent_id.id = "cursor-session".to_string();
+            let subagent_events = capture_hook_metrics(&subagent_result);
+            let subagent = subagent_events
+                .iter()
+                .find(|event| event.event_id == 11)
+                .unwrap();
+            assert_eq!(
+                subagent.values.get("0").and_then(|v| v.as_str()),
+                Some("started")
+            );
+            assert_eq!(
+                subagent.values.get("1").and_then(|v| v.as_str()),
+                Some("subagent-1")
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_should_emit_agent_usage_uses_filesystem_dedupe() {
+        with_temp_dedupe_dir(|| {
+            let agent = AgentId {
+                tool: "cursor".to_string(),
+                id: "session-usage".to_string(),
+                model: "gpt-5".to_string(),
+            };
+
+            assert!(should_emit_agent_usage(&agent));
+            assert!(!should_emit_agent_usage(&agent));
+        });
     }
 }

@@ -11,7 +11,57 @@ use std::path::PathBuf;
 
 // Command patterns for hooks
 const CLAUDE_PRE_TOOL_CMD: &str = "checkpoint claude --hook-input stdin";
+#[cfg(test)]
 const CLAUDE_POST_TOOL_CMD: &str = "checkpoint claude --hook-input stdin";
+const CLAUDE_LEGACY_TOOL_MATCHER: &str = "Write|Edit|MultiEdit";
+
+struct ClaudeHookSpec {
+    hook_type: &'static str,
+    matcher: Option<&'static str>,
+}
+
+const CLAUDE_HOOK_SPECS: &[ClaudeHookSpec] = &[
+    ClaudeHookSpec {
+        hook_type: "SessionStart",
+        matcher: None,
+    },
+    ClaudeHookSpec {
+        hook_type: "SessionEnd",
+        matcher: None,
+    },
+    ClaudeHookSpec {
+        hook_type: "UserPromptSubmit",
+        matcher: None,
+    },
+    ClaudeHookSpec {
+        hook_type: "PermissionRequest",
+        matcher: None,
+    },
+    ClaudeHookSpec {
+        hook_type: "PreToolUse",
+        matcher: None,
+    },
+    ClaudeHookSpec {
+        hook_type: "PostToolUse",
+        matcher: None,
+    },
+    ClaudeHookSpec {
+        hook_type: "PostToolUseFailure",
+        matcher: None,
+    },
+    ClaudeHookSpec {
+        hook_type: "SubagentStart",
+        matcher: None,
+    },
+    ClaudeHookSpec {
+        hook_type: "SubagentStop",
+        matcher: None,
+    },
+    ClaudeHookSpec {
+        hook_type: "Stop",
+        matcher: None,
+    },
+];
 
 pub struct ClaudeCodeInstaller;
 
@@ -67,32 +117,47 @@ impl HookInstaller for ClaudeCodeInstaller {
         let content = fs::read_to_string(&settings_path)?;
         let existing: Value = serde_json::from_str(&content).unwrap_or_else(|_| json!({}));
 
-        // Check if our hooks are installed
-        let has_hooks = existing
-            .get("hooks")
-            .and_then(|h| h.get("PreToolUse"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter().any(|item| {
-                    item.get("hooks")
-                        .and_then(|h| h.as_array())
-                        .map(|hooks| {
-                            hooks.iter().any(|hook| {
-                                hook.get("command")
-                                    .and_then(|c| c.as_str())
-                                    .map(is_git_ai_checkpoint_command)
-                                    .unwrap_or(false)
-                            })
-                        })
-                        .unwrap_or(false)
+        let has_hook_for_spec = |spec: &ClaudeHookSpec| {
+            existing
+                .get("hooks")
+                .and_then(|h| h.get(spec.hook_type))
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter().any(|item| {
+                        let matcher_matches = match spec.matcher {
+                            Some(expected) => item
+                                .get("matcher")
+                                .and_then(|m| m.as_str())
+                                .map(|m| m == expected)
+                                .unwrap_or(false),
+                            None => true,
+                        };
+
+                        matcher_matches
+                            && item
+                                .get("hooks")
+                                .and_then(|h| h.as_array())
+                                .map(|hooks| {
+                                    hooks.iter().any(|hook| {
+                                        hook.get("command")
+                                            .and_then(|c| c.as_str())
+                                            .map(is_git_ai_checkpoint_command)
+                                            .unwrap_or(false)
+                                    })
+                                })
+                                .unwrap_or(false)
+                    })
                 })
-            })
-            .unwrap_or(false);
+                .unwrap_or(false)
+        };
+
+        let has_any = CLAUDE_HOOK_SPECS.iter().any(has_hook_for_spec);
+        let has_all = CLAUDE_HOOK_SPECS.iter().all(has_hook_for_spec);
 
         Ok(HookCheckResult {
             tool_installed: true,
-            hooks_installed: has_hooks,
-            hooks_up_to_date: has_hooks, // If installed, assume up to date for now
+            hooks_installed: has_any,
+            hooks_up_to_date: has_all,
         })
     }
 
@@ -122,62 +187,79 @@ impl HookInstaller for ClaudeCodeInstaller {
             serde_json::from_str(&existing_content)?
         };
 
-        // Build commands with absolute path
+        // Build command with absolute path
         // On Windows, Claude Code runs hooks in git bash shell, so we need
         // paths in MSYS/MinGW format (e.g. /c/Users/... instead of C:\Users\...)
         let binary_path_str = to_git_bash_path(&params.binary_path);
-        let pre_tool_cmd = format!("{} {}", binary_path_str, CLAUDE_PRE_TOOL_CMD);
-        let post_tool_cmd = format!("{} {}", binary_path_str, CLAUDE_POST_TOOL_CMD);
-
-        let desired_hooks = json!({
-            "PreToolUse": {
-                "matcher": "Write|Edit|MultiEdit",
-                "desired_cmd": pre_tool_cmd,
-            },
-            "PostToolUse": {
-                "matcher": "Write|Edit|MultiEdit",
-                "desired_cmd": post_tool_cmd,
-            }
-        });
+        let checkpoint_cmd = format!("{} {}", binary_path_str, CLAUDE_PRE_TOOL_CMD);
 
         // Merge desired into existing
         let mut merged = existing.clone();
         let mut hooks_obj = merged.get("hooks").cloned().unwrap_or_else(|| json!({}));
 
-        // Process both PreToolUse and PostToolUse
-        for hook_type in &["PreToolUse", "PostToolUse"] {
-            let desired_matcher = desired_hooks[hook_type]["matcher"].as_str().unwrap();
-            let desired_cmd = desired_hooks[hook_type]["desired_cmd"].as_str().unwrap();
+        for spec in CLAUDE_HOOK_SPECS {
+            let hook_type = spec.hook_type;
+            let desired_matcher = spec.matcher;
+            let desired_cmd = checkpoint_cmd.as_str();
 
             // Get or create the hooks array for this type
             let mut hook_type_array = hooks_obj
-                .get(*hook_type)
+                .get(hook_type)
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
 
-            // Find existing matcher block for Write|Edit|MultiEdit
+            // Find existing matcher block
             let mut found_matcher_idx: Option<usize> = None;
             for (idx, item) in hook_type_array.iter().enumerate() {
-                if let Some(matcher) = item.get("matcher").and_then(|m| m.as_str())
-                    && matcher == desired_matcher
-                {
-                    found_matcher_idx = Some(idx);
-                    break;
+                match desired_matcher {
+                    Some(expected) => {
+                        if let Some(matcher) = item.get("matcher").and_then(|m| m.as_str())
+                            && matcher == expected
+                        {
+                            found_matcher_idx = Some(idx);
+                            break;
+                        }
+                    }
+                    None => {
+                        if item.get("matcher").is_none() {
+                            found_matcher_idx = Some(idx);
+                            break;
+                        }
+
+                        if matches!(
+                            hook_type,
+                            "PreToolUse" | "PostToolUse" | "PostToolUseFailure"
+                        ) && item.get("matcher").and_then(|m| m.as_str())
+                            == Some(CLAUDE_LEGACY_TOOL_MATCHER)
+                        {
+                            found_matcher_idx = Some(idx);
+                            break;
+                        }
+                    }
                 }
             }
 
             let matcher_idx = match found_matcher_idx {
                 Some(idx) => idx,
                 None => {
-                    // Create new matcher block
-                    hook_type_array.push(json!({
-                        "matcher": desired_matcher,
-                        "hooks": []
-                    }));
+                    let mut block = json!({ "hooks": [] });
+                    if let Some(matcher) = desired_matcher
+                        && let Some(obj) = block.as_object_mut()
+                    {
+                        obj.insert("matcher".to_string(), json!(matcher));
+                    }
+                    hook_type_array.push(block);
                     hook_type_array.len() - 1
                 }
             };
+
+            // For unfiltered hooks, migrate legacy matcher blocks to intercept all tools.
+            if desired_matcher.is_none()
+                && let Some(obj) = hook_type_array[matcher_idx].as_object_mut()
+            {
+                obj.remove("matcher");
+            }
 
             // Get the hooks array within this matcher block
             let mut hooks_array = hook_type_array[matcher_idx]
@@ -243,7 +325,7 @@ impl HookInstaller for ClaudeCodeInstaller {
 
             // Write back the updated hook_type_array
             if let Some(obj) = hooks_obj.as_object_mut() {
-                obj.insert(hook_type.to_string(), Value::Array(hook_type_array));
+                obj.insert(spec.hook_type.to_string(), Value::Array(hook_type_array));
             }
         }
 
@@ -293,12 +375,23 @@ impl HookInstaller for ClaudeCodeInstaller {
 
         let mut changed = false;
 
-        // Remove git-ai checkpoint commands from both PreToolUse and PostToolUse
-        for hook_type in &["PreToolUse", "PostToolUse"] {
-            if let Some(hook_type_array) =
-                hooks_obj.get_mut(*hook_type).and_then(|v| v.as_array_mut())
+        // Remove git-ai checkpoint commands from all managed hook types
+        for spec in CLAUDE_HOOK_SPECS {
+            if let Some(hook_type_array) = hooks_obj
+                .get_mut(spec.hook_type)
+                .and_then(|v| v.as_array_mut())
             {
                 for matcher_block in hook_type_array.iter_mut() {
+                    if let Some(expected_matcher) = spec.matcher
+                        && matcher_block
+                            .get("matcher")
+                            .and_then(|m| m.as_str())
+                            .map(|m| m != expected_matcher)
+                            .unwrap_or(true)
+                    {
+                        continue;
+                    }
+
                     if let Some(hooks_array) = matcher_block
                         .get_mut("hooks")
                         .and_then(|h| h.as_array_mut())
@@ -369,7 +462,6 @@ mod tests {
             "hooks": {
                 "PreToolUse": [
                     {
-                        "matcher": "Write|Edit|MultiEdit",
                         "hooks": [
                             {
                                 "type": "command",
@@ -380,7 +472,6 @@ mod tests {
                 ],
                 "PostToolUse": [
                     {
-                        "matcher": "Write|Edit|MultiEdit",
                         "hooks": [
                             {
                                 "type": "command",
@@ -407,14 +498,13 @@ mod tests {
 
         assert_eq!(pre_tool.len(), 1);
         assert_eq!(post_tool.len(), 1);
-
-        assert_eq!(
-            pre_tool[0].get("matcher").unwrap().as_str().unwrap(),
-            "Write|Edit|MultiEdit"
+        assert!(
+            pre_tool[0].get("matcher").is_none(),
+            "PreToolUse should install without matcher"
         );
-        assert_eq!(
-            post_tool[0].get("matcher").unwrap().as_str().unwrap(),
-            "Write|Edit|MultiEdit"
+        assert!(
+            post_tool[0].get("matcher").is_none(),
+            "PostToolUse should install without matcher"
         );
     }
 

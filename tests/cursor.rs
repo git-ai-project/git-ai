@@ -325,6 +325,127 @@ fn test_cursor_preset_human_checkpoint_no_filepath() {
 }
 
 #[test]
+fn test_cursor_preset_session_start_telemetry_only() {
+    use git_ai::authorship::working_log::CheckpointKind;
+    use git_ai::commands::checkpoint_agent::agent_presets::{
+        AgentCheckpointFlags, AgentCheckpointPreset, CheckpointExecution, CursorPreset, NoOpReason,
+    };
+    use git_ai::commands::checkpoint_agent::telemetry_events::{
+        AgentTelemetryEvent, SessionPhase, TelemetrySignal,
+    };
+
+    let hook_input = r##"{
+        "conversation_id": "test-conversation-id",
+        "workspace_roots": ["/Users/test/workspace"],
+        "hook_event_name": "sessionStart",
+        "model": "gpt-5",
+        "composer_mode": "agent"
+    }"##;
+
+    let flags = AgentCheckpointFlags {
+        hook_input: Some(hook_input.to_string()),
+    };
+
+    let preset = CursorPreset;
+    let result = preset
+        .run(flags)
+        .expect("Should parse sessionStart hook payload");
+
+    assert_eq!(result.checkpoint_kind, CheckpointKind::AiAgent);
+    assert_eq!(
+        result.checkpoint_execution,
+        CheckpointExecution::NoOp {
+            reason: NoOpReason::TelemetryOnly
+        }
+    );
+    assert_eq!(
+        result.telemetry_events.len(),
+        1,
+        "sessionStart should emit exactly one telemetry event"
+    );
+    assert!(result.telemetry_events.iter().any(|event| matches!(
+        event,
+        AgentTelemetryEvent::Session(session)
+            if session.phase == SessionPhase::Started
+                && session.signal == TelemetrySignal::Explicit
+    )));
+}
+
+#[test]
+fn test_cursor_preset_precompact_telemetry_only() {
+    use git_ai::authorship::working_log::CheckpointKind;
+    use git_ai::commands::checkpoint_agent::agent_presets::{
+        AgentCheckpointFlags, AgentCheckpointPreset, CheckpointExecution, CursorPreset, NoOpReason,
+    };
+
+    let hook_input = r##"{
+        "conversation_id": "test-conversation-id",
+        "workspace_roots": ["/Users/test/workspace"],
+        "hook_event_name": "preCompact",
+        "trigger": "auto",
+        "model": "gpt-5"
+    }"##;
+
+    let flags = AgentCheckpointFlags {
+        hook_input: Some(hook_input.to_string()),
+    };
+
+    let preset = CursorPreset;
+    let result = preset
+        .run(flags)
+        .expect("Should parse preCompact hook payload");
+
+    assert_eq!(result.checkpoint_kind, CheckpointKind::AiAgent);
+    assert_eq!(
+        result.checkpoint_execution,
+        CheckpointExecution::NoOp {
+            reason: NoOpReason::TelemetryOnly
+        }
+    );
+    assert!(
+        result.telemetry_events.is_empty(),
+        "preCompact currently emits no normalized telemetry events"
+    );
+}
+
+#[test]
+fn test_cursor_preset_before_read_file_telemetry_only() {
+    use git_ai::authorship::working_log::CheckpointKind;
+    use git_ai::commands::checkpoint_agent::agent_presets::{
+        AgentCheckpointFlags, AgentCheckpointPreset, CheckpointExecution, CursorPreset, NoOpReason,
+    };
+
+    let hook_input = r##"{
+        "conversation_id": "test-conversation-id",
+        "workspace_roots": ["/Users/test/workspace"],
+        "hook_event_name": "beforeReadFile",
+        "file_path": "/Users/test/workspace/src/main.rs",
+        "model": "gpt-5"
+    }"##;
+
+    let flags = AgentCheckpointFlags {
+        hook_input: Some(hook_input.to_string()),
+    };
+
+    let preset = CursorPreset;
+    let result = preset
+        .run(flags)
+        .expect("Should parse beforeReadFile hook payload");
+
+    assert_eq!(result.checkpoint_kind, CheckpointKind::AiAgent);
+    assert_eq!(
+        result.checkpoint_execution,
+        CheckpointExecution::NoOp {
+            reason: NoOpReason::TelemetryOnly
+        }
+    );
+    assert!(
+        result.telemetry_events.is_empty(),
+        "beforeReadFile should be telemetry-only without normalized events"
+    );
+}
+
+#[test]
 fn test_cursor_checkpoint_stdin_with_utf8_bom() {
     let repo = TestRepo::new();
     let hook_input = format!(

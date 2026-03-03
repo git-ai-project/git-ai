@@ -4,9 +4,12 @@ use crate::utils::debug_log;
 use jsonc_parser::ParseOptions;
 use jsonc_parser::cst::CstRootNode;
 use std::fs;
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // Minimum version requirements
 pub const MIN_CURSOR_VERSION: (u32, u32) = (1, 7);
@@ -374,20 +377,64 @@ pub fn home_dir() -> PathBuf {
 /// Write data to a file atomically (write to temp, then rename)
 /// If the path is a symlink, writes to the target file (preserving the symlink)
 pub fn write_atomic(path: &Path, data: &[u8]) -> Result<(), GitAiError> {
+    static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
     let target_path = if path.is_symlink() {
         fs::canonicalize(path)?
     } else {
         path.to_path_buf()
     };
 
-    let tmp_path = target_path.with_extension("tmp");
-    {
-        let mut file = fs::File::create(&tmp_path)?;
+    let parent = target_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let file_name = target_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("settings");
+
+    for _ in 0..32 {
+        let ts_nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let seq = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp_path = parent.join(format!(
+            ".{}.{}.{}.{}.tmp",
+            file_name,
+            std::process::id(),
+            ts_nanos,
+            seq
+        ));
+
+        let mut file = match OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp_path)
+        {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.into()),
+        };
+
         file.write_all(data)?;
         file.sync_all()?;
+        drop(file);
+
+        match fs::rename(&tmp_path, &target_path) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                let _ = fs::remove_file(&tmp_path);
+                return Err(e.into());
+            }
+        }
     }
-    fs::rename(&tmp_path, &target_path)?;
-    Ok(())
+
+    Err(GitAiError::Generic(format!(
+        "Failed to create temporary file for atomic write: {}",
+        target_path.display()
+    )))
 }
 
 /// Ensure parent directory exists
@@ -840,6 +887,8 @@ pub fn update_vscode_chat_hook_settings(
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
     use tempfile::TempDir;
 
     #[test]
@@ -1119,6 +1168,59 @@ mod tests {
         let content = fs::read_to_string(&file_path).unwrap();
         assert_eq!(content, "hello world");
         assert!(!file_path.is_symlink());
+    }
+
+    #[test]
+    fn test_write_atomic_concurrent_writes_same_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("shared.json");
+        fs::write(&file_path, "{}").unwrap();
+
+        let path = Arc::new(file_path);
+        let barrier = Arc::new(Barrier::new(8));
+        let mut payloads = Vec::new();
+        let mut handles = Vec::new();
+
+        for i in 0..8 {
+            let payload = format!(r#"{{"writer":{}}}"#, i);
+            payloads.push(payload.clone());
+
+            let path = Arc::clone(&path);
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                write_atomic(path.as_ref(), payload.as_bytes()).unwrap();
+            }));
+        }
+
+        for handle in handles {
+            handle.join().expect("writer thread should complete");
+        }
+
+        let final_content = fs::read_to_string(path.as_ref()).unwrap();
+        assert!(
+            payloads.contains(&final_content),
+            "final content should match exactly one writer payload: {}",
+            final_content
+        );
+
+        let leftover_tmp_files: Vec<String> = fs::read_dir(temp_dir.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.ends_with(".tmp") {
+                    Some(name)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(
+            leftover_tmp_files.is_empty(),
+            "no temporary files should be left behind: {:?}",
+            leftover_tmp_files
+        );
     }
 
     #[test]

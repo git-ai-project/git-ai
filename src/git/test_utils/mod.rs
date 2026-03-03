@@ -439,7 +439,9 @@ impl TmpRepo {
     ) -> Result<(usize, usize, usize), GitAiError> {
         use crate::authorship::transcript::AiTranscript;
         use crate::authorship::working_log::AgentId;
-        use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
+        use crate::commands::checkpoint_agent::agent_presets::{
+            AgentRunResult, CheckpointExecution,
+        };
 
         // Use a deterministic but unique session ID based on agent_name
         // For common agent names (Claude, GPT-4), use fixed ID for backwards compat
@@ -473,6 +475,8 @@ impl TmpRepo {
             edited_filepaths: None,
             will_edit_filepaths: None,
             dirty_files: None,
+            checkpoint_execution: CheckpointExecution::Run,
+            telemetry_events: vec![],
         };
 
         checkpoint(

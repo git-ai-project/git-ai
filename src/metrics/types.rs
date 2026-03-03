@@ -20,6 +20,13 @@ pub enum MetricEventId {
     AgentUsage = 2,
     InstallHooks = 3,
     Checkpoint = 4,
+    AgentSession = 5,
+    AgentMessage = 6,
+    AgentResponse = 7,
+    AgentToolCall = 8,
+    AgentMcpCall = 9,
+    AgentSkillUsage = 10,
+    AgentSubagent = 11,
 }
 
 /// Trait for event-specific values.
@@ -159,6 +166,13 @@ mod tests {
         assert_eq!(MetricEventId::AgentUsage as u16, 2);
         assert_eq!(MetricEventId::InstallHooks as u16, 3);
         assert_eq!(MetricEventId::Checkpoint as u16, 4);
+        assert_eq!(MetricEventId::AgentSession as u16, 5);
+        assert_eq!(MetricEventId::AgentMessage as u16, 6);
+        assert_eq!(MetricEventId::AgentResponse as u16, 7);
+        assert_eq!(MetricEventId::AgentToolCall as u16, 8);
+        assert_eq!(MetricEventId::AgentMcpCall as u16, 9);
+        assert_eq!(MetricEventId::AgentSkillUsage as u16, 10);
+        assert_eq!(MetricEventId::AgentSubagent as u16, 11);
     }
 
     #[test]

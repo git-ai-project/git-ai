@@ -175,6 +175,11 @@ mod tests {
 
         let content = fs::read_to_string(&plugin_path).unwrap();
         assert!(content.contains("GitAiPlugin"));
+        assert!(content.contains("session.created"));
+        assert!(content.contains("session.deleted"));
+        assert!(content.contains("session.idle"));
+        assert!(content.contains("message.updated"));
+        assert!(content.contains("message.part.updated"));
         assert!(content.contains("tool.execute.before"));
         assert!(content.contains("tool.execute.after"));
         // Uses the opencode preset with session_id-based hook input and absolute path
@@ -193,12 +198,16 @@ mod tests {
         assert!(content.contains("export const GitAiPlugin: Plugin"));
         assert!(content.contains("\"tool.execute.before\""));
         assert!(content.contains("\"tool.execute.after\""));
+        assert!(content.contains("\"session.created\""));
+        assert!(content.contains("\"message.updated\""));
         assert!(content.contains("FILE_EDIT_TOOLS"));
         assert!(content.contains("edit"));
         assert!(content.contains("write"));
         // Template contains placeholder for binary path
         assert!(content.contains("__GIT_AI_BINARY_PATH__"));
         assert!(content.contains("hook_event_name"));
+        assert!(content.contains("hook_source"));
+        assert!(content.contains("telemetry_payload"));
         assert!(content.contains("session_id"));
         assert!(content.contains("PreToolUse"));
         assert!(content.contains("PostToolUse"));

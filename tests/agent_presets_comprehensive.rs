@@ -4,8 +4,8 @@ mod test_utils;
 
 use git_ai::authorship::working_log::CheckpointKind;
 use git_ai::commands::checkpoint_agent::agent_presets::{
-    AgentCheckpointFlags, AgentCheckpointPreset, AiTabPreset, ClaudePreset, CodexPreset,
-    ContinueCliPreset, CursorPreset, DroidPreset, GeminiPreset, GithubCopilotPreset,
+    AgentCheckpointFlags, AgentCheckpointPreset, AiTabPreset, CheckpointExecution, ClaudePreset,
+    CodexPreset, ContinueCliPreset, CursorPreset, DroidPreset, GeminiPreset, GithubCopilotPreset,
 };
 use git_ai::commands::checkpoint_agent::amp_preset::AmpPreset;
 use git_ai::error::GitAiError;
@@ -51,7 +51,11 @@ fn test_claude_preset_missing_transcript_path() {
     let preset = ClaudePreset;
     let hook_input = json!({
         "cwd": "/some/path",
-        "hook_event_name": "PostToolUse"
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": "/some/file.rs"
+        }
     })
     .to_string();
 
@@ -73,7 +77,11 @@ fn test_claude_preset_missing_cwd() {
     let preset = ClaudePreset;
     let hook_input = json!({
         "transcript_path": "tests/fixtures/example-claude-code.jsonl",
-        "hook_event_name": "PostToolUse"
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": "/some/file.rs"
+        }
     })
     .to_string();
 
@@ -735,18 +743,18 @@ fn test_github_copilot_preset_invalid_hook_event_name() {
     })
     .to_string();
 
-    let result = preset.run(AgentCheckpointFlags {
-        hook_input: Some(hook_input),
-    });
+    let result = preset
+        .run(AgentCheckpointFlags {
+            hook_input: Some(hook_input),
+        })
+        .expect("unknown copilot hook should fail-open to telemetry no-op");
 
-    assert!(result.is_err());
-    match result {
-        Err(GitAiError::PresetError(msg)) => {
-            assert!(msg.contains("Invalid hook_event_name"));
-            assert!(msg.contains("before_edit") || msg.contains("after_edit"));
-        }
-        _ => panic!("Expected PresetError for invalid hook_event_name"),
-    }
+    assert!(matches!(
+        result.checkpoint_execution,
+        CheckpointExecution::NoOp { .. }
+    ));
+    assert_eq!(result.edited_filepaths, None);
+    assert_eq!(result.will_edit_filepaths, None);
 }
 
 // ==============================================================================
