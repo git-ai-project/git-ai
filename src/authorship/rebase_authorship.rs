@@ -724,12 +724,15 @@ pub fn rewrite_authorship_after_rebase_v2(
         current_authorship_log.metadata.base_commit_sha = new_commit.clone();
         current_authorship_log.metadata.prompts = flatten_prompts_for_metadata(&current_prompts);
 
-        // Preserve the id from the original (source) commit's note
-        if let Some(original_commit) = new_to_original.get(new_commit.as_str())
-            && let Ok(original_log) = get_reference_as_authorship_log_v3(repo, original_commit)
-        {
-            current_authorship_log.metadata.id = original_log.metadata.id;
-        }
+        // Preserve the id from the original (source) commit's note.
+        // Always reset to avoid leaking the previous iteration's id when lookup fails.
+        current_authorship_log.metadata.id = new_to_original
+            .get(new_commit.as_str())
+            .and_then(|original_commit| {
+                get_reference_as_authorship_log_v3(repo, original_commit)
+                    .ok()
+                    .and_then(|log| log.metadata.id)
+            });
 
         let computed_note_has_payload = !current_authorship_log.attestations.is_empty()
             || !current_authorship_log.metadata.prompts.is_empty();
