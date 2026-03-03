@@ -14,7 +14,7 @@ use regex::Regex;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[cfg(windows)]
@@ -2799,6 +2799,7 @@ pub fn exec_git_stdin_with_profile(
     if let Some(mut stdin) = child.stdin.take() {
         use std::io::Write;
         if let Err(e) = stdin.write_all(stdin_data) {
+            kill_and_reap_child_process(&mut child);
             return Err(GitAiError::IoError(e));
         }
     }
@@ -2864,6 +2865,7 @@ pub fn exec_git_stdin_with_env_with_profile(
     if let Some(mut stdin) = child.stdin.take() {
         use std::io::Write;
         if let Err(e) = stdin.write_all(stdin_data) {
+            kill_and_reap_child_process(&mut child);
             return Err(GitAiError::IoError(e));
         }
     }
@@ -2881,6 +2883,13 @@ pub fn exec_git_stdin_with_env_with_profile(
     }
 
     Ok(output)
+}
+
+fn kill_and_reap_child_process(child: &mut Child) {
+    if let Ok(None) = child.try_wait() {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
 }
 
 /// Parse git version string (e.g., "git version 2.39.3 (Apple Git-146)") to extract major, minor, patch.
