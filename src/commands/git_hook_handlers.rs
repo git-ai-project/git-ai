@@ -2460,6 +2460,8 @@ fn run_managed_hook(
                 args.extend([
                     "interpret-trailers".to_string(),
                     "--in-place".to_string(),
+                    "--if-exists".to_string(),
+                    "replace".to_string(),
                     "--trailer".to_string(),
                     format!("Git-AI: {}", note_id),
                     msg_file.clone(),

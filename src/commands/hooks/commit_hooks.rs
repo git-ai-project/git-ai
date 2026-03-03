@@ -39,6 +39,12 @@ pub fn commit_pre_command_hook(
     // (the trailer is instead written by the prepare-commit-msg handler).
     let note_id = Uuid::new_v4().to_string();
     repository.storage.write_pending_note_id(&note_id);
+    // Tell git to replace any existing Git-AI trailer (from the original
+    // message on --amend) instead of appending a duplicate.
+    parsed_args.global_args.extend([
+        "-c".to_string(),
+        "trailer.Git-AI.ifExists=replace".to_string(),
+    ]);
     // Insert --trailer before any "--" separator so that git treats it as
     // an option rather than a pathspec.
     let insert_pos = parsed_args
