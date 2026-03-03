@@ -55,6 +55,8 @@ define_feature_flags!(
     rewrite_stash: rewrite_stash, debug = true, release = false,
     inter_commit_move: checkpoint_inter_commit_move, debug = false, release = false,
     auth_keyring: auth_keyring, debug = false, release = false,
+    hooks_enabled: hooks_enabled, debug = false, release = false,
+    hooks_externally_managed: hooks_externally_managed, debug = false, release = false,
 );
 
 impl FeatureFlags {
@@ -121,12 +123,16 @@ mod tests {
             assert!(flags.rewrite_stash);
             assert!(!flags.inter_commit_move);
             assert!(!flags.auth_keyring);
+            assert!(!flags.hooks_enabled);
+            assert!(!flags.hooks_externally_managed);
         }
         #[cfg(not(debug_assertions))]
         {
             assert!(!flags.rewrite_stash);
             assert!(!flags.inter_commit_move);
             assert!(!flags.auth_keyring);
+            assert!(!flags.hooks_enabled);
+            assert!(!flags.hooks_externally_managed);
         }
     }
 
@@ -221,12 +227,16 @@ mod tests {
             rewrite_stash: true,
             inter_commit_move: false,
             auth_keyring: true,
+            hooks_enabled: false,
+            hooks_externally_managed: false,
         };
 
         let serialized = serde_json::to_string(&flags).unwrap();
         assert!(serialized.contains("rewrite_stash"));
         assert!(serialized.contains("inter_commit_move"));
         assert!(serialized.contains("auth_keyring"));
+        assert!(serialized.contains("hooks_enabled"));
+        assert!(serialized.contains("hooks_externally_managed"));
     }
 
     #[test]
@@ -235,11 +245,18 @@ mod tests {
             rewrite_stash: true,
             inter_commit_move: false,
             auth_keyring: true,
+            hooks_enabled: true,
+            hooks_externally_managed: false,
         };
         let cloned = flags.clone();
         assert_eq!(cloned.rewrite_stash, flags.rewrite_stash);
         assert_eq!(cloned.inter_commit_move, flags.inter_commit_move);
         assert_eq!(cloned.auth_keyring, flags.auth_keyring);
+        assert_eq!(cloned.hooks_enabled, flags.hooks_enabled);
+        assert_eq!(
+            cloned.hooks_externally_managed,
+            flags.hooks_externally_managed
+        );
     }
 
     #[test]

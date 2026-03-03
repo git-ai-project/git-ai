@@ -21,6 +21,8 @@ fn setup() {
         rewrite_stash: true,
         inter_commit_move: true,
         auth_keyring: false,
+        hooks_enabled: false,
+        hooks_externally_managed: false,
     };
 
     git_ai::config::Config::set_test_feature_flags(test_flags.clone());
