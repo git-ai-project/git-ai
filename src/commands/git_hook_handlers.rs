@@ -2449,7 +2449,11 @@ fn run_managed_hook(
             // In hooks mode, the pre-commit handler stored a pending note UUID.
             // Append a Git-AI trailer to the commit-message file so the trailer
             // appears in the final commit (mirrors --trailer injection in wrapper mode).
-            if let Some(note_id) = repo.storage.read_pending_note_id()
+            // Guard: only inject during normal commits, not cherry-picks where
+            // pre-commit did not write a fresh pending_note_id (a stale file from
+            // an aborted commit could otherwise leak into the cherry-picked message).
+            if !is_cherry_pick_in_progress(&repo)
+                && let Some(note_id) = repo.storage.read_pending_note_id()
                 && let Some(msg_file) = hook_args.first()
             {
                 let mut args = repo.global_args_for_exec();
