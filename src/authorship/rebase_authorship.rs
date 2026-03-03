@@ -726,13 +726,14 @@ pub fn rewrite_authorship_after_rebase_v2(
 
         // Preserve the id from the original (source) commit's note.
         // Always reset to avoid leaking the previous iteration's id when lookup fails.
-        current_authorship_log.metadata.id = new_to_original
-            .get(new_commit.as_str())
-            .and_then(|original_commit| {
-                get_reference_as_authorship_log_v3(repo, original_commit)
-                    .ok()
-                    .and_then(|log| log.metadata.id)
-            });
+        current_authorship_log.metadata.id =
+            new_to_original
+                .get(new_commit.as_str())
+                .and_then(|original_commit| {
+                    get_reference_as_authorship_log_v3(repo, original_commit)
+                        .ok()
+                        .and_then(|log| log.metadata.id)
+                });
 
         let computed_note_has_payload = !current_authorship_log.attestations.is_empty()
             || !current_authorship_log.metadata.prompts.is_empty();
