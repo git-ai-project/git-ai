@@ -751,7 +751,6 @@ fn test_concurrent_bind_attempts_only_one_succeeds() {
 mod async_worker_integration {
     use super::*;
     use git_ai::async_worker::socket;
-    use git_ai::async_worker::socket::platform;
     use repos::test_file::ExpectedLineExt;
     use repos::test_repo::TestRepo;
     use std::time::{Duration, Instant};
@@ -781,9 +780,14 @@ mod async_worker_integration {
         socket::socket_path_for_ai_dir(&ai_dir)
     }
 
-    /// Wait until the async worker has shut down (socket is no longer live).
+    /// Wait until the async worker has shut down (socket file is removed).
     /// This is the "guard" that must run before any assertions to ensure the
     /// worker has finished processing the dispatched job.
+    ///
+    /// IMPORTANT: We check for socket file *existence* rather than using
+    /// `is_socket_live()` because the latter connects to the socket, which
+    /// the worker accepts as a real connection — resetting its idle timer
+    /// and keeping it alive indefinitely.
     fn wait_for_worker_shutdown(repo: &TestRepo) {
         let sock = socket_path_for_repo(repo);
         let start = Instant::now();
@@ -793,9 +797,9 @@ mod async_worker_integration {
         std::thread::sleep(Duration::from_millis(200));
 
         while start.elapsed() < MAX_WORKER_WAIT {
-            if !platform::is_socket_live(&sock) {
-                // Socket is dead — worker has exited. Give a tiny grace period
-                // for any final filesystem flushes.
+            if !sock.exists() {
+                // Socket file is gone — worker has exited and cleaned up.
+                // Give a tiny grace period for any final filesystem flushes.
                 std::thread::sleep(Duration::from_millis(100));
                 return;
             }
@@ -803,7 +807,7 @@ mod async_worker_integration {
         }
 
         panic!(
-            "Async worker did not shut down within {:?} (socket still live at {})",
+            "Async worker did not shut down within {:?} (socket still exists at {})",
             MAX_WORKER_WAIT,
             sock.display()
         );
