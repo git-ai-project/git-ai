@@ -9,7 +9,7 @@ use interprocess::local_socket::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Write};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -23,6 +23,7 @@ const ASYNC_REWRITE_WORKER_BOOT_TIMEOUT: Duration = Duration::from_millis(2_000)
 const ASYNC_REWRITE_WORKER_BOOT_POLL: Duration = Duration::from_millis(50);
 const ASYNC_REWRITE_WORKER_ACCEPT_POLL: Duration = Duration::from_millis(25);
 const ASYNC_REWRITE_JOB_SCHEMA_VERSION: &str = "async_rewrite/1";
+const ASYNC_REWRITE_WORKER_ACK_OK: &str = "ok";
 const ENV_ASYNC_REWRITE_WORKER: &str = "GIT_AI_ASYNC_REWRITE_WORKER";
 #[cfg(unix)]
 const UNIX_SOCKET_SAFE_MAX_PATH_BYTES: usize = 100;
@@ -209,6 +210,28 @@ fn try_send_job(socket_name: &Name<'_>, job: &AsyncRewriteJob) -> Result<SendAtt
         ))
     })?;
 
+    let mut ack = String::new();
+    {
+        let mut reader = BufReader::new(&mut stream);
+        let bytes_read = reader.read_line(&mut ack).map_err(|err| {
+            GitAiError::Generic(format!(
+                "Failed to read async rewrite worker ACK from socket: {}",
+                err
+            ))
+        })?;
+        if bytes_read == 0 {
+            return Err(GitAiError::Generic(
+                "Async rewrite worker closed socket without ACK".to_string(),
+            ));
+        }
+    }
+    if ack.trim() != ASYNC_REWRITE_WORKER_ACK_OK {
+        return Err(GitAiError::Generic(format!(
+            "Async rewrite worker returned unexpected ACK: {}",
+            ack.trim()
+        )));
+    }
+
     Ok(SendAttempt::Sent)
 }
 
@@ -242,7 +265,13 @@ fn run_async_rewrite_worker(args: &[String]) -> Result<(), GitAiError> {
     loop {
         match listener.accept() {
             Ok(mut stream) => {
-                process_job_stream(&mut repo, &mut stream);
+                if let Err(err) = process_job_stream(&mut repo, &mut stream) {
+                    debug_log(&format!("Failed processing async rewrite job: {}", err));
+                    let _ = stream.write_all(b"err\n");
+                } else {
+                    let _ =
+                        stream.write_all(format!("{}\n", ASYNC_REWRITE_WORKER_ACK_OK).as_bytes());
+                }
                 idle_deadline = Instant::now() + ASYNC_REWRITE_WORKER_IDLE_TIMEOUT;
             }
             Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
@@ -271,36 +300,35 @@ fn run_async_rewrite_worker(args: &[String]) -> Result<(), GitAiError> {
     Ok(())
 }
 
-fn process_job_stream(repo: &mut Repository, stream: &mut LocalSocketStream) {
+fn process_job_stream(
+    repo: &mut Repository,
+    stream: &mut LocalSocketStream,
+) -> Result<(), GitAiError> {
     let mut payload = String::new();
-    if let Err(err) = stream.read_to_string(&mut payload) {
-        debug_log(&format!(
-            "Failed reading async rewrite job payload: {}",
-            err
+    let bytes_read = {
+        let mut reader = BufReader::new(&mut *stream);
+        reader.read_line(&mut payload)?
+    };
+    if bytes_read == 0 {
+        return Err(GitAiError::Generic(
+            "Received empty async rewrite payload".to_string(),
         ));
-        return;
     }
 
     let payload = payload.trim();
     if payload.is_empty() {
-        debug_log("Received empty async rewrite payload");
-        return;
+        return Err(GitAiError::Generic(
+            "Received empty async rewrite payload".to_string(),
+        ));
     }
 
-    let job = match serde_json::from_str::<AsyncRewriteJob>(payload) {
-        Ok(job) => job,
-        Err(err) => {
-            debug_log(&format!("Failed parsing async rewrite payload: {}", err));
-            return;
-        }
-    };
+    let job = serde_json::from_str::<AsyncRewriteJob>(payload)?;
 
     if job.schema_version != ASYNC_REWRITE_JOB_SCHEMA_VERSION {
-        debug_log(&format!(
+        return Err(GitAiError::Generic(format!(
             "Ignoring async rewrite payload with unsupported schema version {}",
             job.schema_version
-        ));
-        return;
+        )));
     }
 
     repo.handle_rewrite_log_event(
@@ -309,6 +337,8 @@ fn process_job_stream(repo: &mut Repository, stream: &mut LocalSocketStream) {
         job.supress_output,
         job.apply_side_effects,
     );
+
+    Ok(())
 }
 
 fn parse_repo_path(args: &[String]) -> Result<String, GitAiError> {
