@@ -1,6 +1,8 @@
 use crate::error::GitAiError;
+#[cfg(not(windows))]
 use crate::utils::LockFile;
 use serde::{Deserialize, Serialize};
+#[cfg(not(windows))]
 use std::time::{Duration, Instant};
 
 /// Simple case classes for rewrite events
@@ -528,8 +530,6 @@ pub fn append_event_to_file(
     } else {
         None
     };
-    #[cfg(windows)]
-    let _rewrite_log_lock: Option<LockFile> = None;
 
     // Serialize new event
     let new_event_json = serde_json::to_string(&new_event)?;
@@ -569,6 +569,7 @@ pub fn append_event_to_file(
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn acquire_rewrite_log_lock(file_path: &std::path::Path) -> Result<LockFile, GitAiError> {
     const LOCK_WAIT_TIMEOUT: Duration = Duration::from_millis(2_000);
     const LOCK_WAIT_POLL: Duration = Duration::from_millis(10);
