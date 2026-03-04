@@ -391,20 +391,17 @@ fn async_socket_target(repo: &Repository) -> Result<AsyncSocketTarget, GitAiErro
         });
     }
 
-    #[cfg(not(unix))]
-    if let Ok(name) = socket_path.to_path_buf().to_fs_name::<GenericFilePath>() {
-        return Ok(AsyncSocketTarget {
-            name: name.into_owned(),
-            cleanup_path: Some(socket_path),
-        });
-    }
-
     let mut hasher = Sha256::new();
     let canonical_ai_dir = repo
         .storage
         .ai_dir
         .canonicalize()
         .unwrap_or_else(|_| repo.storage.ai_dir.clone());
+    #[cfg(windows)]
+    let canonical_ai_dir = {
+        // Keep the namespaced endpoint stable across path-style/case differences.
+        PathBuf::from(canonical_ai_dir.to_string_lossy().to_lowercase())
+    };
     hasher.update(canonical_ai_dir.to_string_lossy().as_bytes());
     let hash = format!("{:x}", hasher.finalize());
     let namespace = format!("git-ai-async-{}", &hash[..24]);
