@@ -23,10 +23,16 @@ fn wait_for_rewrite_events(repo: &TestRepo, expected_min_events: usize) -> Vec<R
             return events;
         }
 
+        let rewrite_log_path = gitai_repo.storage.rewrite_log.clone();
+        let raw_rewrite_log = std::fs::read_to_string(&rewrite_log_path).unwrap_or_else(|err| {
+            format!("<failed to read {}: {}>", rewrite_log_path.display(), err)
+        });
         assert!(
             Instant::now() < deadline,
-            "Timed out waiting for rewrite events; currently have {} event(s)",
-            events.len()
+            "Timed out waiting for rewrite events; currently have {} event(s). rewrite_log path: {}. raw contents:\n{}",
+            events.len(),
+            rewrite_log_path.display(),
+            raw_rewrite_log
         );
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -46,9 +52,15 @@ where
             return;
         }
 
+        let rewrite_log_path = gitai_repo.storage.rewrite_log.clone();
+        let raw_rewrite_log = std::fs::read_to_string(&rewrite_log_path).unwrap_or_else(|err| {
+            format!("<failed to read {}: {}>", rewrite_log_path.display(), err)
+        });
         assert!(
             Instant::now() < deadline,
-            "Timed out waiting for matching rewrite event"
+            "Timed out waiting for matching rewrite event. rewrite_log path: {}. raw contents:\n{}",
+            rewrite_log_path.display(),
+            raw_rewrite_log
         );
         std::thread::sleep(Duration::from_millis(50));
     }
