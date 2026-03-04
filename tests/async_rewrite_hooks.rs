@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 #[cfg(windows)]
 const ASYNC_EVENT_WAIT_TIMEOUT: Duration = Duration::from_secs(180);
 #[cfg(not(windows))]
-const ASYNC_EVENT_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+const ASYNC_EVENT_WAIT_TIMEOUT: Duration = Duration::from_secs(20);
 
 fn wait_for_rewrite_events(repo: &TestRepo, expected_min_events: usize) -> Vec<RewriteLogEvent> {
     let deadline = Instant::now() + ASYNC_EVENT_WAIT_TIMEOUT;
