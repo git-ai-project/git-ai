@@ -257,10 +257,11 @@ mod tests {
         let sent = platform::try_send_to_socket(&socket_path, payload).unwrap();
         assert!(sent);
 
-        // Accept the connection and read the message
-        let mut stream = platform::accept_with_timeout(&listener, Duration::from_secs(1))
-            .unwrap()
-            .unwrap();
+        // Accept the connection and read the message (use longer timeout for CI)
+        let accept_result =
+            platform::accept_with_timeout(&listener, Duration::from_secs(5)).unwrap();
+        assert!(accept_result.is_some(), "Should accept connection");
+        let mut stream = accept_result.unwrap();
 
         let msg = read_message(&mut stream).unwrap().unwrap();
         assert_eq!(msg, payload);

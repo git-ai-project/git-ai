@@ -90,7 +90,7 @@ pub fn try_dispatch_async(
     match platform::try_send_to_socket(&socket_path, json_payload) {
         Ok(true) => {
             debug_log("Async job dispatched on retry to existing worker");
-            return true;
+            true
         }
         Ok(false) | Err(_) => {
             debug_log("Async dispatch failed after all attempts, falling back to sync");
