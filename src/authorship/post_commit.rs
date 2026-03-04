@@ -554,11 +554,11 @@ fn record_commit_metrics(
     commit_sha: &str,
     parent_sha: &str,
     human_author: &str,
-    _authorship_log: &AuthorshipLog,
+    authorship_log: &AuthorshipLog,
     stats: &crate::authorship::stats::CommitStats,
     checkpoints: &[Checkpoint],
 ) {
-    use crate::metrics::{CommittedValues, EventAttributes, record};
+    use crate::metrics::{CommittedValues, record};
 
     // Build parallel arrays: index 0 = "all" (aggregate), index 1+ = per tool/model
     let mut tool_model_pairs: Vec<String> = vec!["all".to_string()];
@@ -614,13 +614,35 @@ fn record_commit_metrics(
         values.commit_subject_null().commit_body_null()
     };
 
-    // Build attributes - start with version
-    let mut attrs = EventAttributes::with_version(env!("CARGO_PKG_VERSION"));
+    let attrs = build_commit_metrics_attrs(
+        repo,
+        commit_sha,
+        parent_sha,
+        human_author,
+        authorship_log.metadata.id.as_deref(),
+    );
 
-    attrs = attrs
+    // Record the metric
+    record(values, attrs);
+}
+
+fn build_commit_metrics_attrs(
+    repo: &Repository,
+    commit_sha: &str,
+    parent_sha: &str,
+    human_author: &str,
+    note_id: Option<&str>,
+) -> crate::metrics::EventAttributes {
+    // Build attributes - start with version
+    let mut attrs = crate::metrics::EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
         .author(human_author)
         .commit_sha(commit_sha)
         .base_commit_sha(parent_sha);
+
+    // Include note UUID for commit telemetry correlation.
+    if let Some(note_id) = note_id {
+        attrs = attrs.external_prompt_id(note_id);
+    }
 
     // Get repo URL from default remote
     if let Ok(Some(remote_name)) = repo.get_default_remote()
@@ -638,15 +660,15 @@ fn record_commit_metrics(
         attrs = attrs.branch(short_branch);
     }
 
-    // Record the metric
-    record(values, attrs);
+    attrs
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         STATS_SKIP_MAX_ADDED_LINES, STATS_SKIP_MAX_FILES_WITH_ADDITIONS, STATS_SKIP_MAX_HUNKS,
-        StatsCostEstimate, count_line_ranges, should_skip_expensive_post_commit_stats,
+        StatsCostEstimate, build_commit_metrics_attrs, count_line_ranges,
+        should_skip_expensive_post_commit_stats,
     };
     use crate::git::test_utils::TmpRepo;
 
@@ -751,6 +773,37 @@ mod tests {
             authorship_log.attestations.is_empty(),
             "Should have empty attestations when no checkpoints exist"
         );
+    }
+
+    #[test]
+    fn test_build_commit_metrics_attrs_includes_note_id() {
+        let tmp_repo = TmpRepo::new().unwrap();
+        let attrs = build_commit_metrics_attrs(
+            tmp_repo.gitai_repo(),
+            "commit-sha",
+            "parent-sha",
+            "test-author",
+            Some("note-uuid"),
+        );
+
+        assert_eq!(
+            attrs.external_prompt_id,
+            Some(Some("note-uuid".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_build_commit_metrics_attrs_omits_note_id_when_missing() {
+        let tmp_repo = TmpRepo::new().unwrap();
+        let attrs = build_commit_metrics_attrs(
+            tmp_repo.gitai_repo(),
+            "commit-sha",
+            "parent-sha",
+            "test-author",
+            None,
+        );
+
+        assert_eq!(attrs.external_prompt_id, None);
     }
 
     #[test]
