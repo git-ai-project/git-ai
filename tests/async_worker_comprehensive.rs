@@ -552,6 +552,8 @@ fn test_feature_flags_with_async_worker_struct() {
         inter_commit_move: false,
         auth_keyring: false,
         async_worker: true,
+        git_hooks_enabled: false,
+        git_hooks_externally_managed: false,
     };
     assert!(flags.async_worker);
     assert!(!flags.rewrite_stash);
