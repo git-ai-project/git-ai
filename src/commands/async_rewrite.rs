@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
 const ASYNC_REWRITE_SOCKET_FILE: &str = "async-rewrite.socket";
 const ASYNC_REWRITE_WORKER_LOCK_FILE: &str = "async-rewrite-worker.lock";
 const ASYNC_REWRITE_WORKER_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -376,6 +377,7 @@ fn parse_repo_path(args: &[String]) -> Result<String, GitAiError> {
     Ok(cwd.to_string_lossy().to_string())
 }
 
+#[cfg(unix)]
 fn async_rewrite_socket_path(repo: &Repository) -> PathBuf {
     repo.storage.ai_dir.join(ASYNC_REWRITE_SOCKET_FILE)
 }
@@ -427,6 +429,7 @@ fn unix_socket_path_is_safe(path: &Path) -> bool {
     path.as_os_str().as_bytes().len() < UNIX_SOCKET_SAFE_MAX_PATH_BYTES
 }
 
+#[cfg(unix)]
 fn resolve_socket_path(path: &Path) -> PathBuf {
     let Some(parent) = path.parent() else {
         return path.to_path_buf();
