@@ -10,6 +10,8 @@ use interprocess::local_socket::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -335,13 +337,13 @@ fn async_socket_target(repo: &Repository) -> Result<AsyncSocketTarget, GitAiErro
     let socket_path = resolve_socket_path(&async_rewrite_socket_path(repo));
 
     #[cfg(unix)]
-    if unix_socket_path_is_safe(&socket_path) {
-        if let Ok(name) = socket_path.to_path_buf().to_fs_name::<GenericFilePath>() {
-            return Ok(AsyncSocketTarget {
-                name: name.into_owned(),
-                cleanup_path: Some(socket_path),
-            });
-        }
+    if unix_socket_path_is_safe(&socket_path)
+        && let Ok(name) = socket_path.to_path_buf().to_fs_name::<GenericFilePath>()
+    {
+        return Ok(AsyncSocketTarget {
+            name: name.into_owned(),
+            cleanup_path: Some(socket_path),
+        });
     }
 
     #[cfg(not(unix))]
