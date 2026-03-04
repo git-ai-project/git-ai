@@ -136,13 +136,22 @@ fn enqueue_async_rewrite_job(repo: &Repository, job: &AsyncRewriteJob) -> Result
     debug_log("Spawned async rewrite worker process");
 
     let boot_deadline = Instant::now() + ASYNC_REWRITE_WORKER_BOOT_TIMEOUT;
+    let mut spawned_worker_exited_cleanly = false;
     while Instant::now() < boot_deadline {
-        if let Some(status) = worker_child.try_wait().map_err(GitAiError::IoError)? {
-            debug_log(&format!(
-                "Async rewrite worker exited before socket handoff completed: {}",
-                status
-            ));
-            break;
+        if !spawned_worker_exited_cleanly
+            && let Some(status) = worker_child.try_wait().map_err(GitAiError::IoError)?
+        {
+            if status.success() {
+                // This worker likely exited because another process already holds the lock.
+                // Keep polling for the shared worker's socket within the boot timeout.
+                spawned_worker_exited_cleanly = true;
+            } else {
+                debug_log(&format!(
+                    "Async rewrite worker exited before socket handoff completed: {}",
+                    status
+                ));
+                break;
+            }
         }
         match try_send_job(&socket_target.name, job)? {
             SendAttempt::Sent => return Ok(()),
