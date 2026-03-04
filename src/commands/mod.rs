@@ -1,3 +1,4 @@
+pub mod async_rewrite;
 pub mod blame;
 pub mod checkpoint;
 pub mod checkpoint_agent;

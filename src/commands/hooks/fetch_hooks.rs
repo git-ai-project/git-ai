@@ -354,7 +354,8 @@ fn process_completed_pull_rebase(repository: &mut Repository, original_head: &st
         ));
 
     let commit_author = get_commit_default_author(repository, &[]);
-    repository.handle_rewrite_log_event(
+    crate::commands::async_rewrite::handle_rewrite_log_event(
+        repository,
         rebase_event,
         commit_author,
         false, // don't suppress output

@@ -45,6 +45,25 @@ macro_rules! define_feature_flags {
                     $($field: overrides.$file_name.unwrap_or(base.$field),)*
                 }
             }
+
+            /// Read environment overrides for known feature-flag keys only.
+            ///
+            /// We intentionally avoid deserializing all `GIT_AI_*` env vars because
+            /// non-feature env keys (for example `GIT_AI=git`) would otherwise cause
+            /// parse failures and silently drop valid feature-flag overrides.
+            fn env_overrides() -> DeserializableFeatureFlags {
+                let mut env_flags = DeserializableFeatureFlags::default();
+                $(
+                    {
+                        let key = format!(
+                            "GIT_AI_{}",
+                            stringify!($file_name).to_ascii_uppercase()
+                        );
+                        env_flags.$file_name = parse_env_bool_var(&key);
+                    }
+                )*
+                env_flags
+            }
         }
     };
 }
@@ -55,6 +74,7 @@ define_feature_flags!(
     rewrite_stash: rewrite_stash, debug = true, release = false,
     inter_commit_move: checkpoint_inter_commit_move, debug = false, release = false,
     auth_keyring: auth_keyring, debug = false, release = false,
+    async_rewrite_hooks: async_rewrite_hooks, debug = false, release = false,
 );
 
 impl FeatureFlags {
@@ -80,8 +100,7 @@ impl FeatureFlags {
     /// Falls back to defaults for any invalid or missing values
     #[allow(dead_code)]
     pub fn from_env() -> Self {
-        let env_flags: DeserializableFeatureFlags =
-            envy::prefixed("GIT_AI_").from_env().unwrap_or_default();
+        let env_flags: DeserializableFeatureFlags = Self::env_overrides();
         Self::from_deserializable(env_flags)
     }
 
@@ -100,11 +119,20 @@ impl FeatureFlags {
         }
 
         // Apply env var overrides (highest priority)
-        let env_flags: DeserializableFeatureFlags =
-            envy::prefixed("GIT_AI_").from_env().unwrap_or_default();
+        let env_flags: DeserializableFeatureFlags = Self::env_overrides();
         result = Self::merge_with(result, env_flags);
 
         result
+    }
+}
+
+fn parse_env_bool_var(key: &str) -> Option<bool> {
+    let raw = std::env::var(key).ok()?;
+    let normalized = raw.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
     }
 }
 
@@ -121,12 +149,14 @@ mod tests {
             assert!(flags.rewrite_stash);
             assert!(!flags.inter_commit_move);
             assert!(!flags.auth_keyring);
+            assert!(!flags.async_rewrite_hooks);
         }
         #[cfg(not(debug_assertions))]
         {
             assert!(!flags.rewrite_stash);
             assert!(!flags.inter_commit_move);
             assert!(!flags.auth_keyring);
+            assert!(!flags.async_rewrite_hooks);
         }
     }
 
@@ -146,11 +176,13 @@ mod tests {
         deserializable.rewrite_stash = Some(false);
         deserializable.checkpoint_inter_commit_move = Some(true);
         deserializable.auth_keyring = Some(true);
+        deserializable.async_rewrite_hooks = Some(true);
 
         let flags = FeatureFlags::from_file_config(Some(deserializable));
         assert!(!flags.rewrite_stash);
         assert!(flags.inter_commit_move);
         assert!(flags.auth_keyring);
+        assert!(flags.async_rewrite_hooks);
     }
 
     #[test]
@@ -165,6 +197,7 @@ mod tests {
         let defaults = FeatureFlags::default();
         assert_eq!(flags.inter_commit_move, defaults.inter_commit_move);
         assert_eq!(flags.auth_keyring, defaults.auth_keyring);
+        assert_eq!(flags.async_rewrite_hooks, defaults.async_rewrite_hooks);
     }
 
     #[test]
@@ -173,11 +206,13 @@ mod tests {
         deserializable.rewrite_stash = Some(false);
         deserializable.checkpoint_inter_commit_move = Some(false);
         deserializable.auth_keyring = Some(true);
+        deserializable.async_rewrite_hooks = Some(true);
 
         let flags = FeatureFlags::from_deserializable(deserializable);
         assert!(!flags.rewrite_stash);
         assert!(!flags.inter_commit_move);
         assert!(flags.auth_keyring);
+        assert!(flags.async_rewrite_hooks);
     }
 
     #[test]
@@ -188,6 +223,7 @@ mod tests {
             std::env::remove_var("GIT_AI_REWRITE_STASH");
             std::env::remove_var("GIT_AI_CHECKPOINT_INTER_COMMIT_MOVE");
             std::env::remove_var("GIT_AI_AUTH_KEYRING");
+            std::env::remove_var("GIT_AI_ASYNC_REWRITE_HOOKS");
         }
 
         let flags = FeatureFlags::from_env_and_file(None);
@@ -195,6 +231,7 @@ mod tests {
         assert_eq!(flags.rewrite_stash, defaults.rewrite_stash);
         assert_eq!(flags.inter_commit_move, defaults.inter_commit_move);
         assert_eq!(flags.auth_keyring, defaults.auth_keyring);
+        assert_eq!(flags.async_rewrite_hooks, defaults.async_rewrite_hooks);
     }
 
     #[test]
@@ -204,15 +241,35 @@ mod tests {
             std::env::remove_var("GIT_AI_REWRITE_STASH");
             std::env::remove_var("GIT_AI_CHECKPOINT_INTER_COMMIT_MOVE");
             std::env::remove_var("GIT_AI_AUTH_KEYRING");
+            std::env::remove_var("GIT_AI_ASYNC_REWRITE_HOOKS");
         }
 
         let mut file_flags = DeserializableFeatureFlags::default();
         file_flags.rewrite_stash = Some(true);
         file_flags.auth_keyring = Some(true);
+        file_flags.async_rewrite_hooks = Some(true);
 
         let flags = FeatureFlags::from_env_and_file(Some(file_flags));
         assert!(flags.rewrite_stash);
         assert!(flags.auth_keyring);
+        assert!(flags.async_rewrite_hooks);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_from_env_ignores_non_feature_git_ai_env_vars() {
+        unsafe {
+            std::env::set_var("GIT_AI", "git");
+            std::env::set_var("GIT_AI_ASYNC_REWRITE_HOOKS", "true");
+        }
+
+        let flags = FeatureFlags::from_env_and_file(None);
+        assert!(flags.async_rewrite_hooks);
+
+        unsafe {
+            std::env::remove_var("GIT_AI");
+            std::env::remove_var("GIT_AI_ASYNC_REWRITE_HOOKS");
+        }
     }
 
     #[test]
@@ -221,12 +278,14 @@ mod tests {
             rewrite_stash: true,
             inter_commit_move: false,
             auth_keyring: true,
+            async_rewrite_hooks: false,
         };
 
         let serialized = serde_json::to_string(&flags).unwrap();
         assert!(serialized.contains("rewrite_stash"));
         assert!(serialized.contains("inter_commit_move"));
         assert!(serialized.contains("auth_keyring"));
+        assert!(serialized.contains("async_rewrite_hooks"));
     }
 
     #[test]
@@ -235,11 +294,13 @@ mod tests {
             rewrite_stash: true,
             inter_commit_move: false,
             auth_keyring: true,
+            async_rewrite_hooks: false,
         };
         let cloned = flags.clone();
         assert_eq!(cloned.rewrite_stash, flags.rewrite_stash);
         assert_eq!(cloned.inter_commit_move, flags.inter_commit_move);
         assert_eq!(cloned.auth_keyring, flags.auth_keyring);
+        assert_eq!(cloned.async_rewrite_hooks, flags.async_rewrite_hooks);
     }
 
     #[test]

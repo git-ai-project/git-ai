@@ -34,7 +34,8 @@ pub fn post_merge_hook(
             }
         };
 
-        repository.handle_rewrite_log_event(
+        crate::commands::async_rewrite::handle_rewrite_log_event(
+            repository,
             RewriteLogEvent::merge_squash(MergeSquashEvent::new(
                 source_branch.clone(),
                 source_head_sha,

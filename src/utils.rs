@@ -158,6 +158,10 @@ fn current_git_ai_exe() -> Result<PathBuf, GitAiError> {
     Ok(resolve_git_ai_exe_from_invocation_path(path))
 }
 
+pub fn current_git_ai_exe_path() -> Result<PathBuf, GitAiError> {
+    current_git_ai_exe()
+}
+
 fn internal_git_ai_command_with_exe(exe: PathBuf, subcommand: &str) -> Command {
     let mut cmd = Command::new(exe);
     cmd.arg(subcommand)

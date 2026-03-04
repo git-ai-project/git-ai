@@ -1,5 +1,7 @@
 use crate::error::GitAiError;
+use crate::utils::LockFile;
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
 
 /// Simple case classes for rewrite events
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -512,6 +514,10 @@ pub fn append_event_to_file(
     file_path: &std::path::Path,
     new_event: RewriteLogEvent,
 ) -> Result<(), GitAiError> {
+    // Serialize concurrent writers (sync hooks + async worker) so we don't lose updates
+    // in the read-modify-write cycle below.
+    let _rewrite_log_lock = acquire_rewrite_log_lock(file_path)?;
+
     // Serialize new event
     let new_event_json = serde_json::to_string(&new_event)?;
 
@@ -548,6 +554,26 @@ pub fn append_event_to_file(
     std::fs::write(file_path, lines.join("\n"))?;
 
     Ok(())
+}
+
+fn acquire_rewrite_log_lock(file_path: &std::path::Path) -> Result<LockFile, GitAiError> {
+    const LOCK_WAIT_TIMEOUT: Duration = Duration::from_millis(2_000);
+    const LOCK_WAIT_POLL: Duration = Duration::from_millis(10);
+
+    let lock_path = file_path.with_extension("lock");
+    let deadline = Instant::now() + LOCK_WAIT_TIMEOUT;
+    loop {
+        if let Some(lock) = LockFile::try_acquire(&lock_path) {
+            return Ok(lock);
+        }
+        if Instant::now() >= deadline {
+            return Err(GitAiError::Generic(format!(
+                "Timed out waiting for rewrite log lock: {}",
+                lock_path.display()
+            )));
+        }
+        std::thread::sleep(LOCK_WAIT_POLL);
+    }
 }
 
 #[cfg(test)]

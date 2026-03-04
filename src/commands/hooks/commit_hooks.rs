@@ -71,22 +71,25 @@ pub fn commit_post_command_hook(
     let commit_author = get_commit_default_author(repository, &parsed_args.command_args);
     if parsed_args.has_command_flag("--amend") {
         if let (Some(orig), Some(sha)) = (original_commit.clone(), new_sha.clone()) {
-            repository.handle_rewrite_log_event(
+            crate::commands::async_rewrite::handle_rewrite_log_event(
+                repository,
                 RewriteLogEvent::commit_amend(orig, sha),
-                commit_author,
+                commit_author.clone(),
                 supress_output,
                 true,
             );
         } else {
-            repository.handle_rewrite_log_event(
+            crate::commands::async_rewrite::handle_rewrite_log_event(
+                repository,
                 RewriteLogEvent::commit(original_commit, new_sha.unwrap()),
-                commit_author,
+                commit_author.clone(),
                 supress_output,
                 true,
             );
         }
     } else {
-        repository.handle_rewrite_log_event(
+        crate::commands::async_rewrite::handle_rewrite_log_event(
+            repository,
             RewriteLogEvent::commit(original_commit, new_sha.unwrap()),
             commit_author,
             supress_output,

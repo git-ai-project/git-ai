@@ -2,6 +2,87 @@ pub mod test_file;
 pub mod test_repo;
 
 #[macro_export]
+macro_rules! async_feature_test_wrappers {
+    (
+        fn $test_name:ident() $body:block
+    ) => {
+        paste::paste! {
+            #[test]
+            #[serial_test::serial]
+            fn [<test_ $test_name _with_async_feature_flag>]() {
+                struct AsyncFeatureEnvGuard {
+                    previous: Option<String>,
+                }
+
+                impl AsyncFeatureEnvGuard {
+                    fn enable() -> Self {
+                        let previous = std::env::var("GIT_AI_ASYNC_REWRITE_HOOKS").ok();
+                        // SAFETY: guarded by serial_test::serial in generated tests.
+                        unsafe {
+                            std::env::set_var("GIT_AI_ASYNC_REWRITE_HOOKS", "1");
+                        }
+                        Self { previous }
+                    }
+                }
+
+                impl Drop for AsyncFeatureEnvGuard {
+                    fn drop(&mut self) {
+                        // SAFETY: guarded by serial_test::serial in generated tests.
+                        unsafe {
+                            if let Some(previous) = &self.previous {
+                                std::env::set_var("GIT_AI_ASYNC_REWRITE_HOOKS", previous);
+                            } else {
+                                std::env::remove_var("GIT_AI_ASYNC_REWRITE_HOOKS");
+                            }
+                        }
+                    }
+                }
+
+                let _guard = AsyncFeatureEnvGuard::enable();
+                $body
+            }
+
+            #[test]
+            #[serial_test::serial]
+            fn [<test_ $test_name _with_async_feature_flag_in_worktree>]() {
+                struct AsyncFeatureEnvGuard {
+                    previous: Option<String>,
+                }
+
+                impl AsyncFeatureEnvGuard {
+                    fn enable() -> Self {
+                        let previous = std::env::var("GIT_AI_ASYNC_REWRITE_HOOKS").ok();
+                        // SAFETY: guarded by serial_test::serial in generated tests.
+                        unsafe {
+                            std::env::set_var("GIT_AI_ASYNC_REWRITE_HOOKS", "1");
+                        }
+                        Self { previous }
+                    }
+                }
+
+                impl Drop for AsyncFeatureEnvGuard {
+                    fn drop(&mut self) {
+                        // SAFETY: guarded by serial_test::serial in generated tests.
+                        unsafe {
+                            if let Some(previous) = &self.previous {
+                                std::env::set_var("GIT_AI_ASYNC_REWRITE_HOOKS", previous);
+                            } else {
+                                std::env::remove_var("GIT_AI_ASYNC_REWRITE_HOOKS");
+                            }
+                        }
+                    }
+                }
+
+                let _guard = AsyncFeatureEnvGuard::enable();
+                $crate::repos::test_repo::with_worktree_mode(|| {
+                    $body
+                });
+            }
+        }
+    };
+}
+
+#[macro_export]
 macro_rules! subdir_test_variants {
     (
         fn $test_name:ident() $body:block

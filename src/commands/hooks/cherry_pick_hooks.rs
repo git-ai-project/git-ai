@@ -377,7 +377,8 @@ fn process_completed_cherry_pick(
     debug_log("Creating CherryPickComplete event and rewriting authorship...");
     let commit_author = get_commit_default_author(repository, &parsed_args.command_args);
 
-    repository.handle_rewrite_log_event(
+    crate::commands::async_rewrite::handle_rewrite_log_event(
+        repository,
         cherry_pick_event,
         commit_author,
         false, // don't suppress output

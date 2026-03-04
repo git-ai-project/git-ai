@@ -302,7 +302,8 @@ fn process_completed_rebase(
     debug_log("Creating RebaseComplete event and rewriting authorship...");
     let commit_author = get_commit_default_author(repository, &parsed_args.command_args);
 
-    repository.handle_rewrite_log_event(
+    crate::commands::async_rewrite::handle_rewrite_log_event(
+        repository,
         rebase_event,
         commit_author,
         false, // don't suppress output

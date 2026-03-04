@@ -1940,7 +1940,13 @@ fn maybe_handle_pull_post_rewrite(repo: &mut Repository) {
     );
 
     let commit_author = commit_hooks::get_commit_default_author(repo, &[]);
-    repo.handle_rewrite_log_event(rebase_event, commit_author, false, true);
+    crate::commands::async_rewrite::handle_rewrite_log_event(
+        repo,
+        rebase_event,
+        commit_author,
+        false,
+        true,
+    );
     clear_pull_hook_state(repo);
 }
 
@@ -2098,7 +2104,8 @@ fn maybe_finalize_cherry_pick_batch_state(repo: &mut Repository, force: bool) {
     };
 
     let commit_author = commit_hooks::get_commit_default_author(repo, &[]);
-    repo.handle_rewrite_log_event(
+    crate::commands::async_rewrite::handle_rewrite_log_event(
+        repo,
         crate::git::rewrite_log::RewriteLogEvent::cherry_pick_complete(
             crate::git::rewrite_log::CherryPickCompleteEvent::new(
                 original_head,
@@ -2256,7 +2263,13 @@ fn handle_rebase_post_rewrite_from_stdin(repo: &mut Repository, stdin: &[u8]) {
         ),
     );
     let commit_author = commit_hooks::get_commit_default_author(repo, &[]);
-    repo.handle_rewrite_log_event(rebase_event, commit_author, false, true);
+    crate::commands::async_rewrite::handle_rewrite_log_event(
+        repo,
+        rebase_event,
+        commit_author,
+        false,
+        true,
+    );
 }
 
 fn run_managed_hook(
@@ -2351,7 +2364,8 @@ fn run_managed_hook(
                 }
                 for (old_sha, new_sha) in parse_hook_stdin(stdin) {
                     let commit_author = commit_hooks::get_commit_default_author(&repo, &[]);
-                    repo.handle_rewrite_log_event(
+                    crate::commands::async_rewrite::handle_rewrite_log_event(
+                        &mut repo,
                         crate::git::rewrite_log::RewriteLogEvent::commit_amend(old_sha, new_sha),
                         commit_author,
                         false,
