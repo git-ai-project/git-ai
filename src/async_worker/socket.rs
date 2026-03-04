@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::utils::debug_log;
-use interprocess::local_socket::{ListenerNonblockingMode, ListenerOptions};
 #[cfg(unix)]
 use interprocess::local_socket::{GenericFilePath, ToFsName};
+use interprocess::local_socket::{ListenerNonblockingMode, ListenerOptions};
 
 /// The socket filename within the .git/ai/ directory.
 const SOCKET_FILENAME: &str = "async-worker.sock";
