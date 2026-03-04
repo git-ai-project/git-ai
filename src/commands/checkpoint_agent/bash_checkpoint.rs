@@ -126,7 +126,6 @@ const BLACKLISTED_COMMANDS: &[&str] = &[
     "tree",
     "exa",
     // Search
-    "find",
     "grep",
     "egrep",
     "fgrep",
@@ -169,7 +168,6 @@ const BLACKLISTED_COMMANDS: &[&str] = &[
     "tr",
     "jq",
     "yq",
-    "xargs",
     // Network inspection
     "curl",
     "ping",
@@ -749,7 +747,6 @@ mod tests {
             "ls -la",
             "cat file.txt",
             "grep -r pattern .",
-            "find . -name '*.rs'",
             "git status",
             "git log --oneline",
             "git diff HEAD~1",
@@ -1246,6 +1243,35 @@ mod tests {
         assert!(
             result.should_checkpoint,
             "wget should trigger checkpoint since it writes files to disk"
+        );
+    }
+
+    #[test]
+    fn test_xargs_not_blacklisted() {
+        // xargs executes arbitrary commands, so pipelines like
+        // `grep -rl pattern | xargs sed -i 's/old/new/'` must trigger checkpoints
+        let result = evaluate_bash_command("xargs rm", false).unwrap();
+        assert!(
+            result.should_checkpoint,
+            "xargs should trigger checkpoint since it runs arbitrary commands"
+        );
+
+        // Pipeline where xargs is the modifying segment
+        let result =
+            evaluate_bash_command("grep -rl pattern | xargs sed -i 's/old/new/'", false).unwrap();
+        assert!(
+            result.should_checkpoint,
+            "pipeline with xargs should trigger checkpoint"
+        );
+    }
+
+    #[test]
+    fn test_find_not_blacklisted() {
+        // find can modify files via -delete, -exec, etc.
+        let result = evaluate_bash_command("find . -name '*.bak' -delete", false).unwrap();
+        assert!(
+            result.should_checkpoint,
+            "find should trigger checkpoint since it can delete/modify files"
         );
     }
 
