@@ -9,7 +9,7 @@ use interprocess::local_socket::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{Read, Write};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -194,8 +194,18 @@ fn try_send_job(socket_name: &Name<'_>, job: &AsyncRewriteJob) -> Result<SendAtt
         }
     };
 
-    let mut payload = serde_json::to_vec(job)?;
-    payload.push(b'\n');
+    let payload = serde_json::to_vec(job)?;
+    let payload_len = u32::try_from(payload.len()).map_err(|_| {
+        GitAiError::Generic("Async rewrite payload exceeds max supported size".to_string())
+    })?;
+    stream
+        .write_all(&payload_len.to_le_bytes())
+        .map_err(|err| {
+            GitAiError::Generic(format!(
+                "Failed to write async rewrite payload length to socket: {}",
+                err
+            ))
+        })?;
     stream.write_all(&payload).map_err(|err| {
         GitAiError::Generic(format!(
             "Failed to write async rewrite job to socket: {}",
@@ -277,25 +287,31 @@ fn process_job_stream(
     repo: &mut Repository,
     stream: &mut LocalSocketStream,
 ) -> Result<(), GitAiError> {
-    let mut payload = String::new();
-    let bytes_read = {
-        let mut reader = BufReader::new(&mut *stream);
-        reader.read_line(&mut payload)?
-    };
-    if bytes_read == 0 {
+    let mut len_bytes = [0u8; 4];
+    stream.read_exact(&mut len_bytes).map_err(|err| {
+        if err.kind() == std::io::ErrorKind::UnexpectedEof {
+            return GitAiError::Generic("Received empty async rewrite payload".to_string());
+        }
+        GitAiError::IoError(err)
+    })?;
+
+    let payload_len = u32::from_le_bytes(len_bytes) as usize;
+    if payload_len == 0 {
         return Err(GitAiError::Generic(
             "Received empty async rewrite payload".to_string(),
         ));
     }
-
-    let payload = payload.trim();
-    if payload.is_empty() {
-        return Err(GitAiError::Generic(
-            "Received empty async rewrite payload".to_string(),
-        ));
+    const MAX_ASYNC_REWRITE_PAYLOAD_BYTES: usize = 1_048_576;
+    if payload_len > MAX_ASYNC_REWRITE_PAYLOAD_BYTES {
+        return Err(GitAiError::Generic(format!(
+            "Async rewrite payload too large: {} bytes",
+            payload_len
+        )));
     }
 
-    let job = serde_json::from_str::<AsyncRewriteJob>(payload)?;
+    let mut payload = vec![0u8; payload_len];
+    stream.read_exact(&mut payload)?;
+    let job = serde_json::from_slice::<AsyncRewriteJob>(&payload)?;
 
     if job.schema_version != ASYNC_REWRITE_JOB_SCHEMA_VERSION {
         return Err(GitAiError::Generic(format!(
