@@ -7,8 +7,13 @@ use git_ai::git::rewrite_log::RewriteLogEvent;
 use serial_test::serial;
 use std::time::{Duration, Instant};
 
+#[cfg(windows)]
+const ASYNC_EVENT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(not(windows))]
+const ASYNC_EVENT_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+
 fn wait_for_rewrite_events(repo: &TestRepo, expected_min_events: usize) -> Vec<RewriteLogEvent> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + ASYNC_EVENT_WAIT_TIMEOUT;
 
     loop {
         let gitai_repo =
@@ -31,7 +36,7 @@ fn wait_for_rewrite_event<F>(repo: &TestRepo, predicate: F)
 where
     F: Fn(&RewriteLogEvent) -> bool,
 {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + ASYNC_EVENT_WAIT_TIMEOUT;
 
     loop {
         let gitai_repo =
