@@ -260,6 +260,15 @@ fn run_async_rewrite_worker(args: &[String]) -> Result<(), GitAiError> {
     loop {
         match listener.accept() {
             Ok(mut stream) => {
+                // Some platforms can return accepted streams in nonblocking mode when the
+                // listener itself is configured nonblocking for accept(). Force blocking reads
+                // for deterministic payload consumption.
+                if let Err(err) = stream.set_nonblocking(false) {
+                    debug_log(&format!(
+                        "Failed to configure async rewrite stream as blocking: {}",
+                        err
+                    ));
+                }
                 if let Err(err) = process_job_stream(&mut repo, &mut stream) {
                     debug_log(&format!("Failed processing async rewrite job: {}", err));
                 }
