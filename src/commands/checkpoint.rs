@@ -2009,6 +2009,65 @@ mod tests {
     }
 
     #[test]
+    fn test_checkpoint_does_not_persist_blob_for_git_ai_ignored_file() {
+        let repo = TmpRepo::new().unwrap();
+        repo.write_file("src/main.rs", "fn main() {}\n", true).unwrap();
+        repo.commit_with_message("initial").unwrap();
+
+        repo.write_file(".git-ai-ignore", "docs/**\n", true).unwrap();
+        repo.commit_with_message("add ignore").unwrap();
+
+        let tracked_contents = "fn main() {}\nfn added() {}\n";
+        let ignored_contents = "# Guide\nline 1\nline 2\n";
+        repo.write_file("src/main.rs", tracked_contents, false).unwrap();
+        repo.write_file("docs/guide.md", ignored_contents, false).unwrap();
+
+        repo.trigger_checkpoint_with_author("human").unwrap();
+
+        let gitai_repo =
+            crate::git::repository::find_repository_in_path(repo.path().to_str().unwrap())
+                .expect("Repository should exist");
+        let base_commit = gitai_repo
+            .head()
+            .ok()
+            .and_then(|head| head.target().ok())
+            .unwrap_or_else(|| "initial".to_string());
+        let working_log = gitai_repo.storage.working_log_for_base_commit(&base_commit);
+        let checkpoints = working_log.read_all_checkpoints().unwrap();
+        let latest = checkpoints.last().unwrap();
+
+        assert!(
+            latest.entries.iter().any(|entry| entry.file == "src/main.rs"),
+            "Expected non-ignored file to be checkpointed"
+        );
+        assert!(
+            latest
+                .entries
+                .iter()
+                .all(|entry| entry.file != "docs/guide.md"),
+            "Expected .git-ai-ignore pattern to filter out docs/guide.md"
+        );
+
+        let mut tracked_hasher = Sha256::new();
+        tracked_hasher.update(tracked_contents.as_bytes());
+        let tracked_sha = format!("{:x}", tracked_hasher.finalize());
+
+        let mut ignored_hasher = Sha256::new();
+        ignored_hasher.update(ignored_contents.as_bytes());
+        let ignored_sha = format!("{:x}", ignored_hasher.finalize());
+
+        let blobs_dir = working_log.dir.join("blobs");
+        assert!(
+            blobs_dir.join(&tracked_sha).exists(),
+            "Tracked file content should be written to blob storage"
+        );
+        assert!(
+            !blobs_dir.join(&ignored_sha).exists(),
+            "Ignored file content should not be written to blob storage"
+        );
+    }
+
+    #[test]
     fn test_compute_line_stats_ignores_whitespace_only_lines() {
         let (tmp_repo, _lines_file, _alphabet_file) = TmpRepo::new_with_base_commit().unwrap();
 
