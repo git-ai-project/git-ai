@@ -44,7 +44,7 @@ export const GitAiPlugin: Plugin = async (ctx) => {
 
   // Track pending edits by callID so we can reference them in the after hook
   // Stores { filePath, repoDir, sessionID } for each pending edit
-  const pendingEdits = new Map<string, { filePath: string; repoDir: string; sessionID: string }>()
+  const pendingEdits = new Map<string, { filePath: string; repoDir: string; sessionID: string; bashCommand?: string }>()
 
   // Helper to find git repo root from a file path
   const findGitRepo = async (filePath: string): Promise<string | null> => {
@@ -91,7 +91,7 @@ export const GitAiPlugin: Plugin = async (ctx) => {
       }
 
       // Store info for the after hook
-      pendingEdits.set(input.callID, { filePath: filePath ?? "", repoDir, sessionID: input.sessionID })
+      pendingEdits.set(input.callID, { filePath: filePath ?? "", repoDir, sessionID: input.sessionID, bashCommand })
 
       try {
         const hookInput = JSON.stringify({
@@ -120,7 +120,7 @@ export const GitAiPlugin: Plugin = async (ctx) => {
         return
       }
 
-      const { filePath, repoDir, sessionID } = editInfo
+      const { filePath, repoDir, sessionID, bashCommand } = editInfo
 
       try {
         const hookInput = JSON.stringify({
@@ -130,6 +130,7 @@ export const GitAiPlugin: Plugin = async (ctx) => {
           cwd: repoDir,
           tool_input: {
             ...(filePath ? { filePath } : {}),
+            ...(bashCommand ? { command: bashCommand } : {}),
           },
         })
 

@@ -172,7 +172,6 @@ const BLACKLISTED_COMMANDS: &[&str] = &[
     "xargs",
     // Network inspection
     "curl",
-    "wget",
     "ping",
     "dig",
     "nslookup",
@@ -1237,6 +1236,16 @@ mod tests {
         assert!(
             result.should_checkpoint,
             "awk should trigger checkpoint since it can modify files"
+        );
+    }
+
+    #[test]
+    fn test_wget_not_blacklisted() {
+        // wget writes files to disk by default (unlike curl which defaults to stdout)
+        let result = evaluate_bash_command("wget https://example.com/setup.sh", false).unwrap();
+        assert!(
+            result.should_checkpoint,
+            "wget should trigger checkpoint since it writes files to disk"
         );
     }
 
