@@ -514,9 +514,16 @@ pub fn append_event_to_file(
     file_path: &std::path::Path,
     new_event: RewriteLogEvent,
 ) -> Result<(), GitAiError> {
-    // Serialize concurrent writers (sync hooks + async worker) so we don't lose updates
-    // in the read-modify-write cycle below.
-    let _rewrite_log_lock = acquire_rewrite_log_lock(file_path)?;
+    // Serialize concurrent writers (sync hooks + async worker) only when async rewrite
+    // handoff is enabled; otherwise the lock adds avoidable overhead on hot sync paths.
+    let _rewrite_log_lock = if crate::config::Config::get()
+        .feature_flags()
+        .async_rewrite_hooks
+    {
+        Some(acquire_rewrite_log_lock(file_path)?)
+    } else {
+        None
+    };
 
     // Serialize new event
     let new_event_json = serde_json::to_string(&new_event)?;
