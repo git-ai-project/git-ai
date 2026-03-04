@@ -101,38 +101,40 @@ pub mod platform {
 
     /// Accept a connection on the listener with a timeout.
     /// Returns None if the timeout expires without a connection.
+    ///
+    /// Uses `libc::poll()` to wait for readiness, then a blocking `accept()`.
+    /// This avoids macOS issues where non-blocking `accept()` on a
+    /// `UnixListener` returns `EINVAL` instead of `EWOULDBLOCK`.
     pub fn accept_with_timeout(
         listener: &UnixListener,
         timeout: Duration,
     ) -> io::Result<Option<UnixStream>> {
-        // Use poll(2) via set_nonblocking + sleep loop.
-        // Some platforms (macOS) return EINVAL from accept() on non-blocking
-        // Unix sockets, so we temporarily set non-blocking, attempt accept,
-        // and handle both WouldBlock and InvalidInput as "not ready yet".
-        listener.set_nonblocking(true)?;
-        let start = std::time::Instant::now();
-        let result = loop {
-            match listener.accept() {
-                Ok((stream, _addr)) => {
-                    stream.set_nonblocking(false)?;
-                    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-                    break Ok(Some(stream));
-                }
-                Err(ref e)
-                    if e.kind() == io::ErrorKind::WouldBlock
-                        || e.kind() == io::ErrorKind::InvalidInput =>
-                {
-                    if start.elapsed() >= timeout {
-                        break Ok(None);
-                    }
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-                Err(e) => break Err(e),
-            }
+        use std::os::unix::io::AsRawFd;
+
+        let fd = listener.as_raw_fd();
+        let timeout_ms: i32 = timeout.as_millis().min(i32::MAX as u128) as i32;
+
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
         };
-        // Restore blocking mode for the listener
-        let _ = listener.set_nonblocking(false);
-        result
+
+        // SAFETY: We pass a valid pointer to a single pollfd struct and nfds=1.
+        let ret = unsafe { libc::poll(&mut pfd as *mut libc::pollfd, 1, timeout_ms) };
+
+        if ret < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if ret == 0 {
+            // Timeout – no connection arrived
+            return Ok(None);
+        }
+
+        // poll says the fd is ready – do a blocking accept
+        let (stream, _addr) = listener.accept()?;
+        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+        Ok(Some(stream))
     }
 
     /// Clean up the socket file.
