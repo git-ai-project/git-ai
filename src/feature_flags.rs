@@ -56,6 +56,8 @@ define_feature_flags!(
     inter_commit_move: checkpoint_inter_commit_move, debug = false, release = false,
     auth_keyring: auth_keyring, debug = false, release = false,
     async_worker: async_worker, debug = false, release = false,
+    git_hooks_enabled: git_hooks_enabled, debug = false, release = false,
+    git_hooks_externally_managed: git_hooks_externally_managed, debug = false, release = false,
 );
 
 impl FeatureFlags {
@@ -123,6 +125,8 @@ mod tests {
             assert!(!flags.inter_commit_move);
             assert!(!flags.auth_keyring);
             assert!(!flags.async_worker);
+            assert!(!flags.git_hooks_enabled);
+            assert!(!flags.git_hooks_externally_managed);
         }
         #[cfg(not(debug_assertions))]
         {
@@ -130,6 +134,8 @@ mod tests {
             assert!(!flags.inter_commit_move);
             assert!(!flags.auth_keyring);
             assert!(!flags.async_worker);
+            assert!(!flags.git_hooks_enabled);
+            assert!(!flags.git_hooks_externally_managed);
         }
     }
 
@@ -228,6 +234,8 @@ mod tests {
             inter_commit_move: false,
             auth_keyring: true,
             async_worker: false,
+            git_hooks_enabled: false,
+            git_hooks_externally_managed: false,
         };
 
         let serialized = serde_json::to_string(&flags).unwrap();
@@ -235,6 +243,8 @@ mod tests {
         assert!(serialized.contains("inter_commit_move"));
         assert!(serialized.contains("auth_keyring"));
         assert!(serialized.contains("async_worker"));
+        assert!(serialized.contains("git_hooks_enabled"));
+        assert!(serialized.contains("git_hooks_externally_managed"));
     }
 
     #[test]
@@ -244,12 +254,19 @@ mod tests {
             inter_commit_move: false,
             auth_keyring: true,
             async_worker: false,
+            git_hooks_enabled: true,
+            git_hooks_externally_managed: false,
         };
         let cloned = flags.clone();
         assert_eq!(cloned.rewrite_stash, flags.rewrite_stash);
         assert_eq!(cloned.inter_commit_move, flags.inter_commit_move);
         assert_eq!(cloned.auth_keyring, flags.auth_keyring);
         assert_eq!(cloned.async_worker, flags.async_worker);
+        assert_eq!(cloned.git_hooks_enabled, flags.git_hooks_enabled);
+        assert_eq!(
+            cloned.git_hooks_externally_managed,
+            flags.git_hooks_externally_managed
+        );
     }
 
     #[test]

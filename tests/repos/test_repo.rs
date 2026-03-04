@@ -693,6 +693,15 @@ impl TestRepo {
         if ff.auth_keyring != defaults.auth_keyring {
             command.env("GIT_AI_AUTH_KEYRING", ff.auth_keyring.to_string());
         }
+        if ff.git_hooks_enabled != defaults.git_hooks_enabled {
+            command.env("GIT_AI_GIT_HOOKS_ENABLED", ff.git_hooks_enabled.to_string());
+        }
+        if ff.git_hooks_externally_managed != defaults.git_hooks_externally_managed {
+            command.env(
+                "GIT_AI_GIT_HOOKS_EXTERNALLY_MANAGED",
+                ff.git_hooks_externally_managed.to_string(),
+            );
+        }
     }
 
     /// Patch the git-ai config for this test repo

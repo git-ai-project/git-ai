@@ -779,6 +779,33 @@ fn select_forward_target_for_repo(
     current_local_hooks: Option<&str>,
     prior_state: Option<&RepoHookState>,
 ) -> (ForwardMode, Option<String>, Option<String>) {
+    // When hooks are externally managed, disable all forwarding.
+    // Preserve any previously saved `original_local_hooks_path` so that
+    // `git-hooks remove` can still restore the user's prior hooksPath.
+    let feature_flags = config::Config::get().get_feature_flags().clone();
+    if feature_flags.git_hooks_enabled && feature_flags.git_hooks_externally_managed {
+        let preserved_original_local_hooks_path = prior_state
+            .and_then(|state| state.original_local_hooks_path.clone())
+            .or_else(|| {
+                current_local_hooks
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .and_then(|value| {
+                        let path = PathBuf::from(value);
+                        if is_disallowed_forward_hooks_path(
+                            &path,
+                            Some(repo),
+                            Some(managed_hooks_dir),
+                        ) {
+                            None
+                        } else {
+                            Some(value.to_string())
+                        }
+                    })
+            });
+        return (ForwardMode::None, None, preserved_original_local_hooks_path);
+    }
+
     if let Some(local_hooks) = current_local_hooks
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -888,12 +915,18 @@ pub fn ensure_repo_hooks_installed(
         dry_run,
     )?;
 
-    changed |= set_hooks_path_in_config(
-        &local_config_path,
-        gix_config::Source::Local,
-        &managed_hooks_dir.to_string_lossy(),
-        dry_run,
-    )?;
+    // Skip changing git config when hooks are externally managed
+    let feature_flags = config::Config::get().get_feature_flags().clone();
+    let externally_managed =
+        feature_flags.git_hooks_enabled && feature_flags.git_hooks_externally_managed;
+    if !externally_managed {
+        changed |= set_hooks_path_in_config(
+            &local_config_path,
+            gix_config::Source::Local,
+            &managed_hooks_dir.to_string_lossy(),
+            dry_run,
+        )?;
+    }
 
     let state = RepoHookState {
         schema_version: repo_hook_state_schema_version(),
@@ -2620,6 +2653,19 @@ pub fn handle_git_hook_invocation(hook_name: &str, hook_args: &[String]) -> i32 
 }
 
 pub fn ensure_repo_level_hooks_for_checkpoint(repo: &Repository) {
+    let feature_flags = config::Config::get().get_feature_flags().clone();
+    if feature_flags.git_hooks_enabled {
+        // When the git_hooks_enabled feature flag is on, always ensure hooks are installed
+        // regardless of whether they were previously set up.
+        if let Err(err) = ensure_repo_hooks_installed(repo, false) {
+            debug_log(&format!(
+                "ensure_repo_level_hooks_for_checkpoint (git_hooks_enabled): {}",
+                err
+            ));
+        }
+        // Also mark hooks as enabled so the existing self-heal logic continues to work
+        let _ = mark_repo_hooks_enabled(repo);
+    }
     maybe_spawn_repo_hook_self_heal(repo);
 }
 
