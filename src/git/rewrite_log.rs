@@ -516,6 +516,10 @@ pub fn append_event_to_file(
 ) -> Result<(), GitAiError> {
     // Serialize concurrent writers (sync hooks + async worker) only when async rewrite
     // handoff is enabled; otherwise the lock adds avoidable overhead on hot sync paths.
+    //
+    // On Windows, lock-file open modes are much stricter and can cause intermittent
+    // write starvation in heavily parallel CI environments; skip the advisory lock there.
+    #[cfg(not(windows))]
     let _rewrite_log_lock = if crate::config::Config::get()
         .feature_flags()
         .async_rewrite_hooks
@@ -524,6 +528,8 @@ pub fn append_event_to_file(
     } else {
         None
     };
+    #[cfg(windows)]
+    let _rewrite_log_lock: Option<LockFile> = None;
 
     // Serialize new event
     let new_event_json = serde_json::to_string(&new_event)?;
