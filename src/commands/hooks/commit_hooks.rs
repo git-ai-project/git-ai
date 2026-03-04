@@ -1,3 +1,4 @@
+use crate::async_worker::dispatch::try_dispatch_async;
 use crate::authorship::pre_commit;
 use crate::commands::git_handlers::CommandHooksContext;
 use crate::git::cli_parser::{ParsedGitInvocation, is_dry_run};
@@ -69,29 +70,20 @@ pub fn commit_post_command_hook(
     }
 
     let commit_author = get_commit_default_author(repository, &parsed_args.command_args);
-    if parsed_args.has_command_flag("--amend") {
+
+    let event = if parsed_args.has_command_flag("--amend") {
         if let (Some(orig), Some(sha)) = (original_commit.clone(), new_sha.clone()) {
-            repository.handle_rewrite_log_event(
-                RewriteLogEvent::commit_amend(orig, sha),
-                commit_author,
-                supress_output,
-                true,
-            );
+            RewriteLogEvent::commit_amend(orig, sha)
         } else {
-            repository.handle_rewrite_log_event(
-                RewriteLogEvent::commit(original_commit, new_sha.unwrap()),
-                commit_author,
-                supress_output,
-                true,
-            );
+            RewriteLogEvent::commit(original_commit, new_sha.unwrap())
         }
     } else {
-        repository.handle_rewrite_log_event(
-            RewriteLogEvent::commit(original_commit, new_sha.unwrap()),
-            commit_author,
-            supress_output,
-            true,
-        );
+        RewriteLogEvent::commit(original_commit, new_sha.unwrap())
+    };
+
+    // Try async dispatch first; fall back to synchronous if disabled or failed
+    if !try_dispatch_async(repository, &event, &commit_author, supress_output, true) {
+        repository.handle_rewrite_log_event(event, commit_author, supress_output, true);
     }
 
     // Flush logs and metrics after commit

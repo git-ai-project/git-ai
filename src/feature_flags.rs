@@ -55,6 +55,7 @@ define_feature_flags!(
     rewrite_stash: rewrite_stash, debug = true, release = false,
     inter_commit_move: checkpoint_inter_commit_move, debug = false, release = false,
     auth_keyring: auth_keyring, debug = false, release = false,
+    async_worker: async_worker, debug = false, release = false,
 );
 
 impl FeatureFlags {
@@ -121,12 +122,14 @@ mod tests {
             assert!(flags.rewrite_stash);
             assert!(!flags.inter_commit_move);
             assert!(!flags.auth_keyring);
+            assert!(!flags.async_worker);
         }
         #[cfg(not(debug_assertions))]
         {
             assert!(!flags.rewrite_stash);
             assert!(!flags.inter_commit_move);
             assert!(!flags.auth_keyring);
+            assert!(!flags.async_worker);
         }
     }
 
@@ -188,6 +191,7 @@ mod tests {
             std::env::remove_var("GIT_AI_REWRITE_STASH");
             std::env::remove_var("GIT_AI_CHECKPOINT_INTER_COMMIT_MOVE");
             std::env::remove_var("GIT_AI_AUTH_KEYRING");
+            std::env::remove_var("GIT_AI_ASYNC_WORKER");
         }
 
         let flags = FeatureFlags::from_env_and_file(None);
@@ -195,6 +199,7 @@ mod tests {
         assert_eq!(flags.rewrite_stash, defaults.rewrite_stash);
         assert_eq!(flags.inter_commit_move, defaults.inter_commit_move);
         assert_eq!(flags.auth_keyring, defaults.auth_keyring);
+        assert_eq!(flags.async_worker, defaults.async_worker);
     }
 
     #[test]
@@ -204,6 +209,7 @@ mod tests {
             std::env::remove_var("GIT_AI_REWRITE_STASH");
             std::env::remove_var("GIT_AI_CHECKPOINT_INTER_COMMIT_MOVE");
             std::env::remove_var("GIT_AI_AUTH_KEYRING");
+            std::env::remove_var("GIT_AI_ASYNC_WORKER");
         }
 
         let mut file_flags = DeserializableFeatureFlags::default();
@@ -221,12 +227,14 @@ mod tests {
             rewrite_stash: true,
             inter_commit_move: false,
             auth_keyring: true,
+            async_worker: false,
         };
 
         let serialized = serde_json::to_string(&flags).unwrap();
         assert!(serialized.contains("rewrite_stash"));
         assert!(serialized.contains("inter_commit_move"));
         assert!(serialized.contains("auth_keyring"));
+        assert!(serialized.contains("async_worker"));
     }
 
     #[test]
@@ -235,11 +243,13 @@ mod tests {
             rewrite_stash: true,
             inter_commit_move: false,
             auth_keyring: true,
+            async_worker: false,
         };
         let cloned = flags.clone();
         assert_eq!(cloned.rewrite_stash, flags.rewrite_stash);
         assert_eq!(cloned.inter_commit_move, flags.inter_commit_move);
         assert_eq!(cloned.auth_keyring, flags.auth_keyring);
+        assert_eq!(cloned.async_worker, flags.async_worker);
     }
 
     #[test]

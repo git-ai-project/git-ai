@@ -1,4 +1,5 @@
 use crate::{
+    async_worker::dispatch::try_dispatch_async,
     commands::hooks::commit_hooks::get_commit_default_author,
     git::{
         cli_parser::{ParsedGitInvocation, is_dry_run},
@@ -34,16 +35,16 @@ pub fn post_merge_hook(
             }
         };
 
-        repository.handle_rewrite_log_event(
-            RewriteLogEvent::merge_squash(MergeSquashEvent::new(
-                source_branch.clone(),
-                source_head_sha,
-                base_branch,
-                base_head,
-            )),
-            commit_author,
-            false,
-            true,
-        );
+        let event = RewriteLogEvent::merge_squash(MergeSquashEvent::new(
+            source_branch.clone(),
+            source_head_sha,
+            base_branch,
+            base_head,
+        ));
+
+        // Try async dispatch first; fall back to synchronous if disabled or failed
+        if !try_dispatch_async(repository, &event, &commit_author, false, true) {
+            repository.handle_rewrite_log_event(event, commit_author, false, true);
+        }
     }
 }

@@ -168,6 +168,9 @@ pub fn handle_git_ai(args: &[String]) {
         "continue" => {
             commands::continue_session::handle_continue(&args[1..]);
         }
+        "async-worker" => {
+            crate::async_worker::handle_async_worker_command(&args[1..]);
+        }
         #[cfg(debug_assertions)]
         "show-transcript" => {
             handle_show_transcript(&args[1..]);

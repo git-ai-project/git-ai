@@ -1,4 +1,5 @@
 pub mod api;
+pub mod async_worker;
 pub mod auth;
 pub mod authorship;
 pub mod ci;

@@ -1,3 +1,4 @@
+use crate::async_worker::dispatch::try_dispatch_async;
 use crate::authorship::rebase_authorship::walk_commits_to_base;
 use crate::commands::git_handlers::CommandHooksContext;
 use crate::commands::hooks::commit_hooks::get_commit_default_author;
@@ -302,12 +303,15 @@ fn process_completed_rebase(
     debug_log("Creating RebaseComplete event and rewriting authorship...");
     let commit_author = get_commit_default_author(repository, &parsed_args.command_args);
 
-    repository.handle_rewrite_log_event(
-        rebase_event,
-        commit_author,
-        false, // don't suppress output
-        true,  // save to log
-    );
+    // Try async dispatch first; fall back to synchronous if disabled or failed
+    if !try_dispatch_async(repository, &rebase_event, &commit_author, false, true) {
+        repository.handle_rewrite_log_event(
+            rebase_event,
+            commit_author,
+            false, // don't suppress output
+            true,  // save to log
+        );
+    }
 
     debug_log("✓ Rebase authorship rewrite complete");
 }
