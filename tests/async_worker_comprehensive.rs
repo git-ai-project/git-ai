@@ -733,61 +733,307 @@ fn test_concurrent_bind_attempts_only_one_succeeds() {
 }
 
 // ==============================================================================
-// Async Worker Macro Test (similar to worktree_test_wrappers pattern)
+// End-to-end integration tests with real repos and async worker enabled
 // ==============================================================================
+//
+// These tests exercise the full async worker pipeline:
+//   1. Create a TestRepo with async_worker feature flag enabled
+//   2. Set a short idle timeout so the worker shuts down quickly
+//   3. Run a real git operation (commit, rebase, cherry-pick, merge)
+//   4. Wait for the async worker to finish (poll socket liveness)
+//   5. Assert authorship / notes were written correctly
+//
+// The idle timeout env var (GIT_AI_ASYNC_WORKER_IDLE_TIMEOUT_MS) is passed
+// through the test environment so the spawned worker inherits it.
 
-/// Macro to create test variants that run with the async_worker feature flag enabled.
-/// This follows the same pattern as `worktree_test_wrappers!` in the codebase.
-macro_rules! async_worker_test {
-    (
-        fn $test_name:ident() $body:block
-    ) => {
-        paste::paste! {
-            #[test]
-            fn [<test_ $test_name _with_async_worker>]() {
-                // Run the test body with async_worker feature flag enabled
-                // Tests can check FeatureFlags to verify behavior
-                let flags = FeatureFlags {
-                    async_worker: true,
-                    ..FeatureFlags::default()
-                };
-                assert!(
-                    flags.async_worker,
-                    "Async worker flag should be enabled in this test variant"
-                );
-                $body
-            }
+mod async_worker_integration {
+    use super::*;
+    use git_ai::async_worker::socket;
+    use git_ai::async_worker::socket::platform;
+    use repos::test_file::ExpectedLineExt;
+    use repos::test_repo::TestRepo;
+    use std::time::{Duration, Instant};
 
-            #[test]
-            fn [<test_ $test_name _without_async_worker>]() {
-                // Run the test body with async_worker feature flag disabled
-                let flags = FeatureFlags::default();
-                assert!(
-                    !flags.async_worker,
-                    "Async worker flag should be disabled in this test variant"
-                );
-                $body
-            }
-        }
-    };
-}
+    /// Short idle timeout (ms) so the worker shuts down quickly in tests.
+    const TEST_IDLE_TIMEOUT_MS: &str = "500";
 
-// Use the macro to test that feature flag correctly gates behavior
-async_worker_test! {
-    fn feature_flag_gating() {
-        // This test runs twice: once with async_worker=true, once with async_worker=false
-        // The assertions in the macro verify the flag state
-        let _event = make_commit_event();
+    /// Maximum time to wait for the async worker to finish processing and shut down.
+    const MAX_WORKER_WAIT: Duration = Duration::from_secs(15);
+
+    /// Create a TestRepo with the async_worker feature flag enabled and a
+    /// short idle timeout so the worker exits promptly after finishing its job.
+    fn new_async_repo() -> TestRepo {
+        let mut repo = TestRepo::new();
+        repo.set_feature_flags(FeatureFlags {
+            async_worker: true,
+            ..FeatureFlags::default()
+        });
+        repo
     }
-}
 
-async_worker_test! {
-    fn job_creation_independent_of_flag() {
-        // Job creation should work regardless of feature flag state
-        let job = make_test_job(make_commit_event());
-        let wire = job.to_wire_bytes().unwrap();
-        assert!(wire.len() > 4);
-        let deserialized = AsyncJob::from_json_bytes(&wire[4..]).unwrap();
-        assert_eq!(deserialized.git_dir, "/tmp/test-repo/.git");
+    /// Derive the async-worker socket path from a TestRepo.
+    fn socket_path_for_repo(repo: &TestRepo) -> std::path::PathBuf {
+        let ai_dir = repo.path().join(".git").join("ai");
+        socket::socket_path_for_ai_dir(&ai_dir)
+    }
+
+    /// Wait until the async worker has shut down (socket is no longer live).
+    /// This is the "guard" that must run before any assertions to ensure the
+    /// worker has finished processing the dispatched job.
+    fn wait_for_worker_shutdown(repo: &TestRepo) {
+        let sock = socket_path_for_repo(repo);
+        let start = Instant::now();
+        let poll = Duration::from_millis(100);
+
+        // First wait a moment for the worker to start (it may not have bound yet)
+        std::thread::sleep(Duration::from_millis(200));
+
+        while start.elapsed() < MAX_WORKER_WAIT {
+            if !platform::is_socket_live(&sock) {
+                // Socket is dead — worker has exited. Give a tiny grace period
+                // for any final filesystem flushes.
+                std::thread::sleep(Duration::from_millis(100));
+                return;
+            }
+            std::thread::sleep(poll);
+        }
+
+        panic!(
+            "Async worker did not shut down within {:?} (socket still live at {})",
+            MAX_WORKER_WAIT,
+            sock.display()
+        );
+    }
+
+    /// Helper: run a git command with the short idle-timeout env var so the
+    /// spawned worker inherits it.
+    fn git_with_async_env(repo: &TestRepo, args: &[&str]) -> Result<String, String> {
+        repo.git_with_env(
+            args,
+            &[("GIT_AI_ASYNC_WORKER_IDLE_TIMEOUT_MS", TEST_IDLE_TIMEOUT_MS)],
+            None,
+        )
+    }
+
+    /// Helper: stage all and commit with the short idle-timeout env var.
+    fn stage_all_and_commit_async(repo: &TestRepo, message: &str) -> Result<String, String> {
+        repo.git(&["add", "-A"]).expect("git add should succeed");
+        git_with_async_env(repo, &["commit", "-m", message])
+    }
+
+    // ------------------------------------------------------------------
+    // Commit
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_async_worker_commit_preserves_ai_authorship() {
+        let repo = new_async_repo();
+
+        // Create initial commit (needed so HEAD exists)
+        let mut file = repo.filename("hello.txt");
+        file.set_contents(lines!["human line 1"]);
+        repo.stage_all_and_commit("Initial commit").unwrap();
+
+        // Make an AI-authored change and commit through the async path
+        file.insert_at(1, lines!["ai generated line".ai()]);
+        stage_all_and_commit_async(&repo, "AI commit via async worker").unwrap();
+
+        // Guard: wait for the async worker to finish
+        wait_for_worker_shutdown(&repo);
+
+        // Assert authorship is correct
+        file.assert_lines_and_blame(lines!["human line 1".human(), "ai generated line".ai(),]);
+    }
+
+    #[test]
+    fn test_async_worker_commit_human_only() {
+        let repo = new_async_repo();
+
+        let mut file = repo.filename("readme.txt");
+        file.set_contents(lines!["line one"]);
+        repo.stage_all_and_commit("Initial commit").unwrap();
+
+        // Human-only change through async path
+        file.insert_at(1, lines!["line two"]);
+        stage_all_and_commit_async(&repo, "Human commit via async").unwrap();
+
+        wait_for_worker_shutdown(&repo);
+
+        file.assert_lines_and_blame(lines!["line one".human(), "line two".human(),]);
+    }
+
+    // ------------------------------------------------------------------
+    // Rebase
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_async_worker_rebase_preserves_ai_authorship() {
+        let repo = new_async_repo();
+
+        // Initial commit on main
+        let mut main_file = repo.filename("main.txt");
+        main_file.set_contents(lines!["main line 1", "main line 2"]);
+        repo.stage_all_and_commit("Initial commit").unwrap();
+        let default_branch = repo.current_branch();
+
+        // Feature branch with AI commits
+        repo.git(&["checkout", "-b", "feature"]).unwrap();
+        let mut feature_file = repo.filename("feature.txt");
+        feature_file.set_contents(lines!["// AI generated feature".ai(), "feature body".ai()]);
+        stage_all_and_commit_async(&repo, "AI feature commit").unwrap();
+
+        // Advance main with a non-conflicting change
+        repo.git(&["checkout", &default_branch]).unwrap();
+        let mut other = repo.filename("other.txt");
+        other.set_contents(lines!["other content"]);
+        stage_all_and_commit_async(&repo, "Main advances").unwrap();
+
+        // Rebase feature onto main
+        repo.git(&["checkout", "feature"]).unwrap();
+        git_with_async_env(&repo, &["rebase", &default_branch]).unwrap();
+
+        // Guard: wait for worker to finish processing the rebase events
+        wait_for_worker_shutdown(&repo);
+
+        // Assert AI authorship preserved after rebase
+        feature_file
+            .assert_lines_and_blame(lines!["// AI generated feature".ai(), "feature body".ai()]);
+    }
+
+    // ------------------------------------------------------------------
+    // Cherry-pick
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_async_worker_cherry_pick_preserves_ai_authorship() {
+        let repo = new_async_repo();
+
+        // Initial commit
+        let mut file = repo.filename("file.txt");
+        file.set_contents(lines!["Initial content"]);
+        repo.stage_all_and_commit("Initial commit").unwrap();
+        let main_branch = repo.current_branch();
+
+        // Feature branch with AI change
+        repo.git(&["checkout", "-b", "feature"]).unwrap();
+        file.insert_at(1, lines!["AI feature line".ai()]);
+        stage_all_and_commit_async(&repo, "Add AI feature").unwrap();
+        let feature_commit = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+        // Cherry-pick onto main
+        repo.git(&["checkout", &main_branch]).unwrap();
+        git_with_async_env(&repo, &["cherry-pick", &feature_commit]).unwrap();
+
+        // Guard: wait for worker to finish
+        wait_for_worker_shutdown(&repo);
+
+        // Assert authorship
+        file.assert_lines_and_blame(lines!["Initial content".human(), "AI feature line".ai(),]);
+    }
+
+    #[test]
+    fn test_async_worker_cherry_pick_multiple_commits() {
+        let repo = new_async_repo();
+
+        let mut file = repo.filename("file.txt");
+        file.set_contents(lines!["Line 1", ""]);
+        repo.stage_all_and_commit("Initial commit").unwrap();
+        let main_branch = repo.current_branch();
+
+        // Feature branch with multiple AI commits
+        repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+        file.insert_at(1, lines!["AI line 2".ai()]);
+        stage_all_and_commit_async(&repo, "AI commit 1").unwrap();
+        let commit1 = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+        file.insert_at(2, lines!["AI line 3".ai()]);
+        stage_all_and_commit_async(&repo, "AI commit 2").unwrap();
+        let commit2 = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+        // Cherry-pick both onto main
+        repo.git(&["checkout", &main_branch]).unwrap();
+        git_with_async_env(&repo, &["cherry-pick", &commit1, &commit2]).unwrap();
+
+        // Guard: wait for worker
+        wait_for_worker_shutdown(&repo);
+
+        // Assert authorship on all lines
+        file.assert_lines_and_blame(lines!["Line 1".human(), "AI line 2".ai(), "AI line 3".ai(),]);
+    }
+
+    // ------------------------------------------------------------------
+    // Merge
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_async_worker_merge_preserves_ai_authorship() {
+        let repo = new_async_repo();
+        let mut file = repo.filename("test.txt");
+
+        // Base commit
+        file.set_contents(lines!["Base line 1", "Base line 2", "Base line 3"]);
+        repo.stage_all_and_commit("Initial commit").unwrap();
+        let default_branch = repo.current_branch();
+
+        // Feature branch with AI changes (appended to avoid conflicts)
+        repo.git(&["checkout", "-b", "feature"]).unwrap();
+        file.insert_at(3, lines!["FEATURE LINE 1".ai(), "FEATURE LINE 2".ai()]);
+        stage_all_and_commit_async(&repo, "feature branch changes").unwrap();
+
+        // Back to main — human changes at the beginning (no conflict)
+        repo.git(&["checkout", &default_branch]).unwrap();
+        file = repo.filename("test.txt");
+        file.insert_at(0, lines!["MAIN LINE 1", "MAIN LINE 2"]);
+        stage_all_and_commit_async(&repo, "main branch changes").unwrap();
+
+        // Merge feature into main
+        git_with_async_env(
+            &repo,
+            &["merge", "feature", "-m", "merge feature into main"],
+        )
+        .unwrap();
+
+        // Guard: wait for worker
+        wait_for_worker_shutdown(&repo);
+
+        // Assert blame after merge
+        file = repo.filename("test.txt");
+        file.assert_lines_and_blame(lines![
+            "MAIN LINE 1".human(),
+            "MAIN LINE 2".human(),
+            "Base line 1".human(),
+            "Base line 2".human(),
+            "Base line 3".human(),
+            "FEATURE LINE 1".ai(),
+            "FEATURE LINE 2".ai(),
+        ]);
+    }
+
+    // ------------------------------------------------------------------
+    // Verify socket cleanup
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_async_worker_socket_cleaned_up_after_shutdown() {
+        let repo = new_async_repo();
+
+        let mut file = repo.filename("cleanup.txt");
+        file.set_contents(lines!["content"]);
+        repo.stage_all_and_commit("Initial commit").unwrap();
+
+        file.insert_at(1, lines!["more content".ai()]);
+        stage_all_and_commit_async(&repo, "Trigger async worker").unwrap();
+
+        // Wait for worker to shut down
+        wait_for_worker_shutdown(&repo);
+
+        // Verify the socket file has been cleaned up
+        let sock = socket_path_for_repo(&repo);
+        assert!(
+            !sock.exists(),
+            "Socket file should be cleaned up after worker shuts down: {}",
+            sock.display()
+        );
     }
 }

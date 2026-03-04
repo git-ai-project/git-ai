@@ -653,6 +653,9 @@ impl TestRepo {
         if self.git_mode.uses_wrapper() {
             command.env("GIT_AI", "git");
         }
+
+        // Propagate feature flags so hooks (which spawn git-ai) inherit them
+        self.apply_feature_flag_env(command);
     }
 
     fn configure_git_ai_env(&self, command: &mut Command) {
@@ -660,6 +663,35 @@ impl TestRepo {
             command.env("HOME", &self.test_home);
             command.env("GIT_CONFIG_GLOBAL", self.test_home.join(".gitconfig"));
             command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
+        }
+
+        // Propagate feature flags to spawned git-ai processes
+        self.apply_feature_flag_env(command);
+    }
+
+    /// Propagate feature flags as environment variables to a spawned command.
+    /// This ensures that spawned git-ai processes (and any workers they spawn)
+    /// see the same feature flag configuration as the test.
+    fn apply_feature_flag_env(&self, command: &mut Command) {
+        let defaults = FeatureFlags::default();
+        let ff = &self.feature_flags;
+
+        // Only set env vars for flags that differ from defaults to keep the
+        // environment minimal and avoid interfering with other tests.
+        if ff.async_worker != defaults.async_worker {
+            command.env("GIT_AI_ASYNC_WORKER", ff.async_worker.to_string());
+        }
+        if ff.rewrite_stash != defaults.rewrite_stash {
+            command.env("GIT_AI_REWRITE_STASH", ff.rewrite_stash.to_string());
+        }
+        if ff.inter_commit_move != defaults.inter_commit_move {
+            command.env(
+                "GIT_AI_CHECKPOINT_INTER_COMMIT_MOVE",
+                ff.inter_commit_move.to_string(),
+            );
+        }
+        if ff.auth_keyring != defaults.auth_keyring {
+            command.env("GIT_AI_AUTH_KEYRING", ff.auth_keyring.to_string());
         }
     }
 

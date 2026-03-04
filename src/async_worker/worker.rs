@@ -6,7 +6,15 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 /// How long the worker waits for new jobs after completing one before shutting down.
-const IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Can be overridden via `GIT_AI_ASYNC_WORKER_IDLE_TIMEOUT_MS` for testing.
+fn idle_timeout() -> Duration {
+    if let Ok(ms) = std::env::var("GIT_AI_ASYNC_WORKER_IDLE_TIMEOUT_MS")
+        && let Ok(ms) = ms.parse::<u64>()
+    {
+        return Duration::from_millis(ms);
+    }
+    Duration::from_secs(5)
+}
 
 /// Run the async worker process.
 ///
@@ -50,7 +58,7 @@ pub fn run_async_worker(socket_path_str: &str, ai_dir_str: &str) {
 
     // Main job processing loop
     loop {
-        let connection = platform::accept_with_timeout(&listener, IDLE_TIMEOUT);
+        let connection = platform::accept_with_timeout(&listener, idle_timeout());
 
         match connection {
             Ok(Some(mut stream)) => {
