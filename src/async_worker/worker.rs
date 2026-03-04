@@ -3,11 +3,9 @@ use crate::async_worker::socket::{platform, read_message};
 use crate::git::repository::find_repository;
 use crate::utils::debug_log;
 use std::path::PathBuf;
-#[cfg(unix)]
 use std::time::Duration;
 
 /// How long the worker waits for new jobs after completing one before shutting down.
-#[cfg(unix)]
 const IDLE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Run the async worker process.
@@ -16,7 +14,8 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(5);
 /// 1. Binds to the socket atomically (exits if another worker owns it)
 /// 2. Accepts jobs on the socket and processes them sequentially
 /// 3. After each job, waits IDLE_TIMEOUT for more work
-/// 4. Cleans up the socket and exits when idle
+/// 4. Drains any pending connections before shutting down
+/// 5. Cleans up the socket and exits when idle
 pub fn run_async_worker(socket_path_str: &str, ai_dir_str: &str) {
     let socket_path = PathBuf::from(socket_path_str);
     let _ai_dir = PathBuf::from(ai_dir_str);
@@ -36,7 +35,6 @@ pub fn run_async_worker(socket_path_str: &str, ai_dir_str: &str) {
     }
 
     // Bind to the socket atomically
-    #[cfg(unix)]
     let listener = match platform::bind_socket(&socket_path) {
         Ok(listener) => listener,
         Err(e) => {
@@ -48,32 +46,11 @@ pub fn run_async_worker(socket_path_str: &str, ai_dir_str: &str) {
         }
     };
 
-    #[cfg(windows)]
-    {
-        if let Err(e) = platform::bind_socket(&socket_path) {
-            debug_log(&format!(
-                "Failed to acquire lock (another worker likely owns it): {}",
-                e
-            ));
-            return;
-        }
-    }
-
     debug_log("Async worker bound to socket, ready to accept jobs");
 
     // Main job processing loop
     loop {
-        #[cfg(unix)]
         let connection = platform::accept_with_timeout(&listener, IDLE_TIMEOUT);
-
-        #[cfg(windows)]
-        let connection: std::io::Result<Option<std::net::TcpStream>> = {
-            // On Windows, we'd accept via named pipe server
-            // For now, use a simplified approach
-            Err(std::io::Error::other(
-                "Windows named pipe server not yet implemented",
-            ))
-        };
 
         match connection {
             Ok(Some(mut stream)) => {
@@ -104,6 +81,24 @@ pub fn run_async_worker(socket_path_str: &str, ai_dir_str: &str) {
             }
         }
     }
+
+    // Drain any pending connections before cleanup to avoid losing jobs
+    // that were dispatched between the last accept() and shutdown.
+    platform::drain_pending(&listener, |stream| match read_message(stream) {
+        Ok(Some(payload)) => {
+            debug_log(&format!(
+                "Draining pending job ({} bytes) before shutdown",
+                payload.len()
+            ));
+            process_job(&payload);
+        }
+        Ok(None) => {
+            debug_log("Pending connection had no data");
+        }
+        Err(e) => {
+            debug_log(&format!("Error reading pending job: {}", e));
+        }
+    });
 
     // Clean up
     platform::cleanup_socket(&socket_path);

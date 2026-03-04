@@ -117,7 +117,9 @@ fn spawn_worker_and_send(ai_dir: &Path, socket_path: &Path, json_payload: &[u8])
         return false;
     }
 
-    // Wait for the worker to bind to the socket (poll with timeout)
+    // Wait for the worker to bind to the socket (poll with timeout).
+    // We probe for socket liveness first, then send the payload exactly once
+    // to avoid duplicate job delivery.
     let max_wait = std::time::Duration::from_secs(3);
     let start = std::time::Instant::now();
     let poll_interval = std::time::Duration::from_millis(25);
@@ -125,11 +127,15 @@ fn spawn_worker_and_send(ai_dir: &Path, socket_path: &Path, json_payload: &[u8])
     while start.elapsed() < max_wait {
         std::thread::sleep(poll_interval);
 
-        // Check if the socket exists and is accepting connections
+        // Check if the socket is live without sending data
+        if !platform::is_socket_live(socket_path) {
+            continue;
+        }
+
+        // Socket is live - send the payload exactly once
         match platform::try_send_to_socket(socket_path, json_payload) {
             Ok(true) => return true,
-            Ok(false) => continue, // Socket not ready yet
-            Err(_) => continue,
+            Ok(false) | Err(_) => continue,
         }
     }
 

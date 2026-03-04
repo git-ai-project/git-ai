@@ -25,7 +25,7 @@ pub struct AsyncJob {
     /// The rewrite log event to process
     pub rewrite_log_event: RewriteLogEvent,
 
-    /// The commit author string (e.g., "Name <email>")
+    /// The commit author string (e.g., `Name <email>`)
     pub commit_author: String,
 
     /// Whether to suppress output
@@ -43,7 +43,8 @@ pub enum AsyncJobType {
 
 impl AsyncJob {
     /// Serialize the job to a length-prefixed message for socket transmission.
-    /// Format: [4-byte big-endian length][JSON payload]
+    ///
+    /// Wire format: 4-byte big-endian length followed by the JSON payload.
     pub fn to_wire_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
         let json = serde_json::to_vec(self)?;
         let len = json.len() as u32;

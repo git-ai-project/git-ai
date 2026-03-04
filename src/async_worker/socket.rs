@@ -1,9 +1,11 @@
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
 use std::time::Duration;
 
 use crate::utils::debug_log;
+use interprocess::local_socket::{
+    GenericFilePath, ListenerNonblockingMode, ListenerOptions, ToFsName,
+};
 
 /// The socket filename within the .git/ai/ directory.
 const SOCKET_FILENAME: &str = "async-worker.sock";
@@ -14,7 +16,8 @@ pub fn socket_path_for_ai_dir(ai_dir: &Path) -> PathBuf {
 }
 
 /// Write a length-prefixed message to a stream.
-/// Format: [4-byte big-endian length][payload]
+///
+/// Wire format: 4-byte big-endian length followed by the payload bytes.
 pub fn write_message(stream: &mut impl Write, payload: &[u8]) -> io::Result<()> {
     let len = payload.len() as u32;
     stream.write_all(&len.to_be_bytes())?;
@@ -47,24 +50,51 @@ pub fn read_message(stream: &mut impl Read) -> io::Result<Option<Vec<u8>>> {
     Ok(Some(buf))
 }
 
-// ── Unix socket implementation ──────────────────────────────────────────────
+// ── Cross-platform socket implementation using interprocess ─────────────────
 
+/// On Windows, interprocess uses named pipes, which require a `\\.\pipe\` path.
+/// We hash the socket_path to derive a stable pipe name.
+#[cfg(windows)]
+fn to_local_socket_name(
+    socket_path: &Path,
+) -> io::Result<interprocess::local_socket::Name<'static>> {
+    use interprocess::local_socket::ToNsName;
+    // Use a hash of the path to create a unique namespaced name
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(socket_path.to_string_lossy().as_bytes());
+    let hash = format!("{:x}", hasher.finalize());
+    let name = format!("git-ai-worker-{}", &hash[..16]);
+    name.to_ns_name::<interprocess::local_socket::GenericNamespaced>()
+}
+
+/// On Unix, use the filesystem path directly as a Unix domain socket.
 #[cfg(unix)]
+fn to_local_socket_name(socket_path: &Path) -> io::Result<interprocess::local_socket::Name<'_>> {
+    socket_path.to_fs_name::<GenericFilePath>()
+}
+
 pub mod platform {
     use super::*;
-    use std::os::unix::net::{UnixListener, UnixStream};
+    use interprocess::local_socket::prelude::*;
 
     /// Try to connect to the worker socket and send a message.
     /// Returns Ok(true) if the message was sent successfully.
     /// Returns Ok(false) if the socket doesn't exist or isn't accepting connections.
     pub fn try_send_to_socket(socket_path: &Path, payload: &[u8]) -> io::Result<bool> {
+        // On Unix, check file existence first (fast path).
+        #[cfg(unix)]
         if !socket_path.exists() {
             return Ok(false);
         }
-        match UnixStream::connect(socket_path) {
+
+        let name = match to_local_socket_name(socket_path) {
+            Ok(name) => name,
+            Err(_) => return Ok(false),
+        };
+
+        match LocalSocketStream::connect(name) {
             Ok(mut stream) => {
-                // Set a write timeout so we don't hang forever
-                stream.set_write_timeout(Some(Duration::from_secs(5)))?;
                 write_message(&mut stream, payload)?;
                 debug_log(&format!(
                     "Successfully sent {} bytes to async worker socket",
@@ -79,129 +109,101 @@ pub mod platform {
         }
     }
 
+    /// Probe whether a worker is listening on the socket.
+    /// Returns true if a connection can be established (without sending data).
+    pub fn is_socket_live(socket_path: &Path) -> bool {
+        #[cfg(unix)]
+        if !socket_path.exists() {
+            return false;
+        }
+
+        let name = match to_local_socket_name(socket_path) {
+            Ok(name) => name,
+            Err(_) => return false,
+        };
+        LocalSocketStream::connect(name).is_ok()
+    }
+
     /// Bind to the socket path, returning the listener.
     /// This is atomic: if another process already owns the socket, this fails.
-    pub fn bind_socket(socket_path: &Path) -> io::Result<UnixListener> {
-        // Remove stale socket file if it exists
+    pub fn bind_socket(socket_path: &Path) -> io::Result<interprocess::local_socket::Listener> {
+        // On Unix, check if there's already a live listener
+        #[cfg(unix)]
         if socket_path.exists() {
-            // Try connecting first to see if it's alive
-            if UnixStream::connect(socket_path).is_ok() {
+            if is_socket_live(socket_path) {
                 return Err(io::Error::new(
                     io::ErrorKind::AddrInUse,
                     "Socket is already owned by another worker",
                 ));
             }
-            // Stale socket - remove it
-            std::fs::remove_file(socket_path)?;
+            // Stale socket file - remove it so we can rebind
+            let _ = std::fs::remove_file(socket_path);
         }
 
-        let listener = UnixListener::bind(socket_path)?;
-        Ok(listener)
+        let name = to_local_socket_name(socket_path)?;
+
+        ListenerOptions::new().name(name).create_sync()
     }
 
     /// Accept a connection on the listener with a timeout.
     /// Returns None if the timeout expires without a connection.
-    ///
-    /// Uses `libc::poll()` to wait for readiness, then a blocking `accept()`.
-    /// This avoids macOS issues where non-blocking `accept()` on a
-    /// `UnixListener` returns `EINVAL` instead of `EWOULDBLOCK`.
     pub fn accept_with_timeout(
-        listener: &UnixListener,
+        listener: &interprocess::local_socket::Listener,
         timeout: Duration,
-    ) -> io::Result<Option<UnixStream>> {
-        use std::os::unix::io::AsRawFd;
+    ) -> io::Result<Option<interprocess::local_socket::Stream>> {
+        // Set the listener to non-blocking accept mode
+        listener.set_nonblocking(ListenerNonblockingMode::Accept)?;
 
-        let fd = listener.as_raw_fd();
-        let timeout_ms: i32 = timeout.as_millis().min(i32::MAX as u128) as i32;
+        let start = std::time::Instant::now();
+        let poll_interval = Duration::from_millis(50);
 
-        let mut pfd = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-
-        // SAFETY: We pass a valid pointer to a single pollfd struct and nfds=1.
-        let ret = unsafe { libc::poll(&mut pfd as *mut libc::pollfd, 1, timeout_ms) };
-
-        if ret < 0 {
-            return Err(io::Error::last_os_error());
+        loop {
+            match listener.accept() {
+                Ok(stream) => {
+                    // Restore blocking mode
+                    listener.set_nonblocking(ListenerNonblockingMode::Neither)?;
+                    return Ok(Some(stream));
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if start.elapsed() >= timeout {
+                        listener.set_nonblocking(ListenerNonblockingMode::Neither)?;
+                        return Ok(None);
+                    }
+                    std::thread::sleep(poll_interval);
+                }
+                Err(e) => {
+                    let _ = listener.set_nonblocking(ListenerNonblockingMode::Neither);
+                    return Err(e);
+                }
+            }
         }
-        if ret == 0 {
-            // Timeout – no connection arrived
-            return Ok(None);
+    }
+
+    /// Drain any pending connections from the listener backlog.
+    /// Processes each pending job before returning.
+    /// This prevents losing jobs during worker shutdown.
+    pub fn drain_pending(
+        listener: &interprocess::local_socket::Listener,
+        mut process_fn: impl FnMut(&mut interprocess::local_socket::Stream),
+    ) {
+        // Set non-blocking to drain without waiting
+        if listener
+            .set_nonblocking(ListenerNonblockingMode::Accept)
+            .is_err()
+        {
+            return;
         }
 
-        // poll says the fd is ready – do a blocking accept
-        let (stream, _addr) = listener.accept()?;
-        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-        Ok(Some(stream))
+        while let Ok(mut stream) = listener.accept() {
+            process_fn(&mut stream);
+        }
+
+        let _ = listener.set_nonblocking(ListenerNonblockingMode::Neither);
     }
 
     /// Clean up the socket file.
     pub fn cleanup_socket(socket_path: &Path) {
         let _ = std::fs::remove_file(socket_path);
-    }
-}
-
-// ── Windows named pipe implementation ───────────────────────────────────────
-
-#[cfg(windows)]
-pub mod platform {
-    use super::*;
-    use std::fs::OpenOptions;
-
-    /// Derive a named pipe path from the ai_dir.
-    /// Named pipes on Windows use the \\.\pipe\ prefix.
-    pub fn named_pipe_path(ai_dir: &Path) -> String {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(ai_dir.to_string_lossy().as_bytes());
-        let hash = format!("{:x}", hasher.finalize());
-        format!(r"\\.\pipe\git-ai-worker-{}", &hash[..16])
-    }
-
-    /// Try to connect to the worker named pipe and send a message.
-    pub fn try_send_to_socket(socket_path: &Path, payload: &[u8]) -> io::Result<bool> {
-        let pipe_name = named_pipe_path(socket_path);
-        match OpenOptions::new().write(true).open(&pipe_name) {
-            Ok(mut pipe) => {
-                write_message(&mut pipe, payload)?;
-                debug_log(&format!(
-                    "Successfully sent {} bytes to async worker pipe",
-                    payload.len()
-                ));
-                Ok(true)
-            }
-            Err(e) => {
-                debug_log(&format!("Failed to connect to async worker pipe: {}", e));
-                Ok(false)
-            }
-        }
-    }
-
-    /// Bind to a named pipe. On Windows we use a lock file for atomic ownership
-    /// since named pipes don't have the same bind semantics as Unix sockets.
-    pub fn bind_socket(socket_path: &Path) -> io::Result<()> {
-        // On Windows, we rely on the LockFile mechanism for atomic ownership.
-        // The actual pipe server is created in the worker loop.
-        // This function just verifies no other worker owns the lock.
-        let lock_path = socket_path.with_extension("lock");
-        match crate::utils::LockFile::try_acquire(&lock_path) {
-            Some(_lock) => {
-                // We got the lock - but we drop it here; the worker will re-acquire.
-                Ok(())
-            }
-            None => Err(io::Error::new(
-                io::ErrorKind::AddrInUse,
-                "Lock is already held by another worker",
-            )),
-        }
-    }
-
-    /// Clean up the socket/pipe files.
-    pub fn cleanup_socket(socket_path: &Path) {
-        let lock_path = socket_path.with_extension("lock");
-        let _ = std::fs::remove_file(&lock_path);
     }
 }
 
@@ -253,19 +255,14 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[cfg(unix)]
     #[test]
-    fn test_unix_socket_bind_and_connect() {
-        use std::time::Duration;
-
+    fn test_socket_bind_and_connect() {
         let dir = tempfile::tempdir().unwrap();
         let socket_path = dir.path().join("test.sock");
 
         let listener = platform::bind_socket(&socket_path).unwrap();
-        assert!(socket_path.exists());
 
-        // Send the message from a background thread to avoid macOS timing issues
-        // where accept() can't see connections made before entering the accept loop.
+        // Send the message from a background thread
         let sender_path = socket_path.clone();
         let sender = std::thread::spawn(move || {
             // Small delay to ensure the accept loop is running
@@ -286,14 +283,13 @@ mod tests {
         sender.join().unwrap();
 
         platform::cleanup_socket(&socket_path);
-        assert!(!socket_path.exists());
     }
 
-    #[cfg(unix)]
     #[test]
-    fn test_unix_socket_nonexistent_returns_false() {
-        let path = Path::new("/tmp/nonexistent-git-ai-test.sock");
-        let result = platform::try_send_to_socket(path, b"hello").unwrap();
+    fn test_socket_nonexistent_returns_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonexistent-git-ai-test.sock");
+        let result = platform::try_send_to_socket(&path, b"hello").unwrap();
         assert!(!result);
     }
 }

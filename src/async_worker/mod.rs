@@ -4,7 +4,8 @@ pub mod socket;
 pub mod worker;
 
 /// Handle the `git-ai async-worker` subcommand.
-/// Args: --socket-path <path> --ai-dir <path>
+///
+/// Required arguments: `--socket-path` and `--ai-dir`.
 pub fn handle_async_worker_command(args: &[String]) {
     let mut socket_path: Option<&str> = None;
     let mut ai_dir: Option<&str> = None;
