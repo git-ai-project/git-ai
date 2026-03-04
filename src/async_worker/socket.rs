@@ -96,8 +96,6 @@ pub mod platform {
         }
 
         let listener = UnixListener::bind(socket_path)?;
-        // Set non-blocking so we can implement timeout-based accept
-        listener.set_nonblocking(true)?;
         Ok(listener)
     }
 
@@ -107,24 +105,34 @@ pub mod platform {
         listener: &UnixListener,
         timeout: Duration,
     ) -> io::Result<Option<UnixStream>> {
+        // Use poll(2) via set_nonblocking + sleep loop.
+        // Some platforms (macOS) return EINVAL from accept() on non-blocking
+        // Unix sockets, so we temporarily set non-blocking, attempt accept,
+        // and handle both WouldBlock and InvalidInput as "not ready yet".
+        listener.set_nonblocking(true)?;
         let start = std::time::Instant::now();
-        loop {
+        let result = loop {
             match listener.accept() {
                 Ok((stream, _addr)) => {
-                    // Set the stream to blocking mode for reading
                     stream.set_nonblocking(false)?;
                     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-                    return Ok(Some(stream));
+                    break Ok(Some(stream));
                 }
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                Err(ref e)
+                    if e.kind() == io::ErrorKind::WouldBlock
+                        || e.kind() == io::ErrorKind::InvalidInput =>
+                {
                     if start.elapsed() >= timeout {
-                        return Ok(None);
+                        break Ok(None);
                     }
                     std::thread::sleep(Duration::from_millis(50));
                 }
-                Err(e) => return Err(e),
+                Err(e) => break Err(e),
             }
-        }
+        };
+        // Restore blocking mode for the listener
+        let _ = listener.set_nonblocking(false);
+        result
     }
 
     /// Clean up the socket file.

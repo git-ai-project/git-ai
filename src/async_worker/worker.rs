@@ -70,8 +70,7 @@ pub fn run_async_worker(socket_path_str: &str, ai_dir_str: &str) {
         let connection: std::io::Result<Option<std::net::TcpStream>> = {
             // On Windows, we'd accept via named pipe server
             // For now, use a simplified approach
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            Err(std::io::Error::other(
                 "Windows named pipe server not yet implemented",
             ))
         };
