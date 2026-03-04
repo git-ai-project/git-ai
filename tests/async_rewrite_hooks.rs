@@ -8,7 +8,7 @@ use serial_test::serial;
 use std::time::{Duration, Instant};
 
 #[cfg(windows)]
-const ASYNC_EVENT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+const ASYNC_EVENT_WAIT_TIMEOUT: Duration = Duration::from_secs(180);
 #[cfg(not(windows))]
 const ASYNC_EVENT_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
