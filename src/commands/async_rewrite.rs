@@ -4,8 +4,10 @@ use crate::git::find_repository_in_path;
 use crate::git::repository::Repository;
 use crate::git::rewrite_log::RewriteLogEvent;
 use crate::utils::{LockFile, debug_log};
+#[cfg(unix)]
+use interprocess::local_socket::GenericFilePath;
 use interprocess::local_socket::{
-    GenericFilePath, GenericNamespaced, ListenerNonblockingMode, ListenerOptions, Name, prelude::*,
+    GenericNamespaced, ListenerNonblockingMode, ListenerOptions, Name, prelude::*,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -379,6 +381,7 @@ fn async_rewrite_socket_path(repo: &Repository) -> PathBuf {
 }
 
 fn async_socket_target(repo: &Repository) -> Result<AsyncSocketTarget, GitAiError> {
+    #[cfg(unix)]
     let socket_path = resolve_socket_path(&async_rewrite_socket_path(repo));
 
     #[cfg(unix)]
