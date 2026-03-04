@@ -199,6 +199,8 @@ pub mod platform {
         }
 
         while let Ok(mut stream) = listener.accept() {
+            // Ensure blocking mode (macOS can inherit non-blocking from listener)
+            let _ = stream.set_nonblocking(false);
             process_fn(&mut stream);
         }
 
