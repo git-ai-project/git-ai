@@ -160,8 +160,12 @@ pub mod platform {
         loop {
             match listener.accept() {
                 Ok(stream) => {
-                    // Restore blocking mode
+                    // Restore listener to blocking mode
                     listener.set_nonblocking(ListenerNonblockingMode::Neither)?;
+                    // Ensure the accepted stream is in blocking mode.
+                    // On macOS, accepted streams can inherit non-blocking state
+                    // from the listener, causing WouldBlock errors on read.
+                    stream.set_nonblocking(false)?;
                     return Ok(Some(stream));
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
