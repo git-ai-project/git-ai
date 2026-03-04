@@ -168,9 +168,17 @@ fn spawn_async_worker_process(repo_path: &str) -> Result<Child, GitAiError> {
         .env(ENV_ASYNC_REWRITE_WORKER, "1")
         // In debug builds, GIT_AI=git forces argv[0]-independent git-proxy mode.
         // Worker must run in git-ai subcommand mode, so strip this override.
-        .env_remove("GIT_AI")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .env_remove("GIT_AI");
+
+    if std::env::var("GIT_AI_TEST_DB_PATH").is_ok() {
+        // Keep worker logs visible in integration test output to diagnose handoff/processing
+        // failures in CI (especially Windows named-pipe edge cases).
+        cmd.env("GIT_AI_DEBUG", "1")
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+    } else {
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    }
 
     #[cfg(windows)]
     {
