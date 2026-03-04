@@ -1,8 +1,6 @@
 use crate::error::GitAiError;
-#[cfg(not(windows))]
 use crate::utils::LockFile;
 use serde::{Deserialize, Serialize};
-#[cfg(not(windows))]
 use std::time::{Duration, Instant};
 
 /// Simple case classes for rewrite events
@@ -519,9 +517,6 @@ pub fn append_event_to_file(
     // Serialize concurrent writers (sync hooks + async worker) only when async rewrite
     // handoff is enabled; otherwise the lock adds avoidable overhead on hot sync paths.
     //
-    // On Windows, lock-file open modes are much stricter and can cause intermittent
-    // write starvation in heavily parallel CI environments; skip the advisory lock there.
-    #[cfg(not(windows))]
     let _rewrite_log_lock = if crate::config::Config::get()
         .feature_flags()
         .async_rewrite_hooks
@@ -569,7 +564,6 @@ pub fn append_event_to_file(
     Ok(())
 }
 
-#[cfg(not(windows))]
 fn acquire_rewrite_log_lock(file_path: &std::path::Path) -> Result<LockFile, GitAiError> {
     const LOCK_WAIT_TIMEOUT: Duration = Duration::from_millis(2_000);
     const LOCK_WAIT_POLL: Duration = Duration::from_millis(10);
