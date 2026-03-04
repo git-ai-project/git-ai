@@ -760,15 +760,17 @@ mod async_worker_integration {
     /// Maximum time to wait for the async worker to finish processing and shut down.
     const MAX_WORKER_WAIT: Duration = Duration::from_secs(15);
 
-    /// Create a TestRepo with the async_worker feature flag enabled and a
-    /// short idle timeout so the worker exits promptly after finishing its job.
+    /// Create a plain TestRepo.
+    ///
+    /// We intentionally do NOT set `async_worker: true` on the repo because
+    /// that would cause *all* git commands (including setup/initial commits) to
+    /// go through the async path.  `commit_with_env()` reads the authorship
+    /// note immediately after the commit, which races the async worker.
+    ///
+    /// Instead, each test passes `GIT_AI_ASYNC_WORKER=true` only for the
+    /// specific operation being tested via `git_with_async_env`.
     fn new_async_repo() -> TestRepo {
-        let mut repo = TestRepo::new();
-        repo.set_feature_flags(FeatureFlags {
-            async_worker: true,
-            ..FeatureFlags::default()
-        });
-        repo
+        TestRepo::new()
     }
 
     /// Derive the async-worker socket path from a TestRepo.
@@ -805,12 +807,15 @@ mod async_worker_integration {
         );
     }
 
-    /// Helper: run a git command with the short idle-timeout env var so the
-    /// spawned worker inherits it.
+    /// Helper: run a git command with async worker enabled and a short idle
+    /// timeout so the spawned worker inherits both.
     fn git_with_async_env(repo: &TestRepo, args: &[&str]) -> Result<String, String> {
         repo.git_with_env(
             args,
-            &[("GIT_AI_ASYNC_WORKER_IDLE_TIMEOUT_MS", TEST_IDLE_TIMEOUT_MS)],
+            &[
+                ("GIT_AI_ASYNC_WORKER", "true"),
+                ("GIT_AI_ASYNC_WORKER_IDLE_TIMEOUT_MS", TEST_IDLE_TIMEOUT_MS),
+            ],
             None,
         )
     }
@@ -881,12 +886,14 @@ mod async_worker_integration {
         let mut feature_file = repo.filename("feature.txt");
         feature_file.set_contents(lines!["// AI generated feature".ai(), "feature body".ai()]);
         stage_all_and_commit_async(&repo, "AI feature commit").unwrap();
+        wait_for_worker_shutdown(&repo);
 
         // Advance main with a non-conflicting change
         repo.git(&["checkout", &default_branch]).unwrap();
         let mut other = repo.filename("other.txt");
         other.set_contents(lines!["other content"]);
         stage_all_and_commit_async(&repo, "Main advances").unwrap();
+        wait_for_worker_shutdown(&repo);
 
         // Rebase feature onto main
         repo.git(&["checkout", "feature"]).unwrap();
@@ -918,6 +925,7 @@ mod async_worker_integration {
         repo.git(&["checkout", "-b", "feature"]).unwrap();
         file.insert_at(1, lines!["AI feature line".ai()]);
         stage_all_and_commit_async(&repo, "Add AI feature").unwrap();
+        wait_for_worker_shutdown(&repo);
         let feature_commit = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
         // Cherry-pick onto main
@@ -945,10 +953,12 @@ mod async_worker_integration {
 
         file.insert_at(1, lines!["AI line 2".ai()]);
         stage_all_and_commit_async(&repo, "AI commit 1").unwrap();
+        wait_for_worker_shutdown(&repo);
         let commit1 = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
         file.insert_at(2, lines!["AI line 3".ai()]);
         stage_all_and_commit_async(&repo, "AI commit 2").unwrap();
+        wait_for_worker_shutdown(&repo);
         let commit2 = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
         // Cherry-pick both onto main
@@ -980,12 +990,14 @@ mod async_worker_integration {
         repo.git(&["checkout", "-b", "feature"]).unwrap();
         file.insert_at(3, lines!["FEATURE LINE 1".ai(), "FEATURE LINE 2".ai()]);
         stage_all_and_commit_async(&repo, "feature branch changes").unwrap();
+        wait_for_worker_shutdown(&repo);
 
         // Back to main — human changes at the beginning (no conflict)
         repo.git(&["checkout", &default_branch]).unwrap();
         file = repo.filename("test.txt");
         file.insert_at(0, lines!["MAIN LINE 1", "MAIN LINE 2"]);
         stage_all_and_commit_async(&repo, "main branch changes").unwrap();
+        wait_for_worker_shutdown(&repo);
 
         // Merge feature into main
         git_with_async_env(
