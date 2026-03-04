@@ -167,7 +167,6 @@ const BLACKLISTED_COMMANDS: &[&str] = &[
     "uniq",
     "cut",
     "tr",
-    "awk",
     "jq",
     "yq",
     "xargs",
@@ -250,7 +249,6 @@ const GIT_READONLY_SUBCOMMANDS: &[&str] = &[
     "blame",
     "shortlog",
     "reflog",
-    "stash list",
     "config",
     "name-rev",
     "rev-list",
@@ -281,6 +279,12 @@ fn is_single_command_blacklisted(command: &str) -> bool {
         return true;
     }
 
+    // Commands with output redirection can modify files even if the base command
+    // is read-only (e.g. `echo "foo" > bar.txt`, `cat template > output.txt`)
+    if has_output_redirection(trimmed) {
+        return false;
+    }
+
     // Skip leading env vars (FOO=bar cmd ...) and sudo
     let effective = skip_env_prefixes(trimmed);
     if effective.is_empty() {
@@ -296,6 +300,33 @@ fn is_single_command_blacklisted(command: &str) -> bool {
 
     // Check against the blacklist
     BLACKLISTED_COMMANDS.contains(&first_token)
+}
+
+/// Check if a command contains output redirection operators (`>` or `>>`)
+/// outside of quotes. These indicate the command writes to a file.
+fn has_output_redirection(command: &str) -> bool {
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let chars = command.chars();
+    let mut prev_char = None;
+
+    for c in chars {
+        match c {
+            '\'' if !in_double_quote && prev_char != Some('\\') => {
+                in_single_quote = !in_single_quote;
+            }
+            '"' if !in_single_quote && prev_char != Some('\\') => {
+                in_double_quote = !in_double_quote;
+            }
+            '>' if !in_single_quote && !in_double_quote => {
+                // We consider any > or >> outside quotes as output redirection
+                return true;
+            }
+            _ => {}
+        }
+        prev_char = Some(c);
+    }
+    false
 }
 
 /// Skip leading `VAR=value` assignments and `sudo`/`env` wrappers.
@@ -1166,12 +1197,47 @@ mod tests {
 
     #[test]
     fn test_redirection_not_blacklisted() {
-        // Commands with redirection operators should typically checkpoint
-        // since they write to files, but the base command might be blacklisted.
-        // The full redirection handling is intentionally simple — if the base
-        // command is unknown (not blacklisted), we checkpoint.
+        // Commands with redirection operators should trigger checkpoints
+        // even if the base command is blacklisted, because redirection writes files.
         let result = evaluate_bash_command("custom-tool > output.txt", false).unwrap();
         assert!(result.should_checkpoint);
+
+        // Blacklisted commands with output redirection should still checkpoint
+        let result = evaluate_bash_command("echo 'foo' > bar.txt", false).unwrap();
+        assert!(
+            result.should_checkpoint,
+            "echo with > redirection should trigger checkpoint"
+        );
+
+        let result = evaluate_bash_command("cat template.txt > output.txt", false).unwrap();
+        assert!(
+            result.should_checkpoint,
+            "cat with > redirection should trigger checkpoint"
+        );
+
+        let result = evaluate_bash_command("printf '%s' data >> log.txt", false).unwrap();
+        assert!(
+            result.should_checkpoint,
+            "printf with >> redirection should trigger checkpoint"
+        );
+
+        // Redirection inside quotes should NOT trigger (it's just a string)
+        let result = evaluate_bash_command("echo 'hello > world'", false).unwrap();
+        assert!(
+            !result.should_checkpoint,
+            "echo with > inside quotes should be blacklisted"
+        );
+    }
+
+    #[test]
+    fn test_awk_not_blacklisted() {
+        // awk can modify files (e.g. with -i inplace or output redirection)
+        // so it should NOT be blacklisted
+        let result = evaluate_bash_command("awk '{print $1}' file.txt", false).unwrap();
+        assert!(
+            result.should_checkpoint,
+            "awk should trigger checkpoint since it can modify files"
+        );
     }
 
     #[test]

@@ -28,15 +28,10 @@ struct OpenCodeHookInput {
     cwd: String,
     #[serde(default)]
     tool_name: Option<String>,
-    tool_input: Option<ToolInput>,
+    /// Raw tool_input as a JSON value so we can both extract typed fields
+    /// (like filePath) and pass the full value to bash command extraction.
     #[serde(default)]
-    tool_input_raw: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ToolInput {
-    #[serde(rename = "filePath")]
-    file_path: Option<String>,
+    tool_input: Option<serde_json::Value>,
 }
 
 /// Message metadata from legacy file storage message/{session_id}/{msg_id}.json
@@ -172,8 +167,7 @@ impl AgentCheckpointPreset for OpenCodePreset {
             session_id,
             cwd,
             tool_name: oc_tool_name_opt,
-            tool_input,
-            tool_input_raw,
+            tool_input: tool_input_raw,
         } = hook_input;
 
         // Checkpoint-time tool filtering: classify the tool and skip non-relevant tools
@@ -186,10 +180,12 @@ impl AgentCheckpointPreset for OpenCodePreset {
             )));
         }
 
-        // Extract file_path from tool_input if present
-        let file_path_as_vec = tool_input
-            .and_then(|ti| ti.file_path)
-            .map(|path| vec![path]);
+        // Extract file_path from tool_input if present (field name: "filePath")
+        let file_path_as_vec = tool_input_raw
+            .as_ref()
+            .and_then(|v| v.get("filePath"))
+            .and_then(|v| v.as_str())
+            .map(|path| vec![path.to_string()]);
 
         // Determine OpenCode path (test override can point to either root or legacy storage path)
         let opencode_path = if let Ok(test_path) = std::env::var("GIT_AI_OPENCODE_STORAGE_PATH") {
@@ -234,7 +230,7 @@ impl AgentCheckpointPreset for OpenCodePreset {
 
         // Bash/shell tools: use shared bash checkpoint logic
         if tool_class == ToolClassification::Bash {
-            let bash_input = tool_input_raw.unwrap_or_default();
+            let bash_input = tool_input_raw.clone().unwrap_or_default();
             let command = extract_bash_command(&bash_input).unwrap_or_default();
             let bash_result = evaluate_bash_command(&command, is_pre_tool)?;
 
