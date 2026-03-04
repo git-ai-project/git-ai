@@ -3,9 +3,11 @@ use crate::async_worker::socket::{platform, read_message};
 use crate::git::repository::find_repository;
 use crate::utils::debug_log;
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::time::Duration;
 
 /// How long the worker waits for new jobs after completing one before shutting down.
+#[cfg(unix)]
 const IDLE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Run the async worker process.

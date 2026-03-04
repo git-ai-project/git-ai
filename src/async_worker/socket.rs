@@ -1,5 +1,6 @@
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::time::Duration;
 
 use crate::utils::debug_log;
@@ -138,7 +139,6 @@ pub mod platform {
 pub mod platform {
     use super::*;
     use std::fs::OpenOptions;
-    use std::os::windows::fs::OpenOptionsExt;
 
     /// Derive a named pipe path from the ai_dir.
     /// Named pipes on Windows use the \\.\pipe\ prefix.
