@@ -3,8 +3,11 @@ use crate::{
         transcript::{AiTranscript, Message},
         working_log::{AgentId, CheckpointKind},
     },
-    commands::checkpoint_agent::agent_presets::{
-        AgentCheckpointFlags, AgentCheckpointPreset, AgentRunResult,
+    commands::checkpoint_agent::{
+        agent_presets::{AgentCheckpointFlags, AgentCheckpointPreset, AgentRunResult},
+        bash_checkpoint::{
+            ToolClassification, classify_tool, evaluate_bash_command, extract_bash_command,
+        },
     },
     error::GitAiError,
     observability::log_error,
@@ -21,6 +24,8 @@ struct AmpHookInput {
     hook_event_name: String,
     #[serde(default)]
     tool_use_id: Option<String>,
+    #[serde(default)]
+    tool_name: Option<String>,
     #[serde(default)]
     thread_id: Option<String>,
     #[serde(default)]
@@ -102,6 +107,16 @@ impl AgentCheckpointPreset for AmpPreset {
 
         let is_pre_tool_use = hook_input.hook_event_name == "PreToolUse";
 
+        // Checkpoint-time tool filtering: classify the tool and skip non-relevant tools
+        let amp_tool_name = hook_input.tool_name.as_deref().unwrap_or("");
+        let tool_class = classify_tool("amp", amp_tool_name);
+        if tool_class == ToolClassification::Skip {
+            return Err(GitAiError::PresetError(format!(
+                "Skipping checkpoint for non-file-edit, non-bash tool: {}",
+                amp_tool_name
+            )));
+        }
+
         let file_paths = Self::extract_file_paths(&hook_input);
         let resolved_thread_path = Self::resolve_thread_path(
             hook_input.transcript_path.as_deref(),
@@ -141,6 +156,56 @@ impl AgentCheckpointPreset for AmpPreset {
             model: model.unwrap_or_else(|| "unknown".to_string()),
         };
 
+        // Bash/shell tools: use shared bash checkpoint logic
+        if tool_class == ToolClassification::Bash {
+            let tool_input = hook_input.tool_input.clone().unwrap_or_default();
+            let command = extract_bash_command(&tool_input).unwrap_or_default();
+            let bash_result = evaluate_bash_command(&command, is_pre_tool_use)?;
+
+            if !bash_result.should_checkpoint {
+                return Err(GitAiError::PresetError(format!(
+                    "Bash command blacklisted, skipping checkpoint: {}",
+                    command.chars().take(100).collect::<String>()
+                )));
+            }
+
+            let mut bash_metadata = HashMap::new();
+            if let Some(path) = resolved_thread_path.as_ref() {
+                bash_metadata.insert(
+                    "transcript_path".to_string(),
+                    path.to_string_lossy().to_string(),
+                );
+            }
+
+            return Ok(AgentRunResult {
+                agent_id,
+                agent_metadata: if is_pre_tool_use || bash_metadata.is_empty() {
+                    None
+                } else {
+                    Some(bash_metadata)
+                },
+                checkpoint_kind: bash_result.checkpoint_kind,
+                transcript: if is_pre_tool_use {
+                    None
+                } else {
+                    Some(transcript)
+                },
+                repo_working_dir: hook_input.cwd.clone(),
+                edited_filepaths: if is_pre_tool_use {
+                    None
+                } else {
+                    bash_result.scoped_paths.clone()
+                },
+                will_edit_filepaths: if is_pre_tool_use {
+                    bash_result.scoped_paths
+                } else {
+                    None
+                },
+                dirty_files: None,
+            });
+        }
+
+        // Standard file-edit tool checkpoint logic
         if is_pre_tool_use {
             return Ok(AgentRunResult {
                 agent_id,

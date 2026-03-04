@@ -91,6 +91,7 @@ fn test_amp_preset_pretooluse_returns_human_checkpoint() {
     let hook_input = json!({
         "hook_event_name": "PreToolUse",
         "tool_use_id": AMP_SIMPLE_EDIT_TOOL_USE_ID,
+        "tool_name": "Write",
         "cwd": "/Users/test/project",
         "edited_filepaths": ["/Users/test/project/jokes.csv"],
         "tool_input": {
@@ -134,6 +135,7 @@ fn test_amp_preset_posttooluse_returns_ai_checkpoint() {
     let hook_input = json!({
         "hook_event_name": "PostToolUse",
         "tool_use_id": AMP_SIMPLE_EDIT_TOOL_USE_ID,
+        "tool_name": "Write",
         "cwd": "/Users/test/project",
         "edited_filepaths": ["/Users/test/project/jokes.csv"],
         "tool_input": {
@@ -196,6 +198,7 @@ fn test_amp_e2e_checkpoint_and_commit() {
     let pre_hook_input = json!({
         "hook_event_name": "PreToolUse",
         "tool_use_id": AMP_SIMPLE_EDIT_TOOL_USE_ID,
+        "tool_name": "Write",
         "cwd": repo_root.to_string_lossy().to_string(),
         "edited_filepaths": [file_path.to_string_lossy().to_string()],
         "tool_input": {
@@ -211,6 +214,7 @@ fn test_amp_e2e_checkpoint_and_commit() {
     let post_hook_input = json!({
         "hook_event_name": "PostToolUse",
         "tool_use_id": AMP_SIMPLE_EDIT_TOOL_USE_ID,
+        "tool_name": "Write",
         "cwd": repo_root.to_string_lossy().to_string(),
         "edited_filepaths": [file_path.to_string_lossy().to_string()],
         "tool_input": {
@@ -277,6 +281,7 @@ fn test_amp_post_commit_resyncs_latest_thread_transcript() {
     let pre_hook_input = json!({
         "hook_event_name": "PreToolUse",
         "tool_use_id": AMP_SIMPLE_EDIT_TOOL_USE_ID,
+        "tool_name": "Write",
         "cwd": repo_root.to_string_lossy().to_string(),
         "edited_filepaths": [file_path.to_string_lossy().to_string()]
     })
@@ -289,6 +294,7 @@ fn test_amp_post_commit_resyncs_latest_thread_transcript() {
     let post_hook_input = json!({
         "hook_event_name": "PostToolUse",
         "tool_use_id": AMP_SIMPLE_EDIT_TOOL_USE_ID,
+        "tool_name": "Write",
         "cwd": repo_root.to_string_lossy().to_string(),
         "edited_filepaths": [file_path.to_string_lossy().to_string()]
     })

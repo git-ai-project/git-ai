@@ -85,7 +85,7 @@ fn test_claude_preset_no_filepath_when_tool_input_missing() {
         "cwd": "/Users/svarlamov/projects/testing-git",
         "hook_event_name": "PostToolUse",
         "session_id": "23aad27c-175d-427f-ac5f-a6830b8e6e65",
-        "tool_name": "Read",
+        "tool_name": "Write",
         "transcript_path": "tests/fixtures/example-claude-code.jsonl"
     }"##;
 
@@ -175,6 +175,7 @@ fn test_claude_preset_does_not_ignore_when_transcript_path_is_claude() {
         "hookEventName": "PostToolUse",
         "cwd": "/Users/test/project",
         "toolName": "copilot_replaceString",
+        "tool_name": "Write",
         "toolInput": {
             "file_path": "/Users/test/project/src/main.ts"
         },
@@ -223,6 +224,7 @@ fn test_claude_e2e_prefers_latest_checkpoint_for_prompts() {
         "cwd": repo_root.to_string_lossy().to_string(),
         "hook_event_name": "PostToolUse",
         "transcript_path": transcript_path.to_string_lossy().to_string(),
+        "tool_name": "Write",
         "tool_input": {
             "file_path": file_path.to_string_lossy().to_string()
         }

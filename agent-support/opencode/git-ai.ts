@@ -23,8 +23,8 @@ import { dirname } from "path"
 // Absolute path to git-ai binary, replaced at install time by `git-ai install-hooks`
 const GIT_AI_BIN = "__GIT_AI_BINARY_PATH__"
 
-// Tools that modify files and should be tracked
-const FILE_EDIT_TOOLS = ["edit", "write"]
+// Bash/shell tool names that need special checkpoint handling
+const BASH_TOOLS = ["bash", "shell"]
 
 export const GitAiPlugin: Plugin = async (ctx) => {
   const { $ } = ctx
@@ -61,51 +61,58 @@ export const GitAiPlugin: Plugin = async (ctx) => {
 
   return {
     "tool.execute.before": async (input, output) => {
-      // Only intercept file editing tools
-      if (!FILE_EDIT_TOOLS.includes(input.tool)) {
-        return
-      }
-
       // Extract file path from tool arguments (args are in output, not input)
       const filePath = output.args?.filePath as string | undefined
-      if (!filePath) {
-        return
+
+      // For bash/shell tools, extract the command for blacklist evaluation
+      const isBashTool = BASH_TOOLS.includes(input.tool)
+      const bashCommand = isBashTool
+        ? (output.args?.command as string | undefined) ?? (output.args?.input as string | undefined)
+        : undefined
+
+      // Determine the working directory
+      let repoDir: string | null = null
+      if (filePath) {
+        repoDir = await findGitRepo(filePath)
+      } else if (output.args?.cwd) {
+        repoDir = await findGitRepo(output.args.cwd as string)
+      } else {
+        // Try process cwd as fallback
+        try {
+          const result = await $`git rev-parse --show-toplevel`.quiet()
+          repoDir = result.stdout.toString().trim() || null
+        } catch {
+          // Not in a git repo
+        }
       }
 
-      // Find the git repo for this file
-      const repoDir = await findGitRepo(filePath)
       if (!repoDir) {
-        // File is not in a git repo, skip silently
         return
       }
 
-      // Store filePath, repoDir, and sessionID for the after hook
-      pendingEdits.set(input.callID, { filePath, repoDir, sessionID: input.sessionID })
+      // Store info for the after hook
+      pendingEdits.set(input.callID, { filePath: filePath ?? "", repoDir, sessionID: input.sessionID })
 
       try {
-        // Create human checkpoint before AI edit
-        // This marks any changes since the last checkpoint as human-authored
         const hookInput = JSON.stringify({
           hook_event_name: "PreToolUse",
+          tool_name: input.tool,
           session_id: input.sessionID,
           cwd: repoDir,
-          tool_input: { filePath },
+          tool_input: {
+            ...(filePath ? { filePath } : {}),
+            ...(bashCommand ? { command: bashCommand } : {}),
+          },
         })
 
         await $`echo ${hookInput} | ${GIT_AI_BIN} checkpoint opencode --hook-input stdin`.quiet()
       } catch (error) {
-        // Log to stderr for debugging, but don't throw - git-ai errors shouldn't break the agent
         console.error("[git-ai] Failed to create human checkpoint:", String(error))
       }
     },
 
     "tool.execute.after": async (input, _output) => {
-      // Only intercept file editing tools
-      if (!FILE_EDIT_TOOLS.includes(input.tool)) {
-        return
-      }
-
-      // Get the filePath and repoDir we stored in the before hook
+      // Get the info we stored in the before hook
       const editInfo = pendingEdits.get(input.callID)
       pendingEdits.delete(input.callID)
 
@@ -116,19 +123,18 @@ export const GitAiPlugin: Plugin = async (ctx) => {
       const { filePath, repoDir, sessionID } = editInfo
 
       try {
-        // Create AI checkpoint after edit
-        // This marks the changes made by this tool call as AI-authored
-        // Transcript is fetched from OpenCode's local storage by the preset
         const hookInput = JSON.stringify({
           hook_event_name: "PostToolUse",
+          tool_name: input.tool,
           session_id: sessionID,
           cwd: repoDir,
-          tool_input: { filePath },
+          tool_input: {
+            ...(filePath ? { filePath } : {}),
+          },
         })
 
         await $`echo ${hookInput} | ${GIT_AI_BIN} checkpoint opencode --hook-input stdin`.quiet()
       } catch (error) {
-        // Log to stderr for debugging, but don't throw - git-ai errors shouldn't break the agent
         console.error("[git-ai] Failed to create AI checkpoint:", String(error))
       }
     },

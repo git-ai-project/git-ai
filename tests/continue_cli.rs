@@ -222,6 +222,7 @@ fn test_continue_cli_preset_extracts_model_from_hook_input() {
         "hook_event_name": "PostToolUse",
         "session_id": "2dbfd673-096d-4773-b5f3-9023894a7355",
         "model": "claude-3.5-sonnet",
+        "tool_name": "edit",
         "tool_input": {
             "file_path": "/Users/svarlamov/projects/testing-git/index.ts"
         },
@@ -247,6 +248,7 @@ fn test_continue_cli_preset_defaults_to_unknown_model() {
         "cwd": "/Users/svarlamov/projects/testing-git",
         "hook_event_name": "PostToolUse",
         "session_id": "2dbfd673-096d-4773-b5f3-9023894a7355",
+        "tool_name": "edit",
         "tool_input": {
             "file_path": "/Users/svarlamov/projects/testing-git/index.ts"
         },
@@ -271,6 +273,7 @@ fn test_continue_cli_preset_extracts_edited_filepath() {
         "hook_event_name": "PostToolUse",
         "session_id": "2dbfd673-096d-4773-b5f3-9023894a7355",
         "model": "claude-3.5-sonnet",
+        "tool_name": "edit",
         "tool_input": {
             "file_path": "/Users/svarlamov/projects/testing-git/index.ts"
         },
@@ -301,6 +304,7 @@ fn test_continue_cli_preset_no_filepath_when_tool_input_missing() {
         "hook_event_name": "PostToolUse",
         "session_id": "2dbfd673-096d-4773-b5f3-9023894a7355",
         "model": "claude-3.5-sonnet",
+        "tool_name": "edit",
         "transcript_path": "tests/fixtures/continue-cli-session-simple.json"
     });
 
@@ -324,6 +328,7 @@ fn test_continue_cli_preset_human_checkpoint() {
         "hook_event_name": "PreToolUse",
         "session_id": "2dbfd673-096d-4773-b5f3-9023894a7355",
         "model": "claude-3.5-sonnet",
+        "tool_name": "edit",
         "tool_input": {
             "file_path": "/Users/svarlamov/projects/testing-git/index.ts"
         },
@@ -369,6 +374,7 @@ fn test_continue_cli_preset_ai_checkpoint() {
         "hook_event_name": "PostToolUse",
         "session_id": "2dbfd673-096d-4773-b5f3-9023894a7355",
         "model": "claude-3.5-sonnet",
+        "tool_name": "edit",
         "tool_input": {
             "file_path": "/Users/svarlamov/projects/testing-git/index.ts"
         },
@@ -406,6 +412,7 @@ fn test_continue_cli_preset_stores_transcript_path_in_metadata() {
         "hook_event_name": "PostToolUse",
         "session_id": "2dbfd673-096d-4773-b5f3-9023894a7355",
         "model": "claude-3.5-sonnet",
+        "tool_name": "edit",
         "transcript_path": "tests/fixtures/continue-cli-session-simple.json"
     });
 
@@ -431,7 +438,8 @@ fn test_continue_cli_preset_handles_missing_transcript_path() {
         "cwd": "/Users/svarlamov/projects/testing-git",
         "hook_event_name": "PostToolUse",
         "session_id": "2dbfd673-096d-4773-b5f3-9023894a7355",
-        "model": "claude-3.5-sonnet"
+        "model": "claude-3.5-sonnet",
+        "tool_name": "edit"
     });
 
     let flags = AgentCheckpointFlags {
@@ -472,6 +480,7 @@ fn test_continue_cli_preset_handles_missing_session_id() {
         "cwd": "/Users/svarlamov/projects/testing-git",
         "hook_event_name": "PostToolUse",
         "model": "claude-3.5-sonnet",
+        "tool_name": "edit",
         "transcript_path": "tests/fixtures/continue-cli-session-simple.json"
     });
 
@@ -499,6 +508,7 @@ fn test_continue_cli_preset_handles_missing_file() {
         "hook_event_name": "PostToolUse",
         "session_id": "2dbfd673-096d-4773-b5f3-9023894a7355",
         "model": "claude-3.5-sonnet",
+        "tool_name": "edit",
         "transcript_path": "tests/fixtures/nonexistent.json"
     });
 
@@ -549,6 +559,7 @@ fn test_continue_cli_e2e_with_attribution() {
         "cwd": repo.canonical_path().to_string_lossy().to_string(),
         "hook_event_name": "PostToolUse",
         "model": "claude-3.5-sonnet",
+        "tool_name": "edit",
         "tool_input": {
             "file_path": file_path.to_string_lossy().to_string()
         },
@@ -632,6 +643,7 @@ fn test_continue_cli_e2e_human_checkpoint() {
         "cwd": repo.canonical_path().to_string_lossy().to_string(),
         "hook_event_name": "PreToolUse",
         "model": "claude-3.5-sonnet",
+        "tool_name": "edit",
         "tool_input": {
             "file_path": file_path.to_string_lossy().to_string()
         },
@@ -691,6 +703,7 @@ fn test_continue_cli_e2e_multiple_tool_calls() {
         "cwd": repo.canonical_path().to_string_lossy().to_string(),
         "hook_event_name": "PostToolUse",
         "model": "claude-3.5-sonnet",
+        "tool_name": "edit",
         "tool_input": {
             "file_path": file_path.to_string_lossy().to_string()
         },
@@ -737,6 +750,7 @@ fn test_continue_cli_e2e_preserves_model_on_commit() {
         "cwd": repo.canonical_path().to_string_lossy().to_string(),
         "hook_event_name": "PostToolUse",
         "model": "claude-opus-4",
+        "tool_name": "edit",
         "tool_input": {
             "file_path": file_path.to_string_lossy().to_string()
         },

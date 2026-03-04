@@ -283,6 +283,7 @@ fn test_gemini_preset_extracts_edited_filepath() {
         "cwd": "/Users/svarlamov/projects/testing-git",
         "hook_event_name": "AfterTool",
         "session_id": "18f475c0-690f-4bc9-b84e-88a0a1e9518f",
+        "tool_name": "write_file",
         "tool_input": {
             "file_path": "/Users/svarlamov/projects/testing-git/index.ts"
         },
@@ -312,6 +313,7 @@ fn test_gemini_preset_no_filepath_when_tool_input_missing() {
         "cwd": "/Users/svarlamov/projects/testing-git",
         "hook_event_name": "AfterTool",
         "session_id": "18f475c0-690f-4bc9-b84e-88a0a1e9518f",
+        "tool_name": "write_file",
         "transcript_path": "tests/fixtures/gemini-session-simple.json"
     });
 
@@ -334,6 +336,7 @@ fn test_gemini_preset_human_checkpoint() {
         "cwd": "/Users/svarlamov/projects/testing-git",
         "hook_event_name": "BeforeTool",
         "session_id": "18f475c0-690f-4bc9-b84e-88a0a1e9518f",
+        "tool_name": "write_file",
         "tool_input": {
             "file_path": "/Users/svarlamov/projects/testing-git/index.ts"
         },
@@ -378,6 +381,7 @@ fn test_gemini_preset_ai_checkpoint() {
         "cwd": "/Users/svarlamov/projects/testing-git",
         "hook_event_name": "AfterTool",
         "session_id": "18f475c0-690f-4bc9-b84e-88a0a1e9518f",
+        "tool_name": "write_file",
         "tool_input": {
             "file_path": "/Users/svarlamov/projects/testing-git/index.ts"
         },
@@ -414,6 +418,7 @@ fn test_gemini_preset_extracts_model() {
         "cwd": "/Users/svarlamov/projects/testing-git",
         "hook_event_name": "AfterTool",
         "session_id": "18f475c0-690f-4bc9-b84e-88a0a1e9518f",
+        "tool_name": "write_file",
         "transcript_path": "tests/fixtures/gemini-session-simple.json"
     });
 
@@ -436,6 +441,7 @@ fn test_gemini_preset_stores_transcript_path_in_metadata() {
         "cwd": "/Users/svarlamov/projects/testing-git",
         "hook_event_name": "AfterTool",
         "session_id": "18f475c0-690f-4bc9-b84e-88a0a1e9518f",
+        "tool_name": "write_file",
         "transcript_path": "tests/fixtures/gemini-session-simple.json"
     });
 
@@ -460,7 +466,8 @@ fn test_gemini_preset_handles_missing_transcript_path() {
     let hook_input = json!({
         "cwd": "/Users/svarlamov/projects/testing-git",
         "hook_event_name": "AfterTool",
-        "session_id": "18f475c0-690f-4bc9-b84e-88a0a1e9518f"
+        "session_id": "18f475c0-690f-4bc9-b84e-88a0a1e9518f",
+        "tool_name": "write_file"
     });
 
     let flags = AgentCheckpointFlags {
@@ -500,6 +507,7 @@ fn test_gemini_preset_handles_missing_session_id() {
     let hook_input = json!({
         "cwd": "/Users/svarlamov/projects/testing-git",
         "hook_event_name": "AfterTool",
+        "tool_name": "write_file",
         "transcript_path": "tests/fixtures/gemini-session-simple.json"
     });
 
@@ -526,6 +534,7 @@ fn test_gemini_preset_handles_missing_file() {
         "cwd": "/Users/svarlamov/projects/testing-git",
         "hook_event_name": "AfterTool",
         "session_id": "18f475c0-690f-4bc9-b84e-88a0a1e9518f",
+        "tool_name": "write_file",
         "transcript_path": "tests/fixtures/nonexistent.json"
     });
 
@@ -573,6 +582,7 @@ fn test_gemini_e2e_with_attribution() {
     // Run checkpoint with the Gemini session
     let hook_input = json!({
         "session_id": "18f475c0-690f-4bc9-b84e-88a0a1e9518f",
+        "tool_name": "write_file",
         "cwd": repo.canonical_path().to_string_lossy().to_string(),
         "hook_event_name": "AfterTool",
         "tool_input": {
@@ -655,6 +665,7 @@ fn test_gemini_e2e_human_checkpoint() {
     // Human checkpoint before tool use
     let hook_input = json!({
         "session_id": "18f475c0-690f-4bc9-b84e-88a0a1e9518f",
+        "tool_name": "write_file",
         "cwd": repo.canonical_path().to_string_lossy().to_string(),
         "hook_event_name": "BeforeTool",
         "tool_input": {
@@ -713,6 +724,7 @@ fn test_gemini_e2e_multiple_tool_calls() {
     // Run checkpoint
     let hook_input = json!({
         "session_id": "18f475c0-690f-4bc9-b84e-88a0a1e9518f",
+        "tool_name": "write_file",
         "cwd": repo.canonical_path().to_string_lossy().to_string(),
         "hook_event_name": "AfterTool",
         "tool_input": {
@@ -791,6 +803,7 @@ fn test_gemini_e2e_with_resync() {
     // Run checkpoint with ORIGINAL session file
     let hook_input = json!({
         "session_id": "18f475c0-690f-4bc9-b84e-88a0a1e9518f",
+        "tool_name": "write_file",
         "cwd": repo.canonical_path().to_string_lossy().to_string(),
         "hook_event_name": "AfterTool",
         "tool_input": {
@@ -871,6 +884,7 @@ fn test_gemini_e2e_partial_staging() {
     // Run checkpoint
     let hook_input = json!({
         "session_id": "18f475c0-690f-4bc9-b84e-88a0a1e9518f",
+        "tool_name": "write_file",
         "cwd": repo.canonical_path().to_string_lossy().to_string(),
         "hook_event_name": "AfterTool",
         "tool_input": {

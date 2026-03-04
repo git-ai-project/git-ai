@@ -41,6 +41,7 @@ fn create_ai_commit(repo: &TestRepo, transcript_fixture: &str) -> String {
         "session_id": "test-session-id-12345",
         "cwd": repo.canonical_path().to_string_lossy().to_string(),
         "hook_event_name": "PostToolUse",
+        "tool_name": "edit",
         "model": "claude-3.5-sonnet",
         "tool_input": {
             "file_path": file_path.to_string_lossy().to_string()
@@ -87,6 +88,7 @@ fn create_ai_commit_with_file(
         "session_id": format!("session-{}", filename.replace("/", "-")),
         "cwd": repo.canonical_path().to_string_lossy().to_string(),
         "hook_event_name": "PostToolUse",
+        "tool_name": "edit",
         "model": "claude-3.5-sonnet",
         "tool_input": {
             "file_path": file_path.to_string_lossy().to_string()
@@ -201,6 +203,7 @@ fn test_search_by_commit_range() {
         "session_id": "second-session",
         "cwd": repo.canonical_path().to_string_lossy().to_string(),
         "hook_event_name": "PostToolUse",
+        "tool_name": "edit",
         "model": "claude-3.5-sonnet",
         "tool_input": {
             "file_path": file_path.to_string_lossy().to_string()

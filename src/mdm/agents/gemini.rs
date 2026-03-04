@@ -115,13 +115,17 @@ impl HookInstaller for GeminiInstaller {
         );
         let after_tool_cmd = format!("{} {}", params.binary_path.display(), GEMINI_AFTER_TOOL_CMD);
 
+        // Old matchers that should be migrated to the new catch-all matcher
+        let old_matchers: &[&str] = &["write_file|replace"];
+        let desired_matcher = ".*";
+
         let desired_hooks = json!({
             "BeforeTool": {
-                "matcher": "write_file|replace",
+                "matcher": desired_matcher,
                 "desired_cmd": before_tool_cmd,
             },
             "AfterTool": {
-                "matcher": "write_file|replace",
+                "matcher": desired_matcher,
                 "desired_cmd": after_tool_cmd,
             }
         });
@@ -142,7 +146,6 @@ impl HookInstaller for GeminiInstaller {
 
         // Process both BeforeTool and AfterTool
         for hook_type in &["BeforeTool", "AfterTool"] {
-            let desired_matcher = desired_hooks[hook_type]["matcher"].as_str().unwrap();
             let desired_cmd = desired_hooks[hook_type]["desired_cmd"].as_str().unwrap();
 
             // Get or create the hooks array for this type
@@ -152,19 +155,32 @@ impl HookInstaller for GeminiInstaller {
                 .cloned()
                 .unwrap_or_default();
 
-            // Find existing matcher block for write_file|replace
+            // Find existing matcher block: check for the new ".*" matcher first,
+            // then fall back to any old matchers we need to migrate
             let mut found_matcher_idx: Option<usize> = None;
             for (idx, item) in hook_type_array.iter().enumerate() {
-                if let Some(matcher) = item.get("matcher").and_then(|m| m.as_str())
-                    && matcher == desired_matcher
-                {
-                    found_matcher_idx = Some(idx);
-                    break;
+                if let Some(matcher) = item.get("matcher").and_then(|m| m.as_str()) {
+                    if matcher == desired_matcher {
+                        found_matcher_idx = Some(idx);
+                        break;
+                    }
+                    if old_matchers.contains(&matcher) && found_matcher_idx.is_none() {
+                        found_matcher_idx = Some(idx);
+                    }
                 }
             }
 
             let matcher_idx = match found_matcher_idx {
-                Some(idx) => idx,
+                Some(idx) => {
+                    // Migrate old matcher to new catch-all
+                    if let Some(matcher_block) = hook_type_array[idx].as_object_mut() {
+                        matcher_block.insert(
+                            "matcher".to_string(),
+                            Value::String(desired_matcher.to_string()),
+                        );
+                    }
+                    idx
+                }
                 None => {
                     hook_type_array.push(json!({
                         "matcher": desired_matcher,
@@ -365,7 +381,7 @@ mod tests {
             "hooks": {
                 "BeforeTool": [
                     {
-                        "matcher": "write_file|replace",
+                        "matcher": ".*",
                         "hooks": [
                             {
                                 "type": "command",
@@ -376,7 +392,7 @@ mod tests {
                 ],
                 "AfterTool": [
                     {
-                        "matcher": "write_file|replace",
+                        "matcher": ".*",
                         "hooks": [
                             {
                                 "type": "command",
@@ -412,11 +428,11 @@ mod tests {
 
         assert_eq!(
             before_tool[0].get("matcher").unwrap().as_str().unwrap(),
-            "write_file|replace"
+            ".*"
         );
         assert_eq!(
             after_tool[0].get("matcher").unwrap().as_str().unwrap(),
-            "write_file|replace"
+            ".*"
         );
     }
 

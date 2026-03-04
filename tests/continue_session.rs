@@ -50,6 +50,7 @@ fn create_ai_commit_with_transcript(
         "cwd": repo.canonical_path().to_string_lossy().to_string(),
         "hook_event_name": "PostToolUse",
         "model": "claude-3.5-sonnet",
+        "tool_name": "edit",
         "tool_input": {
             "file_path": file_path.to_string_lossy().to_string()
         },
@@ -397,6 +398,7 @@ fn test_continue_max_messages_truncation() {
         "cwd": repo.canonical_path().to_string_lossy().to_string(),
         "hook_event_name": "PostToolUse",
         "model": "claude-3.5-sonnet",
+        "tool_name": "edit",
         "tool_input": {
             "file_path": file_path.to_string_lossy().to_string()
         },
@@ -454,6 +456,7 @@ fn test_continue_truncation_notice() {
         "cwd": repo.canonical_path().to_string_lossy().to_string(),
         "hook_event_name": "PostToolUse",
         "model": "claude-3.5-sonnet",
+        "tool_name": "edit",
         "tool_input": {
             "file_path": file_path.to_string_lossy().to_string()
         },
@@ -651,6 +654,7 @@ fn test_continue_redacts_secrets() {
         "cwd": repo.canonical_path().to_string_lossy().to_string(),
         "hook_event_name": "PostToolUse",
         "model": "claude-3.5-sonnet",
+        "tool_name": "edit",
         "tool_input": {
             "file_path": file_path.to_string_lossy().to_string()
         },
@@ -734,6 +738,7 @@ fn test_continue_redacts_before_format() {
         "cwd": repo.canonical_path().to_string_lossy().to_string(),
         "hook_event_name": "PostToolUse",
         "model": "claude-3.5-sonnet",
+        "tool_name": "edit",
         "tool_input": {
             "file_path": file_path.to_string_lossy().to_string()
         },
@@ -828,6 +833,7 @@ fn test_continue_unicode_content() {
         "cwd": repo.canonical_path().to_string_lossy().to_string(),
         "hook_event_name": "PostToolUse",
         "model": "claude-3.5-sonnet",
+        "tool_name": "edit",
         "tool_input": {
             "file_path": file_path.to_string_lossy().to_string()
         },
@@ -890,6 +896,7 @@ fn test_continue_empty_transcript() {
         "cwd": repo.canonical_path().to_string_lossy().to_string(),
         "hook_event_name": "PostToolUse",
         "model": "claude-3.5-sonnet",
+        "tool_name": "edit",
         "tool_input": {
             "file_path": file_path.to_string_lossy().to_string()
         },
