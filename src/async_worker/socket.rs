@@ -254,25 +254,34 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_unix_socket_bind_and_connect() {
+        use std::time::Duration;
+
         let dir = tempfile::tempdir().unwrap();
         let socket_path = dir.path().join("test.sock");
 
         let listener = platform::bind_socket(&socket_path).unwrap();
         assert!(socket_path.exists());
 
-        // Should be able to connect
-        let payload = b"test message";
-        let sent = platform::try_send_to_socket(&socket_path, payload).unwrap();
-        assert!(sent);
+        // Send the message from a background thread to avoid macOS timing issues
+        // where accept() can't see connections made before entering the accept loop.
+        let sender_path = socket_path.clone();
+        let sender = std::thread::spawn(move || {
+            // Small delay to ensure the accept loop is running
+            std::thread::sleep(Duration::from_millis(100));
+            let sent = platform::try_send_to_socket(&sender_path, b"test message").unwrap();
+            assert!(sent);
+        });
 
-        // Accept the connection and read the message (use longer timeout for CI)
+        // Accept the connection and read the message
         let accept_result =
             platform::accept_with_timeout(&listener, Duration::from_secs(5)).unwrap();
         assert!(accept_result.is_some(), "Should accept connection");
         let mut stream = accept_result.unwrap();
 
         let msg = read_message(&mut stream).unwrap().unwrap();
-        assert_eq!(msg, payload);
+        assert_eq!(msg, b"test message");
+
+        sender.join().unwrap();
 
         platform::cleanup_socket(&socket_path);
         assert!(!socket_path.exists());
