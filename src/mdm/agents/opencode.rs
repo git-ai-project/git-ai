@@ -193,9 +193,9 @@ mod tests {
         assert!(content.contains("export const GitAiPlugin: Plugin"));
         assert!(content.contains("\"tool.execute.before\""));
         assert!(content.contains("\"tool.execute.after\""));
-        assert!(content.contains("FILE_EDIT_TOOLS"));
-        assert!(content.contains("edit"));
-        assert!(content.contains("write"));
+        assert!(content.contains("BASH_TOOLS"));
+        assert!(content.contains("tool_name"));
+        assert!(content.contains("tool_input"));
         // Template contains placeholder for binary path
         assert!(content.contains("__GIT_AI_BINARY_PATH__"));
         assert!(content.contains("hook_event_name"));

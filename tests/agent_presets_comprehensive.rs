@@ -51,7 +51,8 @@ fn test_claude_preset_missing_transcript_path() {
     let preset = ClaudePreset;
     let hook_input = json!({
         "cwd": "/some/path",
-        "hook_event_name": "PostToolUse"
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Write"
     })
     .to_string();
 
@@ -73,7 +74,8 @@ fn test_claude_preset_missing_cwd() {
     let preset = ClaudePreset;
     let hook_input = json!({
         "transcript_path": "tests/fixtures/example-claude-code.jsonl",
-        "hook_event_name": "PostToolUse"
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Write"
     })
     .to_string();
 
@@ -97,6 +99,7 @@ fn test_claude_preset_pretooluse_checkpoint() {
         "cwd": "/some/path",
         "hook_event_name": "PreToolUse",
         "transcript_path": "tests/fixtures/example-claude-code.jsonl",
+        "tool_name": "Write",
         "tool_input": {
             "file_path": "/some/file.rs"
         }
@@ -124,7 +127,8 @@ fn test_claude_preset_invalid_transcript_path() {
     let hook_input = json!({
         "cwd": "/some/path",
         "hook_event_name": "PostToolUse",
-        "transcript_path": "/nonexistent/path/to/transcript.jsonl"
+        "transcript_path": "/nonexistent/path/to/transcript.jsonl",
+        "tool_name": "Write"
     })
     .to_string();
 
@@ -281,7 +285,8 @@ fn test_gemini_preset_missing_session_id() {
     let preset = GeminiPreset;
     let hook_input = json!({
         "transcript_path": "tests/fixtures/gemini-session-simple.json",
-        "cwd": "/path"
+        "cwd": "/path",
+        "tool_name": "write_file"
     })
     .to_string();
 
@@ -303,7 +308,8 @@ fn test_gemini_preset_missing_transcript_path() {
     let preset = GeminiPreset;
     let hook_input = json!({
         "session_id": "test-session",
-        "cwd": "/path"
+        "cwd": "/path",
+        "tool_name": "write_file"
     })
     .to_string();
 
@@ -325,7 +331,8 @@ fn test_gemini_preset_missing_cwd() {
     let preset = GeminiPreset;
     let hook_input = json!({
         "session_id": "test-session",
-        "transcript_path": "tests/fixtures/gemini-session-simple.json"
+        "transcript_path": "tests/fixtures/gemini-session-simple.json",
+        "tool_name": "write_file"
     })
     .to_string();
 
@@ -350,6 +357,7 @@ fn test_gemini_preset_beforetool_checkpoint() {
         "transcript_path": "tests/fixtures/gemini-session-simple.json",
         "cwd": "/path",
         "hook_event_name": "BeforeTool",
+        "tool_name": "write_file",
         "tool_input": {
             "file_path": "/file.js"
         }
@@ -454,7 +462,8 @@ fn test_continue_preset_missing_session_id() {
     let hook_input = json!({
         "transcript_path": "tests/fixtures/continue-cli-session-simple.json",
         "cwd": "/path",
-        "model": "gpt-4"
+        "model": "gpt-4",
+        "tool_name": "edit"
     })
     .to_string();
 
@@ -477,7 +486,8 @@ fn test_continue_preset_missing_transcript_path() {
     let hook_input = json!({
         "session_id": "test-session",
         "cwd": "/path",
-        "model": "gpt-4"
+        "model": "gpt-4",
+        "tool_name": "edit"
     })
     .to_string();
 
@@ -500,7 +510,8 @@ fn test_continue_preset_missing_model_defaults_to_unknown() {
     let hook_input = json!({
         "session_id": "test-session",
         "transcript_path": "tests/fixtures/continue-cli-session-simple.json",
-        "cwd": "/path"
+        "cwd": "/path",
+        "tool_name": "edit"
     })
     .to_string();
 
@@ -523,6 +534,7 @@ fn test_continue_preset_pretooluse_checkpoint() {
         "cwd": "/path",
         "model": "gpt-4",
         "hook_event_name": "PreToolUse",
+        "tool_name": "edit",
         "tool_input": {
             "file_path": "/file.py"
         }
@@ -1062,6 +1074,7 @@ fn test_claude_preset_with_tool_input_no_file_path() {
         "cwd": "/path",
         "hook_event_name": "PostToolUse",
         "transcript_path": "tests/fixtures/example-claude-code.jsonl",
+        "tool_name": "Write",
         "tool_input": {
             "other_field": "value"
         }
@@ -1084,6 +1097,7 @@ fn test_gemini_preset_with_tool_input_no_file_path() {
         "session_id": "test",
         "transcript_path": "tests/fixtures/gemini-session-simple.json",
         "cwd": "/path",
+        "tool_name": "write_file",
         "tool_input": {
             "other": "value"
         }
@@ -1107,6 +1121,7 @@ fn test_continue_preset_with_tool_input_no_file_path() {
         "transcript_path": "tests/fixtures/continue-cli-session-simple.json",
         "cwd": "/path",
         "model": "gpt-4",
+        "tool_name": "edit",
         "tool_input": {}
     })
     .to_string();
@@ -1127,6 +1142,7 @@ fn test_claude_preset_with_unicode_in_path() {
         "cwd": "/Users/测试/项目",
         "hook_event_name": "PostToolUse",
         "transcript_path": "tests/fixtures/example-claude-code.jsonl",
+        "tool_name": "Write",
         "tool_input": {
             "file_path": "/Users/测试/项目/文件.rs"
         }

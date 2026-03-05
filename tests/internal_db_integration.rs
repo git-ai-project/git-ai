@@ -88,6 +88,7 @@ fn test_checkpoint_saves_prompt_to_internal_db() {
     let hook_input = json!({
         "cwd": repo_root.to_string_lossy().to_string(),
         "hook_event_name": "PostToolUse",
+        "tool_name": "Write",
         "transcript_path": transcript_path.to_string_lossy().to_string(),
         "tool_input": {
             "file_path": file_path.to_string_lossy().to_string()
@@ -136,6 +137,7 @@ fn test_commit_updates_prompt_with_commit_sha_and_model() {
     let hook_input = json!({
         "cwd": repo_root.to_string_lossy().to_string(),
         "hook_event_name": "PostToolUse",
+        "tool_name": "Write",
         "transcript_path": transcript_path.to_string_lossy().to_string(),
         "tool_input": {
             "file_path": file_path.to_string_lossy().to_string()
@@ -196,6 +198,7 @@ fn test_post_commit_uses_latest_transcript_messages() {
     let hook_input = json!({
         "cwd": repo_root.to_string_lossy().to_string(),
         "hook_event_name": "PostToolUse",
+        "tool_name": "Write",
         "transcript_path": transcript_path.to_string_lossy().to_string(),
         "tool_input": {
             "file_path": file_path.to_string_lossy().to_string()
@@ -269,6 +272,7 @@ fn test_multiple_checkpoints_same_session_deduplicated() {
     let hook_input = json!({
         "cwd": repo_root.to_string_lossy().to_string(),
         "hook_event_name": "PostToolUse",
+        "tool_name": "Write",
         "transcript_path": transcript_path.to_string_lossy().to_string(),
         "tool_input": {
             "file_path": file_path.to_string_lossy().to_string()
@@ -316,6 +320,7 @@ fn test_different_sessions_create_separate_prompts() {
     let hook_input_1 = json!({
         "cwd": repo_root.to_string_lossy().to_string(),
         "hook_event_name": "PostToolUse",
+        "tool_name": "Write",
         "transcript_path": transcript_path_1.to_string_lossy().to_string(),
         "tool_input": {
             "file_path": file_path.to_string_lossy().to_string()
@@ -331,6 +336,7 @@ fn test_different_sessions_create_separate_prompts() {
     let hook_input_2 = json!({
         "cwd": repo_root.to_string_lossy().to_string(),
         "hook_event_name": "PostToolUse",
+        "tool_name": "Write",
         "transcript_path": transcript_path_2.to_string_lossy().to_string(),
         "tool_input": {
             "file_path": file_path.to_string_lossy().to_string()
@@ -379,6 +385,7 @@ fn test_line_stats_saved_to_db_after_commit() {
     let hook_input = json!({
         "cwd": repo_root.to_string_lossy().to_string(),
         "hook_event_name": "PostToolUse",
+        "tool_name": "Write",
         "transcript_path": transcript_path.to_string_lossy().to_string(),
         "tool_input": {
             "file_path": file_path.to_string_lossy().to_string()
@@ -439,6 +446,7 @@ fn test_human_author_saved_to_db_after_commit() {
     let hook_input = json!({
         "cwd": repo_root.to_string_lossy().to_string(),
         "hook_event_name": "PostToolUse",
+        "tool_name": "Write",
         "transcript_path": transcript_path.to_string_lossy().to_string(),
         "tool_input": {
             "file_path": file_path.to_string_lossy().to_string()
@@ -491,6 +499,7 @@ fn test_workdir_saved_to_db() {
     let hook_input = json!({
         "cwd": repo_root.to_string_lossy().to_string(),
         "hook_event_name": "PostToolUse",
+        "tool_name": "Write",
         "transcript_path": transcript_path.to_string_lossy().to_string(),
         "tool_input": {
             "file_path": file_path.to_string_lossy().to_string()
@@ -567,6 +576,7 @@ fn test_thinking_transcript_saves_to_internal_db_after_commit() {
     let hook_input = json!({
         "cwd": repo_root.to_string_lossy().to_string(),
         "hook_event_name": "PostToolUse",
+        "tool_name": "Write",
         "transcript_path": transcript_path.to_string_lossy().to_string(),
         "tool_input": {
             "file_path": file_path.to_string_lossy().to_string()

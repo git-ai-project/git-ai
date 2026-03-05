@@ -3,8 +3,11 @@ use crate::{
         transcript::{AiTranscript, Message},
         working_log::{AgentId, CheckpointKind},
     },
-    commands::checkpoint_agent::agent_presets::{
-        AgentCheckpointFlags, AgentCheckpointPreset, AgentRunResult,
+    commands::checkpoint_agent::{
+        agent_presets::{AgentCheckpointFlags, AgentCheckpointPreset, AgentRunResult},
+        bash_checkpoint::{
+            ToolClassification, classify_tool, evaluate_bash_command, extract_bash_command,
+        },
     },
     error::GitAiError,
     observability::log_error,
@@ -23,13 +26,12 @@ struct OpenCodeHookInput {
     hook_event_name: String,
     session_id: String,
     cwd: String,
-    tool_input: Option<ToolInput>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ToolInput {
-    #[serde(rename = "filePath")]
-    file_path: Option<String>,
+    #[serde(default)]
+    tool_name: Option<String>,
+    /// Raw tool_input as a JSON value so we can both extract typed fields
+    /// (like filePath) and pass the full value to bash command extraction.
+    #[serde(default)]
+    tool_input: Option<serde_json::Value>,
 }
 
 /// Message metadata from legacy file storage message/{session_id}/{msg_id}.json
@@ -164,13 +166,26 @@ impl AgentCheckpointPreset for OpenCodePreset {
             hook_event_name,
             session_id,
             cwd,
-            tool_input,
+            tool_name: oc_tool_name_opt,
+            tool_input: tool_input_raw,
         } = hook_input;
 
-        // Extract file_path from tool_input if present
-        let file_path_as_vec = tool_input
-            .and_then(|ti| ti.file_path)
-            .map(|path| vec![path]);
+        // Checkpoint-time tool filtering: classify the tool and skip non-relevant tools
+        let oc_tool_name = oc_tool_name_opt.as_deref().unwrap_or("");
+        let tool_class = classify_tool("opencode", oc_tool_name);
+        if tool_class == ToolClassification::Skip {
+            return Err(GitAiError::PresetError(format!(
+                "Skipping checkpoint for non-file-edit, non-bash tool: {}",
+                oc_tool_name
+            )));
+        }
+
+        // Extract file_path from tool_input if present (field name: "filePath")
+        let file_path_as_vec = tool_input_raw
+            .as_ref()
+            .and_then(|v| v.get("filePath"))
+            .and_then(|v| v.as_str())
+            .map(|path| vec![path.to_string()]);
 
         // Determine OpenCode path (test override can point to either root or legacy storage path)
         let opencode_path = if let Ok(test_path) = std::env::var("GIT_AI_OPENCODE_STORAGE_PATH") {
@@ -211,7 +226,47 @@ impl AgentCheckpointPreset for OpenCodePreset {
         }
 
         // Check if this is a PreToolUse event (human checkpoint)
-        if hook_event_name == "PreToolUse" {
+        let is_pre_tool = hook_event_name == "PreToolUse";
+
+        // Bash/shell tools: use shared bash checkpoint logic
+        if tool_class == ToolClassification::Bash {
+            let bash_input = tool_input_raw.clone().unwrap_or_default();
+            let command = extract_bash_command(&bash_input).unwrap_or_default();
+            let bash_result = evaluate_bash_command(&command, is_pre_tool)?;
+
+            if !bash_result.should_checkpoint {
+                return Err(GitAiError::PresetError(format!(
+                    "Bash command blacklisted, skipping checkpoint: {}",
+                    command.chars().take(100).collect::<String>()
+                )));
+            }
+
+            return Ok(AgentRunResult {
+                agent_id,
+                agent_metadata: if is_pre_tool {
+                    None
+                } else {
+                    Some(agent_metadata)
+                },
+                checkpoint_kind: bash_result.checkpoint_kind,
+                transcript: if is_pre_tool { None } else { Some(transcript) },
+                repo_working_dir: Some(cwd),
+                edited_filepaths: if is_pre_tool {
+                    None
+                } else {
+                    bash_result.scoped_paths.clone()
+                },
+                will_edit_filepaths: if is_pre_tool {
+                    bash_result.scoped_paths
+                } else {
+                    None
+                },
+                dirty_files: None,
+            });
+        }
+
+        // Standard file-edit tool checkpoint logic
+        if is_pre_tool {
             return Ok(AgentRunResult {
                 agent_id,
                 agent_metadata: None,

@@ -103,13 +103,17 @@ impl HookInstaller for DroidInstaller {
         let pre_tool_cmd = format!("{} {}", binary_path, DROID_PRE_TOOL_CMD);
         let post_tool_cmd = format!("{} {}", binary_path, DROID_POST_TOOL_CMD);
 
+        // Old matchers that should be migrated to the new catch-all matcher
+        let old_matchers: &[&str] = &["^(Edit|Write|Create|ApplyPatch)$"];
+        let desired_matcher = ".*";
+
         let desired_hooks = json!({
             "PreToolUse": {
-                "matcher": "^(Edit|Write|Create|ApplyPatch)$",
+                "matcher": desired_matcher,
                 "desired_cmd": pre_tool_cmd,
             },
             "PostToolUse": {
-                "matcher": "^(Edit|Write|Create|ApplyPatch)$",
+                "matcher": desired_matcher,
                 "desired_cmd": post_tool_cmd,
             }
         });
@@ -118,7 +122,6 @@ impl HookInstaller for DroidInstaller {
         let mut hooks_obj = merged.get("hooks").cloned().unwrap_or_else(|| json!({}));
 
         for hook_type in &["PreToolUse", "PostToolUse"] {
-            let desired_matcher = desired_hooks[hook_type]["matcher"].as_str().unwrap();
             let desired_cmd = desired_hooks[hook_type]["desired_cmd"].as_str().unwrap();
 
             let mut hook_type_array = hooks_obj
@@ -127,18 +130,32 @@ impl HookInstaller for DroidInstaller {
                 .cloned()
                 .unwrap_or_default();
 
+            // Find existing matcher block: check for the new ".*" matcher first,
+            // then fall back to any old matchers we need to migrate
             let mut found_matcher_idx: Option<usize> = None;
             for (idx, item) in hook_type_array.iter().enumerate() {
-                if let Some(matcher) = item.get("matcher").and_then(|m| m.as_str())
-                    && matcher == desired_matcher
-                {
-                    found_matcher_idx = Some(idx);
-                    break;
+                if let Some(matcher) = item.get("matcher").and_then(|m| m.as_str()) {
+                    if matcher == desired_matcher {
+                        found_matcher_idx = Some(idx);
+                        break;
+                    }
+                    if old_matchers.contains(&matcher) && found_matcher_idx.is_none() {
+                        found_matcher_idx = Some(idx);
+                    }
                 }
             }
 
             let matcher_idx = match found_matcher_idx {
-                Some(idx) => idx,
+                Some(idx) => {
+                    // Migrate old matcher to new catch-all
+                    if let Some(matcher_block) = hook_type_array[idx].as_object_mut() {
+                        matcher_block.insert(
+                            "matcher".to_string(),
+                            Value::String(desired_matcher.to_string()),
+                        );
+                    }
+                    idx
+                }
                 None => {
                     hook_type_array.push(json!({
                         "matcher": desired_matcher,
@@ -325,7 +342,7 @@ mod tests {
             "hooks": {
                 "PreToolUse": [
                     {
-                        "matcher": "^(Edit|Write|Create)$",
+                        "matcher": ".*",
                         "hooks": [
                             {
                                 "type": "command",
@@ -336,7 +353,7 @@ mod tests {
                 ],
                 "PostToolUse": [
                     {
-                        "matcher": "^(Edit|Write|Create)$",
+                        "matcher": ".*",
                         "hooks": [
                             {
                                 "type": "command",
@@ -364,14 +381,8 @@ mod tests {
         assert_eq!(pre_tool.len(), 1);
         assert_eq!(post_tool.len(), 1);
 
-        assert_eq!(
-            pre_tool[0].get("matcher").unwrap().as_str().unwrap(),
-            "^(Edit|Write|Create)$"
-        );
-        assert_eq!(
-            post_tool[0].get("matcher").unwrap().as_str().unwrap(),
-            "^(Edit|Write|Create)$"
-        );
+        assert_eq!(pre_tool[0].get("matcher").unwrap().as_str().unwrap(), ".*");
+        assert_eq!(post_tool[0].get("matcher").unwrap().as_str().unwrap(), ".*");
     }
 
     #[test]
