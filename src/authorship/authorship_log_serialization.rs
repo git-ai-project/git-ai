@@ -640,6 +640,19 @@ mod tests {
     use super::*;
     use insta::assert_debug_snapshot;
 
+    fn normalize_serialized_for_snapshot(serialized: &str) -> String {
+        serialized.replace(
+            &format!("\"git_ai_version\": \"{}\"", GIT_AI_VERSION),
+            "\"git_ai_version\": \"development\"",
+        )
+    }
+
+    fn normalize_log_for_snapshot(log: &AuthorshipLog) -> AuthorshipLog {
+        let mut normalized = log.clone();
+        normalized.metadata.git_ai_version = Some("development".to_string());
+        normalized
+    }
+
     #[test]
     fn test_format_line_ranges() {
         let ranges = vec![
@@ -692,11 +705,11 @@ mod tests {
 
         // Serialize and snapshot the format
         let serialized = log.serialize_to_string().unwrap();
-        assert_debug_snapshot!(serialized);
+        assert_debug_snapshot!(normalize_serialized_for_snapshot(&serialized));
 
         // Test roundtrip: deserialize and verify structure matches
         let deserialized = AuthorshipLog::deserialize_from_string(&serialized).unwrap();
-        assert_debug_snapshot!(deserialized);
+        assert_debug_snapshot!(normalize_log_for_snapshot(&deserialized));
     }
 
     #[test]
@@ -731,7 +744,7 @@ mod tests {
         log.attestations.push(file2);
 
         let serialized = log.serialize_to_string().unwrap();
-        assert_debug_snapshot!(serialized);
+        assert_debug_snapshot!(normalize_serialized_for_snapshot(&serialized));
     }
 
     #[test]
@@ -803,14 +816,14 @@ mod tests {
 
         let serialized = log.serialize_to_string().unwrap();
         println!("Serialized with special file names:\n{}", serialized);
-        assert_debug_snapshot!(serialized);
+        assert_debug_snapshot!(normalize_serialized_for_snapshot(&serialized));
 
         // Try to deserialize - this should work if we handle escaping properly
         let deserialized = AuthorshipLog::deserialize_from_string(&serialized);
         match deserialized {
             Ok(log) => {
                 println!("Deserialization successful!");
-                assert_debug_snapshot!(log);
+                assert_debug_snapshot!(normalize_log_for_snapshot(&log));
             }
             Err(e) => {
                 println!("Deserialization failed: {}", e);
@@ -854,7 +867,7 @@ mod tests {
         log.attestations.push(file1);
 
         let serialized = log.serialize_to_string().unwrap();
-        assert_debug_snapshot!(serialized);
+        assert_debug_snapshot!(normalize_serialized_for_snapshot(&serialized));
 
         // Verify that every hash in attestations has a corresponding prompt
         for file_attestation in &log.attestations {
@@ -896,11 +909,11 @@ mod tests {
 
         // Serialize and verify the format
         let serialized = log.serialize_to_string().unwrap();
-        assert_debug_snapshot!(serialized);
+        assert_debug_snapshot!(normalize_serialized_for_snapshot(&serialized));
 
         // Test roundtrip: deserialize and verify structure matches
         let deserialized = AuthorshipLog::deserialize_from_string(&serialized).unwrap();
-        assert_debug_snapshot!(deserialized);
+        assert_debug_snapshot!(normalize_log_for_snapshot(&deserialized));
 
         // Verify that the deserialized log has the same metadata but no attestations
         assert_eq!(deserialized.metadata.base_commit_sha, "abc123");
