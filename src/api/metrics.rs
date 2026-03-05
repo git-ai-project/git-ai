@@ -40,16 +40,16 @@ impl MetricsUploadResponse {
 
 /// Upload metrics batch with retry logic.
 ///
-/// Returns Ok(()) on success (200 response, even with partial errors).
+/// Returns Ok(response) on success (200 response, including partial errors).
 /// Returns Err on failure after all retries exhausted.
 ///
-/// Partial errors (200 + errors array) are logged to Sentry but not retried,
-/// since validation errors won't succeed on retry.
+/// Partial errors (200 + errors array) are logged to Sentry and returned to callers
+/// so they can decide what to retry/delete from local queue state.
 pub fn upload_metrics_with_retry(
     client: &ApiClient,
     batch: &MetricsBatch,
     operation: &str,
-) -> Result<(), GitAiError> {
+) -> Result<MetricsUploadResponse, GitAiError> {
     // First attempt (no delay), then retry with delays
     for (attempt, delay_secs) in std::iter::once(&0u64)
         .chain(RETRY_DELAYS_SECS.iter())
@@ -80,7 +80,7 @@ pub fn upload_metrics_with_retry(
                         })),
                     );
                 }
-                return Ok(());
+                return Ok(response);
             }
             Err(e) => {
                 // Non-200 - will retry if attempts remain
