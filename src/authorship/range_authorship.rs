@@ -211,6 +211,7 @@ fn create_authorship_log_for_range(
                     git_ai_version: Some(
                         crate::authorship::authorship_log_serialization::GIT_AI_VERSION.to_string(),
                     ),
+                    id: None,
                     base_commit_sha: end_sha.to_string(),
                     prompts: std::collections::BTreeMap::new(),
                 },

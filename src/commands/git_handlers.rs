@@ -339,7 +339,7 @@ fn run_pre_command_hooks(
         match parsed_args.command.as_deref() {
             Some("commit") => {
                 command_hooks_context.pre_commit_hook_result = Some(
-                    commit_hooks::commit_pre_command_hook(parsed_args, repository),
+                    commit_hooks::commit_pre_command_hook(&mut *parsed_args, repository),
                 );
             }
             Some("rebase") => {

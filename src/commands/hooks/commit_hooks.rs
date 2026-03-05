@@ -4,9 +4,10 @@ use crate::git::cli_parser::{ParsedGitInvocation, is_dry_run};
 use crate::git::repository::Repository;
 use crate::git::rewrite_log::RewriteLogEvent;
 use crate::utils::debug_log;
+use uuid::Uuid;
 
 pub fn commit_pre_command_hook(
-    parsed_args: &ParsedGitInvocation,
+    parsed_args: &mut ParsedGitInvocation,
     repository: &mut Repository,
 ) -> bool {
     if is_dry_run(&parsed_args.command_args) {
@@ -31,6 +32,33 @@ pub fn commit_pre_command_hook(
         eprintln!("Pre-commit failed: {}", e);
         std::process::exit(1);
     }
+
+    // Generate a UUID for this commit's authorship note and inject the Git-AI trailer.
+    // In wrapper mode the modified args are forwarded to `proxy_to_git`, so the trailer
+    // ends up in the actual commit message. In hooks mode these args are discarded
+    // (the trailer is instead written by the prepare-commit-msg handler).
+    let note_id = Uuid::new_v4().to_string();
+    repository.storage.write_pending_note_id(&note_id);
+    // Tell git to replace any existing Git-AI trailer (from the original
+    // message on --amend) instead of appending a duplicate.
+    parsed_args.global_args.extend([
+        "-c".to_string(),
+        "trailer.Git-AI.ifExists=replace".to_string(),
+    ]);
+    // Insert --trailer before any "--" separator so that git treats it as
+    // an option rather than a pathspec.
+    let insert_pos = parsed_args
+        .command_args
+        .iter()
+        .position(|a| a == "--")
+        .unwrap_or(parsed_args.command_args.len());
+    parsed_args
+        .command_args
+        .insert(insert_pos, format!("Git-AI: {}", note_id));
+    parsed_args
+        .command_args
+        .insert(insert_pos, "--trailer".to_string());
+
     true
 }
 

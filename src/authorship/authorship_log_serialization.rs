@@ -25,6 +25,8 @@ pub const GIT_AI_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub struct AuthorshipMetadata {
     pub schema_version: String,
     pub git_ai_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub base_commit_sha: String,
     pub prompts: BTreeMap<String, PromptRecord>,
 }
@@ -34,6 +36,7 @@ impl AuthorshipMetadata {
         Self {
             schema_version: AUTHORSHIP_LOG_VERSION.to_string(),
             git_ai_version: Some(GIT_AI_VERSION.to_string()),
+            id: None,
             base_commit_sha: String::new(),
             prompts: BTreeMap::new(),
         }

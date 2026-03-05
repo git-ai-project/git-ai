@@ -8,7 +8,7 @@ use crate::commands::hooks::stash_hooks;
 use crate::config;
 use crate::error::GitAiError;
 use crate::git::cli_parser::ParsedGitInvocation;
-use crate::git::repository::{Repository, disable_internal_git_hooks};
+use crate::git::repository::{Repository, disable_internal_git_hooks, worktree_storage_ai_dir};
 use crate::git::sync_authorship::fetch_authorship_notes;
 use crate::utils::{debug_log, debug_performance_log_structured};
 use serde::{Deserialize, Serialize};
@@ -2321,8 +2321,8 @@ fn run_managed_hook(
                 return 0;
             }
             maybe_capture_cherry_pick_pre_commit_state(&repo);
-            let parsed = parsed_invocation("commit", vec![]);
-            let _ = commit_hooks::commit_pre_command_hook(&parsed, &mut repo);
+            let mut parsed = parsed_invocation("commit", vec![]);
+            let _ = commit_hooks::commit_pre_command_hook(&mut parsed, &mut repo);
             0
         }
         "post-commit" => {
@@ -2478,6 +2478,29 @@ fn run_managed_hook(
                 return 0;
             }
             maybe_capture_cherry_pick_pre_commit_state(&repo);
+
+            // In hooks mode, the pre-commit handler stored a pending note UUID.
+            // Append a Git-AI trailer to the commit-message file so the trailer
+            // appears in the final commit (mirrors --trailer injection in wrapper mode).
+            // Guard: only inject during normal commits, not cherry-picks where
+            // pre-commit did not write a fresh pending_note_id (a stale file from
+            // an aborted commit could otherwise leak into the cherry-picked message).
+            if !is_cherry_pick_in_progress(&repo)
+                && let Some(note_id) = repo.storage.read_pending_note_id()
+                && let Some(msg_file) = hook_args.first()
+            {
+                let mut args = repo.global_args_for_exec();
+                args.extend([
+                    "interpret-trailers".to_string(),
+                    "--in-place".to_string(),
+                    "--if-exists".to_string(),
+                    "replace".to_string(),
+                    "--trailer".to_string(),
+                    format!("Git-AI: {}", note_id),
+                    msg_file.clone(),
+                ]);
+                let _ = crate::git::repository::exec_git(&args);
+            }
             0
         }
         _ => 0,
@@ -2494,7 +2517,39 @@ fn needs_prepare_commit_msg_handling() -> bool {
         return true;
     };
 
-    git_dir.join("CHERRY_PICK_HEAD").is_file()
+    // Also handle normal commits when a pending note UUID exists (written by
+    // the pre-commit hook) so the Git-AI trailer can be injected.
+    git_dir.join("CHERRY_PICK_HEAD").is_file() || pending_note_id_exists(&git_dir)
+}
+
+/// Check whether a `pending_note_id` file exists in the storage directory
+/// corresponding to `git_dir`.  Delegates to `worktree_storage_ai_dir` (the
+/// canonical helper that resolves the correct ai directory for both the main
+/// worktree and linked worktrees) so that the path logic is not duplicated.
+fn pending_note_id_exists(git_dir: &Path) -> bool {
+    let git_common_dir = resolve_git_common_dir(git_dir);
+    let ai_dir = worktree_storage_ai_dir(git_dir, &git_common_dir);
+    ai_dir.join("pending_note_id").is_file()
+}
+
+/// Resolve the git common directory from `git_dir`.  For linked worktrees git
+/// stores a `commondir` file inside the worktree-specific git directory that
+/// contains a (usually relative) path to the shared common directory.  When
+/// that file is absent the repository is not a linked worktree and
+/// `git_dir` itself is the common directory.
+fn resolve_git_common_dir(git_dir: &Path) -> PathBuf {
+    let commondir_file = git_dir.join("commondir");
+    if let Ok(contents) = fs::read_to_string(&commondir_file) {
+        let trimmed = contents.trim();
+        if !trimmed.is_empty() {
+            let candidate = Path::new(trimmed);
+            if candidate.is_relative() {
+                return git_dir.join(candidate);
+            }
+            return candidate.to_path_buf();
+        }
+    }
+    git_dir.to_path_buf()
 }
 
 fn is_rebase_in_progress_from_context() -> bool {

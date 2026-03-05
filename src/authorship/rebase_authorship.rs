@@ -391,6 +391,9 @@ pub fn rewrite_authorship_after_squash_or_rebase(
     let mut authorship_log = merged_va.to_authorship_log()?;
     authorship_log.metadata.base_commit_sha = merge_commit_sha.to_string();
 
+    // Generate a new UUID for the merge note (no single source id to inherit)
+    authorship_log.metadata.id = Some(uuid::Uuid::new_v4().to_string());
+
     // Preserve accumulated totals from source commits (squash/rebase should not drop session totals).
     let mut summed_totals: HashMap<String, (u32, u32)> = HashMap::new();
     for commit_sha in &source_commits {
@@ -634,6 +637,12 @@ pub fn rewrite_authorship_after_rebase_v2(
     let mut original_note_content_by_new_commit: HashMap<String, String> = HashMap::new();
     let mut original_note_content_loaded = false;
 
+    // Build new_commit -> original_commit lookup for id preservation
+    let new_to_original: HashMap<&str, &str> = commit_pairs_to_process
+        .iter()
+        .map(|(original, new)| (new.as_str(), original.as_str()))
+        .collect();
+
     // Step 3: Process each new commit in order (oldest to newest)
     for (idx, new_commit) in commits_to_process.iter().enumerate() {
         debug_log(&format!(
@@ -714,6 +723,17 @@ pub fn rewrite_authorship_after_rebase_v2(
 
         current_authorship_log.metadata.base_commit_sha = new_commit.clone();
         current_authorship_log.metadata.prompts = flatten_prompts_for_metadata(&current_prompts);
+
+        // Preserve the id from the original (source) commit's note.
+        // Always reset to avoid leaking the previous iteration's id when lookup fails.
+        current_authorship_log.metadata.id =
+            new_to_original
+                .get(new_commit.as_str())
+                .and_then(|original_commit| {
+                    get_reference_as_authorship_log_v3(repo, original_commit)
+                        .ok()
+                        .and_then(|log| log.metadata.id)
+                });
 
         let computed_note_has_payload = !current_authorship_log.attestations.is_empty()
             || !current_authorship_log.metadata.prompts.is_empty();
@@ -926,6 +946,13 @@ pub fn rewrite_authorship_after_cherry_pick(
         });
 
         authorship_log.metadata.base_commit_sha = new_commit.clone();
+
+        // Preserve the id from the source commit's note
+        if let Some(source_commit) = source_commits.get(idx)
+            && let Ok(source_log) = get_reference_as_authorship_log_v3(repo, source_commit)
+        {
+            authorship_log.metadata.id = source_log.metadata.id;
+        }
 
         // Save computed note when it has payload; otherwise preserve original metadata-only notes.
         let computed_note_has_payload =
@@ -1502,6 +1529,13 @@ pub fn rewrite_authorship_after_commit_amend(
     // Update base commit SHA
     authorship_log.metadata.base_commit_sha = amended_commit.to_string();
 
+    // Pick up the pending note UUID (written by the pre-commit hook) and stamp
+    // it into the authorship metadata so the Git-AI trailer matches this note.
+    if let Some(note_id) = repo.storage.read_pending_note_id() {
+        authorship_log.metadata.id = Some(note_id);
+        repo.storage.clear_pending_note_id();
+    }
+
     // Save authorship log
     let authorship_json = authorship_log
         .serialize_to_string()
@@ -1980,6 +2014,8 @@ fn build_metadata_only_authorship_log_from_source_notes(
     let mut authorship_log = AuthorshipLog::new();
     authorship_log.metadata.base_commit_sha = target_commit_sha.to_string();
     authorship_log.metadata.prompts = merged_prompts;
+    // Generate a new UUID for the metadata-only note
+    authorship_log.metadata.id = Some(uuid::Uuid::new_v4().to_string());
     Ok(Some(authorship_log))
 }
 
