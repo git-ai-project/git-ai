@@ -1,24 +1,7 @@
-src/authorship/post_commit.rs
-  be6b66b676dbc080 557,561,617-623,625-627,629-637,642-645,663,670,778-791,793-806
 ---
 {
   "schema_version": "authorship/3.0.0",
   "git_ai_version": "development:1.1.9",
   "base_commit_sha": "469b2c06e769d538e47b413c8cf5f42bc10fd4b7",
-  "prompts": {
-    "be6b66b676dbc080": {
-      "agent_id": {
-        "tool": "codex",
-        "id": "019cb9e8-9c17-7542-bd3c-0e91f0fc4043",
-        "model": "gpt-5.3-codex"
-      },
-      "human_author": "Sasha Varlamov <sasha@sashavarlamov.com>",
-      "messages": [],
-      "total_additions": 61,
-      "total_deletions": 8,
-      "accepted_lines": 60,
-      "overriden_lines": 0,
-      "messages_url": "http://localhost:4000/cas/eee9f8d2f052073d9891106c4f3ec4938137c40bf240f4653f4efb467eaf9f39"
-    }
-  }
+  "prompts": {}
 }
