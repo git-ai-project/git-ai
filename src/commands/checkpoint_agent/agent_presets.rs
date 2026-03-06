@@ -109,7 +109,8 @@ impl AgentCheckpointPreset for ClaudePreset {
 
         // The filename should be a UUID
         let agent_id = AgentId {
-            tool: "claude".to_string(),
+            tool: env::var("GIT_AI_CLAUDE_PRESET_TOOL_NAME")
+                .unwrap_or_else(|_| "claude".to_string()),
             id: filename.to_string(),
             model: model.unwrap_or_else(|| "unknown".to_string()),
         };

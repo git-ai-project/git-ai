@@ -195,6 +195,35 @@ fn test_claude_preset_does_not_ignore_when_transcript_path_is_claude() {
 }
 
 #[test]
+fn test_claude_preset_tool_name_env_override() {
+    let hook_input = r##"{
+        "cwd": "/Users/svarlamov/projects/testing-git",
+        "hook_event_name": "PostToolUse",
+        "session_id": "23aad27c-175d-427f-ac5f-a6830b8e6e65",
+        "tool_name": "Edit",
+        "transcript_path": "tests/fixtures/example-claude-code.jsonl"
+    }"##;
+
+    unsafe {
+        std::env::set_var("GIT_AI_CLAUDE_PRESET_TOOL_NAME", "eddy");
+    }
+
+    let flags = AgentCheckpointFlags {
+        hook_input: Some(hook_input.to_string()),
+    };
+
+    let result = ClaudePreset
+        .run(flags)
+        .expect("Failed to run ClaudePreset");
+
+    unsafe {
+        std::env::remove_var("GIT_AI_CLAUDE_PRESET_TOOL_NAME");
+    }
+
+    assert_eq!(result.agent_id.tool, "eddy");
+}
+
+#[test]
 fn test_claude_e2e_prefers_latest_checkpoint_for_prompts() {
     use repos::test_repo::TestRepo;
 
