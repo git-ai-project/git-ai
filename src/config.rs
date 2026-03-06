@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -147,6 +148,8 @@ pub struct FileConfig {
     pub api_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quiet: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_attributes: Option<HashMap<String, serde_json::Value>>,
 }
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
@@ -659,6 +662,63 @@ fn build_config() -> Config {
         api_key,
         quiet,
     }
+}
+
+/// Load custom attributes on demand from `~/.git-ai/config.json` and/or
+/// the `GIT_AI_CUSTOM_ATTRIBUTES` environment variable.
+///
+/// These key-value pairs are attached to every `PromptRecord` in git notes
+/// and included in metric events (position 30, JSON-encoded). Enterprise
+/// users can use them to tag AI authorship data with organizational metadata
+/// such as employee IDs, device IDs, team names, etc.
+///
+/// # Resolution order
+/// 1. Read `custom_attributes` from `~/.git-ai/config.json` (if present).
+/// 2. Parse `GIT_AI_CUSTOM_ATTRIBUTES` env var as a JSON object. Env var
+///    keys **override** file config keys on conflict.
+/// 3. Drop any key whose value is not a string, number, or boolean
+///    (arrays, objects, and null are silently ignored via `debug_log`).
+///
+/// # Why this is not part of `Config`
+/// `Config` is initialised once via `OnceLock` at first access, which may
+/// happen long before the post-commit hook runs. Reading the env var at
+/// init time would capture the wrong process environment. This function
+/// re-reads both sources every time it is called so the values are fresh.
+///
+/// # Example env var
+/// ```sh
+/// export GIT_AI_CUSTOM_ATTRIBUTES='{"employee_id":"E123","team":"platform","active":true}'
+/// ```
+pub fn load_custom_attributes() -> HashMap<String, serde_json::Value> {
+    let file_cfg = load_file_config();
+    let mut custom_attributes = file_cfg
+        .as_ref()
+        .and_then(|c| c.custom_attributes.clone())
+        .unwrap_or_default();
+
+    if let Ok(env_val) = env::var("GIT_AI_CUSTOM_ATTRIBUTES") {
+        if let Ok(env_attrs) = serde_json::from_str::<HashMap<String, serde_json::Value>>(&env_val)
+        {
+            custom_attributes.extend(env_attrs);
+        } else {
+            crate::utils::debug_log("GIT_AI_CUSTOM_ATTRIBUTES is not valid JSON, ignoring");
+        }
+    }
+
+    custom_attributes.retain(|key, value| match value {
+        serde_json::Value::String(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::Bool(_) => true,
+        _ => {
+            crate::utils::debug_log(&format!(
+                "custom_attributes key '{}' has unsupported type, ignoring",
+                key
+            ));
+            false
+        }
+    });
+
+    custom_attributes
 }
 
 fn build_feature_flags(file_cfg: &Option<FileConfig>) -> FeatureFlags {

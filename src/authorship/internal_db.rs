@@ -161,6 +161,7 @@ impl PromptDbRecord {
             accepted_lines: self.accepted_lines.unwrap_or(0),
             overriden_lines: self.overridden_lines.unwrap_or(0),
             messages_url: None,
+            custom_attributes: None,
         }
     }
 

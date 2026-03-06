@@ -1,6 +1,7 @@
 use crate::authorship::transcript::Message;
 use crate::authorship::working_log::AgentId;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,6 +204,8 @@ pub struct PromptRecord {
     /// Full URL to CAS-stored messages (format: {api_base_url}/cas/{hash})
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub messages_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_attributes: Option<HashMap<String, serde_json::Value>>,
 }
 
 impl Eq for PromptRecord {}
@@ -249,6 +252,7 @@ mod tests {
             accepted_lines: 0,
             overriden_lines: 0,
             messages_url: None,
+            custom_attributes: None,
         }
     }
 

@@ -714,6 +714,7 @@ mod tests {
             accepted_lines: 8,
             overriden_lines: 2,
             messages_url: None,
+            custom_attributes: None,
         }
     }
 

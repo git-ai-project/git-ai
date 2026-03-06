@@ -775,6 +775,7 @@ mod tests {
                 accepted_lines: 0,
                 overriden_lines: 0,
                 messages_url: None,
+                custom_attributes: None,
             },
         );
 
@@ -842,6 +843,7 @@ mod tests {
                 accepted_lines: 0,
                 overriden_lines: 0,
                 messages_url: None,
+                custom_attributes: None,
             },
         );
 
@@ -891,6 +893,7 @@ mod tests {
                 accepted_lines: 0,
                 overriden_lines: 0,
                 messages_url: None,
+                custom_attributes: None,
             },
         );
 
@@ -1070,6 +1073,7 @@ mod tests {
                 accepted_lines: 11,
                 overriden_lines: 0,
                 messages_url: None,
+                custom_attributes: None,
             },
         );
 
@@ -1241,6 +1245,7 @@ mod tests {
                 accepted_lines: 10,
                 overriden_lines: 0,
                 messages_url: None,
+                custom_attributes: None,
             },
         );
 
@@ -1265,6 +1270,7 @@ mod tests {
                 accepted_lines: 20,
                 overriden_lines: 0,
                 messages_url: None,
+                custom_attributes: None,
             },
         );
 

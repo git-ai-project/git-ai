@@ -65,6 +65,10 @@ fn build_checkpoint_attrs(
             .external_prompt_id(&agent_id.id);
     }
 
+    // Attach custom attributes
+    let custom = &crate::config::load_custom_attributes();
+    attrs = attrs.custom_attributes_map(custom);
+
     // Add repo URL
     if let Ok(Some(remote_name)) = repo.get_default_remote()
         && let Ok(remotes) = repo.remotes_with_urls()

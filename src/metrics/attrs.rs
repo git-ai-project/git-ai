@@ -15,6 +15,7 @@ pub mod attr_pos {
     pub const MODEL: usize = 21;
     pub const PROMPT_ID: usize = 22;
     pub const EXTERNAL_PROMPT_ID: usize = 23;
+    pub const CUSTOM_ATTRIBUTES: usize = 30;
 }
 
 /// Common attributes for all events.
@@ -31,6 +32,7 @@ pub mod attr_pos {
 /// | 21 | model | String | No (nullable) |
 /// | 22 | prompt_id | String | No (nullable) |
 /// | 23 | external_prompt_id | String | No (nullable) |
+/// | 30 | custom_attributes | String (JSON) | No (nullable) |
 #[derive(Debug, Clone, Default)]
 pub struct EventAttributes {
     pub git_ai_version: PosField<String>,
@@ -43,6 +45,7 @@ pub struct EventAttributes {
     pub model: PosField<String>,
     pub prompt_id: PosField<String>,
     pub external_prompt_id: PosField<String>,
+    pub custom_attributes: PosField<String>,
 }
 
 impl EventAttributes {
@@ -179,6 +182,32 @@ impl EventAttributes {
         self.external_prompt_id = Some(None);
         self
     }
+
+    // Builder methods for custom_attributes
+    pub fn custom_attributes(mut self, value: impl Into<String>) -> Self {
+        self.custom_attributes = Some(Some(value.into()));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn custom_attributes_null(mut self) -> Self {
+        self.custom_attributes = Some(None);
+        self
+    }
+
+    pub fn custom_attributes_map(
+        self,
+        attrs: &std::collections::HashMap<String, serde_json::Value>,
+    ) -> Self {
+        if attrs.is_empty() {
+            self
+        } else {
+            match serde_json::to_string(attrs) {
+                Ok(json) => self.custom_attributes(json),
+                Err(_) => self,
+            }
+        }
+    }
 }
 
 impl PosEncoded for EventAttributes {
@@ -214,6 +243,11 @@ impl PosEncoded for EventAttributes {
             attr_pos::EXTERNAL_PROMPT_ID,
             string_to_json(&self.external_prompt_id),
         );
+        sparse_set(
+            &mut map,
+            attr_pos::CUSTOM_ATTRIBUTES,
+            string_to_json(&self.custom_attributes),
+        );
         map
     }
 
@@ -229,6 +263,7 @@ impl PosEncoded for EventAttributes {
             model: sparse_get_string(arr, attr_pos::MODEL),
             prompt_id: sparse_get_string(arr, attr_pos::PROMPT_ID),
             external_prompt_id: sparse_get_string(arr, attr_pos::EXTERNAL_PROMPT_ID),
+            custom_attributes: sparse_get_string(arr, attr_pos::CUSTOM_ATTRIBUTES),
         }
     }
 }

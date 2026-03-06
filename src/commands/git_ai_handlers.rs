@@ -1277,11 +1277,13 @@ fn emit_no_repo_agent_metrics(agent_run_result: Option<&AgentRunResult>) {
     }
 
     let prompt_id = generate_short_hash(&agent_id.id, &agent_id.tool);
+    let custom = &crate::config::load_custom_attributes();
     let attrs = crate::metrics::EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
         .tool(&agent_id.tool)
         .model(&agent_id.model)
         .prompt_id(prompt_id)
-        .external_prompt_id(&agent_id.id);
+        .external_prompt_id(&agent_id.id)
+        .custom_attributes_map(custom);
 
     let values = crate::metrics::AgentUsageValues::new();
     crate::metrics::record(values, attrs);
