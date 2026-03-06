@@ -21,6 +21,34 @@ use std::io::IsTerminal;
 use std::io::Read;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Resolve the human author identity from git config at checkpoint time.
+/// Uses git config user.name/user.email (not env vars, which may be overridden
+/// by a background agent). Returns `None` if neither is configured.
+fn resolve_human_author_from_config(
+    repo: &crate::git::repository::Repository,
+) -> Option<String> {
+    let author_name = repo
+        .config_get_str("user.name")
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_string());
+
+    let author_email = repo
+        .config_get_str("user.email")
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_string());
+
+    match (author_name, author_email) {
+        (Some(name), Some(email)) => Some(format!("{} <{}>", name, email)),
+        (Some(name), None) => Some(name),
+        (None, Some(email)) => Some(email),
+        (None, None) => None,
+    }
+}
+
 pub fn handle_git_ai(args: &[String]) {
     if args.is_empty() {
         print_help();
@@ -620,6 +648,7 @@ fn handle_checkpoint(args: &[String]) {
                         false,
                         repo_agent_result,
                         false,
+                        resolve_human_author_from_config(&repo),
                     );
 
                     match checkpoint_result {
@@ -724,6 +753,9 @@ fn handle_checkpoint(args: &[String]) {
 
     let checkpoint_start = std::time::Instant::now();
     let agent_tool = agent_run_result.as_ref().map(|r| r.agent_id.tool.clone());
+    // Resolve the human author from git config at checkpoint time,
+    // before a background agent may override the git author at commit time.
+    let human_author = resolve_human_author_from_config(&repo);
     let checkpoint_result = commands::checkpoint::run(
         &repo,
         &default_user_name,
@@ -733,6 +765,7 @@ fn handle_checkpoint(args: &[String]) {
         false,
         agent_run_result,
         false,
+        human_author,
     );
     match checkpoint_result {
         Ok((_, files_edited, _)) => {

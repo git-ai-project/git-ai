@@ -78,6 +78,7 @@ pub fn run(
     quiet: bool,
     agent_run_result: Option<AgentRunResult>,
     is_pre_commit: bool,
+    human_author: Option<String>,
 ) -> Result<(usize, usize, usize), GitAiError> {
     let checkpoint_start = Instant::now();
     debug_log("[BENCHMARK] Starting checkpoint run");
@@ -362,6 +363,8 @@ pub fn run(
             checkpoint.agent_id = Some(agent_run.agent_id.clone());
             checkpoint.agent_metadata = agent_run.agent_metadata.clone();
         }
+        // Store human author identity captured at checkpoint time
+        checkpoint.human_author = human_author.clone();
         debug_log(&format!(
             "[BENCHMARK] Checkpoint creation took {:?}",
             checkpoint_create_start.elapsed()
@@ -1646,6 +1649,163 @@ mod tests {
             entries_len_after, 1,
             "Should create 1 entry for new changes after conflict resolution"
         );
+    }
+
+    #[test]
+    fn test_human_author_from_checkpoint_overrides_commit_time_author() {
+        use crate::authorship::transcript::AiTranscript;
+        use crate::authorship::virtual_attribution::VirtualAttributions;
+        use crate::authorship::working_log::AgentId;
+        use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
+
+        // Create a repo with an initial commit
+        let (tmp_repo, mut file, _) = TmpRepo::new_with_base_commit().unwrap();
+
+        // Make changes to the file
+        file.append("AI-generated code\n").unwrap();
+
+        // Create an agent run result simulating an AI agent
+        let agent_run_result = AgentRunResult {
+            agent_id: AgentId {
+                tool: "claude".to_string(),
+                id: "test_session".to_string(),
+                model: "opus".to_string(),
+            },
+            agent_metadata: None,
+            transcript: Some(AiTranscript { messages: vec![] }),
+            checkpoint_kind: CheckpointKind::AiAgent,
+            repo_working_dir: None,
+            edited_filepaths: Some(vec![file.filename().to_string()]),
+            will_edit_filepaths: None,
+            dirty_files: None,
+        };
+
+        // Get the repo for direct calls
+        let repo = crate::git::repository::find_repository_in_path(
+            tmp_repo.path().to_str().unwrap(),
+        )
+        .unwrap();
+
+        let base_commit = repo
+            .head()
+            .ok()
+            .and_then(|h| h.target().ok())
+            .unwrap_or_else(|| "initial".to_string());
+
+        // Run checkpoint with a specific human_author (simulating checkpoint-time capture)
+        let result = run(
+            &repo,
+            "claude",
+            CheckpointKind::AiAgent,
+            false,
+            false,
+            true,
+            Some(agent_run_result),
+            false,
+            Some("Jane Developer <jane@example.com>".to_string()),
+        );
+        assert!(result.is_ok());
+
+        // Now build VirtualAttributions with a DIFFERENT commit-time author
+        // (simulating a CI bot committing)
+        let va = VirtualAttributions::from_just_working_log(
+            repo.clone(),
+            base_commit,
+            Some("ci-bot <ci@service.com>".to_string()),
+        )
+        .unwrap();
+
+        // The PromptRecord should have Jane's identity (from checkpoint),
+        // NOT the CI bot (from commit time)
+        let mut found_prompt = false;
+        for (_prompt_id, commits) in &va.prompts {
+            for (_sha, prompt_record) in commits {
+                assert_eq!(
+                    prompt_record.human_author,
+                    Some("Jane Developer <jane@example.com>".to_string()),
+                    "human_author should come from checkpoint, not commit-time author"
+                );
+                found_prompt = true;
+            }
+        }
+        assert!(found_prompt, "Should have at least one prompt record");
+    }
+
+    #[test]
+    fn test_human_author_falls_back_to_commit_time_when_checkpoint_has_none() {
+        use crate::authorship::transcript::AiTranscript;
+        use crate::authorship::virtual_attribution::VirtualAttributions;
+        use crate::authorship::working_log::AgentId;
+        use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
+
+        // Create a repo with an initial commit
+        let (tmp_repo, mut file, _) = TmpRepo::new_with_base_commit().unwrap();
+
+        // Make changes to the file
+        file.append("AI-generated code\n").unwrap();
+
+        // Create an agent run result
+        let agent_run_result = AgentRunResult {
+            agent_id: AgentId {
+                tool: "claude".to_string(),
+                id: "test_session_2".to_string(),
+                model: "opus".to_string(),
+            },
+            agent_metadata: None,
+            transcript: Some(AiTranscript { messages: vec![] }),
+            checkpoint_kind: CheckpointKind::AiAgent,
+            repo_working_dir: None,
+            edited_filepaths: Some(vec![file.filename().to_string()]),
+            will_edit_filepaths: None,
+            dirty_files: None,
+        };
+
+        let repo = crate::git::repository::find_repository_in_path(
+            tmp_repo.path().to_str().unwrap(),
+        )
+        .unwrap();
+
+        let base_commit = repo
+            .head()
+            .ok()
+            .and_then(|h| h.target().ok())
+            .unwrap_or_else(|| "initial".to_string());
+
+        // Run checkpoint WITHOUT human_author (simulating old behavior / backwards compat)
+        let result = run(
+            &repo,
+            "claude",
+            CheckpointKind::AiAgent,
+            false,
+            false,
+            true,
+            Some(agent_run_result),
+            false,
+            None, // No human_author at checkpoint time
+        );
+        assert!(result.is_ok());
+
+        // Build VirtualAttributions with a commit-time author
+        let va = VirtualAttributions::from_just_working_log(
+            repo.clone(),
+            base_commit,
+            Some("Commit Author <commit@example.com>".to_string()),
+        )
+        .unwrap();
+
+        // Should fall back to the commit-time author since checkpoint had None
+        let mut found_prompt = false;
+        for (_prompt_id, commits) in &va.prompts {
+            for (_sha, prompt_record) in commits {
+                assert_eq!(
+                    prompt_record.human_author,
+                    Some("Commit Author <commit@example.com>".to_string()),
+                    "human_author should fall back to commit-time author when checkpoint has None"
+                );
+                found_prompt = true;
+            }
+        }
+        assert!(found_prompt, "Should have at least one prompt record");
     }
 
     #[test]

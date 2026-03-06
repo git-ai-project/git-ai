@@ -29,15 +29,17 @@ pub fn pre_stash_hook(
             debug_log(&format!("Pre-stash: captured stash SHA for {}", subcommand));
         }
     } else {
+        let default_author = get_commit_default_author(repository, &parsed_args.command_args);
         let _ = match crate::commands::checkpoint::run(
             repository,
-            &get_commit_default_author(repository, &parsed_args.command_args),
+            &default_author,
             CheckpointKind::Human,
             false,
             false,
             true,
             None,
             true, // same optimizations as pre_commit.rs
+            Some(default_author.clone()),
         ) {
             Ok(result) => result,
             Err(e) => {

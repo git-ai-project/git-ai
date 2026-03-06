@@ -59,6 +59,7 @@ fn run_status(json: bool) -> Result<(), GitAiError> {
         true,
         None,
         false,
+        None,
     );
 
     let head = repo.head()?;

@@ -20,6 +20,7 @@ pub fn pre_reset_hook(parsed_args: &ParsedGitInvocation, repository: &mut Reposi
         true,
         None,
         true,
+        Some(human_author.clone()),
     );
 
     // Capture HEAD before reset happens

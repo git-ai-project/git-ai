@@ -367,6 +367,7 @@ impl TmpRepo {
             true,
             None, // agent_run_result
             false,
+            None, // human_author
         )
     }
 
@@ -424,6 +425,7 @@ impl TmpRepo {
             true,
             Some(agent_run_result),
             false,
+            None, // human_author
         )
     }
 
@@ -446,6 +448,7 @@ impl TmpRepo {
             true,  // quiet
             agent_run_result,
             false,
+            None, // human_author
         )
     }
 

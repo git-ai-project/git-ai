@@ -350,7 +350,7 @@ impl VirtualAttributions {
                 // transcripts/models from post-commit aren't lost.
                 let prompt_record = crate::authorship::authorship_log::PromptRecord {
                     agent_id: agent_id.clone(),
-                    human_author: human_author.clone(),
+                    human_author: checkpoint.human_author.clone().or(human_author.clone()),
                     messages: checkpoint
                         .transcript
                         .as_ref()

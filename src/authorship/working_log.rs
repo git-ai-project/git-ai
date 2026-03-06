@@ -118,6 +118,10 @@ pub struct Checkpoint {
     pub api_version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_ai_version: Option<String>,
+    /// Human author identity captured at checkpoint time (e.g., "Name <email>").
+    /// Ensures the real human is recorded even when a background agent commits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human_author: Option<String>,
 }
 
 impl Checkpoint {
@@ -144,6 +148,7 @@ impl Checkpoint {
             line_stats: CheckpointLineStats::default(),
             api_version: CHECKPOINT_API_VERSION.to_string(),
             git_ai_version: Some(GIT_AI_VERSION.to_string()),
+            human_author: None,
         }
     }
 }
@@ -304,5 +309,48 @@ mod tests {
         let deserialized_agent = deserialized.agent_id.as_ref().unwrap();
         assert_eq!(deserialized_agent.tool, "cursor");
         assert_eq!(deserialized_agent.id, "session-abc123");
+    }
+
+    #[test]
+    fn test_checkpoint_with_human_author() {
+        let entry = WorkingLogEntry::new(
+            "src/xyz.rs".to_string(),
+            "abc123def456".to_string(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let mut checkpoint = Checkpoint::new(
+            CheckpointKind::AiAgent,
+            "".to_string(),
+            "claude".to_string(),
+            vec![entry],
+        );
+        checkpoint.human_author = Some("Jane Developer <jane@example.com>".to_string());
+
+        let json = serde_json::to_string_pretty(&checkpoint).unwrap();
+        assert!(json.contains("human_author"));
+        assert!(json.contains("Jane Developer <jane@example.com>"));
+
+        let deserialized: Checkpoint = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            deserialized.human_author,
+            Some("Jane Developer <jane@example.com>".to_string())
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_without_human_author_deserializes_as_none() {
+        // Simulate an old checkpoint JSON without the human_author field
+        let json = r#"{
+            "kind": "AiAgent",
+            "diff": "",
+            "author": "claude",
+            "entries": [],
+            "timestamp": 1672574400,
+            "api_version": "checkpoint/1.0.0"
+        }"#;
+
+        let deserialized: Checkpoint = serde_json::from_str(json).unwrap();
+        assert!(deserialized.human_author.is_none());
     }
 }
