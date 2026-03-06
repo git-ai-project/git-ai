@@ -442,8 +442,13 @@ fn run_install_script(script_content: &str, tag: &str, silent: bool) -> Result<(
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
-        // Write script to a temp file
-        let temp_dir = std::env::temp_dir();
+        // Write script to ~/.git-ai/tmp/ to avoid /tmp noexec or permission issues.
+        // Fall back to the system temp dir if the home-based path is unavailable.
+        let temp_dir = crate::config::git_ai_dir_path()
+            .map(|p| p.join("tmp"))
+            .unwrap_or_else(std::env::temp_dir);
+        fs::create_dir_all(&temp_dir)
+            .map_err(|e| format!("Failed to create temp directory: {}", e))?;
         let script_path = temp_dir.join(format!("git-ai-install-{}.sh", std::process::id()));
 
         // Write and make executable
