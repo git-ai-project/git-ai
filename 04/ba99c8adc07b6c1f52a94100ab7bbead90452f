@@ -1,0 +1,44 @@
+src/commands/git_ai_handlers.rs
+  4982b6e3cf26e6e4 138-140
+src/feature_flags.rs
+  4982b6e3cf26e6e4 58,125,132,144,153,159,174,183,189,200,208,218,224,229,238,245,254,260
+tests/async_rewrite_hooks.rs
+  4982b6e3cf26e6e4 1-195
+src/git/repository.rs
+  4982b6e3cf26e6e4 5,11,1237-1243,1245-1260,1265
+tests/repos/test_repo.rs
+  4982b6e3cf26e6e4 656-657,666-686
+tests/repos/mod.rs
+  4982b6e3cf26e6e4 389-457
+src/git/async_rewrite.rs
+  4982b6e3cf26e6e4 1-19,21-24,26-49,70-112,114-150,154,156-182,184-197,199-213,255-256,262-306,309-312,316-335,337,339-340,343,345-351,356-374,385-388,390,392-394,396-399,419-426,428-451,453-474
+Cargo.toml
+  4982b6e3cf26e6e4 36
+src/utils.rs
+  4982b6e3cf26e6e4 183-185
+tests/performance.rs
+  4982b6e3cf26e6e4 24
+src/git/mod.rs
+  4982b6e3cf26e6e4 1
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.1.9",
+  "base_commit_sha": "04ba99c8adc07b6c1f52a94100ab7bbead90452f",
+  "prompts": {
+    "4982b6e3cf26e6e4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019cb77e-04b4-7940-8bb2-b7f47cae2086",
+        "model": "gpt-5.3-codex"
+      },
+      "human_author": "Sasha Varlamov <sasha@sashavarlamov.com>",
+      "messages": [],
+      "total_additions": 706,
+      "total_deletions": 8,
+      "accepted_lines": 691,
+      "overriden_lines": 17,
+      "messages_url": "http://localhost:4000/cas/f2add09acb6356268816c2618c025278e8d6f7b3e82410ff21a5f94537d62c67"
+    }
+  }
+}
