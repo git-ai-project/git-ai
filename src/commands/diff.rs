@@ -99,31 +99,63 @@ pub fn handle_diff(repo: &Repository, args: &[String]) -> Result<(), GitAiError>
 // ============================================================================
 
 pub fn parse_diff_args(args: &[String]) -> Result<(DiffSpec, DiffFormat), GitAiError> {
-    let arg = &args[0];
-
     let format = if args.iter().any(|arg| arg == "--json") {
         DiffFormat::Json
     } else {
         DiffFormat::GitCompatibleTerminal
     };
 
-    // Check for commit range (start..end)
-    if arg.contains("..") {
-        let parts: Vec<&str> = arg.split("..").collect();
-        if parts.len() == 2 && !parts[0].is_empty() && !parts[1].is_empty() {
+    let positional_args: Vec<&str> = args
+        .iter()
+        .map(String::as_str)
+        .filter(|arg| *arg != "--json")
+        .collect();
+
+    match positional_args.as_slice() {
+        [] => {
+            return Err(GitAiError::Generic(
+                "diff requires a commit or commit range argument".to_string(),
+            ));
+        }
+        [start, end] => {
+            if start.contains("..") || end.contains("..") {
+                return Err(GitAiError::Generic(
+                    "Invalid diff arguments. Expected: <commit>, <commit1>..<commit2>, or <commit1> <commit2>".to_string(),
+                ));
+            }
             return Ok((
-                DiffSpec::TwoCommit(parts[0].to_string(), parts[1].to_string()),
+                DiffSpec::TwoCommit((*start).to_string(), (*end).to_string()),
                 format,
             ));
-        } else {
+        }
+        [arg] => {
+            // Check for commit range (start..end)
+            if arg.contains("..") {
+                let parts: Vec<&str> = arg.split("..").collect();
+                if parts.len() == 2 && !parts[0].is_empty() && !parts[1].is_empty() {
+                    return Ok((
+                        DiffSpec::TwoCommit(parts[0].to_string(), parts[1].to_string()),
+                        format,
+                    ));
+                } else {
+                    return Err(GitAiError::Generic(
+                        "Invalid commit range format. Expected: <commit>..<commit>".to_string(),
+                    ));
+                }
+            }
+        }
+        _ => {
             return Err(GitAiError::Generic(
-                "Invalid commit range format. Expected: <commit>..<commit>".to_string(),
+                "Invalid diff arguments. Expected: <commit>, <commit1>..<commit2>, or <commit1> <commit2>".to_string(),
             ));
         }
     }
 
     // Single commit
-    Ok((DiffSpec::SingleCommit(arg.to_string()), format))
+    Ok((
+        DiffSpec::SingleCommit(positional_args[0].to_string()),
+        format,
+    ))
 }
 
 // ============================================================================
@@ -998,6 +1030,58 @@ mod tests {
             }
             _ => panic!("Expected TwoCommit"),
         }
+    }
+
+    #[test]
+    fn test_parse_diff_args_two_positional_commits() {
+        let args = vec!["abc123".to_string(), "def456".to_string()];
+        let (spec, _format) = parse_diff_args(&args).unwrap();
+
+        match spec {
+            DiffSpec::TwoCommit(start, end) => {
+                assert_eq!(start, "abc123");
+                assert_eq!(end, "def456");
+            }
+            _ => panic!("Expected TwoCommit"),
+        }
+    }
+
+    #[test]
+    fn test_parse_diff_args_two_positional_commits_with_json() {
+        let args = vec![
+            "abc123".to_string(),
+            "def456".to_string(),
+            "--json".to_string(),
+        ];
+        let (spec, format) = parse_diff_args(&args).unwrap();
+
+        match spec {
+            DiffSpec::TwoCommit(start, end) => {
+                assert_eq!(start, "abc123");
+                assert_eq!(end, "def456");
+            }
+            _ => panic!("Expected TwoCommit"),
+        }
+
+        assert!(matches!(format, DiffFormat::Json));
+    }
+
+    #[test]
+    fn test_parse_diff_args_too_many_positional_args() {
+        let args = vec![
+            "abc123".to_string(),
+            "def456".to_string(),
+            "ghi789".to_string(),
+        ];
+        let result = parse_diff_args(&args);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_diff_args_only_json_flag() {
+        let args = vec!["--json".to_string()];
+        let result = parse_diff_args(&args);
+        assert!(result.is_err());
     }
 
     #[test]

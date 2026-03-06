@@ -379,6 +379,51 @@ fn test_diff_commit_range() {
 }
 
 #[test]
+fn test_diff_two_positional_revisions_uses_git_range_semantics() {
+    let repo = TestRepo::new();
+
+    // Ensure the "from" commit has a parent so the regression catches accidental from^..from behavior.
+    repo.git(&["commit", "--allow-empty", "-m", "Empty initial"])
+        .expect("empty commit should succeed");
+
+    let mut file = repo.filename("range_positional.txt");
+    file.set_contents(lines!["BASE".human()]);
+    let from = repo.stage_all_and_commit("Base commit").unwrap();
+
+    file.set_contents(lines!["BASE".human(), "AI line 1".ai(), "AI line 2".ai()]);
+    let to = repo.stage_all_and_commit("Append lines").unwrap();
+
+    let plain_git_diff = repo
+        .git_og(&["--no-pager", "diff", &from.commit_sha, &to.commit_sha])
+        .expect("plain git diff should succeed");
+    assert!(
+        plain_git_diff.contains("+AI line 1") && plain_git_diff.contains("+AI line 2"),
+        "plain git diff sanity check failed:\n{}",
+        plain_git_diff
+    );
+    assert!(
+        !plain_git_diff.contains("new file mode"),
+        "plain git diff should not treat this as a new file:\n{}",
+        plain_git_diff
+    );
+
+    let git_ai_diff = repo
+        .git_ai(&["diff", &from.commit_sha, &to.commit_sha])
+        .expect("git-ai diff should support two positional revisions");
+
+    assert!(
+        git_ai_diff.contains("+AI line 1") && git_ai_diff.contains("+AI line 2"),
+        "git-ai diff should include net additions between from/to commits:\n{}",
+        git_ai_diff
+    );
+    assert!(
+        !git_ai_diff.contains("new file mode") && !git_ai_diff.contains("--- /dev/null"),
+        "git-ai diff should not fallback to from^..from behavior:\n{}",
+        git_ai_diff
+    );
+}
+
+#[test]
 fn test_diff_shows_ai_attribution() {
     let repo = TestRepo::new();
 
