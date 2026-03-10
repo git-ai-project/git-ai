@@ -22,11 +22,11 @@ use crate::config;
 /// Exits with code 0 on success.
 pub fn handle_exchange_nonce(args: &[String]) {
     // Nonce: first arg, or INSTALL_NONCE env var
-    let nonce = args
-        .first()
-        .filter(|s| !s.is_empty())
-        .cloned()
-        .or_else(|| std::env::var("INSTALL_NONCE").ok().filter(|s| !s.is_empty()));
+    let nonce = args.first().filter(|s| !s.is_empty()).cloned().or_else(|| {
+        std::env::var("INSTALL_NONCE")
+            .ok()
+            .filter(|s| !s.is_empty())
+    });
 
     // API base: API_BASE env var, or config fallback
     let api_base = std::env::var("API_BASE")
