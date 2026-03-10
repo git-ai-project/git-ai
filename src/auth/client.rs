@@ -231,6 +231,18 @@ impl OAuthClient {
         self.exchange_token(body)
             .map_err(|e| format!("Nonce exchange failed: {}", e))
     }
+
+    /// Exchange an impersonation nonce for credentials (background agent auth)
+    pub fn exchange_impersonation_nonce(&self, nonce: &str) -> Result<StoredCredentials, String> {
+        let body = serde_json::json!({
+            "grant_type": "impersonation_nonce",
+            "impersonation_nonce": nonce,
+            "client_id": "git-ai-cli"
+        });
+
+        self.exchange_token(body)
+            .map_err(|e| format!("Impersonation nonce exchange failed: {}", e))
+    }
 }
 
 impl Default for OAuthClient {
