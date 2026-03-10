@@ -41,12 +41,16 @@ pub fn post_clone_hook(parsed_args: &ParsedGitInvocation, exit_status: std::proc
     // Check if the cloned repository is allowed by config
     let config = Config::get();
     if !config.is_allowed_repository(&Some(repository.clone())) {
-        debug_log("post-clone: skipping authorship fetch because repository is not in allow_repositories list");
+        debug_log(
+            "post-clone: skipping authorship fetch because repository is not in allow_repositories list",
+        );
         return;
     }
 
     // Determine if output should be suppressed
-    let quiet = config.is_quiet() || parsed_args.has_command_flag("--quiet") || parsed_args.has_command_flag("-q");
+    let quiet = config.is_quiet()
+        || parsed_args.has_command_flag("--quiet")
+        || parsed_args.has_command_flag("-q");
 
     if !quiet {
         eprint!("Fetching git-ai authorship notes");
