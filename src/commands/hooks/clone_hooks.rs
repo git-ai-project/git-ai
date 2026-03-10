@@ -1,3 +1,4 @@
+use crate::config::Config;
 use crate::git::cli_parser::{ParsedGitInvocation, extract_clone_target_directory};
 use crate::git::repository::find_repository_in_path;
 use crate::git::sync_authorship::fetch_authorship_notes;
@@ -25,7 +26,6 @@ pub fn post_clone_hook(parsed_args: &ParsedGitInvocation, exit_status: std::proc
         target_dir
     ));
 
-    print!("Fetching git-ai authorship notes");
     // Open the newly cloned repository
     let repository = match find_repository_in_path(&target_dir) {
         Ok(repo) => repo,
@@ -38,12 +38,30 @@ pub fn post_clone_hook(parsed_args: &ParsedGitInvocation, exit_status: std::proc
         }
     };
 
+    // Check if the cloned repository is allowed by config
+    let config = Config::get();
+    if !config.is_allowed_repository(&Some(repository.clone())) {
+        debug_log("post-clone: skipping authorship fetch because repository is not in allow_repositories list");
+        return;
+    }
+
+    // Determine if output should be suppressed
+    let quiet = config.is_quiet() || parsed_args.has_command_flag("--quiet") || parsed_args.has_command_flag("-q");
+
+    if !quiet {
+        eprint!("Fetching git-ai authorship notes");
+    }
+
     // Fetch authorship notes from origin
     if let Err(e) = fetch_authorship_notes(&repository, "origin") {
         debug_log(&format!("authorship fetch from origin failed: {}", e));
-        println!(", failed.");
+        if !quiet {
+            eprintln!(", failed.");
+        }
     } else {
         debug_log("successfully fetched authorship notes from origin");
-        println!(", done.");
+        if !quiet {
+            eprintln!(", done.");
+        }
     }
 }
