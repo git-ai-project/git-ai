@@ -1,34 +1,42 @@
 //! Exchange install nonce for credentials (auto-login from web install page)
 //!
 //! This command is called by the install script to exchange a nonce for
-//! OAuth credentials. It reads INSTALL_NONCE and API_BASE from environment
-//! variables and stores credentials in ~/.git-ai/internal/credentials.
+//! OAuth credentials.
+//!
+//! Usage: git-ai exchange-nonce [NONCE]
+//!
+//! Nonce can be passed as the first argument or via INSTALL_NONCE env var.
+//! API base is resolved from API_BASE env var, falling back to the
+//! configured api_base_url (config file / GIT_AI_API_BASE_URL / default).
 //!
 //! On failure, exits with code 1 silently so the install script can fall back
 //! to running `git-ai login`. Errors are recorded server-side for debugging.
 
 use crate::auth::CredentialStore;
 use crate::auth::client::OAuthClient;
+use crate::config;
 
 /// Handle the exchange-nonce command (internal - called by install scripts)
 ///
 /// Exits with code 1 on failure (silently) so install script can run `git-ai login`.
 /// Exits with code 0 on success.
-pub fn handle_exchange_nonce(_args: &[String]) {
-    // Read from environment variables (injected by install script)
-    let nonce = std::env::var("INSTALL_NONCE")
+pub fn handle_exchange_nonce(args: &[String]) {
+    // Nonce: first arg, or INSTALL_NONCE env var
+    let nonce = args
+        .first()
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .or_else(|| std::env::var("INSTALL_NONCE").ok().filter(|s| !s.is_empty()));
+
+    // API base: API_BASE env var, or config fallback
+    let api_base = std::env::var("API_BASE")
         .ok()
-        .filter(|s| !s.is_empty());
-    let api_base = std::env::var("API_BASE").ok().filter(|s| !s.is_empty());
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| config::Config::get().api_base_url().to_string());
 
     // If no nonce provided, silently exit success (not an error - just means no auto-login)
     let Some(nonce) = nonce else {
         return;
-    };
-
-    // If API_BASE missing, exit with failure so login runs
-    let Some(api_base) = api_base else {
-        std::process::exit(1);
     };
 
     // Perform the exchange - exit with failure code on error (silently)
