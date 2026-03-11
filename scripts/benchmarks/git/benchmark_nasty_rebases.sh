@@ -19,7 +19,7 @@ Options:
   --burst-every <n>            Every Nth feature commit rewrites all generated files (default: 25)
   --git-bin <path>             Git binary to use (default: wrapper next to git-ai, else PATH git)
   --git-ai-bin <path>          git-ai binary (default: PATH git-ai)
-  --hook-mode <mode>           wrapper | hooks | both (default: wrapper)
+  --hook-mode <mode>           wrapper | hooks | both | daemon (default: wrapper)
   --skip-clone                 Reuse existing clone in <work-root>/repo
   -h, --help                   Show help
 
@@ -83,8 +83,8 @@ if [[ -z "$WORK_ROOT" ]]; then
   WORK_ROOT="${TMPDIR:-/tmp}/git-ai-nasty-rebase-$(date +%Y%m%d-%H%M%S)"
 fi
 
-if [[ "$HOOK_MODE" != "wrapper" && "$HOOK_MODE" != "hooks" && "$HOOK_MODE" != "both" ]]; then
-  echo "error: --hook-mode must be one of wrapper|hooks|both" >&2
+if [[ "$HOOK_MODE" != "wrapper" && "$HOOK_MODE" != "hooks" && "$HOOK_MODE" != "both" && "$HOOK_MODE" != "daemon" ]]; then
+  echo "error: --hook-mode must be one of wrapper|hooks|both|daemon" >&2
   exit 1
 fi
 
@@ -94,6 +94,19 @@ SUMMARY_FILE="$WORK_ROOT/summary.txt"
 RESULTS_TSV="$WORK_ROOT/results.tsv"
 
 mkdir -p "$WORK_ROOT" "$LOG_DIR"
+
+if [[ "$HOOK_MODE" == "daemon" ]]; then
+  if [[ -z "${GIT_AI_DAEMON_CONTROL_SOCKET:-}" ]]; then
+    export GIT_AI_DAEMON_CONTROL_SOCKET="$HOME/.git-ai/internal/daemon/control.sock"
+  fi
+  if [[ -z "${GIT_TRACE2_EVENT:-}" ]]; then
+    export GIT_TRACE2_EVENT="af_unix:stream:$HOME/.git-ai/internal/daemon/trace2.sock"
+  fi
+  if [[ -z "${GIT_TRACE2_EVENT_NESTING:-}" ]]; then
+    export GIT_TRACE2_EVENT_NESTING="10"
+  fi
+  export GIT_AI_DAEMON_CHECKPOINT_DELEGATE="true"
+fi
 
 now_ns() {
   python3 - <<'PY'
@@ -123,6 +136,23 @@ g() {
   GIT_AI_DEBUG=0 GIT_AI_DEBUG_PERFORMANCE=0 "$GIT_BIN" -C "$REPO_DIR" "$@"
 }
 
+daemon_sync_repo() {
+  if [[ "$HOOK_MODE" != "daemon" ]]; then
+    return 0
+  fi
+  for _ in $(seq 1 50); do
+    if (
+      cd "$REPO_DIR"
+      GIT_AI_DEBUG=0 GIT_AI_DEBUG_PERFORMANCE=0 "$GIT_AI_BIN" daemon reconcile --repo "$REPO_DIR" >/dev/null 2>&1
+    ); then
+      return 0
+    fi
+    sleep 0.05
+  done
+  echo "error: daemon did not reconcile for repo $REPO_DIR" >&2
+  exit 1
+}
+
 generate_file() {
   local path="$1"
   local seed="$2"
@@ -144,10 +174,20 @@ PY
 }
 
 run_ai_checkpoint() {
-  (
-    cd "$REPO_DIR"
-    GIT_AI_DEBUG=0 GIT_AI_DEBUG_PERFORMANCE=0 "$GIT_AI_BIN" checkpoint mock_ai >/dev/null
-  )
+  if [[ "$HOOK_MODE" == "daemon" ]]; then
+    (
+      cd "$REPO_DIR"
+      GIT_AI_DEBUG=0 GIT_AI_DEBUG_PERFORMANCE=0 \
+      GIT_AI_DAEMON_CHECKPOINT_DELEGATE=true \
+      GIT_AI_DAEMON_CONTROL_SOCKET="$GIT_AI_DAEMON_CONTROL_SOCKET" \
+      "$GIT_AI_BIN" checkpoint mock_ai >/dev/null
+    )
+  else
+    (
+      cd "$REPO_DIR"
+      GIT_AI_DEBUG=0 GIT_AI_DEBUG_PERFORMANCE=0 "$GIT_AI_BIN" checkpoint mock_ai >/dev/null
+    )
+  fi
 }
 
 ensure_clean_rebase_state() {
@@ -172,6 +212,7 @@ run_rebase_scenario() {
 
   ensure_clean_rebase_state
   g checkout "$branch" >/dev/null
+  daemon_sync_repo
 
   local start_ns
   local end_ns
@@ -184,6 +225,7 @@ run_rebase_scenario() {
   fi
   end_ns="$(now_ns)"
   duration_s="$(seconds_from_ns_delta "$start_ns" "$end_ns")"
+  daemon_sync_repo
 
   if [[ "$status" == "fail" ]]; then
     ensure_clean_rebase_state
@@ -403,6 +445,7 @@ SIDE_TIP="$(g rev-parse HEAD)"
 g checkout -B bench-feature-merge "$FEATURE_TIP" >/dev/null
 g merge --no-ff --no-edit bench-side >/dev/null
 MERGE_FEATURE_TIP="$(g rev-parse HEAD)"
+daemon_sync_repo
 
 echo
 echo "Running rebase scenarios..."

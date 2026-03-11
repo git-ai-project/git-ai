@@ -16,7 +16,10 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        test_mode: [wrapper, hooks, both]
+        test_mode: [wrapper, hooks, both, daemon]
+        exclude:
+          - os: windows-latest
+            test_mode: daemon
 
     steps:
       - name: Checkout code

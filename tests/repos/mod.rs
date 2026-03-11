@@ -45,35 +45,44 @@ macro_rules! subdir_test_variants {
                         full_args.extend(args);
 
                         use std::process::Command;
-                        use $crate::repos::test_repo::get_binary_path;
+                        use $crate::repos::test_repo::{get_binary_path, GitTestMode};
 
                         let binary_path = get_binary_path();
-                        let mode = std::env::var("GIT_AI_TEST_GIT_MODE")
-                            .unwrap_or_else(|_| "wrapper".to_string())
-                            .to_lowercase();
-                        let uses_wrapper = mode != "hooks";
-                        let uses_hooks = mode == "hooks"
-                            || mode == "both"
-                            || mode == "wrapper+hooks"
-                            || mode == "hooks+wrapper";
+                        let mode = GitTestMode::from_env();
 
-                        let mut command = if uses_wrapper {
+                        let mut command = if mode.uses_wrapper() {
                             Command::new(binary_path)
                         } else {
                             Command::new($crate::repos::test_repo::real_git_executable())
                         };
                         command.current_dir(&arbitrary_dir);
                         command.args(&full_args);
-                        if uses_wrapper {
+                        command.env("HOME", self.inner.test_home_path());
+                        command.env(
+                            "GIT_CONFIG_GLOBAL",
+                            self.inner.test_home_path().join(".gitconfig"),
+                        );
+                        if mode.uses_wrapper() {
                             command.env("GIT_AI", "git");
                         }
-                        if uses_hooks {
-                            command.env("HOME", self.inner.test_home_path());
-                            command.env(
-                                "GIT_CONFIG_GLOBAL",
-                                self.inner.test_home_path().join(".gitconfig"),
-                            );
+                        if mode.uses_hooks() {
                             command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
+                        }
+                        if mode.uses_daemon() {
+                            let trace_socket = self
+                                .inner
+                                .test_home_path()
+                                .join(".git-ai")
+                                .join("internal")
+                                .join("daemon")
+                                .join("trace2.sock");
+                            let nesting = std::env::var("GIT_AI_TEST_TRACE2_NESTING")
+                                .unwrap_or_else(|_| "10".to_string());
+                            command.env(
+                                "GIT_TRACE2_EVENT",
+                                format!("af_unix:stream:{}", trace_socket.to_string_lossy()),
+                            );
+                            command.env("GIT_TRACE2_EVENT_NESTING", nesting);
                         }
 
                         // Add config patch if present
@@ -95,6 +104,9 @@ macro_rules! subdir_test_variants {
                         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
                         if output.status.success() {
+                            if mode.uses_daemon() {
+                                self.inner.sync_daemon();
+                            }
                             Ok(if stdout.is_empty() { stderr } else { stdout })
                         } else {
                             Err(stderr)
@@ -115,35 +127,44 @@ macro_rules! subdir_test_variants {
                             full_args.extend(args);
 
                             use std::process::Command;
-                            use $crate::repos::test_repo::get_binary_path;
+                            use $crate::repos::test_repo::{get_binary_path, GitTestMode};
 
                             let binary_path = get_binary_path();
-                            let mode = std::env::var("GIT_AI_TEST_GIT_MODE")
-                                .unwrap_or_else(|_| "wrapper".to_string())
-                                .to_lowercase();
-                            let uses_wrapper = mode != "hooks";
-                            let uses_hooks = mode == "hooks"
-                                || mode == "both"
-                                || mode == "wrapper+hooks"
-                                || mode == "hooks+wrapper";
+                            let mode = GitTestMode::from_env();
 
-                            let mut command = if uses_wrapper {
+                            let mut command = if mode.uses_wrapper() {
                                 Command::new(binary_path)
                             } else {
                                 Command::new($crate::repos::test_repo::real_git_executable())
                             };
                             command.current_dir(&arbitrary_dir);
                             command.args(&full_args);
-                            if uses_wrapper {
+                            command.env("HOME", self.inner.test_home_path());
+                            command.env(
+                                "GIT_CONFIG_GLOBAL",
+                                self.inner.test_home_path().join(".gitconfig"),
+                            );
+                            if mode.uses_wrapper() {
                                 command.env("GIT_AI", "git");
                             }
-                            if uses_hooks {
-                                command.env("HOME", self.inner.test_home_path());
-                                command.env(
-                                    "GIT_CONFIG_GLOBAL",
-                                    self.inner.test_home_path().join(".gitconfig"),
-                                );
+                            if mode.uses_hooks() {
                                 command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
+                            }
+                            if mode.uses_daemon() {
+                                let trace_socket = self
+                                    .inner
+                                    .test_home_path()
+                                    .join(".git-ai")
+                                    .join("internal")
+                                    .join("daemon")
+                                    .join("trace2.sock");
+                                let nesting = std::env::var("GIT_AI_TEST_TRACE2_NESTING")
+                                    .unwrap_or_else(|_| "10".to_string());
+                                command.env(
+                                    "GIT_TRACE2_EVENT",
+                                    format!("af_unix:stream:{}", trace_socket.to_string_lossy()),
+                                );
+                                command.env("GIT_TRACE2_EVENT_NESTING", nesting);
                             }
 
                             if let Some(patch) = &self.inner.config_patch {
@@ -169,6 +190,9 @@ macro_rules! subdir_test_variants {
                             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
                             if output.status.success() {
+                                if mode.uses_daemon() {
+                                    self.inner.sync_daemon();
+                                }
                                 Ok(if stdout.is_empty() { stderr } else { stdout })
                             } else {
                                 Err(stderr)
@@ -325,6 +349,49 @@ macro_rules! worktree_test_wrappers {
 
                     fn git_mode() -> $crate::repos::test_repo::GitTestMode {
                         $crate::repos::test_repo::GitTestMode::Both
+                    }
+                }
+
+                impl std::ops::Deref for WorktreeTestRepo {
+                    type Target = $crate::repos::test_repo::TestRepo;
+                    fn deref(&self) -> &Self::Target {
+                        &self.inner
+                    }
+                }
+
+                type TestRepo = WorktreeTestRepo;
+                $body
+            }
+
+            #[test]
+            fn [<test_ $test_name _in_worktree_daemon_mode>]() {
+                struct WorktreeTestRepo {
+                    inner: $crate::repos::test_repo::TestRepo,
+                }
+
+                #[allow(dead_code)]
+                impl WorktreeTestRepo {
+                    fn new() -> Self {
+                        Self {
+                            inner: $crate::repos::test_repo::TestRepo::new_worktree_with_mode(
+                                $crate::repos::test_repo::GitTestMode::Daemon,
+                            ),
+                        }
+                    }
+
+                    fn new_with_remote() -> (Self, Self) {
+                        let (local, upstream) =
+                            $crate::repos::test_repo::TestRepo::new_with_remote_with_mode(
+                                $crate::repos::test_repo::GitTestMode::Daemon,
+                            );
+                        (
+                            Self { inner: local },
+                            Self { inner: upstream },
+                        )
+                    }
+
+                    fn git_mode() -> $crate::repos::test_repo::GitTestMode {
+                        $crate::repos::test_repo::GitTestMode::Daemon
                     }
                 }
 

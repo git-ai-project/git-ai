@@ -3,6 +3,7 @@
 use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 use git_ai::authorship::stats::CommitStats;
 use git_ai::config::ConfigPatch;
+use git_ai::daemon::{ControlRequest, send_control_request};
 use git_ai::feature_flags::FeatureFlags;
 use git_ai::git::repo_storage::PersistedWorkingLog;
 use git_ai::git::repository as GitAiRepository;
@@ -12,9 +13,10 @@ use insta::{Settings, assert_debug_snapshot};
 use rand::Rng;
 use std::cell::Cell;
 use std::fs;
-use std::path::PathBuf;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::OnceLock;
+use std::thread;
 use std::time::Duration;
 
 use super::test_file::TestFile;
@@ -24,10 +26,11 @@ pub enum GitTestMode {
     Wrapper,
     Hooks,
     Both,
+    Daemon,
 }
 
 impl GitTestMode {
-    fn from_env() -> Self {
+    pub fn from_env() -> Self {
         let mode = std::env::var("GIT_AI_TEST_GIT_MODE")
             .unwrap_or_else(|_| "wrapper".to_string())
             .to_lowercase();
@@ -38,16 +41,236 @@ impl GitTestMode {
         match mode.to_lowercase().as_str() {
             "hooks" => Self::Hooks,
             "both" | "wrapper+hooks" | "hooks+wrapper" => Self::Both,
+            "daemon" | "trace-daemon" | "pure-daemon" => Self::Daemon,
             _ => Self::Wrapper,
         }
     }
 
-    fn uses_wrapper(self) -> bool {
+    pub fn uses_wrapper(self) -> bool {
         matches!(self, Self::Wrapper | Self::Both)
     }
 
-    fn uses_hooks(self) -> bool {
+    pub fn uses_hooks(self) -> bool {
         matches!(self, Self::Hooks | Self::Both)
+    }
+
+    pub fn uses_daemon(self) -> bool {
+        matches!(self, Self::Daemon)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DaemonProcess {
+    pid: u32,
+    control_socket_path: PathBuf,
+    trace_socket_path: PathBuf,
+}
+
+impl DaemonProcess {
+    fn control_socket_path_for_home(test_home: &Path) -> PathBuf {
+        test_home
+            .join(".git-ai")
+            .join("internal")
+            .join("daemon")
+            .join("control.sock")
+    }
+
+    fn trace_socket_path_for_home(test_home: &Path) -> PathBuf {
+        test_home
+            .join(".git-ai")
+            .join("internal")
+            .join("daemon")
+            .join("trace2.sock")
+    }
+
+    fn start(repo_path: &Path, test_home: &Path, test_db_path: &Path) -> Self {
+        let control_socket_path = Self::control_socket_path_for_home(test_home);
+        let trace_socket_path = Self::trace_socket_path_for_home(test_home);
+
+        let mut command = Command::new(get_binary_path());
+        command
+            .arg("daemon")
+            .arg("start")
+            .arg("--mode")
+            .arg("write")
+            .current_dir(repo_path)
+            .env("HOME", test_home)
+            .env("GIT_CONFIG_GLOBAL", test_home.join(".gitconfig"))
+            .env("GIT_AI_TEST_DB_PATH", test_db_path)
+            .env("GITAI_TEST_DB_PATH", test_db_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        let child = command
+            .spawn()
+            .expect("failed to spawn git-ai daemon subprocess for test mode");
+        let pid = child.id();
+        drop(child);
+
+        let daemon = Self {
+            pid,
+            control_socket_path,
+            trace_socket_path,
+        };
+        daemon.wait_until_ready(repo_path);
+        daemon
+    }
+
+    fn wait_until_ready(&self, repo_path: &Path) {
+        let repo_working_dir = repo_path.to_string_lossy().to_string();
+        for _ in 0..200 {
+            #[cfg(unix)]
+            {
+                if !is_process_alive(self.pid) {
+                    panic!(
+                        "daemon exited before becoming ready (pid {}): sockets {} {}",
+                        self.pid,
+                        self.control_socket_path.display(),
+                        self.trace_socket_path.display()
+                    );
+                }
+            }
+
+            if self.control_socket_path.exists() && self.trace_socket_path.exists() {
+                let status = send_control_request(
+                    &self.control_socket_path,
+                    &ControlRequest::StatusFamily {
+                        repo_working_dir: repo_working_dir.clone(),
+                    },
+                );
+                if status.is_ok() {
+                    return;
+                }
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+
+        panic!(
+            "daemon did not become ready at {} (trace socket: {})",
+            self.control_socket_path.display(),
+            self.trace_socket_path.display()
+        );
+    }
+
+    fn wait_for_repo_idle(&self, repo_working_dir: &str) -> Result<(), String> {
+        let mut last_latest_seq = 0_u64;
+        let mut stable_idle_polls = 0_u8;
+
+        for _ in 0..200 {
+            let status = send_control_request(
+                &self.control_socket_path,
+                &ControlRequest::StatusFamily {
+                    repo_working_dir: repo_working_dir.to_string(),
+                },
+            )
+            .map_err(|e| format!("status request failed: {}", e))?;
+            if !status.ok {
+                return Err(status
+                    .error
+                    .unwrap_or_else(|| "status request returned not ok".to_string()));
+            }
+            let latest_seq = status
+                .data
+                .as_ref()
+                .and_then(|v| v.get("latest_seq"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+
+            if latest_seq > 0 {
+                let barrier = send_control_request(
+                    &self.control_socket_path,
+                    &ControlRequest::BarrierAppliedThroughSeq {
+                        repo_working_dir: repo_working_dir.to_string(),
+                        seq: latest_seq,
+                    },
+                )
+                .map_err(|e| format!("barrier request failed: {}", e))?;
+                if !barrier.ok {
+                    return Err(barrier
+                        .error
+                        .unwrap_or_else(|| "barrier request returned not ok".to_string()));
+                }
+            }
+
+            let settled = send_control_request(
+                &self.control_socket_path,
+                &ControlRequest::StatusFamily {
+                    repo_working_dir: repo_working_dir.to_string(),
+                },
+            )
+            .map_err(|e| format!("settled status request failed: {}", e))?;
+            if !settled.ok {
+                return Err(settled
+                    .error
+                    .unwrap_or_else(|| "settled status request returned not ok".to_string()));
+            }
+            let settled_latest = settled
+                .data
+                .as_ref()
+                .and_then(|v| v.get("latest_seq"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let settled_backlog = settled
+                .data
+                .as_ref()
+                .and_then(|v| v.get("backlog"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+
+            if settled_backlog == 0 && settled_latest == last_latest_seq {
+                stable_idle_polls = stable_idle_polls.saturating_add(1);
+                if stable_idle_polls >= 2 {
+                    return Ok(());
+                }
+            } else {
+                stable_idle_polls = 0;
+            }
+
+            last_latest_seq = settled_latest;
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        Err(format!(
+            "daemon did not settle for repo {} (latest seq={})",
+            repo_working_dir, last_latest_seq
+        ))
+    }
+
+    fn shutdown(&self) {
+        let _ = send_control_request(&self.control_socket_path, &ControlRequest::Shutdown);
+
+        #[cfg(unix)]
+        {
+            for _ in 0..200 {
+                if reap_child_if_exited(self.pid) {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+
+            let _ = unsafe { libc::kill(self.pid as libc::pid_t, libc::SIGKILL) };
+            for _ in 0..100 {
+                if reap_child_if_exited(self.pid) {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            let _ = Command::new("taskkill")
+                .args(["/PID", &self.pid.to_string(), "/T", "/F"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .output();
+        }
+    }
+}
+
+impl Drop for DaemonProcess {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
@@ -103,7 +326,7 @@ fn resolve_test_db_path(
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct TestRepo {
     path: PathBuf,
     pub feature_flags: FeatureFlags,
@@ -111,6 +334,7 @@ pub struct TestRepo {
     test_db_path: PathBuf,
     test_home: PathBuf,
     git_mode: GitTestMode,
+    daemon_process: Option<DaemonProcess>,
     /// When this TestRepo is backed by a linked worktree, holds the base repo path
     /// so we can clean it up on drop.
     _base_repo_path: Option<PathBuf>,
@@ -198,7 +422,7 @@ impl TestRepo {
     /// This creates a normal base repo and then adds an orphan linked worktree
     /// so tests keep empty-repo semantics (the first real commit is still a root commit).
     fn new_worktree_variant() -> Self {
-        let base = Self::new_with_mode(GitTestMode::from_env());
+        let mut base = Self::new_with_mode(GitTestMode::from_env());
 
         let default_branch = default_branchname();
         let base_branch = base.current_branch();
@@ -295,6 +519,7 @@ impl TestRepo {
         let feature_flags = base.feature_flags.clone();
         let config_patch = base.config_patch.clone();
         let git_mode = base.git_mode;
+        let daemon_process = base.daemon_process.take();
 
         // Prevent base Drop from running - we manage cleanup in the worktree Drop
         std::mem::forget(base);
@@ -309,6 +534,7 @@ impl TestRepo {
             test_db_path: wt_test_db_path,
             test_home: base_test_home,
             git_mode,
+            daemon_process,
             _base_repo_path: Some(base_path),
             _base_test_db_path: Some(base_test_db_path),
         };
@@ -341,6 +567,7 @@ impl TestRepo {
             test_db_path,
             test_home,
             git_mode,
+            daemon_process: None,
             _base_repo_path: None,
             _base_test_db_path: None,
         };
@@ -350,6 +577,7 @@ impl TestRepo {
         let _ = repo.git(&["symbolic-ref", "HEAD", "refs/heads/main"]);
 
         repo.apply_default_config_patch();
+        repo.setup_daemon_mode();
         repo.setup_git_hooks_mode();
 
         repo
@@ -433,11 +661,13 @@ impl TestRepo {
             test_db_path,
             test_home,
             git_mode,
+            daemon_process: None,
             _base_repo_path: Some(main_path),
             _base_test_db_path: None,
         };
 
         repo.apply_default_config_patch();
+        repo.setup_daemon_mode();
         repo.setup_git_hooks_mode();
         repo
     }
@@ -465,10 +695,13 @@ impl TestRepo {
             test_db_path,
             test_home,
             git_mode,
+            daemon_process: None,
             _base_repo_path: None,
             _base_test_db_path: None,
         };
 
+        let mut repo = repo;
+        repo.setup_daemon_mode();
         repo.setup_git_hooks_mode();
         repo
     }
@@ -511,6 +744,7 @@ impl TestRepo {
             test_db_path: upstream_test_db_path,
             test_home: upstream_test_home,
             git_mode,
+            daemon_process: None,
             _base_repo_path: None,
             _base_test_db_path: None,
         };
@@ -560,6 +794,7 @@ impl TestRepo {
             test_db_path: mirror_test_db_path,
             test_home: mirror_test_home,
             git_mode,
+            daemon_process: None,
             _base_repo_path: None,
             _base_test_db_path: None,
         };
@@ -569,6 +804,8 @@ impl TestRepo {
 
         upstream.apply_default_config_patch();
         mirror.apply_default_config_patch();
+        upstream.setup_daemon_mode();
+        mirror.setup_daemon_mode();
         upstream.setup_git_hooks_mode();
         mirror.setup_git_hooks_mode();
 
@@ -599,6 +836,7 @@ impl TestRepo {
             test_db_path,
             test_home,
             git_mode,
+            daemon_process: None,
             _base_repo_path: None,
             _base_test_db_path: None,
         };
@@ -607,12 +845,49 @@ impl TestRepo {
         let _ = repo.git(&["symbolic-ref", "HEAD", "refs/heads/main"]);
 
         repo.apply_default_config_patch();
+        repo.setup_daemon_mode();
         repo.setup_git_hooks_mode();
         repo
     }
 
     pub fn set_feature_flags(&mut self, feature_flags: FeatureFlags) {
         self.feature_flags = feature_flags;
+    }
+
+    fn daemon_control_socket_path(&self) -> PathBuf {
+        DaemonProcess::control_socket_path_for_home(&self.test_home)
+    }
+
+    fn daemon_trace_socket_path(&self) -> PathBuf {
+        DaemonProcess::trace_socket_path_for_home(&self.test_home)
+    }
+
+    fn trace2_nesting_value() -> String {
+        std::env::var("GIT_AI_TEST_TRACE2_NESTING").unwrap_or_else(|_| "10".to_string())
+    }
+
+    fn setup_daemon_mode(&mut self) {
+        if !self.git_mode.uses_daemon() {
+            return;
+        }
+        if self.daemon_process.is_some() {
+            return;
+        }
+        let daemon = DaemonProcess::start(&self.path, &self.test_home, &self.test_db_path);
+        self.daemon_process = Some(daemon);
+    }
+
+    fn wait_for_daemon_idle(&self) {
+        if !self.git_mode.uses_daemon() {
+            return;
+        }
+        if let Some(daemon) = &self.daemon_process {
+            daemon
+                .wait_for_repo_idle(self.path.to_string_lossy().as_ref())
+                .unwrap_or_else(|e| {
+                    panic!("daemon sync failed for {}: {}", self.path.display(), e)
+                });
+        }
     }
 
     fn setup_git_hooks_mode(&self) {
@@ -648,6 +923,17 @@ impl TestRepo {
         command.env("HOME", &self.test_home);
         command.env("GIT_CONFIG_GLOBAL", self.test_home.join(".gitconfig"));
 
+        if self.git_mode.uses_daemon() {
+            command.env(
+                "GIT_TRACE2_EVENT",
+                format!(
+                    "af_unix:stream:{}",
+                    self.daemon_trace_socket_path().to_string_lossy()
+                ),
+            );
+            command.env("GIT_TRACE2_EVENT_NESTING", Self::trace2_nesting_value());
+        }
+
         if self.git_mode.uses_hooks() {
             command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
         }
@@ -661,6 +947,14 @@ impl TestRepo {
         // Isolate all git + git-ai config reads from developer machine settings.
         command.env("HOME", &self.test_home);
         command.env("GIT_CONFIG_GLOBAL", self.test_home.join(".gitconfig"));
+
+        if self.git_mode.uses_daemon() {
+            command.env("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true");
+            command.env(
+                "GIT_AI_DAEMON_CONTROL_SOCKET",
+                self.daemon_control_socket_path(),
+            );
+        }
 
         if self.git_mode.uses_hooks() {
             command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
@@ -705,6 +999,14 @@ impl TestRepo {
 
     pub fn test_home_path(&self) -> &PathBuf {
         &self.test_home
+    }
+
+    pub fn mode(&self) -> GitTestMode {
+        self.git_mode
+    }
+
+    pub fn sync_daemon(&self) {
+        self.wait_for_daemon_idle();
     }
 
     pub fn stats(&self) -> Result<CommitStats, String> {
@@ -919,6 +1221,7 @@ impl TestRepo {
             } else {
                 format!("{}{}", stdout, stderr)
             };
+            self.wait_for_daemon_idle();
             Ok(combined)
         } else {
             Err(stderr)
@@ -968,6 +1271,7 @@ impl TestRepo {
             } else {
                 format!("{}{}", stdout, stderr)
             };
+            self.wait_for_daemon_idle();
             Ok(combined)
         } else {
             Err(stderr)
@@ -1013,6 +1317,7 @@ impl TestRepo {
             } else {
                 format!("{}{}", stdout, stderr)
             };
+            self.wait_for_daemon_idle();
             Ok(combined)
         } else {
             Err(stderr)
@@ -1069,6 +1374,7 @@ impl TestRepo {
             } else {
                 format!("{}{}", stdout, stderr)
             };
+            self.wait_for_daemon_idle();
             Ok(combined)
         } else {
             Err(stderr)
@@ -1171,6 +1477,10 @@ impl TestRepo {
 
 impl Drop for TestRepo {
     fn drop(&mut self) {
+        if let Some(daemon) = self.daemon_process.take() {
+            daemon.shutdown();
+        }
+
         if let Some(base_path) = &self._base_repo_path {
             let _ = Command::new(real_git_executable())
                 .args([
@@ -1223,6 +1533,30 @@ fn remove_dir_all_with_retry(
     }
 
     Ok(())
+}
+
+#[cfg(unix)]
+fn is_process_alive(pid: u32) -> bool {
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if rc == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error()
+        .raw_os_error()
+        .is_some_and(|code| code == libc::EPERM)
+}
+
+#[cfg(unix)]
+fn reap_child_if_exited(pid: u32) -> bool {
+    let mut status: libc::c_int = 0;
+    let rc = unsafe {
+        libc::waitpid(
+            pid as libc::pid_t,
+            &mut status as *mut libc::c_int,
+            libc::WNOHANG,
+        )
+    };
+    rc == pid as libc::pid_t || rc == -1
 }
 
 fn should_retry_remove_dir_error(err: &std::io::Error) -> bool {
