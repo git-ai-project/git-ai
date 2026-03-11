@@ -2672,6 +2672,7 @@ pub fn ensure_repo_level_hooks_for_checkpoint(repo: &Repository) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::feature_flags::FeatureFlags;
     use serial_test::serial;
 
     struct GlobalConfigOverrideGuard {
@@ -2688,6 +2689,21 @@ mod tests {
     impl Drop for GlobalConfigOverrideGuard {
         fn drop(&mut self) {
             let _ = set_test_global_git_config_override_path(self.old.clone());
+        }
+    }
+
+    struct TestFeatureFlagsGuard;
+
+    impl TestFeatureFlagsGuard {
+        fn defaults() -> Self {
+            crate::config::Config::set_test_feature_flags(FeatureFlags::default());
+            Self
+        }
+    }
+
+    impl Drop for TestFeatureFlagsGuard {
+        fn drop(&mut self) {
+            crate::config::Config::clear_test_feature_flags();
         }
     }
 
@@ -2798,7 +2814,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn ensure_repo_hooks_installed_uses_repo_local_forwarding() {
+        let _flags = TestFeatureFlagsGuard::defaults();
         let tmp = tempfile::tempdir().expect("failed to create tempdir");
         let repo = init_repo(&tmp.path().join("repo"));
         let user_hooks = tmp.path().join("repo-user-hooks");
@@ -2870,6 +2888,7 @@ mod tests {
     #[test]
     #[serial]
     fn ensure_repo_hooks_installed_uses_global_fallback_when_local_missing() {
+        let _flags = TestFeatureFlagsGuard::defaults();
         let tmp = tempfile::tempdir().expect("failed to create tempdir");
         let home = tmp.path().join("home");
         fs::create_dir_all(&home).expect("failed to create home dir");
@@ -2957,7 +2976,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn remove_repo_hooks_unsets_local_hooks_path_when_no_original_value() {
+        let _flags = TestFeatureFlagsGuard::defaults();
         let tmp = tempfile::tempdir().expect("failed to create tempdir");
         let repo = init_repo(&tmp.path().join("repo"));
         let local_config = repo_local_config_path(&repo);
@@ -3762,7 +3783,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn non_managed_hooks_provisioned_only_when_original_exists() {
+        let _flags = TestFeatureFlagsGuard::defaults();
         let tmp = tempfile::tempdir().expect("failed to create tempdir");
         let repo = init_repo(&tmp.path().join("repo"));
         let user_hooks = tmp.path().join("user-hooks");

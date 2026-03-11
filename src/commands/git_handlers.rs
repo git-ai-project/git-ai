@@ -1,4 +1,6 @@
 use std::collections::HashSet;
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::authorship::virtual_attribution::VirtualAttributions;
 use crate::commands::git_hook_handlers::{
@@ -16,6 +18,7 @@ use crate::commands::hooks::reset_hooks;
 use crate::commands::hooks::stash_hooks;
 use crate::commands::hooks::switch_hooks;
 use crate::config;
+use crate::daemon::{ControlRequest, DaemonConfig, send_control_request};
 use crate::git::cli_parser::{ParsedGitInvocation, parse_git_cli_args};
 use crate::git::find_repository;
 use crate::git::repository::{Repository, disable_internal_git_hooks};
@@ -27,6 +30,7 @@ use crate::utils::CREATE_NO_WINDOW;
 use crate::utils::debug_log;
 #[cfg(windows)]
 use crate::utils::is_interactive_terminal;
+use serde_json::json;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 #[cfg(unix)]
@@ -163,11 +167,13 @@ pub fn handle_git(args: &[String]) {
         let child_hooks_path_override =
             resolve_child_git_hooks_path_override(&parsed_args, Some(repository));
         let git_start = Instant::now();
+        let daemon_trace_ctx = start_daemon_trace_mirror(&parsed_args, Some(repository));
         let exit_status = proxy_to_git(
             &parsed_args.to_invocation_vec(),
             false,
             child_hooks_path_override.as_deref(),
         );
+        finish_daemon_trace_mirror(&daemon_trace_ctx, &exit_status, &parsed_args);
         if exit_status_was_interrupted(&exit_status) {
             exit_with_status(exit_status);
         }
@@ -194,11 +200,14 @@ pub fn handle_git(args: &[String]) {
         // run without hooks
         let child_hooks_path_override =
             resolve_child_git_hooks_path_override(&parsed_args, repository_option.as_ref());
-        proxy_to_git(
+        let daemon_trace_ctx = start_daemon_trace_mirror(&parsed_args, repository_option.as_ref());
+        let exit_status = proxy_to_git(
             &parsed_args.to_invocation_vec(),
             false,
             child_hooks_path_override.as_deref(),
-        )
+        );
+        finish_daemon_trace_mirror(&daemon_trace_ctx, &exit_status, &parsed_args);
+        exit_status
     };
     exit_with_status(exit_status);
 }
@@ -560,6 +569,112 @@ fn resolve_child_git_hooks_path_override(
         .unwrap_or_else(|| platform_null_hooks_path().to_string());
 
     Some(hooks_path)
+}
+
+#[derive(Debug, Clone)]
+struct DaemonTraceMirrorContext {
+    socket_path: PathBuf,
+    sid: String,
+    repo_working_dir: String,
+}
+
+fn daemon_trace_mirror_enabled() -> bool {
+    matches!(
+        std::env::var("GIT_AI_DAEMON_MIRROR_TRACE")
+            .ok()
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    )
+}
+
+fn daemon_control_socket_path() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("GIT_AI_DAEMON_CONTROL_SOCKET")
+        && !path.trim().is_empty()
+    {
+        return Some(PathBuf::from(path));
+    }
+    DaemonConfig::from_default_paths()
+        .ok()
+        .map(|cfg| cfg.control_socket_path)
+}
+
+fn start_daemon_trace_mirror(
+    parsed_args: &ParsedGitInvocation,
+    repository: Option<&Repository>,
+) -> Option<DaemonTraceMirrorContext> {
+    if !daemon_trace_mirror_enabled() {
+        return None;
+    }
+    let socket_path = daemon_control_socket_path()?;
+    let repo_working_dir = repository
+        .and_then(|repo| repo.workdir().ok())
+        .map(|p| p.to_string_lossy().to_string())?;
+    let sid = format!(
+        "wrapper-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+    let argv = parsed_args.to_invocation_vec();
+    let command = parsed_args.command.clone().unwrap_or_default();
+
+    let start_payload = json!({
+        "event": "start",
+        "sid": sid.clone(),
+        "argv": argv,
+        "repo_working_dir": repo_working_dir.clone(),
+    });
+    let cmd_name_payload = json!({
+        "event": "cmd_name",
+        "sid": sid.clone(),
+        "name": command,
+        "repo_working_dir": repo_working_dir.clone(),
+    });
+
+    try_send_daemon_trace_payload(&socket_path, &repo_working_dir, start_payload);
+    try_send_daemon_trace_payload(&socket_path, &repo_working_dir, cmd_name_payload);
+
+    Some(DaemonTraceMirrorContext {
+        socket_path,
+        sid,
+        repo_working_dir,
+    })
+}
+
+fn finish_daemon_trace_mirror(
+    ctx: &Option<DaemonTraceMirrorContext>,
+    exit_status: &std::process::ExitStatus,
+    _parsed_args: &ParsedGitInvocation,
+) {
+    let Some(ctx) = ctx else {
+        return;
+    };
+    let payload = json!({
+        "event": "exit",
+        "sid": ctx.sid,
+        "code": exit_status.code().unwrap_or(1),
+        "repo_working_dir": ctx.repo_working_dir,
+    });
+    try_send_daemon_trace_payload(&ctx.socket_path, &ctx.repo_working_dir, payload);
+}
+
+fn try_send_daemon_trace_payload(
+    socket_path: &PathBuf,
+    repo_working_dir: &str,
+    payload: serde_json::Value,
+) {
+    let request = ControlRequest::TraceIngest {
+        repo_working_dir: repo_working_dir.to_string(),
+        payload,
+        wait: Some(false),
+    };
+    if let Err(e) = send_control_request(socket_path, &request) {
+        debug_log(&format!("daemon trace mirror send failed: {}", e));
+    }
 }
 
 fn proxy_to_git(

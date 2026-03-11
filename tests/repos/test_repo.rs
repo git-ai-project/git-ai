@@ -644,9 +644,11 @@ impl TestRepo {
     }
 
     fn configure_command_env(&self, command: &mut Command) {
+        // Isolate all git + git-ai config reads from developer machine settings.
+        command.env("HOME", &self.test_home);
+        command.env("GIT_CONFIG_GLOBAL", self.test_home.join(".gitconfig"));
+
         if self.git_mode.uses_hooks() {
-            command.env("HOME", &self.test_home);
-            command.env("GIT_CONFIG_GLOBAL", self.test_home.join(".gitconfig"));
             command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
         }
 
@@ -656,9 +658,11 @@ impl TestRepo {
     }
 
     fn configure_git_ai_env(&self, command: &mut Command) {
+        // Isolate all git + git-ai config reads from developer machine settings.
+        command.env("HOME", &self.test_home);
+        command.env("GIT_CONFIG_GLOBAL", self.test_home.join(".gitconfig"));
+
         if self.git_mode.uses_hooks() {
-            command.env("HOME", &self.test_home);
-            command.env("GIT_CONFIG_GLOBAL", self.test_home.join(".gitconfig"));
             command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
         }
     }
@@ -1276,6 +1280,21 @@ pub fn default_branchname() -> &'static str {
 }
 
 fn compile_binary() -> PathBuf {
+    if let Ok(override_path) = std::env::var("GIT_AI_TEST_BINARY_PATH") {
+        let path = PathBuf::from(override_path);
+        if path.is_file() {
+            println!(
+                "Using prebuilt git-ai test binary from GIT_AI_TEST_BINARY_PATH: {}",
+                path.display()
+            );
+            return path;
+        }
+        panic!(
+            "GIT_AI_TEST_BINARY_PATH does not point to a file: {}",
+            path.display()
+        );
+    }
+
     println!("Compiling git-ai binary for tests...");
 
     let manifest_dir = env!("CARGO_MANIFEST_DIR");

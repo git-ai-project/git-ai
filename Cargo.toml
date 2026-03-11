@@ -16,6 +16,8 @@ humantime = "2.3"
 indicatif = "0.17"
 smol = "1.3"
 futures = "0.3"
+tokio = { version = "1.45", features = ["rt-multi-thread", "sync", "time", "macros"] }
+interprocess = "1.2"
 rusqlite = { version = "0.31", features = ["bundled"] }
 libc = "0.2"
 git2 = { version = "0.20.2", optional = true }
