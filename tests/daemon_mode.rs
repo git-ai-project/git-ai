@@ -3,7 +3,7 @@ mod repos;
 
 use git_ai::authorship::working_log::CheckpointKind;
 use git_ai::daemon::{ControlRequest, ControlResponse, send_control_request};
-use repos::test_repo::{GitTestMode, TestRepo, get_binary_path};
+use repos::test_repo::{GitTestMode, TestRepo, get_binary_path, real_git_executable};
 use serde_json::Value;
 use serial_test::serial;
 use std::fs;
@@ -755,4 +755,694 @@ fn daemon_pure_trace_socket_reset_modes_emit_reset_kinds() {
             kind
         );
     }
+}
+
+#[test]
+#[serial]
+fn daemon_pure_trace_socket_rebase_continue_emits_complete_event() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let daemon = DaemonGuard::start(&repo, "write");
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let env = git_trace_env(&trace_socket);
+    let env_refs = vec![
+        (env[0].0, env[0].1.as_str()),
+        (env[1].0, env[1].1.as_str()),
+        ("GIT_EDITOR", "true"),
+    ];
+    let default_branch = repo.current_branch();
+
+    fs::write(repo.path().join("rebase-continue.txt"), "base\n").expect("failed to write base");
+    repo.git_og_with_env(&["add", "rebase-continue.txt"], &env_refs)
+        .expect("add should succeed");
+    repo.git_og_with_env(&["commit", "-m", "base"], &env_refs)
+        .expect("base commit should succeed");
+
+    repo.git_og_with_env(&["checkout", "-b", "feature"], &env_refs)
+        .expect("feature checkout should succeed");
+    fs::write(repo.path().join("rebase-continue.txt"), "feature\n")
+        .expect("failed to write feature change");
+    repo.git_og_with_env(&["add", "rebase-continue.txt"], &env_refs)
+        .expect("feature add should succeed");
+    repo.git_og_with_env(&["commit", "-m", "feature change"], &env_refs)
+        .expect("feature commit should succeed");
+
+    repo.git_og_with_env(&["checkout", default_branch.as_str()], &env_refs)
+        .expect("checkout default should succeed");
+    fs::write(repo.path().join("rebase-continue.txt"), "main\n")
+        .expect("failed to write main change");
+    repo.git_og_with_env(&["add", "rebase-continue.txt"], &env_refs)
+        .expect("main add should succeed");
+    repo.git_og_with_env(&["commit", "-m", "main change"], &env_refs)
+        .expect("main commit should succeed");
+
+    repo.git_og_with_env(&["checkout", "feature"], &env_refs)
+        .expect("checkout feature should succeed");
+    let rebase_conflict = repo.git_og_with_env(&["rebase", default_branch.as_str()], &env_refs);
+    assert!(
+        rebase_conflict.is_err(),
+        "rebase should conflict before continue"
+    );
+
+    fs::write(repo.path().join("rebase-continue.txt"), "resolved\n")
+        .expect("failed to write resolved content");
+    repo.git_og_with_env(&["add", "rebase-continue.txt"], &env_refs)
+        .expect("add resolved should succeed");
+    repo.git_og_with_env(&["rebase", "--continue"], &env_refs)
+        .expect("rebase continue should succeed");
+
+    daemon.latest_seq_and_wait_idle();
+
+    let rewrite_log_path = git_common_dir(&repo).join("ai").join("rewrite_log");
+    let rewrite_log = fs::read_to_string(&rewrite_log_path)
+        .expect("rewrite log should exist after rebase continue");
+    assert!(
+        rewrite_log
+            .lines()
+            .any(|line| line.contains("\"rebase_complete\"")),
+        "pure trace socket mode should emit rebase_complete for continue flow"
+    );
+}
+
+#[test]
+#[serial]
+fn daemon_pure_trace_socket_cherry_pick_continue_emits_complete_event() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let daemon = DaemonGuard::start(&repo, "write");
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let env = git_trace_env(&trace_socket);
+    let env_refs = vec![
+        (env[0].0, env[0].1.as_str()),
+        (env[1].0, env[1].1.as_str()),
+        ("GIT_EDITOR", "true"),
+    ];
+    let default_branch = repo.current_branch();
+
+    fs::write(repo.path().join("cherry-continue.txt"), "base\n").expect("failed to write base");
+    repo.git_og_with_env(&["add", "cherry-continue.txt"], &env_refs)
+        .expect("add should succeed");
+    repo.git_og_with_env(&["commit", "-m", "base"], &env_refs)
+        .expect("base commit should succeed");
+
+    repo.git_og_with_env(&["checkout", "-b", "topic"], &env_refs)
+        .expect("topic checkout should succeed");
+    fs::write(repo.path().join("cherry-continue.txt"), "topic\n")
+        .expect("failed to write topic change");
+    repo.git_og_with_env(&["add", "cherry-continue.txt"], &env_refs)
+        .expect("topic add should succeed");
+    repo.git_og_with_env(&["commit", "-m", "topic change"], &env_refs)
+        .expect("topic commit should succeed");
+    let topic_sha = repo
+        .git(&["rev-parse", "topic"])
+        .expect("topic rev-parse should succeed")
+        .trim()
+        .to_string();
+
+    repo.git_og_with_env(&["checkout", default_branch.as_str()], &env_refs)
+        .expect("checkout default should succeed");
+    fs::write(repo.path().join("cherry-continue.txt"), "main\n")
+        .expect("failed to write main conflict change");
+    repo.git_og_with_env(&["add", "cherry-continue.txt"], &env_refs)
+        .expect("main add should succeed");
+    repo.git_og_with_env(&["commit", "-m", "main change"], &env_refs)
+        .expect("main commit should succeed");
+
+    let cherry_conflict = repo.git_og_with_env(&["cherry-pick", topic_sha.as_str()], &env_refs);
+    assert!(
+        cherry_conflict.is_err(),
+        "cherry-pick should conflict before continue"
+    );
+
+    fs::write(repo.path().join("cherry-continue.txt"), "resolved\n")
+        .expect("failed to write resolved cherry content");
+    repo.git_og_with_env(&["add", "cherry-continue.txt"], &env_refs)
+        .expect("add resolved cherry content should succeed");
+    repo.git_og_with_env(&["cherry-pick", "--continue"], &env_refs)
+        .expect("cherry-pick continue should succeed");
+
+    daemon.latest_seq_and_wait_idle();
+
+    let rewrite_log_path = git_common_dir(&repo).join("ai").join("rewrite_log");
+    let rewrite_log = fs::read_to_string(&rewrite_log_path)
+        .expect("rewrite log should exist after cherry-pick continue");
+    assert!(
+        rewrite_log
+            .lines()
+            .any(|line| line.contains("\"cherry_pick_complete\"")),
+        "pure trace socket mode should emit cherry_pick_complete for continue flow"
+    );
+}
+
+#[test]
+#[serial]
+fn daemon_pure_trace_socket_switch_tracks_success_and_conflict_failure() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let daemon = DaemonGuard::start(&repo, "write");
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let env = git_trace_env(&trace_socket);
+    let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
+    let default_branch = repo.current_branch();
+
+    fs::write(repo.path().join("switch-case.txt"), "base\n").expect("failed to write base");
+    repo.git_og_with_env(&["add", "switch-case.txt"], &env_refs)
+        .expect("add should succeed");
+    repo.git_og_with_env(&["commit", "-m", "base"], &env_refs)
+        .expect("base commit should succeed");
+
+    repo.git_og_with_env(&["switch", "-c", "feature"], &env_refs)
+        .expect("switch -c feature should succeed");
+    fs::write(repo.path().join("switch-case.txt"), "feature branch\n")
+        .expect("failed to write feature content");
+    repo.git_og_with_env(&["add", "switch-case.txt"], &env_refs)
+        .expect("feature add should succeed");
+    repo.git_og_with_env(&["commit", "-m", "feature"], &env_refs)
+        .expect("feature commit should succeed");
+
+    repo.git_og_with_env(&["switch", default_branch.as_str()], &env_refs)
+        .expect("switch back to default branch should succeed");
+    repo.git_og_with_env(&["switch", "feature"], &env_refs)
+        .expect("switch to feature should succeed");
+    repo.git_og_with_env(&["switch", default_branch.as_str()], &env_refs)
+        .expect("switch back to default branch should succeed");
+
+    fs::write(repo.path().join("switch-case.txt"), "dirty local change\n")
+        .expect("failed to write dirty local change");
+    let switch_failure = repo.git_og_with_env(&["switch", "feature"], &env_refs);
+    assert!(
+        switch_failure.is_err(),
+        "switch should fail when local changes would be overwritten"
+    );
+
+    daemon.latest_seq_and_wait_idle();
+
+    let family_state_raw = fs::read_to_string(family_state_path(&repo))
+        .expect("family state should exist after switch operations");
+    let family_state: Value =
+        serde_json::from_str(&family_state_raw).expect("family state should be valid json");
+    let commands = family_state
+        .get("commands")
+        .and_then(Value::as_array)
+        .expect("family state should contain command history");
+    let saw_switch_success = commands.iter().any(|command| {
+        command.get("name").and_then(Value::as_str) == Some("switch")
+            && command.get("exit_code").and_then(Value::as_i64) == Some(0)
+    });
+    let saw_switch_failure = commands.iter().any(|command| {
+        command.get("name").and_then(Value::as_str) == Some("switch")
+            && command
+                .get("exit_code")
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+                != 0
+    });
+    assert!(saw_switch_success, "switch success should be tracked");
+    assert!(saw_switch_failure, "switch failure should be tracked");
+}
+
+#[test]
+#[serial]
+fn daemon_pure_trace_socket_checkout_tracks_success_failure_and_new_branch() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let daemon = DaemonGuard::start(&repo, "write");
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let env = git_trace_env(&trace_socket);
+    let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
+    let default_branch = repo.current_branch();
+
+    fs::write(repo.path().join("checkout-case.txt"), "base\n").expect("failed to write base");
+    repo.git_og_with_env(&["add", "checkout-case.txt"], &env_refs)
+        .expect("add should succeed");
+    repo.git_og_with_env(&["commit", "-m", "base"], &env_refs)
+        .expect("base commit should succeed");
+
+    repo.git_og_with_env(&["checkout", "-b", "feature"], &env_refs)
+        .expect("checkout -b feature should succeed");
+    fs::write(repo.path().join("checkout-case.txt"), "feature branch\n")
+        .expect("failed to write feature content");
+    repo.git_og_with_env(&["add", "checkout-case.txt"], &env_refs)
+        .expect("feature add should succeed");
+    repo.git_og_with_env(&["commit", "-m", "feature"], &env_refs)
+        .expect("feature commit should succeed");
+
+    repo.git_og_with_env(&["checkout", default_branch.as_str()], &env_refs)
+        .expect("checkout default should succeed");
+    repo.git_og_with_env(&["checkout", "feature"], &env_refs)
+        .expect("checkout feature should succeed");
+    repo.git_og_with_env(&["checkout", "-b", "hotfix"], &env_refs)
+        .expect("checkout -b hotfix should succeed");
+    repo.git_og_with_env(&["checkout", default_branch.as_str()], &env_refs)
+        .expect("checkout back to default should succeed");
+
+    fs::write(
+        repo.path().join("checkout-case.txt"),
+        "dirty local change\n",
+    )
+    .expect("failed to write dirty local change");
+    let checkout_failure = repo.git_og_with_env(&["checkout", "feature"], &env_refs);
+    assert!(
+        checkout_failure.is_err(),
+        "checkout should fail when local changes would be overwritten"
+    );
+
+    daemon.latest_seq_and_wait_idle();
+
+    let family_state_raw = fs::read_to_string(family_state_path(&repo))
+        .expect("family state should exist after checkout operations");
+    let family_state: Value =
+        serde_json::from_str(&family_state_raw).expect("family state should be valid json");
+    let commands = family_state
+        .get("commands")
+        .and_then(Value::as_array)
+        .expect("family state should contain command history");
+    let saw_checkout_success = commands.iter().any(|command| {
+        command.get("name").and_then(Value::as_str) == Some("checkout")
+            && command.get("exit_code").and_then(Value::as_i64) == Some(0)
+    });
+    let saw_checkout_failure = commands.iter().any(|command| {
+        command.get("name").and_then(Value::as_str) == Some("checkout")
+            && command
+                .get("exit_code")
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+                != 0
+    });
+    let saw_checkout_new_branch = commands.iter().any(|command| {
+        command.get("name").and_then(Value::as_str) == Some("checkout")
+            && command
+                .get("argv")
+                .and_then(Value::as_array)
+                .map(|argv| argv.iter().any(|arg| arg.as_str() == Some("-b")))
+                .unwrap_or(false)
+    });
+    assert!(saw_checkout_success, "checkout success should be tracked");
+    assert!(saw_checkout_failure, "checkout failure should be tracked");
+    assert!(
+        saw_checkout_new_branch,
+        "checkout new branch (-b) flow should be tracked"
+    );
+}
+
+#[test]
+#[serial]
+fn daemon_pure_trace_socket_pull_fast_forward_tracks_pull_command_and_ref_reconcile() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let daemon = DaemonGuard::start(&repo, "write");
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let env = git_trace_env(&trace_socket);
+    let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
+    let default_branch = repo.current_branch();
+
+    let run_git = |args: &[&str]| -> String {
+        let output = Command::new(real_git_executable())
+            .args(args)
+            .output()
+            .expect("git command should execute");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+
+    fs::write(repo.path().join("pull-case.txt"), "base\n").expect("failed to write base");
+    repo.git_og_with_env(&["add", "pull-case.txt"], &env_refs)
+        .expect("add should succeed");
+    repo.git_og_with_env(&["commit", "-m", "base"], &env_refs)
+        .expect("base commit should succeed");
+
+    let root = repo
+        .path()
+        .parent()
+        .expect("test repo path should have parent")
+        .to_path_buf();
+    let bare_remote = root.join("origin.git");
+    let remote_clone = root.join("origin-work");
+    let bare_remote_str = bare_remote.to_string_lossy().to_string();
+    let remote_clone_str = remote_clone.to_string_lossy().to_string();
+    let _ = fs::remove_dir_all(&bare_remote);
+    let _ = fs::remove_dir_all(&remote_clone);
+
+    run_git(&["init", "--bare", bare_remote_str.as_str()]);
+    repo.git_og_with_env(
+        &["remote", "add", "origin", bare_remote_str.as_str()],
+        &env_refs,
+    )
+    .expect("adding origin remote should succeed");
+    repo.git_og_with_env(
+        &["push", "-u", "origin", default_branch.as_str()],
+        &env_refs,
+    )
+    .expect("pushing base branch should succeed");
+
+    run_git(&["clone", bare_remote_str.as_str(), remote_clone_str.as_str()]);
+    run_git(&[
+        "-C",
+        remote_clone_str.as_str(),
+        "config",
+        "user.name",
+        "Test User",
+    ]);
+    run_git(&[
+        "-C",
+        remote_clone_str.as_str(),
+        "config",
+        "user.email",
+        "test@example.com",
+    ]);
+    fs::write(remote_clone.join("pull-case.txt"), "base\nremote update\n")
+        .expect("failed to write remote update");
+    run_git(&["-C", remote_clone_str.as_str(), "add", "pull-case.txt"]);
+    run_git(&[
+        "-C",
+        remote_clone_str.as_str(),
+        "commit",
+        "-m",
+        "remote update",
+    ]);
+    run_git(&[
+        "-C",
+        remote_clone_str.as_str(),
+        "push",
+        "origin",
+        default_branch.as_str(),
+    ]);
+
+    repo.git_og_with_env(
+        &["pull", "--ff-only", "origin", default_branch.as_str()],
+        &env_refs,
+    )
+    .expect("fast-forward pull should succeed");
+
+    daemon.latest_seq_and_wait_idle();
+
+    let family_state_raw = fs::read_to_string(family_state_path(&repo))
+        .expect("family state should exist after pull operation");
+    let family_state: Value =
+        serde_json::from_str(&family_state_raw).expect("family state should be valid json");
+    let commands = family_state
+        .get("commands")
+        .and_then(Value::as_array)
+        .expect("family state should contain command history");
+    let saw_pull_success = commands.iter().any(|command| {
+        command.get("name").and_then(Value::as_str) == Some("pull")
+            && command.get("exit_code").and_then(Value::as_i64) == Some(0)
+    });
+    assert!(saw_pull_success, "pull success should be tracked");
+
+    let saw_pull_ref_reconcile = family_state
+        .get("rewrite_events")
+        .and_then(Value::as_array)
+        .map(|events| {
+            events.iter().any(|event| {
+                event
+                    .get("ref_reconcile")
+                    .and_then(|ref_reconcile| ref_reconcile.get("command"))
+                    .and_then(Value::as_str)
+                    == Some("pull")
+            })
+        })
+        .unwrap_or(false);
+    assert!(
+        saw_pull_ref_reconcile,
+        "pull fast-forward should record pull ref_reconcile rewrite signal"
+    );
+}
+
+#[test]
+#[serial]
+fn daemon_pure_trace_socket_pull_rebase_tracks_pull_and_rebase_completion() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let daemon = DaemonGuard::start(&repo, "write");
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let env = git_trace_env(&trace_socket);
+    let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
+    let default_branch = repo.current_branch();
+
+    let run_git = |args: &[&str]| -> String {
+        let output = Command::new(real_git_executable())
+            .args(args)
+            .output()
+            .expect("git command should execute");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+
+    fs::write(repo.path().join("pull-rebase-base.txt"), "base\n").expect("failed to write base");
+    repo.git_og_with_env(&["add", "pull-rebase-base.txt"], &env_refs)
+        .expect("add should succeed");
+    repo.git_og_with_env(&["commit", "-m", "base"], &env_refs)
+        .expect("base commit should succeed");
+
+    let root = repo
+        .path()
+        .parent()
+        .expect("test repo path should have parent")
+        .to_path_buf();
+    let bare_remote = root.join("origin-rebase.git");
+    let remote_clone = root.join("origin-rebase-work");
+    let bare_remote_str = bare_remote.to_string_lossy().to_string();
+    let remote_clone_str = remote_clone.to_string_lossy().to_string();
+    let _ = fs::remove_dir_all(&bare_remote);
+    let _ = fs::remove_dir_all(&remote_clone);
+
+    run_git(&["init", "--bare", bare_remote_str.as_str()]);
+    repo.git_og_with_env(
+        &["remote", "add", "origin", bare_remote_str.as_str()],
+        &env_refs,
+    )
+    .expect("adding origin remote should succeed");
+    repo.git_og_with_env(
+        &["push", "-u", "origin", default_branch.as_str()],
+        &env_refs,
+    )
+    .expect("pushing base branch should succeed");
+
+    run_git(&["clone", bare_remote_str.as_str(), remote_clone_str.as_str()]);
+    run_git(&[
+        "-C",
+        remote_clone_str.as_str(),
+        "config",
+        "user.name",
+        "Test User",
+    ]);
+    run_git(&[
+        "-C",
+        remote_clone_str.as_str(),
+        "config",
+        "user.email",
+        "test@example.com",
+    ]);
+    fs::write(remote_clone.join("remote-only.txt"), "remote\n")
+        .expect("failed to write remote file");
+    run_git(&["-C", remote_clone_str.as_str(), "add", "remote-only.txt"]);
+    run_git(&[
+        "-C",
+        remote_clone_str.as_str(),
+        "commit",
+        "-m",
+        "remote commit",
+    ]);
+    run_git(&[
+        "-C",
+        remote_clone_str.as_str(),
+        "push",
+        "origin",
+        default_branch.as_str(),
+    ]);
+
+    fs::write(repo.path().join("local-only.txt"), "local\n").expect("failed to write local file");
+    repo.git_og_with_env(&["add", "local-only.txt"], &env_refs)
+        .expect("local add should succeed");
+    repo.git_og_with_env(&["commit", "-m", "local commit"], &env_refs)
+        .expect("local commit should succeed");
+
+    repo.git_og_with_env(
+        &["pull", "--rebase", "origin", default_branch.as_str()],
+        &env_refs,
+    )
+    .expect("pull --rebase should succeed");
+
+    daemon.latest_seq_and_wait_idle();
+
+    let family_state_raw = fs::read_to_string(family_state_path(&repo))
+        .expect("family state should exist after pull --rebase operation");
+    let family_state: Value =
+        serde_json::from_str(&family_state_raw).expect("family state should be valid json");
+    let commands = family_state
+        .get("commands")
+        .and_then(Value::as_array)
+        .expect("family state should contain command history");
+    let saw_pull_rebase_success = commands.iter().any(|command| {
+        command.get("name").and_then(Value::as_str) == Some("pull")
+            && command.get("exit_code").and_then(Value::as_i64) == Some(0)
+            && command
+                .get("argv")
+                .and_then(Value::as_array)
+                .map(|argv| argv.iter().any(|arg| arg.as_str() == Some("--rebase")))
+                .unwrap_or(false)
+    });
+    assert!(
+        saw_pull_rebase_success,
+        "pull --rebase success should be tracked"
+    );
+
+    let rewrite_log_path = git_common_dir(&repo).join("ai").join("rewrite_log");
+    let rewrite_log = fs::read_to_string(&rewrite_log_path)
+        .expect("rewrite log should exist after pull --rebase");
+    assert!(
+        rewrite_log.contains("\"rebase_complete\""),
+        "pull --rebase should result in a rebase_complete rewrite signal"
+    );
+}
+
+#[test]
+#[serial]
+fn daemon_pure_trace_socket_pull_autostash_preserves_local_changes_and_tracks_command() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let daemon = DaemonGuard::start(&repo, "write");
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let env = git_trace_env(&trace_socket);
+    let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
+    let default_branch = repo.current_branch();
+
+    let run_git = |args: &[&str]| -> String {
+        let output = Command::new(real_git_executable())
+            .args(args)
+            .output()
+            .expect("git command should execute");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+
+    fs::write(repo.path().join("autostash-local.txt"), "base\n").expect("failed to write base");
+    repo.git_og_with_env(&["add", "autostash-local.txt"], &env_refs)
+        .expect("add should succeed");
+    repo.git_og_with_env(&["commit", "-m", "base"], &env_refs)
+        .expect("base commit should succeed");
+
+    let root = repo
+        .path()
+        .parent()
+        .expect("test repo path should have parent")
+        .to_path_buf();
+    let bare_remote = root.join("origin-autostash.git");
+    let remote_clone = root.join("origin-autostash-work");
+    let bare_remote_str = bare_remote.to_string_lossy().to_string();
+    let remote_clone_str = remote_clone.to_string_lossy().to_string();
+    let _ = fs::remove_dir_all(&bare_remote);
+    let _ = fs::remove_dir_all(&remote_clone);
+
+    run_git(&["init", "--bare", bare_remote_str.as_str()]);
+    repo.git_og_with_env(
+        &["remote", "add", "origin", bare_remote_str.as_str()],
+        &env_refs,
+    )
+    .expect("adding origin remote should succeed");
+    repo.git_og_with_env(
+        &["push", "-u", "origin", default_branch.as_str()],
+        &env_refs,
+    )
+    .expect("pushing base branch should succeed");
+
+    run_git(&["clone", bare_remote_str.as_str(), remote_clone_str.as_str()]);
+    run_git(&[
+        "-C",
+        remote_clone_str.as_str(),
+        "config",
+        "user.name",
+        "Test User",
+    ]);
+    run_git(&[
+        "-C",
+        remote_clone_str.as_str(),
+        "config",
+        "user.email",
+        "test@example.com",
+    ]);
+    fs::write(remote_clone.join("autostash-remote.txt"), "remote\n")
+        .expect("failed to write remote update file");
+    run_git(&[
+        "-C",
+        remote_clone_str.as_str(),
+        "add",
+        "autostash-remote.txt",
+    ]);
+    run_git(&[
+        "-C",
+        remote_clone_str.as_str(),
+        "commit",
+        "-m",
+        "remote update",
+    ]);
+    run_git(&[
+        "-C",
+        remote_clone_str.as_str(),
+        "push",
+        "origin",
+        default_branch.as_str(),
+    ]);
+
+    fs::write(
+        repo.path().join("autostash-local.txt"),
+        "base\nlocal dirty change\n",
+    )
+    .expect("failed to write local dirty change");
+
+    repo.git_og_with_env(
+        &[
+            "pull",
+            "--rebase",
+            "--autostash",
+            "origin",
+            default_branch.as_str(),
+        ],
+        &env_refs,
+    )
+    .expect("pull --rebase --autostash should succeed");
+
+    daemon.latest_seq_and_wait_idle();
+
+    let local_contents = fs::read_to_string(repo.path().join("autostash-local.txt"))
+        .expect("local file should remain readable");
+    assert!(
+        local_contents.contains("local dirty change"),
+        "autostash pull should preserve local dirty change content"
+    );
+
+    let family_state_raw = fs::read_to_string(family_state_path(&repo))
+        .expect("family state should exist after pull --autostash operation");
+    let family_state: Value =
+        serde_json::from_str(&family_state_raw).expect("family state should be valid json");
+    let commands = family_state
+        .get("commands")
+        .and_then(Value::as_array)
+        .expect("family state should contain command history");
+    let saw_pull_autostash_success = commands.iter().any(|command| {
+        command.get("name").and_then(Value::as_str) == Some("pull")
+            && command.get("exit_code").and_then(Value::as_i64) == Some(0)
+            && command
+                .get("argv")
+                .and_then(Value::as_array)
+                .map(|argv| {
+                    let has_rebase = argv.iter().any(|arg| arg.as_str() == Some("--rebase"));
+                    let has_autostash = argv.iter().any(|arg| arg.as_str() == Some("--autostash"));
+                    has_rebase && has_autostash
+                })
+                .unwrap_or(false)
+    });
+    assert!(
+        saw_pull_autostash_success,
+        "pull --rebase --autostash success should be tracked"
+    );
 }

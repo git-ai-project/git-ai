@@ -668,6 +668,13 @@ impl DaemonCoordinator {
         payload: Value,
         wait: bool,
     ) -> Result<ControlResponse, GitAiError> {
+        if !is_relevant_trace_payload(&payload) {
+            return Ok(ControlResponse::ok(
+                None,
+                None,
+                Some(json!({ "ignored": true })),
+            ));
+        }
         let mut payload = payload;
         let root_sid = payload
             .get("sid")
@@ -964,6 +971,23 @@ fn root_from_sid(sid: &str) -> String {
     sid.split('/').next().unwrap_or(sid).to_string()
 }
 
+fn is_relevant_trace_payload(payload: &Value) -> bool {
+    let Some(event) = payload.get("event").and_then(Value::as_str) else {
+        return false;
+    };
+    if event == "def_repo" {
+        return true;
+    }
+    if !matches!(event, "start" | "cmd_name" | "exit") {
+        return false;
+    }
+    payload
+        .get("sid")
+        .and_then(Value::as_str)
+        .map(is_root_sid)
+        .unwrap_or(false)
+}
+
 fn apply_trace_event(
     runtime: &FamilyRuntime,
     state: &mut FamilyState,
@@ -1010,13 +1034,19 @@ fn apply_trace_event(
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
             };
-            pending.pre_snapshot = parse_payload_snapshot(payload, "pre_snapshot").or_else(|| {
-                if let Some(worktree) = pending.worktree.as_ref() {
-                    snapshot_repo(worktree).ok()
-                } else {
-                    snapshot_common_dir(&runtime.store.common_dir).ok()
-                }
-            });
+            let start_command_is_tracked = argv_primary_command(&pending.argv)
+                .map(is_tracked_command_name)
+                .unwrap_or(false);
+            if start_command_is_tracked {
+                pending.pre_snapshot =
+                    parse_payload_snapshot(payload, "pre_snapshot").or_else(|| {
+                        if let Some(worktree) = pending.worktree.as_ref() {
+                            snapshot_repo(worktree).ok()
+                        } else {
+                            snapshot_common_dir(&runtime.store.common_dir).ok()
+                        }
+                    });
+            }
             state.pending_roots.insert(root_sid, pending);
         }
         "def_repo" => {
@@ -1024,7 +1054,13 @@ fn apply_trace_event(
                 && let Some(pending) = state.pending_roots.get_mut(&root_sid)
             {
                 pending.worktree = Some(worktree.to_string());
-                if pending.pre_snapshot.is_none() {
+                let command_is_tracked = pending
+                    .name
+                    .as_deref()
+                    .map(is_tracked_command_name)
+                    .or_else(|| argv_primary_command(&pending.argv).map(is_tracked_command_name))
+                    .unwrap_or(false);
+                if pending.pre_snapshot.is_none() && command_is_tracked {
                     pending.pre_snapshot = parse_payload_snapshot(payload, "pre_snapshot")
                         .or_else(|| snapshot_repo(worktree).ok());
                 }
@@ -1037,8 +1073,15 @@ fn apply_trace_event(
                 }
                 if let Some(pending) = state.pending_roots.get_mut(&root_sid) {
                     pending.name = Some(name.to_string());
-                    if pending.pre_snapshot.is_none() {
-                        pending.pre_snapshot = parse_payload_snapshot(payload, "pre_snapshot");
+                    if pending.pre_snapshot.is_none() && is_tracked_command_name(name) {
+                        pending.pre_snapshot = parse_payload_snapshot(payload, "pre_snapshot")
+                            .or_else(|| {
+                                if let Some(worktree) = pending.worktree.as_deref() {
+                                    snapshot_repo(worktree).ok()
+                                } else {
+                                    snapshot_common_dir(&runtime.store.common_dir).ok()
+                                }
+                            });
                     }
                 } else {
                     let worktree = payload
@@ -1055,14 +1098,17 @@ fn apply_trace_event(
                                 .collect::<Vec<_>>()
                         })
                         .unwrap_or_default();
-                    let pre_snapshot =
+                    let pre_snapshot = if is_tracked_command_name(name) {
                         parse_payload_snapshot(payload, "pre_snapshot").or_else(|| {
                             if let Some(worktree) = worktree.as_deref() {
                                 snapshot_repo(worktree).ok()
                             } else {
                                 snapshot_common_dir(&runtime.store.common_dir).ok()
                             }
-                        });
+                        })
+                    } else {
+                        None
+                    };
                     state.pending_roots.insert(
                         root_sid.clone(),
                         PendingRootCommand {
@@ -1096,21 +1142,32 @@ fn apply_trace_event(
                 }
                 state.dedupe_trace.insert(dedupe_key);
 
-                let post_snapshot = pending
-                    .worktree
-                    .as_ref()
-                    .and_then(|worktree| snapshot_repo(worktree).ok())
-                    .or_else(|| parse_payload_snapshot(payload, "post_snapshot"))
-                    .or_else(|| snapshot_common_dir(&runtime.store.common_dir).ok())
-                    .unwrap_or_default();
-                let pre_snapshot = pending
-                    .pre_snapshot
-                    .clone()
-                    .or_else(|| parse_payload_snapshot(payload, "pre_snapshot"))
-                    .or_else(|| snapshot_common_dir(&runtime.store.common_dir).ok())
-                    .unwrap_or_default();
-                let ref_changes = diff_refs(&pre_snapshot.refs, &post_snapshot.refs);
-                state.last_snapshot = post_snapshot.clone();
+                let command_is_tracked = pending
+                    .name
+                    .as_deref()
+                    .map(is_tracked_command_name)
+                    .or_else(|| argv_primary_command(&pending.argv).map(is_tracked_command_name))
+                    .unwrap_or(false);
+                let (pre_snapshot, post_snapshot, ref_changes) = if command_is_tracked {
+                    let post_snapshot = pending
+                        .worktree
+                        .as_ref()
+                        .and_then(|worktree| snapshot_repo(worktree).ok())
+                        .or_else(|| parse_payload_snapshot(payload, "post_snapshot"))
+                        .or_else(|| snapshot_common_dir(&runtime.store.common_dir).ok())
+                        .unwrap_or_default();
+                    let pre_snapshot = pending
+                        .pre_snapshot
+                        .clone()
+                        .or_else(|| parse_payload_snapshot(payload, "pre_snapshot"))
+                        .or_else(|| snapshot_common_dir(&runtime.store.common_dir).ok())
+                        .unwrap_or_default();
+                    let ref_changes = diff_refs(&pre_snapshot.refs, &post_snapshot.refs);
+                    state.last_snapshot = post_snapshot.clone();
+                    (pre_snapshot, post_snapshot, ref_changes)
+                } else {
+                    (RepoSnapshot::default(), RepoSnapshot::default(), vec![])
+                };
 
                 let command = AppliedCommand {
                     seq: event.seq,
@@ -1238,6 +1295,7 @@ fn enrich_trace_payload_with_snapshots(common_dir: &Path, payload: &mut Value) {
     match trace_event {
         "start" | "cmd_name" => {
             if payload.get("pre_snapshot").is_none()
+                && trace_payload_is_tracked_command(payload)
                 && let Some(snapshot) = snapshot_for_trace_payload(common_dir, payload)
             {
                 set_payload_snapshot(payload, "pre_snapshot", snapshot);
@@ -1458,6 +1516,49 @@ fn apply_rewrite_side_effect_from_common_dir(
     let author = repo.git_author_identity().name_or_unknown();
     repo.handle_rewrite_log_event(rewrite_event, author, true, true);
     Ok(())
+}
+
+fn argv_primary_command(argv: &[String]) -> Option<&str> {
+    let mut i = if argv.is_empty() { 0 } else { 1 };
+    while i < argv.len() {
+        let arg = argv[i].as_str();
+        if matches!(arg, "-C" | "-c" | "--git-dir" | "--work-tree") {
+            i = i.saturating_add(2);
+            continue;
+        }
+        if arg.starts_with('-') {
+            i = i.saturating_add(1);
+            continue;
+        }
+        return Some(arg);
+    }
+    None
+}
+
+fn is_tracked_command_name(name: &str) -> bool {
+    matches!(
+        name,
+        "commit" | "switch" | "checkout" | "pull" | "stash" | "reset" | "rebase" | "cherry-pick"
+    )
+}
+
+fn trace_payload_is_tracked_command(payload: &Value) -> bool {
+    if let Some(name) = payload.get("name").and_then(Value::as_str) {
+        return is_tracked_command_name(name);
+    }
+    let argv = payload
+        .get("argv")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    argv_primary_command(&argv)
+        .map(is_tracked_command_name)
+        .unwrap_or(false)
 }
 
 fn is_internal_cmd_name(name: &str) -> bool {
@@ -1688,6 +1789,23 @@ fn synthesize_rewrite_event(
                 true,
                 vec![],
             )))
+        }
+        "pull" => {
+            if argv.iter().any(|arg| arg == "--rebase")
+                && pre.head.is_some()
+                && post.head.is_some()
+                && pre.head != post.head
+            {
+                Some(RewriteLogEvent::rebase_complete(RebaseCompleteEvent::new(
+                    pre.head.clone().unwrap_or_default(),
+                    post.head.clone().unwrap_or_default(),
+                    false,
+                    vec![pre.head.clone().unwrap_or_default()],
+                    vec![post.head.clone().unwrap_or_default()],
+                )))
+            } else {
+                None
+            }
         }
         _ => None,
     }
