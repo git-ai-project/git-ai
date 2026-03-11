@@ -1,7 +1,8 @@
 use crate::config;
 use crate::error::GitAiError;
 use crate::git::rewrite_log::{
-    CherryPickCompleteEvent, RebaseCompleteEvent, ResetEvent, ResetKind, RewriteLogEvent,
+    CherryPickAbortEvent, CherryPickCompleteEvent, RebaseAbortEvent, RebaseCompleteEvent,
+    ResetEvent, ResetKind, RewriteLogEvent,
 };
 use crate::git::{find_repository_in_path, from_bare_repository};
 use crate::utils::debug_log;
@@ -1137,9 +1138,12 @@ fn apply_trace_event(
                         &mut state.consumed_reflog,
                     );
                     if rewrite_event.is_none()
-                        && pre_snapshot.head.is_some()
-                        && post_snapshot.head.is_some()
-                        && pre_snapshot.head != post_snapshot.head
+                        && should_synthesize_rewrite_from_snapshots(
+                            pending.name.as_deref().unwrap_or_default(),
+                            &pending.argv,
+                            &pre_snapshot,
+                            &post_snapshot,
+                        )
                     {
                         rewrite_event = synthesize_rewrite_event(
                             pending.name.as_deref().unwrap_or_default(),
@@ -1579,6 +1583,18 @@ fn is_zero_oid(oid: &str) -> bool {
     is_valid_oid(oid) && oid.chars().all(|c| c == '0')
 }
 
+fn should_synthesize_rewrite_from_snapshots(
+    name: &str,
+    argv: &[String],
+    pre: &RepoSnapshot,
+    post: &RepoSnapshot,
+) -> bool {
+    let head_changed = pre.head.is_some() && post.head.is_some() && pre.head != post.head;
+    let explicit_abort =
+        matches!(name, "rebase" | "cherry-pick") && argv.iter().any(|arg| arg == "--abort");
+    head_changed || explicit_abort
+}
+
 fn synthesize_rewrite_event(
     name: &str,
     argv: &[String],
@@ -1616,21 +1632,45 @@ fn synthesize_rewrite_event(
                 pre.head.clone().unwrap_or_default(),
             )))
         }
-        "rebase" => Some(RewriteLogEvent::rebase_complete(RebaseCompleteEvent::new(
-            pre.head.clone().unwrap_or_default(),
-            post.head.clone().unwrap_or_default(),
-            argv.iter().any(|a| a == "-i" || a == "--interactive"),
-            vec![pre.head.clone().unwrap_or_default()],
-            vec![post.head.clone().unwrap_or_default()],
-        ))),
-        "cherry-pick" => Some(RewriteLogEvent::cherry_pick_complete(
-            CherryPickCompleteEvent::new(
-                pre.head.clone().unwrap_or_default(),
-                post.head.clone().unwrap_or_default(),
-                vec![],
-                vec![post.head.clone().unwrap_or_default()],
-            ),
-        )),
+        "rebase" => {
+            if argv.iter().any(|arg| arg == "--abort") {
+                Some(RewriteLogEvent::rebase_abort(RebaseAbortEvent::new(
+                    pre.head
+                        .clone()
+                        .or_else(|| post.head.clone())
+                        .unwrap_or_default(),
+                )))
+            } else {
+                Some(RewriteLogEvent::rebase_complete(RebaseCompleteEvent::new(
+                    pre.head.clone().unwrap_or_default(),
+                    post.head.clone().unwrap_or_default(),
+                    argv.iter().any(|a| a == "-i" || a == "--interactive"),
+                    vec![pre.head.clone().unwrap_or_default()],
+                    vec![post.head.clone().unwrap_or_default()],
+                )))
+            }
+        }
+        "cherry-pick" => {
+            if argv.iter().any(|arg| arg == "--abort") {
+                Some(RewriteLogEvent::cherry_pick_abort(
+                    CherryPickAbortEvent::new(
+                        pre.head
+                            .clone()
+                            .or_else(|| post.head.clone())
+                            .unwrap_or_default(),
+                    ),
+                ))
+            } else {
+                Some(RewriteLogEvent::cherry_pick_complete(
+                    CherryPickCompleteEvent::new(
+                        pre.head.clone().unwrap_or_default(),
+                        post.head.clone().unwrap_or_default(),
+                        vec![],
+                        vec![post.head.clone().unwrap_or_default()],
+                    ),
+                ))
+            }
+        }
         _ => None,
     }
 }

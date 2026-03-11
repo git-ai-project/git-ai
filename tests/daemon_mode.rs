@@ -56,6 +56,7 @@ fn repo_workdir_string(repo: &TestRepo) -> String {
 struct DaemonGuard {
     child: Child,
     control_socket_path: PathBuf,
+    trace_socket_path: PathBuf,
     repo_working_dir: String,
 }
 
@@ -84,6 +85,7 @@ impl DaemonGuard {
         let mut daemon = Self {
             child,
             control_socket_path: daemon_control_socket_path(repo),
+            trace_socket_path: daemon_trace_socket_path(repo),
             repo_working_dir: repo_workdir_string(repo),
         };
         daemon.wait_until_ready();
@@ -160,7 +162,7 @@ impl DaemonGuard {
             {
                 panic!("daemon exited before becoming ready: {}", status);
             }
-            if self.control_socket_path.exists() {
+            if self.control_socket_path.exists() && self.trace_socket_path.exists() {
                 let status = send_control_request(
                     &self.control_socket_path,
                     &ControlRequest::StatusFamily {
@@ -506,5 +508,123 @@ fn daemon_pure_trace_socket_shadow_mode_tracks_without_writes() {
     assert!(
         saw_commit,
         "shadow mode should still track commands from pure trace socket events"
+    );
+}
+
+#[test]
+#[serial]
+fn daemon_pure_trace_socket_rebase_abort_emits_abort_event() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let daemon = DaemonGuard::start(&repo, "write");
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let env = git_trace_env(&trace_socket);
+    let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
+    let default_branch = repo.current_branch();
+
+    fs::write(repo.path().join("rebase-conflict.txt"), "base\n").expect("failed to write base");
+    repo.git_og_with_env(&["add", "rebase-conflict.txt"], &env_refs)
+        .expect("add should succeed");
+    repo.git_og_with_env(&["commit", "-m", "base"], &env_refs)
+        .expect("base commit should succeed");
+
+    repo.git_og_with_env(&["checkout", "-b", "feature"], &env_refs)
+        .expect("feature branch checkout should succeed");
+    fs::write(repo.path().join("rebase-conflict.txt"), "feature\n")
+        .expect("failed to write feature branch change");
+    repo.git_og_with_env(&["add", "rebase-conflict.txt"], &env_refs)
+        .expect("feature add should succeed");
+    repo.git_og_with_env(&["commit", "-m", "feature change"], &env_refs)
+        .expect("feature commit should succeed");
+
+    repo.git_og_with_env(&["checkout", default_branch.as_str()], &env_refs)
+        .expect("checkout default branch should succeed");
+    fs::write(repo.path().join("rebase-conflict.txt"), "main\n")
+        .expect("failed to write default branch change");
+    repo.git_og_with_env(&["add", "rebase-conflict.txt"], &env_refs)
+        .expect("default branch add should succeed");
+    repo.git_og_with_env(&["commit", "-m", "main change"], &env_refs)
+        .expect("default branch commit should succeed");
+
+    repo.git_og_with_env(&["checkout", "feature"], &env_refs)
+        .expect("checkout feature should succeed");
+    let rebase_conflict = repo.git_og_with_env(&["rebase", default_branch.as_str()], &env_refs);
+    assert!(
+        rebase_conflict.is_err(),
+        "rebase should conflict for abort flow coverage"
+    );
+    repo.git_og_with_env(&["rebase", "--abort"], &env_refs)
+        .expect("rebase abort should succeed");
+
+    daemon.latest_seq_and_wait_idle();
+
+    let rewrite_log_path = git_common_dir(&repo).join("ai").join("rewrite_log");
+    let rewrite_log =
+        fs::read_to_string(&rewrite_log_path).expect("rewrite log should exist after rebase abort");
+    assert!(
+        rewrite_log
+            .lines()
+            .any(|line| line.contains("\"rebase_abort\"")),
+        "pure trace socket mode should emit rebase_abort rewrite event"
+    );
+}
+
+#[test]
+#[serial]
+fn daemon_pure_trace_socket_cherry_pick_abort_emits_abort_event() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let daemon = DaemonGuard::start(&repo, "write");
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let env = git_trace_env(&trace_socket);
+    let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
+    let default_branch = repo.current_branch();
+
+    fs::write(repo.path().join("cherry-conflict.txt"), "base\n").expect("failed to write base");
+    repo.git_og_with_env(&["add", "cherry-conflict.txt"], &env_refs)
+        .expect("add should succeed");
+    repo.git_og_with_env(&["commit", "-m", "base"], &env_refs)
+        .expect("base commit should succeed");
+
+    repo.git_og_with_env(&["checkout", "-b", "topic"], &env_refs)
+        .expect("topic branch checkout should succeed");
+    fs::write(repo.path().join("cherry-conflict.txt"), "topic\n")
+        .expect("failed to write topic branch change");
+    repo.git_og_with_env(&["add", "cherry-conflict.txt"], &env_refs)
+        .expect("topic add should succeed");
+    repo.git_og_with_env(&["commit", "-m", "topic change"], &env_refs)
+        .expect("topic commit should succeed");
+    let topic_sha = repo
+        .git(&["rev-parse", "topic"])
+        .expect("topic rev-parse should succeed")
+        .trim()
+        .to_string();
+
+    repo.git_og_with_env(&["checkout", default_branch.as_str()], &env_refs)
+        .expect("checkout default branch should succeed");
+    fs::write(repo.path().join("cherry-conflict.txt"), "main\n")
+        .expect("failed to write default branch conflicting change");
+    repo.git_og_with_env(&["add", "cherry-conflict.txt"], &env_refs)
+        .expect("default branch add should succeed");
+    repo.git_og_with_env(&["commit", "-m", "main change"], &env_refs)
+        .expect("default branch commit should succeed");
+
+    let cherry_pick_conflict =
+        repo.git_og_with_env(&["cherry-pick", topic_sha.as_str()], &env_refs);
+    assert!(
+        cherry_pick_conflict.is_err(),
+        "cherry-pick should conflict for abort flow coverage"
+    );
+    repo.git_og_with_env(&["cherry-pick", "--abort"], &env_refs)
+        .expect("cherry-pick abort should succeed");
+
+    daemon.latest_seq_and_wait_idle();
+
+    let rewrite_log_path = git_common_dir(&repo).join("ai").join("rewrite_log");
+    let rewrite_log = fs::read_to_string(&rewrite_log_path)
+        .expect("rewrite log should exist after cherry-pick abort");
+    assert!(
+        rewrite_log
+            .lines()
+            .any(|line| line.contains("\"cherry_pick_abort\"")),
+        "pure trace socket mode should emit cherry_pick_abort rewrite event"
     );
 }
