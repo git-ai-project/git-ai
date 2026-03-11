@@ -628,3 +628,131 @@ fn daemon_pure_trace_socket_cherry_pick_abort_emits_abort_event() {
         "pure trace socket mode should emit cherry_pick_abort rewrite event"
     );
 }
+
+#[test]
+#[serial]
+fn daemon_pure_trace_socket_stash_main_ops_emit_stash_events() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let daemon = DaemonGuard::start(&repo, "write");
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let env = git_trace_env(&trace_socket);
+    let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
+
+    fs::write(repo.path().join("stash-case.txt"), "base\n").expect("failed to write base");
+    repo.git_og_with_env(&["add", "stash-case.txt"], &env_refs)
+        .expect("base add should succeed");
+    repo.git_og_with_env(&["commit", "-m", "base"], &env_refs)
+        .expect("base commit should succeed");
+
+    fs::write(repo.path().join("stash-case.txt"), "base\nchange one\n")
+        .expect("failed to write stash content");
+    repo.git_og_with_env(&["stash", "push", "-m", "save one"], &env_refs)
+        .expect("stash push should succeed");
+    repo.git_og_with_env(&["stash", "list"], &env_refs)
+        .expect("stash list should succeed");
+    repo.git_og_with_env(&["stash", "apply", "stash@{0}"], &env_refs)
+        .expect("stash apply should succeed");
+
+    repo.git_og_with_env(&["reset", "--hard", "HEAD"], &env_refs)
+        .expect("reset hard should succeed");
+    repo.git_og_with_env(&["stash", "pop", "stash@{0}"], &env_refs)
+        .expect("stash pop should succeed");
+
+    repo.git_og_with_env(&["add", "stash-case.txt"], &env_refs)
+        .expect("add before commit should succeed");
+    repo.git_og_with_env(&["commit", "-m", "stash pop result"], &env_refs)
+        .expect("commit after stash pop should succeed");
+
+    fs::write(repo.path().join("stash-case.txt"), "base\nchange two\n")
+        .expect("failed to write second stash content");
+    repo.git_og_with_env(&["stash", "push", "-m", "save two"], &env_refs)
+        .expect("second stash push should succeed");
+    repo.git_og_with_env(&["stash", "drop", "stash@{0}"], &env_refs)
+        .expect("stash drop should succeed");
+
+    daemon.latest_seq_and_wait_idle();
+
+    let rewrite_log_path = git_common_dir(&repo).join("ai").join("rewrite_log");
+    let rewrite_log =
+        fs::read_to_string(&rewrite_log_path).expect("rewrite log should exist after stash ops");
+    for expected_operation in [
+        "\"operation\":\"Create\"",
+        "\"operation\":\"List\"",
+        "\"operation\":\"Apply\"",
+        "\"operation\":\"Pop\"",
+        "\"operation\":\"Drop\"",
+    ] {
+        assert!(
+            rewrite_log.contains(expected_operation),
+            "pure trace stash flow should include {} operation",
+            expected_operation
+        );
+    }
+}
+
+#[test]
+#[serial]
+fn daemon_pure_trace_socket_reset_modes_emit_reset_kinds() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let daemon = DaemonGuard::start(&repo, "write");
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let env = git_trace_env(&trace_socket);
+    let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
+
+    fs::write(repo.path().join("reset-case.txt"), "line 1\n").expect("failed to write file");
+    repo.git_og_with_env(&["add", "reset-case.txt"], &env_refs)
+        .expect("add should succeed");
+    repo.git_og_with_env(&["commit", "-m", "c1"], &env_refs)
+        .expect("c1 should succeed");
+
+    fs::write(repo.path().join("reset-case.txt"), "line 1\nline 2\n")
+        .expect("failed to write c2 content");
+    repo.git_og_with_env(&["add", "reset-case.txt"], &env_refs)
+        .expect("add c2 should succeed");
+    repo.git_og_with_env(&["commit", "-m", "c2"], &env_refs)
+        .expect("c2 should succeed");
+
+    fs::write(
+        repo.path().join("reset-case.txt"),
+        "line 1\nline 2\nline 3\n",
+    )
+    .expect("failed to write c3 content");
+    repo.git_og_with_env(&["add", "reset-case.txt"], &env_refs)
+        .expect("add c3 should succeed");
+    repo.git_og_with_env(&["commit", "-m", "c3"], &env_refs)
+        .expect("c3 should succeed");
+
+    fs::write(
+        repo.path().join("reset-case.txt"),
+        "line 1\nline 2\nline 3\nline 4\n",
+    )
+    .expect("failed to write c4 content");
+    repo.git_og_with_env(&["add", "reset-case.txt"], &env_refs)
+        .expect("add c4 should succeed");
+    repo.git_og_with_env(&["commit", "-m", "c4"], &env_refs)
+        .expect("c4 should succeed");
+
+    repo.git_og_with_env(&["reset", "--soft", "HEAD~1"], &env_refs)
+        .expect("soft reset should succeed");
+    repo.git_og_with_env(&["reset", "--mixed", "HEAD~1"], &env_refs)
+        .expect("mixed reset should succeed");
+    repo.git_og_with_env(&["reset", "--hard", "HEAD~1"], &env_refs)
+        .expect("hard reset should succeed");
+
+    daemon.latest_seq_and_wait_idle();
+
+    let rewrite_log_path = git_common_dir(&repo).join("ai").join("rewrite_log");
+    let rewrite_log =
+        fs::read_to_string(&rewrite_log_path).expect("rewrite log should exist after reset modes");
+    for kind in [
+        "\"kind\":\"soft\"",
+        "\"kind\":\"mixed\"",
+        "\"kind\":\"hard\"",
+    ] {
+        assert!(
+            rewrite_log.contains(kind),
+            "pure trace reset flow should include {} rewrite event",
+            kind
+        );
+    }
+}

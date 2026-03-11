@@ -2,7 +2,7 @@ use crate::config;
 use crate::error::GitAiError;
 use crate::git::rewrite_log::{
     CherryPickAbortEvent, CherryPickCompleteEvent, RebaseAbortEvent, RebaseCompleteEvent,
-    ResetEvent, ResetKind, RewriteLogEvent,
+    ResetEvent, ResetKind, RewriteLogEvent, StashEvent, StashOperation,
 };
 use crate::git::{find_repository_in_path, from_bare_repository};
 use crate::utils::debug_log;
@@ -1592,7 +1592,16 @@ fn should_synthesize_rewrite_from_snapshots(
     let head_changed = pre.head.is_some() && post.head.is_some() && pre.head != post.head;
     let explicit_abort =
         matches!(name, "rebase" | "cherry-pick") && argv.iter().any(|arg| arg == "--abort");
-    head_changed || explicit_abort
+    let stash_operation = name == "stash";
+    let reset_without_pathspec = name == "reset" && !is_reset_pathspec_command(argv);
+    head_changed || explicit_abort || stash_operation || reset_without_pathspec
+}
+
+fn is_reset_pathspec_command(argv: &[String]) -> bool {
+    let Some(reset_pos) = argv.iter().position(|arg| arg == "reset") else {
+        return false;
+    };
+    argv.iter().skip(reset_pos + 1).any(|arg| arg == "--")
 }
 
 fn synthesize_rewrite_event(
@@ -1671,8 +1680,44 @@ fn synthesize_rewrite_event(
                 ))
             }
         }
+        "stash" => {
+            let (operation, stash_ref) = stash_operation_and_ref_from_argv(argv);
+            Some(RewriteLogEvent::stash(StashEvent::new(
+                operation,
+                stash_ref,
+                true,
+                vec![],
+            )))
+        }
         _ => None,
     }
+}
+
+fn stash_operation_and_ref_from_argv(argv: &[String]) -> (StashOperation, Option<String>) {
+    let args_after_stash = argv
+        .iter()
+        .position(|arg| arg == "stash")
+        .and_then(|idx| argv.get(idx + 1..))
+        .unwrap_or(&[]);
+    let subcommand = args_after_stash
+        .iter()
+        .find(|arg| !arg.starts_with('-'))
+        .map(String::as_str);
+    let stash_ref = args_after_stash
+        .iter()
+        .find(|arg| arg.starts_with("stash@{"))
+        .cloned();
+
+    let operation = match subcommand {
+        Some("apply") => StashOperation::Apply,
+        Some("pop") => StashOperation::Pop,
+        Some("drop") => StashOperation::Drop,
+        Some("list") => StashOperation::List,
+        Some("push") | Some("save") | Some("create") | Some("store") => StashOperation::Create,
+        Some(_) | None => StashOperation::Create,
+    };
+
+    (operation, stash_ref)
 }
 
 fn snapshot_repo(worktree: &str) -> Result<RepoSnapshot, GitAiError> {
