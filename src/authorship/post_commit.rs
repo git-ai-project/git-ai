@@ -134,9 +134,13 @@ pub fn post_commit(
 
     authorship_log.metadata.base_commit_sha = commit_sha.clone();
 
-    // Handle prompts based on effective prompt storage mode for this repository
-    // The effective mode considers include/exclude lists and fallback settings
-    let effective_storage = Config::get().effective_prompt_storage(&Some(repo.clone()));
+    // Use a fresh config snapshot so long-lived daemon mode picks up runtime
+    // config changes (e.g. prompt sharing exclusions) before post-commit runs.
+    let config = Config::fresh();
+
+    // Handle prompts based on effective prompt storage mode for this repository.
+    // The effective mode considers include/exclude lists and fallback settings.
+    let effective_storage = config.effective_prompt_storage(&Some(repo.clone()));
 
     match effective_storage {
         PromptStorageMode::Local => {
@@ -156,8 +160,7 @@ pub fn post_commit(
             // - user is logged in OR using custom API URL
             let context = ApiContext::new(None);
             let client = ApiClient::new(context);
-            let using_custom_api =
-                Config::get().api_base_url() != crate::config::DEFAULT_API_BASE_URL;
+            let using_custom_api = config.api_base_url() != crate::config::DEFAULT_API_BASE_URL;
             let should_enqueue_cas = client.is_logged_in() || using_custom_api;
 
             if should_enqueue_cas {

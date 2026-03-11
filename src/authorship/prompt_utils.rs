@@ -509,8 +509,32 @@ fn update_amp_prompt(
     {
         AmpPreset::transcript_and_model_from_thread_path(std::path::Path::new(transcript_path))
             .map(|(transcript, model, _)| (transcript, model))
+    } else if let Some(threads_dir) = metadata
+        .and_then(|m| m.get("__test_amp_threads_path"))
+        .filter(|p| !p.trim().is_empty())
+    {
+        let threads_dir = std::path::Path::new(threads_dir);
+        if !thread_id.trim().is_empty() {
+            AmpPreset::transcript_and_model_from_thread_id_in_dir(threads_dir, thread_id)
+        } else if let Some(tool_use_id) = metadata
+            .and_then(|m| m.get("tool_use_id"))
+            .filter(|p| !p.trim().is_empty())
+        {
+            AmpPreset::transcript_and_model_from_tool_use_id_in_dir(threads_dir, tool_use_id)
+        } else {
+            return PromptUpdateResult::Unchanged;
+        }
     } else if !thread_id.trim().is_empty() {
         AmpPreset::transcript_and_model_from_thread_id(thread_id)
+    } else if let Some(tool_use_id) = metadata
+        .and_then(|m| m.get("tool_use_id"))
+        .filter(|p| !p.trim().is_empty())
+    {
+        let default_threads = match AmpPreset::amp_threads_path() {
+            Ok(path) => path,
+            Err(e) => return PromptUpdateResult::Failed(e),
+        };
+        AmpPreset::transcript_and_model_from_tool_use_id_in_dir(&default_threads, tool_use_id)
     } else {
         return PromptUpdateResult::Unchanged;
     };

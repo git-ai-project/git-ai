@@ -155,6 +155,14 @@ impl AgentCheckpointPreset for AmpPreset {
         }
 
         let mut agent_metadata = HashMap::new();
+        if let Some(tool_use_id) = hook_input.tool_use_id.clone() {
+            agent_metadata.insert("tool_use_id".to_string(), tool_use_id);
+        }
+        if let Ok(threads_path) = std::env::var("GIT_AI_AMP_THREADS_PATH")
+            && !threads_path.trim().is_empty()
+        {
+            agent_metadata.insert("__test_amp_threads_path".to_string(), threads_path);
+        }
         if let Some(path) = resolved_thread_path {
             agent_metadata.insert(
                 "transcript_path".to_string(),
@@ -243,6 +251,33 @@ impl AmpPreset {
         thread_id: &str,
     ) -> Result<(AiTranscript, Option<String>), GitAiError> {
         let thread_path = Self::amp_threads_path()?.join(format!("{}.json", thread_id));
+        let (transcript, model, _resolved_thread_id) =
+            Self::transcript_and_model_from_thread_path(&thread_path)?;
+        Ok((transcript, model))
+    }
+
+    pub fn transcript_and_model_from_thread_id_in_dir(
+        threads_dir: &Path,
+        thread_id: &str,
+    ) -> Result<(AiTranscript, Option<String>), GitAiError> {
+        let thread_path = threads_dir.join(format!("{}.json", thread_id));
+        let (transcript, model, _resolved_thread_id) =
+            Self::transcript_and_model_from_thread_path(&thread_path)?;
+        Ok((transcript, model))
+    }
+
+    pub fn transcript_and_model_from_tool_use_id_in_dir(
+        threads_dir: &Path,
+        tool_use_id: &str,
+    ) -> Result<(AiTranscript, Option<String>), GitAiError> {
+        let thread_path = Self::find_thread_file_by_tool_use_id(threads_dir, tool_use_id)?
+            .ok_or_else(|| {
+                GitAiError::Generic(format!(
+                    "No Amp thread file found for tool_use_id {} in {}",
+                    tool_use_id,
+                    threads_dir.display()
+                ))
+            })?;
         let (transcript, model, _resolved_thread_id) =
             Self::transcript_and_model_from_thread_path(&thread_path)?;
         Ok((transcript, model))

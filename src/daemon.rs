@@ -1,14 +1,15 @@
 use crate::config;
 use crate::error::GitAiError;
-use crate::git::repository::exec_git;
+use crate::git::cli_parser::{ParsedGitInvocation, parse_git_cli_args};
+use crate::git::repository::{Repository, exec_git};
 use crate::git::rewrite_log::{
     CherryPickAbortEvent, CherryPickCompleteEvent, RebaseAbortEvent, RebaseCompleteEvent,
     ResetEvent, ResetKind, RewriteLogEvent, StashEvent, StashOperation,
 };
-use crate::git::{find_repository_in_path, from_bare_repository};
+use crate::git::{find_repository, find_repository_in_path, from_bare_repository};
 use crate::utils::debug_log;
 use crate::{
-    authorship::rebase_authorship::reconstruct_working_log_after_reset,
+    authorship::rebase_authorship::{reconstruct_working_log_after_reset, walk_commits_to_base},
     authorship::working_log::CheckpointKind,
     commands::checkpoint_agent::agent_presets::AgentRunResult,
     commands::hooks::rebase_hooks::build_rebase_commit_mappings,
@@ -17,7 +18,7 @@ use interprocess::local_socket::{LocalSocketListener, LocalSocketStream};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 #[cfg(unix)]
@@ -33,6 +34,7 @@ const DAEMON_STATE_VERSION: &str = "daemon-v1";
 const TRACE_EVENT_TYPE: &str = "trace2_raw";
 const CHECKPOINT_EVENT_TYPE: &str = "checkpoint";
 const RECONCILE_EVENT_TYPE: &str = "reconcile";
+const ENV_OVERRIDE_EVENT_TYPE: &str = "env_override";
 const COMMAND_INDEX_FILE: &str = "command_index.jsonl";
 const CHECKPOINT_INDEX_FILE: &str = "checkpoint_index.jsonl";
 const PID_META_FILE: &str = "daemon.pid.json";
@@ -188,6 +190,13 @@ pub struct PendingRootCommand {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DeferredRootExit {
+    pub seq: u64,
+    pub received_at_ns: u128,
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppliedCommand {
     pub seq: u64,
     pub sid: String,
@@ -218,8 +227,16 @@ pub struct RefChange {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ActiveCherryPickState {
+    pub original_head: String,
+    pub source_commits: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FamilyState {
     pub pending_roots: HashMap<String, PendingRootCommand>,
+    #[serde(default)]
+    pub deferred_root_exits: HashMap<String, DeferredRootExit>,
     #[serde(default)]
     pub sid_worktrees: HashMap<String, String>,
     #[serde(default)]
@@ -228,6 +245,10 @@ pub struct FamilyState {
     pub checkpoints: HashMap<String, CheckpointSummary>,
     pub unresolved_transcripts: BTreeSet<String>,
     pub rewrite_events: Vec<Value>,
+    #[serde(default)]
+    pub active_cherry_pick_by_worktree: HashMap<String, ActiveCherryPickState>,
+    #[serde(default)]
+    pub env_overrides_by_worktree: HashMap<String, HashMap<String, String>>,
     pub last_snapshot: RepoSnapshot,
     pub dedupe_trace: BTreeSet<String>,
     pub dedupe_checkpoints: BTreeSet<String>,
@@ -454,6 +475,12 @@ pub enum ControlRequest {
         payload: Value,
         wait: Option<bool>,
     },
+    #[serde(rename = "env.override")]
+    EnvOverride {
+        repo_working_dir: String,
+        env: HashMap<String, String>,
+        wait: Option<bool>,
+    },
     #[serde(rename = "status.family")]
     StatusFamily { repo_working_dir: String },
     #[serde(rename = "barrier.applied_through_seq")]
@@ -508,6 +535,7 @@ pub struct FamilyStatus {
     pub backlog: u64,
     pub unresolved_transcripts: Vec<String>,
     pub pending_roots: usize,
+    pub deferred_root_exits: usize,
     pub last_error: Option<String>,
     pub last_reconcile_ns: Option<u128>,
 }
@@ -715,12 +743,13 @@ impl DaemonCoordinator {
                 .and_then(Value::as_str)
                 .or_else(|| payload.get("repo_working_dir").and_then(Value::as_str))
                 .map(ToString::to_string);
-            let pending = self
+            let mut pending = self
                 .pending_trace_by_root
                 .lock()
                 .map_err(|_| GitAiError::Generic("pending trace map lock poisoned".to_string()))?
                 .remove(root_sid)
                 .unwrap_or_default();
+            pending.sort_by(compare_buffered_trace_payloads);
             for mut buffered_payload in pending {
                 if let Some(worktree) = resolved_worktree.as_ref() {
                     let missing_worktree = buffered_payload.get("worktree").is_none()
@@ -786,6 +815,34 @@ impl DaemonCoordinator {
         Ok(ControlResponse::ok(Some(seq), None, None))
     }
 
+    pub async fn ingest_env_override(
+        self: &Arc<Self>,
+        repo_working_dir: String,
+        env: HashMap<String, String>,
+        wait: bool,
+    ) -> Result<ControlResponse, GitAiError> {
+        let (family_key, common_dir) = self.resolve_family_from_worktree(&repo_working_dir)?;
+        let payload = json!({
+            "repo_working_dir": repo_working_dir,
+            "env": env,
+        });
+        let (seq, runtime) = self
+            .append_family_event(
+                family_key,
+                common_dir,
+                "control",
+                ENV_OVERRIDE_EVENT_TYPE,
+                payload,
+            )
+            .await?;
+        if wait {
+            runtime.wait_for_applied(seq).await;
+            let applied = runtime.applied_seq.load(Ordering::SeqCst);
+            return Ok(ControlResponse::ok(Some(seq), Some(applied), None));
+        }
+        Ok(ControlResponse::ok(Some(seq), None, None))
+    }
+
     pub async fn status_for_family(
         self: &Arc<Self>,
         repo_working_dir: String,
@@ -795,7 +852,10 @@ impl DaemonCoordinator {
         let latest_seq = store.latest_seq()?;
         let cursor = store.load_cursor()?;
         let state = store.load_state()?;
-        let backlog = latest_seq.saturating_sub(cursor);
+        let event_backlog = latest_seq.saturating_sub(cursor);
+        let live_backlog =
+            state.pending_roots.len() as u64 + state.deferred_root_exits.len() as u64;
+        let backlog = event_backlog.saturating_add(live_backlog);
         Ok(FamilyStatus {
             family_key,
             mode: self.mode,
@@ -804,6 +864,7 @@ impl DaemonCoordinator {
             backlog,
             unresolved_transcripts: state.unresolved_transcripts.iter().cloned().collect(),
             pending_roots: state.pending_roots.len(),
+            deferred_root_exits: state.deferred_root_exits.len(),
             last_error: state.last_error,
             last_reconcile_ns: state.last_reconcile_ns,
         })
@@ -868,6 +929,14 @@ impl DaemonCoordinator {
                 wait,
             } => {
                 self.ingest_checkpoint_payload(repo_working_dir, payload, wait.unwrap_or(false))
+                    .await
+            }
+            ControlRequest::EnvOverride {
+                repo_working_dir,
+                env,
+                wait,
+            } => {
+                self.ingest_env_override(repo_working_dir, env, wait.unwrap_or(false))
                     .await
             }
             ControlRequest::StatusFamily { repo_working_dir } => self
@@ -977,6 +1046,7 @@ fn apply_event(
         TRACE_EVENT_TYPE => apply_trace_event(runtime, state, event),
         CHECKPOINT_EVENT_TYPE => apply_checkpoint_event(runtime, state, event),
         RECONCILE_EVENT_TYPE => apply_reconcile_event(runtime, state, event),
+        ENV_OVERRIDE_EVENT_TYPE => apply_env_override_event(state, event),
         other => Err(GitAiError::Generic(format!(
             "unknown daemon event type: {}",
             other
@@ -990,6 +1060,40 @@ fn is_root_sid(sid: &str) -> bool {
 
 fn root_from_sid(sid: &str) -> String {
     sid.split('/').next().unwrap_or(sid).to_string()
+}
+
+fn trace_event_phase_rank(payload: &Value) -> u8 {
+    match payload
+        .get("event")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+    {
+        "start" => 0,
+        "def_repo" => 1,
+        "cmd_name" => 2,
+        "exit" => 3,
+        _ => 4,
+    }
+}
+
+fn compare_buffered_trace_payloads(left: &Value, right: &Value) -> std::cmp::Ordering {
+    let left_rank = trace_event_phase_rank(left);
+    let right_rank = trace_event_phase_rank(right);
+    if left_rank != right_rank {
+        return left_rank.cmp(&right_rank);
+    }
+
+    let left_abs = left
+        .get("t_abs")
+        .and_then(Value::as_f64)
+        .unwrap_or(f64::INFINITY);
+    let right_abs = right
+        .get("t_abs")
+        .and_then(Value::as_f64)
+        .unwrap_or(f64::INFINITY);
+    left_abs
+        .partial_cmp(&right_abs)
+        .unwrap_or(std::cmp::Ordering::Equal)
 }
 
 fn is_relevant_trace_payload(payload: &Value) -> bool {
@@ -1007,6 +1111,202 @@ fn is_relevant_trace_payload(payload: &Value) -> bool {
         .and_then(Value::as_str)
         .map(is_root_sid)
         .unwrap_or(false)
+}
+
+fn apply_exit_for_pending_root(
+    runtime: &FamilyRuntime,
+    state: &mut FamilyState,
+    pending: PendingRootCommand,
+    exit_seq: u64,
+    exit_payload: &Value,
+) -> Result<(), GitAiError> {
+    let exit_code = exit_payload
+        .get("code")
+        .and_then(Value::as_i64)
+        .unwrap_or(1) as i32;
+    let dedupe_key = format!(
+        "{}:{}:{}",
+        pending.sid,
+        pending.start_seq,
+        short_hash_json(&json!(pending.argv))
+    );
+    if state.dedupe_trace.contains(&dedupe_key) {
+        return Ok(());
+    }
+    state.dedupe_trace.insert(dedupe_key);
+
+    let command_is_tracked = pending
+        .name
+        .as_deref()
+        .map(is_tracked_command_name)
+        .or_else(|| argv_primary_command(&pending.argv).map(is_tracked_command_name))
+        .unwrap_or(false);
+    let (pre_snapshot, post_snapshot, ref_changes) = if command_is_tracked {
+        let prior_worktree_snapshot = pending
+            .worktree
+            .as_ref()
+            .and_then(|worktree| state.worktree_snapshots.get(worktree))
+            .cloned();
+        let post_snapshot = pending
+            .worktree
+            .as_ref()
+            .and_then(|worktree| snapshot_repo(worktree).ok())
+            .or_else(|| parse_payload_snapshot(exit_payload, "post_snapshot"))
+            .or_else(|| snapshot_common_dir(&runtime.store.common_dir).ok())
+            .unwrap_or_default();
+        let pre_snapshot = prior_worktree_snapshot
+            .or_else(|| pending.pre_snapshot.clone())
+            .or_else(|| parse_payload_snapshot(exit_payload, "pre_snapshot"))
+            .or_else(|| {
+                if pending.worktree.is_none() {
+                    Some(state.last_snapshot.clone())
+                } else {
+                    None
+                }
+            })
+            .or_else(|| snapshot_common_dir(&runtime.store.common_dir).ok())
+            .unwrap_or_default();
+        let ref_changes = diff_refs(&pre_snapshot.refs, &post_snapshot.refs);
+        if let Some(worktree) = pending.worktree.as_ref() {
+            state
+                .worktree_snapshots
+                .insert(worktree.clone(), post_snapshot.clone());
+        }
+        state.last_snapshot = post_snapshot.clone();
+        (pre_snapshot, post_snapshot, ref_changes)
+    } else {
+        (RepoSnapshot::default(), RepoSnapshot::default(), vec![])
+    };
+
+    let command = AppliedCommand {
+        seq: exit_seq,
+        sid: pending.sid.clone(),
+        name: pending.name.clone().unwrap_or_default(),
+        argv: pending.argv.clone(),
+        exit_code,
+        worktree: pending.worktree.clone(),
+        pre_head: pre_snapshot.head.clone(),
+        post_head: post_snapshot.head.clone(),
+        ref_changes: ref_changes.clone(),
+    };
+    state.commands.push(command);
+    if state.commands.len() > 1000 {
+        state.commands.drain(0..state.commands.len() - 1000);
+    }
+    if let Some(last) = state.commands.last() {
+        runtime.store.append_command_index(last)?;
+    }
+
+    let cherry_pick_worktree_key = if pending.name.as_deref() == Some("cherry-pick") {
+        Some(cherry_pick_worktree_key(pending.worktree.as_deref()))
+    } else {
+        None
+    };
+    if pending.name.as_deref() == Some("cherry-pick")
+        && !cherry_pick_continue_flag(&pending.argv)
+        && !cherry_pick_abort_flag(&pending.argv)
+    {
+        let source_specs = cherry_pick_source_specs_from_argv(&pending.argv);
+        let source_commits =
+            resolve_commit_specs_to_oids(pending.worktree.as_deref(), &source_specs);
+        let (old_head, _) = resolve_command_heads(&pre_snapshot, &post_snapshot, &ref_changes);
+        let original_head = old_head
+            .or_else(|| pre_snapshot.head.clone())
+            .unwrap_or_default();
+        if !source_commits.is_empty()
+            && !original_head.is_empty()
+            && let Some(key) = cherry_pick_worktree_key.as_ref()
+        {
+            state.active_cherry_pick_by_worktree.insert(
+                key.clone(),
+                ActiveCherryPickState {
+                    original_head,
+                    source_commits,
+                },
+            );
+        }
+    }
+
+    if exit_code == 0 {
+        let active_cherry_pick = cherry_pick_worktree_key
+            .as_ref()
+            .and_then(|key| state.active_cherry_pick_by_worktree.get(key).cloned());
+        let rewrite_event = if should_synthesize_rewrite_from_snapshots(
+            pending.name.as_deref().unwrap_or_default(),
+            &pending.argv,
+            &pre_snapshot,
+            &post_snapshot,
+        ) {
+            synthesize_rewrite_event(
+                pending.name.as_deref().unwrap_or_default(),
+                &pending.argv,
+                &pre_snapshot,
+                &post_snapshot,
+                &ref_changes,
+                pending.worktree.as_deref(),
+                active_cherry_pick.as_ref(),
+            )
+        } else {
+            None
+        };
+        if let Some(rewrite_event) = rewrite_event {
+            if matches!(
+                rewrite_event,
+                RewriteLogEvent::CherryPickComplete { .. }
+                    | RewriteLogEvent::CherryPickAbort { .. }
+            ) && let Some(key) = cherry_pick_worktree_key.as_ref()
+            {
+                state.active_cherry_pick_by_worktree.remove(key);
+            }
+            state
+                .rewrite_events
+                .push(serde_json::to_value(&rewrite_event)?);
+            if state.rewrite_events.len() > 1000 {
+                state
+                    .rewrite_events
+                    .drain(0..state.rewrite_events.len() - 1000);
+            }
+            if runtime.mode.apply_side_effects() && !pending.wrapper_mirror {
+                let env_overrides = pending
+                    .worktree
+                    .as_ref()
+                    .and_then(|worktree| state.env_overrides_by_worktree.get(worktree).cloned());
+                if let Some(worktree) = pending.worktree.as_deref() {
+                    let _ =
+                        apply_rewrite_side_effect(worktree, rewrite_event, env_overrides.as_ref());
+                } else {
+                    let _ = apply_rewrite_side_effect_from_common_dir(
+                        &runtime.store.common_dir,
+                        rewrite_event,
+                        env_overrides.as_ref(),
+                    );
+                }
+            }
+        } else if !ref_changes.is_empty()
+            && matches!(
+                pending.name.as_deref(),
+                Some("update-ref")
+                    | Some("commit-tree")
+                    | Some("pull")
+                    | Some("checkout")
+                    | Some("switch")
+            )
+        {
+            state.rewrite_events.push(json!({
+                "ref_reconcile": {
+                    "command": pending.name.clone().unwrap_or_default(),
+                    "ref_changes": ref_changes
+                }
+            }));
+        }
+    } else if pending.name.as_deref() == Some("cherry-pick")
+        && cherry_pick_abort_flag(&pending.argv)
+        && let Some(key) = cherry_pick_worktree_key.as_ref()
+    {
+        state.active_cherry_pick_by_worktree.remove(key);
+    }
+
+    Ok(())
 }
 
 fn apply_trace_event(
@@ -1058,8 +1358,16 @@ fn apply_trace_event(
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
             };
-            let start_command_is_tracked = argv_primary_command(&pending.argv)
+            let (resolved_name, resolved_argv) =
+                resolve_command_from_trace_argv(&pending.argv, pending.worktree.as_deref());
+            pending.name = resolved_name;
+            pending.argv = resolved_argv;
+
+            let start_command_is_tracked = pending
+                .name
+                .as_deref()
                 .map(is_tracked_command_name)
+                .or_else(|| argv_primary_command(&pending.argv).map(is_tracked_command_name))
                 .unwrap_or(false);
             if start_command_is_tracked {
                 pending.pre_snapshot = if let Some(worktree) = pending.worktree.as_ref() {
@@ -1069,7 +1377,17 @@ fn apply_trace_event(
                         .or_else(|| snapshot_common_dir(&runtime.store.common_dir).ok())
                 };
             }
-            state.pending_roots.insert(root_sid, pending);
+            if let Some(deferred_exit) = state.deferred_root_exits.remove(&root_sid) {
+                apply_exit_for_pending_root(
+                    runtime,
+                    state,
+                    pending,
+                    deferred_exit.seq,
+                    &deferred_exit.payload,
+                )?;
+            } else {
+                state.pending_roots.insert(root_sid, pending);
+            }
         }
         "def_repo" => {
             if let Some(worktree) = payload.get("worktree").and_then(Value::as_str) {
@@ -1085,6 +1403,27 @@ fn apply_trace_event(
                 }
                 if let Some(pending) = state.pending_roots.get_mut(&root_sid) {
                     pending.worktree = Some(worktree.to_string());
+                    if !pending
+                        .name
+                        .as_deref()
+                        .map(is_tracked_command_name)
+                        .unwrap_or(false)
+                    {
+                        let (resolved_name, resolved_argv) = resolve_command_from_trace_argv(
+                            &pending.argv,
+                            pending.worktree.as_deref(),
+                        );
+                        if pending.name.is_none() {
+                            pending.name = resolved_name;
+                        } else if resolved_name
+                            .as_deref()
+                            .map(is_tracked_command_name)
+                            .unwrap_or(false)
+                        {
+                            pending.name = resolved_name;
+                        }
+                        pending.argv = resolved_argv;
+                    }
                     let command_is_tracked = pending
                         .name
                         .as_deref()
@@ -1107,7 +1446,14 @@ fn apply_trace_event(
                     return Ok(());
                 }
                 if let Some(pending) = state.pending_roots.get_mut(&root_sid) {
-                    pending.name = Some(name.to_string());
+                    let existing_name_is_tracked = pending
+                        .name
+                        .as_deref()
+                        .map(is_tracked_command_name)
+                        .unwrap_or(false);
+                    if !existing_name_is_tracked || is_tracked_command_name(name) {
+                        pending.name = Some(name.to_string());
+                    }
                     if pending.worktree.is_none() {
                         pending.worktree = worktree_from_argv(&pending.argv)
                             .or_else(|| state.sid_worktrees.get(&root_sid).cloned());
@@ -1168,135 +1514,16 @@ fn apply_trace_event(
         }
         "exit" if is_root_sid(sid) => {
             if let Some(pending) = state.pending_roots.remove(&root_sid) {
-                let exit_code = payload.get("code").and_then(Value::as_i64).unwrap_or(1) as i32;
-                let dedupe_key = format!(
-                    "{}:{}:{}",
-                    pending.sid,
-                    pending.start_seq,
-                    short_hash_json(&json!(pending.argv))
+                apply_exit_for_pending_root(runtime, state, pending, event.seq, payload)?;
+            } else {
+                state.deferred_root_exits.insert(
+                    root_sid,
+                    DeferredRootExit {
+                        seq: event.seq,
+                        received_at_ns: event.received_at_ns,
+                        payload: payload.clone(),
+                    },
                 );
-                if state.dedupe_trace.contains(&dedupe_key) {
-                    return Ok(());
-                }
-                state.dedupe_trace.insert(dedupe_key);
-
-                let command_is_tracked = pending
-                    .name
-                    .as_deref()
-                    .map(is_tracked_command_name)
-                    .or_else(|| argv_primary_command(&pending.argv).map(is_tracked_command_name))
-                    .unwrap_or(false);
-                let (pre_snapshot, post_snapshot, ref_changes) = if command_is_tracked {
-                    let prior_worktree_snapshot = pending
-                        .worktree
-                        .as_ref()
-                        .and_then(|worktree| state.worktree_snapshots.get(worktree))
-                        .cloned();
-                    let post_snapshot = pending
-                        .worktree
-                        .as_ref()
-                        .and_then(|worktree| snapshot_repo(worktree).ok())
-                        .or_else(|| parse_payload_snapshot(payload, "post_snapshot"))
-                        .or_else(|| snapshot_common_dir(&runtime.store.common_dir).ok())
-                        .unwrap_or_default();
-                    let pre_snapshot = prior_worktree_snapshot
-                        .or_else(|| pending.pre_snapshot.clone())
-                        .or_else(|| parse_payload_snapshot(payload, "pre_snapshot"))
-                        .or_else(|| {
-                            if pending.worktree.is_none() {
-                                Some(state.last_snapshot.clone())
-                            } else {
-                                None
-                            }
-                        })
-                        .or_else(|| snapshot_common_dir(&runtime.store.common_dir).ok())
-                        .unwrap_or_default();
-                    let ref_changes = diff_refs(&pre_snapshot.refs, &post_snapshot.refs);
-                    if let Some(worktree) = pending.worktree.as_ref() {
-                        state
-                            .worktree_snapshots
-                            .insert(worktree.clone(), post_snapshot.clone());
-                    }
-                    state.last_snapshot = post_snapshot.clone();
-                    (pre_snapshot, post_snapshot, ref_changes)
-                } else {
-                    (RepoSnapshot::default(), RepoSnapshot::default(), vec![])
-                };
-
-                let command = AppliedCommand {
-                    seq: event.seq,
-                    sid: pending.sid.clone(),
-                    name: pending.name.clone().unwrap_or_default(),
-                    argv: pending.argv.clone(),
-                    exit_code,
-                    worktree: pending.worktree.clone(),
-                    pre_head: pre_snapshot.head.clone(),
-                    post_head: post_snapshot.head.clone(),
-                    ref_changes: ref_changes.clone(),
-                };
-                state.commands.push(command);
-                if state.commands.len() > 1000 {
-                    state.commands.drain(0..state.commands.len() - 1000);
-                }
-                if let Some(last) = state.commands.last() {
-                    runtime.store.append_command_index(last)?;
-                }
-
-                if exit_code == 0 {
-                    let rewrite_event = if should_synthesize_rewrite_from_snapshots(
-                        pending.name.as_deref().unwrap_or_default(),
-                        &pending.argv,
-                        &pre_snapshot,
-                        &post_snapshot,
-                    ) {
-                        synthesize_rewrite_event(
-                            pending.name.as_deref().unwrap_or_default(),
-                            &pending.argv,
-                            &pre_snapshot,
-                            &post_snapshot,
-                            &ref_changes,
-                            pending.worktree.as_deref(),
-                        )
-                    } else {
-                        None
-                    };
-                    if let Some(rewrite_event) = rewrite_event {
-                        state
-                            .rewrite_events
-                            .push(serde_json::to_value(&rewrite_event)?);
-                        if state.rewrite_events.len() > 1000 {
-                            state
-                                .rewrite_events
-                                .drain(0..state.rewrite_events.len() - 1000);
-                        }
-                        if runtime.mode.apply_side_effects() && !pending.wrapper_mirror {
-                            if let Some(worktree) = pending.worktree.as_deref() {
-                                let _ = apply_rewrite_side_effect(worktree, rewrite_event);
-                            } else {
-                                let _ = apply_rewrite_side_effect_from_common_dir(
-                                    &runtime.store.common_dir,
-                                    rewrite_event,
-                                );
-                            }
-                        }
-                    } else if !ref_changes.is_empty()
-                        && matches!(
-                            pending.name.as_deref(),
-                            Some("update-ref")
-                                | Some("commit-tree")
-                                | Some("pull")
-                                | Some("checkout")
-                                | Some("switch")
-                        )
-                    {
-                        state.rewrite_events.push(json!({
-                            "ref_reconcile": {
-                                "command": pending.name.clone().unwrap_or_default(),
-                                "ref_changes": ref_changes
-                            }
-                        }));
-                    }
-                }
             }
         }
         _ => {}
@@ -1462,6 +1689,27 @@ fn apply_reconcile_event(
     Ok(())
 }
 
+fn apply_env_override_event(
+    state: &mut FamilyState,
+    event: &EventEnvelope,
+) -> Result<(), GitAiError> {
+    let payload = &event.payload;
+    let worktree = payload
+        .get("repo_working_dir")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "__family__".to_string());
+    let env_map = payload
+        .get("env")
+        .cloned()
+        .ok_or_else(|| GitAiError::Generic("env override payload missing env".to_string()))
+        .and_then(|value| {
+            serde_json::from_value::<HashMap<String, String>>(value).map_err(GitAiError::from)
+        })?;
+    state.env_overrides_by_worktree.insert(worktree, env_map);
+    Ok(())
+}
+
 fn resolve_transcript_hash(payload: &Value) -> Result<Option<String>, GitAiError> {
     if let Some(transcript) = payload.get("transcript")
         && !transcript.is_null()
@@ -1551,12 +1799,14 @@ fn parse_checkpoint_kind(value: &str) -> Option<CheckpointKind> {
 fn apply_rewrite_side_effect(
     worktree: &str,
     rewrite_event: RewriteLogEvent,
+    env_overrides: Option<&HashMap<String, String>>,
 ) -> Result<(), GitAiError> {
     let mut repo = find_repository_in_path(worktree)?;
     let author = repo.git_author_identity().name_or_unknown();
     if let RewriteLogEvent::Reset { reset } = &rewrite_event {
         apply_reset_working_log_side_effect(&repo, reset, &author)?;
     }
+    apply_env_overrides_to_working_log(&repo, &rewrite_event, env_overrides)?;
     repo.handle_rewrite_log_event(rewrite_event, author, true, true);
     Ok(())
 }
@@ -1564,17 +1814,112 @@ fn apply_rewrite_side_effect(
 fn apply_rewrite_side_effect_from_common_dir(
     common_dir: &Path,
     rewrite_event: RewriteLogEvent,
+    env_overrides: Option<&HashMap<String, String>>,
 ) -> Result<(), GitAiError> {
     let mut repo = from_bare_repository(common_dir)?;
     let author = repo.git_author_identity().name_or_unknown();
+    apply_env_overrides_to_working_log(&repo, &rewrite_event, env_overrides)?;
     repo.handle_rewrite_log_event(rewrite_event, author, true, true);
     Ok(())
 }
 
+fn apply_env_overrides_to_working_log(
+    repo: &crate::git::repository::Repository,
+    rewrite_event: &RewriteLogEvent,
+    env_overrides: Option<&HashMap<String, String>>,
+) -> Result<(), GitAiError> {
+    let Some(env_overrides) = env_overrides else {
+        return Ok(());
+    };
+    let RewriteLogEvent::Commit { commit } = rewrite_event else {
+        return Ok(());
+    };
+    let base_commit = commit
+        .base_commit
+        .as_deref()
+        .filter(|sha| !sha.is_empty())
+        .unwrap_or("initial");
+
+    let mut changed = false;
+    let working_log = repo.storage.working_log_for_base_commit(base_commit);
+    let mut checkpoints = working_log.read_all_checkpoints()?;
+    if checkpoints.is_empty() {
+        return Ok(());
+    }
+
+    let cursor_db_override = env_overrides
+        .get("GIT_AI_CURSOR_GLOBAL_DB_PATH")
+        .filter(|value| !value.trim().is_empty())
+        .cloned();
+    let opencode_storage_override = env_overrides
+        .get("GIT_AI_OPENCODE_STORAGE_PATH")
+        .filter(|value| !value.trim().is_empty())
+        .cloned();
+    let amp_threads_override = env_overrides
+        .get("GIT_AI_AMP_THREADS_PATH")
+        .filter(|value| !value.trim().is_empty())
+        .cloned();
+
+    for checkpoint in &mut checkpoints {
+        let Some(agent_id) = checkpoint.agent_id.as_ref() else {
+            continue;
+        };
+        match agent_id.tool.as_str() {
+            "cursor" => {
+                if let Some(path) = cursor_db_override.as_ref() {
+                    let metadata = checkpoint.agent_metadata.get_or_insert_with(HashMap::new);
+                    metadata.insert("__test_cursor_db_path".to_string(), path.clone());
+                    changed = true;
+                }
+            }
+            "opencode" => {
+                if let Some(path) = opencode_storage_override.as_ref() {
+                    let metadata = checkpoint.agent_metadata.get_or_insert_with(HashMap::new);
+                    metadata.insert("__test_storage_path".to_string(), path.clone());
+                    changed = true;
+                }
+            }
+            "amp" => {
+                if let Some(path) = amp_threads_override.as_ref() {
+                    let metadata = checkpoint.agent_metadata.get_or_insert_with(HashMap::new);
+                    metadata.insert("__test_amp_threads_path".to_string(), path.clone());
+                    changed = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if changed {
+        working_log.write_all_checkpoints(&checkpoints)?;
+    }
+    Ok(())
+}
+
+fn trace_argv_has_executable_prefix(argv: &[String]) -> bool {
+    let Some(first) = argv.first() else {
+        return false;
+    };
+    let file_name = Path::new(first)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(first);
+    file_name.eq_ignore_ascii_case("git") || file_name.eq_ignore_ascii_case("git.exe")
+}
+
+fn trace_argv_invocation_tokens(argv: &[String]) -> &[String] {
+    if trace_argv_has_executable_prefix(argv) {
+        &argv[1..]
+    } else {
+        argv
+    }
+}
+
 fn argv_primary_command(argv: &[String]) -> Option<&str> {
-    let mut i = if argv.is_empty() { 0 } else { 1 };
-    while i < argv.len() {
-        let arg = argv[i].as_str();
+    let args = trace_argv_invocation_tokens(argv);
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
         if matches!(arg, "-C" | "-c" | "--git-dir" | "--work-tree") {
             i = i.saturating_add(2);
             continue;
@@ -1589,12 +1934,13 @@ fn argv_primary_command(argv: &[String]) -> Option<&str> {
 }
 
 fn worktree_from_argv(argv: &[String]) -> Option<String> {
-    let mut i = if argv.is_empty() { 0 } else { 1 };
-    while i < argv.len() {
-        match argv[i].as_str() {
+    let args = trace_argv_invocation_tokens(argv);
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
             "-C" => {
-                if i + 1 < argv.len() {
-                    let candidate = PathBuf::from(&argv[i + 1]);
+                if i + 1 < args.len() {
+                    let candidate = PathBuf::from(&args[i + 1]);
                     let normalized = candidate
                         .canonicalize()
                         .unwrap_or(candidate)
@@ -1624,6 +1970,149 @@ fn is_tracked_command_name(name: &str) -> bool {
     )
 }
 
+fn parse_alias_tokens_for_daemon(value: &str) -> Option<Vec<String>> {
+    let trimmed = value.trim_start();
+    if trimmed.starts_with('!') {
+        return None;
+    }
+
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+
+    for ch in trimmed.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+
+        if in_single {
+            if ch == '\'' {
+                in_single = false;
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+
+        if in_double {
+            match ch {
+                '"' => in_double = false,
+                '\\' => escaped = true,
+                _ => current.push(ch),
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            '\\' => escaped = true,
+            c if c.is_whitespace() => {
+                if !current.is_empty() {
+                    tokens.push(current.clone());
+                    current.clear();
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if escaped {
+        current.push('\\');
+    }
+    if in_single || in_double {
+        return None;
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    Some(tokens)
+}
+
+fn resolve_alias_invocation_for_daemon(
+    parsed: &ParsedGitInvocation,
+    repository: &Repository,
+) -> Option<ParsedGitInvocation> {
+    let mut current = parsed.clone();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    loop {
+        let command = match current.command.as_deref() {
+            Some(command) => command,
+            None => return Some(current),
+        };
+
+        if !seen.insert(command.to_string()) {
+            return None;
+        }
+
+        let key = format!("alias.{}", command);
+        let alias_value = match repository.config_get_str(&key) {
+            Ok(Some(value)) => value,
+            _ => return Some(current),
+        };
+
+        let alias_tokens = parse_alias_tokens_for_daemon(&alias_value)?;
+        let mut expanded_args = Vec::new();
+        expanded_args.extend(current.global_args.iter().cloned());
+        expanded_args.extend(alias_tokens);
+        expanded_args.extend(current.command_args.iter().cloned());
+        current = parse_git_cli_args(&expanded_args);
+    }
+}
+
+fn resolve_alias_invocation_from_trace_argv(
+    argv: &[String],
+    worktree: Option<&str>,
+) -> Option<ParsedGitInvocation> {
+    let invocation = parse_git_cli_args(trace_argv_invocation_tokens(argv));
+    let Some(command) = invocation.command.as_deref() else {
+        return Some(invocation);
+    };
+    if is_tracked_command_name(command) {
+        return Some(invocation);
+    }
+
+    let repository = if let Some(worktree) = worktree {
+        find_repository_in_path(worktree).ok()
+    } else {
+        find_repository(&invocation.global_args).ok()
+    }?;
+
+    resolve_alias_invocation_for_daemon(&invocation, &repository)
+}
+
+fn resolve_command_from_trace_argv(
+    argv: &[String],
+    worktree: Option<&str>,
+) -> (Option<String>, Vec<String>) {
+    let fallback_name = argv_primary_command(argv).map(ToString::to_string);
+    let fallback_argv = argv.to_vec();
+    let Some(resolved) = resolve_alias_invocation_from_trace_argv(argv, worktree) else {
+        return (fallback_name, fallback_argv);
+    };
+
+    let mut normalized_argv = Vec::new();
+    if trace_argv_has_executable_prefix(argv)
+        && let Some(first) = argv.first()
+    {
+        normalized_argv.push(first.clone());
+    }
+    normalized_argv.extend(resolved.to_invocation_vec());
+    if normalized_argv.is_empty() {
+        normalized_argv = fallback_argv;
+    }
+
+    (
+        resolved.command.clone().or_else(|| fallback_name.clone()),
+        normalized_argv,
+    )
+}
+
 fn trace_payload_is_tracked_command(payload: &Value) -> bool {
     if let Some(name) = payload.get("name").and_then(Value::as_str) {
         return is_tracked_command_name(name);
@@ -1638,7 +2127,13 @@ fn trace_payload_is_tracked_command(payload: &Value) -> bool {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    argv_primary_command(&argv)
+    let worktree = payload
+        .get("worktree")
+        .and_then(Value::as_str)
+        .or_else(|| payload.get("repo_working_dir").and_then(Value::as_str));
+    resolve_command_from_trace_argv(&argv, worktree)
+        .0
+        .as_deref()
         .map(is_tracked_command_name)
         .unwrap_or(false)
 }
@@ -1776,6 +2271,26 @@ fn resolve_commit_specs_to_oids(worktree: Option<&str>, specs: &[String]) -> Vec
         && let Ok(repo) = find_repository_in_path(worktree)
     {
         for spec in specs {
+            if spec.contains("..") {
+                let mut args = repo.global_args_for_exec();
+                args.push("rev-list".to_string());
+                args.push("--reverse".to_string());
+                args.push(spec.clone());
+                if let Ok(output) = exec_git(&args)
+                    && let Ok(stdout) = String::from_utf8(output.stdout)
+                {
+                    for oid in stdout
+                        .lines()
+                        .map(str::trim)
+                        .filter(|line| is_valid_oid(line))
+                    {
+                        if !is_zero_oid(oid) {
+                            resolved.push(oid.to_string());
+                        }
+                    }
+                    continue;
+                }
+            }
             if let Ok(object) = repo.revparse_single(spec)
                 && let Ok(commit) = object.peel_to_commit()
             {
@@ -1795,6 +2310,57 @@ fn resolve_commit_specs_to_oids(worktree: Option<&str>, specs: &[String]) -> Vec
         }
     }
     resolved
+}
+
+fn cherry_pick_worktree_key(worktree: Option<&str>) -> String {
+    worktree.unwrap_or("__family__").to_string()
+}
+
+fn cherry_pick_continue_flag(argv: &[String]) -> bool {
+    argv.iter().any(|arg| arg == "--continue")
+}
+
+fn cherry_pick_abort_flag(argv: &[String]) -> bool {
+    argv.iter().any(|arg| arg == "--abort")
+}
+
+fn cherry_pick_created_commits_best_effort(
+    worktree: Option<&str>,
+    original_head: &str,
+    new_head: &str,
+) -> Vec<String> {
+    if original_head.is_empty() || new_head.is_empty() || original_head == new_head {
+        return vec![];
+    }
+    if let Some(worktree) = worktree
+        && let Ok(repo) = find_repository_in_path(worktree)
+        && let Ok(mut commits) = walk_commits_to_base(&repo, new_head, original_head)
+    {
+        commits.reverse();
+        return commits;
+    }
+    vec![new_head.to_string()]
+}
+
+fn align_cherry_pick_commits(
+    mut source_commits: Vec<String>,
+    mut new_commits: Vec<String>,
+) -> (Vec<String>, Vec<String>) {
+    if source_commits.is_empty() && !new_commits.is_empty() {
+        source_commits.push(new_commits[0].clone());
+    }
+    if new_commits.is_empty() && !source_commits.is_empty() {
+        new_commits.push(source_commits[0].clone());
+    }
+    if source_commits.len() > new_commits.len() {
+        source_commits.truncate(new_commits.len());
+    } else if new_commits.len() > source_commits.len() {
+        let keep = source_commits.len();
+        if keep > 0 {
+            new_commits = new_commits.split_off(new_commits.len().saturating_sub(keep));
+        }
+    }
+    (source_commits, new_commits)
 }
 
 fn repo_is_ancestor(
@@ -1855,6 +2421,7 @@ fn should_synthesize_rewrite_from_snapshots(
 ) -> bool {
     let head_changed = pre.head.is_some() && post.head.is_some() && pre.head != post.head;
     let commit_operation = name == "commit";
+    let pull_rebase_operation = name == "pull" && argv.iter().any(|arg| arg == "--rebase");
     let explicit_abort =
         matches!(name, "rebase" | "cherry-pick") && argv.iter().any(|arg| arg == "--abort");
     let explicit_continue =
@@ -1863,6 +2430,7 @@ fn should_synthesize_rewrite_from_snapshots(
     let reset_without_pathspec = name == "reset" && !is_reset_pathspec_command(argv);
     head_changed
         || commit_operation
+        || pull_rebase_operation
         || explicit_abort
         || explicit_continue
         || stash_operation
@@ -1883,6 +2451,7 @@ fn synthesize_rewrite_event(
     post: &RepoSnapshot,
     ref_changes: &[RefChange],
     worktree: Option<&str>,
+    active_cherry_pick: Option<&ActiveCherryPickState>,
 ) -> Option<RewriteLogEvent> {
     match name {
         "commit" => {
@@ -1955,7 +2524,7 @@ fn synthesize_rewrite_event(
             }
         }
         "cherry-pick" => {
-            if argv.iter().any(|arg| arg == "--abort") {
+            if cherry_pick_abort_flag(argv) {
                 Some(RewriteLogEvent::cherry_pick_abort(
                     CherryPickAbortEvent::new(
                         pre.head
@@ -1965,9 +2534,28 @@ fn synthesize_rewrite_event(
                     ),
                 ))
             } else {
-                let (old_head, new_head) = resolve_command_heads(pre, post, ref_changes);
+                let (old_head, new_head_opt) = resolve_command_heads(pre, post, ref_changes);
+                let new_head = new_head_opt.clone().unwrap_or_default();
                 let source_specs = cherry_pick_source_specs_from_argv(argv);
-                let mut source_commits = resolve_commit_specs_to_oids(worktree, &source_specs);
+                let mut source_commits = if cherry_pick_continue_flag(argv) {
+                    active_cherry_pick
+                        .map(|state| state.source_commits.clone())
+                        .unwrap_or_default()
+                } else {
+                    resolve_commit_specs_to_oids(worktree, &source_specs)
+                };
+
+                let mut original_head = if cherry_pick_continue_flag(argv) {
+                    active_cherry_pick
+                        .map(|state| state.original_head.clone())
+                        .unwrap_or_default()
+                } else {
+                    old_head.clone().unwrap_or_default()
+                };
+
+                if original_head.is_empty() {
+                    original_head = old_head.clone().unwrap_or_default();
+                }
                 if source_commits.is_empty()
                     && let Some(old_head) = old_head.clone()
                     && is_valid_oid(&old_head)
@@ -1975,12 +2563,20 @@ fn synthesize_rewrite_event(
                 {
                     source_commits.push(old_head);
                 }
+
+                let mut new_commits =
+                    cherry_pick_created_commits_best_effort(worktree, &original_head, &new_head);
+                if new_commits.is_empty() && !new_head.is_empty() {
+                    new_commits.push(new_head.clone());
+                }
+                let (source_commits, new_commits) =
+                    align_cherry_pick_commits(source_commits, new_commits);
                 Some(RewriteLogEvent::cherry_pick_complete(
                     CherryPickCompleteEvent::new(
-                        old_head.unwrap_or_default(),
-                        new_head.clone().unwrap_or_default(),
+                        original_head,
+                        new_head,
                         source_commits,
-                        vec![new_head.unwrap_or_default()],
+                        new_commits,
                     ),
                 ))
             }

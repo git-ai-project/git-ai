@@ -12,6 +12,7 @@ use git2::Repository;
 use insta::{Settings, assert_debug_snapshot};
 use rand::Rng;
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -350,8 +351,50 @@ impl Default for TestRepo {
 }
 
 impl TestRepo {
+    fn sync_daemon_env_overrides(&self, envs: &[(&str, &str)]) {
+        if !self.git_mode.uses_daemon() || envs.is_empty() {
+            return;
+        }
+
+        let overrides: HashMap<String, String> = envs
+            .iter()
+            .filter_map(|(key, value)| {
+                if matches!(
+                    *key,
+                    "GIT_AI_CURSOR_GLOBAL_DB_PATH"
+                        | "GIT_AI_OPENCODE_STORAGE_PATH"
+                        | "GIT_AI_AMP_THREADS_PATH"
+                ) {
+                    Some(((*key).to_string(), (*value).to_string()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if overrides.is_empty() {
+            return;
+        }
+
+        let request = ControlRequest::EnvOverride {
+            repo_working_dir: self.canonical_path().to_string_lossy().to_string(),
+            env: overrides,
+            wait: Some(true),
+        };
+        let response = send_control_request(&self.daemon_control_socket_path(), &request)
+            .unwrap_or_else(|e| panic!("failed to sync daemon env overrides: {}", e));
+        if !response.ok {
+            panic!(
+                "daemon env override request failed: {}",
+                response
+                    .error
+                    .unwrap_or_else(|| "unknown daemon error".to_string())
+            );
+        }
+    }
+
     fn sync_test_home_config_for_hooks(&self) {
-        if !self.git_mode.uses_hooks() {
+        if !self.git_mode.uses_hooks() && !self.git_mode.uses_daemon() {
             return;
         }
 
@@ -1075,6 +1118,8 @@ impl TestRepo {
     /// Run a raw git command (bypassing git-ai hooks) with custom environment variables.
     /// Useful for creating commits with specific author/committer identities.
     pub fn git_og_with_env(&self, args: &[&str], envs: &[(&str, &str)]) -> Result<String, String> {
+        self.sync_daemon_env_overrides(envs);
+
         #[cfg(windows)]
         let null_hooks = "NUL";
         #[cfg(not(windows))]
@@ -1164,6 +1209,8 @@ impl TestRepo {
         envs: &[(&str, &str)],
         working_dir: Option<&std::path::Path>,
     ) -> Result<String, String> {
+        self.sync_daemon_env_overrides(envs);
+
         let mut command = if self.git_mode.uses_wrapper() {
             Command::new(get_binary_path())
         } else {
