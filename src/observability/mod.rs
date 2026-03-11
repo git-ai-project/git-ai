@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[allow(unused_imports)]
 use crate::metrics::{METRICS_API_VERSION, MetricEvent};
 
 pub mod flush;
@@ -63,6 +64,7 @@ enum LogEnvelope {
     Performance(PerformanceEnvelope),
     #[allow(dead_code)]
     Message(MessageEnvelope),
+    #[allow(dead_code)]
     Metrics(MetricsEnvelope),
 }
 

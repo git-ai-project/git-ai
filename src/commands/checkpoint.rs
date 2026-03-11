@@ -43,6 +43,7 @@ use crate::authorship::working_log::AgentId;
 
 /// Emit at most one `agent_usage` metric per prompt every 2.5 minutes.
 /// This is half of the server-side bucketing window.
+#[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
 const AGENT_USAGE_MIN_INTERVAL_SECS: u64 = 150;
 
 /// Build EventAttributes with repo metadata.
