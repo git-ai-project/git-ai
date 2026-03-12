@@ -66,6 +66,10 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::OnceLock;
 
+const DETERMINISTIC_GIT_NAME: &str = "Graphite Test";
+const DETERMINISTIC_GIT_EMAIL: &str = "graphite-test@example.com";
+const DETERMINISTIC_GIT_DATE: &str = "2000-01-01T00:00:00+00:00";
+
 // ---------------------------------------------------------------------------
 // Helper utilities
 // ---------------------------------------------------------------------------
@@ -159,6 +163,45 @@ fn wrapper_path() -> String {
     format!("{}{}{}", wrapper_dir.display(), sep, original_path)
 }
 
+fn apply_deterministic_git_env(command: &mut Command, repo: &TestRepo) {
+    command.env("HOME", repo.test_home_path());
+    command.env(
+        "GIT_CONFIG_GLOBAL",
+        repo.test_home_path().join(".gitconfig"),
+    );
+
+    command.env("GIT_AUTHOR_NAME", DETERMINISTIC_GIT_NAME);
+    command.env("GIT_AUTHOR_EMAIL", DETERMINISTIC_GIT_EMAIL);
+    command.env("GIT_AUTHOR_DATE", DETERMINISTIC_GIT_DATE);
+    command.env("GIT_COMMITTER_NAME", DETERMINISTIC_GIT_NAME);
+    command.env("GIT_COMMITTER_EMAIL", DETERMINISTIC_GIT_EMAIL);
+    command.env("GIT_COMMITTER_DATE", DETERMINISTIC_GIT_DATE);
+    command.env("TZ", "UTC");
+    command.env("LC_ALL", "C");
+    command.env("LANG", "C");
+    command.env("GIT_CONFIG_NOSYSTEM", "1");
+    command.env("GIT_TERMINAL_PROMPT", "0");
+}
+
+fn assert_head_branch(repo: &TestRepo, expected_branch: &str) {
+    let current = repo.current_branch();
+    assert_eq!(
+        current, expected_branch,
+        "expected HEAD branch {expected_branch}, found {current}"
+    );
+}
+
+fn assert_worktree_clean(repo: &TestRepo) {
+    let status = repo
+        .git(&["status", "--porcelain"])
+        .expect("git status should succeed");
+    assert!(
+        status.trim().is_empty(),
+        "expected clean worktree, found:\n{}",
+        status
+    );
+}
+
 /// Execute a `gt` command inside the given TestRepo directory.
 ///
 /// The key insight: `gt` calls `git` internally for commits, rebases, etc.
@@ -199,13 +242,13 @@ fn gt(repo: &TestRepo, args: &[&str]) -> Result<String, String> {
     // in src/config.rs, which probes well-known system paths (/usr/bin/git, etc.).
     // No explicit env var is needed for delegation.
 
-    // Set up environment for git-ai to work properly (both wrapper and hooks)
-    command.env("HOME", repo.test_home_path());
-    command.env(
-        "GIT_CONFIG_GLOBAL",
-        repo.test_home_path().join(".gitconfig"),
-    );
-    command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
+    // Set deterministic git metadata + isolated config/locale across all gt invocations.
+    apply_deterministic_git_env(&mut command, repo);
+
+    // Only set hook-mode env in hook-based test modes.
+    if repo.mode().uses_hooks() {
+        command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
+    }
     command.env("GIT_AI_TEST_DB_PATH", repo.test_db_path().to_str().unwrap());
 
     // Isolate Graphite's config and data directories per test to prevent
@@ -243,9 +286,13 @@ fn gt(repo: &TestRepo, args: &[&str]) -> Result<String, String> {
         } else {
             format!("{}{}", stdout, stderr)
         };
+        // Ensure daemon-mode processing is fully settled before assertions execute.
+        repo.sync_daemon();
         Ok(combined)
     } else {
         let combined_err = format!("{}{}", stderr, stdout);
+        // Even on failures, wait for daemon processing to settle before returning.
+        repo.sync_daemon();
         Err(combined_err)
     }
 }
@@ -255,6 +302,10 @@ fn gt(repo: &TestRepo, args: &[&str]) -> Result<String, String> {
 /// The wrapper handles commit-time attribution, while hooks handle
 /// the old-SHA → new-SHA note remapping during rebases.
 fn install_hooks(repo: &TestRepo) {
+    if !repo.mode().uses_hooks() {
+        return;
+    }
+
     let binary_path = get_binary_path();
     let mut command = Command::new(binary_path);
     command
@@ -325,6 +376,8 @@ fn test_gt_create_preserves_ai_attribution() {
         &["create", "feature-branch", "-m", "add feature with AI"],
     )
     .expect("gt create should succeed");
+    assert_head_branch(&repo, "feature-branch");
+    assert_worktree_clean(&repo);
 
     // Verify attribution is preserved
     file.assert_lines_and_blame(lines![
@@ -355,6 +408,8 @@ fn test_gt_create_stacked_branches_preserve_attribution() {
     repo.git(&["add", "-A"]).unwrap();
     gt(&repo, &["create", "branch-2", "-m", "second branch"])
         .expect("gt create branch-2 should succeed");
+    assert_head_branch(&repo, "branch-2");
+    assert_worktree_clean(&repo);
 
     // Verify attribution on both files from the tip of the stack
     file1.assert_lines_and_blame(lines!["file1 ai line".ai(), "file1 human line".human(),]);
@@ -362,6 +417,7 @@ fn test_gt_create_stacked_branches_preserve_attribution() {
 
     // Navigate down and verify attribution still correct on branch-1
     gt(&repo, &["checkout", "branch-1"]).expect("gt checkout should succeed");
+    assert_head_branch(&repo, "branch-1");
     file1.assert_lines_and_blame(lines!["file1 ai line".ai(), "file1 human line".human(),]);
 }
 
@@ -380,6 +436,8 @@ fn test_gt_create_empty_branch() {
     // Create empty branch (no changes)
     gt(&repo, &["create", "empty-branch", "-m", "empty branch"])
         .expect("gt create empty branch should succeed");
+    assert_head_branch(&repo, "empty-branch");
+    assert_worktree_clean(&repo);
 
     // Attribution on existing file should be unchanged
     file.assert_lines_and_blame(lines!["ai content".ai(), "human content".human(),]);
@@ -407,6 +465,8 @@ fn test_gt_modify_amend_preserves_attribution() {
     file2.set_contents(lines!["new ai line".ai()]);
     repo.git(&["add", "-A"]).unwrap();
     gt(&repo, &["modify", "-m", "amended with more AI"]).expect("gt modify should succeed");
+    assert_head_branch(&repo, "modify-branch");
+    assert_worktree_clean(&repo);
 
     // Both files should have correct attribution
     file.assert_lines_and_blame(lines![
@@ -436,6 +496,8 @@ fn test_gt_modify_new_commit_preserves_attribution() {
     repo.git(&["add", "-A"]).unwrap();
     gt(&repo, &["modify", "--commit", "-m", "second commit"])
         .expect("gt modify --commit should succeed");
+    assert_head_branch(&repo, "modify-commit-branch");
+    assert_worktree_clean(&repo);
 
     // Both files should have correct attribution
     file.assert_lines_and_blame(lines!["ai line 1".ai(), "human line 1".human(),]);
@@ -511,6 +573,8 @@ fn test_gt_squash_preserves_ai_lines() {
 
     // Squash all commits in the branch
     gt(&repo, &["squash", "-m", "squashed"]).expect("gt squash should succeed");
+    assert_head_branch(&repo, "squash-branch");
+    assert_worktree_clean(&repo);
 
     // Verify all attribution is preserved after squash
     file.assert_lines_and_blame(lines![
@@ -547,6 +611,8 @@ fn test_gt_squash_mixed_ai_human_across_commits() {
 
     // Squash
     gt(&repo, &["squash", "-m", "squashed mixed"]).expect("gt squash should succeed");
+    assert_head_branch(&repo, "squash-mixed");
+    assert_worktree_clean(&repo);
 
     file.assert_lines_and_blame(lines![
         "human only line 1".human(),
@@ -667,6 +733,8 @@ fn test_gt_fold_preserves_attribution() {
 
     // Fold child into parent
     gt(&repo, &["fold"]).expect("gt fold should succeed");
+    assert_head_branch(&repo, "fold-parent");
+    assert_worktree_clean(&repo);
 
     // After fold, we should be on fold-parent with both files
     // and all attribution preserved
@@ -701,6 +769,8 @@ fn test_gt_fold_with_mixed_content() {
 
     // Fold child into parent
     gt(&repo, &["fold"]).expect("gt fold should succeed");
+    assert_head_branch(&repo, "fold-mixed-parent");
+    assert_worktree_clean(&repo);
 
     file.assert_lines_and_blame(lines![
         "parent line 1".human(),
@@ -964,13 +1034,14 @@ fn test_gt_rename_preserves_attribution() {
 
     // Rename the branch
     gt(&repo, &["rename", "new-name"]).expect("gt rename should succeed");
+    assert_head_branch(&repo, "new-name");
+    assert_worktree_clean(&repo);
 
     // Verify attribution is unchanged
     file.assert_lines_and_blame(lines!["rename ai".ai(), "rename human".human(),]);
 
-    // Verify we're on the new branch name
-    let current = repo.current_branch();
-    assert_eq!(current, "new-name", "Branch should be renamed");
+    // Verify we're on the new branch name.
+    assert_head_branch(&repo, "new-name");
 }
 
 // ===========================================================================
@@ -992,12 +1063,16 @@ fn test_gt_track_untrack_preserves_attribution() {
 
     // Track it with Graphite
     gt(&repo, &["track", "--parent", "main"]).expect("gt track should succeed");
+    assert_head_branch(&repo, "manual-branch");
+    assert_worktree_clean(&repo);
 
     // Verify attribution after tracking
     file.assert_lines_and_blame(lines!["track ai".ai(), "track human".human(),]);
 
     // Untrack
     gt(&repo, &["untrack"]).expect("gt untrack should succeed");
+    assert_head_branch(&repo, "manual-branch");
+    assert_worktree_clean(&repo);
 
     // Verify attribution after untracking
     file.assert_lines_and_blame(lines!["track ai".ai(), "track human".human(),]);
@@ -1156,6 +1231,8 @@ fn test_gt_create_with_all_flag() {
         &["create", "all-flag-branch", "-a", "-m", "auto stage"],
     )
     .expect("gt create -a should succeed");
+    assert_head_branch(&repo, "all-flag-branch");
+    assert_worktree_clean(&repo);
 
     file.assert_lines_and_blame(lines![
         "human line 1".human(),
@@ -1180,6 +1257,8 @@ fn test_gt_modify_all_flag() {
     // Modify with unstaged changes, use -a flag
     file.set_contents(lines!["initial line", "ai addition".ai()]);
     gt(&repo, &["modify", "-a", "-m", "modified with ai"]).expect("gt modify -a should succeed");
+    assert_head_branch(&repo, "modify-all-branch");
+    assert_worktree_clean(&repo);
 
     file.assert_lines_and_blame(lines!["initial line".human(), "ai addition".ai(),]);
 }
