@@ -69,3 +69,20 @@ Daemon result against `current_wrapper`:
 ## Remaining TODOs
 
 - No open daemon-mode compatibility TODOs in this tracker.
+
+## Phase 3 Robustness Proofs
+
+Additional daemon failure-mode tests now exist in `src/daemon.rs`:
+
+- `test_worker_crash_recovery_replays_remaining_events`
+- `test_trace_exit_before_start_is_deferred_then_applied`
+- `test_trace_buffer_flush_orders_events_and_applies_command`
+- `test_family_worker_burst_backlog_drains`
+
+Focused verification command:
+
+`cargo test --package git-ai --lib daemon::tests::test_trace_ -- --nocapture`
+
+Result:
+
+- All targeted ordering/deferred-exit tests pass.

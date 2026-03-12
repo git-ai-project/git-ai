@@ -3890,6 +3890,190 @@ mod tests {
     }
 
     #[test]
+    fn test_trace_exit_before_start_is_deferred_then_applied() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_repo(&repo);
+        let common_dir = repo.join(".git");
+        let store = FamilyStore::for_common_dir(&common_dir).unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let runtime = FamilyRuntime {
+            store,
+            mode: DaemonMode::Shadow,
+            append_lock: AsyncMutex::new(()),
+            notify_tx: tx,
+            applied_seq: AtomicU64::new(0),
+            applied_notify: Notify::new(),
+        };
+        let mut state = FamilyState::default();
+        let worktree = repo.to_string_lossy().to_string();
+
+        let exit = EventEnvelope {
+            seq: 1,
+            repo_family: common_dir.to_string_lossy().to_string(),
+            source: "trace2".to_string(),
+            event_type: TRACE_EVENT_TYPE.to_string(),
+            received_at_ns: 1,
+            payload: json!({
+                "event": "exit",
+                "sid": "root-sid",
+                "name": "checkout",
+                "argv": ["git", "checkout", "main"],
+                "code": 0,
+                "worktree": worktree,
+                "repo_working_dir": worktree
+            }),
+            checksum: "x".to_string(),
+        };
+        apply_trace_event(&runtime, &mut state, &exit).unwrap();
+        assert_eq!(state.commands.len(), 0);
+        assert_eq!(state.deferred_root_exits.len(), 1);
+
+        let start = EventEnvelope {
+            seq: 2,
+            repo_family: common_dir.to_string_lossy().to_string(),
+            source: "trace2".to_string(),
+            event_type: TRACE_EVENT_TYPE.to_string(),
+            received_at_ns: 2,
+            payload: json!({
+                "event": "start",
+                "sid": "root-sid",
+                "argv": ["git", "checkout", "main"],
+                "worktree": repo.to_string_lossy().to_string(),
+                "repo_working_dir": repo.to_string_lossy().to_string()
+            }),
+            checksum: "y".to_string(),
+        };
+        apply_trace_event(&runtime, &mut state, &start).unwrap();
+
+        assert!(
+            state.deferred_root_exits.is_empty(),
+            "deferred exit should be consumed when start arrives"
+        );
+        assert!(
+            state.pending_roots.is_empty(),
+            "pending root should be drained after deferred exit is applied"
+        );
+        assert_eq!(state.commands.len(), 1);
+        let applied = &state.commands[0];
+        assert_eq!(applied.sid, "root-sid");
+        assert_eq!(applied.name, "checkout");
+        assert_eq!(applied.exit_code, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial]
+    async fn test_trace_buffer_flush_orders_events_and_applies_command() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_repo(&repo);
+        let common_dir = repo.join(".git");
+        let daemon_dir = dir.path().join("daemon");
+        let config = DaemonConfig {
+            internal_dir: dir.path().join("internal"),
+            lock_path: daemon_dir.join("daemon.lock"),
+            trace_socket_path: daemon_dir.join("trace2.sock"),
+            control_socket_path: daemon_dir.join("control.sock"),
+            mode: DaemonMode::Shadow,
+        };
+        let coordinator = Arc::new(DaemonCoordinator::new(config));
+        let worktree = repo.to_string_lossy().to_string();
+
+        let cmd_resp = coordinator
+            .ingest_trace_payload(
+                json!({
+                    "event": "cmd_name",
+                    "sid": "root-ordered",
+                    "name": "checkout",
+                    "t_abs": 3.0
+                }),
+                false,
+            )
+            .await
+            .expect("cmd_name ingest should succeed");
+        assert_eq!(
+            cmd_resp
+                .data
+                .as_ref()
+                .and_then(|v| v.get("buffered"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+
+        coordinator
+            .ingest_trace_payload(
+                json!({
+                    "event": "exit",
+                    "sid": "root-ordered",
+                    "code": 0,
+                    "t_abs": 4.0
+                }),
+                false,
+            )
+            .await
+            .expect("exit ingest should succeed");
+
+        coordinator
+            .ingest_trace_payload(
+                json!({
+                    "event": "start",
+                    "sid": "root-ordered",
+                    "argv": ["git", "checkout", "main"],
+                    "t_abs": 2.0
+                }),
+                false,
+            )
+            .await
+            .expect("start ingest should succeed");
+
+        let def_repo_resp = coordinator
+            .ingest_trace_payload(
+                json!({
+                    "event": "def_repo",
+                    "sid": "root-ordered",
+                    "worktree": worktree,
+                    "repo_working_dir": repo.to_string_lossy().to_string(),
+                    "t_abs": 1.0
+                }),
+                false,
+            )
+            .await
+            .expect("def_repo ingest should resolve family and flush buffer");
+
+        let applied_seq = def_repo_resp.seq.expect("def_repo should return a sequence");
+        let barrier = coordinator
+            .wait_through_seq(repo.to_string_lossy().to_string(), applied_seq)
+            .await
+            .expect("barrier should succeed");
+        assert_eq!(barrier.applied_seq, Some(applied_seq));
+
+        let store = FamilyStore::for_common_dir(&common_dir).unwrap();
+        let state = store.load_state().expect("family state should be readable");
+        assert!(
+            state.pending_roots.is_empty() && state.deferred_root_exits.is_empty(),
+            "buffer flush should leave no pending/deferred roots"
+        );
+        assert_eq!(state.commands.len(), 1);
+
+        let command = &state.commands[0];
+        assert_eq!(command.sid, "root-ordered");
+        assert_eq!(command.name, "checkout");
+        assert_eq!(
+            command.argv,
+            vec!["git".to_string(), "checkout".to_string(), "main".to_string()]
+        );
+        assert_eq!(
+            command.seq, 3,
+            "command should be applied at the buffered exit sequence after sorted start/cmd/exit"
+        );
+        assert_eq!(
+            command.worktree.as_deref(),
+            Some(repo.to_string_lossy().as_ref()),
+            "buffered events should inherit resolved worktree before flush"
+        );
+    }
+
+    #[test]
     fn test_reconcile_event_updates_last_snapshot() {
         let dir = tempdir().unwrap();
         let repo_path = dir.path().join("repo");
