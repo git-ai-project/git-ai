@@ -19,7 +19,7 @@ futures = "0.3"
 rusqlite = { version = "0.31", features = ["bundled"] }
 libc = "0.2"
 git2 = { version = "0.20.2", optional = true }
-jsonc-parser = { version = "0.27", features = ["cst"] }
+jsonc-parser = { version = "0.29", features = ["cst"] }
 dirs = "5.0"
 minreq = { version = "2.12", features = ["https-rustls-probe"] }
 url = "2.5"
