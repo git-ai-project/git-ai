@@ -1,9 +1,12 @@
 mod repos;
 
+use git_ai::daemon::{ControlRequest, send_control_request};
 use repos::test_repo::{GitTestMode, TestRepo, real_git_executable};
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::Duration;
 
 fn git_common_dir(repo: &TestRepo) -> PathBuf {
     let common_dir = repo
@@ -35,6 +38,38 @@ fn read_global_git_config(repo: &TestRepo, key: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+fn daemon_trace_socket_path(repo: &TestRepo) -> PathBuf {
+    repo.test_home_path()
+        .join(".git-ai")
+        .join("internal")
+        .join("daemon")
+        .join("trace2.sock")
+}
+
+fn daemon_control_socket_path(repo: &TestRepo) -> PathBuf {
+    repo.test_home_path()
+        .join(".git-ai")
+        .join("internal")
+        .join("daemon")
+        .join("control.sock")
+}
+
+fn wait_for_daemon_sockets(repo: &TestRepo) {
+    let control = daemon_control_socket_path(repo);
+    let trace = daemon_trace_socket_path(repo);
+    for _ in 0..200 {
+        if control.exists() && trace.exists() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!(
+        "daemon sockets did not become ready: control={}, trace={}",
+        control.display(),
+        trace.display()
+    );
 }
 
 #[test]
@@ -121,4 +156,103 @@ fn install_hooks_async_mode_dry_run_does_not_write_trace2_global_config() {
         nesting.is_none(),
         "install-hooks dry-run should not set trace2.eventNesting"
     );
+}
+
+#[test]
+fn daemon_status_does_not_self_emit_trace2_events() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    fs::create_dir_all(repo.test_home_path()).expect("failed to create test HOME directory");
+    let trace_target = format!(
+        "af_unix:stream:{}",
+        daemon_trace_socket_path(&repo).to_string_lossy()
+    );
+
+    let set_target = Command::new(real_git_executable())
+        .args(["config", "--global", "trace2.eventTarget", &trace_target])
+        .current_dir(repo.path())
+        .env("HOME", repo.test_home_path())
+        .env(
+            "GIT_CONFIG_GLOBAL",
+            repo.test_home_path().join(".gitconfig"),
+        )
+        .output()
+        .expect("failed to set global trace2.eventTarget");
+    assert!(
+        set_target.status.success(),
+        "setting trace2.eventTarget failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&set_target.stdout),
+        String::from_utf8_lossy(&set_target.stderr)
+    );
+
+    let set_nesting = Command::new(real_git_executable())
+        .args(["config", "--global", "trace2.eventNesting", "10"])
+        .current_dir(repo.path())
+        .env("HOME", repo.test_home_path())
+        .env(
+            "GIT_CONFIG_GLOBAL",
+            repo.test_home_path().join(".gitconfig"),
+        )
+        .output()
+        .expect("failed to set global trace2.eventNesting");
+    assert!(
+        set_nesting.status.success(),
+        "setting trace2.eventNesting failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&set_nesting.stdout),
+        String::from_utf8_lossy(&set_nesting.stderr)
+    );
+
+    let mut daemon = Command::new(repos::test_repo::get_binary_path())
+        .arg("daemon")
+        .arg("start")
+        .arg("--mode")
+        .arg("write")
+        .current_dir(repo.path())
+        .env("HOME", repo.test_home_path())
+        .env(
+            "GIT_CONFIG_GLOBAL",
+            repo.test_home_path().join(".gitconfig"),
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to start daemon");
+
+    wait_for_daemon_sockets(&repo);
+
+    let repo_working_dir = repo.canonical_path().to_string_lossy().to_string();
+    let status_response = send_control_request(
+        &daemon_control_socket_path(&repo),
+        &ControlRequest::StatusFamily { repo_working_dir },
+    )
+    .expect("status request failed");
+    assert!(status_response.ok, "daemon status should succeed");
+    let status_data = status_response.data.expect("status response missing data");
+    let latest_seq = status_data
+        .get("latest_seq")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(u64::MAX);
+    let cursor = status_data
+        .get("cursor")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(u64::MAX);
+
+    assert_eq!(
+        latest_seq, 0,
+        "daemon status should not create self-trace events when global trace2 target points to daemon"
+    );
+    assert_eq!(cursor, 0);
+
+    let _ = send_control_request(
+        &daemon_control_socket_path(&repo),
+        &ControlRequest::Shutdown,
+    );
+    for _ in 0..100 {
+        match daemon.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) => thread::sleep(Duration::from_millis(20)),
+            Err(_) => break,
+        }
+    }
+    let _ = daemon.kill();
+    let _ = daemon.wait();
 }

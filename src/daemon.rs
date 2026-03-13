@@ -3969,7 +3969,18 @@ fn handle_trace_connection(
     Ok(())
 }
 
+fn disable_trace2_for_daemon_process() {
+    // The daemon executes internal git commands while processing events and control requests.
+    // If trace2.eventTarget points at this daemon socket globally, those internal git
+    // commands can recursively feed trace2 events back into the daemon and starve progress.
+    // Force-disable trace2 emission for the daemon process and all of its child git commands.
+    unsafe {
+        std::env::set_var("GIT_TRACE2_EVENT", "0");
+    }
+}
+
 pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
+    disable_trace2_for_daemon_process();
     config.ensure_parent_dirs()?;
     let _lock = DaemonLock::acquire(&config.lock_path)?;
     let _active_guard = DaemonProcessActiveGuard::enter();
