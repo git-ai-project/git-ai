@@ -1,3 +1,4 @@
+use crate::api::metrics::MetricsUploadResponse;
 use crate::api::{ApiClient, ApiContext, upload_metrics_with_retry};
 use crate::config::{Config, get_or_create_distinct_id};
 use crate::git::find_repository_in_path;
@@ -5,7 +6,7 @@ use crate::metrics::db::MetricsDatabase;
 use crate::metrics::{MetricEvent, MetricsBatch};
 use futures::stream::{self, StreamExt};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -112,6 +113,7 @@ pub fn handle_flush_logs(args: &[String]) {
         if !is_background_worker {
             eprintln!("No log files to flush.");
         }
+        crate::commands::flush_metrics_db::handle_flush_metrics_db(&[]);
         std::process::exit(0);
     }
 
@@ -185,26 +187,36 @@ pub fn handle_flush_logs(args: &[String]) {
         }
 
         let mut uploaded_batches = 0usize;
+        let mut failed_batches = 0usize;
         for chunk in all_metrics.chunks(crate::observability::MAX_METRICS_PER_ENVELOPE) {
             if send_metrics_events(chunk, &metrics_uploader) {
                 uploaded_batches += 1;
+            } else {
+                failed_batches += 1;
             }
         }
 
         eprintln!(
-            "\nSummary: {} metrics events sent in {} batch request(s) from {} files",
+            "\nSummary: {} metrics events sent in {} batch request(s) from {} files ({} batch request(s) failed)",
             all_metrics.len(),
             uploaded_batches,
-            files_to_delete.len()
+            files_to_delete.len(),
+            failed_batches
         );
 
-        if !files_to_delete.is_empty() {
+        if !files_to_delete.is_empty() && failed_batches == 0 {
             eprintln!("Deleting {} processed log files", files_to_delete.len());
             for file_path in files_to_delete {
                 let _ = fs::remove_file(&file_path);
             }
+        } else if failed_batches > 0 {
+            eprintln!(
+                "Retaining {} log file(s) because one or more metrics batches could not be processed",
+                files_to_delete.len()
+            );
         }
 
+        crate::commands::flush_metrics_db::handle_flush_metrics_db(&[]);
         std::process::exit(0);
     }
 
@@ -289,6 +301,8 @@ pub fn handle_flush_logs(args: &[String]) {
             let _ = fs::remove_file(&file_path);
         }
     }
+
+    crate::commands::flush_metrics_db::handle_flush_metrics_db(&[]);
 
     // Exit 0 - processing completed successfully even if no events were sent
     // (e.g., debug builds skip non-metrics events, which is expected behavior)
@@ -488,6 +502,7 @@ fn process_log_file(
 ) -> Result<usize, Box<dyn std::error::Error>> {
     let content = fs::read_to_string(path)?;
     let mut count = 0;
+    let mut had_unsent_metrics = false;
 
     for line in content.lines() {
         if line.trim().is_empty() {
@@ -502,6 +517,8 @@ fn process_log_file(
             if event_type == Some("metrics") {
                 if send_metrics_envelope(&envelope, metrics_uploader) {
                     sent = true;
+                } else {
+                    had_unsent_metrics = true;
                 }
             } else if !skip_non_metrics {
                 // Only send error/performance/message envelopes if not in dev mode
@@ -533,6 +550,10 @@ fn process_log_file(
                 count += 1;
             }
         }
+    }
+
+    if had_unsent_metrics {
+        return Err("one or more metrics envelopes could not be uploaded or buffered".into());
     }
 
     Ok(count)
@@ -795,41 +816,168 @@ fn send_metrics_events(events: &[MetricEvent], uploader: &MetricsUploader) -> bo
         && let Some(client) = &uploader.client
     {
         match upload_metrics_with_retry(client, &batch, "flush_logs") {
-            Ok(()) => return true,
+            Ok(response) => {
+                let failed_events = failed_metrics_events_for_retry(events, &response);
+                if failed_events.is_empty() {
+                    return true;
+                }
+                eprintln!(
+                    "[metrics] {} event(s) from flush-logs failed on server and will be retried from local DB",
+                    failed_events.len()
+                );
+                return store_metrics_in_db(&failed_events);
+            }
             Err(_) => {
-                store_metrics_in_db(events);
-                return true;
+                return store_metrics_in_db(events);
             }
         }
     }
 
-    store_metrics_in_db(events);
-    true
+    store_metrics_in_db(events)
+}
+
+fn failed_metrics_events_for_retry(
+    events: &[MetricEvent],
+    response: &MetricsUploadResponse,
+) -> Vec<MetricEvent> {
+    let mut failed_indexes = HashSet::new();
+    let mut has_invalid_error_index = false;
+    for error in &response.errors {
+        if error.index < events.len() {
+            failed_indexes.insert(error.index);
+        } else {
+            has_invalid_error_index = true;
+            eprintln!(
+                "[metrics] Server returned out-of-range error index {} for batch of {} events",
+                error.index,
+                events.len()
+            );
+        }
+    }
+
+    if has_invalid_error_index {
+        // Defensive fallback: keep full batch for retry when server indices are inconsistent.
+        return events.to_vec();
+    }
+
+    let mut failed_events = Vec::with_capacity(failed_indexes.len());
+    for (index, event) in events.iter().enumerate() {
+        if failed_indexes.contains(&index) {
+            failed_events.push(event.clone());
+        }
+    }
+
+    failed_events
 }
 
 /// Store metric events in SQLite database for later upload
-fn store_metrics_in_db(events: &[MetricEvent]) {
+fn store_metrics_in_db(events: &[MetricEvent]) -> bool {
     if events.is_empty() {
-        return;
+        return true;
     }
 
-    let event_jsons: Vec<String> = events
-        .iter()
-        .filter_map(|e| serde_json::to_string(e).ok())
-        .collect();
+    let mut event_jsons: Vec<String> = Vec::with_capacity(events.len());
+    for event in events {
+        match serde_json::to_string(event) {
+            Ok(serialized) => event_jsons.push(serialized),
+            Err(e) => {
+                eprintln!("[metrics] Failed to serialize metrics event for local buffering: {e}");
+                return false;
+            }
+        }
+    }
 
     if event_jsons.is_empty() {
-        return;
+        return true;
     }
 
     match MetricsDatabase::global() {
-        Ok(db) => {
-            if let Ok(mut db_lock) = db.lock() {
-                let _ = db_lock.insert_events(&event_jsons);
+        Ok(db) => match db.lock() {
+            Ok(mut db_lock) => match db_lock.insert_events(&event_jsons) {
+                Ok(()) => true,
+                Err(e) => {
+                    eprintln!("[metrics] Failed to insert events into local metrics DB: {e}");
+                    false
+                }
+            },
+            Err(e) => {
+                eprintln!("[metrics] Failed to lock local metrics DB: {e}");
+                false
             }
+        },
+        Err(e) => {
+            eprintln!(
+                "[metrics] Local metrics DB unavailable; unable to buffer {} event(s): {e}",
+                events.len()
+            );
+            false
         }
-        Err(_) => {
-            // Database unavailable - events will be lost
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::metrics::MetricsUploadError;
+    use serde_json::Value;
+    use std::collections::HashMap;
+
+    fn metric_event(id: u32) -> MetricEvent {
+        let mut values = HashMap::new();
+        values.insert("0".to_string(), Value::from(id));
+
+        MetricEvent {
+            timestamp: 1_700_000_000 + id,
+            event_id: 2,
+            values,
+            attrs: HashMap::new(),
         }
+    }
+
+    #[test]
+    fn test_failed_metrics_events_for_retry_empty_errors() {
+        let events = vec![metric_event(1), metric_event(2)];
+        let response = MetricsUploadResponse { errors: vec![] };
+
+        let failed = failed_metrics_events_for_retry(&events, &response);
+        assert!(failed.is_empty());
+    }
+
+    #[test]
+    fn test_failed_metrics_events_for_retry_partial_errors() {
+        let events = vec![metric_event(10), metric_event(11), metric_event(12)];
+        let response = MetricsUploadResponse {
+            errors: vec![
+                MetricsUploadError {
+                    index: 0,
+                    error: "fail-a".to_string(),
+                },
+                MetricsUploadError {
+                    index: 2,
+                    error: "fail-c".to_string(),
+                },
+            ],
+        };
+
+        let failed = failed_metrics_events_for_retry(&events, &response);
+        assert_eq!(failed.len(), 2);
+        assert_eq!(failed[0].values.get("0"), Some(&Value::from(10)));
+        assert_eq!(failed[1].values.get("0"), Some(&Value::from(12)));
+    }
+
+    #[test]
+    fn test_failed_metrics_events_for_retry_invalid_index_retries_whole_batch() {
+        let events = vec![metric_event(7), metric_event(8)];
+        let response = MetricsUploadResponse {
+            errors: vec![MetricsUploadError {
+                index: 999,
+                error: "bad-index".to_string(),
+            }],
+        };
+
+        let failed = failed_metrics_events_for_retry(&events, &response);
+        assert_eq!(failed.len(), 2);
+        assert_eq!(failed[0].values.get("0"), Some(&Value::from(7)));
+        assert_eq!(failed[1].values.get("0"), Some(&Value::from(8)));
     }
 }
