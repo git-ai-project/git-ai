@@ -11,7 +11,7 @@
     "@opencode-ai/plugin": "^1.2.25"
   },
   "devDependencies": {
-    "@types/node": "^20.x",
+    "@types/node": "^25.x",
     "typescript": "^5.8.3"
   }
 }
