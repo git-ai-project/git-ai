@@ -9,32 +9,26 @@ pub struct OAuthClient {
     base_url: String,
 }
 
-const ENV_ALLOW_INSECURE_OAUTH: &str = "GIT_AI_ALLOW_INSECURE";
-
-fn should_allow_insecure_oauth() -> bool {
-    cfg!(debug_assertions) || std::env::var(ENV_ALLOW_INSECURE_OAUTH).unwrap_or_default() == "1"
-}
-
-fn validate_https_url_with_mode(url: &str, allow_insecure: bool) -> Result<(), String> {
-    if allow_insecure {
-        if !url.starts_with("https://") && !url.starts_with("http://") {
-            return Err(format!("Invalid URL scheme: {}", url));
-        }
-    } else if !url.starts_with("https://") {
+/// Validate that a URL uses HTTPS (security requirement for OAuth)
+/// In release builds, only HTTPS is accepted — the HTTP path is not compiled in.
+/// In debug builds, HTTP is also allowed for local development.
+#[cfg(not(debug_assertions))]
+fn validate_https_url(url: &str) -> Result<(), String> {
+    if !url.starts_with("https://") {
         return Err(format!(
             "Security error: OAuth requires HTTPS. URL '{}' is not secure.",
             url
         ));
     }
-
     Ok(())
 }
 
-/// Validate that a URL uses HTTPS (security requirement for OAuth)
-/// Release builds require HTTPS unless GIT_AI_ALLOW_INSECURE=1.
-/// Debug builds allow HTTP for local development.
+#[cfg(debug_assertions)]
 fn validate_https_url(url: &str) -> Result<(), String> {
-    validate_https_url_with_mode(url, should_allow_insecure_oauth())
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Err(format!("Invalid URL scheme: {}", url));
+    }
+    Ok(())
 }
 
 impl OAuthClient {
@@ -261,32 +255,6 @@ mod tests {
     fn test_validate_https_url_with_port() {
         let result = validate_https_url("https://example.com:8443/api");
         assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_validate_https_url_with_mode_strict_rejects_http() {
-        let result = validate_https_url_with_mode("http://example.com", false);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("HTTPS"));
-    }
-
-    #[test]
-    fn test_validate_https_url_with_mode_strict_allows_https() {
-        let result = validate_https_url_with_mode("https://example.com", false);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_validate_https_url_with_mode_allow_insecure_allows_http() {
-        let result = validate_https_url_with_mode("http://localhost:8080", true);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_validate_https_url_with_mode_allow_insecure_rejects_other_scheme() {
-        let result = validate_https_url_with_mode("ftp://example.com", true);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Invalid URL scheme"));
     }
 
     #[cfg(debug_assertions)]
