@@ -17,7 +17,7 @@ impl OpenCodeInstaller {
         home_dir()
             .join(".config")
             .join("opencode")
-            .join("plugin")
+            .join("plugins")
             .join("git-ai.ts")
     }
 
