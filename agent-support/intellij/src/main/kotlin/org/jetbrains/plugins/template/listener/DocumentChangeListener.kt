@@ -11,7 +11,7 @@ import org.jetbrains.plugins.template.services.GitAiService
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 
@@ -19,15 +19,13 @@ import java.util.concurrent.TimeUnit
  * Listens for document changes and triggers git-ai checkpoints when AI agents
  * (like GitHub Copilot) make edits.
  */
-class DocumentChangeListener : BulkAwareDocumentListener.Simple {
+class DocumentChangeListener(
+    private val agentTouchedFiles: ConcurrentHashMap<String, TrackedAgent>,
+    private val scheduler: ScheduledExecutorService,
+) : BulkAwareDocumentListener.Simple {
 
     private val logger = Logger.getInstance(DocumentChangeListener::class.java)
     private val dateFormatter = DateTimeFormatter.ISO_LOCAL_DATE_TIME
-
-    // Debounce scheduler for batching rapid changes
-    private val scheduler = Executors.newSingleThreadScheduledExecutor { r ->
-        Thread(r, "git-ai-checkpoint-scheduler").apply { isDaemon = true }
-    }
 
     // Track pending after_edit checkpoints per file (for debouncing)
     private val pendingCheckpoints = ConcurrentHashMap<String, PendingCheckpoint>()
@@ -83,6 +81,13 @@ class DocumentChangeListener : BulkAwareDocumentListener.Simple {
         fileContentBeforeEdit[filePath] = currentContent
         beforeEditTriggered[filePath] = now
 
+        // Track this file so later VFS refresh events (from patch-based edits) trigger a sweep
+        agentTouchedFiles[filePath] = TrackedAgent(
+            agentName = analysis.sourceName,
+            workspaceRoot = workspaceRoot,
+            lastCheckpointContent = currentContent
+        )
+
         // Trigger before_edit checkpoint
         triggerBeforeEditCheckpoint(
             agentName = analysis.sourceName,
@@ -110,6 +115,11 @@ class DocumentChangeListener : BulkAwareDocumentListener.Simple {
 
         val workspaceRoot = findWorkspaceRoot(file) ?: return
         val contentAfterEdit = document.text
+
+        // Update tracked file content so sweep won't re-checkpoint the same state
+        agentTouchedFiles.computeIfPresent(filePath) { _, existing ->
+            existing.copy(lastCheckpointContent = contentAfterEdit)
+        }
 
         // Cancel any existing pending checkpoint for this file
         pendingCheckpoints[filePath]?.scheduledFuture?.cancel(false)
@@ -153,40 +163,23 @@ class DocumentChangeListener : BulkAwareDocumentListener.Simple {
 
     private fun executeAfterEditCheckpoint(filePath: String) {
         val pending = pendingCheckpoints.remove(filePath) ?: return
-        val contentBefore = fileContentBeforeEdit.remove(filePath)
+        fileContentBeforeEdit.remove(filePath)
         beforeEditTriggered.remove(filePath)
 
         // Convert absolute path to relative path for git-ai
         val relativePath = toRelativePath(pending.filePath, pending.workspaceRoot)
-
-        // Build dirty_files map with current content using relative path
-        val dirtyFiles = mutableMapOf(relativePath to pending.contentAfterEdit)
-        if (contentBefore != null && contentBefore != pending.contentAfterEdit) {
-            // Content actually changed
-        }
 
         val input = AgentV1Input.AiAgent(
             repoWorkingDir = pending.workspaceRoot,
             editedFilepaths = listOf(relativePath),
             agentName = pending.agentName,  // Already formatted by StackTraceAnalyzer
             conversationId = GitAiService.getInstance().sessionId,
-            dirtyFiles = dirtyFiles
+            dirtyFiles = mapOf(relativePath to pending.contentAfterEdit)
         )
 
         logger.warn("Triggering ai_agent checkpoint for ${pending.agentName} on $relativePath")
 
         GitAiService.getInstance().checkpoint(input, pending.workspaceRoot)
-    }
-
-    /**
-     * Converts an absolute file path to a path relative to the workspace root.
-     */
-    private fun toRelativePath(absolutePath: String, workspaceRoot: String): String {
-        return if (absolutePath.startsWith(workspaceRoot)) {
-            absolutePath.removePrefix(workspaceRoot).removePrefix("/")
-        } else {
-            absolutePath
-        }
     }
 
     private fun findWorkspaceRoot(file: VirtualFile): String? {

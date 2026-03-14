@@ -51,8 +51,8 @@ dependencies {
         plugins(providers.gradleProperty("platformPlugins").map { it.split(',') })
 
         // Development-only plugins for testing (not release dependencies)
-        plugin("com.github.copilot", "1.5.63-243")
-        plugin("org.jetbrains.junie", "252.549.165")
+        plugin("com.github.copilot", "1.6.1-243")
+        plugin("org.jetbrains.junie", "253.819.54")
 
         // Module Dependencies. Uses `platformBundledModules` property from the gradle.properties file for bundled IntelliJ Platform modules.
         bundledModules(providers.gradleProperty("platformBundledModules").map { it.split(',') })
