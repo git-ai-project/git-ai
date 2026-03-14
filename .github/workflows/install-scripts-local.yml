@@ -1,4 +1,4 @@
-name: Install Scripts (Local Build)
+name: End-to-End Tests
 
 on:
   pull_request:
@@ -10,12 +10,21 @@ on:
 
 jobs:
   install-local-unix:
-    name: Local install.sh on ${{ matrix.os }}
+    name: E2E ${{ matrix.agent.name }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        agent:
+          - name: claude
+            npm_pkg: "@anthropic-ai/claude-code"
+          - name: codex
+            npm_pkg: "@openai/codex"
+          - name: gemini
+            npm_pkg: "@google/gemini-cli"
+          - name: opencode
+            npm_pkg: "opencode-ai"
 
     steps:
       - name: Checkout code
@@ -32,21 +41,19 @@ jobs:
       - name: Build git-ai
         run: cargo build --release --bin git-ai
 
-      - name: Prepare test home and fake Claude Code
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install agent CLI — ${{ matrix.agent.name }}
+        run: npm install -g "${{ matrix.agent.npm_pkg }}"
+
+      - name: Prepare test home
         run: |
           TEST_HOME="$RUNNER_TEMP/git-ai-home"
-          mkdir -p "$TEST_HOME/.config/fish" "$TEST_HOME/.claude"
+          mkdir -p "$TEST_HOME/.config/fish"
           touch "$TEST_HOME/.bashrc" "$TEST_HOME/.zshrc" "$TEST_HOME/.config/fish/config.fish"
           echo "HOME=$TEST_HOME" >> "$GITHUB_ENV"
-
-          BIN_DIR="$RUNNER_TEMP/fake-bin"
-          mkdir -p "$BIN_DIR"
-          cat > "$BIN_DIR/claude" <<'EOF'
-          #!/bin/sh
-          echo "2.0.0 (Claude Code)"
-          EOF
-          chmod +x "$BIN_DIR/claude"
-          echo "$BIN_DIR" >> "$GITHUB_PATH"
 
       - name: Run install.sh with local binary
         env:
@@ -55,21 +62,97 @@ jobs:
           chmod +x ./install.sh
           ./install.sh
 
-      - name: Verify shell configs and Claude hooks
+      - name: Verify shell configs and agent hooks
         run: |
           INSTALL_DIR="$HOME/.git-ai/bin"
           test -x "$INSTALL_DIR/git-ai"
           grep -F "$INSTALL_DIR" "$HOME/.bashrc"
           grep -F "$INSTALL_DIR" "$HOME/.zshrc"
           grep -F "fish_add_path -g \"$INSTALL_DIR\"" "$HOME/.config/fish/config.fish"
-          grep -F "checkpoint claude" "$HOME/.claude/settings.json"
+          case "${{ matrix.agent.name }}" in
+            claude)
+              grep -F "checkpoint claude" "$HOME/.claude/settings.json"
+              ;;
+            codex)
+              # Codex uses TOML array format: notify = ["<bin>", "checkpoint", "codex", ...]
+              grep -F "checkpoint" "$HOME/.codex/config.toml"
+              ;;
+            gemini)
+              grep -F "checkpoint gemini" "$HOME/.gemini/settings.json"
+              ;;
+            opencode)
+              test -f "$HOME/.config/opencode/plugin/git-ai.ts"
+              ;;
+          esac
           # Verify ~/.local/bin/git-ai symlink
           test -L "$HOME/.local/bin/git-ai"
           readlink "$HOME/.local/bin/git-ai" | grep -qF "$INSTALL_DIR/git-ai"
 
+      - name: Set up E2E commit test environment
+        run: |
+          INSTALL_DIR="$HOME/.git-ai/bin"
+          # Create a fresh test repo
+          rm -rf /tmp/e2e-test-repo
+          mkdir -p /tmp/e2e-test-repo
+          cd /tmp/e2e-test-repo
+          git init
+          git config user.email "e2e-test@example.com"
+          git config user.name "E2E Test"
+          echo "# E2E Test Repo" > README.md
+          git add README.md
+          # The proxy symlink doesn't exist yet, so 'git' here is still the real system git
+          git commit -m "Initial commit"
+          # Create proxy symlink AFTER initial commit so it only affects subsequent commits
+          ln -sf "$INSTALL_DIR/git-ai" "$INSTALL_DIR/git"
+          # Add install dir to PATH for subsequent steps
+          echo "$INSTALL_DIR" >> "$GITHUB_PATH"
+
+      - name: Run git-ai install in E2E test repo
+        run: |
+          INSTALL_DIR="$HOME/.git-ai/bin"
+          cd /tmp/e2e-test-repo
+          "$INSTALL_DIR/git-ai" install
+
+      - name: Run synthetic agent commit
+        env:
+          RESULTS_DIR: /tmp/e2e-results/${{ matrix.agent.name }}
+        run: |
+          mkdir -p "$RESULTS_DIR"
+          bash "$GITHUB_WORKSPACE/scripts/nightly/test-synthetic-checkpoint.sh" \
+            "${{ matrix.agent.name }}" /tmp/e2e-test-repo
+
+      - name: Verify attribution pipeline (note, schema, prompts, stats, blame)
+        env:
+          RESULTS_DIR: /tmp/e2e-results/${{ matrix.agent.name }}
+        run: |
+          mkdir -p "$RESULTS_DIR"
+          bash "$GITHUB_WORKSPACE/scripts/nightly/verify-synthetic-attribution.sh" \
+            "${{ matrix.agent.name }}" /tmp/e2e-test-repo
+
+      - name: Upload E2E test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-install-${{ matrix.agent.name }}-${{ matrix.os }}
+          path: /tmp/e2e-results/
+          retention-days: 7
+          if-no-files-found: warn
+
   install-local-windows:
-    name: Local install.ps1 on windows-latest
+    name: E2E ${{ matrix.agent.name }} on windows-latest
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        agent:
+          - name: claude
+            npm_pkg: "@anthropic-ai/claude-code"
+          - name: codex
+            npm_pkg: "@openai/codex"
+          - name: gemini
+            npm_pkg: "@google/gemini-cli"
+          - name: opencode
+            npm_pkg: "opencode-ai"
 
     steps:
       - name: Checkout code
@@ -86,7 +169,14 @@ jobs:
       - name: Build git-ai
         run: cargo build --release --bin git-ai
 
-      - name: Prepare test home and fake Claude Code
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install agent CLI — ${{ matrix.agent.name }}
+        run: npm install -g "${{ matrix.agent.npm_pkg }}"
+
+      - name: Prepare test home
         shell: pwsh
         run: |
           $testHome = Join-Path $env:RUNNER_TEMP "git-ai-home"
@@ -96,15 +186,6 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value "TEST_HOME=$testHome"
           Add-Content -Path $env:GITHUB_ENV -Value "TEST_HOME_DRIVE=$homeDrive"
           Add-Content -Path $env:GITHUB_ENV -Value "TEST_HOME_PATH=$homePath"
-
-          $claudeDir = Join-Path $testHome ".claude"
-          New-Item -ItemType Directory -Force -Path $claudeDir | Out-Null
-
-          $binDir = Join-Path $env:RUNNER_TEMP "fake-bin"
-          New-Item -ItemType Directory -Force -Path $binDir | Out-Null
-          $claudeCmd = Join-Path $binDir "claude.cmd"
-          "@echo 2.0.0 (Claude Code)" | Out-File -FilePath $claudeCmd -Encoding ASCII -Force
-          Add-Content -Path $env:GITHUB_PATH -Value $binDir
 
       - name: Run install.ps1 with local binary
         shell: pwsh
@@ -118,7 +199,7 @@ jobs:
           Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
           ./install.ps1
 
-      - name: Verify Claude hooks
+      - name: Verify agent hooks
         shell: pwsh
         env:
           HOME: ${{ env.TEST_HOME }}
@@ -128,5 +209,219 @@ jobs:
         run: |
           $installDir = Join-Path $env:USERPROFILE ".git-ai\bin"
           if (-not (Test-Path -LiteralPath (Join-Path $installDir "git-ai.exe"))) { throw "git-ai.exe not installed" }
-          $settings = Join-Path $env:USERPROFILE ".claude\settings.json"
-          if (-not (Select-String -Path $settings -Pattern "checkpoint claude")) { throw "Claude hooks not configured" }
+          switch ("${{ matrix.agent.name }}") {
+            "claude" {
+              $settings = Join-Path $env:USERPROFILE ".claude\settings.json"
+              if (-not (Select-String -Path $settings -Pattern "checkpoint claude")) { throw "Claude hooks not configured" }
+            }
+            "codex" {
+              $config = Join-Path $env:USERPROFILE ".codex\config.toml"
+              # Codex uses TOML array format: notify = ["<bin>", "checkpoint", "codex", ...]
+              if (-not (Select-String -Path $config -Pattern "checkpoint")) { throw "Codex hooks not configured" }
+            }
+            "gemini" {
+              $settings = Join-Path $env:USERPROFILE ".gemini\settings.json"
+              if (-not (Select-String -Path $settings -Pattern "checkpoint gemini")) { throw "Gemini hooks not configured" }
+            }
+            "opencode" {
+              $plugin = Join-Path $env:USERPROFILE ".config\opencode\plugin\git-ai.ts"
+              if (-not (Test-Path -LiteralPath $plugin)) { throw "OpenCode plugin not installed" }
+            }
+          }
+
+      - name: Set up E2E commit test environment
+        shell: pwsh
+        env:
+          HOME: ${{ env.TEST_HOME }}
+          USERPROFILE: ${{ env.TEST_HOME }}
+          HOMEDRIVE: ${{ env.TEST_HOME_DRIVE }}
+          HOMEPATH: ${{ env.TEST_HOME_PATH }}
+        run: |
+          $installDir = Join-Path $env:USERPROFILE ".git-ai\bin"
+          $gitAiExe = Join-Path $installDir "git-ai.exe"
+          if (-not (Test-Path -LiteralPath $gitAiExe)) { throw "git-ai.exe not found at $gitAiExe" }
+          # Create a fresh test repo (remove if exists)
+          $testRepo = "C:\e2e-test-repo"
+          if (Test-Path $testRepo) { Remove-Item -Recurse -Force $testRepo }
+          New-Item -ItemType Directory -Force -Path $testRepo | Out-Null
+          Set-Location $testRepo
+          git init
+          git config user.email "e2e-test@example.com"
+          git config user.name "E2E Test"
+          Set-Content -Path "README.md" -Value "# E2E Test Repo"
+          git add README.md
+          git commit -m "Initial commit"
+          # Copy git-ai.exe to git.exe as proxy (symlinks may require developer mode on Windows)
+          Copy-Item -Path $gitAiExe -Destination (Join-Path $installDir "git.exe") -Force
+          # Add install dir to PATH for subsequent steps
+          Add-Content -Path $env:GITHUB_PATH -Value $installDir
+          # Export test repo path for subsequent steps
+          Add-Content -Path $env:GITHUB_ENV -Value "E2E_TEST_REPO=$testRepo"
+          # Run git-ai install in the test repo
+          & $gitAiExe install
+          if ($LASTEXITCODE -ne 0) { throw "git-ai install failed with exit code $LASTEXITCODE" }
+
+      - name: Run synthetic agent commit (Windows)
+        shell: pwsh
+        env:
+          HOME: ${{ env.TEST_HOME }}
+          USERPROFILE: ${{ env.TEST_HOME }}
+          HOMEDRIVE: ${{ env.TEST_HOME_DRIVE }}
+          HOMEPATH: ${{ env.TEST_HOME_PATH }}
+        run: |
+          $agent = "${{ matrix.agent.name }}"
+          $testRepo = $env:E2E_TEST_REPO
+          $installDir = Join-Path $env:USERPROFILE ".git-ai\bin"
+          $gitAiExe = Join-Path $installDir "git-ai.exe"
+          Set-Location $testRepo
+          # Create test file representing agent output
+          $testFile = "agent-test-$agent.txt"
+          Set-Content -Path $testFile -Value "Hello from $agent synthetic test"
+          git add $testFile
+          # Build synthetic checkpoint JSON using ConvertTo-Json to avoid YAML heredoc issues
+          $epoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+          $testRepoFwd = $testRepo -replace '\\','/'
+          $checkpointObj = [ordered]@{
+            type = 'ai_agent'
+            repo_working_dir = $testRepoFwd
+            edited_filepaths = @($testFile)
+            transcript = [ordered]@{
+              messages = @(
+                [ordered]@{ type = 'user'; text = "Create $testFile for synthetic CI test" }
+                [ordered]@{ type = 'assistant'; text = 'Creating the file now.' }
+              )
+            }
+            agent_name = $agent
+            model = 'synthetic-test-model'
+            conversation_id = "synthetic-$agent-$epoch"
+          }
+          $checkpointJson = $checkpointObj | ConvertTo-Json -Depth 10
+          # Feed checkpoint data to git-ai
+          $checkpointJson | & $gitAiExe checkpoint agent-v1 --hook-input stdin
+          if ($LASTEXITCODE -ne 0) { throw "git-ai checkpoint agent-v1 failed with exit code $LASTEXITCODE" }
+          # Commit the staged file
+          git commit -m "Synthetic $agent checkpoint test"
+          if ($LASTEXITCODE -ne 0) { throw "git commit failed with exit code $LASTEXITCODE" }
+
+      - name: Verify attribution pipeline (Windows)
+        shell: pwsh
+        env:
+          HOME: ${{ env.TEST_HOME }}
+          USERPROFILE: ${{ env.TEST_HOME }}
+          HOMEDRIVE: ${{ env.TEST_HOME_DRIVE }}
+          HOMEPATH: ${{ env.TEST_HOME_PATH }}
+        run: |
+          $agent = "${{ matrix.agent.name }}"
+          $testRepo = $env:E2E_TEST_REPO
+          $installDir = Join-Path $env:USERPROFILE ".git-ai\bin"
+          $gitAiExe = Join-Path $installDir "git-ai.exe"
+          $resultsDir = "C:\e2e-results\$agent"
+          New-Item -ItemType Directory -Force -Path $resultsDir | Out-Null
+          $log = Join-Path $resultsDir "synthetic-attribution-$agent.txt"
+          $lines = [System.Collections.Generic.List[string]]::new()
+          $passed = $true
+          function Write-Log($msg) { $lines.Add($msg); Write-Host $msg }
+          Set-Location $testRepo
+          $testFile = "agent-test-$agent.txt"
+          # ── 1. Authorship note exists ──────────────────────────────────────────
+          $noteRaw = git notes --ref=ai show HEAD 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            Write-Log "FAIL: No authorship note on HEAD — post-commit hook did not fire"
+            $lines | Set-Content -Path $log
+            throw "Verification failed: no authorship note"
+          }
+          Write-Log "PASS: Authorship note found on HEAD"
+          # ── 2. Parse JSON from note ───────────────────────────────────────────
+          $noteLines = $noteRaw -split "`n"
+          $metaJson = $null
+          for ($i = 0; $i -lt $noteLines.Count; $i++) {
+            if ($noteLines[$i].Trim().StartsWith('{')) {
+              try {
+                $metaJson = ($noteLines[$i..($noteLines.Count - 1)] -join "`n") | ConvertFrom-Json
+                break
+              } catch { continue }
+            }
+          }
+          if ($null -eq $metaJson) {
+            Write-Log "FAIL: Could not extract JSON metadata from authorship note"
+            $lines | Set-Content -Path $log
+            throw "Verification failed: no JSON in note"
+          }
+          Write-Log "PASS: Authorship note contains parseable JSON metadata"
+          # ── 3. Schema version ─────────────────────────────────────────────────
+          $schema = $metaJson.schema_version
+          if ($schema -ne "authorship/3.0.0") {
+            Write-Log "FAIL: Wrong schema_version: '$schema' (expected 'authorship/3.0.0')"
+            $lines | Set-Content -Path $log
+            throw "Verification failed: wrong schema_version"
+          }
+          Write-Log "PASS: schema_version = $schema"
+          # ── 4. Prompts non-empty ──────────────────────────────────────────────
+          $promptCount = ($metaJson.prompts | Get-Member -MemberType NoteProperty).Count
+          if ($promptCount -lt 1) {
+            Write-Log "FAIL: No prompt sessions in authorship note — checkpoint data was not stored"
+            $lines | Set-Content -Path $log
+            throw "Verification failed: no prompts recorded"
+          }
+          Write-Log "PASS: $promptCount prompt session(s) recorded"
+          # ── 5. Transcript messages ────────────────────────────────────────────
+          $msgCount = 0
+          foreach ($key in ($metaJson.prompts | Get-Member -MemberType NoteProperty).Name) {
+            $record = $metaJson.prompts.$key
+            if ($record.messages) { $msgCount += $record.messages.Count }
+          }
+          if ($msgCount -gt 0) {
+            Write-Log "PASS: Transcript captured: $msgCount message(s) recorded"
+          } else {
+            Write-Log "WARN: No transcript messages in authorship note — conversation capture is only available in live agent runs, not synthetic checkpoints"
+          }
+          # ── 6. git-ai stats reports AI additions ──────────────────────────────
+          $statsRaw = & $gitAiExe stats HEAD --json 2>&1
+          $statsJson = $null
+          $statsLines = $statsRaw -split "`n"
+          for ($i = 0; $i -lt $statsLines.Count; $i++) {
+            if ($statsLines[$i] -match '^\[DEBUG\]') { continue }
+            if ($statsLines[$i].Trim().StartsWith('{')) {
+              try {
+                $statsJson = ($statsLines[$i..($statsLines.Count - 1)] -join "`n") | ConvertFrom-Json
+                break
+              } catch { continue }
+            }
+          }
+          if ($null -eq $statsJson) {
+            Write-Log "FAIL: git-ai stats HEAD --json produced no parseable JSON"
+            $lines | Set-Content -Path $log
+            throw "Verification failed: stats JSON not parseable"
+          }
+          $aiAdds = [int]$statsJson.ai_additions
+          if ($aiAdds -lt 1) {
+            Write-Log "FAIL: git-ai stats HEAD reports ai_additions=0 — AI work not tracked"
+            $lines | Set-Content -Path $log
+            throw "Verification failed: ai_additions=0"
+          }
+          Write-Log "PASS: git-ai stats HEAD: ai_additions=$aiAdds"
+          # ── 7. Test file in note text (warn only) ─────────────────────────────
+          if ($noteRaw -match [regex]::Escape($testFile)) {
+            Write-Log "PASS: $testFile appears in authorship note"
+          } else {
+            Write-Log "WARN: $testFile not found in authorship note text"
+          }
+          # ── 8. git-ai blame (warn only) ───────────────────────────────────────
+          $blameOut = & $gitAiExe blame $testFile 2>&1
+          if ($blameOut -match 'ai-generated|generated|ai_human_author' -or $blameOut -match [regex]::Escape($agent)) {
+            Write-Log "PASS: AI attribution visible in git-ai blame output for $testFile"
+          } else {
+            Write-Log "WARN: git-ai blame does not show explicit AI attribution for $testFile"
+            Write-Host "Blame output: $blameOut"
+          }
+          $lines | Set-Content -Path $log
+          Write-Log "=== Synthetic attribution verification COMPLETE: $agent ==="
+
+      - name: Upload E2E test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-install-${{ matrix.agent.name }}-windows-latest
+          path: C:\e2e-results\
+          retention-days: 7
+          if-no-files-found: warn
