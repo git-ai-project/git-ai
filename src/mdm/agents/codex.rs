@@ -139,7 +139,7 @@ impl HookInstaller for CodexInstaller {
         let config_path = Self::config_path();
         if !config_path.exists() {
             return Ok(HookCheckResult {
-                tool_installed: true,
+                tool_installed: has_binary,
                 hooks_installed: false,
                 hooks_up_to_date: false,
             });
