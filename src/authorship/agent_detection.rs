@@ -11,46 +11,52 @@ use crate::authorship::authorship_log_serialization::{
 };
 use crate::authorship::working_log::AgentId;
 
-/// Known agent email mappings: (email, tool_name)
+/// Known agent email mappings: (email_suffix, tool_name)
+/// For GitHub noreply emails, we match after the `+` to ignore numeric user ID prefixes.
 const AGENT_EMAIL_MAPPINGS: &[(&str, &str)] = &[
-    ("cursoragent@cursor.com", "cursor"),
+    ("cursoragent@cursor.com", "cursor-agent"),
+    ("+copilot@users.noreply.github.com", "github-copilot"),
     (
-        "198982749+Copilot@users.noreply.github.com",
-        "github-copilot",
-    ),
-    (
-        "158243242+devin-ai-integration[bot]@users.noreply.github.com",
+        "+devin-ai-integration[bot]@users.noreply.github.com",
         "devin",
     ),
-    ("noreply@anthropic.com", "claude"),
-    ("noreply@openai.com", "codex"),
+    ("noreply@anthropic.com", "claude-web"),
+    ("noreply@openai.com", "codex-cloud"),
 ];
 
 /// Known GitHub username mappings: (username, platform)
 const AGENT_USERNAME_MAPPINGS: &[(&str, &str)] = &[
-    ("copilot-swe-agent[bot]", "github-copilot"),
+    ("copilot-swe-agent[bot]", "github-copilot-agent"),
     ("devin-ai-integration[bot]", "devin"),
-    ("cursor[bot]", "cursor"),
+    ("cursor[bot]", "cursor-agent"),
 ];
 
 /// Match a commit author email to a known AI agent tool name.
 ///
-/// Returns the tool name (e.g. "cursor", "github-copilot", "devin", "claude", "codex")
+/// Returns the tool name (e.g. "cursor-agent", "github-copilot-agent", "devin", "claude-web", "codex-cloud")
 /// if the email matches a known agent pattern, or `None` otherwise.
 ///
 /// # Examples
 /// ```
 /// use git_ai::authorship::agent_detection::match_email_to_agent;
 ///
-/// assert_eq!(match_email_to_agent("cursoragent@cursor.com"), Some("cursor"));
-/// assert_eq!(match_email_to_agent("noreply@anthropic.com"), Some("claude"));
+/// assert_eq!(match_email_to_agent("cursoragent@cursor.com"), Some("cursor-agent"));
+/// assert_eq!(match_email_to_agent("noreply@anthropic.com"), Some("claude-web"));
 /// assert_eq!(match_email_to_agent("user@example.com"), None);
 /// ```
 pub fn match_email_to_agent(email: &str) -> Option<&'static str> {
     let email_lower = email.to_lowercase();
     AGENT_EMAIL_MAPPINGS
         .iter()
-        .find(|(pattern, _)| pattern.to_lowercase() == email_lower)
+        .find(|(pattern, _)| {
+            let pattern_lower = pattern.to_lowercase();
+            if pattern_lower.starts_with('+') {
+                // Suffix match: ignore numeric ID prefix in GitHub noreply emails
+                email_lower.ends_with(&pattern_lower)
+            } else {
+                email_lower == pattern_lower
+            }
+        })
         .map(|(_, tool)| *tool)
 }
 
@@ -63,7 +69,7 @@ pub fn match_email_to_agent(email: &str) -> Option<&'static str> {
 /// ```
 /// use git_ai::authorship::agent_detection::match_username_to_platform;
 ///
-/// assert_eq!(match_username_to_platform("copilot-swe-agent[bot]"), Some("github-copilot"));
+/// assert_eq!(match_username_to_platform("copilot-swe-agent[bot]"), Some("github-copilot-agent"));
 /// assert_eq!(match_username_to_platform("devin-ai-integration[bot]"), Some("devin"));
 /// assert_eq!(match_username_to_platform("regular-user"), None);
 /// ```
@@ -160,7 +166,7 @@ mod tests {
     fn test_match_email_cursor() {
         assert_eq!(
             match_email_to_agent("cursoragent@cursor.com"),
-            Some("cursor")
+            Some("cursor-agent")
         );
     }
 
@@ -168,6 +174,11 @@ mod tests {
     fn test_match_email_copilot() {
         assert_eq!(
             match_email_to_agent("198982749+Copilot@users.noreply.github.com"),
+            Some("github-copilot")
+        );
+        // Different numeric prefix should still match
+        assert_eq!(
+            match_email_to_agent("999999+Copilot@users.noreply.github.com"),
             Some("github-copilot")
         );
     }
@@ -178,30 +189,38 @@ mod tests {
             match_email_to_agent("158243242+devin-ai-integration[bot]@users.noreply.github.com"),
             Some("devin")
         );
+        // Different numeric prefix should still match
+        assert_eq!(
+            match_email_to_agent("12345+devin-ai-integration[bot]@users.noreply.github.com"),
+            Some("devin")
+        );
     }
 
     #[test]
     fn test_match_email_claude() {
         assert_eq!(
             match_email_to_agent("noreply@anthropic.com"),
-            Some("claude")
+            Some("claude-web")
         );
     }
 
     #[test]
     fn test_match_email_codex() {
-        assert_eq!(match_email_to_agent("noreply@openai.com"), Some("codex"));
+        assert_eq!(
+            match_email_to_agent("noreply@openai.com"),
+            Some("codex-cloud")
+        );
     }
 
     #[test]
     fn test_match_email_case_insensitive() {
         assert_eq!(
             match_email_to_agent("CursorAgent@Cursor.com"),
-            Some("cursor")
+            Some("cursor-agent")
         );
         assert_eq!(
             match_email_to_agent("NOREPLY@ANTHROPIC.COM"),
-            Some("claude")
+            Some("claude-web")
         );
     }
 
@@ -220,7 +239,7 @@ mod tests {
     fn test_match_username_copilot() {
         assert_eq!(
             match_username_to_platform("copilot-swe-agent[bot]"),
-            Some("github-copilot")
+            Some("github-copilot-agent")
         );
     }
 
@@ -234,14 +253,17 @@ mod tests {
 
     #[test]
     fn test_match_username_cursor() {
-        assert_eq!(match_username_to_platform("cursor[bot]"), Some("cursor"));
+        assert_eq!(
+            match_username_to_platform("cursor[bot]"),
+            Some("cursor-agent")
+        );
     }
 
     #[test]
     fn test_match_username_case_insensitive() {
         assert_eq!(
             match_username_to_platform("Copilot-SWE-Agent[bot]"),
-            Some("github-copilot")
+            Some("github-copilot-agent")
         );
     }
 
