@@ -3,6 +3,114 @@ use serde_json::Value;
 
 use crate::git::repository::find_repository_in_path;
 
+macro_rules! set_string_field {
+    ($file_config:expr, $field:ident, $key:literal, $value:expr) => {{
+        $file_config.$field = Some($value.to_string());
+        crate::config::save_file_config(&$file_config)?;
+        eprintln!("[{}]: {}", $key, $value);
+    }};
+}
+
+macro_rules! set_bool_field {
+    ($file_config:expr, $field:ident, $key:literal, $value:expr) => {{
+        let bool_value = parse_bool($value)?;
+        $file_config.$field = Some(bool_value);
+        crate::config::save_file_config(&$file_config)?;
+        eprintln!("[{}]: {}", $key, bool_value);
+    }};
+}
+
+macro_rules! unset_field {
+    ($file_config:expr, $field:ident, $key:literal) => {{
+        let old_value = $file_config.$field.take();
+        crate::config::save_file_config(&$file_config)?;
+        if let Some(v) = old_value {
+            eprintln!("- [{}]: {}", $key, v);
+        }
+    }};
+}
+
+macro_rules! opt_string_value {
+    ($value:expr) => {{
+        if let Some(v) = $value {
+            Value::String(v.clone())
+        } else {
+            Value::Null
+        }
+    }};
+}
+
+macro_rules! vec_or_empty {
+    ($value:expr) => {{
+        if let Some(v) = $value {
+            serde_json::to_value(v).unwrap_or(Value::Array(vec![]))
+        } else {
+            Value::Array(vec![])
+        }
+    }};
+}
+
+/// Single source of truth for scalar config keys.
+///
+/// Each entry defines:
+/// - external CLI key
+/// - FileConfig field name
+/// - parser/validation strategy for `set`
+/// - expression for `get` / `show` effective value
+macro_rules! scalar_config_entries {
+    ($m:ident) => {
+        $m!("git_path", git_path, [string], get_git_path_value);
+        $m!(
+            "telemetry_enterprise_dsn",
+            telemetry_enterprise_dsn,
+            [string],
+            get_telemetry_enterprise_dsn_value
+        );
+        $m!(
+            "disable_version_checks",
+            disable_version_checks,
+            [bool],
+            get_disable_version_checks_value
+        );
+        $m!(
+            "disable_auto_updates",
+            disable_auto_updates,
+            [bool],
+            get_disable_auto_updates_value
+        );
+        $m!(
+            "update_channel",
+            update_channel,
+            [validated_string(validate_update_channel_value)],
+            get_update_channel_value
+        );
+        $m!(
+            "prompt_storage",
+            prompt_storage,
+            [validated_string(validate_prompt_storage_value)],
+            get_prompt_storage_value
+        );
+        $m!(
+            "default_prompt_storage",
+            default_prompt_storage,
+            [validated_string(validate_prompt_storage_value)],
+            get_default_prompt_storage_value
+        );
+        $m!("quiet", quiet, [bool], get_quiet_value);
+    };
+}
+
+macro_rules! repository_array_entries {
+    ($m:ident) => {
+        $m!(
+            "exclude_prompts_in_repositories",
+            exclude_prompts_in_repositories
+        );
+        $m!("allow_repositories", allow_repositories);
+        $m!("exclude_repositories", exclude_repositories);
+    };
+}
+
 /// Determines the type of pattern value provided
 #[derive(Debug, PartialEq)]
 enum PatternType {
@@ -208,6 +316,351 @@ pub fn handle_config(args: &[String]) {
     }
 }
 
+fn get_git_path_value(_: &crate::config::FileConfig, runtime: &crate::config::Config) -> Value {
+    Value::String(runtime.git_cmd().to_string())
+}
+
+fn get_telemetry_enterprise_dsn_value(
+    file: &crate::config::FileConfig,
+    _: &crate::config::Config,
+) -> Value {
+    opt_string_value!(file.telemetry_enterprise_dsn.as_ref())
+}
+
+fn get_disable_version_checks_value(
+    _: &crate::config::FileConfig,
+    runtime: &crate::config::Config,
+) -> Value {
+    Value::Bool(runtime.version_checks_disabled())
+}
+
+fn get_disable_auto_updates_value(
+    _: &crate::config::FileConfig,
+    runtime: &crate::config::Config,
+) -> Value {
+    Value::Bool(runtime.auto_updates_disabled())
+}
+
+fn get_update_channel_value(
+    _: &crate::config::FileConfig,
+    runtime: &crate::config::Config,
+) -> Value {
+    Value::String(runtime.update_channel().as_str().to_string())
+}
+
+fn get_prompt_storage_value(
+    _: &crate::config::FileConfig,
+    runtime: &crate::config::Config,
+) -> Value {
+    Value::String(runtime.prompt_storage().to_string())
+}
+
+fn get_default_prompt_storage_value(
+    file: &crate::config::FileConfig,
+    _: &crate::config::Config,
+) -> Value {
+    opt_string_value!(file.default_prompt_storage.as_ref())
+}
+
+fn get_quiet_value(_: &crate::config::FileConfig, runtime: &crate::config::Config) -> Value {
+    Value::Bool(runtime.is_quiet())
+}
+
+fn get_feature_flags_value(runtime: &crate::config::Config) -> Value {
+    serde_json::to_value(runtime.get_feature_flags())
+        .unwrap_or_else(|_| Value::Object(serde_json::Map::new()))
+}
+
+fn get_masked_api_key_value(file: &crate::config::FileConfig) -> Value {
+    if let Some(key) = &file.api_key {
+        Value::String(mask_api_key(key))
+    } else {
+        Value::Null
+    }
+}
+
+fn insert_repository_array_values(
+    effective_config: &mut serde_json::Map<String, Value>,
+    file_config: &crate::config::FileConfig,
+) {
+    macro_rules! insert_repo_array {
+        ($entry_key:literal, $field:ident) => {
+            effective_config.insert(
+                $entry_key.to_string(),
+                vec_or_empty!(file_config.$field.as_ref()),
+            );
+        };
+    }
+
+    repository_array_entries!(insert_repo_array);
+}
+
+fn try_get_repository_array_value(
+    key: &str,
+    file_config: &crate::config::FileConfig,
+) -> Option<Value> {
+    macro_rules! get_repo_array {
+        ($entry_key:literal, $field:ident) => {
+            if key == $entry_key {
+                return Some(vec_or_empty!(file_config.$field.as_ref()));
+            }
+        };
+    }
+
+    repository_array_entries!(get_repo_array);
+    None
+}
+
+fn try_set_repository_array_value(
+    key: &str,
+    value: &str,
+    add_mode: bool,
+    file_config: &mut crate::config::FileConfig,
+) -> Result<bool, String> {
+    macro_rules! set_repo_array {
+        ($entry_key:literal, $field:ident) => {
+            if key == $entry_key {
+                let added = set_repository_array_field(&mut file_config.$field, value, add_mode)?;
+                crate::config::save_file_config(file_config)?;
+                log_array_changes(&added, add_mode);
+                return Ok(true);
+            }
+        };
+    }
+
+    repository_array_entries!(set_repo_array);
+    Ok(false)
+}
+
+fn try_unset_repository_array_value(
+    key: &str,
+    file_config: &mut crate::config::FileConfig,
+) -> Result<bool, String> {
+    macro_rules! unset_repo_array {
+        ($entry_key:literal, $field:ident) => {
+            if key == $entry_key {
+                let old_values = file_config.$field.take();
+                crate::config::save_file_config(file_config)?;
+                if let Some(items) = old_values {
+                    log_array_removals(&items);
+                }
+                return Ok(true);
+            }
+        };
+    }
+
+    repository_array_entries!(unset_repo_array);
+    Ok(false)
+}
+
+fn set_include_prompts_in_repositories(
+    file_config: &mut crate::config::FileConfig,
+    value: &str,
+    add_mode: bool,
+) -> Result<(), String> {
+    let resolved = resolve_repository_value(value)?;
+    if add_mode {
+        let mut list = file_config
+            .include_prompts_in_repositories
+            .take()
+            .unwrap_or_default();
+        for pattern in &resolved {
+            if !list.contains(pattern) {
+                list.push(pattern.clone());
+            }
+        }
+        file_config.include_prompts_in_repositories = Some(list);
+    } else {
+        file_config.include_prompts_in_repositories = Some(resolved.clone());
+    }
+    crate::config::save_file_config(file_config)?;
+    for pattern in resolved {
+        eprintln!("[include_prompts_in_repositories]: {}", pattern);
+    }
+    Ok(())
+}
+
+fn set_feature_flags_top_level(
+    file_config: &mut crate::config::FileConfig,
+    value: &str,
+    add_mode: bool,
+) -> Result<(), String> {
+    if add_mode {
+        return Err(
+            "Cannot use --add with feature_flags at top level. Use dot notation: feature_flags.key"
+                .to_string(),
+        );
+    }
+
+    let json_value: Value = serde_json::from_str(value)
+        .map_err(|e| format!("Invalid JSON for feature_flags: {}", e))?;
+    if !json_value.is_object() {
+        return Err("feature_flags must be a JSON object".to_string());
+    }
+
+    file_config.feature_flags = Some(json_value);
+    crate::config::save_file_config(file_config)?;
+    eprintln!("[feature_flags]: {}", value);
+    Ok(())
+}
+
+fn set_feature_flags_nested(
+    file_config: &mut crate::config::FileConfig,
+    key_path: &[String],
+    value: &str,
+) -> Result<(), String> {
+    if key_path.len() < 2 {
+        return Err(
+            "feature_flags requires a nested key (e.g., feature_flags.some_flag)".to_string(),
+        );
+    }
+
+    let mut flags = file_config
+        .feature_flags
+        .take()
+        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+
+    if !flags.is_object() {
+        return Err("feature_flags must be a JSON object".to_string());
+    }
+
+    let flags_obj = flags
+        .as_object_mut()
+        .ok_or_else(|| "feature_flags must be a JSON object".to_string())?;
+
+    let nested_key = key_path[1..].join(".");
+    let parsed_value = parse_value(value)?;
+
+    if key_path.len() == 2 {
+        flags_obj.insert(key_path[1].clone(), parsed_value);
+    } else {
+        let mut current = flags_obj;
+        for segment in &key_path[1..key_path.len() - 1] {
+            current = current
+                .entry(segment.clone())
+                .or_insert_with(|| Value::Object(serde_json::Map::new()))
+                .as_object_mut()
+                .ok_or_else(|| format!("Cannot navigate through non-object at {}", segment))?;
+        }
+        current.insert(key_path.last().unwrap().clone(), parsed_value);
+    }
+
+    file_config.feature_flags = Some(flags);
+    crate::config::save_file_config(file_config)?;
+    eprintln!("+ [{}]: {}", nested_key, value);
+    Ok(())
+}
+
+fn unset_feature_flags_nested(
+    file_config: &mut crate::config::FileConfig,
+    key_path: &[String],
+    full_key: &str,
+) -> Result<(), String> {
+    if key_path.len() < 2 {
+        return Err(
+            "feature_flags requires a nested key (e.g., feature_flags.some_flag)".to_string(),
+        );
+    }
+
+    let mut flags = file_config
+        .feature_flags
+        .take()
+        .ok_or_else(|| format!("Config key not found: {}", full_key))?;
+
+    if !flags.is_object() {
+        return Err("feature_flags must be a JSON object".to_string());
+    }
+
+    let flags_obj = flags
+        .as_object_mut()
+        .ok_or_else(|| "feature_flags must be a JSON object".to_string())?;
+    let nested_key = key_path[1..].join(".");
+
+    let removed = if key_path.len() == 2 {
+        flags_obj.remove(&key_path[1])
+    } else {
+        let mut current = flags_obj;
+        for segment in &key_path[1..key_path.len() - 1] {
+            current = current
+                .get_mut(segment)
+                .and_then(|v| v.as_object_mut())
+                .ok_or_else(|| format!("Config key not found: {}", full_key))?;
+        }
+        current.remove(key_path.last().unwrap())
+    };
+
+    let old_value = removed.ok_or_else(|| format!("Config key not found: {}", full_key))?;
+    file_config.feature_flags = Some(flags);
+    crate::config::save_file_config(file_config)?;
+    eprintln!("- [{}]: {}", nested_key, old_value);
+    Ok(())
+}
+
+fn try_get_scalar_config_value(
+    key: &str,
+    file_config: &crate::config::FileConfig,
+    runtime_config: &crate::config::Config,
+) -> Option<Value> {
+    macro_rules! scalar_get_if_arm {
+        ($entry_key:literal, $field:ident, [$($kind:tt)+], $getter:ident) => {
+            if key == $entry_key {
+                return Some($getter(file_config, runtime_config));
+            }
+        };
+    }
+
+    scalar_config_entries!(scalar_get_if_arm);
+    None
+}
+
+fn try_set_scalar_config_value(
+    key: &str,
+    value: &str,
+    file_config: &mut crate::config::FileConfig,
+) -> Result<bool, String> {
+    macro_rules! scalar_set_if_arm {
+        ($entry_key:literal, $field:ident, [string], $getter:ident) => {
+            if key == $entry_key {
+                set_string_field!(file_config, $field, $entry_key, value);
+                return Ok(true);
+            }
+        };
+        ($entry_key:literal, $field:ident, [bool], $getter:ident) => {
+            if key == $entry_key {
+                set_bool_field!(file_config, $field, $entry_key, value);
+                return Ok(true);
+            }
+        };
+        ($entry_key:literal, $field:ident, [validated_string($validator:path)], $getter:ident) => {
+            if key == $entry_key {
+                $validator(value)?;
+                set_string_field!(file_config, $field, $entry_key, value);
+                return Ok(true);
+            }
+        };
+    }
+
+    scalar_config_entries!(scalar_set_if_arm);
+    Ok(false)
+}
+
+fn try_unset_scalar_config_value(
+    key: &str,
+    file_config: &mut crate::config::FileConfig,
+) -> Result<bool, String> {
+    macro_rules! scalar_unset_if_arm {
+        ($entry_key:literal, $field:ident, [$($kind:tt)+], $getter:ident) => {
+            if key == $entry_key {
+                unset_field!(file_config, $field, $entry_key);
+                return Ok(true);
+            }
+        };
+    }
+
+    scalar_config_entries!(scalar_unset_if_arm);
+    Ok(false)
+}
+
 fn show_all_config() -> Result<(), String> {
     let file_config = crate::config::load_file_config_public()?;
 
@@ -217,102 +670,47 @@ fn show_all_config() -> Result<(), String> {
     // Get the actual runtime config
     let runtime_config = crate::config::Config::get();
 
-    // Add fields with their effective values
-    effective_config.insert(
-        "git_path".to_string(),
-        Value::String(runtime_config.git_cmd().to_string()),
-    );
-
     // Arrays
-    if let Some(ref repos) = file_config.exclude_prompts_in_repositories {
-        effective_config.insert(
-            "exclude_prompts_in_repositories".to_string(),
-            serde_json::to_value(repos).unwrap(),
-        );
-    } else {
-        effective_config.insert(
-            "exclude_prompts_in_repositories".to_string(),
-            Value::Array(vec![]),
-        );
-    }
-
-    if let Some(ref repos) = file_config.allow_repositories {
-        effective_config.insert(
-            "allow_repositories".to_string(),
-            serde_json::to_value(repos).unwrap(),
-        );
-    } else {
-        effective_config.insert("allow_repositories".to_string(), Value::Array(vec![]));
-    }
-
-    if let Some(ref repos) = file_config.exclude_repositories {
-        effective_config.insert(
-            "exclude_repositories".to_string(),
-            serde_json::to_value(repos).unwrap(),
-        );
-    } else {
-        effective_config.insert("exclude_repositories".to_string(), Value::Array(vec![]));
-    }
+    insert_repository_array_values(&mut effective_config, &file_config);
 
     // Booleans with runtime values
     effective_config.insert(
         "telemetry_oss_disabled".to_string(),
         Value::Bool(runtime_config.is_telemetry_oss_disabled()),
     );
-    effective_config.insert(
-        "disable_version_checks".to_string(),
-        Value::Bool(runtime_config.version_checks_disabled()),
-    );
-    effective_config.insert(
-        "disable_auto_updates".to_string(),
-        Value::Bool(runtime_config.auto_updates_disabled()),
-    );
-
-    // Optional strings
-    if let Some(ref dsn) = file_config.telemetry_enterprise_dsn {
-        effective_config.insert(
-            "telemetry_enterprise_dsn".to_string(),
-            Value::String(dsn.clone()),
-        );
+    // Scalar keys generated from schema
+    macro_rules! scalar_show_insert_arm {
+        ($entry_key:literal, $field:ident, [$($kind:tt)+], $getter:ident) => {
+            effective_config.insert(
+                $entry_key.to_string(),
+                $getter(&file_config, runtime_config),
+            );
+        };
     }
-
-    effective_config.insert(
-        "update_channel".to_string(),
-        Value::String(runtime_config.update_channel().as_str().to_string()),
-    );
-
-    effective_config.insert(
-        "prompt_storage".to_string(),
-        Value::String(runtime_config.prompt_storage().to_string()),
-    );
+    scalar_config_entries!(scalar_show_insert_arm);
 
     // include_prompts_in_repositories
-    if let Some(ref repos) = file_config.include_prompts_in_repositories {
+    if file_config.include_prompts_in_repositories.is_some() {
         effective_config.insert(
             "include_prompts_in_repositories".to_string(),
-            serde_json::to_value(repos).unwrap_or(Value::Array(vec![])),
+            vec_or_empty!(file_config.include_prompts_in_repositories.as_ref()),
         );
     }
 
-    // default_prompt_storage
-    if let Some(ref storage) = file_config.default_prompt_storage {
-        effective_config.insert(
-            "default_prompt_storage".to_string(),
-            Value::String(storage.clone()),
-        );
-    }
-
-    effective_config.insert("quiet".to_string(), Value::Bool(runtime_config.is_quiet()));
+    // `default_prompt_storage` and `quiet` are included via scalar_config_entries!.
 
     // Feature flags - show effective flags with defaults applied
-    let flags_value = serde_json::to_value(runtime_config.get_feature_flags())
-        .unwrap_or_else(|_| Value::Object(serde_json::Map::new()));
-    effective_config.insert("feature_flags".to_string(), flags_value);
+    effective_config.insert(
+        "feature_flags".to_string(),
+        get_feature_flags_value(runtime_config),
+    );
 
     // API key - show masked value if set
-    if let Some(ref key) = file_config.api_key {
-        let masked = mask_api_key(key);
-        effective_config.insert("api_key".to_string(), Value::String(masked));
+    if file_config.api_key.is_some() {
+        effective_config.insert(
+            "api_key".to_string(),
+            get_masked_api_key_value(&file_config),
+        );
     }
 
     let json = serde_json::to_string_pretty(&effective_config)
@@ -330,68 +728,29 @@ fn get_config_value(key: &str) -> Result<(), String> {
 
     // Handle top-level keys
     if key_path.len() == 1 {
+        if let Some(value) =
+            try_get_scalar_config_value(key_path[0].as_str(), &file_config, runtime_config)
+        {
+            let json = serde_json::to_string_pretty(&value)
+                .map_err(|e| format!("Failed to serialize value: {}", e))?;
+            println!("{}", json);
+            return Ok(());
+        }
+
+        if let Some(value) = try_get_repository_array_value(key_path[0].as_str(), &file_config) {
+            let json = serde_json::to_string_pretty(&value)
+                .map_err(|e| format!("Failed to serialize value: {}", e))?;
+            println!("{}", json);
+            return Ok(());
+        }
+
         let value = match key_path[0].as_str() {
-            "git_path" => Value::String(runtime_config.git_cmd().to_string()),
-            "exclude_prompts_in_repositories" => {
-                if let Some(ref repos) = file_config.exclude_prompts_in_repositories {
-                    serde_json::to_value(repos).unwrap()
-                } else {
-                    Value::Array(vec![])
-                }
-            }
-            "allow_repositories" => {
-                if let Some(ref repos) = file_config.allow_repositories {
-                    serde_json::to_value(repos).unwrap()
-                } else {
-                    Value::Array(vec![])
-                }
-            }
-            "exclude_repositories" => {
-                if let Some(ref repos) = file_config.exclude_repositories {
-                    serde_json::to_value(repos).unwrap()
-                } else {
-                    Value::Array(vec![])
-                }
-            }
             "telemetry_oss_disabled" => Value::Bool(runtime_config.is_telemetry_oss_disabled()),
-            "telemetry_enterprise_dsn" => {
-                if let Some(ref dsn) = file_config.telemetry_enterprise_dsn {
-                    Value::String(dsn.clone())
-                } else {
-                    Value::Null
-                }
-            }
-            "disable_version_checks" => Value::Bool(runtime_config.version_checks_disabled()),
-            "disable_auto_updates" => Value::Bool(runtime_config.auto_updates_disabled()),
-            "update_channel" => Value::String(runtime_config.update_channel().as_str().to_string()),
-            "feature_flags" => {
-                // Show effective flags with defaults applied
-                serde_json::to_value(runtime_config.get_feature_flags())
-                    .unwrap_or_else(|_| Value::Object(serde_json::Map::new()))
-            }
-            "api_key" => {
-                if let Some(ref key) = file_config.api_key {
-                    Value::String(mask_api_key(key))
-                } else {
-                    Value::Null
-                }
-            }
-            "prompt_storage" => Value::String(runtime_config.prompt_storage().to_string()),
+            "feature_flags" => get_feature_flags_value(runtime_config),
+            "api_key" => get_masked_api_key_value(&file_config),
             "include_prompts_in_repositories" => {
-                if let Some(ref repos) = file_config.include_prompts_in_repositories {
-                    serde_json::to_value(repos).unwrap()
-                } else {
-                    Value::Array(vec![])
-                }
+                vec_or_empty!(file_config.include_prompts_in_repositories.as_ref())
             }
-            "default_prompt_storage" => {
-                if let Some(ref storage) = file_config.default_prompt_storage {
-                    Value::String(storage.clone())
-                } else {
-                    Value::Null
-                }
-            }
-            "quiet" => Value::Bool(runtime_config.is_quiet()),
             _ => return Err(format!("Unknown config key: {}", key)),
         };
 
@@ -403,10 +762,7 @@ fn get_config_value(key: &str) -> Result<(), String> {
 
     // Handle nested keys (dot notation)
     if key_path[0] == "feature_flags" {
-        // Get effective flags with defaults applied
-        let feature_flags = serde_json::to_value(runtime_config.get_feature_flags())
-            .unwrap_or_else(|_| Value::Object(serde_json::Map::new()));
-
+        let feature_flags = get_feature_flags_value(runtime_config);
         let mut current = &feature_flags;
         for segment in &key_path[1..] {
             current = current
@@ -429,85 +785,21 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
 
     // Handle top-level keys
     if key_path.len() == 1 {
+        if try_set_scalar_config_value(key_path[0].as_str(), value, &mut file_config)? {
+            return Ok(());
+        }
+
+        if try_set_repository_array_value(key_path[0].as_str(), value, add_mode, &mut file_config)?
+        {
+            return Ok(());
+        }
+
         match key_path[0].as_str() {
-            "git_path" => {
-                file_config.git_path = Some(value.to_string());
-                crate::config::save_file_config(&file_config)?;
-                eprintln!("[git_path]: {}", value);
-            }
-            "exclude_prompts_in_repositories" => {
-                let added = set_repository_array_field(
-                    &mut file_config.exclude_prompts_in_repositories,
-                    value,
-                    add_mode,
-                )?;
-                crate::config::save_file_config(&file_config)?;
-                log_array_changes(&added, add_mode);
-            }
-            "allow_repositories" => {
-                let added = set_repository_array_field(
-                    &mut file_config.allow_repositories,
-                    value,
-                    add_mode,
-                )?;
-                crate::config::save_file_config(&file_config)?;
-                log_array_changes(&added, add_mode);
-            }
-            "exclude_repositories" => {
-                let added = set_repository_array_field(
-                    &mut file_config.exclude_repositories,
-                    value,
-                    add_mode,
-                )?;
-                crate::config::save_file_config(&file_config)?;
-                log_array_changes(&added, add_mode);
-            }
             "telemetry_oss" => {
-                file_config.telemetry_oss = Some(value.to_string());
-                crate::config::save_file_config(&file_config)?;
-                eprintln!("[telemetry_oss]: {}", value);
-            }
-            "telemetry_enterprise_dsn" => {
-                file_config.telemetry_enterprise_dsn = Some(value.to_string());
-                crate::config::save_file_config(&file_config)?;
-                eprintln!("[telemetry_enterprise_dsn]: {}", value);
-            }
-            "disable_version_checks" => {
-                let bool_value = parse_bool(value)?;
-                file_config.disable_version_checks = Some(bool_value);
-                crate::config::save_file_config(&file_config)?;
-                eprintln!("[disable_version_checks]: {}", bool_value);
-            }
-            "disable_auto_updates" => {
-                let bool_value = parse_bool(value)?;
-                file_config.disable_auto_updates = Some(bool_value);
-                crate::config::save_file_config(&file_config)?;
-                eprintln!("[disable_auto_updates]: {}", bool_value);
-            }
-            "update_channel" => {
-                // Validate update channel
-                if value != "latest" && value != "next" {
-                    return Err(
-                        "Invalid update_channel value. Expected 'latest' or 'next'".to_string()
-                    );
-                }
-                file_config.update_channel = Some(value.to_string());
-                crate::config::save_file_config(&file_config)?;
-                eprintln!("[update_channel]: {}", value);
+                set_string_field!(file_config, telemetry_oss, "telemetry_oss", value);
             }
             "feature_flags" => {
-                if add_mode {
-                    return Err("Cannot use --add with feature_flags at top level. Use dot notation: feature_flags.key".to_string());
-                }
-                // Parse as JSON object
-                let json_value: Value = serde_json::from_str(value)
-                    .map_err(|e| format!("Invalid JSON for feature_flags: {}", e))?;
-                if !json_value.is_object() {
-                    return Err("feature_flags must be a JSON object".to_string());
-                }
-                file_config.feature_flags = Some(json_value);
-                crate::config::save_file_config(&file_config)?;
-                eprintln!("[feature_flags]: {}", value);
+                set_feature_flags_top_level(&mut file_config, value, add_mode)?;
             }
             "api_key" => {
                 file_config.api_key = Some(value.to_string());
@@ -515,43 +807,8 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
                 let masked = mask_api_key(value);
                 eprintln!("[api_key]: {}", masked);
             }
-            "prompt_storage" => {
-                validate_prompt_storage_value(value)?;
-                file_config.prompt_storage = Some(value.to_string());
-                crate::config::save_file_config(&file_config)?;
-                eprintln!("[prompt_storage]: {}", value);
-            }
             "include_prompts_in_repositories" => {
-                let resolved = resolve_repository_value(value)?;
-                if add_mode {
-                    let mut list = file_config
-                        .include_prompts_in_repositories
-                        .unwrap_or_default();
-                    for pattern in &resolved {
-                        if !list.contains(pattern) {
-                            list.push(pattern.clone());
-                        }
-                    }
-                    file_config.include_prompts_in_repositories = Some(list);
-                } else {
-                    file_config.include_prompts_in_repositories = Some(resolved.clone());
-                }
-                crate::config::save_file_config(&file_config)?;
-                for pattern in resolved {
-                    eprintln!("[include_prompts_in_repositories]: {}", pattern);
-                }
-            }
-            "default_prompt_storage" => {
-                validate_prompt_storage_value(value)?;
-                file_config.default_prompt_storage = Some(value.to_string());
-                crate::config::save_file_config(&file_config)?;
-                eprintln!("[default_prompt_storage]: {}", value);
-            }
-            "quiet" => {
-                let bool_value = parse_bool(value)?;
-                file_config.quiet = Some(bool_value);
-                crate::config::save_file_config(&file_config)?;
-                eprintln!("[quiet]: {}", bool_value);
+                set_include_prompts_in_repositories(&mut file_config, value, add_mode)?;
             }
             _ => return Err(format!("Unknown config key: {}", key)),
         }
@@ -561,51 +818,7 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
 
     // Handle nested keys (dot notation) - only for feature_flags
     if key_path[0] == "feature_flags" {
-        if key_path.len() < 2 {
-            return Err(
-                "feature_flags requires a nested key (e.g., feature_flags.some_flag)".to_string(),
-            );
-        }
-
-        // Get or create feature_flags object
-        let mut flags = file_config
-            .feature_flags
-            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-
-        if !flags.is_object() {
-            return Err("feature_flags must be a JSON object".to_string());
-        }
-
-        // Navigate to the nested location
-        let flags_obj = flags.as_object_mut().unwrap();
-
-        let nested_key = key_path[1..].join(".");
-        if key_path.len() == 2 {
-            // Simple nested key: feature_flags.key
-            let parsed_value = parse_value(value)?;
-            if add_mode {
-                // For add mode on objects, this is an upsert
-                flags_obj.insert(key_path[1].clone(), parsed_value);
-            } else {
-                flags_obj.insert(key_path[1].clone(), parsed_value);
-            }
-        } else {
-            // Deep nested key: feature_flags.parent.child...
-            let mut current = flags_obj;
-            for segment in &key_path[1..key_path.len() - 1] {
-                current = current
-                    .entry(segment.clone())
-                    .or_insert_with(|| Value::Object(serde_json::Map::new()))
-                    .as_object_mut()
-                    .ok_or_else(|| format!("Cannot navigate through non-object at {}", segment))?;
-            }
-            let parsed_value = parse_value(value)?;
-            current.insert(key_path.last().unwrap().clone(), parsed_value);
-        }
-
-        file_config.feature_flags = Some(flags);
-        crate::config::save_file_config(&file_config)?;
-        eprintln!("+ [{}]: {}", nested_key, value);
+        set_feature_flags_nested(&mut file_config, &key_path, value)?;
         return Ok(());
     }
 
@@ -618,69 +831,17 @@ fn unset_config_value(key: &str) -> Result<(), String> {
 
     // Handle top-level keys
     if key_path.len() == 1 {
+        if try_unset_scalar_config_value(key_path[0].as_str(), &mut file_config)? {
+            return Ok(());
+        }
+
+        if try_unset_repository_array_value(key_path[0].as_str(), &mut file_config)? {
+            return Ok(());
+        }
+
         match key_path[0].as_str() {
-            "git_path" => {
-                let old_value = file_config.git_path.take();
-                crate::config::save_file_config(&file_config)?;
-                if let Some(v) = old_value {
-                    eprintln!("- [git_path]: {}", v);
-                }
-            }
-            "exclude_prompts_in_repositories" => {
-                let old_values = file_config.exclude_prompts_in_repositories.take();
-                crate::config::save_file_config(&file_config)?;
-                if let Some(items) = old_values {
-                    log_array_removals(&items);
-                }
-            }
-            "allow_repositories" => {
-                let old_values = file_config.allow_repositories.take();
-                crate::config::save_file_config(&file_config)?;
-                if let Some(items) = old_values {
-                    log_array_removals(&items);
-                }
-            }
-            "exclude_repositories" => {
-                let old_values = file_config.exclude_repositories.take();
-                crate::config::save_file_config(&file_config)?;
-                if let Some(items) = old_values {
-                    log_array_removals(&items);
-                }
-            }
             "telemetry_oss" => {
-                let old_value = file_config.telemetry_oss.take();
-                crate::config::save_file_config(&file_config)?;
-                if let Some(v) = old_value {
-                    eprintln!("- [telemetry_oss]: {}", v);
-                }
-            }
-            "telemetry_enterprise_dsn" => {
-                let old_value = file_config.telemetry_enterprise_dsn.take();
-                crate::config::save_file_config(&file_config)?;
-                if let Some(v) = old_value {
-                    eprintln!("- [telemetry_enterprise_dsn]: {}", v);
-                }
-            }
-            "disable_version_checks" => {
-                let old_value = file_config.disable_version_checks.take();
-                crate::config::save_file_config(&file_config)?;
-                if let Some(v) = old_value {
-                    eprintln!("- [disable_version_checks]: {}", v);
-                }
-            }
-            "disable_auto_updates" => {
-                let old_value = file_config.disable_auto_updates.take();
-                crate::config::save_file_config(&file_config)?;
-                if let Some(v) = old_value {
-                    eprintln!("- [disable_auto_updates]: {}", v);
-                }
-            }
-            "update_channel" => {
-                let old_value = file_config.update_channel.take();
-                crate::config::save_file_config(&file_config)?;
-                if let Some(v) = old_value {
-                    eprintln!("- [update_channel]: {}", v);
-                }
+                unset_field!(file_config, telemetry_oss, "telemetry_oss");
             }
             "feature_flags" => {
                 let old_value = file_config.feature_flags.take();
@@ -696,32 +857,11 @@ fn unset_config_value(key: &str) -> Result<(), String> {
                     eprintln!("- [api_key]: ****");
                 }
             }
-            "prompt_storage" => {
-                let old_value = file_config.prompt_storage.take();
-                crate::config::save_file_config(&file_config)?;
-                if let Some(v) = old_value {
-                    eprintln!("- [prompt_storage]: {}", v);
-                }
-            }
             "include_prompts_in_repositories" => {
                 let old_value = file_config.include_prompts_in_repositories.take();
                 crate::config::save_file_config(&file_config)?;
                 if let Some(v) = old_value {
                     eprintln!("- [include_prompts_in_repositories]: {:?}", v);
-                }
-            }
-            "default_prompt_storage" => {
-                let old_value = file_config.default_prompt_storage.take();
-                crate::config::save_file_config(&file_config)?;
-                if let Some(v) = old_value {
-                    eprintln!("- [default_prompt_storage]: {}", v);
-                }
-            }
-            "quiet" => {
-                let old_value = file_config.quiet.take();
-                crate::config::save_file_config(&file_config)?;
-                if let Some(v) = old_value {
-                    eprintln!("- [quiet]: {}", v);
                 }
             }
             _ => return Err(format!("Unknown config key: {}", key)),
@@ -732,54 +872,7 @@ fn unset_config_value(key: &str) -> Result<(), String> {
 
     // Handle nested keys (dot notation) - only for feature_flags
     if key_path[0] == "feature_flags" {
-        if key_path.len() < 2 {
-            return Err(
-                "feature_flags requires a nested key (e.g., feature_flags.some_flag)".to_string(),
-            );
-        }
-
-        let mut flags = file_config
-            .feature_flags
-            .ok_or_else(|| format!("Config key not found: {}", key))?;
-
-        if !flags.is_object() {
-            return Err("feature_flags must be a JSON object".to_string());
-        }
-
-        // Navigate to the parent of the key to remove
-        let flags_obj = flags.as_object_mut().unwrap();
-        let nested_key = key_path[1..].join(".");
-
-        if key_path.len() == 2 {
-            // Simple nested key: feature_flags.key
-            let old_value = flags_obj.remove(&key_path[1]);
-            if old_value.is_none() {
-                return Err(format!("Config key not found: {}", key));
-            }
-            file_config.feature_flags = Some(flags);
-            crate::config::save_file_config(&file_config)?;
-            if let Some(v) = old_value {
-                eprintln!("- [{}]: {}", nested_key, v);
-            }
-        } else {
-            // Deep nested key: feature_flags.parent.child...
-            let mut current = flags_obj;
-            for segment in &key_path[1..key_path.len() - 1] {
-                current = current
-                    .get_mut(segment)
-                    .and_then(|v| v.as_object_mut())
-                    .ok_or_else(|| format!("Config key not found: {}", key))?;
-            }
-            let old_value = current.remove(key_path.last().unwrap());
-            if old_value.is_none() {
-                return Err(format!("Config key not found: {}", key));
-            }
-            file_config.feature_flags = Some(flags);
-            crate::config::save_file_config(&file_config)?;
-            if let Some(v) = old_value {
-                eprintln!("- [{}]: {}", nested_key, v);
-            }
-        }
+        unset_feature_flags_nested(&mut file_config, &key_path, key)?;
 
         return Ok(());
     }
@@ -918,6 +1011,14 @@ fn validate_prompt_storage_value(value: &str) -> Result<(), String> {
             "Invalid prompt_storage value '{}'. Expected 'default', 'notes', or 'local'",
             value
         ));
+    }
+    Ok(())
+}
+
+/// Validate update_channel value
+fn validate_update_channel_value(value: &str) -> Result<(), String> {
+    if value != "latest" && value != "next" {
+        return Err("Invalid update_channel value. Expected 'latest' or 'next'".to_string());
     }
     Ok(())
 }
