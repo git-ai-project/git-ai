@@ -21,7 +21,7 @@ import type { Plugin } from "@opencode-ai/plugin";
 import { dirname } from "path";
 
 // Absolute path to git-ai binary, replaced at install time by `git-ai install-hooks`
-const GIT_AI_BIN = "/Users/kimputer/.git-ai/bin/git-ai";
+const GIT_AI_BIN = "__GIT_AI_BINARY_PATH__";
 
 // Tools that modify files and should be tracked
 const FILE_EDIT_TOOLS = ["edit", "write", "patch", "multiedit", "apply_patch"];
