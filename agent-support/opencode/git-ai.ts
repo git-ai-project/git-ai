@@ -73,7 +73,7 @@ export const GitAiPlugin: Plugin = async (ctx) => {
       // Patches have the path in patchText only, so this needs to be extracted
       const filePath = (output.args?.filePath ??
         (output.args?.patchText as string | undefined)
-          ?.match(/\*\* Update File: (.+?)\n/)?.[1]
+          ?.match(/\*\*\* (?:Update|Add) File: (.+?)\n/)?.[1]
           ?.trim()) as string | undefined;
 
       if (!filePath) {
