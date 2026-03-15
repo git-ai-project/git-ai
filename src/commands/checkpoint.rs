@@ -123,17 +123,45 @@ pub fn run(
     agent_run_result: Option<AgentRunResult>,
     is_pre_commit: bool,
 ) -> Result<(usize, usize, usize), GitAiError> {
+    run_with_base_commit_override(
+        repo,
+        author,
+        kind,
+        show_working_log,
+        reset,
+        quiet,
+        agent_run_result,
+        is_pre_commit,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_with_base_commit_override(
+    repo: &Repository,
+    author: &str,
+    kind: CheckpointKind,
+    show_working_log: bool,
+    reset: bool,
+    quiet: bool,
+    agent_run_result: Option<AgentRunResult>,
+    is_pre_commit: bool,
+    base_commit_override: Option<&str>,
+) -> Result<(usize, usize, usize), GitAiError> {
     let checkpoint_start = Instant::now();
     debug_log("[BENCHMARK] Starting checkpoint run");
 
     // Robustly handle zero-commit repos
-    let base_commit = match repo.head() {
-        Ok(head) => match head.target() {
-            Ok(oid) => oid,
+    let base_commit = base_commit_override
+        .filter(|base| !base.trim().is_empty())
+        .map(|base| base.to_string())
+        .unwrap_or_else(|| match repo.head() {
+            Ok(head) => match head.target() {
+                Ok(oid) => oid,
+                Err(_) => "initial".to_string(),
+            },
             Err(_) => "initial".to_string(),
-        },
-        Err(_) => "initial".to_string(),
-    };
+        });
 
     // Cannot run checkpoint on bare repositories
     if repo.workdir().is_err() {
@@ -270,6 +298,7 @@ pub fn run(
         &working_log,
         pathspec_filter,
         is_pre_commit,
+        is_pre_commit && pathspec_filter.is_some(),
         &ignore_matcher,
     )?;
     debug_log(&format!(
@@ -381,6 +410,7 @@ pub fn run(
         agent_run_result.as_ref(),
         ts,
         is_pre_commit,
+        base_commit_override,
     ))?;
     debug_log(&format!(
         "[BENCHMARK] get_checkpoint_entries generated {} entries, took {:?}",
@@ -607,9 +637,10 @@ fn get_all_tracked_files(
     working_log: &PersistedWorkingLog,
     edited_filepaths: Option<&Vec<String>>,
     is_pre_commit: bool,
+    preserve_explicit_pre_commit_paths: bool,
     ignore_matcher: &IgnoreMatcher,
 ) -> Result<Vec<String>, GitAiError> {
-    let mut files: HashSet<String> = edited_filepaths
+    let explicit_pre_commit_paths: HashSet<String> = edited_filepaths
         .map(|paths| {
             paths
                 .iter()
@@ -618,6 +649,7 @@ fn get_all_tracked_files(
                 .collect()
         })
         .unwrap_or_default();
+    let mut files = explicit_pre_commit_paths.clone();
 
     // Helper closure to check if a path is within the repository
     // This prevents crashes when files outside the repo were tracked (e.g., opened in IDE but not in repo)
@@ -732,6 +764,24 @@ fn get_all_tracked_files(
                 if is_text_file(working_log, &normalized_path) {
                     results_for_tracked_files.push(normalized_path);
                 }
+            }
+        }
+    }
+
+    if preserve_explicit_pre_commit_paths {
+        for normalized_path in explicit_pre_commit_paths {
+            if !is_path_in_repo(&normalized_path) {
+                continue;
+            }
+            if should_ignore_file_with_matcher(&normalized_path, ignore_matcher) {
+                continue;
+            }
+            if results_for_tracked_files.contains(&normalized_path) {
+                continue;
+            }
+            if is_text_file(working_log, &normalized_path) || is_text_file_in_head(repo, &normalized_path)
+            {
+                results_for_tracked_files.push(normalized_path);
             }
         }
     }
@@ -1114,6 +1164,7 @@ async fn get_checkpoint_entries(
     agent_run_result: Option<&AgentRunResult>,
     ts: u128,
     is_pre_commit: bool,
+    head_commit_override: Option<&str>,
 ) -> Result<(Vec<WorkingLogEntry>, Vec<FileLineStats>), GitAiError> {
     let entries_fn_start = Instant::now();
 
@@ -1151,11 +1202,16 @@ async fn get_checkpoint_entries(
     };
 
     // Get HEAD commit info for git operations
-    let head_commit = repo
-        .head()
-        .ok()
-        .and_then(|h| h.target().ok())
-        .and_then(|oid| repo.find_commit(oid).ok());
+    let head_commit = head_commit_override
+        .map(str::trim)
+        .filter(|sha| !sha.is_empty() && *sha != "initial")
+        .and_then(|sha| repo.find_commit(sha.to_string()).ok())
+        .or_else(|| {
+            repo.head()
+                .ok()
+                .and_then(|h| h.target().ok())
+                .and_then(|oid| repo.find_commit(oid).ok())
+        });
     let head_commit_sha = head_commit.as_ref().map(|c| c.id().to_string());
     let head_tree_id = head_commit
         .as_ref()
@@ -1594,6 +1650,65 @@ mod tests {
         assert_eq!(
             entries_len, 1,
             "Should create an AI checkpoint entry for unstaged changes without pathspecs"
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_base_override_controls_head_context_for_entry_generation() {
+        use crate::authorship::transcript::AiTranscript;
+        use crate::authorship::working_log::AgentId;
+        use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
+        use std::collections::HashMap;
+        use std::fs;
+
+        let (tmp_repo, mut file, _) = TmpRepo::new_with_base_commit().unwrap();
+        let filename = file.filename().to_string();
+
+        file.update("line from commit A\n").unwrap();
+        tmp_repo.commit_with_message("commit A").unwrap();
+        let base_commit = tmp_repo.get_head_commit_sha().unwrap();
+
+        file.update("line from commit B\n").unwrap();
+        tmp_repo.commit_with_message("commit B").unwrap();
+
+        // Keep the worktree dirty so git status returns this file, but inject deterministic
+        // content from commit B via dirty_files.
+        fs::write(file.path(), "line from uncommitted edit\n").unwrap();
+
+        let mut dirty_files = HashMap::new();
+        dirty_files.insert(filename.clone(), "line from commit B\n".to_string());
+        let agent_run_result = AgentRunResult {
+            agent_id: AgentId {
+                tool: "mock_ai".to_string(),
+                id: "base-override-regression".to_string(),
+                model: "test".to_string(),
+            },
+            agent_metadata: None,
+            transcript: Some(AiTranscript { messages: vec![] }),
+            checkpoint_kind: CheckpointKind::AiAgent,
+            repo_working_dir: None,
+            edited_filepaths: Some(vec![filename]),
+            will_edit_filepaths: None,
+            dirty_files: Some(dirty_files),
+        };
+
+        let (entries_len, files_len, _) = run_with_base_commit_override(
+            tmp_repo.gitai_repo(),
+            "mock-ai",
+            CheckpointKind::AiAgent,
+            false,
+            false,
+            true,
+            Some(agent_run_result),
+            false,
+            Some(base_commit.as_str()),
+        )
+        .unwrap();
+
+        assert_eq!(files_len, 1, "Expected one tracked file for the checkpoint run");
+        assert_eq!(
+            entries_len, 1,
+            "When base override points to commit A, current content from commit B must produce an entry"
         );
     }
 

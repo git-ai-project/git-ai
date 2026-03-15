@@ -2438,7 +2438,6 @@ fn apply_checkpoint_side_effect(payload: &Value) -> Result<(), GitAiError> {
         .and_then(parse_checkpoint_kind)
         .or_else(|| request.agent_run_result.as_ref().map(|r| r.checkpoint_kind))
         .unwrap_or(CheckpointKind::Human);
-
     let author = request
         .author
         .unwrap_or_else(|| repo.git_author_identity().name_or_unknown());
@@ -2526,6 +2525,181 @@ fn apply_pull_fast_forward_working_log_side_effect_from_common_dir(
     Ok(())
 }
 
+fn commit_replay_context_from_rewrite_event(
+    rewrite_event: &RewriteLogEvent,
+) -> Option<(String, String)> {
+    match rewrite_event {
+        RewriteLogEvent::Commit { commit } => {
+            let base_commit = commit
+                .base_commit
+                .as_deref()
+                .filter(|sha| !sha.trim().is_empty())
+                .unwrap_or("initial")
+                .to_string();
+            Some((base_commit, commit.commit_sha.clone()))
+        }
+        RewriteLogEvent::CommitAmend { commit_amend } => Some((
+            commit_amend.original_commit.clone(),
+            commit_amend.amended_commit_sha.clone(),
+        )),
+        _ => None,
+    }
+}
+
+fn build_commit_replay_file_snapshot(
+    repo: &Repository,
+    base_commit: &str,
+    target_commit: &str,
+) -> Result<(Vec<String>, HashMap<String, String>), GitAiError> {
+    const EMPTY_TREE_OID: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+    let from_ref = if base_commit == "initial" {
+        EMPTY_TREE_OID
+    } else {
+        base_commit
+    };
+    let mut files = repo.diff_changed_files(from_ref, target_commit)?;
+    files.retain(|file| !file.trim().is_empty());
+    files.sort();
+    files.dedup();
+
+    let mut dirty_files = HashMap::new();
+    for file_path in &files {
+        let content = repo
+            .get_file_content(file_path, target_commit)
+            .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
+            .unwrap_or_default();
+        dirty_files.insert(file_path.clone(), content);
+    }
+
+    Ok((files, dirty_files))
+}
+
+fn commit_file_content(repo: &Repository, commit: &str, file_path: &str) -> String {
+    let trimmed = commit.trim();
+    if trimmed.is_empty() || trimmed == "initial" {
+        return String::new();
+    }
+
+    repo.get_file_content(file_path, trimmed)
+        .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
+        .unwrap_or_default()
+}
+
+fn latest_checkpoint_file_content(
+    working_log: &crate::git::repo_storage::PersistedWorkingLog,
+    file_path: &str,
+) -> Option<String> {
+    let checkpoints = working_log.read_all_checkpoints().ok()?;
+    let entry = checkpoints
+        .iter()
+        .rev()
+        .find_map(|checkpoint| checkpoint.entries.iter().find(|entry| entry.file == file_path))?;
+    working_log.get_file_version(&entry.blob_sha).ok()
+}
+
+fn filter_commit_replay_files(
+    repo: &Repository,
+    working_log: &crate::git::repo_storage::PersistedWorkingLog,
+    base_commit: &str,
+    files: Vec<String>,
+    dirty_files: HashMap<String, String>,
+) -> (Vec<String>, HashMap<String, String>) {
+    let mut selected_files = Vec::new();
+    let mut selected_dirty_files = HashMap::new();
+
+    for file_path in files {
+        let Some(target_content) = dirty_files.get(&file_path).cloned() else {
+            continue;
+        };
+
+        let should_replay = match latest_checkpoint_file_content(working_log, &file_path) {
+            None => true,
+            Some(tracked_content) => {
+                if tracked_content == target_content {
+                    false
+                } else {
+                    let base_content = commit_file_content(repo, base_commit, &file_path);
+                    tracked_content == base_content
+                }
+            }
+        };
+
+        if should_replay {
+            selected_dirty_files.insert(file_path.clone(), target_content);
+            selected_files.push(file_path);
+        } else {
+            debug_log(&format!(
+                "Skipping synthetic pre-commit replay for {} to preserve tracked unstaged state",
+                file_path
+            ));
+        }
+    }
+
+    (selected_files, selected_dirty_files)
+}
+
+fn build_human_replay_agent_result(
+    files: Vec<String>,
+    dirty_files: HashMap<String, String>,
+) -> AgentRunResult {
+    AgentRunResult {
+        agent_id: crate::authorship::working_log::AgentId {
+            tool: "daemon".to_string(),
+            id: "daemon-commit-replay".to_string(),
+            model: "daemon".to_string(),
+        },
+        agent_metadata: None,
+        transcript: Some(crate::authorship::transcript::AiTranscript { messages: vec![] }),
+        checkpoint_kind: CheckpointKind::Human,
+        repo_working_dir: None,
+        edited_filepaths: None,
+        will_edit_filepaths: Some(files),
+        dirty_files: Some(dirty_files),
+    }
+}
+
+fn sync_pre_commit_checkpoint_for_daemon_commit(
+    repo: &Repository,
+    rewrite_event: &RewriteLogEvent,
+    author: &str,
+) -> Result<(), GitAiError> {
+    let Some((base_commit, target_commit)) = commit_replay_context_from_rewrite_event(rewrite_event)
+    else {
+        return Ok(());
+    };
+    if base_commit.trim().is_empty() || target_commit.trim().is_empty() || repo.workdir().is_err() {
+        return Ok(());
+    }
+    let (changed_files, dirty_files) =
+        build_commit_replay_file_snapshot(repo, &base_commit, &target_commit)?;
+    let working_log = repo.storage.working_log_for_base_commit(&base_commit);
+    let (changed_files, dirty_files) = filter_commit_replay_files(
+        repo,
+        &working_log,
+        &base_commit,
+        changed_files,
+        dirty_files,
+    );
+    if changed_files.is_empty() {
+        return Ok(());
+    }
+    let replay_agent_result = build_human_replay_agent_result(changed_files, dirty_files);
+
+    crate::commands::checkpoint::run_with_base_commit_override(
+        repo,
+        author,
+        CheckpointKind::Human,
+        false,
+        false,
+        true,
+        Some(replay_agent_result),
+        true,
+        Some(base_commit.as_str()),
+    )
+    .map(|_| ())
+}
+
 fn apply_rewrite_side_effect(
     worktree: &str,
     rewrite_event: RewriteLogEvent,
@@ -2539,6 +2713,7 @@ fn apply_rewrite_side_effect(
     if let RewriteLogEvent::Stash { stash } = &rewrite_event {
         apply_stash_rewrite_side_effect(&mut repo, stash)?;
     }
+    sync_pre_commit_checkpoint_for_daemon_commit(&repo, &rewrite_event, &author)?;
     apply_env_overrides_to_working_log(&repo, &rewrite_event, env_overrides)?;
     repo.handle_rewrite_log_event(rewrite_event, author, true, true);
     Ok(())
@@ -2551,6 +2726,7 @@ fn apply_rewrite_side_effect_from_common_dir(
 ) -> Result<(), GitAiError> {
     let mut repo = from_bare_repository(common_dir)?;
     let author = repo.git_author_identity().name_or_unknown();
+    sync_pre_commit_checkpoint_for_daemon_commit(&repo, &rewrite_event, &author)?;
     apply_env_overrides_to_working_log(&repo, &rewrite_event, env_overrides)?;
     repo.handle_rewrite_log_event(rewrite_event, author, true, true);
     Ok(())
@@ -4093,9 +4269,161 @@ mod tests {
         let _ = git(path, &["config", "user.email", "daemon-test@example.com"]);
     }
 
+    fn seed_ai_checkpoint_for_file(
+        repo: &crate::git::repository::Repository,
+        base_commit: &str,
+        file_path: &str,
+        file_content: &str,
+    ) {
+        use crate::authorship::attribution_tracker::LineAttribution;
+        use crate::authorship::working_log::{Checkpoint, CheckpointKind, WorkingLogEntry};
+
+        let working_log = repo.storage.working_log_for_base_commit(base_commit);
+        let blob_sha = working_log
+            .persist_file_version(file_content)
+            .expect("seed blob should persist");
+        let entry = WorkingLogEntry::new(
+            file_path.to_string(),
+            blob_sha,
+            vec![],
+            vec![LineAttribution::new(
+                1,
+                1,
+                CheckpointKind::AiAgent.to_str(),
+                None,
+            )],
+        );
+        let checkpoint = Checkpoint::new(
+            CheckpointKind::AiAgent,
+            "seed".to_string(),
+            "mock-ai".to_string(),
+            vec![entry],
+        );
+        working_log
+            .append_checkpoint(&checkpoint)
+            .expect("seed checkpoint should persist");
+    }
+
+    fn latest_human_checkpoint_file_content(
+        repo: &crate::git::repository::Repository,
+        base_commit: &str,
+        file_path: &str,
+    ) -> Option<String> {
+        use crate::authorship::working_log::CheckpointKind;
+
+        let working_log = repo.storage.working_log_for_base_commit(base_commit);
+        let checkpoints = working_log.read_all_checkpoints().ok()?;
+        let entry = checkpoints
+            .iter()
+            .rev()
+            .find(|checkpoint| checkpoint.kind == CheckpointKind::Human)
+            .and_then(|checkpoint| checkpoint.entries.iter().find(|entry| entry.file == file_path))?;
+        working_log.get_file_version(&entry.blob_sha).ok()
+    }
+
     fn empty_commit(path: &Path, message: &str) -> String {
         let _ = git(path, &["commit", "--allow-empty", "-m", message]);
         git(path, &["rev-parse", "HEAD"])
+    }
+
+    #[test]
+    fn test_sync_pre_commit_checkpoint_on_clean_tree_still_records_commit_files() {
+        let dir = tempdir().unwrap();
+        let repo_path = dir.path().join("repo");
+        init_repo(&repo_path);
+        configure_test_identity(&repo_path);
+
+        let file_rel = "example.txt";
+        fs::write(repo_path.join(file_rel), "base\n").unwrap();
+        let _ = git(&repo_path, &["add", file_rel]);
+        let _ = git(&repo_path, &["commit", "-m", "base"]);
+        let base_commit = git(&repo_path, &["rev-parse", "HEAD"]);
+
+        let repo = find_repository_in_path(repo_path.to_string_lossy().as_ref()).unwrap();
+        seed_ai_checkpoint_for_file(&repo, &base_commit, file_rel, "base\n");
+
+        fs::write(repo_path.join(file_rel), "ai-change\n").unwrap();
+        let _ = git(&repo_path, &["add", file_rel]);
+        let _ = git(&repo_path, &["commit", "-m", "commit-one"]);
+        let commit_one = git(&repo_path, &["rev-parse", "HEAD"]);
+
+        // Worktree is clean here. Synthetic pre-commit replay still needs to record commit files.
+        let rewrite_event = RewriteLogEvent::commit(Some(base_commit.clone()), commit_one);
+        sync_pre_commit_checkpoint_for_daemon_commit(&repo, &rewrite_event, "Daemon Test").unwrap();
+
+        let checkpoint_content = latest_human_checkpoint_file_content(&repo, &base_commit, file_rel);
+        assert_eq!(
+            checkpoint_content.as_deref(),
+            Some("ai-change\n"),
+            "clean-tree replay should still append a human checkpoint entry for committed content"
+        );
+    }
+
+    #[test]
+    fn test_sync_pre_commit_checkpoint_uses_commit_content_not_later_worktree_edit() {
+        let dir = tempdir().unwrap();
+        let repo_path = dir.path().join("repo");
+        init_repo(&repo_path);
+        configure_test_identity(&repo_path);
+
+        let file_rel = "example.txt";
+        fs::write(repo_path.join(file_rel), "base\n").unwrap();
+        let _ = git(&repo_path, &["add", file_rel]);
+        let _ = git(&repo_path, &["commit", "-m", "base"]);
+        let base_commit = git(&repo_path, &["rev-parse", "HEAD"]);
+
+        let repo = find_repository_in_path(repo_path.to_string_lossy().as_ref()).unwrap();
+        seed_ai_checkpoint_for_file(&repo, &base_commit, file_rel, "base\n");
+
+        fs::write(repo_path.join(file_rel), "ai-change\n").unwrap();
+        let _ = git(&repo_path, &["add", file_rel]);
+        let _ = git(&repo_path, &["commit", "-m", "commit-one"]);
+        let commit_one = git(&repo_path, &["rev-parse", "HEAD"]);
+
+        // Simulate later edits arriving before daemon processes this commit event.
+        fs::write(repo_path.join(file_rel), "late-edit\n").unwrap();
+
+        let rewrite_event = RewriteLogEvent::commit(Some(base_commit.clone()), commit_one);
+        sync_pre_commit_checkpoint_for_daemon_commit(&repo, &rewrite_event, "Daemon Test").unwrap();
+
+        let checkpoint_content = latest_human_checkpoint_file_content(&repo, &base_commit, file_rel);
+        assert_eq!(
+            checkpoint_content.as_deref(),
+            Some("ai-change\n"),
+            "replay must use committed snapshot for this command, not later worktree edits"
+        );
+    }
+
+    #[test]
+    fn test_sync_pre_commit_checkpoint_skips_files_with_newer_tracked_state() {
+        let dir = tempdir().unwrap();
+        let repo_path = dir.path().join("repo");
+        init_repo(&repo_path);
+        configure_test_identity(&repo_path);
+
+        let file_rel = "example.txt";
+        fs::write(repo_path.join(file_rel), "base\n").unwrap();
+        let _ = git(&repo_path, &["add", file_rel]);
+        let _ = git(&repo_path, &["commit", "-m", "base"]);
+        let base_commit = git(&repo_path, &["rev-parse", "HEAD"]);
+
+        let repo = find_repository_in_path(repo_path.to_string_lossy().as_ref()).unwrap();
+        // Simulate a file with newer tracked (checkpointed) state than the commit snapshot.
+        seed_ai_checkpoint_for_file(&repo, &base_commit, file_rel, "base\ntest\ntest1\n");
+
+        fs::write(repo_path.join(file_rel), "base\ntest\n").unwrap();
+        let _ = git(&repo_path, &["add", file_rel]);
+        let _ = git(&repo_path, &["commit", "-m", "commit-one"]);
+        let commit_one = git(&repo_path, &["rev-parse", "HEAD"]);
+
+        let rewrite_event = RewriteLogEvent::commit(Some(base_commit.clone()), commit_one);
+        sync_pre_commit_checkpoint_for_daemon_commit(&repo, &rewrite_event, "Daemon Test").unwrap();
+
+        let checkpoint_content = latest_human_checkpoint_file_content(&repo, &base_commit, file_rel);
+        assert!(
+            checkpoint_content.is_none(),
+            "replay should skip files whose tracked state is newer than this commit snapshot"
+        );
     }
 
     #[test]

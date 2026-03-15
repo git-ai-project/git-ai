@@ -3,10 +3,12 @@ mod repos;
 
 use git_ai::authorship::working_log::CheckpointKind;
 use git_ai::daemon::{ControlRequest, ControlResponse, send_control_request};
+use repos::test_file::ExpectedLineExt;
 use repos::test_repo::{GitTestMode, TestRepo, get_binary_path, real_git_executable};
 use serde_json::Value;
 use serial_test::serial;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -358,6 +360,194 @@ fn daemon_shadow_mode_tracks_checkpoint_without_applying_side_effects() {
         !checkpoints_map.is_empty(),
         "shadow-mode daemon should still track checkpoint summaries in state"
     );
+}
+
+#[test]
+#[serial]
+fn daemon_pure_trace_socket_commit_after_ai_checkpoint_preserves_ai_replacement_attribution() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let daemon = DaemonGuard::start(&repo, "write");
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let env = git_trace_env(&trace_socket);
+    let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
+    let file_path = repo.path().join("daemon-ai-replace.txt");
+
+    fs::write(&file_path, "old line\n").expect("failed to write base contents");
+    repo.git_og_with_env(&["add", "daemon-ai-replace.txt"], &env_refs)
+        .expect("base add should succeed");
+    repo.git_og_with_env(&["commit", "-m", "base"], &env_refs)
+        .expect("base commit should succeed");
+
+    fs::write(&file_path, "new line from ai\n").expect("failed to write ai contents");
+    repo.git_ai_with_env(
+        &["checkpoint", "mock_ai", "daemon-ai-replace.txt"],
+        &[("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true")],
+    )
+    .expect("ai checkpoint should succeed");
+    repo.git_og_with_env(&["add", "daemon-ai-replace.txt"], &env_refs)
+        .expect("add should succeed");
+    repo.git_og_with_env(&["commit", "-m", "commit ai replacement"], &env_refs)
+        .expect("commit should succeed");
+
+    daemon.latest_seq_and_wait_idle();
+
+    let mut file = repo.filename("daemon-ai-replace.txt");
+    file.assert_lines_and_blame(lines!["new line from ai".ai()]);
+}
+
+#[test]
+#[serial]
+fn daemon_pure_trace_socket_checkpoint_stage_checkpoint_two_commits_preserve_ai_lines() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let daemon = DaemonGuard::start(&repo, "write");
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let env = git_trace_env(&trace_socket);
+    let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
+    let file_rel = "daemon-two-ai-lines.txt";
+    let file_path = repo.path().join(file_rel);
+
+    fs::write(&file_path, "base\n").expect("failed to seed base file");
+    repo.git_og_with_env(&["add", file_rel], &env_refs)
+        .expect("base add should succeed");
+    repo.git_og_with_env(&["commit", "-m", "base"], &env_refs)
+        .expect("base commit should succeed");
+
+    {
+        let mut f = fs::OpenOptions::new()
+            .append(true)
+            .open(&file_path)
+            .expect("failed to open file for first append");
+        writeln!(f, "test").expect("failed to append first ai line");
+    }
+    repo.git_ai_with_env(
+        &["checkpoint", "mock_ai", file_rel],
+        &[("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true")],
+    )
+    .expect("first delegated ai checkpoint should succeed");
+
+    repo.git_og_with_env(&["add", "."], &env_refs)
+        .expect("staging first ai line should succeed");
+
+    {
+        let mut f = fs::OpenOptions::new()
+            .append(true)
+            .open(&file_path)
+            .expect("failed to open file for second append");
+        writeln!(f, "test1").expect("failed to append second ai line");
+    }
+    repo.git_ai_with_env(
+        &["checkpoint", "mock_ai", file_rel],
+        &[("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true")],
+    )
+    .expect("second delegated ai checkpoint should succeed");
+
+    repo.git_og_with_env(&["commit", "-m", "first ai line"], &env_refs)
+        .expect("first commit should succeed");
+    daemon.latest_seq_and_wait_idle();
+
+    repo.git_og_with_env(&["add", "."], &env_refs)
+        .expect("staging second ai line should succeed");
+    repo.git_og_with_env(&["commit", "-m", "second ai line"], &env_refs)
+        .expect("second commit should succeed");
+    daemon.latest_seq_and_wait_idle();
+
+    let mut file = repo.filename(file_rel);
+    file.assert_lines_and_blame(lines!["base", "test".ai(), "test1".ai()]);
+}
+
+#[test]
+#[serial]
+fn daemon_pure_trace_socket_checkpoint_stage_checkpoint_non_adjacent_hunks_survive_split_commits() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let daemon = DaemonGuard::start(&repo, "write");
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let env = git_trace_env(&trace_socket);
+    let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
+    let file_rel = "daemon-non-adjacent.md";
+    let file_path = repo.path().join(file_rel);
+
+    let initial = "\
+Top line
+
+**Section Alpha**
+alpha body
+
+middle line 1
+middle line 2
+
+**Section Omega**
+omega body
+";
+    fs::write(&file_path, initial).expect("failed to write initial content");
+    repo.git_og_with_env(&["add", file_rel], &env_refs)
+        .expect("base add should succeed");
+    repo.git_og_with_env(&["commit", "-m", "base"], &env_refs)
+        .expect("base commit should succeed");
+
+    let first_ai_hunk = "\
+Top line
+
+### Section Alpha
+alpha body
+
+middle line 1
+middle line 2
+
+**Section Omega**
+omega body
+";
+    fs::write(&file_path, first_ai_hunk).expect("failed to write first hunk content");
+    repo.git_ai_with_env(
+        &["checkpoint", "mock_ai", file_rel],
+        &[("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true")],
+    )
+    .expect("first delegated checkpoint should succeed");
+
+    repo.git_og_with_env(&["add", "."], &env_refs)
+        .expect("staging first hunk should succeed");
+
+    let both_hunks = "\
+Top line
+
+### Section Alpha
+alpha body
+
+middle line 1
+middle line 2
+
+### Section Omega
+omega body
+";
+    fs::write(&file_path, both_hunks).expect("failed to write both hunks content");
+    repo.git_ai_with_env(
+        &["checkpoint", "mock_ai", file_rel],
+        &[("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true")],
+    )
+    .expect("second delegated checkpoint should succeed");
+
+    repo.git_og_with_env(&["commit", "-m", "commit first staged hunk"], &env_refs)
+        .expect("first split commit should succeed");
+    daemon.latest_seq_and_wait_idle();
+
+    repo.git_og_with_env(&["add", "."], &env_refs)
+        .expect("staging remaining hunk should succeed");
+    repo.git_og_with_env(&["commit", "-m", "commit second hunk"], &env_refs)
+        .expect("second split commit should succeed");
+    daemon.latest_seq_and_wait_idle();
+
+    let mut file = repo.filename(file_rel);
+    file.assert_lines_and_blame(lines![
+        "Top line",
+        "".human(),
+        "### Section Alpha".ai(),
+        "alpha body",
+        "".human(),
+        "middle line 1",
+        "middle line 2",
+        "".human(),
+        "### Section Omega".ai(),
+        "omega body",
+    ]);
 }
 
 #[test]
