@@ -17,7 +17,7 @@ impl OpenCodeInstaller {
         home_dir()
             .join(".config")
             .join("opencode")
-            .join("plugin")
+            .join("plugins")
             .join("git-ai.ts")
     }
 
@@ -150,7 +150,7 @@ mod tests {
             .path()
             .join(".config")
             .join("opencode")
-            .join("plugin")
+            .join("plugins")
             .join("git-ai.ts");
         (temp_dir, plugin_path)
     }
@@ -279,7 +279,7 @@ mod tests {
             .path()
             .join(".config")
             .join("opencode")
-            .join("plugin")
+            .join("plugins")
             .join("git-ai.ts");
 
         assert!(!plugin_path.parent().unwrap().exists());

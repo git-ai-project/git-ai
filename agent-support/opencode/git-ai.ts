@@ -7,8 +7,8 @@
  *
  * Installation:
  *   - Automatically installed by `git-ai install-hooks`
- *   - Or manually copy to ~/.config/opencode/plugin/git-ai.ts (global)
- *   - Or to .opencode/plugin/git-ai.ts (project-local)
+ *   - Or manually copy to ~/.config/opencode/plugins/git-ai.ts (global)
+ *   - Or to .opencode/plugins/git-ai.ts (project-local)
  *
  * Requirements:
  *   - git-ai must be installed (path is injected at install time)
