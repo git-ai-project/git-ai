@@ -41,6 +41,7 @@ pub mod family_actor;
 pub mod coordinator;
 pub mod reducer;
 pub mod analyzers;
+pub mod effects;
 
 const TRACE_EVENT_TYPE: &str = "trace2_raw";
 const CHECKPOINT_EVENT_TYPE: &str = "checkpoint";

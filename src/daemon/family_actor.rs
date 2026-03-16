@@ -3,9 +3,13 @@ use crate::daemon::domain::{
     ApplyAck, CheckpointObserved, EnvOverrideSet, FamilyKey, FamilySnapshot, FamilyState,
     FamilyStatus, NormalizedCommand, ReconcileSnapshot,
 };
+use crate::daemon::effects::{
+    EffectIntent, EffectRunnerMode, FamilyEffectRunner, NoopEffectExecutor, plan_effects,
+};
 use crate::daemon::reducer;
 use crate::error::GitAiError;
 use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 pub enum FamilyMsg {
@@ -113,6 +117,13 @@ impl FamilyActorHandle {
 }
 
 pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
+    spawn_family_actor_with_mode(family_key, EffectRunnerMode::Shadow)
+}
+
+pub fn spawn_family_actor_with_mode(
+    family_key: FamilyKey,
+    effect_mode: EffectRunnerMode,
+) -> FamilyActorHandle {
     let (tx, mut rx) = mpsc::channel::<FamilyMsg>(1024);
     let handle = FamilyActorHandle {
         family_key: family_key.clone(),
@@ -121,6 +132,7 @@ pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
 
     tokio::spawn(async move {
         let analyzers = AnalyzerRegistry::new();
+        let effect_runner = FamilyEffectRunner::spawn(effect_mode, Arc::new(NoopEffectExecutor));
         let mut state = FamilyState {
             family_key: family_key.clone(),
             refs: HashMap::new(),
@@ -139,17 +151,32 @@ pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
         while let Some(msg) = rx.recv().await {
             match msg {
                 FamilyMsg::Apply(cmd, respond_to) => {
-                    let result = reducer::reduce_family_command(&mut state, cmd, &analyzers)
-                        .map(|(applied, _)| ApplyAck {
-                            seq: applied.seq,
-                            applied: true,
-                        });
+                    let result = reducer::reduce_family_command(&mut state, cmd, &analyzers).map(
+                        |(applied, _)| {
+                            let plan = plan_effects(&applied);
+                            for intent in plan.intents {
+                                if let Err(err) = effect_runner.try_enqueue(intent) {
+                                    state.last_error = Some(err.to_string());
+                                }
+                            }
+                            ApplyAck {
+                                seq: applied.seq,
+                                applied: true,
+                            }
+                        },
+                    );
                     let seq = result.as_ref().map(|ack| ack.seq).unwrap_or(state.applied_seq);
                     let _ = respond_to.send(result);
                     satisfy_barriers(seq, &mut waiters);
                 }
                 FamilyMsg::ApplyCheckpoint(checkpoint, respond_to) => {
+                    let checkpoint_id = checkpoint.id.clone();
                     reducer::reduce_checkpoint(&mut state, checkpoint);
+                    if let Err(err) = effect_runner.try_enqueue(EffectIntent::RunCheckpointEffect {
+                        checkpoint_id: Some(checkpoint_id),
+                    }) {
+                        state.last_error = Some(err.to_string());
+                    }
                     let _ = respond_to.send(Ok(ApplyAck {
                         seq: state.applied_seq,
                         applied: true,
@@ -178,7 +205,7 @@ pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
                         applied_seq: state.applied_seq,
                         recent_command_count: state.recent_commands.len(),
                         unresolved_transcripts: state.unresolved_transcripts.len(),
-                        effect_queue_depth: 0,
+                        effect_queue_depth: effect_runner.queue_depth(),
                         last_error: state.last_error.clone(),
                         last_reconcile_ns: state.last_reconcile_ns,
                     }));
@@ -208,6 +235,7 @@ pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
                 FamilyMsg::Shutdown => break,
             }
         }
+        let _ = effect_runner.shutdown().await;
     });
 
     handle
