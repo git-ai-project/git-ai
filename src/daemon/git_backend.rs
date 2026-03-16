@@ -1,19 +1,15 @@
-use crate::daemon::domain::{AliasResolution, FamilyKey, RefChange, RepoContext};
+use crate::daemon::domain::{FamilyKey, RefChange, RepoContext};
 use crate::error::GitAiError;
 use crate::git::find_repository_in_path;
 use crate::git::repository::exec_git_allow_nonzero;
-use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReflogCut {
-    pub ordinal: u64,
     pub offsets: HashMap<String, u64>,
-    pub hash: Option<String>,
 }
 
 pub trait GitBackend: Send + Sync + 'static {
@@ -32,21 +28,13 @@ pub trait GitBackend: Send + Sync + 'static {
         end: &ReflogCut,
     ) -> Result<Vec<RefChange>, GitAiError>;
 
-    fn resolve_alias(
-        &self,
-        worktree: Option<&Path>,
-        argv: &[String],
-    ) -> Result<AliasResolution, GitAiError>;
-
     fn clone_target(&self, argv: &[String], cwd_hint: Option<&Path>) -> Option<PathBuf>;
 
     fn init_target(&self, argv: &[String], cwd_hint: Option<&Path>) -> Option<PathBuf>;
 }
 
 #[derive(Debug, Default)]
-pub struct SystemGitBackend {
-    reflog_ordinal: AtomicU64,
-}
+pub struct SystemGitBackend;
 
 impl SystemGitBackend {
     pub fn new() -> Self {
@@ -154,22 +142,7 @@ impl GitBackend for SystemGitBackend {
     fn reflog_cut(&self, family: &FamilyKey) -> Result<ReflogCut, GitAiError> {
         let common_dir = PathBuf::from(&family.0);
         let offsets = reflog_offsets(&common_dir)?;
-        let mut entries = offsets.iter().collect::<Vec<_>>();
-        entries.sort_by(|a, b| a.0.cmp(b.0));
-        let mut hasher = Sha256::new();
-        for (reference, offset) in entries {
-            hasher.update(reference.as_bytes());
-            hasher.update(b":");
-            hasher.update(offset.to_string().as_bytes());
-            hasher.update(b"\n");
-        }
-        let hash = format!("{:x}", hasher.finalize());
-        let ordinal = self.reflog_ordinal.fetch_add(1, Ordering::SeqCst) + 1;
-        Ok(ReflogCut {
-            ordinal,
-            offsets,
-            hash: Some(hash),
-        })
+        Ok(ReflogCut { offsets })
     }
 
     fn reflog_delta(
@@ -231,14 +204,6 @@ impl GitBackend for SystemGitBackend {
         }
 
         Ok(changes)
-    }
-
-    fn resolve_alias(
-        &self,
-        _worktree: Option<&Path>,
-        _argv: &[String],
-    ) -> Result<AliasResolution, GitAiError> {
-        Ok(AliasResolution::None)
     }
 
     fn clone_target(&self, argv: &[String], cwd_hint: Option<&Path>) -> Option<PathBuf> {

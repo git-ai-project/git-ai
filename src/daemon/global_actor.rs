@@ -126,7 +126,7 @@ fn satisfy_barriers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::domain::{AliasResolution, CommandScope, Confidence, NormalizedCommand};
+    use crate::daemon::domain::{CommandScope, Confidence, NormalizedCommand};
 
     fn global_cmd(seq: u128) -> NormalizedCommand {
         NormalizedCommand {
@@ -136,14 +136,12 @@ mod tests {
             root_sid: format!("global-{}", seq),
             raw_argv: vec!["git".to_string(), "help".to_string()],
             primary_command: Some("help".to_string()),
-            alias_resolution: AliasResolution::None,
             observed_child_commands: Vec::new(),
             exit_code: 0,
             started_at_ns: seq,
             finished_at_ns: seq + 1,
             pre_repo: None,
             post_repo: None,
-            pre_stash_sha: None,
             ref_changes: Vec::new(),
             confidence: Confidence::Low,
             wrapper_mirror: false,

@@ -1,11 +1,8 @@
-use crate::daemon::domain::{
-    AliasResolution, CommandScope, Confidence, FamilyKey, NormalizedCommand, RefChange, RepoContext,
-};
+use crate::daemon::domain::{CommandScope, Confidence, FamilyKey, NormalizedCommand, RefChange, RepoContext};
 use crate::daemon::git_backend::{GitBackend, ReflogCut};
 use crate::error::GitAiError;
 use crate::observability;
 use serde_json::Value;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -24,8 +21,6 @@ pub struct PendingTraceCommand {
     pub post_repo: Option<RepoContext>,
     pub reflog_start_cut: Option<ReflogCut>,
     pub reflog_end_cut: Option<ReflogCut>,
-    pub pre_ref_snapshot: Option<HashMap<String, String>>,
-    pub alias_resolution: AliasResolution,
     pub wrapper_mirror: bool,
     pub saw_def_repo: bool,
     pub saw_root_exec: bool,
@@ -142,15 +137,6 @@ impl<B: GitBackend> TraceNormalizer<B> {
         } else {
             None
         };
-        let pre_ref_snapshot = if command_may_mutate_refs(primary_hint.as_deref()) {
-            family_key
-                .as_ref()
-                .and_then(|family| self.backend.ref_snapshot(family).ok())
-        } else {
-            None
-        };
-
-        let alias_resolution = AliasResolution::None;
 
         let wrapper_mirror = payload
             .get("wrapper_mirror")
@@ -171,8 +157,6 @@ impl<B: GitBackend> TraceNormalizer<B> {
             post_repo: None,
             reflog_start_cut,
             reflog_end_cut: None,
-            pre_ref_snapshot,
-            alias_resolution,
             wrapper_mirror,
             saw_def_repo: false,
             saw_root_exec: false,
@@ -244,9 +228,6 @@ impl<B: GitBackend> TraceNormalizer<B> {
                 }
                 if pending.reflog_start_cut.is_none() {
                     pending.reflog_start_cut = self.backend.reflog_cut(&family).ok();
-                }
-                if pending.pre_ref_snapshot.is_none() {
-                    pending.pre_ref_snapshot = self.backend.ref_snapshot(&family).ok();
                 }
             }
         }
@@ -396,38 +377,20 @@ impl<B: GitBackend> TraceNormalizer<B> {
         if let Some(family) = pending.family_key.as_ref()
             && may_mutate_refs
         {
-            ref_changes = match (
-                pending.reflog_start_cut.as_ref(),
-                pending.reflog_end_cut.as_ref(),
-            ) {
-                (Some(start), Some(end)) => match self.backend.reflog_delta(family, start, end) {
-                    Ok(changes) => {
-                        confidence = Confidence::High;
-                        changes
-                    }
-                    Err(reflog_err) => {
-                        observability::log_error(
-                            &reflog_err,
-                            Some(serde_json::json!({
-                                "component": "trace_normalizer",
-                                "phase": "reflog_delta",
-                                "root_sid": pending.root_sid,
-                            })),
-                        );
-                        snapshot_diff(
-                            pending.pre_ref_snapshot.clone().unwrap_or_default(),
-                            self.backend.ref_snapshot(family).unwrap_or_default(),
-                        )
-                    }
-                },
-                _ => snapshot_diff(
-                    pending.pre_ref_snapshot.clone().unwrap_or_default(),
-                    self.backend.ref_snapshot(family).unwrap_or_default(),
-                ),
-            };
-            if confidence != Confidence::High {
-                confidence = Confidence::Medium;
-            }
+            let start = pending.reflog_start_cut.as_ref().ok_or_else(|| {
+                GitAiError::Generic(format!(
+                    "missing reflog start cut for mutating command sid={}",
+                    pending.root_sid
+                ))
+            })?;
+            let end = pending.reflog_end_cut.as_ref().ok_or_else(|| {
+                GitAiError::Generic(format!(
+                    "missing reflog end cut for mutating command sid={}",
+                    pending.root_sid
+                ))
+            })?;
+            ref_changes = self.backend.reflog_delta(family, start, end)?;
+            confidence = Confidence::High;
         }
 
         let mut family_key = pending.family_key.clone();
@@ -480,18 +443,12 @@ impl<B: GitBackend> TraceNormalizer<B> {
             root_sid: pending.root_sid,
             raw_argv: pending.raw_argv,
             primary_command,
-            alias_resolution: pending.alias_resolution,
             observed_child_commands: pending.observed_child_commands,
             exit_code,
             started_at_ns: pending.started_at_ns,
             finished_at_ns,
             pre_repo: pending.pre_repo,
             post_repo: pending.post_repo,
-            pre_stash_sha: pending
-                .pre_ref_snapshot
-                .as_ref()
-                .and_then(|snapshot| snapshot.get("refs/stash").cloned())
-                .filter(|sha| !sha.trim().is_empty()),
             ref_changes,
             confidence,
             wrapper_mirror: pending.wrapper_mirror,
@@ -499,34 +456,6 @@ impl<B: GitBackend> TraceNormalizer<B> {
 
         Ok(Some(normalized))
     }
-}
-
-fn snapshot_diff(
-    before: HashMap<String, String>,
-    after: HashMap<String, String>,
-) -> Vec<RefChange> {
-    let mut refs = before
-        .keys()
-        .chain(after.keys())
-        .cloned()
-        .collect::<Vec<_>>();
-    refs.sort();
-    refs.dedup();
-    refs.into_iter()
-        .filter_map(|reference| {
-            let old = before.get(&reference).cloned().unwrap_or_default();
-            let new = after.get(&reference).cloned().unwrap_or_default();
-            if old == new {
-                None
-            } else {
-                Some(RefChange {
-                    reference,
-                    old,
-                    new,
-                })
-            }
-        })
-        .collect()
 }
 
 fn payload_timestamp_ns(payload: &Value) -> Result<u128, GitAiError> {
@@ -700,8 +629,6 @@ mod tests {
         family_by_worktree: Mutex<HashMap<String, FamilyKey>>,
         context_by_worktree: Mutex<HashMap<String, RepoContext>>,
         refs_by_family: Mutex<HashMap<String, HashMap<String, String>>>,
-        reflog_ordinal: Mutex<u64>,
-        alias: Mutex<Option<AliasResolution>>,
     }
 
     impl MockBackend {
@@ -754,12 +681,8 @@ mod tests {
         }
 
         fn reflog_cut(&self, _family: &FamilyKey) -> Result<ReflogCut, GitAiError> {
-            let mut ordinal = self.reflog_ordinal.lock().unwrap();
-            *ordinal += 1;
             Ok(ReflogCut {
-                ordinal: *ordinal,
                 offsets: HashMap::new(),
-                hash: None,
             })
         }
 
@@ -770,19 +693,6 @@ mod tests {
             _end: &ReflogCut,
         ) -> Result<Vec<RefChange>, GitAiError> {
             Ok(vec![])
-        }
-
-        fn resolve_alias(
-            &self,
-            _worktree: Option<&Path>,
-            _argv: &[String],
-        ) -> Result<AliasResolution, GitAiError> {
-            Ok(self
-                .alias
-                .lock()
-                .unwrap()
-                .clone()
-                .unwrap_or(AliasResolution::None))
         }
 
         fn clone_target(&self, _argv: &[String], _cwd_hint: Option<&Path>) -> Option<PathBuf> {

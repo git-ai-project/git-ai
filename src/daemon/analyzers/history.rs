@@ -184,7 +184,7 @@ fn infer_reset_kind(args: &[String]) -> ResetKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::domain::{AliasResolution, CommandScope, RefChange};
+    use crate::daemon::domain::{CommandScope, RefChange};
 
     fn command(primary: &str, argv: &[&str]) -> NormalizedCommand {
         NormalizedCommand {
@@ -194,14 +194,12 @@ mod tests {
             root_sid: "r".to_string(),
             raw_argv: argv.iter().map(|s| s.to_string()).collect(),
             primary_command: Some(primary.to_string()),
-            alias_resolution: AliasResolution::None,
             observed_child_commands: Vec::new(),
             exit_code: 0,
             started_at_ns: 1,
             finished_at_ns: 2,
             pre_repo: None,
             post_repo: None,
-            pre_stash_sha: None,
             ref_changes: vec![RefChange {
                 reference: "HEAD".to_string(),
                 old: "a".to_string(),

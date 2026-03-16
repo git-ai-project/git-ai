@@ -119,9 +119,7 @@ impl<B: GitBackend> Coordinator<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::domain::{
-        AliasResolution, CommandScope, Confidence, FamilyKey, NormalizedCommand, RepoContext,
-    };
+    use crate::daemon::domain::{CommandScope, Confidence, FamilyKey, NormalizedCommand, RepoContext};
     use crate::daemon::git_backend::{GitBackend, ReflogCut};
     use std::path::PathBuf;
     use std::sync::Mutex;
@@ -172,14 +170,6 @@ mod tests {
             Ok(Vec::new())
         }
 
-        fn resolve_alias(
-            &self,
-            _worktree: Option<&Path>,
-            _argv: &[String],
-        ) -> Result<AliasResolution, GitAiError> {
-            Ok(AliasResolution::None)
-        }
-
         fn clone_target(&self, _argv: &[String], _cwd_hint: Option<&Path>) -> Option<PathBuf> {
             None
         }
@@ -197,14 +187,12 @@ mod tests {
             root_sid: "g1".to_string(),
             raw_argv: vec!["git".to_string(), "help".to_string()],
             primary_command: Some("help".to_string()),
-            alias_resolution: AliasResolution::None,
             observed_child_commands: Vec::new(),
             exit_code: 0,
             started_at_ns: 1,
             finished_at_ns: 2,
             pre_repo: None,
             post_repo: None,
-            pre_stash_sha: None,
             ref_changes: Vec::new(),
             confidence: Confidence::Low,
             wrapper_mirror: false,
@@ -219,14 +207,12 @@ mod tests {
             root_sid: "f1".to_string(),
             raw_argv: vec!["git".to_string(), "status".to_string()],
             primary_command: Some("status".to_string()),
-            alias_resolution: AliasResolution::None,
             observed_child_commands: Vec::new(),
             exit_code: 0,
             started_at_ns: 1,
             finished_at_ns: 2,
             pre_repo: None,
             post_repo: None,
-            pre_stash_sha: None,
             ref_changes: Vec::new(),
             confidence: Confidence::Low,
             wrapper_mirror: false,

@@ -5,9 +5,6 @@ use std::sync::Arc;
 
 pub mod generic;
 pub mod history;
-pub mod read_only;
-pub mod ref_admin;
-pub mod repo_admin;
 pub mod transport;
 pub mod workspace;
 

@@ -122,7 +122,7 @@ mod tests {
     use super::*;
     use crate::daemon::analyzers::AnalyzerRegistry;
     use crate::daemon::domain::{
-        AliasResolution, CommandScope, Confidence, FamilyKey, FamilyState, GlobalState, RefChange,
+        CommandScope, Confidence, FamilyKey, FamilyState, GlobalState, RefChange,
     };
     use std::collections::{BTreeSet, HashMap, VecDeque};
 
@@ -150,14 +150,12 @@ mod tests {
             root_sid: "sid".to_string(),
             raw_argv: vec!["git".to_string(), "update-ref".to_string()],
             primary_command: Some("update-ref".to_string()),
-            alias_resolution: AliasResolution::None,
             observed_child_commands: Vec::new(),
             exit_code: 0,
             started_at_ns: 1,
             finished_at_ns: 2,
             pre_repo: None,
             post_repo: None,
-            pre_stash_sha: None,
             ref_changes: vec![RefChange {
                 reference: "refs/heads/main".to_string(),
                 old: "".to_string(),

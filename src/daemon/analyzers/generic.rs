@@ -110,7 +110,7 @@ fn is_read_only_command(command: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::domain::{AliasResolution, CommandScope, RefChange};
+    use crate::daemon::domain::{CommandScope, RefChange};
 
     fn command(primary: &str) -> NormalizedCommand {
         NormalizedCommand {
@@ -120,14 +120,12 @@ mod tests {
             root_sid: "r".to_string(),
             raw_argv: vec!["git".to_string(), primary.to_string()],
             primary_command: Some(primary.to_string()),
-            alias_resolution: AliasResolution::None,
             observed_child_commands: Vec::new(),
             exit_code: 0,
             started_at_ns: 1,
             finished_at_ns: 2,
             pre_repo: None,
             post_repo: None,
-            pre_stash_sha: None,
             ref_changes: Vec::new(),
             confidence: Confidence::Low,
             wrapper_mirror: false,

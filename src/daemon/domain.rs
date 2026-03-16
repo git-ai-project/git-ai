@@ -31,14 +31,6 @@ pub enum Confidence {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AliasResolution {
-    None,
-    DirectAlias { alias: String, expansion: String },
-    ShellAlias { alias: String, expansion: String },
-    Unknown { reason: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefChange {
     pub reference: String,
     pub old: String,
@@ -60,14 +52,12 @@ pub struct NormalizedCommand {
     pub root_sid: String,
     pub raw_argv: Vec<String>,
     pub primary_command: Option<String>,
-    pub alias_resolution: AliasResolution,
     pub observed_child_commands: Vec<String>,
     pub exit_code: i32,
     pub started_at_ns: u128,
     pub finished_at_ns: u128,
     pub pre_repo: Option<RepoContext>,
     pub post_repo: Option<RepoContext>,
-    pub pre_stash_sha: Option<String>,
     pub ref_changes: Vec<RefChange>,
     pub confidence: Confidence,
     pub wrapper_mirror: bool,

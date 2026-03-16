@@ -1527,25 +1527,6 @@ impl ActorDaemonCoordinator {
     ) -> Option<String> {
         let parsed = Self::parsed_trace_invocation(cmd);
         if let Some(invoked) = parsed.command.as_deref() {
-            if let Some(primary) = cmd.primary_command.as_deref()
-                && !primary.trim().is_empty()
-                && matches!(
-                    cmd.alias_resolution,
-                    crate::daemon::domain::AliasResolution::DirectAlias { .. }
-                        | crate::daemon::domain::AliasResolution::ShellAlias { .. }
-                )
-            {
-                let alias_name = match &cmd.alias_resolution {
-                    crate::daemon::domain::AliasResolution::DirectAlias { alias, .. }
-                    | crate::daemon::domain::AliasResolution::ShellAlias { alias, .. } => {
-                        alias.as_str()
-                    }
-                    _ => "",
-                };
-                if !alias_name.is_empty() && invoked == alias_name {
-                    return Some(primary.to_string());
-                }
-            }
             return Some(invoked.to_string());
         }
 
@@ -1563,19 +1544,6 @@ impl ActorDaemonCoordinator {
         let parsed_command = parsed.command.as_deref();
         if parsed_command == Some(command_name) {
             return parsed.command_args;
-        }
-
-        if let Some(invoked) = parsed_command {
-            let alias_name = match &cmd.alias_resolution {
-                crate::daemon::domain::AliasResolution::DirectAlias { alias, .. }
-                | crate::daemon::domain::AliasResolution::ShellAlias { alias, .. } => {
-                    Some(alias.as_str())
-                }
-                _ => None,
-            };
-            if alias_name == Some(invoked) {
-                return parsed.command_args;
-            }
         }
 
         Self::args_after_command(&cmd.raw_argv, command_name)
@@ -1857,14 +1825,6 @@ impl ActorDaemonCoordinator {
         let is_default_stash_ref = stash_ref
             .map(|reference| reference == "stash@{0}")
             .unwrap_or(true);
-        if matches!(operation, StashOperation::Apply | StashOperation::Pop)
-            && is_default_stash_ref
-            && let Some(pre_stash_sha) = cmd.pre_stash_sha.as_ref()
-            && is_valid_oid(pre_stash_sha)
-            && !is_zero_oid(pre_stash_sha)
-        {
-            return Some(pre_stash_sha.clone());
-        }
 
         if matches!(operation, StashOperation::Pop)
             && let Some(old_stash_sha) = Self::stash_sha_from_ref_changes(cmd)
