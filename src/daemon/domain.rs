@@ -282,7 +282,6 @@ pub struct FamilyStatus {
     pub applied_seq: u64,
     pub recent_command_count: usize,
     pub unresolved_transcripts: usize,
-    pub effect_queue_depth: usize,
     pub last_error: Option<String>,
     pub last_reconcile_ns: Option<u128>,
 }

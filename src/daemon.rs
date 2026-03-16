@@ -35,7 +35,6 @@ use tokio::sync::{Mutex as AsyncMutex, Notify};
 pub mod analyzers;
 pub mod coordinator;
 pub mod domain;
-pub mod effects;
 pub mod family_actor;
 pub mod git_backend;
 pub mod global_actor;
@@ -1822,10 +1821,6 @@ impl ActorDaemonCoordinator {
         operation: &StashOperation,
         stash_ref: Option<&str>,
     ) -> Option<String> {
-        let is_default_stash_ref = stash_ref
-            .map(|reference| reference == "stash@{0}")
-            .unwrap_or(true);
-
         if matches!(operation, StashOperation::Pop)
             && let Some(old_stash_sha) = Self::stash_sha_from_ref_changes(cmd)
         {
@@ -2558,7 +2553,7 @@ impl ActorDaemonCoordinator {
             latest_seq,
             cursor,
             backlog,
-            effect_queue_depth: status.effect_queue_depth.saturating_add(inflight_effects),
+            effect_queue_depth: inflight_effects,
             active_trace_connections: active_connections as usize,
             unresolved_transcripts: Vec::new(),
             pending_roots: pending_roots as usize,

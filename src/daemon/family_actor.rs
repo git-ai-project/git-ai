@@ -3,13 +3,9 @@ use crate::daemon::domain::{
     ApplyAck, CheckpointObserved, EnvOverrideSet, FamilyKey, FamilySnapshot, FamilyState,
     FamilyStatus, NormalizedCommand, ReconcileSnapshot,
 };
-use crate::daemon::effects::{
-    EffectIntent, EffectRunnerMode, FamilyEffectRunner, NoopEffectExecutor, plan_effects,
-};
 use crate::daemon::reducer;
 use crate::error::GitAiError;
 use std::collections::{BTreeSet, HashMap, VecDeque};
-use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 pub enum FamilyMsg {
@@ -128,13 +124,6 @@ impl FamilyActorHandle {
 }
 
 pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
-    spawn_family_actor_with_mode(family_key, EffectRunnerMode::Shadow)
-}
-
-pub fn spawn_family_actor_with_mode(
-    family_key: FamilyKey,
-    effect_mode: EffectRunnerMode,
-) -> FamilyActorHandle {
     let (tx, mut rx) = mpsc::channel::<FamilyMsg>(1024);
     let handle = FamilyActorHandle {
         family_key: family_key.clone(),
@@ -143,7 +132,6 @@ pub fn spawn_family_actor_with_mode(
 
     tokio::spawn(async move {
         let analyzers = AnalyzerRegistry::new();
-        let effect_runner = FamilyEffectRunner::spawn(effect_mode, Arc::new(NoopEffectExecutor));
         let mut state = FamilyState {
             family_key: family_key.clone(),
             refs: HashMap::new(),
@@ -163,17 +151,9 @@ pub fn spawn_family_actor_with_mode(
             match msg {
                 FamilyMsg::Apply(cmd, respond_to) => {
                     let result = reducer::reduce_family_command(&mut state, cmd, &analyzers).map(
-                        |(applied, _)| {
-                            let plan = plan_effects(&applied);
-                            for intent in plan.intents {
-                                if let Err(err) = effect_runner.try_enqueue(intent) {
-                                    state.last_error = Some(err.to_string());
-                                }
-                            }
-                            ApplyAck {
-                                seq: applied.seq,
-                                applied: true,
-                            }
+                        |(applied, _)| ApplyAck {
+                            seq: applied.seq,
+                            applied: true,
                         },
                     );
                     let seq = result
@@ -184,13 +164,7 @@ pub fn spawn_family_actor_with_mode(
                     satisfy_barriers(seq, &mut waiters);
                 }
                 FamilyMsg::ApplyCheckpoint(checkpoint, respond_to) => {
-                    let checkpoint_id = checkpoint.id.clone();
                     reducer::reduce_checkpoint(&mut state, checkpoint);
-                    if let Err(err) = effect_runner.try_enqueue(EffectIntent::RunCheckpointEffect {
-                        checkpoint_id: Some(checkpoint_id),
-                    }) {
-                        state.last_error = Some(err.to_string());
-                    }
                     let _ = respond_to.send(Ok(ApplyAck {
                         seq: state.applied_seq,
                         applied: true,
@@ -219,7 +193,6 @@ pub fn spawn_family_actor_with_mode(
                         applied_seq: state.applied_seq,
                         recent_command_count: state.recent_commands.len(),
                         unresolved_transcripts: state.unresolved_transcripts.len(),
-                        effect_queue_depth: effect_runner.queue_depth(),
                         last_error: state.last_error.clone(),
                         last_reconcile_ns: state.last_reconcile_ns,
                     }));
@@ -253,7 +226,6 @@ pub fn spawn_family_actor_with_mode(
                 FamilyMsg::Shutdown => break,
             }
         }
-        let _ = effect_runner.shutdown().await;
     });
 
     handle
@@ -277,7 +249,7 @@ fn satisfy_barriers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::domain::{AliasResolution, CommandScope, Confidence, NormalizedCommand};
+    use crate::daemon::domain::{CommandScope, Confidence, NormalizedCommand};
     use std::path::PathBuf;
 
     fn sample_normalized_cmd(family_key: &str, seq: u128) -> NormalizedCommand {
@@ -288,14 +260,12 @@ mod tests {
             root_sid: format!("sid-{}", seq),
             raw_argv: vec!["git".to_string(), "status".to_string()],
             primary_command: Some("status".to_string()),
-            alias_resolution: AliasResolution::None,
             observed_child_commands: Vec::new(),
             exit_code: 0,
             started_at_ns: seq,
             finished_at_ns: seq + 1,
             pre_repo: None,
             post_repo: None,
-            pre_stash_sha: None,
             ref_changes: Vec::new(),
             confidence: Confidence::Low,
             wrapper_mirror: false,

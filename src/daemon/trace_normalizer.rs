@@ -1,8 +1,9 @@
-use crate::daemon::domain::{CommandScope, Confidence, FamilyKey, NormalizedCommand, RefChange, RepoContext};
+use crate::daemon::domain::{CommandScope, Confidence, FamilyKey, NormalizedCommand, RepoContext};
 use crate::daemon::git_backend::{GitBackend, ReflogCut};
 use crate::error::GitAiError;
 use crate::observability;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -621,6 +622,8 @@ fn select_primary_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::domain::RefChange;
+    use std::collections::HashMap;
     use std::path::Path;
     use std::sync::{Arc, Mutex};
 

@@ -119,7 +119,9 @@ impl<B: GitBackend> Coordinator<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::domain::{CommandScope, Confidence, FamilyKey, NormalizedCommand, RepoContext};
+    use crate::daemon::domain::{
+        CommandScope, Confidence, FamilyKey, NormalizedCommand, RepoContext,
+    };
     use crate::daemon::git_backend::{GitBackend, ReflogCut};
     use std::path::PathBuf;
     use std::sync::Mutex;
