@@ -227,6 +227,31 @@ fn git_trace_env(trace_socket_path: &Path) -> [(&'static str, String); 2] {
     ]
 }
 
+fn rewrite_log_path(repo: &TestRepo) -> PathBuf {
+    git_common_dir(repo).join("ai").join("rewrite_log")
+}
+
+fn rewrite_event_count(repo: &TestRepo, marker: &str) -> usize {
+    let path = rewrite_log_path(repo);
+    fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.contains(marker))
+        .count()
+}
+
+fn wait_for_rewrite_event_count(repo: &TestRepo, marker: &str, expected_count: usize) -> usize {
+    let mut observed = 0usize;
+    for _ in 0..200 {
+        observed = rewrite_event_count(repo, marker);
+        if observed >= expected_count {
+            return observed;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    observed
+}
+
 impl Drop for DaemonGuard {
     fn drop(&mut self) {
         self.shutdown();
@@ -585,13 +610,7 @@ fn daemon_trace_mirror_preserves_amend_rewrite_parity_and_records_command() {
         "trace mirror should append start/cmd_name/exit events"
     );
 
-    let rewrite_log_path = git_common_dir(&repo).join("ai").join("rewrite_log");
-    let rewrite_log =
-        fs::read_to_string(&rewrite_log_path).expect("rewrite log should exist after amend");
-    let amend_events = rewrite_log
-        .lines()
-        .filter(|line| line.contains("\"commit_amend\""))
-        .count();
+    let amend_events = wait_for_rewrite_event_count(&repo, "\"commit_amend\"", 1);
     assert_eq!(
         amend_events, 1,
         "daemon trace mirroring in write mode should not duplicate commit_amend rewrite events"
@@ -638,13 +657,7 @@ fn daemon_pure_trace_socket_write_mode_applies_amend_rewrite() {
 
     daemon.latest_seq_and_wait_idle();
 
-    let rewrite_log_path = git_common_dir(&repo).join("ai").join("rewrite_log");
-    let rewrite_log =
-        fs::read_to_string(&rewrite_log_path).expect("rewrite log should exist after amend");
-    let amend_events = rewrite_log
-        .lines()
-        .filter(|line| line.contains("\"commit_amend\""))
-        .count();
+    let amend_events = wait_for_rewrite_event_count(&repo, "\"commit_amend\"", 1);
     assert_eq!(
         amend_events, 1,
         "pure trace socket mode should emit exactly one commit_amend rewrite event"

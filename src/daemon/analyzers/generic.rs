@@ -148,6 +148,7 @@ mod tests {
             finished_at_ns: 2,
             pre_repo: None,
             post_repo: None,
+            pre_stash_sha: None,
             ref_changes: Vec::new(),
             confidence: Confidence::Low,
             wrapper_mirror: false,
@@ -164,7 +165,12 @@ mod tests {
             new: "b".to_string(),
         });
         let result = analyzer
-            .analyze(&cmd, AnalysisView { refs: &std::collections::HashMap::new() })
+            .analyze(
+                &cmd,
+                AnalysisView {
+                    refs: &std::collections::HashMap::new(),
+                },
+            )
             .unwrap();
         assert!(matches!(result.class, CommandClass::RefMutation));
     }
@@ -175,10 +181,11 @@ mod tests {
         let result = analyzer
             .analyze(
                 &command("custom-weird-command"),
-                AnalysisView { refs: &std::collections::HashMap::new() },
+                AnalysisView {
+                    refs: &std::collections::HashMap::new(),
+                },
             )
             .unwrap();
         assert!(!result.events.is_empty());
     }
 }
-

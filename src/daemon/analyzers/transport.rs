@@ -125,6 +125,7 @@ mod tests {
             finished_at_ns: 2,
             pre_repo: None,
             post_repo: None,
+            pre_stash_sha: None,
             ref_changes: Vec::new(),
             confidence: Confidence::Low,
             wrapper_mirror: false,
@@ -137,7 +138,9 @@ mod tests {
         let result = analyzer
             .analyze(
                 &command("pull", &["git", "pull", "--rebase"]),
-                AnalysisView { refs: &Default::default() },
+                AnalysisView {
+                    refs: &Default::default(),
+                },
             )
             .unwrap();
         assert!(result.events.iter().any(|event| matches!(

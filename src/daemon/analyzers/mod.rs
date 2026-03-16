@@ -73,8 +73,16 @@ impl AnalyzerRegistry {
         }
 
         let repo_admin: Arc<dyn CommandAnalyzer> = Arc::new(repo_admin::RepoAdminAnalyzer);
-        for command in ["init", "worktree", "config", "credential", "gc", "maintenance", "fsck", "prune"]
-        {
+        for command in [
+            "init",
+            "worktree",
+            "config",
+            "credential",
+            "gc",
+            "maintenance",
+            "fsck",
+            "prune",
+        ] {
             registry.register_command(command, repo_admin.clone());
         }
 

@@ -1,5 +1,7 @@
 use crate::daemon::analyzers::{AnalysisView, CommandAnalyzer};
-use crate::daemon::domain::{AnalysisResult, CommandClass, Confidence, NormalizedCommand, SemanticEvent};
+use crate::daemon::domain::{
+    AnalysisResult, CommandClass, Confidence, NormalizedCommand, SemanticEvent,
+};
 use crate::error::GitAiError;
 
 #[derive(Default)]
@@ -11,7 +13,11 @@ impl CommandAnalyzer for ReadOnlyAnalyzer {
         cmd: &NormalizedCommand,
         _state: AnalysisView<'_>,
     ) -> Result<AnalysisResult, GitAiError> {
-        let name = cmd.primary_command.as_deref().unwrap_or_default().to_ascii_lowercase();
+        let name = cmd
+            .primary_command
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
         if !is_supported_read_only(&name) {
             return Err(GitAiError::Generic(format!(
                 "read_only analyzer does not support command '{}'",
@@ -66,14 +72,19 @@ mod tests {
             finished_at_ns: 2,
             pre_repo: None,
             post_repo: None,
+            pre_stash_sha: None,
             ref_changes: Vec::new(),
             confidence: Confidence::Low,
             wrapper_mirror: false,
         };
         let result = analyzer
-            .analyze(&cmd, AnalysisView { refs: &Default::default() })
+            .analyze(
+                &cmd,
+                AnalysisView {
+                    refs: &Default::default(),
+                },
+            )
             .unwrap();
         assert!(matches!(result.class, CommandClass::ReadOnly));
     }
 }
-

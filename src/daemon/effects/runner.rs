@@ -116,7 +116,8 @@ mod tests {
 
     #[tokio::test]
     async fn shadow_runner_tracks_queue_depth() {
-        let runner = FamilyEffectRunner::spawn(EffectRunnerMode::Shadow, Arc::new(NoopEffectExecutor));
+        let runner =
+            FamilyEffectRunner::spawn(EffectRunnerMode::Shadow, Arc::new(NoopEffectExecutor));
         runner
             .enqueue(EffectIntent::SyncAuthorshipNotes {
                 reason: "fetch".to_string(),

@@ -20,12 +20,16 @@ pub fn plan_effects(applied: &AppliedCommand) -> EffectPlan {
 
     for event in &applied.analysis.events {
         match event {
-            SemanticEvent::FetchCompleted { .. } => intents.push(EffectIntent::SyncAuthorshipNotes {
-                reason: "fetch".to_string(),
-            }),
-            SemanticEvent::CloneCompleted { .. } => intents.push(EffectIntent::SyncAuthorshipNotes {
-                reason: "clone".to_string(),
-            }),
+            SemanticEvent::FetchCompleted { .. } => {
+                intents.push(EffectIntent::SyncAuthorshipNotes {
+                    reason: "fetch".to_string(),
+                })
+            }
+            SemanticEvent::CloneCompleted { .. } => {
+                intents.push(EffectIntent::SyncAuthorshipNotes {
+                    reason: "clone".to_string(),
+                })
+            }
             SemanticEvent::PullCompleted { strategy, .. } => {
                 intents.push(EffectIntent::SyncAuthorshipNotes {
                     reason: "pull".to_string(),
@@ -51,9 +55,11 @@ pub fn plan_effects(applied: &AppliedCommand) -> EffectPlan {
                     reason: format!("{:?}", event),
                 });
             }
-            SemanticEvent::StashOperation { .. } => intents.push(EffectIntent::ApplyRewriteLogEvent {
-                reason: "stash".to_string(),
-            }),
+            SemanticEvent::StashOperation { .. } => {
+                intents.push(EffectIntent::ApplyRewriteLogEvent {
+                    reason: "stash".to_string(),
+                })
+            }
             SemanticEvent::ConfigChanged | SemanticEvent::RemoteConfigChanged => {
                 intents.push(EffectIntent::RewriteAgentMetadataPaths);
             }
@@ -63,4 +69,3 @@ pub fn plan_effects(applied: &AppliedCommand) -> EffectPlan {
 
     EffectPlan { intents }
 }
-

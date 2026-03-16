@@ -1,14 +1,15 @@
 use crate::daemon::analyzers::AnalyzerRegistry;
-use crate::daemon::domain::{
-    ApplyAck, GlobalSnapshot, GlobalState, NormalizedCommand,
-};
+use crate::daemon::domain::{ApplyAck, GlobalSnapshot, GlobalState, NormalizedCommand};
 use crate::daemon::reducer;
 use crate::error::GitAiError;
 use std::collections::VecDeque;
 use tokio::sync::{mpsc, oneshot};
 
 pub enum GlobalMsg {
-    Apply(NormalizedCommand, oneshot::Sender<Result<ApplyAck, GitAiError>>),
+    Apply(
+        NormalizedCommand,
+        oneshot::Sender<Result<ApplyAck, GitAiError>>,
+    ),
     Snapshot(oneshot::Sender<Result<GlobalSnapshot, GitAiError>>),
     Barrier(u64, oneshot::Sender<Result<(), GitAiError>>),
     Shutdown,
@@ -73,12 +74,16 @@ pub fn spawn_global_actor() -> GlobalActorHandle {
         while let Some(msg) = rx.recv().await {
             match msg {
                 GlobalMsg::Apply(cmd, respond_to) => {
-                    let result = reducer::reduce_global_command(&mut state, cmd, &analyzers)
-                        .map(|(applied, _)| ApplyAck {
+                    let result = reducer::reduce_global_command(&mut state, cmd, &analyzers).map(
+                        |(applied, _)| ApplyAck {
                             seq: applied.seq,
                             applied: true,
-                        });
-                    let seq = result.as_ref().map(|ack| ack.seq).unwrap_or(state.applied_seq);
+                        },
+                    );
+                    let seq = result
+                        .as_ref()
+                        .map(|ack| ack.seq)
+                        .unwrap_or(state.applied_seq);
                     let _ = respond_to.send(result);
                     satisfy_barriers(seq, &mut waiters);
                 }
@@ -138,6 +143,7 @@ mod tests {
             finished_at_ns: seq + 1,
             pre_repo: None,
             post_repo: None,
+            pre_stash_sha: None,
             ref_changes: Vec::new(),
             confidence: Confidence::Low,
             wrapper_mirror: false,

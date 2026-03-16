@@ -1,5 +1,7 @@
 use crate::daemon::analyzers::{AnalysisView, CommandAnalyzer};
-use crate::daemon::domain::{AnalysisResult, CommandClass, Confidence, NormalizedCommand, SemanticEvent};
+use crate::daemon::domain::{
+    AnalysisResult, CommandClass, Confidence, NormalizedCommand, SemanticEvent,
+};
 use crate::error::GitAiError;
 use std::path::PathBuf;
 
@@ -17,10 +19,9 @@ impl CommandAnalyzer for RepoAdminAnalyzer {
         let mut events = Vec::new();
         match name {
             "init" => events.push(SemanticEvent::RepoInitialized {
-                path: cmd
-                    .worktree
-                    .clone()
-                    .unwrap_or_else(|| infer_init_target(&args).unwrap_or_else(|| PathBuf::from("."))),
+                path: cmd.worktree.clone().unwrap_or_else(|| {
+                    infer_init_target(&args).unwrap_or_else(|| PathBuf::from("."))
+                }),
             }),
             "worktree" => {
                 if args.iter().any(|a| a == "add") {
@@ -107,18 +108,24 @@ mod tests {
             finished_at_ns: 2,
             pre_repo: None,
             post_repo: None,
+            pre_stash_sha: None,
             ref_changes: Vec::new(),
             confidence: Confidence::Low,
             wrapper_mirror: false,
         };
 
         let out = analyzer
-            .analyze(&cmd, AnalysisView { refs: &Default::default() })
+            .analyze(
+                &cmd,
+                AnalysisView {
+                    refs: &Default::default(),
+                },
+            )
             .unwrap();
-        assert!(out
-            .events
-            .iter()
-            .any(|e| matches!(e, SemanticEvent::RepoInitialized { .. })));
+        assert!(
+            out.events
+                .iter()
+                .any(|e| matches!(e, SemanticEvent::RepoInitialized { .. }))
+        );
     }
 }
-

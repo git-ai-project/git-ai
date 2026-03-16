@@ -643,12 +643,14 @@ fn test_checkpoint_then_stage_then_checkpoint_across_two_commits_preserves_ai_li
     let file_path = repo.path().join("example.txt");
 
     fs::write(&file_path, "test\n").unwrap();
-    repo.git_ai(&["checkpoint", "mock_ai", "example.txt"]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "example.txt"])
+        .unwrap();
 
     repo.git(&["add", "."]).unwrap();
 
     fs::write(&file_path, "test\ntest1\n").unwrap();
-    repo.git_ai(&["checkpoint", "mock_ai", "example.txt"]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "example.txt"])
+        .unwrap();
 
     let first_commit = repo.commit("test").unwrap();
     assert!(
@@ -714,7 +716,8 @@ omega 2
 omega 3
 ";
     fs::write(&file_path, first_ai_hunk_only).unwrap();
-    repo.git_ai(&["checkpoint", "mock_ai", "example.md"]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "example.md"])
+        .unwrap();
 
     repo.git(&["add", "."]).unwrap();
 
@@ -737,7 +740,8 @@ omega 2
 omega 3
 ";
     fs::write(&file_path, both_ai_hunks).unwrap();
-    repo.git_ai(&["checkpoint", "mock_ai", "example.md"]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "example.md"])
+        .unwrap();
 
     let first_commit = repo.commit("Commit first staged hunk").unwrap();
     assert!(

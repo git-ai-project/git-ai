@@ -7,6 +7,7 @@ use crate::git::repo_storage::RepoStorage;
 use crate::git::rewrite_log::RewriteLogEvent;
 use crate::git::status::MAX_PATHSPEC_ARGS;
 use crate::git::sync_authorship::{fetch_authorship_notes, push_authorship_notes};
+use crate::utils::debug_log;
 #[cfg(windows)]
 use crate::utils::is_interactive_terminal;
 
@@ -1233,14 +1234,27 @@ impl Repository {
             .expect("Error writing .git/ai/rewrite_log");
 
         if apply_side_effects
-            && let Ok(_) = rewrite_authorship_if_needed(
+            && let Err(error) = rewrite_authorship_if_needed(
                 self,
                 &rewrite_log_event,
                 commit_author,
                 &log,
                 supress_output,
             )
-        {}
+        {
+            debug_log(&format!(
+                "rewrite_authorship_if_needed failed for {:?}: {}",
+                rewrite_log_event, error
+            ));
+            crate::observability::log_error(
+                &error,
+                Some(serde_json::json!({
+                    "component": "repository",
+                    "operation": "handle_rewrite_log_event",
+                    "rewrite_event": rewrite_log_event,
+                })),
+            );
+        }
     }
 
     // Internal util to get the git object type for a given OID
@@ -2730,12 +2744,18 @@ pub fn exec_git(args: &[String]) -> Result<Output, GitAiError> {
     exec_git_with_profile(args, InternalGitProfile::General)
 }
 
-/// Helper to execute a git command with an explicit internal profile.
-pub fn exec_git_with_profile(
+/// Helper to execute a git command and return output regardless of exit status.
+/// Callers that need success-only behavior should use `exec_git*`.
+pub fn exec_git_allow_nonzero(args: &[String]) -> Result<Output, GitAiError> {
+    exec_git_allow_nonzero_with_profile(args, InternalGitProfile::General)
+}
+
+/// Helper to execute a git command with an explicit internal profile and return output
+/// regardless of exit status.
+pub fn exec_git_allow_nonzero_with_profile(
     args: &[String],
     profile: InternalGitProfile,
 ) -> Result<Output, GitAiError> {
-    // TODO Make sure to handle process signals, etc.
     let effective_args =
         args_with_internal_git_profile(&args_with_disabled_hooks_if_needed(args), profile);
     let mut cmd = Command::new(config::Config::get().git_cmd());
@@ -2750,7 +2770,17 @@ pub fn exec_git_with_profile(
         }
     }
 
-    let output = cmd.output().map_err(GitAiError::IoError)?;
+    cmd.output().map_err(GitAiError::IoError)
+}
+
+/// Helper to execute a git command with an explicit internal profile.
+pub fn exec_git_with_profile(
+    args: &[String],
+    profile: InternalGitProfile,
+) -> Result<Output, GitAiError> {
+    let effective_args =
+        args_with_internal_git_profile(&args_with_disabled_hooks_if_needed(args), profile);
+    let output = exec_git_allow_nonzero_with_profile(args, profile)?;
 
     if !output.status.success() {
         let code = output.status.code();

@@ -14,8 +14,9 @@ use rand::Rng;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
@@ -65,6 +66,7 @@ struct DaemonProcess {
     pid: u32,
     control_socket_path: PathBuf,
     trace_socket_path: PathBuf,
+    stderr_log_path: PathBuf,
 }
 
 impl DaemonProcess {
@@ -87,6 +89,23 @@ impl DaemonProcess {
     fn start(repo_path: &Path, test_home: &Path, test_db_path: &Path) -> Self {
         let control_socket_path = Self::control_socket_path_for_home(test_home);
         let trace_socket_path = Self::trace_socket_path_for_home(test_home);
+        let stderr_log_path = test_home
+            .join(".git-ai")
+            .join("internal")
+            .join("daemon")
+            .join("daemon.test.stderr.log");
+        fs::create_dir_all(
+            stderr_log_path
+                .parent()
+                .expect("daemon stderr path should have parent"),
+        )
+        .expect("failed to create daemon log dir");
+        let stderr_log = fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&stderr_log_path)
+            .expect("failed to create daemon stderr log");
 
         let mut command = Command::new(get_binary_path());
         command
@@ -100,35 +119,60 @@ impl DaemonProcess {
             .env("GIT_AI_TEST_DB_PATH", test_db_path)
             .env("GITAI_TEST_DB_PATH", test_db_path)
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stderr(
+                stderr_log
+                    .try_clone()
+                    .expect("failed to clone daemon stderr log file"),
+            );
 
-        let child = command
+        let mut child = command
             .spawn()
             .expect("failed to spawn git-ai daemon subprocess for test mode");
         let pid = child.id();
-        drop(child);
 
         let daemon = Self {
             pid,
             control_socket_path,
             trace_socket_path,
+            stderr_log_path,
         };
-        daemon.wait_until_ready(repo_path);
+        if let Err(error) = daemon.wait_until_ready(repo_path, &mut child) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("{}", error);
+        }
+        drop(child);
         daemon
     }
 
-    fn wait_until_ready(&self, repo_path: &Path) {
+    fn wait_until_ready(&self, repo_path: &Path, child: &mut Child) -> Result<(), String> {
         let repo_working_dir = repo_path.to_string_lossy().to_string();
-        for _ in 0..200 {
+        for _ in 0..600 {
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|e| format!("failed polling daemon child status: {}", e))?
+            {
+                let stderr_tail = self.read_stderr_tail();
+                return Err(format!(
+                    "daemon exited before becoming ready (pid {}, status {}): sockets {} {}{}",
+                    self.pid,
+                    status,
+                    self.control_socket_path.display(),
+                    self.trace_socket_path.display(),
+                    stderr_tail
+                ));
+            }
+
             #[cfg(unix)]
             {
                 if !is_process_alive(self.pid) {
-                    panic!(
+                    let stderr_tail = self.read_stderr_tail();
+                    return Err(format!(
                         "daemon exited before becoming ready (pid {}): sockets {} {}",
                         self.pid,
                         self.control_socket_path.display(),
                         self.trace_socket_path.display()
-                    );
+                    ) + &stderr_tail);
                 }
             }
 
@@ -140,17 +184,41 @@ impl DaemonProcess {
                     },
                 );
                 if status.is_ok() {
-                    return;
+                    return Ok(());
                 }
             }
             thread::sleep(Duration::from_millis(25));
         }
 
-        panic!(
+        let stderr_tail = self.read_stderr_tail();
+        Err(format!(
             "daemon did not become ready at {} (trace socket: {})",
             self.control_socket_path.display(),
             self.trace_socket_path.display()
-        );
+        ) + &stderr_tail)
+    }
+
+    fn read_stderr_tail(&self) -> String {
+        let mut file = match fs::File::open(&self.stderr_log_path) {
+            Ok(file) => file,
+            Err(_) => return String::new(),
+        };
+        let mut content = String::new();
+        if file.read_to_string(&mut content).is_err() {
+            return String::new();
+        }
+        if content.trim().is_empty() {
+            return String::new();
+        }
+        let mut lines: Vec<&str> = content.lines().collect();
+        if lines.len() > 20 {
+            lines = lines.split_off(lines.len() - 20);
+        }
+        format!(
+            "\nDaemon stderr tail ({})\n{}",
+            self.stderr_log_path.display(),
+            lines.join("\n")
+        )
     }
 
     fn wait_for_repo_idle(&self, repo_working_dir: &str) -> Result<(), String> {
@@ -158,6 +226,7 @@ impl DaemonProcess {
         let mut last_backlog = 0_u64;
         let mut last_pending_roots = 0_u64;
         let mut last_deferred_root_exits = 0_u64;
+        let mut last_effect_queue_depth = 0_u64;
         let mut stable_idle_polls = 0_u8;
 
         for _ in 0..800 {
@@ -232,13 +301,21 @@ impl DaemonProcess {
                 .and_then(|v| v.get("deferred_root_exits"))
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0);
+            let settled_effect_queue_depth = settled
+                .data
+                .as_ref()
+                .and_then(|v| v.get("effect_queue_depth"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
             last_backlog = settled_backlog;
             last_pending_roots = settled_pending_roots;
             last_deferred_root_exits = settled_deferred_root_exits;
+            last_effect_queue_depth = settled_effect_queue_depth;
 
             if settled_backlog == 0
                 && settled_pending_roots == 0
                 && settled_deferred_root_exits == 0
+                && settled_effect_queue_depth == 0
                 && settled_latest == last_latest_seq
             {
                 stable_idle_polls = stable_idle_polls.saturating_add(1);
@@ -254,12 +331,13 @@ impl DaemonProcess {
         }
 
         Err(format!(
-            "daemon did not settle for repo {} (latest seq={}, backlog={}, pending_roots={}, deferred_root_exits={})",
+            "daemon did not settle for repo {} (latest seq={}, backlog={}, pending_roots={}, deferred_root_exits={}, effect_queue_depth={})",
             repo_working_dir,
             last_latest_seq,
             last_backlog,
             last_pending_roots,
-            last_deferred_root_exits
+            last_deferred_root_exits,
+            last_effect_queue_depth
         ))
     }
 
@@ -1163,31 +1241,42 @@ impl TestRepo {
         full_args.push(format!("core.hooksPath={}", null_hooks));
         full_args.extend(args.iter().map(|s| s.to_string()));
 
-        let mut command = Command::new(real_git_executable());
-        command.args(&full_args);
-        for (key, value) in envs {
-            command.env(key, value);
+        let retry_limit = 8usize;
+        let retry_delay = Duration::from_millis(50);
+        for attempt in 0..=retry_limit {
+            let mut command = Command::new(real_git_executable());
+            command.args(&full_args);
+            for (key, value) in envs {
+                command.env(key, value);
+            }
+
+            let output = command
+                .output()
+                .unwrap_or_else(|_| panic!("Failed to execute git_og command: {:?}", args));
+
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+            if output.status.success() {
+                let combined = if stdout.is_empty() {
+                    stderr
+                } else if stderr.is_empty() {
+                    stdout
+                } else {
+                    format!("{}{}", stdout, stderr)
+                };
+                return Ok(combined);
+            }
+
+            if attempt < retry_limit && is_transient_git_index_lock_error(&stderr) {
+                std::thread::sleep(retry_delay);
+                continue;
+            }
+
+            return Err(format!("{}{}", stdout, stderr));
         }
 
-        let output = command
-            .output()
-            .unwrap_or_else(|_| panic!("Failed to execute git_og command: {:?}", args));
-
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-        if output.status.success() {
-            let combined = if stdout.is_empty() {
-                stderr
-            } else if stderr.is_empty() {
-                stdout
-            } else {
-                format!("{}{}", stdout, stderr)
-            };
-            Ok(combined)
-        } else {
-            Err(format!("{}{}", stdout, stderr))
-        }
+        Err("git_og_with_env failed after retries".to_string())
     }
 
     pub fn benchmark_git(&self, args: &[&str]) -> Result<BenchmarkResult, String> {
@@ -1243,68 +1332,83 @@ impl TestRepo {
     ) -> Result<String, String> {
         self.sync_daemon_env_overrides(envs);
 
-        let mut command = if self.git_mode.uses_wrapper() {
-            Command::new(get_binary_path())
-        } else {
-            Command::new(real_git_executable())
-        };
-
-        // If working_dir is provided, use current_dir instead of -C flag
-        // This tests that git-ai correctly finds the repository root when run from a subdirectory
-        // The working_dir will be canonicalized to ensure it's an absolute path
-        if let Some(working_dir_path) = working_dir {
-            // Canonicalize to ensure we have an absolute path
-            let absolute_working_dir = working_dir_path.canonicalize().map_err(|e| {
+        let canonical_working_dir = if let Some(working_dir_path) = working_dir {
+            Some(working_dir_path.canonicalize().map_err(|e| {
                 format!(
                     "Failed to canonicalize working directory {}: {}",
                     working_dir_path.display(),
                     e
                 )
-            })?;
-            command.args(args).current_dir(&absolute_working_dir);
+            })?)
         } else {
-            let mut full_args = vec!["-C", self.path.to_str().unwrap()];
-            full_args.extend(args);
-            command.args(&full_args);
-        }
+            None
+        };
 
-        self.configure_command_env(&mut command);
-
-        // Add config patch as environment variable if present
-        if let Some(patch) = &self.config_patch
-            && let Ok(patch_json) = serde_json::to_string(patch)
-        {
-            command.env("GIT_AI_TEST_CONFIG_PATCH", patch_json);
-        }
-        command.env("GIT_AI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
-        command.env("GITAI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
-
-        // Add custom environment variables
-        for (key, value) in envs {
-            command.env(key, value);
-        }
-
-        let output = command
-            .output()
-            .unwrap_or_else(|_| panic!("Failed to execute git command with env: {:?}", args));
-
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-        if output.status.success() {
-            // Combine stdout and stderr since git often writes to stderr
-            let combined = if stdout.is_empty() {
-                stderr
-            } else if stderr.is_empty() {
-                stdout
+        let retry_limit = 8usize;
+        let retry_delay = Duration::from_millis(50);
+        for attempt in 0..=retry_limit {
+            let mut command = if self.git_mode.uses_wrapper() {
+                Command::new(get_binary_path())
             } else {
-                format!("{}{}", stdout, stderr)
+                Command::new(real_git_executable())
             };
-            self.wait_for_daemon_idle();
-            Ok(combined)
-        } else {
-            Err(stderr)
+
+            // If working_dir is provided, use current_dir instead of -C flag
+            // This tests that git-ai correctly finds the repository root when run from a subdirectory
+            // The working_dir will be canonicalized to ensure it's an absolute path
+            if let Some(absolute_working_dir) = canonical_working_dir.as_ref() {
+                command.args(args).current_dir(absolute_working_dir);
+            } else {
+                let mut full_args = vec!["-C", self.path.to_str().unwrap()];
+                full_args.extend(args);
+                command.args(&full_args);
+            }
+
+            self.configure_command_env(&mut command);
+
+            // Add config patch as environment variable if present
+            if let Some(patch) = &self.config_patch
+                && let Ok(patch_json) = serde_json::to_string(patch)
+            {
+                command.env("GIT_AI_TEST_CONFIG_PATCH", patch_json);
+            }
+            command.env("GIT_AI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
+            command.env("GITAI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
+
+            // Add custom environment variables
+            for (key, value) in envs {
+                command.env(key, value);
+            }
+
+            let output = command
+                .output()
+                .unwrap_or_else(|_| panic!("Failed to execute git command with env: {:?}", args));
+
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+            if output.status.success() {
+                // Combine stdout and stderr since git often writes to stderr
+                let combined = if stdout.is_empty() {
+                    stderr
+                } else if stderr.is_empty() {
+                    stdout
+                } else {
+                    format!("{}{}", stdout, stderr)
+                };
+                self.wait_for_daemon_idle();
+                return Ok(combined);
+            }
+
+            if attempt < retry_limit && is_transient_git_index_lock_error(&stderr) {
+                std::thread::sleep(retry_delay);
+                continue;
+            }
+
+            return Err(stderr);
         }
+
+        Err("git_with_env failed after retries".to_string())
     }
 
     pub fn git_ai_from_working_dir(
@@ -1528,15 +1632,29 @@ impl TestRepo {
                     .target()
                     .map_err(|e| format!("Failed to get HEAD target: {}", e))?;
 
-                // Get the authorship log for the new commit
-                let authorship_log =
-                    match git_ai::git::refs::show_authorship_note(&repo, &head_commit) {
-                        Some(content) => AuthorshipLog::deserialize_from_string(&content)
-                            .map_err(|e| format!("Failed to parse authorship log: {}", e))?,
-                        None => {
-                            return Err("No authorship log found for the new commit".to_string());
-                        }
-                    };
+                // In daemon mode, notes are applied asynchronously after command state settles.
+                // Poll briefly to avoid flaking on note-read races right after `git commit`.
+                let mut authorship_log = None;
+                let max_attempts = if self.git_mode.uses_daemon() { 200 } else { 1 };
+                for attempt in 0..max_attempts {
+                    if let Some(content) =
+                        git_ai::git::refs::show_authorship_note(&repo, &head_commit)
+                    {
+                        authorship_log = Some(
+                            AuthorshipLog::deserialize_from_string(&content)
+                                .map_err(|e| format!("Failed to parse authorship log: {}", e))?,
+                        );
+                        break;
+                    }
+                    if attempt + 1 < max_attempts {
+                        self.wait_for_daemon_idle();
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                }
+                let authorship_log = match authorship_log {
+                    Some(log) => log,
+                    None => return Err("No authorship log found for the new commit".to_string()),
+                };
 
                 Ok(NewCommit {
                     commit_sha: head_commit,
@@ -1662,6 +1780,12 @@ fn should_retry_remove_dir_error(err: &std::io::Error) -> bool {
     }
 
     false
+}
+
+fn is_transient_git_index_lock_error(stderr: &str) -> bool {
+    stderr.contains(".git/index.lock")
+        && (stderr.contains("File exists")
+            || stderr.contains("Another git process seems to be running"))
 }
 
 #[derive(Debug)]

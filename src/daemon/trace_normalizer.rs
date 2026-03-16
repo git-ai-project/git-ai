@@ -6,7 +6,7 @@ use crate::error::GitAiError;
 use crate::observability;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -27,6 +27,9 @@ pub struct PendingTraceCommand {
     pub pre_ref_snapshot: Option<HashMap<String, String>>,
     pub alias_resolution: AliasResolution,
     pub wrapper_mirror: bool,
+    pub saw_def_repo: bool,
+    pub saw_root_exec: bool,
+    pub capture_repo_context: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -39,6 +42,7 @@ pub struct RawExitFrame {
 pub struct TraceNormalizerState {
     pub pending: HashMap<String, PendingTraceCommand>,
     pub deferred_exits: HashMap<String, RawExitFrame>,
+    pub deferred_child_exits: HashMap<String, RawExitFrame>,
     pub sid_to_worktree: HashMap<String, PathBuf>,
     pub sid_to_family: HashMap<String, FamilyKey>,
 }
@@ -60,7 +64,10 @@ impl<B: GitBackend> TraceNormalizer<B> {
         &self.state
     }
 
-    pub fn ingest_payload(&mut self, payload: &Value) -> Result<Option<NormalizedCommand>, GitAiError> {
+    pub fn ingest_payload(
+        &mut self,
+        payload: &Value,
+    ) -> Result<Option<NormalizedCommand>, GitAiError> {
         let event = payload
             .get("event")
             .and_then(Value::as_str)
@@ -76,6 +83,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
             "start" => self.handle_start(payload, sid, &root_sid, ts),
             "def_repo" => self.handle_def_repo(payload, sid, &root_sid),
             "cmd_name" => self.handle_cmd_name(payload, sid, &root_sid),
+            "exec" => self.handle_exec(sid, &root_sid),
             "exit" => self.handle_exit(payload, sid, &root_sid, ts),
             _ => Ok(None),
         }
@@ -93,6 +101,9 @@ impl<B: GitBackend> TraceNormalizer<B> {
         }
 
         let raw_argv = payload_argv(payload);
+        let primary_hint = argv_primary_command(&raw_argv);
+        let capture_repo_context = command_may_mutate_refs(primary_hint.as_deref())
+            || command_may_mutate_workspace(primary_hint.as_deref());
         let mut worktree = payload_worktree(payload)
             .or_else(|| worktree_from_argv(&raw_argv))
             .or_else(|| self.state.sid_to_worktree.get(root_sid).cloned());
@@ -117,39 +128,45 @@ impl<B: GitBackend> TraceNormalizer<B> {
             self.state.sid_to_family.get(root_sid).cloned()
         };
 
-        let pre_repo = if let Some(worktree) = worktree.as_deref() {
-            self.backend.repo_context(worktree).ok()
+        let pre_repo = if capture_repo_context {
+            worktree
+                .as_ref()
+                .and_then(|worktree_path| self.backend.repo_context(worktree_path).ok())
         } else {
             None
         };
 
-        let reflog_start_cut = if let Some(family) = family_key.as_ref() {
-            self.backend.reflog_cut(family).ok()
+        let reflog_start_cut = if command_may_mutate_refs(primary_hint.as_deref()) {
+            family_key
+                .as_ref()
+                .and_then(|family| self.backend.reflog_cut(family).ok())
         } else {
             None
         };
-        let pre_ref_snapshot = if let Some(family) = family_key.as_ref() {
-            self.backend.ref_snapshot(family).ok()
+        let pre_ref_snapshot = if command_may_mutate_refs(primary_hint.as_deref()) {
+            family_key
+                .as_ref()
+                .and_then(|family| self.backend.ref_snapshot(family).ok())
         } else {
             None
         };
 
-        let alias_resolution = self
-            .backend
-            .resolve_alias(worktree.as_deref(), &raw_argv)
-            .unwrap_or_else(|e| {
+        let alias_resolution = match self.backend.resolve_alias(worktree.as_deref(), &raw_argv) {
+            Ok(resolution) => resolution,
+            Err(error) => {
                 observability::log_error(
-                    &e,
+                    &error,
                     Some(serde_json::json!({
                         "component": "trace_normalizer",
-                        "phase": "alias_resolution",
+                        "phase": "resolve_alias_start",
                         "root_sid": root_sid,
                     })),
                 );
                 AliasResolution::Unknown {
-                    reason: "alias resolution failed".to_string(),
+                    reason: error.to_string(),
                 }
-            });
+            }
+        };
 
         let wrapper_mirror = payload
             .get("wrapper_mirror")
@@ -173,6 +190,9 @@ impl<B: GitBackend> TraceNormalizer<B> {
             pre_ref_snapshot,
             alias_resolution,
             wrapper_mirror,
+            saw_def_repo: false,
+            saw_root_exec: false,
+            capture_repo_context,
         };
         self.state.pending.insert(root_sid.to_string(), pending);
 
@@ -189,10 +209,28 @@ impl<B: GitBackend> TraceNormalizer<B> {
         _sid: &str,
         root_sid: &str,
     ) -> Result<Option<NormalizedCommand>, GitAiError> {
-        let repo = payload
+        let payload_worktree = payload
+            .get("worktree")
+            .or_else(|| payload.get("repo_working_dir"))
+            .and_then(Value::as_str)
+            .map(PathBuf::from);
+        let payload_repo = payload
             .get("repo")
             .and_then(Value::as_str)
-            .map(PathBuf::from)
+            .map(PathBuf::from);
+
+        let pending_worktree = self
+            .state
+            .pending
+            .get(root_sid)
+            .and_then(|pending| pending.worktree.clone());
+
+        // Trace2 `def_repo.repo` may point at a common-dir `.git` path for worktrees.
+        // Keep the start/cwd-derived worktree when available and only fall back to `repo`
+        // when we have no better working-directory signal.
+        let repo = payload_worktree
+            .or(pending_worktree)
+            .or(payload_repo)
             .ok_or_else(|| GitAiError::Generic("def_repo missing repo path".to_string()))?;
 
         self.state
@@ -205,13 +243,52 @@ impl<B: GitBackend> TraceNormalizer<B> {
                 .sid_to_family
                 .insert(root_sid.to_string(), family.clone());
         }
-
         if let Some(pending) = self.state.pending.get_mut(root_sid) {
+            pending.saw_def_repo = true;
             pending.worktree = Some(repo);
-            if let Some(family) = family {
-                pending.family_key = Some(family.clone());
-                pending.reflog_start_cut = self.backend.reflog_cut(&family).ok();
-                pending.pre_ref_snapshot = self.backend.ref_snapshot(&family).ok();
+            if pending.capture_repo_context && pending.pre_repo.is_none() {
+                pending.pre_repo = pending
+                    .worktree
+                    .as_deref()
+                    .and_then(|worktree| self.backend.repo_context(worktree).ok());
+            }
+            if let Some(family) = family
+                && pending_may_mutate_refs(pending)
+            {
+                if pending.family_key.is_none() {
+                    pending.family_key = Some(family.clone());
+                }
+                if pending.reflog_start_cut.is_none() {
+                    pending.reflog_start_cut = self.backend.reflog_cut(&family).ok();
+                }
+                if pending.pre_ref_snapshot.is_none() {
+                    pending.pre_ref_snapshot = self.backend.ref_snapshot(&family).ok();
+                }
+            }
+
+            if matches!(
+                pending.alias_resolution,
+                AliasResolution::None | AliasResolution::Unknown { .. }
+            ) {
+                pending.alias_resolution = match self
+                    .backend
+                    .resolve_alias(pending.worktree.as_deref(), &pending.raw_argv)
+                {
+                    Ok(resolution) => resolution,
+                    Err(error) => {
+                        observability::log_error(
+                            &error,
+                            Some(serde_json::json!({
+                                "component": "trace_normalizer",
+                                "phase": "resolve_alias_def_repo",
+                                "root_sid": root_sid,
+                            })),
+                        );
+                        AliasResolution::Unknown {
+                            reason: error.to_string(),
+                        }
+                    }
+                };
             }
         }
         Ok(None)
@@ -246,6 +323,22 @@ impl<B: GitBackend> TraceNormalizer<B> {
         Ok(None)
     }
 
+    fn handle_exec(
+        &mut self,
+        sid: &str,
+        root_sid: &str,
+    ) -> Result<Option<NormalizedCommand>, GitAiError> {
+        if sid == root_sid
+            && let Some(pending) = self.state.pending.get_mut(root_sid)
+        {
+            pending.saw_root_exec = true;
+            if let Some(exit) = self.state.deferred_child_exits.remove(root_sid) {
+                return self.finalize_root_exit(root_sid, exit.exit_code, exit.finished_at_ns);
+            }
+        }
+        Ok(None)
+    }
+
     fn handle_exit(
         &mut self,
         payload: &Value,
@@ -254,6 +347,23 @@ impl<B: GitBackend> TraceNormalizer<B> {
         finished_at_ns: u128,
     ) -> Result<Option<NormalizedCommand>, GitAiError> {
         if sid != root_sid {
+            let exit_code = payload
+                .get("code")
+                .or_else(|| payload.get("exit_code"))
+                .and_then(Value::as_i64)
+                .unwrap_or(0) as i32;
+            if let Some(pending) = self.state.pending.get(root_sid)
+                && pending.saw_root_exec
+            {
+                return self.finalize_root_exit(root_sid, exit_code, finished_at_ns);
+            }
+            self.state.deferred_child_exits.insert(
+                root_sid.to_string(),
+                RawExitFrame {
+                    exit_code,
+                    finished_at_ns,
+                },
+            );
             return Ok(None);
         }
 
@@ -283,11 +393,10 @@ impl<B: GitBackend> TraceNormalizer<B> {
         exit_code: i32,
         finished_at_ns: u128,
     ) -> Result<Option<NormalizedCommand>, GitAiError> {
-        let mut pending = self
-            .state
-            .pending
-            .remove(root_sid)
-            .ok_or_else(|| GitAiError::Generic("missing pending command at finalize".to_string()))?;
+        self.state.deferred_child_exits.remove(root_sid);
+        let mut pending = self.state.pending.remove(root_sid).ok_or_else(|| {
+            GitAiError::Generic("missing pending command at finalize".to_string())
+        })?;
 
         pending.exit_code = Some(exit_code);
         pending.finished_at_ns = Some(finished_at_ns);
@@ -303,7 +412,9 @@ impl<B: GitBackend> TraceNormalizer<B> {
             pending.family_key = Some(family.clone());
         }
 
-        if let Some(worktree) = pending.worktree.as_deref() {
+        if pending.capture_repo_context
+            && let Some(worktree) = pending.worktree.as_deref()
+        {
             pending.post_repo = self.backend.repo_context(worktree).ok();
         }
 
@@ -311,10 +422,26 @@ impl<B: GitBackend> TraceNormalizer<B> {
             pending.reflog_end_cut = self.backend.reflog_cut(family).ok();
         }
 
+        let mut primary_command = select_primary_command(
+            pending.root_cmd_name.as_deref(),
+            &pending.alias_resolution,
+            &pending.observed_child_commands,
+            &pending.raw_argv,
+        );
+        if primary_command.is_none() {
+            primary_command = argv_primary_command(&pending.raw_argv);
+        }
+
         let mut confidence = Confidence::Low;
         let mut ref_changes = Vec::new();
-        if let Some(family) = pending.family_key.as_ref() {
-            ref_changes = match (pending.reflog_start_cut.as_ref(), pending.reflog_end_cut.as_ref()) {
+        let may_mutate_refs = command_may_mutate_refs(primary_command.as_deref());
+        if let Some(family) = pending.family_key.as_ref()
+            && may_mutate_refs
+        {
+            ref_changes = match (
+                pending.reflog_start_cut.as_ref(),
+                pending.reflog_end_cut.as_ref(),
+            ) {
                 (Some(start), Some(end)) => match self.backend.reflog_delta(family, start, end) {
                     Ok(changes) => {
                         confidence = Confidence::High;
@@ -345,13 +472,6 @@ impl<B: GitBackend> TraceNormalizer<B> {
             }
         }
 
-        let mut primary_command = select_primary_command(
-            pending.root_cmd_name.as_deref(),
-            &pending.alias_resolution,
-            &pending.observed_child_commands,
-            &pending.raw_argv,
-        );
-
         let mut family_key = pending.family_key.clone();
         let mut scope = if let Some(key) = family_key.clone() {
             CommandScope::Family(key)
@@ -359,34 +479,40 @@ impl<B: GitBackend> TraceNormalizer<B> {
             CommandScope::Global
         };
 
-        if exit_code == 0
-            && matches!(primary_command.as_deref(), Some("clone" | "init"))
-            && family_key.is_none()
-        {
-            let target = if primary_command.as_deref() == Some("clone") {
-                self.backend.clone_target(
-                    &pending.raw_argv,
-                    pending.worktree.as_deref().and_then(Path::parent),
-                )
+        if exit_code == 0 && matches!(primary_command.as_deref(), Some("clone" | "init")) {
+            let cwd_hint = pending.worktree.as_deref();
+            let target_from_def_repo = if pending.saw_def_repo {
+                pending.worktree.clone()
             } else {
-                self.backend.init_target(
-                    &pending.raw_argv,
-                    pending.worktree.as_deref().and_then(Path::parent),
-                )
+                None
             };
-            if let Some(target) = target
-                && let Ok(resolved_family) = self.backend.resolve_family(&target)
-            {
-                family_key = Some(resolved_family.clone());
-                scope = CommandScope::Family(resolved_family);
-                if pending.worktree.is_none() {
-                    pending.worktree = Some(target);
+            let target = if primary_command.as_deref() == Some("clone") {
+                target_from_def_repo
+                    .or_else(|| self.backend.clone_target(&pending.raw_argv, cwd_hint))
+            } else {
+                target_from_def_repo
+                    .or_else(|| self.backend.init_target(&pending.raw_argv, cwd_hint))
+            };
+            if let Some(target) = target {
+                pending.worktree = Some(target.clone());
+                match self.backend.resolve_family(&target) {
+                    Ok(resolved_family) => {
+                        family_key = Some(resolved_family.clone());
+                        scope = CommandScope::Family(resolved_family);
+                    }
+                    Err(error) => {
+                        observability::log_error(
+                            &error,
+                            Some(serde_json::json!({
+                                "component": "trace_normalizer",
+                                "phase": "resolve_clone_or_init_target_family",
+                                "root_sid": pending.root_sid,
+                                "target": target,
+                            })),
+                        );
+                    }
                 }
             }
-        }
-
-        if primary_command.is_none() {
-            primary_command = argv_primary_command(&pending.raw_argv);
         }
 
         let normalized = NormalizedCommand {
@@ -403,6 +529,11 @@ impl<B: GitBackend> TraceNormalizer<B> {
             finished_at_ns,
             pre_repo: pending.pre_repo,
             post_repo: pending.post_repo,
+            pre_stash_sha: pending
+                .pre_ref_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.get("refs/stash").cloned())
+                .filter(|sha| !sha.trim().is_empty()),
             ref_changes,
             confidence,
             wrapper_mirror: pending.wrapper_mirror,
@@ -441,13 +572,21 @@ fn snapshot_diff(
 }
 
 fn payload_timestamp_ns(payload: &Value) -> Result<u128, GitAiError> {
-    let time = payload
+    if let Some(time) = payload
         .get("ts")
         .or_else(|| payload.get("time"))
         .or_else(|| payload.get("time_ns"))
         .and_then(Value::as_u64)
-        .ok_or_else(|| GitAiError::Generic("trace payload missing timestamp".to_string()))?;
-    Ok(time as u128)
+    {
+        return Ok(time as u128);
+    }
+    if let Some(seconds) = payload.get("t_abs").and_then(Value::as_f64) {
+        return Ok((seconds * 1_000_000_000_f64) as u128);
+    }
+    Ok(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos())
 }
 
 fn payload_argv(payload: &Value) -> Vec<String> {
@@ -491,21 +630,120 @@ fn worktree_from_argv(argv: &[String]) -> Option<PathBuf> {
 }
 
 fn argv_primary_command(argv: &[String]) -> Option<String> {
-    let mut iter = argv.iter().map(|s| s.as_str()).peekable();
-    if matches!(iter.peek(), Some(&"git")) {
-        iter.next();
+    let mut idx = 0;
+    if argv.first().map(|v| is_git_binary(v)).unwrap_or(false) {
+        idx = 1;
     }
-    while let Some(token) = iter.next() {
+    while idx < argv.len() {
+        let token = argv[idx].as_str();
         if token == "-C" {
-            iter.next();
+            idx += 2;
+            continue;
+        }
+        if takes_value_option(token) {
+            idx += 2;
+            continue;
+        }
+        if token.starts_with("--") && token.contains('=') {
+            idx += 1;
             continue;
         }
         if token.starts_with('-') {
+            idx += 1;
             continue;
         }
         return Some(token.to_string());
     }
     None
+}
+
+fn is_git_binary(token: &str) -> bool {
+    if token == "git" || token == "git.exe" {
+        return true;
+    }
+    std::path::Path::new(token)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name == "git" || name == "git.exe")
+        .unwrap_or(false)
+}
+
+fn takes_value_option(token: &str) -> bool {
+    matches!(
+        token,
+        "-c" | "--config-env"
+            | "--git-dir"
+            | "--work-tree"
+            | "--namespace"
+            | "--super-prefix"
+            | "--exec-path"
+            | "--worktree-attributes"
+            | "--attr-source"
+    )
+}
+
+fn command_may_mutate_refs(primary_command: Option<&str>) -> bool {
+    matches!(
+        primary_command,
+        Some(
+            "am" | "branch"
+                | "cherry-pick"
+                | "checkout"
+                | "clone"
+                | "commit"
+                | "commit-tree"
+                | "fetch"
+                | "init"
+                | "merge"
+                | "notes"
+                | "pack-refs"
+                | "pull"
+                | "push"
+                | "rebase"
+                | "reflog"
+                | "replace"
+                | "reset"
+                | "revert"
+                | "stash"
+                | "switch"
+                | "symbolic-ref"
+                | "tag"
+                | "update-ref"
+                | "worktree"
+        )
+    )
+}
+
+fn command_may_mutate_workspace(primary_command: Option<&str>) -> bool {
+    matches!(
+        primary_command,
+        Some(
+            "add"
+                | "am"
+                | "checkout"
+                | "cherry-pick"
+                | "clean"
+                | "commit"
+                | "merge"
+                | "mv"
+                | "rebase"
+                | "reset"
+                | "restore"
+                | "rm"
+                | "stash"
+                | "switch"
+                | "update-index"
+                | "read-tree"
+        )
+    )
+}
+
+fn pending_may_mutate_refs(pending: &PendingTraceCommand) -> bool {
+    let primary = pending
+        .root_cmd_name
+        .clone()
+        .or_else(|| argv_primary_command(&pending.raw_argv));
+    command_may_mutate_refs(primary.as_deref())
 }
 
 fn select_primary_command(
@@ -514,24 +752,16 @@ fn select_primary_command(
     observed_child_commands: &[String],
     argv: &[String],
 ) -> Option<String> {
+    if let AliasResolution::DirectAlias { expansion, .. } = alias_resolution
+        && let Some(command) = alias_expansion_primary_command(expansion)
+    {
+        return Some(command);
+    }
+
     if let Some(name) = root_cmd_name
         && !is_internal_cmd_name(name)
     {
         return Some(name.to_string());
-    }
-
-    match alias_resolution {
-        AliasResolution::DirectAlias { expansion, .. } => {
-            if !expansion.trim().is_empty() {
-                return Some(expansion.clone());
-            }
-        }
-        AliasResolution::ShellAlias { expansion, .. } => {
-            if !expansion.trim().is_empty() {
-                return Some(expansion.clone());
-            }
-        }
-        AliasResolution::None | AliasResolution::Unknown { .. } => {}
     }
 
     for child in observed_child_commands {
@@ -543,9 +773,21 @@ fn select_primary_command(
     argv_primary_command(argv)
 }
 
+fn alias_expansion_primary_command(expansion: &str) -> Option<String> {
+    let tokens = expansion
+        .split_whitespace()
+        .map(|token| token.trim_matches('\'').trim_matches('"').to_string())
+        .collect::<Vec<_>>();
+    if tokens.is_empty() {
+        return None;
+    }
+    argv_primary_command(&tokens)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
@@ -612,6 +854,7 @@ mod tests {
             *ordinal += 1;
             Ok(ReflogCut {
                 ordinal: *ordinal,
+                offsets: HashMap::new(),
                 hash: None,
             })
         }
@@ -630,7 +873,12 @@ mod tests {
             _worktree: Option<&Path>,
             _argv: &[String],
         ) -> Result<AliasResolution, GitAiError> {
-            Ok(self.alias.lock().unwrap().clone().unwrap_or(AliasResolution::None))
+            Ok(self
+                .alias
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or(AliasResolution::None))
         }
 
         fn clone_target(&self, _argv: &[String], _cwd_hint: Option<&Path>) -> Option<PathBuf> {
@@ -740,6 +988,99 @@ mod tests {
     }
 
     #[test]
+    fn root_exec_then_child_exit_finalizes_root_command() {
+        let backend = Arc::new(MockBackend::default());
+        backend.set_family("/repo", "/repo/.git");
+        backend.set_context("/repo", "head-a");
+        let mut normalizer = TraceNormalizer::new(backend);
+
+        let start = serde_json::json!({
+            "event":"start",
+            "sid":"s-exec",
+            "ts":1,
+            "argv":["git","notes","show","abc123"],
+            "worktree":"/repo"
+        });
+        let cmd_name = serde_json::json!({
+            "event":"cmd_name",
+            "sid":"s-exec",
+            "ts":2,
+            "name":"notes"
+        });
+        let exec = serde_json::json!({
+            "event":"exec",
+            "sid":"s-exec",
+            "ts":3,
+            "argv":["git","show","def456"]
+        });
+        let child_exit = serde_json::json!({
+            "event":"exit",
+            "sid":"s-exec/child",
+            "ts":4,
+            "code":0
+        });
+
+        assert!(normalizer.ingest_payload(&start).unwrap().is_none());
+        assert!(normalizer.ingest_payload(&cmd_name).unwrap().is_none());
+        assert!(normalizer.ingest_payload(&exec).unwrap().is_none());
+
+        let cmd = normalizer.ingest_payload(&child_exit).unwrap().unwrap();
+        assert_eq!(cmd.root_sid, "s-exec");
+        assert_eq!(cmd.primary_command.as_deref(), Some("notes"));
+        assert_eq!(cmd.exit_code, 0);
+        assert!(normalizer.state().pending.is_empty());
+        assert!(normalizer.state().deferred_exits.is_empty());
+        assert!(normalizer.state().deferred_child_exits.is_empty());
+    }
+
+    #[test]
+    fn child_exit_before_root_exec_is_buffered_then_finalized() {
+        let backend = Arc::new(MockBackend::default());
+        backend.set_family("/repo", "/repo/.git");
+        backend.set_context("/repo", "head-a");
+        let mut normalizer = TraceNormalizer::new(backend);
+
+        let start = serde_json::json!({
+            "event":"start",
+            "sid":"s-exec-oop",
+            "ts":1,
+            "argv":["git","notes","show","abc123"],
+            "worktree":"/repo"
+        });
+        let cmd_name = serde_json::json!({
+            "event":"cmd_name",
+            "sid":"s-exec-oop",
+            "ts":2,
+            "name":"notes"
+        });
+        let child_exit = serde_json::json!({
+            "event":"exit",
+            "sid":"s-exec-oop/child",
+            "ts":3,
+            "code":0
+        });
+        let exec = serde_json::json!({
+            "event":"exec",
+            "sid":"s-exec-oop",
+            "ts":4,
+            "argv":["git","show","def456"]
+        });
+
+        assert!(normalizer.ingest_payload(&start).unwrap().is_none());
+        assert!(normalizer.ingest_payload(&cmd_name).unwrap().is_none());
+        assert!(normalizer.ingest_payload(&child_exit).unwrap().is_none());
+        assert_eq!(normalizer.state().deferred_child_exits.len(), 1);
+
+        let cmd = normalizer.ingest_payload(&exec).unwrap().unwrap();
+        assert_eq!(cmd.root_sid, "s-exec-oop");
+        assert_eq!(cmd.primary_command.as_deref(), Some("notes"));
+        assert_eq!(cmd.exit_code, 0);
+        assert!(normalizer.state().pending.is_empty());
+        assert!(normalizer.state().deferred_exits.is_empty());
+        assert!(normalizer.state().deferred_child_exits.is_empty());
+    }
+
+    #[test]
     fn no_repo_routes_to_global_scope() {
         let backend = Arc::new(MockBackend::default());
         let mut normalizer = TraceNormalizer::new(backend);
@@ -770,4 +1111,3 @@ mod tests {
         assert!(normalizer.ingest_payload(&p).unwrap().is_none());
     }
 }
-

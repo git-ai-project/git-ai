@@ -11,7 +11,7 @@ impl CommandAnalyzer for HistoryAnalyzer {
     fn analyze(
         &self,
         cmd: &NormalizedCommand,
-        _state: AnalysisView<'_>,
+        state: AnalysisView<'_>,
     ) -> Result<AnalysisResult, GitAiError> {
         let name = cmd.primary_command.as_deref().unwrap_or_default();
         let args = normalized_args(&cmd.raw_argv);
@@ -19,26 +19,23 @@ impl CommandAnalyzer for HistoryAnalyzer {
         let mut events = Vec::new();
         match name {
             "commit" => {
-                if let Some(change) = cmd.ref_changes.first() {
+                if let Some((old_head, new_head)) = head_change(cmd, state.refs) {
                     if args.iter().any(|arg| arg == "--amend") {
-                        events.push(SemanticEvent::CommitAmended {
-                            old_head: change.old.clone(),
-                            new_head: change.new.clone(),
-                        });
+                        events.push(SemanticEvent::CommitAmended { old_head, new_head });
                     } else {
                         events.push(SemanticEvent::CommitCreated {
-                            base: non_empty(change.old.clone()),
-                            new_head: change.new.clone(),
+                            base: non_empty(old_head),
+                            new_head,
                         });
                     }
                 }
             }
             "reset" => {
-                if let Some(change) = cmd.ref_changes.first() {
+                if let Some((old_head, new_head)) = head_change(cmd, state.refs) {
                     events.push(SemanticEvent::Reset {
                         kind: infer_reset_kind(&args),
-                        old_head: change.old.clone(),
-                        new_head: change.new.clone(),
+                        old_head,
+                        new_head,
                     });
                 }
             }
@@ -51,10 +48,10 @@ impl CommandAnalyzer for HistoryAnalyzer {
                             .and_then(|repo| repo.head.clone())
                             .unwrap_or_default(),
                     });
-                } else if let Some(change) = cmd.ref_changes.first() {
+                } else if let Some((old_head, new_head)) = head_change(cmd, state.refs) {
                     events.push(SemanticEvent::RebaseComplete {
-                        old_head: change.old.clone(),
-                        new_head: change.new.clone(),
+                        old_head,
+                        new_head,
                         interactive: args.iter().any(|arg| arg == "-i" || arg == "--interactive"),
                     });
                 }
@@ -68,10 +65,10 @@ impl CommandAnalyzer for HistoryAnalyzer {
                             .and_then(|repo| repo.head.clone())
                             .unwrap_or_default(),
                     });
-                } else if let Some(change) = cmd.ref_changes.first() {
+                } else if let Some((old_head, new_head)) = head_change(cmd, state.refs) {
                     events.push(SemanticEvent::CherryPickComplete {
-                        original_head: change.old.clone(),
-                        new_head: change.new.clone(),
+                        original_head: old_head,
+                        new_head,
                     });
                 }
             }
@@ -86,11 +83,11 @@ impl CommandAnalyzer for HistoryAnalyzer {
                             .unwrap_or_default(),
                         source: args.last().cloned().unwrap_or_default(),
                     });
-                } else if let Some(change) = cmd.ref_changes.first() {
+                } else if let Some((old_head, new_head)) = head_change(cmd, state.refs) {
                     events.push(SemanticEvent::RefUpdated {
-                        reference: change.reference.clone(),
-                        old: change.old.clone(),
-                        new: change.new.clone(),
+                        reference: "HEAD".to_string(),
+                        old: old_head,
+                        new: new_head,
                     });
                 }
             }
@@ -134,6 +131,37 @@ fn non_empty(value: String) -> Option<String> {
     }
 }
 
+fn non_empty_opt(value: Option<String>) -> Option<String> {
+    value.and_then(non_empty)
+}
+
+fn head_change(
+    cmd: &NormalizedCommand,
+    refs: &std::collections::HashMap<String, String>,
+) -> Option<(String, String)> {
+    if let Some(change) = cmd.ref_changes.first()
+        && !change.new.trim().is_empty()
+        && change.old != change.new
+    {
+        return Some((change.old.clone(), change.new.clone()));
+    }
+
+    let new_head = non_empty_opt(cmd.post_repo.as_ref().and_then(|repo| repo.head.clone()))?;
+
+    let old_head = non_empty_opt(
+        cmd.pre_repo
+            .as_ref()
+            .and_then(|repo| repo.head.clone())
+            .or_else(|| refs.get("HEAD").cloned()),
+    )
+    .unwrap_or_default();
+
+    if old_head == new_head {
+        return None;
+    }
+    Some((old_head, new_head))
+}
+
 fn infer_reset_kind(args: &[String]) -> ResetKind {
     if args.iter().any(|arg| arg == "--soft") {
         return ResetKind::Soft;
@@ -173,6 +201,7 @@ mod tests {
             finished_at_ns: 2,
             pre_repo: None,
             post_repo: None,
+            pre_stash_sha: None,
             ref_changes: vec![RefChange {
                 reference: "HEAD".to_string(),
                 old: "a".to_string(),
@@ -189,13 +218,17 @@ mod tests {
         let result = analyzer
             .analyze(
                 &command("commit", &["git", "commit", "-m", "x"]),
-                AnalysisView { refs: &Default::default() },
+                AnalysisView {
+                    refs: &Default::default(),
+                },
             )
             .unwrap();
-        assert!(result
-            .events
-            .iter()
-            .any(|event| matches!(event, SemanticEvent::CommitCreated { .. })));
+        assert!(
+            result
+                .events
+                .iter()
+                .any(|event| matches!(event, SemanticEvent::CommitCreated { .. }))
+        );
     }
 
     #[test]
@@ -204,7 +237,9 @@ mod tests {
         let result = analyzer
             .analyze(
                 &command("reset", &["git", "reset", "--hard", "HEAD~1"]),
-                AnalysisView { refs: &Default::default() },
+                AnalysisView {
+                    refs: &Default::default(),
+                },
             )
             .unwrap();
         assert!(result.events.iter().any(|event| matches!(
@@ -214,5 +249,45 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn commit_uses_pre_post_head_when_reflog_delta_is_empty() {
+        let analyzer = HistoryAnalyzer;
+        let mut cmd = command("commit", &["git", "commit", "-m", "x"]);
+        cmd.ref_changes.clear();
+        cmd.pre_repo = Some(crate::daemon::domain::RepoContext {
+            head: Some("old-head".to_string()),
+            branch: Some("main".to_string()),
+            detached: false,
+            workspace_fingerprint: None,
+        });
+        cmd.post_repo = Some(crate::daemon::domain::RepoContext {
+            head: Some("new-head".to_string()),
+            branch: Some("main".to_string()),
+            detached: false,
+            workspace_fingerprint: None,
+        });
+
+        let result = analyzer
+            .analyze(
+                &cmd,
+                AnalysisView {
+                    refs: &Default::default(),
+                },
+            )
+            .unwrap();
+
+        assert!(
+            result.events.iter().any(|event| matches!(
+                event,
+                SemanticEvent::CommitCreated {
+                    new_head,
+                    ..
+                } if new_head == "new-head"
+            )),
+            "expected commit-created event from pre/post head fallback, got {:?}",
+            result.events
+        );
     }
 }

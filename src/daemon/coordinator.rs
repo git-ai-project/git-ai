@@ -76,7 +76,11 @@ impl<B: GitBackend> Coordinator<B> {
         actor.snapshot().await
     }
 
-    pub async fn barrier_family(&self, repo_working_dir: &Path, seq: u64) -> Result<(), GitAiError> {
+    pub async fn barrier_family(
+        &self,
+        repo_working_dir: &Path,
+        seq: u64,
+    ) -> Result<(), GitAiError> {
         let family = self.backend.resolve_family(repo_working_dir)?;
         let actor = self.get_or_create_family_actor(family).await;
         actor.barrier(seq).await
@@ -151,10 +155,7 @@ mod tests {
             Err(GitAiError::Generic("unused".to_string()))
         }
 
-        fn ref_snapshot(
-            &self,
-            _family: &FamilyKey,
-        ) -> Result<HashMap<String, String>, GitAiError> {
+        fn ref_snapshot(&self, _family: &FamilyKey) -> Result<HashMap<String, String>, GitAiError> {
             Ok(HashMap::new())
         }
 
@@ -203,6 +204,7 @@ mod tests {
             finished_at_ns: 2,
             pre_repo: None,
             post_repo: None,
+            pre_stash_sha: None,
             ref_changes: Vec::new(),
             confidence: Confidence::Low,
             wrapper_mirror: false,
@@ -224,6 +226,7 @@ mod tests {
             finished_at_ns: 2,
             pre_repo: None,
             post_repo: None,
+            pre_stash_sha: None,
             ref_changes: Vec::new(),
             confidence: Confidence::Low,
             wrapper_mirror: false,
@@ -262,4 +265,3 @@ mod tests {
         coordinator.shutdown().await.unwrap();
     }
 }
-

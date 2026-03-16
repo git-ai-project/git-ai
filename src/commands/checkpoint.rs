@@ -185,8 +185,9 @@ pub fn run_with_base_commit_override(
         storage_start.elapsed()
     ));
 
-    // Early exit for human only
-    if is_pre_commit {
+    // Early exit for human-only pre-commit hooks.
+    // Synthetic replay flows provide an explicit base override and must always process.
+    if is_pre_commit && base_commit_override.is_none() {
         let has_no_ai_edits = working_log
             .all_ai_touched_files()
             .map(|files| files.is_empty())
@@ -779,7 +780,8 @@ fn get_all_tracked_files(
             if results_for_tracked_files.contains(&normalized_path) {
                 continue;
             }
-            if is_text_file(working_log, &normalized_path) || is_text_file_in_head(repo, &normalized_path)
+            if is_text_file(working_log, &normalized_path)
+                || is_text_file_in_head(repo, &normalized_path)
             {
                 results_for_tracked_files.push(normalized_path);
             }
@@ -1705,7 +1707,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(files_len, 1, "Expected one tracked file for the checkpoint run");
+        assert_eq!(
+            files_len, 1,
+            "Expected one tracked file for the checkpoint run"
+        );
         assert_eq!(
             entries_len, 1,
             "When base override points to commit A, current content from commit B must produce an entry"

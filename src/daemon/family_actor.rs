@@ -13,10 +13,22 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 pub enum FamilyMsg {
-    Apply(NormalizedCommand, oneshot::Sender<Result<ApplyAck, GitAiError>>),
-    ApplyCheckpoint(CheckpointObserved, oneshot::Sender<Result<ApplyAck, GitAiError>>),
-    ApplyEnvOverride(EnvOverrideSet, oneshot::Sender<Result<ApplyAck, GitAiError>>),
-    Reconcile(ReconcileSnapshot, oneshot::Sender<Result<ApplyAck, GitAiError>>),
+    Apply(
+        NormalizedCommand,
+        oneshot::Sender<Result<ApplyAck, GitAiError>>,
+    ),
+    ApplyCheckpoint(
+        CheckpointObserved,
+        oneshot::Sender<Result<ApplyAck, GitAiError>>,
+    ),
+    ApplyEnvOverride(
+        EnvOverrideSet,
+        oneshot::Sender<Result<ApplyAck, GitAiError>>,
+    ),
+    Reconcile(
+        ReconcileSnapshot,
+        oneshot::Sender<Result<ApplyAck, GitAiError>>,
+    ),
     Status(oneshot::Sender<Result<FamilyStatus, GitAiError>>),
     Snapshot(oneshot::Sender<Result<FamilySnapshot, GitAiError>>),
     Barrier(u64, oneshot::Sender<Result<(), GitAiError>>),
@@ -93,9 +105,8 @@ impl FamilyActorHandle {
             .send(FamilyMsg::Snapshot(tx))
             .await
             .map_err(|_| GitAiError::Generic("family actor snapshot send failed".to_string()))?;
-        rx.await.map_err(|_| {
-            GitAiError::Generic("family actor snapshot receive failed".to_string())
-        })?
+        rx.await
+            .map_err(|_| GitAiError::Generic("family actor snapshot receive failed".to_string()))?
     }
 
     pub async fn barrier(&self, seq: u64) -> Result<(), GitAiError> {
@@ -165,7 +176,10 @@ pub fn spawn_family_actor_with_mode(
                             }
                         },
                     );
-                    let seq = result.as_ref().map(|ack| ack.seq).unwrap_or(state.applied_seq);
+                    let seq = result
+                        .as_ref()
+                        .map(|ack| ack.seq)
+                        .unwrap_or(state.applied_seq);
                     let _ = respond_to.send(result);
                     satisfy_barriers(seq, &mut waiters);
                 }
@@ -217,7 +231,11 @@ pub fn spawn_family_actor_with_mode(
                         worktrees: state.worktrees.clone(),
                         recent_commands: state.recent_commands.iter().cloned().collect(),
                         checkpoints: state.checkpoints.clone(),
-                        unresolved_transcripts: state.unresolved_transcripts.iter().cloned().collect(),
+                        unresolved_transcripts: state
+                            .unresolved_transcripts
+                            .iter()
+                            .cloned()
+                            .collect(),
                         active_cherry_pick: state.active_cherry_pick.clone(),
                         env_overrides: state.env_overrides.clone(),
                         last_error: state.last_error.clone(),
@@ -277,6 +295,7 @@ mod tests {
             finished_at_ns: seq + 1,
             pre_repo: None,
             post_repo: None,
+            pre_stash_sha: None,
             ref_changes: Vec::new(),
             confidence: Confidence::Low,
             wrapper_mirror: false,
@@ -286,8 +305,14 @@ mod tests {
     #[tokio::test]
     async fn actor_applies_commands_and_barrier_is_state_based() {
         let actor = spawn_family_actor(FamilyKey::new("family-1"));
-        let ack1 = actor.apply(sample_normalized_cmd("family-1", 10)).await.unwrap();
-        let ack2 = actor.apply(sample_normalized_cmd("family-1", 20)).await.unwrap();
+        let ack1 = actor
+            .apply(sample_normalized_cmd("family-1", 10))
+            .await
+            .unwrap();
+        let ack2 = actor
+            .apply(sample_normalized_cmd("family-1", 20))
+            .await
+            .unwrap();
         assert_eq!(ack1.seq, 1);
         assert_eq!(ack2.seq, 2);
         actor.barrier(2).await.unwrap();
@@ -297,7 +322,10 @@ mod tests {
     #[tokio::test]
     async fn actor_status_and_snapshot_report_applied_seq() {
         let actor = spawn_family_actor(FamilyKey::new("family-2"));
-        actor.apply(sample_normalized_cmd("family-2", 1)).await.unwrap();
+        actor
+            .apply(sample_normalized_cmd("family-2", 1))
+            .await
+            .unwrap();
         let status = actor.status().await.unwrap();
         assert_eq!(status.applied_seq, 1);
         let snapshot = actor.snapshot().await.unwrap();

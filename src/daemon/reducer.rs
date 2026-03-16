@@ -17,12 +17,7 @@ pub fn reduce_family_command(
     apply_ref_changes(state, &cmd);
     apply_worktree_state(state, &cmd);
 
-    let analysis = analyzers.analyze(
-        &cmd,
-        AnalysisView {
-            refs: &state.refs,
-        },
-    )?;
+    let analysis = analyzers.analyze(&cmd, AnalysisView { refs: &state.refs })?;
 
     state.applied_seq = state.applied_seq.saturating_add(1);
     let applied = AppliedCommand {
@@ -41,12 +36,7 @@ pub fn reduce_global_command(
     analyzers: &AnalyzerRegistry,
 ) -> Result<(AppliedCommand, AnalysisResult), GitAiError> {
     let empty_refs = std::collections::HashMap::new();
-    let analysis = analyzers.analyze(
-        &cmd,
-        AnalysisView {
-            refs: &empty_refs,
-        },
-    )?;
+    let analysis = analyzers.analyze(&cmd, AnalysisView { refs: &empty_refs })?;
     state.applied_seq = state.applied_seq.saturating_add(1);
     let applied = AppliedCommand {
         seq: state.applied_seq,
@@ -168,6 +158,7 @@ mod tests {
             finished_at_ns: 2,
             pre_repo: None,
             post_repo: None,
+            pre_stash_sha: None,
             ref_changes: vec![RefChange {
                 reference: "refs/heads/main".to_string(),
                 old: "".to_string(),
@@ -182,13 +173,17 @@ mod tests {
     fn reducer_applies_ref_changes_and_produces_applied_command() {
         let mut state = family_state();
         let registry = AnalyzerRegistry::new();
-        let (applied, analysis) = reduce_family_command(&mut state, normalized(), &registry).unwrap();
+        let (applied, analysis) =
+            reduce_family_command(&mut state, normalized(), &registry).unwrap();
         assert_eq!(applied.seq, 1);
         assert!(matches!(
             analysis.class,
             crate::daemon::domain::CommandClass::RefMutation
         ));
-        assert_eq!(state.refs.get("refs/heads/main").map(String::as_str), Some("abc"));
+        assert_eq!(
+            state.refs.get("refs/heads/main").map(String::as_str),
+            Some("abc")
+        );
     }
 
     #[test]
@@ -198,7 +193,8 @@ mod tests {
             applied_seq: 0,
         };
         let registry = AnalyzerRegistry::new();
-        let (applied, _analysis) = reduce_global_command(&mut state, normalized(), &registry).unwrap();
+        let (applied, _analysis) =
+            reduce_global_command(&mut state, normalized(), &registry).unwrap();
         assert_eq!(applied.seq, 1);
         assert_eq!(state.recent_commands.len(), 1);
     }

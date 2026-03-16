@@ -77,6 +77,7 @@ pub struct NormalizedCommand {
     pub finished_at_ns: u128,
     pub pre_repo: Option<RepoContext>,
     pub post_repo: Option<RepoContext>,
+    pub pre_stash_sha: Option<String>,
     pub ref_changes: Vec<RefChange>,
     pub confidence: Confidence,
     pub wrapper_mirror: bool,

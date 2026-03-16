@@ -1,5 +1,7 @@
 use crate::daemon::analyzers::{AnalysisView, CommandAnalyzer};
-use crate::daemon::domain::{AnalysisResult, CommandClass, Confidence, NormalizedCommand, SemanticEvent};
+use crate::daemon::domain::{
+    AnalysisResult, CommandClass, Confidence, NormalizedCommand, SemanticEvent,
+};
 use crate::error::GitAiError;
 
 #[derive(Default)]
@@ -38,9 +40,7 @@ impl CommandAnalyzer for RefAdminAnalyzer {
                         }
                     }
                 }
-                if args.iter().any(|arg| arg == "-m" || arg == "-M")
-                    && args.len() >= 4
-                {
+                if args.iter().any(|arg| arg == "-m" || arg == "-M") && args.len() >= 4 {
                     events.push(SemanticEvent::BranchRenamed {
                         old_name: args[2].clone(),
                         new_name: args[3].clone(),
@@ -150,7 +150,11 @@ mod tests {
             family_key: None,
             worktree: None,
             root_sid: "r".to_string(),
-            raw_argv: vec!["git".to_string(), "branch".to_string(), "feature".to_string()],
+            raw_argv: vec![
+                "git".to_string(),
+                "branch".to_string(),
+                "feature".to_string(),
+            ],
             primary_command: Some("branch".to_string()),
             alias_resolution: AliasResolution::None,
             observed_child_commands: Vec::new(),
@@ -159,6 +163,7 @@ mod tests {
             finished_at_ns: 2,
             pre_repo: None,
             post_repo: None,
+            pre_stash_sha: None,
             ref_changes: vec![RefChange {
                 reference: "refs/heads/feature".to_string(),
                 old: "".to_string(),
@@ -168,12 +173,17 @@ mod tests {
             wrapper_mirror: false,
         };
         let out = analyzer
-            .analyze(&cmd, AnalysisView { refs: &Default::default() })
+            .analyze(
+                &cmd,
+                AnalysisView {
+                    refs: &Default::default(),
+                },
+            )
             .unwrap();
-        assert!(out
-            .events
-            .iter()
-            .any(|e| matches!(e, SemanticEvent::BranchCreated { .. })));
+        assert!(
+            out.events
+                .iter()
+                .any(|e| matches!(e, SemanticEvent::BranchCreated { .. }))
+        );
     }
 }
-
