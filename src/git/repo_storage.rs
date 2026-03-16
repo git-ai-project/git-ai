@@ -4,12 +4,13 @@ use crate::authorship::authorship_log_serialization::generate_short_hash;
 use crate::authorship::working_log::{CHECKPOINT_API_VERSION, Checkpoint, CheckpointKind};
 use crate::error::GitAiError;
 use crate::git::rewrite_log::{RewriteLogEvent, append_event_to_file};
-use crate::utils::{debug_log, normalize_to_posix};
+use crate::utils::{LockFile, debug_log, normalize_to_posix};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 /// Initial attributions data structure stored in the INITIAL file
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -221,6 +222,35 @@ impl PersistedWorkingLog {
         Ok(())
     }
 
+    fn checkpoint_lock_path(&self) -> PathBuf {
+        self.dir.join("checkpoints.lock")
+    }
+
+    fn checkpoints_file_path(&self) -> PathBuf {
+        self.dir.join("checkpoints.jsonl")
+    }
+
+    fn acquire_checkpoints_lock(&self) -> Result<LockFile, GitAiError> {
+        let lock_path = self.checkpoint_lock_path();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(lock) = LockFile::try_acquire(&lock_path) {
+                return Ok(lock);
+            }
+            if Instant::now() >= deadline {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    format!(
+                        "timed out acquiring checkpoint lock at {}",
+                        lock_path.display()
+                    ),
+                )
+                .into());
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
     /* blob storage */
     pub fn get_file_version(&self, sha: &str) -> Result<String, GitAiError> {
         let blob_path = self.dir.join("blobs").join(sha);
@@ -326,8 +356,10 @@ impl PersistedWorkingLog {
 
     /* append checkpoint */
     pub fn append_checkpoint(&self, checkpoint: &Checkpoint) -> Result<(), GitAiError> {
+        let _lock = self.acquire_checkpoints_lock()?;
+
         // Read existing checkpoints
-        let mut checkpoints = self.read_all_checkpoints().unwrap_or_default();
+        let mut checkpoints = self.read_all_checkpoints_unlocked().unwrap_or_default();
 
         // Create a copy, potentially without transcript to reduce storage size.
         // Transcripts are refetched in update_prompts_to_latest() before post-commit
@@ -382,11 +414,16 @@ impl PersistedWorkingLog {
         self.prune_old_char_attributions(&mut checkpoints);
 
         // Write all checkpoints back
-        self.write_all_checkpoints(&checkpoints)
+        self.write_all_checkpoints_unlocked(&checkpoints)
     }
 
     pub fn read_all_checkpoints(&self) -> Result<Vec<Checkpoint>, GitAiError> {
-        let checkpoints_file = self.dir.join("checkpoints.jsonl");
+        let _lock = self.acquire_checkpoints_lock()?;
+        self.read_all_checkpoints_unlocked()
+    }
+
+    fn read_all_checkpoints_unlocked(&self) -> Result<Vec<Checkpoint>, GitAiError> {
+        let checkpoints_file = self.checkpoints_file_path();
 
         if !checkpoints_file.exists() {
             return Ok(Vec::new());
@@ -495,7 +532,12 @@ impl PersistedWorkingLog {
     /// by post-commit after transcripts have been refetched and need to be preserved
     /// for from_just_working_log() to read them.
     pub fn write_all_checkpoints(&self, checkpoints: &[Checkpoint]) -> Result<(), GitAiError> {
-        let checkpoints_file = self.dir.join("checkpoints.jsonl");
+        let _lock = self.acquire_checkpoints_lock()?;
+        self.write_all_checkpoints_unlocked(checkpoints)
+    }
+
+    fn write_all_checkpoints_unlocked(&self, checkpoints: &[Checkpoint]) -> Result<(), GitAiError> {
+        let checkpoints_file = self.checkpoints_file_path();
 
         // Serialize all checkpoints to JSONL
         let mut lines = Vec::new();

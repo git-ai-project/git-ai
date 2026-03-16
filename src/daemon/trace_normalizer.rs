@@ -1110,4 +1110,60 @@ mod tests {
         let p = payload("region_enter", "s5", 1);
         assert!(normalizer.ingest_payload(&p).unwrap().is_none());
     }
+
+    #[test]
+    fn interleaved_roots_with_out_of_order_exits_finalize_independently() {
+        let backend = Arc::new(MockBackend::default());
+        backend.set_family("/repo-a", "/repo-a/.git");
+        backend.set_context("/repo-a", "head-a");
+        backend.set_family("/repo-b", "/repo-b/.git");
+        backend.set_context("/repo-b", "head-b");
+        let mut normalizer = TraceNormalizer::new(backend);
+
+        let start_a = serde_json::json!({
+            "event":"start",
+            "sid":"s-a",
+            "ts":1,
+            "argv":["git","commit","-m","a"],
+            "worktree":"/repo-a"
+        });
+        let start_b = serde_json::json!({
+            "event":"start",
+            "sid":"s-b",
+            "ts":2,
+            "argv":["git","push","origin","main"],
+            "worktree":"/repo-b"
+        });
+        let exit_b = serde_json::json!({
+            "event":"exit",
+            "sid":"s-b",
+            "ts":3,
+            "code":0
+        });
+        let exit_a = serde_json::json!({
+            "event":"exit",
+            "sid":"s-a",
+            "ts":4,
+            "code":0
+        });
+
+        assert!(normalizer.ingest_payload(&start_a).unwrap().is_none());
+        assert!(normalizer.ingest_payload(&start_b).unwrap().is_none());
+
+        let cmd_b = normalizer.ingest_payload(&exit_b).unwrap().unwrap();
+        assert_eq!(cmd_b.root_sid, "s-b");
+        assert_eq!(cmd_b.primary_command.as_deref(), Some("push"));
+        assert_eq!(cmd_b.worktree.as_deref(), Some(Path::new("/repo-b")));
+        assert!(matches!(cmd_b.scope, CommandScope::Family(_)));
+
+        let cmd_a = normalizer.ingest_payload(&exit_a).unwrap().unwrap();
+        assert_eq!(cmd_a.root_sid, "s-a");
+        assert_eq!(cmd_a.primary_command.as_deref(), Some("commit"));
+        assert_eq!(cmd_a.worktree.as_deref(), Some(Path::new("/repo-a")));
+        assert!(matches!(cmd_a.scope, CommandScope::Family(_)));
+
+        assert!(normalizer.state().pending.is_empty());
+        assert!(normalizer.state().deferred_exits.is_empty());
+        assert!(normalizer.state().deferred_child_exits.is_empty());
+    }
 }

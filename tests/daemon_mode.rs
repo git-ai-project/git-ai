@@ -131,8 +131,17 @@ impl DaemonGuard {
                 .and_then(|v| v.get("backlog"))
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
+            let settled_effect_queue = settled
+                .data
+                .as_ref()
+                .and_then(|v| v.get("effect_queue_depth"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
 
-            if settled_backlog == 0 && settled_latest == last_latest_seq {
+            if settled_backlog == 0
+                && settled_effect_queue == 0
+                && settled_latest == last_latest_seq
+            {
                 stable_idle_polls = stable_idle_polls.saturating_add(1);
                 if stable_idle_polls >= 2 {
                     return settled_latest;
@@ -225,6 +234,200 @@ fn git_trace_env(trace_socket_path: &Path) -> [(&'static str, String); 2] {
         ),
         ("GIT_TRACE2_EVENT_NESTING", "10".to_string()),
     ]
+}
+
+#[derive(Clone)]
+struct WorkdirRaceHarness {
+    test_home: PathBuf,
+    test_db_path: PathBuf,
+    trace_socket_path: PathBuf,
+}
+
+impl WorkdirRaceHarness {
+    fn new(repo: &TestRepo, trace_socket_path: PathBuf) -> Self {
+        Self {
+            test_home: repo.test_home_path().to_path_buf(),
+            test_db_path: repo.test_db_path().to_path_buf(),
+            trace_socket_path,
+        }
+    }
+
+    fn run_traced_git(&self, workdir: &Path, args: &[&str]) {
+        let output = Command::new(real_git_executable())
+            .args(args)
+            .current_dir(workdir)
+            .env("HOME", &self.test_home)
+            .env("GIT_CONFIG_GLOBAL", self.test_home.join(".gitconfig"))
+            .env("GIT_AI_TEST_DB_PATH", &self.test_db_path)
+            .env("GITAI_TEST_DB_PATH", &self.test_db_path)
+            .env(
+                "GIT_TRACE2_EVENT",
+                format!(
+                    "af_unix:stream:{}",
+                    self.trace_socket_path.to_string_lossy()
+                ),
+            )
+            .env("GIT_TRACE2_EVENT_NESTING", "10")
+            .output()
+            .expect("failed to execute traced git command");
+        assert!(
+            output.status.success(),
+            "traced git command failed in {}: git {} \nstdout:{}\nstderr:{}",
+            workdir.display(),
+            args.join(" "),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn run_delegated_checkpoint(&self, workdir: &Path, file_rel: &str) {
+        let output = Command::new(get_binary_path())
+            .args(["checkpoint", "mock_ai", file_rel])
+            .current_dir(workdir)
+            .env("HOME", &self.test_home)
+            .env("GIT_CONFIG_GLOBAL", self.test_home.join(".gitconfig"))
+            .env("GIT_AI_TEST_DB_PATH", &self.test_db_path)
+            .env("GITAI_TEST_DB_PATH", &self.test_db_path)
+            .env("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true")
+            .output()
+            .expect("failed to execute delegated checkpoint");
+        assert!(
+            output.status.success(),
+            "delegated checkpoint failed in {} for {} \nstdout:{}\nstderr:{}",
+            workdir.display(),
+            file_rel,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn write_ai_line_checkpoint_and_add(&self, workdir: &Path, file_rel: &str, line: &str) {
+        fs::write(workdir.join(file_rel), format!("{line}\n"))
+            .expect("failed writing ai line test file");
+        self.run_delegated_checkpoint(workdir, file_rel);
+        self.run_traced_git(workdir, &["add", file_rel]);
+    }
+
+    fn spawn_worktree_ai_stream(
+        &self,
+        workdir: PathBuf,
+        file_prefix: &str,
+        line_prefix: &str,
+        file_count: usize,
+        commit_message: &str,
+    ) -> thread::JoinHandle<()> {
+        let harness = self.clone();
+        let file_prefix = file_prefix.to_string();
+        let line_prefix = line_prefix.to_string();
+        let commit_message = commit_message.to_string();
+
+        thread::spawn(move || {
+            for idx in 0..file_count {
+                let file = format!("{file_prefix}-{idx}.txt");
+                let line = format!("{line_prefix}-{idx}");
+                harness.write_ai_line_checkpoint_and_add(&workdir, file.as_str(), line.as_str());
+            }
+            harness.run_traced_git(&workdir, &["commit", "-m", commit_message.as_str()]);
+        })
+    }
+}
+
+fn unique_worktree_path(repo: &TestRepo, prefix: &str) -> PathBuf {
+    repo.path().parent().unwrap_or(repo.path()).join(format!(
+        "{}-{}",
+        prefix,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ))
+}
+
+fn parse_blame_line(line: &str) -> (String, String) {
+    if let Some(start_paren) = line.find('(')
+        && let Some(end_paren) = line.find(')')
+    {
+        let author_section = &line[start_paren + 1..end_paren];
+        let content = line[end_paren + 1..].trim().to_string();
+
+        let parts: Vec<&str> = author_section.split_whitespace().collect();
+        let mut author_parts = Vec::new();
+        for part in parts {
+            if part.chars().next().unwrap_or('a').is_ascii_digit() {
+                break;
+            }
+            author_parts.push(part);
+        }
+        return (author_parts.join(" "), content);
+    }
+    ("unknown".to_string(), line.trim().to_string())
+}
+
+fn is_ai_author(author: &str) -> bool {
+    let author_lower = author.to_lowercase();
+    author_lower.contains("mock_ai")
+        || author_lower.contains("claude")
+        || author_lower.contains("cursor")
+        || author_lower.contains("codex")
+}
+
+fn assert_blame_lines_for_workdir(
+    repo: &TestRepo,
+    workdir: &Path,
+    file_rel: &str,
+    expected: &[(String, bool)],
+) {
+    let blame_output = repo
+        .git_ai_from_working_dir(workdir, &["blame", file_rel])
+        .unwrap_or_else(|e| {
+            panic!(
+                "git-ai blame failed in {} for {}: {}",
+                workdir.display(),
+                file_rel,
+                e
+            )
+        });
+    let actual: Vec<(String, String)> = blame_output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(parse_blame_line)
+        .collect();
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "line count mismatch for {} in {}\nblame:\n{}",
+        file_rel,
+        workdir.display(),
+        blame_output
+    );
+
+    for (idx, ((author, content), (expected_content, expected_ai))) in
+        actual.iter().zip(expected.iter()).enumerate()
+    {
+        assert_eq!(
+            content,
+            expected_content,
+            "line {} content mismatch for {} in {}",
+            idx + 1,
+            file_rel,
+            workdir.display()
+        );
+        let actual_ai = is_ai_author(author);
+        assert_eq!(
+            actual_ai,
+            *expected_ai,
+            "line {} attribution mismatch for {} in {} (author='{}', line='{}')",
+            idx + 1,
+            file_rel,
+            workdir.display(),
+            author,
+            content
+        );
+    }
+}
+
+fn assert_single_ai_line_for_workdir(repo: &TestRepo, workdir: &Path, file_rel: &str, line: &str) {
+    assert_blame_lines_for_workdir(repo, workdir, file_rel, &[(line.to_string(), true)]);
 }
 
 fn rewrite_log_path(repo: &TestRepo) -> PathBuf {
@@ -1625,5 +1828,254 @@ fn daemon_pure_trace_socket_pull_autostash_preserves_local_changes_and_tracks_co
     assert!(
         saw_pull_autostash_success,
         "pull --rebase --autostash success should be tracked"
+    );
+}
+
+#[test]
+#[serial]
+fn daemon_pure_trace_socket_high_throughput_ai_commit_burst_preserves_exact_blame() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let daemon = DaemonGuard::start(&repo, "write");
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let env = git_trace_env(&trace_socket);
+    let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
+
+    let file_count = 16usize;
+    for idx in 0..file_count {
+        let file_rel = format!("daemon-race-file-{idx}.txt");
+        let file_path = repo.path().join(file_rel.as_str());
+        fs::write(&file_path, format!("ai-line-{idx}\n"))
+            .expect("failed to write ai burst test file");
+
+        repo.git_ai_with_env(
+            &["checkpoint", "mock_ai", file_rel.as_str()],
+            &[("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true")],
+        )
+        .expect("delegated ai checkpoint should succeed");
+
+        repo.git_og_with_env(&["add", file_rel.as_str()], &env_refs)
+            .expect("staging ai burst file should succeed");
+    }
+
+    repo.git_og_with_env(&["commit", "-m", "ai burst commit"], &env_refs)
+        .expect("ai burst commit should succeed");
+
+    daemon.latest_seq_and_wait_idle();
+    let commit_events = wait_for_rewrite_event_count(&repo, "\"commit_sha\"", 1);
+    assert_eq!(
+        commit_events, 1,
+        "expected exactly one commit rewrite event for burst commit"
+    );
+
+    for idx in 0..file_count {
+        let mut file = repo.filename(format!("daemon-race-file-{idx}.txt").as_str());
+        file.assert_lines_and_blame(lines![format!("ai-line-{idx}").ai()]);
+    }
+}
+
+#[test]
+#[serial]
+fn daemon_pure_trace_socket_concurrent_worktree_burst_preserves_exact_line_attribution() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let daemon = DaemonGuard::start(&repo, "write");
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let env = git_trace_env(&trace_socket);
+    let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
+
+    let harness = WorkdirRaceHarness::new(&repo, trace_socket.clone());
+    let worker_a_dir = repo.path().to_path_buf();
+    let worker_b_dir = unique_worktree_path(&repo, "daemon-race-worker-b");
+    let worker_b_dir_str = worker_b_dir.to_string_lossy().to_string();
+
+    repo.git_og_with_env(&["checkout", "-b", "daemon-race-worker-a"], &env_refs)
+        .expect("checkout worker-a branch should succeed");
+    repo.git_og_with_env(
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "daemon-race-worker-b",
+            worker_b_dir_str.as_str(),
+        ],
+        &env_refs,
+    )
+    .expect("worktree add worker-b should succeed");
+
+    let file_count = 10usize;
+    for idx in 0..file_count {
+        let file_a = format!("daemon-race-a-{idx}.txt");
+        harness.write_ai_line_checkpoint_and_add(
+            &worker_a_dir,
+            file_a.as_str(),
+            format!("a-ai-line-{idx}").as_str(),
+        );
+
+        let file_b = format!("daemon-race-b-{idx}.txt");
+        harness.write_ai_line_checkpoint_and_add(
+            &worker_b_dir,
+            file_b.as_str(),
+            format!("b-ai-line-{idx}").as_str(),
+        );
+    }
+
+    harness.run_traced_git(&worker_a_dir, &["commit", "-m", "worker-a burst commit"]);
+    harness.run_traced_git(&worker_b_dir, &["commit", "-m", "worker-b burst commit"]);
+
+    daemon.latest_seq_and_wait_idle();
+
+    for idx in 0..file_count {
+        let file_a = format!("daemon-race-a-{idx}.txt");
+        let file_b = format!("daemon-race-b-{idx}.txt");
+        assert_single_ai_line_for_workdir(
+            &repo,
+            &worker_a_dir,
+            file_a.as_str(),
+            format!("a-ai-line-{idx}").as_str(),
+        );
+        assert_single_ai_line_for_workdir(
+            &repo,
+            &worker_b_dir,
+            file_b.as_str(),
+            format!("b-ai-line-{idx}").as_str(),
+        );
+    }
+
+    let _ = repo.git_og_with_env(
+        &["worktree", "remove", "--force", worker_b_dir_str.as_str()],
+        &env_refs,
+    );
+}
+
+#[test]
+#[serial]
+fn daemon_pure_trace_socket_concurrent_checkpoint_requests_preserve_exact_line_attribution() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let daemon = DaemonGuard::start(&repo, "write");
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let env = git_trace_env(&trace_socket);
+    let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
+
+    let harness = WorkdirRaceHarness::new(&repo, trace_socket.clone());
+    let workdir = repo.path().to_path_buf();
+
+    let file_count = 12usize;
+    let mut expected = Vec::new();
+    for idx in 0..file_count {
+        let file_rel = format!("daemon-race-concurrent-checkpoint-{idx}.txt");
+        let line = format!("ai-line-{idx}");
+        fs::write(workdir.join(file_rel.as_str()), format!("{line}\n"))
+            .expect("failed to write concurrent checkpoint test file");
+        expected.push((file_rel, line));
+    }
+
+    let mut checkpoint_threads = Vec::new();
+    for (file_rel, _) in &expected {
+        let thread_workdir = workdir.clone();
+        let harness = harness.clone();
+        let file_rel = file_rel.clone();
+        checkpoint_threads.push(thread::spawn(move || {
+            harness.run_delegated_checkpoint(&thread_workdir, file_rel.as_str());
+        }));
+    }
+    for handle in checkpoint_threads {
+        handle
+            .join()
+            .expect("concurrent delegated checkpoint thread should not panic");
+    }
+
+    repo.git_og_with_env(&["add", "."], &env_refs)
+        .expect("staging concurrent checkpoint files should succeed");
+    repo.git_og_with_env(
+        &["commit", "-m", "concurrent delegated checkpoint burst"],
+        &env_refs,
+    )
+    .expect("commit for concurrent checkpoint files should succeed");
+
+    daemon.latest_seq_and_wait_idle();
+
+    for (file_rel, line) in expected {
+        let mut file = repo.filename(file_rel.as_str());
+        file.assert_lines_and_blame(lines![line.ai()]);
+    }
+}
+
+#[test]
+#[serial]
+fn daemon_pure_trace_socket_parallel_worktree_streams_preserve_exact_line_attribution() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let daemon = DaemonGuard::start(&repo, "write");
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let env = git_trace_env(&trace_socket);
+    let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
+
+    let harness = WorkdirRaceHarness::new(&repo, trace_socket.clone());
+    let worker_a_dir = repo.path().to_path_buf();
+    let worker_b_dir = unique_worktree_path(&repo, "daemon-race-worker-b-parallel");
+    let worker_b_dir_str = worker_b_dir.to_string_lossy().to_string();
+
+    repo.git_og_with_env(
+        &["checkout", "-b", "daemon-race-parallel-worker-a"],
+        &env_refs,
+    )
+    .expect("checkout parallel worker-a branch should succeed");
+    repo.git_og_with_env(
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "daemon-race-parallel-worker-b",
+            worker_b_dir_str.as_str(),
+        ],
+        &env_refs,
+    )
+    .expect("worktree add parallel worker-b should succeed");
+
+    let file_count = 8usize;
+
+    let worker_a = harness.spawn_worktree_ai_stream(
+        worker_a_dir.clone(),
+        "daemon-race-parallel-a",
+        "a-parallel-ai-line",
+        file_count,
+        "parallel worker-a commit",
+    );
+
+    let worker_b = harness.spawn_worktree_ai_stream(
+        worker_b_dir.clone(),
+        "daemon-race-parallel-b",
+        "b-parallel-ai-line",
+        file_count,
+        "parallel worker-b commit",
+    );
+
+    worker_a
+        .join()
+        .expect("parallel worker-a thread should not panic");
+    worker_b
+        .join()
+        .expect("parallel worker-b thread should not panic");
+
+    daemon.latest_seq_and_wait_idle();
+
+    for idx in 0..file_count {
+        let file_a = format!("daemon-race-parallel-a-{idx}.txt");
+        let file_b = format!("daemon-race-parallel-b-{idx}.txt");
+        assert_single_ai_line_for_workdir(
+            &repo,
+            &worker_a_dir,
+            file_a.as_str(),
+            format!("a-parallel-ai-line-{idx}").as_str(),
+        );
+        assert_single_ai_line_for_workdir(
+            &repo,
+            &worker_b_dir,
+            file_b.as_str(),
+            format!("b-parallel-ai-line-{idx}").as_str(),
+        );
+    }
+
+    let _ = repo.git_og_with_env(
+        &["worktree", "remove", "--force", worker_b_dir_str.as_str()],
+        &env_refs,
     );
 }
