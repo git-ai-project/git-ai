@@ -11,6 +11,7 @@ on:
 
 jobs:
   github-integration:
+    if: false # disabled on PageUp fork
     name: GitHub Integration Tests
     runs-on: ubuntu-latest
 

@@ -18,6 +18,7 @@ on:
 
 jobs:
   build:
+    if: false # disabled on PageUp fork
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -60,7 +61,7 @@ jobs:
 
   publish-vsce:
     needs: build
-    if: ${{ !inputs.dry_run && !inputs.skip_vsce }}
+    if: false # disabled on PageUp fork
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -91,7 +92,7 @@ jobs:
 
   publish-ovsx:
     needs: build
-    if: ${{ !inputs.dry_run && !inputs.skip_ovsx }}
+    if: false # disabled on PageUp fork
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -122,12 +123,7 @@ jobs:
 
   bump-version:
     needs: [publish-vsce, publish-ovsx]
-    if: |
-      always() &&
-      !inputs.dry_run &&
-      (needs.publish-vsce.result == 'success' || needs.publish-vsce.result == 'skipped') &&
-      (needs.publish-ovsx.result == 'success' || needs.publish-ovsx.result == 'skipped') &&
-      (needs.publish-vsce.result == 'success' || needs.publish-ovsx.result == 'success')
+    if: false # disabled on PageUp fork
     runs-on: ubuntu-latest
     defaults:
       run:

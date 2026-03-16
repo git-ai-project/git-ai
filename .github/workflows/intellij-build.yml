@@ -27,6 +27,7 @@ jobs:
 
   # Prepare the environment and build the plugin
   build:
+    if: false # disabled on PageUp fork
     name: Build
     runs-on: ubuntu-latest
     steps:
@@ -79,6 +80,7 @@ jobs:
 
   # Run tests and upload a code coverage report
   test:
+    if: false # disabled on PageUp fork
     name: Test
     needs: [build]
     runs-on: ubuntu-latest
@@ -132,6 +134,7 @@ jobs:
 
   # Run Qodana inspections and provide a report
   inspectCode:
+    if: false # disabled on PageUp fork
     name: Inspect code
     needs: [build]
     runs-on: ubuntu-latest
@@ -173,6 +176,7 @@ jobs:
 
   # Run plugin structure verification along with IntelliJ Plugin Verifier
   verify:
+    if: false # disabled on PageUp fork
     name: Verify plugin
     needs: [build]
     runs-on: ubuntu-latest

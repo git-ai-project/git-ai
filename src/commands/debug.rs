@@ -204,78 +204,78 @@ fn build_debug_report() -> String {
 
     #[cfg(feature = "cloud")]
     {
-    let _ = writeln!(out, "== Git AI Login ==");
-    let _ = writeln!(out, "Credential backend: {}", auth_info.backend);
-    match &auth_info.state {
-        AuthState::LoggedOut => {
-            let _ = writeln!(out, "Status: logged out");
+        let _ = writeln!(out, "== Git AI Login ==");
+        let _ = writeln!(out, "Credential backend: {}", auth_info.backend);
+        match &auth_info.state {
+            AuthState::LoggedOut => {
+                let _ = writeln!(out, "Status: logged out");
+            }
+            AuthState::LoggedIn => {
+                let _ = writeln!(out, "Status: logged in");
+            }
+            AuthState::RefreshExpired => {
+                let _ = writeln!(out, "Status: credentials expired (refresh token expired)");
+            }
+            AuthState::Error(err) => {
+                let _ = writeln!(out, "Status: <error: {}>", err);
+            }
         }
-        AuthState::LoggedIn => {
-            let _ = writeln!(out, "Status: logged in");
-        }
-        AuthState::RefreshExpired => {
-            let _ = writeln!(out, "Status: credentials expired (refresh token expired)");
-        }
-        AuthState::Error(err) => {
-            let _ = writeln!(out, "Status: <error: {}>", err);
-        }
-    }
-    if let Some(expires_at) = auth_info.access_token_expires_at {
-        let _ = writeln!(
-            out,
-            "Access token expires at: {}",
-            format_unix_timestamp(expires_at)
-        );
-    }
-    if let Some(expires_at) = auth_info.refresh_token_expires_at {
-        let _ = writeln!(
-            out,
-            "Refresh token expires at: {}",
-            format_unix_timestamp(expires_at)
-        );
-    }
-    if let Some(user_id) = auth_info.user_id {
-        let _ = writeln!(out, "User ID: {}", user_id);
-    } else if matches!(
-        &auth_info.state,
-        AuthState::LoggedIn | AuthState::RefreshExpired
-    ) {
-        let _ = writeln!(out, "User ID: <unavailable>");
-    }
-    if let Some(email) = auth_info.email {
-        let _ = writeln!(out, "Email: {}", email);
-    } else if matches!(
-        &auth_info.state,
-        AuthState::LoggedIn | AuthState::RefreshExpired
-    ) {
-        let _ = writeln!(out, "Email: <unavailable>");
-    }
-    if let Some(name) = auth_info.name {
-        let _ = writeln!(out, "Name: {}", name);
-    } else if matches!(
-        &auth_info.state,
-        AuthState::LoggedIn | AuthState::RefreshExpired
-    ) {
-        let _ = writeln!(out, "Name: <unavailable>");
-    }
-    if let Some(personal_org_id) = auth_info.personal_org_id {
-        let _ = writeln!(out, "Personal org ID: {}", personal_org_id);
-    }
-    if !auth_info.orgs.is_empty() {
-        let _ = writeln!(out, "Organizations:");
-        for org in auth_info.orgs {
-            let org_id = org.org_id.unwrap_or_else(|| "<unknown-id>".to_string());
-            let org_slug = org.org_slug.unwrap_or_else(|| "<unknown-slug>".to_string());
-            let org_name = org.org_name.unwrap_or_else(|| "<unknown-name>".to_string());
-            let role = org.role.unwrap_or_else(|| "<unknown-role>".to_string());
+        if let Some(expires_at) = auth_info.access_token_expires_at {
             let _ = writeln!(
                 out,
-                "  - {} ({}) [{}] role={}",
-                org_slug, org_name, org_id, role
+                "Access token expires at: {}",
+                format_unix_timestamp(expires_at)
             );
         }
-    }
-    let _ = writeln!(out);
+        if let Some(expires_at) = auth_info.refresh_token_expires_at {
+            let _ = writeln!(
+                out,
+                "Refresh token expires at: {}",
+                format_unix_timestamp(expires_at)
+            );
+        }
+        if let Some(user_id) = auth_info.user_id {
+            let _ = writeln!(out, "User ID: {}", user_id);
+        } else if matches!(
+            &auth_info.state,
+            AuthState::LoggedIn | AuthState::RefreshExpired
+        ) {
+            let _ = writeln!(out, "User ID: <unavailable>");
+        }
+        if let Some(email) = auth_info.email {
+            let _ = writeln!(out, "Email: {}", email);
+        } else if matches!(
+            &auth_info.state,
+            AuthState::LoggedIn | AuthState::RefreshExpired
+        ) {
+            let _ = writeln!(out, "Email: <unavailable>");
+        }
+        if let Some(name) = auth_info.name {
+            let _ = writeln!(out, "Name: {}", name);
+        } else if matches!(
+            &auth_info.state,
+            AuthState::LoggedIn | AuthState::RefreshExpired
+        ) {
+            let _ = writeln!(out, "Name: <unavailable>");
+        }
+        if let Some(personal_org_id) = auth_info.personal_org_id {
+            let _ = writeln!(out, "Personal org ID: {}", personal_org_id);
+        }
+        if !auth_info.orgs.is_empty() {
+            let _ = writeln!(out, "Organizations:");
+            for org in auth_info.orgs {
+                let org_id = org.org_id.unwrap_or_else(|| "<unknown-id>".to_string());
+                let org_slug = org.org_slug.unwrap_or_else(|| "<unknown-slug>".to_string());
+                let org_name = org.org_name.unwrap_or_else(|| "<unknown-name>".to_string());
+                let role = org.role.unwrap_or_else(|| "<unknown-role>".to_string());
+                let _ = writeln!(
+                    out,
+                    "  - {} ({}) [{}] role={}",
+                    org_slug, org_name, org_id, role
+                );
+            }
+        }
+        let _ = writeln!(out);
     }
 
     let _ = writeln!(out, "== Git AI Environment ==");

@@ -49,9 +49,15 @@ pub fn handle_git_ai(args: &[String]) {
         }
         "version" | "--version" | "-v" => {
             if cfg!(debug_assertions) {
-                println!("{} (debug) [PageUp build — no telemetry]", env!("CARGO_PKG_VERSION"));
+                println!(
+                    "{} (debug) [PageUp build — no telemetry]",
+                    env!("CARGO_PKG_VERSION")
+                );
             } else {
-                println!("{} [PageUp build — no telemetry]", env!("CARGO_PKG_VERSION"));
+                println!(
+                    "{} [PageUp build — no telemetry]",
+                    env!("CARGO_PKG_VERSION")
+                );
             }
             std::process::exit(0);
         }
@@ -245,14 +251,16 @@ fn print_help() {
     );
     #[cfg(feature = "cloud")]
     {
-    eprintln!("  share <id>         Share a prompt by creating a bundle");
-    eprintln!("    --title <title>       Custom title for the bundle (default: auto-generated)");
-    eprintln!("  sync-prompts       Update prompts in database to latest versions");
-    eprintln!("    --since <time>        Only sync prompts updated after this time");
-    eprintln!(
-        "                          Formats: '1d', '2h', '1w', Unix timestamp, ISO8601, YYYY-MM-DD"
-    );
-    eprintln!("    --workdir <path>      Only sync prompts from specific repository");
+        eprintln!("  share <id>         Share a prompt by creating a bundle");
+        eprintln!(
+            "    --title <title>       Custom title for the bundle (default: auto-generated)"
+        );
+        eprintln!("  sync-prompts       Update prompts in database to latest versions");
+        eprintln!("    --since <time>        Only sync prompts updated after this time");
+        eprintln!(
+            "                          Formats: '1d', '2h', '1w', Unix timestamp, ISO8601, YYYY-MM-DD"
+        );
+        eprintln!("    --workdir <path>      Only sync prompts from specific repository");
     }
     eprintln!("  config             View and manage git-ai configuration");
     eprintln!("                        Show all config as formatted JSON");
@@ -275,8 +283,8 @@ fn print_help() {
     eprintln!("  git-path           Print the path to the underlying git executable");
     #[cfg(feature = "cloud")]
     {
-    eprintln!("  upgrade            Check for updates and install if available");
-    eprintln!("    --force               Reinstall latest version even if already up to date");
+        eprintln!("  upgrade            Check for updates and install if available");
+        eprintln!("    --force               Reinstall latest version even if already up to date");
     }
     eprintln!("  prompts            Create local SQLite database for prompt analysis");
     eprintln!("    --since <time>        Only include prompts after this time (default: 30d)");
@@ -312,9 +320,9 @@ fn print_help() {
     eprintln!("    --json                Output context as structured JSON");
     #[cfg(feature = "cloud")]
     {
-    eprintln!("  login              Authenticate with Git AI");
-    eprintln!("  logout             Clear stored credentials");
-    eprintln!("  whoami             Show auth state and login identity");
+        eprintln!("  login              Authenticate with Git AI");
+        eprintln!("  logout             Clear stored credentials");
+        eprintln!("  whoami             Show auth state and login identity");
     }
     eprintln!("  version, -v, --version     Print the git-ai version");
     eprintln!("  help, -h, --help           Show this help message");

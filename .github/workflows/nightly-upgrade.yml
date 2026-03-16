@@ -7,6 +7,7 @@ on:
 
 jobs:
   upgrade-from-older:
+    if: false # disabled on PageUp fork
     name: Upgrade from older versions on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:

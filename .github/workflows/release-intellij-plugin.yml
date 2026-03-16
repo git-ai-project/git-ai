@@ -20,6 +20,7 @@ jobs:
 
   # Prepare and publish the plugin to JetBrains Marketplace repository
   release:
+    if: false # disabled on PageUp fork
     name: Publish Plugin
     runs-on: ubuntu-latest
     permissions:

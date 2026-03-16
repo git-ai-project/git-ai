@@ -22,9 +22,7 @@ jobs:
   update-changelog:
     name: Generate AI Changelog
     runs-on: ubuntu-latest
-    if: >-
-      (github.event_name == 'workflow_dispatch') ||
-      (github.event.release.draft == false && github.event.release.prerelease == false)
+    if: false # disabled on PageUp fork
 
     steps:
       - name: Set release tag

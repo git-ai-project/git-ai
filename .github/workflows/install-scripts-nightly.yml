@@ -7,6 +7,7 @@ on:
 
 jobs:
   install-nightly-unix:
+    if: false # disabled on PageUp fork
     name: Nightly install.sh on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -44,6 +45,7 @@ jobs:
           grep -F "checkpoint claude" "$HOME/.claude/settings.json"
 
   install-nightly-windows:
+    if: false # disabled on PageUp fork
     name: Nightly install.ps1 on windows-latest
     runs-on: windows-latest
 

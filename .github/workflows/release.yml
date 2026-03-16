@@ -21,6 +21,7 @@ on:
 
 jobs:
   build:
+    if: false # disabled on PageUp fork
     name: Build for ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     outputs:
@@ -176,6 +177,7 @@ jobs:
           retention-days: 30
 
   build-macos-intel:
+    if: false # disabled on PageUp fork
     name: Build for macOS Intel
     runs-on: macos-15-intel
     outputs:
@@ -245,7 +247,7 @@ jobs:
     name: Create Release
     needs: [build, build-macos-intel]
     runs-on: ubuntu-latest
-    if: success() && inputs.dry_run != true
+    if: false # disabled on PageUp fork
 
     steps:
       - name: Determine release metadata

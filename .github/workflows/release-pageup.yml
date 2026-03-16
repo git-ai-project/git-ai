@@ -99,7 +99,7 @@ jobs:
 
   build-macos-intel:
     name: Build git-ai-macos-x64
-    runs-on: macos-13
+    runs-on: macos-14
     outputs:
       version: ${{ steps.get-version.outputs.version }}
 

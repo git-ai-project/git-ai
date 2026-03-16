@@ -25,6 +25,7 @@ defaults:
 jobs:
 
   testUI:
+    if: false # disabled on PageUp fork
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
