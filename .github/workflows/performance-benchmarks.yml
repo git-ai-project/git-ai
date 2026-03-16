@@ -39,6 +39,15 @@ jobs:
             ${{ runner.os }}-perf-smoke-
             ${{ runner.os }}-perf-
 
+      - name: Run AI pathspec hotspot benchmark gate
+        env:
+          GIT_AI_BENCH_PATHSPEC_FILES: "136"
+          GIT_AI_BENCH_PATHSPEC_LINES: "10000"
+          GIT_AI_BENCH_RATIO_RUNS: "3"
+          GIT_AI_BENCH_MAX_SLOWDOWN_RATIO: "2.0"
+        run: |
+          cargo test --test commit_post_stats_benchmark benchmark_commit_post_command_ai_pathspec_hotspot -- --ignored --nocapture
+
       - name: Run reduced nasty benchmark gate
         run: |
           python3 scripts/benchmarks/git/benchmark_nasty_modes_vs_main.py \
@@ -92,6 +101,15 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-perf-nightly-
             ${{ runner.os }}-perf-
+
+      - name: Run AI pathspec hotspot benchmark gate
+        env:
+          GIT_AI_BENCH_PATHSPEC_FILES: "136"
+          GIT_AI_BENCH_PATHSPEC_LINES: "10000"
+          GIT_AI_BENCH_RATIO_RUNS: "3"
+          GIT_AI_BENCH_MAX_SLOWDOWN_RATIO: "2.0"
+        run: |
+          cargo test --test commit_post_stats_benchmark benchmark_commit_post_command_ai_pathspec_hotspot -- --ignored --nocapture
 
       - name: Run heavy benchmark matrix gate
         run: |
