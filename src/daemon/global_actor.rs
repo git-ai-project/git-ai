@@ -1,12 +1,11 @@
+use crate::daemon::analyzers::AnalyzerRegistry;
 use crate::daemon::domain::{
-    AnalysisResult, ApplyAck, AppliedCommand, CommandClass, Confidence, GlobalSnapshot, GlobalState,
-    NormalizedCommand,
+    ApplyAck, GlobalSnapshot, GlobalState, NormalizedCommand,
 };
+use crate::daemon::reducer;
 use crate::error::GitAiError;
 use std::collections::VecDeque;
 use tokio::sync::{mpsc, oneshot};
-
-const DEFAULT_RECENT_COMMAND_CAP: usize = 512;
 
 pub enum GlobalMsg {
     Apply(NormalizedCommand, oneshot::Sender<Result<ApplyAck, GitAiError>>),
@@ -64,6 +63,7 @@ pub fn spawn_global_actor() -> GlobalActorHandle {
     let handle = GlobalActorHandle { tx };
 
     tokio::spawn(async move {
+        let analyzers = AnalyzerRegistry::new();
         let mut state = GlobalState {
             recent_commands: VecDeque::new(),
             applied_seq: 0,
@@ -73,25 +73,14 @@ pub fn spawn_global_actor() -> GlobalActorHandle {
         while let Some(msg) = rx.recv().await {
             match msg {
                 GlobalMsg::Apply(cmd, respond_to) => {
-                    state.applied_seq = state.applied_seq.saturating_add(1);
-                    let applied = AppliedCommand {
-                        seq: state.applied_seq,
-                        command: cmd,
-                        analysis: AnalysisResult {
-                            class: CommandClass::Opaque,
-                            events: Vec::new(),
-                            confidence: Confidence::Low,
-                        },
-                    };
-                    state.recent_commands.push_back(applied);
-                    while state.recent_commands.len() > DEFAULT_RECENT_COMMAND_CAP {
-                        let _ = state.recent_commands.pop_front();
-                    }
-                    let _ = respond_to.send(Ok(ApplyAck {
-                        seq: state.applied_seq,
-                        applied: true,
-                    }));
-                    satisfy_barriers(state.applied_seq, &mut waiters);
+                    let result = reducer::reduce_global_command(&mut state, cmd, &analyzers)
+                        .map(|(applied, _)| ApplyAck {
+                            seq: applied.seq,
+                            applied: true,
+                        });
+                    let seq = result.as_ref().map(|ack| ack.seq).unwrap_or(state.applied_seq);
+                    let _ = respond_to.send(result);
+                    satisfy_barriers(seq, &mut waiters);
                 }
                 GlobalMsg::Snapshot(respond_to) => {
                     let _ = respond_to.send(Ok(GlobalSnapshot {
@@ -132,7 +121,7 @@ fn satisfy_barriers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::domain::{AliasResolution, CommandScope, NormalizedCommand};
+    use crate::daemon::domain::{AliasResolution, CommandScope, Confidence, NormalizedCommand};
 
     fn global_cmd(seq: u128) -> NormalizedCommand {
         NormalizedCommand {
@@ -164,4 +153,3 @@ mod tests {
         actor.shutdown().await.unwrap();
     }
 }
-

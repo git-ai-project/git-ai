@@ -39,6 +39,8 @@ pub mod trace_normalizer;
 pub mod global_actor;
 pub mod family_actor;
 pub mod coordinator;
+pub mod reducer;
+pub mod analyzers;
 
 const TRACE_EVENT_TYPE: &str = "trace2_raw";
 const CHECKPOINT_EVENT_TYPE: &str = "checkpoint";

@@ -1,14 +1,12 @@
+use crate::daemon::analyzers::AnalyzerRegistry;
 use crate::daemon::domain::{
-    AnalysisResult, ApplyAck, AppliedCommand, CheckpointObserved, CheckpointSummary, CommandClass,
-    Confidence, EnvOverrideSet, FamilyKey, FamilySnapshot, FamilyState, FamilyStatus,
-    NormalizedCommand, ReconcileSnapshot,
+    ApplyAck, CheckpointObserved, EnvOverrideSet, FamilyKey, FamilySnapshot, FamilyState,
+    FamilyStatus, NormalizedCommand, ReconcileSnapshot,
 };
+use crate::daemon::reducer;
 use crate::error::GitAiError;
 use std::collections::{BTreeSet, HashMap, VecDeque};
-use std::path::PathBuf;
 use tokio::sync::{mpsc, oneshot};
-
-const DEFAULT_RECENT_COMMAND_CAP: usize = 512;
 
 pub enum FamilyMsg {
     Apply(NormalizedCommand, oneshot::Sender<Result<ApplyAck, GitAiError>>),
@@ -122,6 +120,7 @@ pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
     };
 
     tokio::spawn(async move {
+        let analyzers = AnalyzerRegistry::new();
         let mut state = FamilyState {
             family_key: family_key.clone(),
             refs: HashMap::new(),
@@ -140,35 +139,17 @@ pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
         while let Some(msg) = rx.recv().await {
             match msg {
                 FamilyMsg::Apply(cmd, respond_to) => {
-                    state.applied_seq = state.applied_seq.saturating_add(1);
-                    let applied = AppliedCommand {
-                        seq: state.applied_seq,
-                        command: cmd,
-                        analysis: AnalysisResult {
-                            class: CommandClass::Opaque,
-                            events: Vec::new(),
-                            confidence: Confidence::Low,
-                        },
-                    };
-                    state.recent_commands.push_back(applied);
-                    cap_recent_commands(&mut state.recent_commands);
-                    let _ = respond_to.send(Ok(ApplyAck {
-                        seq: state.applied_seq,
-                        applied: true,
-                    }));
-                    satisfy_barriers(state.applied_seq, &mut waiters);
+                    let result = reducer::reduce_family_command(&mut state, cmd, &analyzers)
+                        .map(|(applied, _)| ApplyAck {
+                            seq: applied.seq,
+                            applied: true,
+                        });
+                    let seq = result.as_ref().map(|ack| ack.seq).unwrap_or(state.applied_seq);
+                    let _ = respond_to.send(result);
+                    satisfy_barriers(seq, &mut waiters);
                 }
                 FamilyMsg::ApplyCheckpoint(checkpoint, respond_to) => {
-                    state.applied_seq = state.applied_seq.saturating_add(1);
-                    state.checkpoints.insert(
-                        checkpoint.id.clone(),
-                        CheckpointSummary {
-                            id: checkpoint.id,
-                            author: checkpoint.author,
-                            timestamp_ns: checkpoint.timestamp_ns,
-                            file_count: checkpoint.file_count,
-                        },
-                    );
+                    reducer::reduce_checkpoint(&mut state, checkpoint);
                     let _ = respond_to.send(Ok(ApplyAck {
                         seq: state.applied_seq,
                         applied: true,
@@ -176,11 +157,7 @@ pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
                     satisfy_barriers(state.applied_seq, &mut waiters);
                 }
                 FamilyMsg::ApplyEnvOverride(env, respond_to) => {
-                    state.applied_seq = state.applied_seq.saturating_add(1);
-                    state.env_overrides.insert(
-                        canonicalize_env_scope(&env.repo_working_dir),
-                        env.overrides,
-                    );
+                    reducer::reduce_env_override(&mut state, env);
                     let _ = respond_to.send(Ok(ApplyAck {
                         seq: state.applied_seq,
                         applied: true,
@@ -188,9 +165,7 @@ pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
                     satisfy_barriers(state.applied_seq, &mut waiters);
                 }
                 FamilyMsg::Reconcile(snapshot, respond_to) => {
-                    state.applied_seq = state.applied_seq.saturating_add(1);
-                    state.refs = snapshot.refs;
-                    state.last_reconcile_ns = Some(snapshot.timestamp_ns);
+                    reducer::reduce_reconcile(&mut state, snapshot);
                     let _ = respond_to.send(Ok(ApplyAck {
                         seq: state.applied_seq,
                         applied: true,
@@ -253,20 +228,11 @@ fn satisfy_barriers(
     }
 }
 
-fn cap_recent_commands(commands: &mut VecDeque<AppliedCommand>) {
-    while commands.len() > DEFAULT_RECENT_COMMAND_CAP {
-        let _ = commands.pop_front();
-    }
-}
-
-fn canonicalize_env_scope(path: &PathBuf) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.clone())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::domain::{AliasResolution, CommandScope, NormalizedCommand};
+    use crate::daemon::domain::{AliasResolution, CommandScope, Confidence, NormalizedCommand};
+    use std::path::PathBuf;
 
     fn sample_normalized_cmd(family_key: &str, seq: u128) -> NormalizedCommand {
         NormalizedCommand {
@@ -312,4 +278,3 @@ mod tests {
         actor.shutdown().await.unwrap();
     }
 }
-
