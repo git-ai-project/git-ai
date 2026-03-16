@@ -1,3 +1,4 @@
+#[cfg(feature = "cloud")]
 use crate::auth::CredentialStore;
 use crate::authorship::authorship_log::PromptRecord;
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
@@ -1341,12 +1342,15 @@ fn output_json_format(
         .collect();
 
     // Compute metadata
+    #[cfg(feature = "cloud")]
     let is_logged_in = CredentialStore::new()
         .load()
         .ok()
         .flatten()
         .map(|creds| !creds.is_refresh_token_expired())
         .unwrap_or(false);
+    #[cfg(not(feature = "cloud"))]
+    let is_logged_in = false;
 
     let current_user = repo.git_author_identity().formatted();
 

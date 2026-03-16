@@ -1,4 +1,6 @@
+#[cfg(feature = "cloud")]
 use crate::api::client::{ApiClient, ApiContext};
+#[cfg(feature = "cloud")]
 use crate::api::types::CasMessagesObject;
 use crate::authorship::internal_db::InternalDatabase;
 use crate::authorship::prompt_utils::find_prompt;
@@ -36,8 +38,9 @@ pub fn handle_show_prompt(args: &[String]) {
     ) {
         Ok((commit_sha, mut prompt_record)) => {
             // If messages are empty, resolve from the best available source.
-            // Priority: CAS cache → CAS API (if messages_url) → local SQLite
             if prompt_record.messages.is_empty() {
+                // CAS cache and API resolution (cloud only)
+                #[cfg(feature = "cloud")]
                 if let Some(url) = &prompt_record.messages_url
                     && let Some(hash) = url.rsplit('/').next().filter(|h| !h.is_empty())
                 {
@@ -98,7 +101,7 @@ pub fn handle_show_prompt(args: &[String]) {
                     }
                 }
 
-                // 3. Last resort: local SQLite (for prompts without a CAS URL)
+                // Local SQLite fallback (always available)
                 if prompt_record.messages.is_empty()
                     && let Ok(db_mutex) = InternalDatabase::global()
                     && let Ok(db_guard) = db_mutex.lock()

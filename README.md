@@ -1,4 +1,128 @@
-# git-ai   <a href="https://discord.gg/XJStYvkb5U"><img alt="Discord" src="https://img.shields.io/badge/discord-join-5865F2?logo=discord&logoColor=white" /></a>        
+# PageUp Developer Setup (Internal Fork)
+
+> **This is PageUp's internal fork of git-ai.** All cloud telemetry, analytics, and external API
+> calls (Sentry, PostHog, OAuth, CAS prompt upload, upgrade checks) have been disabled at compile
+> time via the `cloud` feature gate. The binary runs fully offline with zero network overhead.
+
+---
+
+## Install (pre-built binaries)
+
+No Rust toolchain required. The install script downloads the correct binary for your platform,
+sets up PATH, creates the `git` shim, and configures agent hooks automatically.
+
+### macOS / Linux (WSL)
+
+```bash
+curl -fsSL https://github.com/pageuppeople-opensource/git-ai/releases/latest/download/install.sh | bash
+```
+
+### Windows (PowerShell)
+
+Run in an **elevated** (Admin) PowerShell for system-wide PATH setup, or a normal PowerShell
+for user-level only:
+
+```powershell
+irm https://github.com/pageuppeople-opensource/git-ai/releases/latest/download/install.ps1 | iex
+```
+
+Restart your terminal after installation so the new PATH takes effect.
+
+### What the installer does
+
+1. Downloads the `git-ai` binary for your OS/architecture to `~/.git-ai/bin/`
+2. Creates a `git` shim that transparently routes git commands through git-ai
+3. Creates `git-og` which always calls the real git (escape hatch)
+4. Adds `~/.git-ai/bin` to your PATH
+5. Runs `git-ai install-hooks` to configure supported AI agents
+
+After installation every `git commit` automatically tracks AI attribution. No per-repo setup required.
+
+### Manual install (alternative)
+
+Download the binary for your platform from the
+[latest release](https://github.com/pageuppeople-opensource/git-ai/releases/latest):
+
+| Platform | Binary |
+|----------|--------|
+| macOS Apple Silicon (M1/M2/M3/M4) | `git-ai-macos-arm64` |
+| macOS Intel | `git-ai-macos-x64` |
+| Windows x64 | `git-ai-windows-x64.exe` |
+
+Then place it on your PATH as `git-ai` and run:
+
+```bash
+git-ai install-hooks --dry-run=false
+```
+
+---
+
+## Configuring Visual Studio 2022 (and later)
+
+Visual Studio uses its own bundled copy of git. To enable git-ai tracking, point VS to the
+git-ai shim instead.
+
+### Option A: VS git path override (recommended)
+
+1. Open Visual Studio.
+2. Go to **Tools > Options > Source Control > Git Global Settings**.
+3. Set **Git executable path** to:
+   ```
+   C:\Users\<you>\.git-ai\bin\git.exe
+   ```
+   (The install script placed the shim there. Replace `<you>` with your Windows username.)
+4. Click **OK** and restart Visual Studio.
+
+### Option B: System PATH (works for all VS versions)
+
+If the VS git path setting is left empty, Visual Studio falls back to the system PATH. The
+install script already puts `~/.git-ai/bin` at the front of your PATH, so this should work
+automatically. Verify with:
+
+```powershell
+where.exe git
+# First line should be: C:\Users\<you>\.git-ai\bin\git.exe
+```
+
+If the VS-bundled git still appears first, move `%USERPROFILE%\.git-ai\bin` earlier in your
+User PATH (System Settings > Environment Variables).
+
+### Verifying it works
+
+After configuring VS, make a commit from the IDE. Then open a terminal and run:
+
+```bash
+git-ai blame <file-you-just-committed>
+```
+
+You should see AI attribution lines if any AI-assisted code was included.
+
+### Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| VS ignores the custom git path | Restart VS after changing the setting. Some versions cache the git location. |
+| `git.exe` not found after install | Ensure `%USERPROFILE%\.git-ai\bin` is on your PATH **before** other git directories. |
+| Commits work but no AI attribution | Run `git-ai install-hooks --dry-run=false` to ensure hooks are installed, then verify your AI agent (Copilot, Cursor, etc.) is supported. |
+| Need to bypass git-ai temporarily | Use `git-og` instead of `git` — it calls real git directly. |
+
+---
+
+## Building from source (optional)
+
+Only needed if you want to modify git-ai itself. Developers who just want to **use** it should
+use the pre-built binaries above.
+
+```bash
+# Prerequisites: Rust (https://rustup.rs)
+git clone https://github.com/pageuppeople-opensource/git-ai.git && cd git-ai
+cargo build --release          # telemetry-free build (default)
+cargo build --release --features cloud  # upstream-compatible build with telemetry
+```
+
+---
+
+# git-ai   <a href="https://discord.gg/XJStYvkb5U"><img alt="Discord" src="https://img.shields.io/badge/discord-join-5865F2?logo=discord&logoColor=white" /></a>
 
 <img src="https://github.com/git-ai-project/git-ai/raw/main/assets/docs/git-ai.png" align="right"
      alt="Git AI Logo" width="200" height="200">

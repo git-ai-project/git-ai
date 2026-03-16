@@ -1,3 +1,4 @@
+#[cfg(feature = "cloud")]
 use crate::commands::flush_metrics_db::spawn_background_metrics_db_flush;
 use crate::error::GitAiError;
 use crate::mdm::agents::get_all_installers;
@@ -129,7 +130,8 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
     let statuses = smol::block_on(async_run_install(&params, dry_run, verbose))?;
 
     // Spawn background processes to flush metrics
-    crate::observability::spawn_background_flush();
+    crate::observability_shim::spawn_background_flush();
+    #[cfg(feature = "cloud")]
     spawn_background_metrics_db_flush();
 
     Ok(to_hashmap(statuses))
@@ -394,6 +396,7 @@ async fn async_run_install(
     }
 
     // Emit metrics for each agent/git_client result (only if not dry-run)
+    #[cfg(feature = "cloud")]
     if !dry_run {
         emit_install_hooks_metrics(&detailed_results);
     }
@@ -402,6 +405,7 @@ async fn async_run_install(
 }
 
 /// Emit metrics events for install-hooks results
+#[cfg(feature = "cloud")]
 fn emit_install_hooks_metrics(results: &[(String, InstallResult)]) {
     use crate::metrics::{EventAttributes, InstallHooksValues};
 

@@ -287,7 +287,7 @@ impl InternalDatabase {
                 Err(e) => {
                     // Log error during initialization
                     eprintln!("[Error] Failed to initialize internal database: {}", e);
-                    crate::observability::log_error(
+                    crate::observability_shim::log_error(
                         &e,
                         Some(serde_json::json!({"function": "InternalDatabase::global"})),
                     );

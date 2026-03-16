@@ -1,4 +1,6 @@
+#[cfg(feature = "cloud")]
 pub mod api;
+#[cfg(feature = "cloud")]
 pub mod auth;
 pub mod authorship;
 pub mod ci;
@@ -8,7 +10,10 @@ pub mod error;
 pub mod feature_flags;
 pub mod git;
 pub mod mdm;
+#[cfg(feature = "cloud")]
 pub mod metrics;
+#[cfg(feature = "cloud")]
 pub mod observability;
+pub mod observability_shim;
 pub mod repo_url;
 pub mod utils;

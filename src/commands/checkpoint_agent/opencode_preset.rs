@@ -7,7 +7,7 @@ use crate::{
         AgentCheckpointFlags, AgentCheckpointPreset, AgentRunResult,
     },
     error::GitAiError,
-    observability::log_error,
+    observability_shim::log_error,
 };
 use chrono::DateTime;
 use rusqlite::{Connection, OpenFlags};

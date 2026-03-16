@@ -6,7 +6,7 @@ pub mod state;
 pub mod types;
 
 pub use client::OAuthClient;
-#[cfg(all(not(test), feature = "keyring"))]
+#[cfg(all(not(test), feature = "cloud"))]
 pub use credential_backend::KeyringBackend;
 pub use credentials::CredentialStore;
 pub use state::{AuthState, collect_auth_status, format_unix_timestamp};

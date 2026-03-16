@@ -1,3 +1,4 @@
+#[cfg(feature = "cloud")]
 use crate::auth::{AuthState, collect_auth_status, format_unix_timestamp};
 use crate::config;
 use crate::git::find_repository_in_path;
@@ -44,6 +45,7 @@ fn build_debug_report() -> String {
     let platform_info = collect_platform_info();
     let hardware_info = collect_hardware_info();
     let repository_info = collect_repository_info();
+    #[cfg(feature = "cloud")]
     let auth_info = collect_auth_status();
     let env_overrides = collect_git_ai_env_overrides();
 
@@ -55,7 +57,7 @@ fn build_debug_report() -> String {
     let _ = writeln!(out, "== Versions ==");
     let _ = writeln!(
         out,
-        "Git AI version: {}",
+        "Git AI version: {} [PageUp build — no telemetry]",
         if cfg!(debug_assertions) {
             format!("{} (debug)", env!("CARGO_PKG_VERSION"))
         } else {
@@ -200,6 +202,8 @@ fn build_debug_report() -> String {
     }
     let _ = writeln!(out);
 
+    #[cfg(feature = "cloud")]
+    {
     let _ = writeln!(out, "== Git AI Login ==");
     let _ = writeln!(out, "Credential backend: {}", auth_info.backend);
     match &auth_info.state {
@@ -272,6 +276,7 @@ fn build_debug_report() -> String {
         }
     }
     let _ = writeln!(out);
+    }
 
     let _ = writeln!(out, "== Git AI Environment ==");
     if env_overrides.is_empty() {

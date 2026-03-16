@@ -1,3 +1,4 @@
+#[cfg(feature = "cloud")]
 use crate::api::{ApiClient, ApiContext};
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::ignore::{
@@ -83,7 +84,7 @@ pub fn post_commit(
             "[Warning] Failed to batch upsert prompts to database: {}",
             e
         ));
-        crate::observability::log_error(
+        crate::observability_shim::log_error(
             &e,
             Some(serde_json::json!({
                 "operation": "post_commit_batch_upsert",
@@ -159,41 +160,52 @@ pub fn post_commit(
             }
         }
         PromptStorageMode::Default => {
-            // "default" - attempt CAS upload, NEVER keep messages in notes
-            // Check conditions for CAS upload:
-            // - user is logged in OR has API key OR using custom API URL
-            let context = ApiContext::new(None);
-            let client = ApiClient::new(context);
-            let using_custom_api =
-                Config::get().api_base_url() != crate::config::DEFAULT_API_BASE_URL;
-            let should_enqueue_cas =
-                client.is_logged_in() || client.has_api_key() || using_custom_api;
+            #[cfg(feature = "cloud")]
+            {
+                // "default" - attempt CAS upload, NEVER keep messages in notes
+                // Check conditions for CAS upload:
+                // - user is logged in OR has API key OR using custom API URL
+                let context = ApiContext::new(None);
+                let client = ApiClient::new(context);
+                let using_custom_api =
+                    Config::get().api_base_url() != crate::config::DEFAULT_API_BASE_URL;
+                let should_enqueue_cas =
+                    client.is_logged_in() || client.has_api_key() || using_custom_api;
 
-            if should_enqueue_cas {
-                // Redact secrets before uploading to CAS
-                let redaction_count =
-                    redact_secrets_from_prompts(&mut authorship_log.metadata.prompts);
-                if redaction_count > 0 {
-                    debug_log(&format!(
-                        "Redacted {} secrets from prompts before CAS upload",
-                        redaction_count
-                    ));
-                }
+                if should_enqueue_cas {
+                    // Redact secrets before uploading to CAS
+                    let redaction_count =
+                        redact_secrets_from_prompts(&mut authorship_log.metadata.prompts);
+                    if redaction_count > 0 {
+                        debug_log(&format!(
+                            "Redacted {} secrets from prompts before CAS upload",
+                            redaction_count
+                        ));
+                    }
 
-                if let Err(e) =
-                    enqueue_prompt_messages_to_cas(repo, &mut authorship_log.metadata.prompts)
-                {
-                    debug_log(&format!(
-                        "[Warning] Failed to enqueue prompt messages to CAS: {}",
-                        e
-                    ));
-                    // Enqueue failed - still strip messages (never keep in notes for "default")
+                    if let Err(e) =
+                        enqueue_prompt_messages_to_cas(repo, &mut authorship_log.metadata.prompts)
+                    {
+                        debug_log(&format!(
+                            "[Warning] Failed to enqueue prompt messages to CAS: {}",
+                            e
+                        ));
+                        // Enqueue failed - still strip messages (never keep in notes for "default")
+                        strip_prompt_messages(&mut authorship_log.metadata.prompts);
+                    }
+                    // Success: enqueue function already cleared messages
+                } else {
+                    // Not enqueueing - strip messages (never keep in notes for "default")
                     strip_prompt_messages(&mut authorship_log.metadata.prompts);
                 }
-                // Success: enqueue function already cleared messages
-            } else {
-                // Not enqueueing - strip messages (never keep in notes for "default")
-                strip_prompt_messages(&mut authorship_log.metadata.prompts);
+            }
+            #[cfg(not(feature = "cloud"))]
+            {
+                // Without cloud, behave like Notes mode: redact secrets, keep in notes
+                let count = redact_secrets_from_prompts(&mut authorship_log.metadata.prompts);
+                if count > 0 {
+                    debug_log(&format!("Redacted {} secrets from prompts", count));
+                }
             }
         }
     }
@@ -230,6 +242,7 @@ pub fn post_commit(
     if skip_reason.is_none() {
         let computed = stats_for_commit_stats(repo, &commit_sha, &ignore_patterns)?;
         // Record metrics only when we have full stats.
+        #[cfg(feature = "cloud")]
         record_commit_metrics(
             repo,
             &commit_sha,
@@ -485,6 +498,7 @@ fn batch_upsert_prompts_to_db(
 /// - Serialize messages to JSON
 /// - Enqueue to CAS (returns hash)
 /// - Set messages_url (format: {api_base_url}/cas/{hash}) and clear messages
+#[cfg(feature = "cloud")]
 fn enqueue_prompt_messages_to_cas(
     repo: &Repository,
     prompts: &mut std::collections::BTreeMap<
@@ -550,6 +564,7 @@ fn enqueue_prompt_messages_to_cas(
 
 /// Record metrics for a committed change.
 /// This is a best-effort operation - failures are silently ignored.
+#[cfg(feature = "cloud")]
 fn record_commit_metrics(
     repo: &Repository,
     commit_sha: &str,
