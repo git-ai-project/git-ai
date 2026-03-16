@@ -1,0 +1,147 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: '0 6 * * *'   # Daily 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    name: Rebase PageUp patches on upstream
+    runs-on: ubuntu-latest
+    steps:
+
+      - name: Checkout main (full history)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/git-ai-project/git-ai.git
+          git fetch upstream main
+
+      - name: Check for new upstream commits
+        id: check
+        run: |
+          MERGE_BASE=$(git merge-base HEAD upstream/main)
+          UPSTREAM_HEAD=$(git rev-parse upstream/main)
+          if [ "$MERGE_BASE" = "$UPSTREAM_HEAD" ]; then
+            echo "up_to_date=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Already up to date with upstream."
+          else
+            echo "up_to_date=false" >> "$GITHUB_OUTPUT"
+            COUNT=$(git rev-list "$MERGE_BASE".."upstream/main" --count)
+            echo "commit_count=$COUNT" >> "$GITHUB_OUTPUT"
+            PATCH_COUNT=$(git rev-list "$MERGE_BASE"..HEAD --count)
+            echo "patch_count=$PATCH_COUNT" >> "$GITHUB_OUTPUT"
+            echo "::notice::$COUNT new upstream commits. $PATCH_COUNT PageUp patches to rebase."
+          fi
+
+      - name: Collect upstream commit log
+        if: steps.check.outputs.up_to_date == 'false'
+        id: commits
+        run: |
+          MERGE_BASE=$(git merge-base HEAD upstream/main)
+          {
+            echo 'log<<EOF'
+            git log --oneline --no-merges "$MERGE_BASE"..upstream/main \
+              | sed 's/^/- `/' | sed 's/ /` /'
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+          SECURITY_HITS=$(git log --oneline "$MERGE_BASE"..upstream/main \
+            | grep -ciE 'security|cve|vuln|advisory|exploit|credential' || true)
+          echo "security_hits=$SECURITY_HITS" >> "$GITHUB_OUTPUT"
+
+      - name: Rebase PageUp patches on upstream
+        if: steps.check.outputs.up_to_date == 'false'
+        id: rebase
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git rebase upstream/main; then
+            echo "result=success" >> "$GITHUB_OUTPUT"
+          else
+            git rebase --abort
+            echo "result=conflict" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Force-push rebased main
+        if: steps.rebase.outputs.result == 'success'
+        run: git push --force-with-lease origin main
+
+      - name: Create escalation PR on conflict
+        if: steps.rebase.outputs.result == 'conflict'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="auto/upstream-sync-$(date +%Y%m%d)"
+          git checkout -b "$BRANCH" upstream/main
+          git push -u origin "$BRANCH"
+
+          SECURITY_NOTE=""
+          if [ "${{ steps.commits.outputs.security_hits }}" != "0" ]; then
+            SECURITY_NOTE=$(cat <<'SECEOF'
+
+          ### Security-relevant changes detected
+
+          **${{ steps.commits.outputs.security_hits }}** commit(s) mention security keywords — review with priority.
+          SECEOF
+          )
+          fi
+
+          gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --assignee humblelistener \
+            --label upstream-sync \
+            --title "chore: upstream sync conflict — manual rebase required" \
+            --body "$(cat <<PREOF
+          ## Upstream sync failed — rebase conflict
+
+          **${{ steps.check.outputs.commit_count }}** new upstream commits could not be rebased
+          under the **${{ steps.check.outputs.patch_count }}** PageUp patches.
+          ${SECURITY_NOTE}
+
+          ### Upstream commits
+
+          ${{ steps.commits.outputs.log }}
+
+          ### How to resolve
+
+          \`\`\`bash
+          git fetch upstream main
+          git checkout main
+          git rebase upstream/main
+          # resolve conflicts, then:
+          git rebase --continue
+          git push --force-with-lease origin main
+          \`\`\`
+
+          Then close this PR (do **not** merge it via GitHub UI).
+
+          ---
+          *Created by [sync-upstream](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*
+          PREOF
+          )"
+
+      - name: Job summary
+        if: always() && steps.check.outputs.up_to_date == 'false'
+        run: |
+          R="${{ steps.rebase.outputs.result }}"
+          if [ "$R" = "success" ]; then
+            echo "### Rebased ${{ steps.check.outputs.patch_count }} PageUp patches on ${{ steps.check.outputs.commit_count }} new upstream commits" >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$R" = "conflict" ]; then
+            echo "### Rebase conflict — escalation PR created" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ "${{ steps.commits.outputs.security_hits }}" != "0" ]; then
+            echo "**${{ steps.commits.outputs.security_hits }} security-relevant commit(s)**" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ steps.commits.outputs.log }}" >> "$GITHUB_STEP_SUMMARY"
