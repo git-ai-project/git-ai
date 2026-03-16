@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod repos;
-use git_ai::observability::wrapper_performance_targets::BenchmarkResult;
+use git_ai::observability_shim::BenchmarkResult;
 use repos::test_repo::TestRepo;
 
 fn setup() {
@@ -31,7 +31,7 @@ fn setup() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use git_ai::observability::wrapper_performance_targets::PERFORMANCE_FLOOR_MS;
+    use git_ai::observability_shim::PERFORMANCE_FLOOR_MS;
     use rand::seq::SliceRandom;
     use rstest::rstest;
 

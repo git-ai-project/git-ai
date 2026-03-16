@@ -19,8 +19,7 @@ use crate::config;
 use crate::git::cli_parser::{ParsedGitInvocation, parse_git_cli_args};
 use crate::git::find_repository;
 use crate::git::repository::{Repository, disable_internal_git_hooks};
-use crate::observability;
-
+#[cfg(feature = "cloud")]
 use crate::observability::wrapper_performance_targets::log_performance_target_if_violated;
 #[cfg(windows)]
 use crate::utils::CREATE_NO_WINDOW;
@@ -158,7 +157,7 @@ pub fn handle_git(args: &[String]) {
 
         let pre_command_start = Instant::now();
         run_pre_command_hooks(&mut command_hooks_context, &mut parsed_args, repository);
-        let pre_command_duration = pre_command_start.elapsed();
+        let _pre_command_duration = pre_command_start.elapsed();
 
         let child_hooks_path_override =
             resolve_child_git_hooks_path_override(&parsed_args, Some(repository));
@@ -171,7 +170,7 @@ pub fn handle_git(args: &[String]) {
         if exit_status_was_interrupted(&exit_status) {
             exit_with_status(exit_status);
         }
-        let git_duration = git_start.elapsed();
+        let _git_duration = git_start.elapsed();
 
         let post_command_start = Instant::now();
         run_post_command_hooks(
@@ -180,13 +179,14 @@ pub fn handle_git(args: &[String]) {
             exit_status,
             repository,
         );
-        let post_command_duration = post_command_start.elapsed();
+        let _post_command_duration = post_command_start.elapsed();
 
+        #[cfg(feature = "cloud")]
         log_performance_target_if_violated(
             parsed_args.command.as_deref().unwrap_or("unknown"),
-            pre_command_duration,
-            git_duration,
-            post_command_duration,
+            _pre_command_duration,
+            _git_duration,
+            _post_command_duration,
         );
 
         exit_status
@@ -400,7 +400,7 @@ fn run_pre_command_hooks(
         });
 
         debug_log(&error_message);
-        observability::log_error(&HookPanicError(error_message.clone()), Some(context));
+        crate::observability_shim::log_error(&HookPanicError(error_message.clone()), Some(context));
     }
 }
 
@@ -503,7 +503,7 @@ fn run_post_command_hooks(
         });
 
         debug_log(&error_message);
-        observability::log_error(&HookPanicError(error_message.clone()), Some(context));
+        crate::observability_shim::log_error(&HookPanicError(error_message.clone()), Some(context));
     }
 }
 

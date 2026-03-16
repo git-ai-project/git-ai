@@ -1,3 +1,4 @@
+#[cfg(feature = "cloud")]
 use crate::authorship::authorship_log_serialization::generate_short_hash;
 use crate::authorship::ignore::effective_ignore_patterns;
 use crate::authorship::internal_db::InternalDatabase;
@@ -18,8 +19,9 @@ use crate::git::find_repository;
 use crate::git::find_repository_in_path;
 use crate::git::repository::{CommitRange, Repository, group_files_by_repository};
 use crate::git::sync_authorship::{NotesExistence, fetch_authorship_notes, push_authorship_notes};
+#[cfg(feature = "cloud")]
 use crate::observability::wrapper_performance_targets::log_performance_for_checkpoint;
-use crate::observability::{self, log_message};
+use crate::observability_shim::{log_message, spawn_background_flush};
 use crate::utils::is_interactive_terminal;
 use serde::{Deserialize, Serialize};
 use std::env;
@@ -35,8 +37,7 @@ pub fn handle_git_ai(args: &[String]) {
 
     // Start DB warmup early for commands that need database access
     match args[0].as_str() {
-        "checkpoint" | "show-prompt" | "share" | "sync-prompts" | "flush-cas" | "search"
-        | "continue" => {
+        "checkpoint" | "show-prompt" | "search" | "continue" => {
             InternalDatabase::warmup();
         }
         _ => {}
@@ -48,9 +49,9 @@ pub fn handle_git_ai(args: &[String]) {
         }
         "version" | "--version" | "-v" => {
             if cfg!(debug_assertions) {
-                println!("{} (debug)", env!("CARGO_PKG_VERSION"));
+                println!("{} (debug) [PageUp build — no telemetry]", env!("CARGO_PKG_VERSION"));
             } else {
-                println!(env!("CARGO_PKG_VERSION"));
+                println!("{} [PageUp build — no telemetry]", env!("CARGO_PKG_VERSION"));
             }
             std::process::exit(0);
         }
@@ -126,39 +127,50 @@ pub fn handle_git_ai(args: &[String]) {
         "ci" => {
             commands::ci_handlers::handle_ci(&args[1..]);
         }
+        #[cfg(feature = "cloud")]
         "upgrade" => {
             commands::upgrade::run_with_args(&args[1..]);
         }
+        #[cfg(feature = "cloud")]
         "flush-logs" => {
             commands::flush_logs::handle_flush_logs(&args[1..]);
         }
+        #[cfg(feature = "cloud")]
         "flush-cas" => {
             commands::flush_cas::handle_flush_cas(&args[1..]);
         }
+        #[cfg(feature = "cloud")]
         "flush-metrics-db" => {
             commands::flush_metrics_db::handle_flush_metrics_db(&args[1..]);
         }
+        #[cfg(feature = "cloud")]
         "login" => {
             commands::login::handle_login(&args[1..]);
         }
+        #[cfg(feature = "cloud")]
         "logout" => {
             commands::logout::handle_logout(&args[1..]);
         }
+        #[cfg(feature = "cloud")]
         "whoami" => {
             commands::whoami::handle_whoami(&args[1..]);
         }
+        #[cfg(feature = "cloud")]
         "exchange-nonce" => {
             commands::exchange_nonce::handle_exchange_nonce(&args[1..]);
         }
+        #[cfg(feature = "cloud")]
         "dash" | "dashboard" => {
             commands::personal_dashboard::handle_personal_dashboard(&args[1..]);
         }
         "show-prompt" => {
             commands::show_prompt::handle_show_prompt(&args[1..]);
         }
+        #[cfg(feature = "cloud")]
         "share" => {
             commands::share::handle_share(&args[1..]);
         }
+        #[cfg(feature = "cloud")]
         "sync-prompts" => {
             commands::sync_prompts::handle_sync_prompts(&args[1..]);
         }
@@ -231,6 +243,8 @@ fn print_help() {
     eprintln!(
         "    --offset <n>          Skip n occurrences (0 = most recent, mutually exclusive with --commit)"
     );
+    #[cfg(feature = "cloud")]
+    {
     eprintln!("  share <id>         Share a prompt by creating a bundle");
     eprintln!("    --title <title>       Custom title for the bundle (default: auto-generated)");
     eprintln!("  sync-prompts       Update prompts in database to latest versions");
@@ -239,6 +253,7 @@ fn print_help() {
         "                          Formats: '1d', '2h', '1w', Unix timestamp, ISO8601, YYYY-MM-DD"
     );
     eprintln!("    --workdir <path>      Only sync prompts from specific repository");
+    }
     eprintln!("  config             View and manage git-ai configuration");
     eprintln!("                        Show all config as formatted JSON");
     eprintln!("    <key>                 Show specific config value (supports dot notation)");
@@ -258,8 +273,11 @@ fn print_help() {
     );
     eprintln!("    --dry-run             Show what would be done without making changes");
     eprintln!("  git-path           Print the path to the underlying git executable");
+    #[cfg(feature = "cloud")]
+    {
     eprintln!("  upgrade            Check for updates and install if available");
     eprintln!("    --force               Reinstall latest version even if already up to date");
+    }
     eprintln!("  prompts            Create local SQLite database for prompt analysis");
     eprintln!("    --since <time>        Only include prompts after this time (default: 30d)");
     eprintln!("    --author <name>       Filter by human author (default: current git user)");
@@ -292,9 +310,12 @@ fn print_help() {
     eprintln!("    --launch              Launch agent CLI with restored context");
     eprintln!("    --clipboard           Copy context to system clipboard");
     eprintln!("    --json                Output context as structured JSON");
+    #[cfg(feature = "cloud")]
+    {
     eprintln!("  login              Authenticate with Git AI");
     eprintln!("  logout             Clear stored credentials");
     eprintln!("  whoami             Show auth state and login identity");
+    }
     eprintln!("  version, -v, --version     Print the git-ai version");
     eprintln!("  help, -h, --help           Show this help message");
     eprintln!();
@@ -654,6 +675,7 @@ fn handle_checkpoint(args: &[String]) {
                     "Failed to find any git repositories for the edited files. Orphaned files: {:?}",
                     orphan_files
                 );
+                #[cfg(feature = "cloud")]
                 emit_no_repo_agent_metrics(agent_run_result.as_ref());
                 std::process::exit(0);
             }
@@ -753,13 +775,14 @@ fn handle_checkpoint(args: &[String]) {
                             "repo": repo_workdir.to_string_lossy(),
                             "checkpoint_kind": format!("{:?}", checkpoint_kind)
                         });
-                        observability::log_error(&e, Some(context));
+                        crate::observability_shim::log_error(&e, Some(context));
                         // Continue processing other repos instead of exiting
                     }
                 }
             }
 
             let elapsed = checkpoint_start.elapsed();
+            #[cfg(feature = "cloud")]
             log_performance_for_checkpoint(total_files_edited, elapsed, checkpoint_kind);
             if is_multi_repo {
                 eprintln!(
@@ -776,6 +799,7 @@ fn handle_checkpoint(args: &[String]) {
         eprintln!(
             "Failed to find repository: workspace root is not a git repository and no edited files provided"
         );
+        #[cfg(feature = "cloud")]
         emit_no_repo_agent_metrics(agent_run_result.as_ref());
         std::process::exit(0);
     }
@@ -888,9 +912,10 @@ fn handle_checkpoint(args: &[String]) {
     );
     let local_checkpoint_failed = checkpoint_result.is_err();
     match checkpoint_result {
-        Ok((_, files_edited, _)) => {
+        Ok((_, _files_edited, _)) => {
             let elapsed = checkpoint_start.elapsed();
-            log_performance_for_checkpoint(files_edited, elapsed, checkpoint_kind);
+            #[cfg(feature = "cloud")]
+            log_performance_for_checkpoint(_files_edited, elapsed, checkpoint_kind);
             eprintln!("Checkpoint completed in {:?}", elapsed);
         }
         Err(e) => {
@@ -902,7 +927,7 @@ fn handle_checkpoint(args: &[String]) {
                 "duration": elapsed.as_millis(),
                 "checkpoint_kind": format!("{:?}", checkpoint_kind)
             });
-            observability::log_error(&e, Some(context));
+            crate::observability_shim::log_error(&e, Some(context));
         }
     }
 
@@ -964,14 +989,14 @@ fn handle_checkpoint(args: &[String]) {
                         "repo": repo_workdir.to_string_lossy(),
                         "checkpoint_kind": format!("{:?}", checkpoint_kind)
                     });
-                    observability::log_error(&e, Some(context));
+                    crate::observability_shim::log_error(&e, Some(context));
                 }
             }
         }
     }
 
     if checkpoint_kind != CheckpointKind::Human {
-        observability::spawn_background_flush();
+        spawn_background_flush();
     }
 
     if local_checkpoint_failed {
@@ -1462,6 +1487,7 @@ fn handle_git_hooks(args: &[String]) {
     }
 }
 
+#[cfg(feature = "cloud")]
 fn emit_no_repo_agent_metrics(agent_run_result: Option<&AgentRunResult>) {
     let Some(result) = agent_run_result else {
         return;
@@ -1486,7 +1512,7 @@ fn emit_no_repo_agent_metrics(agent_run_result: Option<&AgentRunResult>) {
     let values = crate::metrics::AgentUsageValues::new();
     crate::metrics::record(values, attrs);
 
-    observability::spawn_background_flush();
+    spawn_background_flush();
 }
 
 fn get_all_files_for_mock_ai(working_dir: &str) -> Vec<String> {

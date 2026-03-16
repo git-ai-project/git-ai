@@ -1,0 +1,265 @@
+name: PageUp Release
+
+permissions:
+  contents: write
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (uncheck to create a release)'
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  build:
+    name: Build ${{ matrix.artifact_name }}
+    runs-on: ${{ matrix.os }}
+    outputs:
+      version: ${{ steps.get-version.outputs.version }}
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: git-ai-windows-x64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: git-ai-macos-arm64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Get version from Cargo.toml
+        id: get-version
+        shell: bash
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | cut -d'"' -f2)
+          echo "version=v$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.target }}-
+
+      - name: Build release binary (no cloud features)
+        run: cargo build --release --target ${{ matrix.target }}
+        env:
+          CARGO_INCREMENTAL: 0
+
+      - name: Strip binary (macOS)
+        if: runner.os == 'macOS'
+        run: strip target/${{ matrix.target }}/release/git-ai
+
+      - name: Strip binary (Windows)
+        if: runner.os == 'Windows'
+        run: strip target/${{ matrix.target }}/release/git-ai.exe
+
+      - name: Prepare artifact
+        shell: bash
+        run: |
+          mkdir -p release
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cp target/${{ matrix.target }}/release/git-ai.exe release/${{ matrix.artifact_name }}.exe
+          else
+            cp target/${{ matrix.target }}/release/git-ai release/${{ matrix.artifact_name }}
+          fi
+
+      - name: Upload artifact (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: release/${{ matrix.artifact_name }}.exe
+          retention-days: 30
+
+      - name: Upload artifact (non-Windows)
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: release/${{ matrix.artifact_name }}
+          retention-days: 30
+
+  build-macos-intel:
+    name: Build git-ai-macos-x64
+    runs-on: macos-13
+    outputs:
+      version: ${{ steps.get-version.outputs.version }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Get version from Cargo.toml
+        id: get-version
+        shell: bash
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | cut -d'"' -f2)
+          echo "version=v$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          targets: x86_64-apple-darwin
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: macOS-cargo-x86_64-apple-darwin-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            macOS-cargo-x86_64-apple-darwin-
+
+      - name: Build release binary (no cloud features)
+        run: cargo build --release --target x86_64-apple-darwin
+        env:
+          CARGO_INCREMENTAL: 0
+
+      - name: Strip binary
+        run: strip target/x86_64-apple-darwin/release/git-ai
+
+      - name: Prepare artifact
+        run: |
+          mkdir -p release
+          cp target/x86_64-apple-darwin/release/git-ai release/git-ai-macos-x64
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: git-ai-macos-x64
+          path: release/git-ai-macos-x64
+          retention-days: 30
+
+  create-release:
+    name: Create Release
+    needs: [build, build-macos-intel]
+    runs-on: ubuntu-latest
+    if: success() && (startsWith(github.ref, 'refs/tags/v') || inputs.dry_run != true)
+
+    steps:
+      - name: Determine release tag
+        id: release-meta
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            TAG="${{ needs.build.outputs.version }}"
+          fi
+          echo "tag_name=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect binaries and create checksums
+        run: |
+          mkdir -p release
+          find artifacts -name "git-ai-*" -exec cp {} release/ \;
+          echo "Release contents:"
+          ls -la release/
+          cd release
+          sha256sum git-ai-* > SHA256SUMS
+
+      - name: Checkout code for install scripts
+        uses: actions/checkout@v4
+        with:
+          path: repo
+
+      - name: Generate version-pinned install.sh
+        run: |
+          TAG="${{ steps.release-meta.outputs.tag_name }}"
+          REPO="${{ github.repository }}"
+          CHECKSUMS=$(tr '\n' '|' < release/SHA256SUMS | sed 's/|$//')
+          [ -z "$CHECKSUMS" ] && CHECKSUMS="__CHECKSUMS_PLACEHOLDER__"
+          awk -v repo="$REPO" -v version="$TAG" -v checksums="$CHECKSUMS" '
+            /^REPO="__REPO_PLACEHOLDER__"/ { sub(/__REPO_PLACEHOLDER__/, repo) }
+            /^PINNED_VERSION="__VERSION_PLACEHOLDER__"/ { sub(/__VERSION_PLACEHOLDER__/, version) }
+            /^EMBEDDED_CHECKSUMS="__CHECKSUMS_PLACEHOLDER__"/ { sub(/__CHECKSUMS_PLACEHOLDER__/, checksums) }
+            { print }
+          ' repo/install.sh > release/install.sh
+          chmod +x release/install.sh
+
+      - name: Generate version-pinned install.ps1
+        run: |
+          TAG="${{ steps.release-meta.outputs.tag_name }}"
+          REPO="${{ github.repository }}"
+          CHECKSUMS=$(tr '\n' '|' < release/SHA256SUMS | sed 's/|$//')
+          [ -z "$CHECKSUMS" ] && CHECKSUMS="__CHECKSUMS_PLACEHOLDER__"
+          awk -v repo="$REPO" -v version="$TAG" -v checksums="$CHECKSUMS" '
+            /^[$]Repo = .__REPO_PLACEHOLDER__/ { sub(/__REPO_PLACEHOLDER__/, repo) }
+            /^[$]PinnedVersion = .__VERSION_PLACEHOLDER__/ { sub(/__VERSION_PLACEHOLDER__/, version) }
+            /^[$]EmbeddedChecksums = .__CHECKSUMS_PLACEHOLDER__/ { sub(/__CHECKSUMS_PLACEHOLDER__/, checksums) }
+            { print }
+          ' repo/install.ps1 > release/install.ps1
+
+      - name: Add install scripts to checksums
+        run: |
+          cd release
+          sha256sum install.sh install.ps1 >> SHA256SUMS
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release-meta.outputs.tag_name }}
+          name: git-ai ${{ steps.release-meta.outputs.tag_name }} (PageUp)
+          generate_release_notes: true
+          body: |
+            ## git-ai ${{ steps.release-meta.outputs.tag_name }} — PageUp Build
+
+            Pre-built binaries with **cloud/telemetry disabled** at compile time.
+
+            ### One-line Install
+
+            **macOS / Linux (WSL):**
+            ```bash
+            curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ steps.release-meta.outputs.tag_name }}/install.sh | bash
+            ```
+
+            **Windows (PowerShell):**
+            ```powershell
+            irm https://github.com/${{ github.repository }}/releases/download/${{ steps.release-meta.outputs.tag_name }}/install.ps1 | iex
+            ```
+
+            ### Manual Download
+            | Platform | Binary |
+            |----------|--------|
+            | macOS Apple Silicon | `git-ai-macos-arm64` |
+            | macOS Intel | `git-ai-macos-x64` |
+            | Windows x64 | `git-ai-windows-x64.exe` |
+
+            ### SHA256 Checksums
+            ```
+            $(cat release/SHA256SUMS)
+            ```
+          files: |
+            release/git-ai-*
+            release/SHA256SUMS
+            release/install.sh
+            release/install.ps1
+          draft: false
+          prerelease: false
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

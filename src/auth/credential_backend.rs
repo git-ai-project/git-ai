@@ -17,13 +17,13 @@ pub trait CredentialBackend: Send + Sync {
 }
 
 /// Keyring-based credential storage using system keychain
-#[cfg(all(not(test), feature = "keyring"))]
+#[cfg(all(not(test), feature = "cloud"))]
 pub struct KeyringBackend {
     service_name: String,
     username: String,
 }
 
-#[cfg(all(not(test), feature = "keyring"))]
+#[cfg(all(not(test), feature = "cloud"))]
 impl KeyringBackend {
     pub fn new(service_name: &str, username: &str) -> Self {
         Self {
@@ -48,7 +48,7 @@ impl KeyringBackend {
     }
 }
 
-#[cfg(all(not(test), feature = "keyring"))]
+#[cfg(all(not(test), feature = "cloud"))]
 impl CredentialBackend for KeyringBackend {
     fn store(&self, value: &str) -> Result<(), String> {
         let entry = keyring::Entry::new(&self.service_name, &self.username)

@@ -1,4 +1,4 @@
-#[cfg(all(not(test), feature = "keyring"))]
+#[cfg(all(not(test), feature = "cloud"))]
 use crate::auth::credential_backend::KeyringBackend;
 use crate::auth::credential_backend::{CredentialBackend, FileBackend};
 use crate::auth::types::StoredCredentials;
@@ -6,9 +6,9 @@ use crate::auth::types::StoredCredentials;
 use crate::config::Config;
 use std::path::PathBuf;
 
-#[cfg(all(not(test), feature = "keyring"))]
+#[cfg(all(not(test), feature = "cloud"))]
 const SERVICE_NAME: &str = "git-ai";
-#[cfg(all(not(test), feature = "keyring"))]
+#[cfg(all(not(test), feature = "cloud"))]
 const USERNAME: &str = "oauth-tokens";
 
 /// Cross-platform credential storage
@@ -30,7 +30,7 @@ impl CredentialStore {
         }
 
         // Production build with keyring feature enabled
-        #[cfg(all(not(test), feature = "keyring"))]
+        #[cfg(all(not(test), feature = "cloud"))]
         {
             let use_keyring = Config::get().get_feature_flags().auth_keyring;
 
@@ -52,7 +52,7 @@ impl CredentialStore {
         }
 
         // Production build without keyring feature
-        #[cfg(all(not(test), not(feature = "keyring")))]
+        #[cfg(all(not(test), not(feature = "cloud")))]
         {
             let use_keyring = Config::get().get_feature_flags().auth_keyring;
 

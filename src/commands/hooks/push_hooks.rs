@@ -1,4 +1,5 @@
 use crate::commands::git_handlers::CommandHooksContext;
+#[cfg(feature = "cloud")]
 use crate::commands::upgrade;
 use crate::git::cli_parser::{ParsedGitInvocation, is_dry_run};
 use crate::git::repository::{Repository, find_repository};
@@ -9,6 +10,7 @@ pub fn push_pre_command_hook(
     parsed_args: &ParsedGitInvocation,
     repository: &Repository,
 ) -> Option<std::thread::JoinHandle<()>> {
+    #[cfg(feature = "cloud")]
     upgrade::maybe_schedule_background_update_check();
 
     // Early returns for cases where we shouldn't push authorship notes
@@ -25,9 +27,10 @@ pub fn push_pre_command_hook(
         // Clone what we need for the background thread
         let global_args = repository.global_args_for_exec();
 
-        crate::observability::spawn_background_flush();
+        crate::observability_shim::spawn_background_flush();
 
         // Spawn CAS flush if prompt_storage is "default" (CAS upload mode)
+        #[cfg(feature = "cloud")]
         if crate::config::Config::get().prompt_storage() == "default" {
             crate::commands::flush_cas::spawn_background_cas_flush();
         }
@@ -51,6 +54,7 @@ pub fn push_pre_command_hook(
 }
 
 pub fn run_pre_push_hook_managed(parsed_args: &ParsedGitInvocation, repository: &Repository) {
+    #[cfg(feature = "cloud")]
     upgrade::maybe_schedule_background_update_check();
 
     if should_skip_authorship_push(&parsed_args.command_args) {
@@ -67,9 +71,10 @@ pub fn run_pre_push_hook_managed(parsed_args: &ParsedGitInvocation, repository: 
         remote
     ));
 
-    crate::observability::spawn_background_flush();
+    crate::observability_shim::spawn_background_flush();
 
     // Spawn CAS flush if prompt_storage is "default" (CAS upload mode)
+    #[cfg(feature = "cloud")]
     if crate::config::Config::get().prompt_storage() == "default" {
         crate::commands::flush_cas::spawn_background_cas_flush();
     }

@@ -95,7 +95,7 @@ pub fn commit_post_command_hook(
     }
 
     // Flush logs and metrics after commit
-    crate::observability::spawn_background_flush();
+    crate::observability_shim::spawn_background_flush();
 }
 
 pub fn get_commit_default_author(repo: &Repository, args: &[String]) -> String {

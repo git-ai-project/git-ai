@@ -1,4 +1,8 @@
-/// Comprehensive tests for performance target tracking and benchmarking
+#![cfg(feature = "cloud")]
+//! Comprehensive tests for performance target tracking and benchmarking.
+//! These tests exercise the real observability logging path and are only
+//! compiled when the `cloud` feature is enabled.
+
 use git_ai::authorship::working_log::CheckpointKind;
 use git_ai::observability::wrapper_performance_targets::{
     BenchmarkResult, PERFORMANCE_FLOOR_MS, log_performance_for_checkpoint,

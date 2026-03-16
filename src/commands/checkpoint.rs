@@ -2,6 +2,7 @@ use crate::authorship::attribution_tracker::{
     Attribution, AttributionTracker, INITIAL_ATTRIBUTION_TS, LineAttribution,
 };
 use crate::authorship::authorship_log::PromptRecord;
+#[cfg(feature = "cloud")]
 use crate::authorship::authorship_log_serialization::generate_short_hash;
 use crate::authorship::ignore::{
     IgnoreMatcher, build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher,
@@ -43,10 +44,12 @@ use crate::authorship::working_log::AgentId;
 
 /// Emit at most one `agent_usage` metric per prompt every 2.5 minutes.
 /// This is half of the server-side bucketing window.
+#[cfg(feature = "cloud")]
 const AGENT_USAGE_MIN_INTERVAL_SECS: u64 = 150;
 
 /// Build EventAttributes with repo metadata.
 /// Reused for both AgentUsage and Checkpoint events.
+#[cfg(feature = "cloud")]
 fn build_checkpoint_attrs(
     repo: &Repository,
     base_commit: &str,
@@ -88,7 +91,7 @@ fn build_checkpoint_attrs(
 }
 
 /// Persistent local rate limit keyed by prompt ID hash.
-#[cfg(not(any(test, feature = "test-support")))]
+#[cfg(all(not(any(test, feature = "test-support")), feature = "cloud"))]
 pub(crate) fn should_emit_agent_usage(agent_id: &AgentId) -> bool {
     let prompt_id = generate_short_hash(&agent_id.id, &agent_id.tool);
     let now_ts = SystemTime::now()
@@ -108,8 +111,9 @@ pub(crate) fn should_emit_agent_usage(agent_id: &AgentId) -> bool {
         .unwrap_or(true)
 }
 
-/// Always returns false in test mode — no metrics DB access needed.
-#[cfg(any(test, feature = "test-support"))]
+/// Always returns false when cloud is off or in test mode.
+#[cfg(any(test, feature = "test-support", not(feature = "cloud")))]
+#[allow(dead_code)]
 pub(crate) fn should_emit_agent_usage(_agent_id: &AgentId) -> bool {
     false
 }
@@ -430,7 +434,7 @@ pub fn run(
                 "[Warning] Failed to upsert prompt to database: {}",
                 e
             ));
-            crate::observability::log_error(
+            crate::observability_shim::log_error(
                 &e,
                 Some(serde_json::json!({
                     "operation": "checkpoint_prompt_upsert",
@@ -448,34 +452,38 @@ pub fn run(
         ));
         checkpoints.push(checkpoint.clone());
 
-        // Build common attributes once (reused for all events)
-        let attrs = build_checkpoint_attrs(repo, &base_commit, checkpoint.agent_id.as_ref());
-
-        // Record agent usage metric for AI checkpoints
-        if kind != CheckpointKind::Human
-            && let Some(agent_id) = checkpoint.agent_id.as_ref()
-            && should_emit_agent_usage(agent_id)
+        // Record metrics (only with cloud feature)
+        #[cfg(feature = "cloud")]
         {
-            let values = crate::metrics::AgentUsageValues::new();
-            crate::metrics::record(values, attrs.clone());
-        }
+            // Build common attributes once (reused for all events)
+            let attrs = build_checkpoint_attrs(repo, &base_commit, checkpoint.agent_id.as_ref());
 
-        // Record per-file checkpoint metrics
-        // entries and file_stats are parallel arrays (same index = same file)
-        for (entry, file_stat) in entries.iter().zip(file_stats.iter()) {
-            let values = crate::metrics::CheckpointValues::new()
-                .checkpoint_ts(checkpoint.timestamp)
-                .kind(checkpoint.kind.to_str().to_string())
-                .file_path(entry.file.clone())
-                .lines_added(file_stat.additions)
-                .lines_deleted(file_stat.deletions)
-                .lines_added_sloc(file_stat.additions_sloc)
-                .lines_deleted_sloc(file_stat.deletions_sloc);
+            // Record agent usage metric for AI checkpoints
+            if kind != CheckpointKind::Human
+                && let Some(agent_id) = checkpoint.agent_id.as_ref()
+                && should_emit_agent_usage(agent_id)
+            {
+                let values = crate::metrics::AgentUsageValues::new();
+                crate::metrics::record(values, attrs.clone());
+            }
 
-            // Add checkpoint author to attrs for this event
-            let file_attrs = attrs.clone().author(&checkpoint.author);
+            // Record per-file checkpoint metrics
+            // entries and file_stats are parallel arrays (same index = same file)
+            for (entry, file_stat) in entries.iter().zip(file_stats.iter()) {
+                let values = crate::metrics::CheckpointValues::new()
+                    .checkpoint_ts(checkpoint.timestamp)
+                    .kind(checkpoint.kind.to_str().to_string())
+                    .file_path(entry.file.clone())
+                    .lines_added(file_stat.additions)
+                    .lines_deleted(file_stat.deletions)
+                    .lines_added_sloc(file_stat.additions_sloc)
+                    .lines_deleted_sloc(file_stat.deletions_sloc);
 
-            crate::metrics::record(values, file_attrs);
+                // Add checkpoint author to attrs for this event
+                let file_attrs = attrs.clone().author(&checkpoint.author);
+
+                crate::metrics::record(values, file_attrs);
+            }
         }
     }
 

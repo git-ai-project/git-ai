@@ -10,7 +10,7 @@ use crate::commands::checkpoint_agent::opencode_preset::OpenCodePreset;
 use crate::error::GitAiError;
 use crate::git::refs::{get_authorship, grep_ai_notes};
 use crate::git::repository::Repository;
-use crate::observability::log_error;
+use crate::observability_shim::log_error;
 use crate::utils::debug_log;
 use std::collections::{HashMap, HashSet};
 

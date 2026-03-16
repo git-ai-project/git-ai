@@ -1,17 +1,18 @@
-/// Comprehensive tests for src/observability/flush.rs
-/// Tests log flushing, metrics upload, CAS operations, error handling, and concurrent access
-///
-/// Coverage areas:
-/// 1. Log directory operations and lifecycle
-/// 2. Log file processing (metrics, errors, performance, messages)
-/// 3. Sentry client DSN parsing and event sending
-/// 4. PostHog client event sending
-/// 5. Metrics upload to API and SQLite fallback
-/// 6. Git URL sanitization (password redaction)
-/// 7. Cleanup operations for old logs
-/// 8. Lock file handling for concurrent flush-logs processes
-/// 9. File I/O error handling
-/// 10. Concurrent access patterns
+#![cfg(feature = "cloud")]
+//! Comprehensive tests for src/observability/flush.rs
+//! Tests log flushing, metrics upload, CAS operations, error handling, and concurrent access
+//!
+//! Coverage areas:
+//! 1. Log directory operations and lifecycle
+//! 2. Log file processing (metrics, errors, performance, messages)
+//! 3. Sentry client DSN parsing and event sending
+//! 4. PostHog client event sending
+//! 5. Metrics upload to API and SQLite fallback
+//! 6. Git URL sanitization (password redaction)
+//! 7. Cleanup operations for old logs
+//! 8. Lock file handling for concurrent flush-logs processes
+//! 9. File I/O error handling
+//! 10. Concurrent access patterns
 use git_ai::metrics::{
     CommittedValues, EventAttributes, METRICS_API_VERSION, MetricEvent, MetricsBatch, PosEncoded,
 };

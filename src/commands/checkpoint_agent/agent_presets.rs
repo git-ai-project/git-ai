@@ -4,7 +4,7 @@ use crate::{
         working_log::{AgentId, CheckpointKind},
     },
     error::GitAiError,
-    observability::log_error,
+    observability_shim::log_error,
 };
 use chrono::{TimeZone, Utc};
 use dirs;

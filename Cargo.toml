@@ -1,6 +1,6 @@
 [package]
 name = "git-ai"
-version = "1.1.13"
+version = "1.1.13-pageup"
 edition = "2024"
 
 [dependencies]
@@ -36,7 +36,7 @@ toml = "0.9"
 
 [features]
 test-support = ["git2"]
-keyring = ["dep:keyring"]
+cloud = ["dep:keyring"]
 
 [dev-dependencies]
 git-ai = { path = ".", features = ["test-support"] }
