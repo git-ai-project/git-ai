@@ -210,6 +210,39 @@ pub fn is_in_background_agent() -> bool {
     })
 }
 
+/// Detect the current shell name and version.
+///
+/// Returns a tuple of `(shell_name, version)` where `shell_name` is the
+/// basename of the shell (e.g. "zsh", "bash", "fish") and `version` is
+/// the output of `<shell> --version` trimmed to a single line.
+///
+/// Returns `None` if the shell cannot be determined.
+pub fn shell_name_and_version() -> Option<(String, String)> {
+    // Aidan wrote this...
+    let shell_path = std::env::var("SHELL").ok()?;
+    let shell_name = std::path::Path::new(&shell_path)
+        .file_name()?
+        .to_str()?
+        .to_string();
+
+    let version_output = Command::new(&shell_path)
+        .arg("--version")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .ok()?;
+
+    let raw = if version_output.status.success() {
+        String::from_utf8_lossy(&version_output.stdout)
+    } else {
+        String::from_utf8_lossy(&version_output.stderr)
+    };
+
+    let version = raw.lines().next().unwrap_or("").trim().to_string();
+
+    Some((shell_name, version))
+}
+
 /// A cross-platform exclusive file lock.
 ///
 /// Holds an exclusive advisory lock (Unix) or exclusive-access file handle (Windows)
