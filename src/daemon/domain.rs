@@ -45,21 +45,11 @@ pub struct RefChange {
     pub new: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkspaceFingerprint {
-    pub raw_hash: String,
-    pub staged_count: u32,
-    pub unstaged_count: u32,
-    pub untracked_count: u32,
-    pub conflicted_count: u32,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoContext {
     pub head: Option<String>,
     pub branch: Option<String>,
     pub detached: bool,
-    pub workspace_fingerprint: Option<WorkspaceFingerprint>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,14 +183,6 @@ pub enum SemanticEvent {
     },
     NotesUpdated,
     ReplaceUpdated,
-    WorkspaceChanged {
-        before: WorkspaceFingerprint,
-        after: WorkspaceFingerprint,
-    },
-    IndexChanged {
-        before: WorkspaceFingerprint,
-        after: WorkspaceFingerprint,
-    },
     CheckoutPaths,
     RestorePaths,
     CleanedWorkspace,
@@ -260,7 +242,6 @@ pub struct WorktreeState {
     pub head: Option<String>,
     pub branch: Option<String>,
     pub detached: bool,
-    pub workspace_fingerprint: Option<WorkspaceFingerprint>,
     pub last_updated_ns: u128,
 }
 

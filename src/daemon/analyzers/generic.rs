@@ -35,27 +35,6 @@ impl CommandAnalyzer for GenericAnalyzer {
             });
         }
 
-        let pre_fp = cmd
-            .pre_repo
-            .as_ref()
-            .and_then(|repo| repo.workspace_fingerprint.as_ref());
-        let post_fp = cmd
-            .post_repo
-            .as_ref()
-            .and_then(|repo| repo.workspace_fingerprint.as_ref());
-        if let (Some(before), Some(after)) = (pre_fp, post_fp)
-            && before != after
-        {
-            return Ok(AnalysisResult {
-                class: CommandClass::WorkspaceMutation,
-                events: vec![SemanticEvent::WorkspaceChanged {
-                    before: before.clone(),
-                    after: after.clone(),
-                }],
-                confidence: Confidence::Medium,
-            });
-        }
-
         if is_transport_command(&command_name) {
             return Ok(AnalysisResult {
                 class: CommandClass::Transport,

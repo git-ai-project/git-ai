@@ -40,23 +40,8 @@ impl CommandAnalyzer for WorkspaceAnalyzer {
                         old: change.old.clone(),
                         new: change.new.clone(),
                     });
-                } else {
-                    events.push(SemanticEvent::WorkspaceChanged {
-                        before: cmd
-                            .pre_repo
-                            .as_ref()
-                            .and_then(|repo| repo.workspace_fingerprint.clone())
-                            .unwrap_or_default(),
-                        after: cmd
-                            .post_repo
-                            .as_ref()
-                            .and_then(|repo| repo.workspace_fingerprint.clone())
-                            .unwrap_or_default(),
-                    });
                 }
             }
-            "restore" => events.push(SemanticEvent::RestorePaths),
-            "clean" => events.push(SemanticEvent::CleanedWorkspace),
             _ => {
                 return Err(GitAiError::Generic(format!(
                     "workspace analyzer does not support command '{}'",

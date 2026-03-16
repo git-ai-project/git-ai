@@ -91,6 +91,7 @@ impl Repository {
     // Get status for tracked files that changed
     pub fn get_staged_and_unstaged_filenames(&self) -> Result<HashSet<String>, GitAiError> {
         let mut args = self.global_args_for_exec();
+        args.push("--no-optional-locks".to_string());
         args.push("status".to_string());
         args.push("--porcelain=v2".to_string());
         args.push("-z".to_string());
@@ -136,6 +137,7 @@ impl Repository {
         }
 
         let mut args = self.global_args_for_exec();
+        args.push("--no-optional-locks".to_string());
         args.push("status".to_string());
         args.push("--porcelain=v2".to_string());
         args.push("-z".to_string());

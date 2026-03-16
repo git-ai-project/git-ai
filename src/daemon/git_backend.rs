@@ -1,6 +1,4 @@
-use crate::daemon::domain::{
-    AliasResolution, FamilyKey, RefChange, RepoContext, WorkspaceFingerprint,
-};
+use crate::daemon::domain::{AliasResolution, FamilyKey, RefChange, RepoContext};
 use crate::error::GitAiError;
 use crate::git::find_repository_in_path;
 use crate::git::repository::exec_git_allow_nonzero;
@@ -95,7 +93,6 @@ impl GitBackend for SystemGitBackend {
             head,
             branch,
             detached,
-            workspace_fingerprint: workspace_fingerprint(worktree).ok(),
         })
     }
 
@@ -238,45 +235,10 @@ impl GitBackend for SystemGitBackend {
 
     fn resolve_alias(
         &self,
-        worktree: Option<&Path>,
-        argv: &[String],
+        _worktree: Option<&Path>,
+        _argv: &[String],
     ) -> Result<AliasResolution, GitAiError> {
-        let Some(command) = argv_primary_command(argv) else {
-            return Ok(AliasResolution::None);
-        };
-        let key = format!("alias.{}", command);
-        let mut args = Vec::new();
-        if let Some(worktree) = worktree {
-            args.push("-C".to_string());
-            args.push(worktree.to_string_lossy().to_string());
-        }
-        args.push("config".to_string());
-        args.push("--get".to_string());
-        args.push(key.clone());
-
-        let output = run_git_allow_nonzero(
-            args.iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>()
-                .as_slice(),
-        )?;
-        if !output.status.success() {
-            return Ok(AliasResolution::None);
-        }
-        let expansion = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if expansion.is_empty() {
-            return Ok(AliasResolution::None);
-        }
-        if expansion.starts_with('!') {
-            return Ok(AliasResolution::ShellAlias {
-                alias: command,
-                expansion,
-            });
-        }
-        Ok(AliasResolution::DirectAlias {
-            alias: command,
-            expansion,
-        })
+        Ok(AliasResolution::None)
     }
 
     fn clone_target(&self, argv: &[String], cwd_hint: Option<&Path>) -> Option<PathBuf> {
@@ -341,86 +303,6 @@ fn git_error_for(args: &[&str], output: &std::process::Output) -> GitAiError {
     }
 }
 
-fn workspace_fingerprint(worktree: &Path) -> Result<WorkspaceFingerprint, GitAiError> {
-    let output = run_git_allow_nonzero(
-        [
-            "-C",
-            &worktree.to_string_lossy(),
-            "status",
-            "--porcelain=v2",
-            "--branch",
-            "--untracked-files=all",
-        ]
-        .as_slice(),
-    )?;
-    if !output.status.success() {
-        return Err(git_error_for(
-            [
-                "-C",
-                &worktree.to_string_lossy(),
-                "status",
-                "--porcelain=v2",
-                "--branch",
-                "--untracked-files=all",
-            ]
-            .as_slice(),
-            &output,
-        ));
-    }
-
-    let raw_hash = format!("{:x}", Sha256::digest(&output.stdout));
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    let mut staged_count = 0_u32;
-    let mut unstaged_count = 0_u32;
-    let mut untracked_count = 0_u32;
-    let mut conflicted_count = 0_u32;
-
-    for line in stdout.lines() {
-        if line.starts_with('#') || line.is_empty() {
-            continue;
-        }
-
-        if line.starts_with("? ") {
-            untracked_count = untracked_count.saturating_add(1);
-            continue;
-        }
-        if line.starts_with("! ") {
-            continue;
-        }
-
-        let tag = line.chars().next().unwrap_or_default();
-        if !matches!(tag, '1' | '2' | 'u') {
-            continue;
-        }
-
-        let Some(xy) = line.split_whitespace().nth(1) else {
-            continue;
-        };
-        let mut chars = xy.chars();
-        let x = chars.next().unwrap_or('.');
-        let y = chars.next().unwrap_or('.');
-
-        if x != '.' {
-            staged_count = staged_count.saturating_add(1);
-        }
-        if y != '.' {
-            unstaged_count = unstaged_count.saturating_add(1);
-        }
-        if tag == 'u' || x == 'U' || y == 'U' {
-            conflicted_count = conflicted_count.saturating_add(1);
-        }
-    }
-
-    Ok(WorkspaceFingerprint {
-        raw_hash,
-        staged_count,
-        unstaged_count,
-        untracked_count,
-        conflicted_count,
-    })
-}
-
 fn reflog_offsets(common_dir: &Path) -> Result<HashMap<String, u64>, GitAiError> {
     let mut out = HashMap::new();
     let logs_dir = common_dir.join("logs");
@@ -479,34 +361,6 @@ fn is_valid_oid(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-fn argv_primary_command(argv: &[String]) -> Option<String> {
-    let mut idx = 0;
-    if argv.first().map(|v| is_git_binary(v)).unwrap_or(false) {
-        idx = 1;
-    }
-    while idx < argv.len() {
-        let token = argv[idx].as_str();
-        if token == "-C" {
-            idx += 2;
-            continue;
-        }
-        if takes_primary_option_value(token) {
-            idx += 2;
-            continue;
-        }
-        if token.starts_with("--") && token.contains('=') {
-            idx += 1;
-            continue;
-        }
-        if token.starts_with('-') {
-            idx += 1;
-            continue;
-        }
-        return Some(token.to_string());
-    }
-    None
-}
-
 fn is_git_binary(token: &str) -> bool {
     if token == "git" || token == "git.exe" {
         return true;
@@ -516,20 +370,6 @@ fn is_git_binary(token: &str) -> bool {
         .and_then(|name| name.to_str())
         .map(|name| name == "git" || name == "git.exe")
         .unwrap_or(false)
-}
-
-fn takes_primary_option_value(token: &str) -> bool {
-    matches!(
-        token,
-        "-c" | "--config-env"
-            | "--git-dir"
-            | "--work-tree"
-            | "--namespace"
-            | "--super-prefix"
-            | "--exec-path"
-            | "--worktree-attributes"
-            | "--attr-source"
-    )
 }
 
 fn command_args(argv: &[String], command: &str) -> Vec<String> {

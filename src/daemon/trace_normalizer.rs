@@ -102,8 +102,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
 
         let raw_argv = payload_argv(payload);
         let primary_hint = argv_primary_command(&raw_argv);
-        let capture_repo_context = command_may_mutate_refs(primary_hint.as_deref())
-            || command_may_mutate_workspace(primary_hint.as_deref());
+        let capture_repo_context = command_may_mutate_refs(primary_hint.as_deref());
         let mut worktree = payload_worktree(payload)
             .or_else(|| worktree_from_argv(&raw_argv))
             .or_else(|| self.state.sid_to_worktree.get(root_sid).cloned());
@@ -151,22 +150,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
             None
         };
 
-        let alias_resolution = match self.backend.resolve_alias(worktree.as_deref(), &raw_argv) {
-            Ok(resolution) => resolution,
-            Err(error) => {
-                observability::log_error(
-                    &error,
-                    Some(serde_json::json!({
-                        "component": "trace_normalizer",
-                        "phase": "resolve_alias_start",
-                        "root_sid": root_sid,
-                    })),
-                );
-                AliasResolution::Unknown {
-                    reason: error.to_string(),
-                }
-            }
-        };
+        let alias_resolution = AliasResolution::None;
 
         let wrapper_mirror = payload
             .get("wrapper_mirror")
@@ -264,31 +248,6 @@ impl<B: GitBackend> TraceNormalizer<B> {
                 if pending.pre_ref_snapshot.is_none() {
                     pending.pre_ref_snapshot = self.backend.ref_snapshot(&family).ok();
                 }
-            }
-
-            if matches!(
-                pending.alias_resolution,
-                AliasResolution::None | AliasResolution::Unknown { .. }
-            ) {
-                pending.alias_resolution = match self
-                    .backend
-                    .resolve_alias(pending.worktree.as_deref(), &pending.raw_argv)
-                {
-                    Ok(resolution) => resolution,
-                    Err(error) => {
-                        observability::log_error(
-                            &error,
-                            Some(serde_json::json!({
-                                "component": "trace_normalizer",
-                                "phase": "resolve_alias_def_repo",
-                                "root_sid": root_sid,
-                            })),
-                        );
-                        AliasResolution::Unknown {
-                            reason: error.to_string(),
-                        }
-                    }
-                };
             }
         }
         Ok(None)
@@ -424,7 +383,6 @@ impl<B: GitBackend> TraceNormalizer<B> {
 
         let mut primary_command = select_primary_command(
             pending.root_cmd_name.as_deref(),
-            &pending.alias_resolution,
             &pending.observed_child_commands,
             &pending.raw_argv,
         );
@@ -686,54 +644,19 @@ fn command_may_mutate_refs(primary_command: Option<&str>) -> bool {
     matches!(
         primary_command,
         Some(
-            "am" | "branch"
-                | "cherry-pick"
+            "cherry-pick"
                 | "checkout"
                 | "clone"
                 | "commit"
-                | "commit-tree"
                 | "fetch"
                 | "init"
                 | "merge"
-                | "notes"
-                | "pack-refs"
                 | "pull"
                 | "push"
                 | "rebase"
-                | "reflog"
-                | "replace"
                 | "reset"
-                | "revert"
                 | "stash"
                 | "switch"
-                | "symbolic-ref"
-                | "tag"
-                | "update-ref"
-                | "worktree"
-        )
-    )
-}
-
-fn command_may_mutate_workspace(primary_command: Option<&str>) -> bool {
-    matches!(
-        primary_command,
-        Some(
-            "add"
-                | "am"
-                | "checkout"
-                | "cherry-pick"
-                | "clean"
-                | "commit"
-                | "merge"
-                | "mv"
-                | "rebase"
-                | "reset"
-                | "restore"
-                | "rm"
-                | "stash"
-                | "switch"
-                | "update-index"
-                | "read-tree"
         )
     )
 }
@@ -748,16 +671,9 @@ fn pending_may_mutate_refs(pending: &PendingTraceCommand) -> bool {
 
 fn select_primary_command(
     root_cmd_name: Option<&str>,
-    alias_resolution: &AliasResolution,
     observed_child_commands: &[String],
     argv: &[String],
 ) -> Option<String> {
-    if let AliasResolution::DirectAlias { expansion, .. } = alias_resolution
-        && let Some(command) = alias_expansion_primary_command(expansion)
-    {
-        return Some(command);
-    }
-
     if let Some(name) = root_cmd_name
         && !is_internal_cmd_name(name)
     {
@@ -771,17 +687,6 @@ fn select_primary_command(
     }
 
     argv_primary_command(argv)
-}
-
-fn alias_expansion_primary_command(expansion: &str) -> Option<String> {
-    let tokens = expansion
-        .split_whitespace()
-        .map(|token| token.trim_matches('\'').trim_matches('"').to_string())
-        .collect::<Vec<_>>();
-    if tokens.is_empty() {
-        return None;
-    }
-    argv_primary_command(&tokens)
 }
 
 #[cfg(test)]
@@ -814,7 +719,6 @@ mod tests {
                     head: Some(head.to_string()),
                     branch: Some("main".to_string()),
                     detached: false,
-                    workspace_fingerprint: None,
                 },
             );
         }

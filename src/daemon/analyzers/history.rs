@@ -260,13 +260,11 @@ mod tests {
             head: Some("old-head".to_string()),
             branch: Some("main".to_string()),
             detached: false,
-            workspace_fingerprint: None,
         });
         cmd.post_repo = Some(crate::daemon::domain::RepoContext {
             head: Some("new-head".to_string()),
             branch: Some("main".to_string()),
             detached: false,
-            workspace_fingerprint: None,
         });
 
         let result = analyzer

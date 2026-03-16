@@ -102,7 +102,6 @@ fn apply_worktree_state(state: &mut FamilyState, cmd: &NormalizedCommand) {
             head: post_repo.head.clone(),
             branch: post_repo.branch.clone(),
             detached: post_repo.detached,
-            workspace_fingerprint: post_repo.workspace_fingerprint.clone(),
             last_updated_ns: cmd.finished_at_ns,
         },
     );
