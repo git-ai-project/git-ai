@@ -15,7 +15,7 @@ use crate::authorship::working_log::AgentId;
 /// For GitHub noreply emails, we match after the `+` to ignore numeric user ID prefixes.
 const AGENT_EMAIL_MAPPINGS: &[(&str, &str)] = &[
     ("cursoragent@cursor.com", "cursor-agent"),
-    ("+copilot@users.noreply.github.com", "github-copilot"),
+    ("+copilot@users.noreply.github.com", "github-copilot-agent"),
     (
         "+devin-ai-integration[bot]@users.noreply.github.com",
         "devin",
