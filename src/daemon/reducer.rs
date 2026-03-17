@@ -5,7 +5,7 @@ use crate::daemon::domain::{
 };
 use crate::error::GitAiError;
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const RECENT_COMMAND_CAP: usize = 512;
 
@@ -113,8 +113,8 @@ fn cap_recent_commands(commands: &mut VecDeque<AppliedCommand>) {
     }
 }
 
-fn canonicalize_path(path: &PathBuf) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.clone())
+fn canonicalize_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 #[cfg(test)]

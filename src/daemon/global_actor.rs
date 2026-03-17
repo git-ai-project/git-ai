@@ -7,7 +7,7 @@ use tokio::sync::{mpsc, oneshot};
 
 pub enum GlobalMsg {
     Apply(
-        NormalizedCommand,
+        Box<NormalizedCommand>,
         oneshot::Sender<Result<AppliedCommand, GitAiError>>,
     ),
     Snapshot(oneshot::Sender<Result<GlobalSnapshot, GitAiError>>),
@@ -24,7 +24,7 @@ impl GlobalActorHandle {
     pub async fn apply(&self, cmd: NormalizedCommand) -> Result<AppliedCommand, GitAiError> {
         let (tx, rx) = oneshot::channel();
         self.tx
-            .send(GlobalMsg::Apply(cmd, tx))
+            .send(GlobalMsg::Apply(Box::new(cmd), tx))
             .await
             .map_err(|_| GitAiError::Generic("global actor apply send failed".to_string()))?;
         rx.await
@@ -74,7 +74,7 @@ pub fn spawn_global_actor() -> GlobalActorHandle {
         while let Some(msg) = rx.recv().await {
             match msg {
                 GlobalMsg::Apply(cmd, respond_to) => {
-                    let result = reducer::reduce_global_command(&mut state, cmd, &analyzers)
+                    let result = reducer::reduce_global_command(&mut state, *cmd, &analyzers)
                         .map(|(applied, _)| applied);
                     let seq = result
                         .as_ref()

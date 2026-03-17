@@ -10,7 +10,7 @@ use tokio::sync::{mpsc, oneshot};
 
 pub enum FamilyMsg {
     Apply(
-        NormalizedCommand,
+        Box<NormalizedCommand>,
         oneshot::Sender<Result<AppliedCommand, GitAiError>>,
     ),
     ApplyCheckpoint(
@@ -41,7 +41,7 @@ impl FamilyActorHandle {
     pub async fn apply(&self, cmd: NormalizedCommand) -> Result<AppliedCommand, GitAiError> {
         let (tx, rx) = oneshot::channel();
         self.tx
-            .send(FamilyMsg::Apply(cmd, tx))
+            .send(FamilyMsg::Apply(Box::new(cmd), tx))
             .await
             .map_err(|_| GitAiError::Generic("family actor apply send failed".to_string()))?;
         rx.await
@@ -148,7 +148,7 @@ pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
         while let Some(msg) = rx.recv().await {
             match msg {
                 FamilyMsg::Apply(cmd, respond_to) => {
-                    let result = reducer::reduce_family_command(&mut state, cmd, &analyzers)
+                    let result = reducer::reduce_family_command(&mut state, *cmd, &analyzers)
                         .map(|(applied, _)| applied);
                     let seq = result
                         .as_ref()

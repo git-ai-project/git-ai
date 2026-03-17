@@ -434,10 +434,9 @@ impl<B: GitBackend> TraceNormalizer<B> {
         if may_mutate_refs {
             if let Some(worktree) = pending.worktree.as_deref()
                 && pending.family_key.is_some()
+                && pending.post_repo.is_none()
             {
-                if pending.post_repo.is_none() {
-                    pending.post_repo = Some(self.backend.repo_context(worktree)?);
-                }
+                pending.post_repo = Some(self.backend.repo_context(worktree)?);
             }
             if let Some(family) = pending.family_key.as_ref() {
                 pending.reflog_end_cut = Some(self.backend.reflog_cut(family)?);

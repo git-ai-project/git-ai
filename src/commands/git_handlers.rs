@@ -672,7 +672,7 @@ fn finish_daemon_trace_mirror(
 }
 
 fn try_send_daemon_trace_payload(
-    socket_path: &PathBuf,
+    socket_path: &std::path::Path,
     _repo_working_dir: &str,
     payload: serde_json::Value,
 ) {

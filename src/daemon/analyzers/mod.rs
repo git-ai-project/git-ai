@@ -36,7 +36,7 @@ impl Default for AnalyzerRegistry {
 impl AnalyzerRegistry {
     pub fn new() -> Self {
         let mut registry = Self {
-            generic: Arc::new(generic::GenericAnalyzer::default()),
+            generic: Arc::new(generic::GenericAnalyzer),
             by_command: HashMap::new(),
         };
 

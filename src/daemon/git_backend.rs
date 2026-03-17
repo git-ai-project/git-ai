@@ -45,7 +45,7 @@ pub struct SystemGitBackend;
 
 impl SystemGitBackend {
     pub fn new() -> Self {
-        Self::default()
+        Self
     }
 }
 

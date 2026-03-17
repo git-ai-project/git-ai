@@ -1001,7 +1001,7 @@ fn run_checkpoint_via_daemon_or_local(
             match crate::commands::daemon::ensure_daemon_running(Duration::from_secs(2)) {
                 Ok(config) => {
                     let request = ControlRequest::CheckpointRun {
-                        request: crate::daemon::CheckpointRunRequest {
+                        request: Box::new(crate::daemon::CheckpointRunRequest {
                             repo_working_dir: repo_working_dir.clone(),
                             kind: Some(checkpoint_kind_to_str(kind).to_string()),
                             author: Some(author.to_string()),
@@ -1010,7 +1010,7 @@ fn run_checkpoint_via_daemon_or_local(
                             quiet: Some(quiet),
                             is_pre_commit: Some(is_pre_commit),
                             agent_run_result: agent_run_result.clone(),
-                        },
+                        }),
                         wait: Some(true),
                     };
                     match send_control_request(&config.control_socket_path, &request) {

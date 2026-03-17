@@ -10,7 +10,7 @@ pub enum ControlRequest {
     TraceIngest { payload: Value, wait: Option<bool> },
     #[serde(rename = "checkpoint.run")]
     CheckpointRun {
-        request: CheckpointRunRequest,
+        request: Box<CheckpointRunRequest>,
         wait: Option<bool>,
     },
     #[serde(rename = "env.override")]

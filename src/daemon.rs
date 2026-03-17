@@ -2019,7 +2019,7 @@ impl ActorDaemonCoordinator {
                     .await
             }
             ControlRequest::CheckpointRun { request, wait } => {
-                self.ingest_checkpoint_payload(request, wait.unwrap_or(false))
+                self.ingest_checkpoint_payload(*request, wait.unwrap_or(false))
                     .await
             }
             ControlRequest::EnvOverride {
