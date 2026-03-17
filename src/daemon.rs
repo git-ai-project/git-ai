@@ -109,7 +109,7 @@ struct DaemonPidMeta {
 
 #[derive(Debug)]
 pub struct DaemonLock {
-    file: File,
+    _file: File,
 }
 
 impl DaemonLock {
@@ -134,7 +134,7 @@ impl DaemonLock {
             }
         }
 
-        Ok(Self { file })
+        Ok(Self { _file: file })
     }
 }
 
@@ -142,7 +142,7 @@ impl Drop for DaemonLock {
     fn drop(&mut self) {
         #[cfg(unix)]
         {
-            let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+            let _ = unsafe { libc::flock(self._file.as_raw_fd(), libc::LOCK_UN) };
         }
     }
 }
