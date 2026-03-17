@@ -1,5 +1,6 @@
 use crate::daemon::domain::{FamilyKey, RefChange, RepoContext};
 use crate::error::GitAiError;
+use crate::git::cli_parser::parse_git_cli_args;
 use crate::git::find_repository_in_path;
 use crate::git::repository::exec_git_allow_nonzero;
 use std::collections::{HashMap, HashSet};
@@ -28,6 +29,12 @@ pub trait GitBackend: Send + Sync + 'static {
         end: &ReflogCut,
     ) -> Result<Vec<RefChange>, GitAiError>;
 
+    fn resolve_primary_command(
+        &self,
+        worktree: &Path,
+        argv: &[String],
+    ) -> Result<Option<String>, GitAiError>;
+
     fn clone_target(&self, argv: &[String], cwd_hint: Option<&Path>) -> Option<PathBuf>;
 
     fn init_target(&self, argv: &[String], cwd_hint: Option<&Path>) -> Option<PathBuf>;
@@ -55,6 +62,7 @@ impl GitBackend for SystemGitBackend {
 
     fn repo_context(&self, worktree: &Path) -> Result<RepoContext, GitAiError> {
         let head = rev_parse_head(worktree).ok();
+        let cherry_pick_head = rev_parse_optional(worktree, "CHERRY_PICK_HEAD");
         let symbolic = run_git_allow_nonzero(
             [
                 "-C",
@@ -81,6 +89,7 @@ impl GitBackend for SystemGitBackend {
             head,
             branch,
             detached,
+            cherry_pick_head,
         })
     }
 
@@ -206,6 +215,41 @@ impl GitBackend for SystemGitBackend {
         Ok(changes)
     }
 
+    fn resolve_primary_command(
+        &self,
+        worktree: &Path,
+        argv: &[String],
+    ) -> Result<Option<String>, GitAiError> {
+        let worktree_str = worktree.to_string_lossy().to_string();
+        let repository = find_repository_in_path(&worktree_str)?;
+        let mut current = parse_git_cli_args(git_invocation_tokens(argv));
+        let mut seen = HashSet::new();
+        loop {
+            let Some(command) = current.command.clone() else {
+                return Ok(None);
+            };
+            if !seen.insert(command.clone()) {
+                return Ok(None);
+            }
+
+            let key = format!("alias.{}", command);
+            let alias_value = match repository.config_get_str(&key)? {
+                Some(value) => value,
+                None => return Ok(Some(command)),
+            };
+
+            let Some(alias_tokens) = parse_alias_tokens(&alias_value) else {
+                return Ok(None);
+            };
+
+            let mut expanded_args = Vec::new();
+            expanded_args.extend(current.global_args.iter().cloned());
+            expanded_args.extend(alias_tokens);
+            expanded_args.extend(current.command_args.iter().cloned());
+            current = parse_git_cli_args(&expanded_args);
+        }
+    }
+
     fn clone_target(&self, argv: &[String], cwd_hint: Option<&Path>) -> Option<PathBuf> {
         let args = command_args(argv, "clone");
         let positional = clone_init_positionals(&args);
@@ -242,6 +286,25 @@ fn rev_parse_head(worktree: &Path) -> Result<String, GitAiError> {
         ]
         .as_slice(),
     )
+}
+
+fn rev_parse_optional(worktree: &Path, rev: &str) -> Option<String> {
+    let output = run_git_allow_nonzero(
+        [
+            "-C",
+            &worktree.to_string_lossy(),
+            "rev-parse",
+            "--verify",
+            rev,
+        ]
+        .as_slice(),
+    )
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() { None } else { Some(value) }
 }
 
 fn run_git_allow_nonzero(args: &[&str]) -> Result<std::process::Output, GitAiError> {
@@ -337,12 +400,20 @@ fn is_git_binary(token: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn command_args(argv: &[String], command: &str) -> Vec<String> {
-    let slice: &[String] = if argv.first().map(|v| is_git_binary(v)).unwrap_or(false) {
+fn git_invocation_tokens(argv: &[String]) -> &[String] {
+    if argv
+        .first()
+        .map(|token| is_git_binary(token))
+        .unwrap_or(false)
+    {
         &argv[1..]
     } else {
         argv
-    };
+    }
+}
+
+fn command_args(argv: &[String], command: &str) -> Vec<String> {
+    let slice = git_invocation_tokens(argv);
     let mut seen = false;
     let mut out = Vec::new();
     for token in slice {
@@ -413,4 +484,67 @@ fn resolve_target(target: PathBuf, cwd_hint: Option<&Path>) -> PathBuf {
         return cwd.join(target);
     }
     target
+}
+
+fn parse_alias_tokens(value: &str) -> Option<Vec<String>> {
+    let trimmed = value.trim_start();
+    if trimmed.starts_with('!') {
+        return None;
+    }
+
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+
+    for ch in trimmed.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+
+        if in_single {
+            if ch == '\'' {
+                in_single = false;
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+
+        if in_double {
+            match ch {
+                '"' => in_double = false,
+                '\\' => escaped = true,
+                _ => current.push(ch),
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            '\\' => escaped = true,
+            c if c.is_whitespace() => {
+                if !current.is_empty() {
+                    tokens.push(current.clone());
+                    current.clear();
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if escaped {
+        current.push('\\');
+    }
+    if in_single || in_double {
+        return None;
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    Some(tokens)
 }

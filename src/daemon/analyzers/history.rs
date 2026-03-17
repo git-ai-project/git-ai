@@ -162,28 +162,39 @@ fn head_change(
     cmd: &NormalizedCommand,
     refs: &std::collections::HashMap<String, String>,
 ) -> Option<(String, String)> {
-    let preferred_change = cmd
+    let preferred_span = cmd
         .ref_changes
         .iter()
-        .find(|change| {
+        .filter(|change| {
             change.reference == "HEAD"
                 && !change.new.trim().is_empty()
                 && change.old.trim() != change.new.trim()
         })
-        .or_else(|| {
-            cmd.ref_changes.iter().find(|change| {
-                change.reference.starts_with("refs/heads/")
-                    && !change.new.trim().is_empty()
-                    && change.old.trim() != change.new.trim()
-            })
+        .collect::<Vec<_>>();
+    if let Some((old_head, new_head)) = change_span(&preferred_span) {
+        return Some((old_head, new_head));
+    }
+
+    let branch_span = cmd
+        .ref_changes
+        .iter()
+        .filter(|change| {
+            change.reference.starts_with("refs/heads/")
+                && !change.new.trim().is_empty()
+                && change.old.trim() != change.new.trim()
         })
-        .or_else(|| {
-            cmd.ref_changes.iter().find(|change| {
-                !change.new.trim().is_empty() && change.old.trim() != change.new.trim()
-            })
-        });
-    if let Some(change) = preferred_change {
-        return Some((change.old.clone(), change.new.clone()));
+        .collect::<Vec<_>>();
+    if let Some((old_head, new_head)) = change_span(&branch_span) {
+        return Some((old_head, new_head));
+    }
+
+    let any_span = cmd
+        .ref_changes
+        .iter()
+        .filter(|change| !change.new.trim().is_empty() && change.old.trim() != change.new.trim())
+        .collect::<Vec<_>>();
+    if let Some((old_head, new_head)) = change_span(&any_span) {
+        return Some((old_head, new_head));
     }
 
     let new_head = non_empty_opt(cmd.post_repo.as_ref().and_then(|repo| repo.head.clone()))?;
@@ -231,6 +242,17 @@ fn head_change(
         return None;
     }
     Some((old_head, new_head))
+}
+
+fn change_span(changes: &[&crate::daemon::domain::RefChange]) -> Option<(String, String)> {
+    let first = changes.first()?;
+    let last = changes.last()?;
+    let old_head = first.old.trim();
+    let new_head = last.new.trim();
+    if old_head.is_empty() || new_head.is_empty() || old_head == new_head {
+        return None;
+    }
+    Some((old_head.to_string(), new_head.to_string()))
 }
 
 fn infer_reset_kind(args: &[String]) -> ResetKind {
@@ -365,11 +387,13 @@ mod tests {
             head: Some("old-head".to_string()),
             branch: Some("main".to_string()),
             detached: false,
+            cherry_pick_head: None,
         });
         cmd.post_repo = Some(crate::daemon::domain::RepoContext {
             head: Some("new-head".to_string()),
             branch: Some("main".to_string()),
             detached: false,
+            cherry_pick_head: None,
         });
 
         let result = analyzer
@@ -390,6 +414,53 @@ mod tests {
                 } if new_head == "new-head"
             )),
             "expected commit-created event from pre/post head fallback, got {:?}",
+            result.events
+        );
+    }
+
+    #[test]
+    fn cherry_pick_uses_full_head_ref_change_span() {
+        let analyzer = HistoryAnalyzer;
+        let mut cmd = command(
+            "cherry-pick",
+            &["git", "cherry-pick", "source-1", "source-2", "source-3"],
+        );
+        cmd.ref_changes = vec![
+            RefChange {
+                reference: "HEAD".to_string(),
+                old: "a".to_string(),
+                new: "b".to_string(),
+            },
+            RefChange {
+                reference: "HEAD".to_string(),
+                old: "b".to_string(),
+                new: "c".to_string(),
+            },
+            RefChange {
+                reference: "HEAD".to_string(),
+                old: "c".to_string(),
+                new: "d".to_string(),
+            },
+        ];
+
+        let result = analyzer
+            .analyze(
+                &cmd,
+                AnalysisView {
+                    refs: &Default::default(),
+                },
+            )
+            .unwrap();
+
+        assert!(
+            result.events.iter().any(|event| matches!(
+                event,
+                SemanticEvent::CherryPickComplete {
+                    original_head,
+                    new_head
+                } if original_head == "a" && new_head == "d"
+            )),
+            "expected cherry-pick span event, got {:?}",
             result.events
         );
     }

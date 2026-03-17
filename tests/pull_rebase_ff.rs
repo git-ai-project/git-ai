@@ -517,13 +517,11 @@ fn test_pull_rebase_skip_commit_does_not_map_entire_upstream_history() {
 
     // Local commit was duplicated upstream via equivalent patch, so rebase should skip it.
     // We expect no newly rebased commits to map, rather than traversing all upstream commits.
-    if !local.mode().uses_daemon() {
-        assert!(
-            output.contains("Commit mapping: 1 original -> 0 new"),
-            "Expected skipped-commit pull --rebase mapping to be 1 original -> 0 new. Output:\n{}",
-            output
-        );
-    }
+    assert!(
+        output.contains("Commit mapping: 1 original -> 0 new"),
+        "Expected skipped-commit pull --rebase mapping to be 1 original -> 0 new. Output:\n{}",
+        output
+    );
 
     // HEAD should move away from original local commit onto upstream tip.
     let new_head = local

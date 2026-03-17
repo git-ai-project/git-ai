@@ -981,6 +981,7 @@ struct ActorDaemonCoordinator {
         >,
     >,
     rewrite_events_by_family: Mutex<HashMap<String, Vec<Value>>>,
+    pending_cherry_pick_sources_by_family: Mutex<HashMap<String, Vec<String>>>,
     inflight_effects_by_family: Mutex<HashMap<String, usize>>,
     ordered_side_effects_by_family: Mutex<HashMap<String, FamilySideEffectState>>,
     side_effect_progress_notify_by_family: Mutex<HashMap<String, Arc<Notify>>>,
@@ -1003,6 +1004,7 @@ impl ActorDaemonCoordinator {
             )),
             backend,
             rewrite_events_by_family: Mutex::new(HashMap::new()),
+            pending_cherry_pick_sources_by_family: Mutex::new(HashMap::new()),
             inflight_effects_by_family: Mutex::new(HashMap::new()),
             ordered_side_effects_by_family: Mutex::new(HashMap::new()),
             side_effect_progress_notify_by_family: Mutex::new(HashMap::new()),
@@ -1212,6 +1214,10 @@ impl ActorDaemonCoordinator {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             let notified = notify.notified();
+            // Read progress under the family execution lock so we never observe
+            // `next_seq` while ordered side effects are still in flight.
+            let exec_lock = self.side_effect_exec_lock(family)?;
+            let _guard = exec_lock.lock().await;
             let applied = {
                 let map = self.ordered_side_effects_by_family.lock().map_err(|_| {
                     GitAiError::Generic("ordered side effect map lock poisoned".to_string())
@@ -1223,6 +1229,7 @@ impl ActorDaemonCoordinator {
             if applied >= seq {
                 return Ok(());
             }
+            drop(_guard);
             let now = tokio::time::Instant::now();
             if now >= deadline {
                 return Err(GitAiError::Generic(format!(
@@ -1267,6 +1274,49 @@ impl ActorDaemonCoordinator {
             .lock()
             .map_err(|_| GitAiError::Generic("rewrite events map lock poisoned".to_string()))?;
         Ok(map.get(family).cloned().unwrap_or_default())
+    }
+
+    fn set_pending_cherry_pick_sources_for_family(
+        &self,
+        family: &str,
+        sources: Vec<String>,
+    ) -> Result<(), GitAiError> {
+        let mut map = self
+            .pending_cherry_pick_sources_by_family
+            .lock()
+            .map_err(|_| {
+                GitAiError::Generic("pending cherry-pick sources map lock poisoned".to_string())
+            })?;
+        if sources.is_empty() {
+            map.remove(family);
+        } else {
+            map.insert(family.to_string(), sources);
+        }
+        Ok(())
+    }
+
+    fn take_pending_cherry_pick_sources_for_family(
+        &self,
+        family: &str,
+    ) -> Result<Vec<String>, GitAiError> {
+        let mut map = self
+            .pending_cherry_pick_sources_by_family
+            .lock()
+            .map_err(|_| {
+                GitAiError::Generic("pending cherry-pick sources map lock poisoned".to_string())
+            })?;
+        Ok(map.remove(family).unwrap_or_default())
+    }
+
+    fn clear_pending_cherry_pick_sources_for_family(&self, family: &str) -> Result<(), GitAiError> {
+        let mut map = self
+            .pending_cherry_pick_sources_by_family
+            .lock()
+            .map_err(|_| {
+                GitAiError::Generic("pending cherry-pick sources map lock poisoned".to_string())
+            })?;
+        map.remove(family);
+        Ok(())
     }
 
     fn resolve_heads_for_command(
@@ -1368,6 +1418,7 @@ impl ActorDaemonCoordinator {
 
     fn rewrite_events_from_semantic_events(
         &self,
+        family: Option<&str>,
         cmd: &crate::daemon::domain::NormalizedCommand,
         events: &[crate::daemon::domain::SemanticEvent],
     ) -> Vec<RewriteLogEvent> {
@@ -1450,8 +1501,23 @@ impl ActorDaemonCoordinator {
                         continue;
                     }
                     let source_specs = cherry_pick_source_specs_from_args(&cmd.invoked_args);
-                    let source_commits =
+                    let mut source_commits =
                         resolve_commit_specs_to_oids(worktree.as_deref(), &source_specs);
+                    let is_continue = cmd.invoked_args.iter().any(|arg| arg == "--continue");
+                    if source_commits.is_empty() && is_continue {
+                        if let Some(source) = cmd
+                            .pre_repo
+                            .as_ref()
+                            .and_then(|repo| repo.cherry_pick_head.clone())
+                            .filter(|source| is_valid_oid(source) && !is_zero_oid(source))
+                        {
+                            source_commits.push(source);
+                        } else if let Some(family) = family {
+                            source_commits = self
+                                .take_pending_cherry_pick_sources_for_family(family)
+                                .unwrap_or_default();
+                        }
+                    }
                     let mut new_commits = cherry_pick_created_commits_best_effort(
                         worktree.as_deref(),
                         original_head,
@@ -1470,12 +1536,18 @@ impl ActorDaemonCoordinator {
                             new_commits,
                         ),
                     ));
+                    if let Some(family) = family {
+                        let _ = self.clear_pending_cherry_pick_sources_for_family(family);
+                    }
                 }
                 crate::daemon::domain::SemanticEvent::CherryPickAbort { head } => {
                     if !head.is_empty() {
                         out.push(RewriteLogEvent::cherry_pick_abort(
                             CherryPickAbortEvent::new(head.clone()),
                         ));
+                    }
+                    if let Some(family) = family {
+                        let _ = self.clear_pending_cherry_pick_sources_for_family(family);
                     }
                 }
                 crate::daemon::domain::SemanticEvent::MergeSquash {
@@ -1604,6 +1676,25 @@ impl ActorDaemonCoordinator {
         });
         if !self.mode.apply_side_effects() || cmd.wrapper_mirror || cmd.exit_code != 0 {
             if let Some(family) = family
+                && cmd.primary_command.as_deref() == Some("cherry-pick")
+            {
+                if cmd.invoked_args.iter().any(|arg| arg == "--abort") {
+                    let _ = self.clear_pending_cherry_pick_sources_for_family(family);
+                } else if cmd.exit_code != 0 {
+                    let source_specs = cherry_pick_source_specs_from_args(&cmd.invoked_args);
+                    let worktree_for_lookup = cmd
+                        .worktree
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().to_string());
+                    let source_commits =
+                        resolve_commit_specs_to_oids(worktree_for_lookup.as_deref(), &source_specs);
+                    if !source_commits.is_empty() {
+                        let _ =
+                            self.set_pending_cherry_pick_sources_for_family(family, source_commits);
+                    }
+                }
+            }
+            if let Some(family) = family
                 && saw_pull_event
                 && !cmd.ref_changes.is_empty()
             {
@@ -1666,7 +1757,7 @@ impl ActorDaemonCoordinator {
             }
         }
 
-        let mut rewrite_events = self.rewrite_events_from_semantic_events(cmd, events);
+        let mut rewrite_events = self.rewrite_events_from_semantic_events(family, cmd, events);
         if rewrite_events.is_empty()
             && let Some(fallback) = fallback_commit_rewrite_event(cmd)
         {
@@ -2123,8 +2214,9 @@ fn handle_trace_connection_actor(
             Ok(v) => v,
             Err(_) => continue,
         };
-        let _ = runtime_handle
-            .block_on(async { coordinator.ingest_trace_payload(parsed, false).await });
+        if let Err(error) = runtime_handle.block_on(async { coordinator.ingest_trace_payload(parsed, false).await }) {
+            debug_log(&format!("daemon trace ingest error: {}", error));
+        }
     }
     Ok(())
 }

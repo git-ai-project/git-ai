@@ -8,9 +8,9 @@ pub(crate) fn fallback_commit_rewrite_event(cmd: &NormalizedCommand) -> Option<R
     }
     let worktree = cmd.worktree.as_ref()?.to_string_lossy().to_string();
     let command = cmd
-        .invoked_command
+        .primary_command
         .as_deref()
-        .or(cmd.primary_command.as_deref())?;
+        .or(cmd.invoked_command.as_deref())?;
     if command != "commit" {
         return None;
     }
@@ -74,4 +74,94 @@ fn is_valid_oid(oid: &str) -> bool {
 
 fn is_zero_oid(oid: &str) -> bool {
     is_valid_oid(oid) && oid.chars().all(|c| c == '0')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::daemon::domain::{
+        CommandScope, Confidence, FamilyKey, NormalizedCommand, RepoContext,
+    };
+    use std::path::Path;
+    use std::process::Command;
+
+    fn run_git(repo: &Path, args: &[&str]) -> String {
+        let output = Command::new("/opt/homebrew/bin/git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn fallback_prefers_primary_commit_over_invoked_alias() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path();
+
+        run_git(repo, &["init"]);
+        run_git(repo, &["config", "user.name", "Test User"]);
+        run_git(repo, &["config", "user.email", "test@example.com"]);
+
+        std::fs::write(repo.join("file.txt"), "base\n").expect("write base");
+        run_git(repo, &["add", "file.txt"]);
+        run_git(repo, &["commit", "-m", "base"]);
+        let base = run_git(repo, &["rev-parse", "HEAD"]);
+
+        std::fs::write(repo.join("file.txt"), "base\nnext\n").expect("write next");
+        run_git(repo, &["add", "file.txt"]);
+        run_git(repo, &["commit", "-m", "next"]);
+        let head = run_git(repo, &["rev-parse", "HEAD"]);
+
+        let cmd = NormalizedCommand {
+            scope: CommandScope::Family(FamilyKey::new("family:/repo")),
+            family_key: Some(FamilyKey::new("family:/repo")),
+            worktree: Some(repo.to_path_buf()),
+            root_sid: "sid".to_string(),
+            raw_argv: vec![
+                "git".to_string(),
+                "ci".to_string(),
+                "-m".to_string(),
+                "next".to_string(),
+            ],
+            primary_command: Some("commit".to_string()),
+            invoked_command: Some("ci".to_string()),
+            invoked_args: vec!["-m".to_string(), "next".to_string()],
+            observed_child_commands: Vec::new(),
+            exit_code: 0,
+            started_at_ns: 1,
+            finished_at_ns: 2,
+            pre_repo: Some(RepoContext {
+                head: Some(base.clone()),
+                branch: Some("main".to_string()),
+                detached: false,
+                cherry_pick_head: None,
+            }),
+            post_repo: Some(RepoContext {
+                head: Some(head.clone()),
+                branch: Some("main".to_string()),
+                detached: false,
+                cherry_pick_head: None,
+            }),
+            ref_changes: Vec::new(),
+            confidence: Confidence::Low,
+            wrapper_mirror: false,
+        };
+
+        let event = fallback_commit_rewrite_event(&cmd).expect("fallback commit event");
+        match event {
+            RewriteLogEvent::Commit { commit } => {
+                assert_eq!(commit.commit_sha, head);
+                assert_eq!(commit.base_commit, Some(base));
+            }
+            other => panic!("expected commit event, got {:?}", other),
+        }
+    }
 }

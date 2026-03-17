@@ -42,6 +42,7 @@ pub struct RepoContext {
     pub head: Option<String>,
     pub branch: Option<String>,
     pub detached: bool,
+    pub cherry_pick_head: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

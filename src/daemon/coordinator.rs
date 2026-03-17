@@ -126,7 +126,8 @@ mod tests {
         CommandScope, Confidence, FamilyKey, NormalizedCommand, RepoContext,
     };
     use crate::daemon::git_backend::{GitBackend, ReflogCut};
-    use std::path::PathBuf;
+    use crate::git::cli_parser::parse_git_cli_args;
+    use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
     #[derive(Default)]
@@ -173,6 +174,22 @@ mod tests {
             _end: &ReflogCut,
         ) -> Result<Vec<crate::daemon::domain::RefChange>, GitAiError> {
             Ok(Vec::new())
+        }
+
+        fn resolve_primary_command(
+            &self,
+            _worktree: &Path,
+            argv: &[String],
+        ) -> Result<Option<String>, GitAiError> {
+            let tokens: &[String] = if argv
+                .first()
+                .is_some_and(|value| value == "git" || value == "git.exe")
+            {
+                &argv[1..]
+            } else {
+                argv
+            };
+            Ok(parse_git_cli_args(tokens).command)
         }
 
         fn clone_target(&self, _argv: &[String], _cwd_hint: Option<&Path>) -> Option<PathBuf> {
