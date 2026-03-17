@@ -216,7 +216,7 @@ def setup_variant_runtime(
         trace_socket = daemon_dir / "trace2.sock"
         daemon_dir.mkdir(parents=True, exist_ok=True)
         daemon_proc = subprocess.Popen(
-            [str(variant.binary), "daemon", "start"],
+            [str(variant.binary), "daemon", "run"],
             cwd=str(runtime_root),
             env=env,
             stdout=subprocess.DEVNULL,

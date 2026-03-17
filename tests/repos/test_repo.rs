@@ -110,7 +110,7 @@ impl DaemonProcess {
         let mut command = Command::new(get_binary_path());
         command
             .arg("daemon")
-            .arg("start")
+            .arg("run")
             .current_dir(repo_path)
             .env("HOME", test_home)
             .env("GIT_CONFIG_GLOBAL", test_home.join(".gitconfig"))

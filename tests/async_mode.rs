@@ -203,7 +203,7 @@ fn daemon_status_does_not_self_emit_trace2_events() {
 
     let mut daemon = Command::new(repos::test_repo::get_binary_path())
         .arg("daemon")
-        .arg("start")
+        .arg("run")
         .current_dir(repo.path())
         .env("HOME", repo.test_home_path())
         .env(

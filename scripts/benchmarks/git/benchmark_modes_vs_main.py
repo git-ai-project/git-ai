@@ -283,7 +283,7 @@ class VariantRunner:
             [
                 str(self.variant.binary),
                 "daemon",
-                "start",
+                "run",
             ],
             cwd=str(self.run_root),
             env=self.base_env,

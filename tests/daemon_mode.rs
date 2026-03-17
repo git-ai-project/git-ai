@@ -2,7 +2,7 @@
 mod repos;
 
 use git_ai::authorship::working_log::CheckpointKind;
-use git_ai::daemon::{ControlRequest, ControlResponse, send_control_request};
+use git_ai::daemon::{ControlRequest, ControlResponse, DaemonLock, send_control_request};
 use repos::test_file::ExpectedLineExt;
 use repos::test_repo::{GitTestMode, TestRepo, get_binary_path, real_git_executable};
 use serde_json::Value;
@@ -43,6 +43,14 @@ fn daemon_trace_socket_path(repo: &TestRepo) -> PathBuf {
         .join("trace2.sock")
 }
 
+fn daemon_lock_path(repo: &TestRepo) -> PathBuf {
+    repo.test_home_path()
+        .join(".git-ai")
+        .join("internal")
+        .join("daemon")
+        .join("daemon.lock")
+}
+
 fn repo_workdir_string(repo: &TestRepo) -> String {
     repo.path().to_string_lossy().to_string()
 }
@@ -59,7 +67,7 @@ impl DaemonGuard {
         let mut command = Command::new(get_binary_path());
         command
             .arg("daemon")
-            .arg("start")
+            .arg("run")
             .current_dir(repo.path())
             .env("HOME", repo.test_home_path())
             .env(
@@ -461,7 +469,57 @@ impl Drop for DaemonGuard {
 
 #[test]
 #[serial]
-fn checkpoint_delegate_falls_back_when_daemon_is_unavailable() {
+fn daemon_start_spawns_detached_run_process() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+
+    let output = Command::new(get_binary_path())
+        .arg("daemon")
+        .arg("start")
+        .current_dir(repo.path())
+        .env("HOME", repo.test_home_path())
+        .env(
+            "GIT_CONFIG_GLOBAL",
+            repo.test_home_path().join(".gitconfig"),
+        )
+        .env("GIT_AI_TEST_DB_PATH", repo.test_db_path())
+        .env("GITAI_TEST_DB_PATH", repo.test_db_path())
+        .output()
+        .expect("failed to invoke daemon start");
+    assert!(
+        output.status.success(),
+        "daemon start should return success: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let mut status_ok = false;
+    for _ in 0..80 {
+        match send_control_request(
+            &daemon_control_socket_path(&repo),
+            &ControlRequest::StatusFamily {
+                repo_working_dir: repo_workdir_string(&repo),
+            },
+        ) {
+            Ok(response) if response.ok => {
+                status_ok = true;
+                break;
+            }
+            _ => {
+                thread::sleep(Duration::from_millis(25));
+            }
+        }
+    }
+    assert!(status_ok, "daemon should be reachable after `daemon start`");
+
+    let _ = send_control_request(
+        &daemon_control_socket_path(&repo),
+        &ControlRequest::Shutdown,
+    );
+}
+
+#[test]
+#[serial]
+fn checkpoint_delegate_autostarts_daemon_when_unavailable() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
 
     fs::write(repo.path().join("delegate-fallback.txt"), "base\n").expect("failed to write base");
@@ -480,7 +538,23 @@ fn checkpoint_delegate_falls_back_when_daemon_is_unavailable() {
         &["checkpoint", "mock_ai", "delegate-fallback.txt"],
         &[("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true")],
     )
-    .expect("checkpoint should fall back to local mode");
+    .expect("checkpoint should auto-start daemon and succeed");
+
+    let status = send_control_request(
+        &daemon_control_socket_path(&repo),
+        &ControlRequest::StatusFamily {
+            repo_working_dir: repo_workdir_string(&repo),
+        },
+    )
+    .expect("daemon status request should succeed after auto-start");
+    assert!(
+        status.ok,
+        "daemon should be running after delegated checkpoint auto-start"
+    );
+    let _ = send_control_request(
+        &daemon_control_socket_path(&repo),
+        &ControlRequest::Shutdown,
+    );
 
     let checkpoints = repo
         .current_working_logs()
@@ -490,7 +564,65 @@ fn checkpoint_delegate_falls_back_when_daemon_is_unavailable() {
         checkpoints
             .iter()
             .any(|checkpoint| checkpoint.kind == CheckpointKind::AiAgent),
-        "local fallback should write ai_agent checkpoint when daemon is unavailable"
+        "delegated checkpoint should write ai_agent checkpoint after daemon auto-start"
+    );
+}
+
+#[test]
+#[serial]
+fn checkpoint_delegate_falls_back_when_daemon_startup_is_blocked() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+
+    fs::write(repo.path().join("delegate-fallback-blocked.txt"), "base\n")
+        .expect("failed to write base");
+    repo.git(&["add", "delegate-fallback-blocked.txt"])
+        .expect("add should succeed");
+    repo.stage_all_and_commit("base commit")
+        .expect("base commit should succeed");
+
+    fs::write(
+        repo.path().join("delegate-fallback-blocked.txt"),
+        "base\nchanged while startup blocked\n",
+    )
+    .expect("failed to write updated file");
+
+    fs::create_dir_all(
+        daemon_lock_path(&repo)
+            .parent()
+            .expect("daemon lock path should have a parent"),
+    )
+    .expect("failed to create daemon lock parent directory");
+    let held_lock = DaemonLock::acquire(&daemon_lock_path(&repo))
+        .expect("should acquire daemon lock before checkpoint invocation");
+
+    repo.git_ai_with_env(
+        &["checkpoint", "mock_ai", "delegate-fallback-blocked.txt"],
+        &[("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true")],
+    )
+    .expect("checkpoint should fall back to local mode when daemon startup is blocked");
+
+    drop(held_lock);
+
+    assert!(
+        send_control_request(
+            &daemon_control_socket_path(&repo),
+            &ControlRequest::StatusFamily {
+                repo_working_dir: repo_workdir_string(&repo),
+            },
+        )
+        .is_err(),
+        "daemon should remain unavailable when startup was blocked"
+    );
+
+    let checkpoints = repo
+        .current_working_logs()
+        .read_all_checkpoints()
+        .expect("checkpoints should be readable");
+    assert!(
+        checkpoints
+            .iter()
+            .any(|checkpoint| checkpoint.kind == CheckpointKind::AiAgent),
+        "local fallback should still write ai_agent checkpoint when daemon startup is blocked"
     );
 }
 

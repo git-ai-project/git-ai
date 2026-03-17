@@ -95,6 +95,17 @@ RESULTS_TSV="$WORK_ROOT/results.tsv"
 
 mkdir -p "$WORK_ROOT" "$LOG_DIR"
 
+DAEMON_STARTED=0
+cleanup() {
+  if [[ "$HOOK_MODE" == "daemon" && "$DAEMON_STARTED" -eq 1 ]]; then
+    (
+      cd "$REPO_DIR" 2>/dev/null || true
+      GIT_AI_DEBUG=0 GIT_AI_DEBUG_PERFORMANCE=0 "$GIT_AI_BIN" daemon shutdown >/dev/null 2>&1 || true
+    )
+  fi
+}
+trap cleanup EXIT
+
 if [[ "$HOOK_MODE" == "daemon" ]]; then
   if [[ -z "${GIT_AI_DAEMON_CONTROL_SOCKET:-}" ]]; then
     export GIT_AI_DAEMON_CONTROL_SOCKET="$HOME/.git-ai/internal/daemon/control.sock"
@@ -106,6 +117,12 @@ if [[ "$HOOK_MODE" == "daemon" ]]; then
     export GIT_TRACE2_EVENT_NESTING="10"
   fi
   export GIT_AI_DAEMON_CHECKPOINT_DELEGATE="true"
+
+  if ! GIT_AI_DEBUG=0 GIT_AI_DEBUG_PERFORMANCE=0 "$GIT_AI_BIN" daemon start >/dev/null 2>&1; then
+    echo "error: failed to start git-ai daemon for benchmark mode" >&2
+    exit 1
+  fi
+  DAEMON_STARTED=1
 fi
 
 now_ns() {
@@ -134,23 +151,6 @@ strip_ansi_file() {
 
 g() {
   GIT_AI_DEBUG=0 GIT_AI_DEBUG_PERFORMANCE=0 "$GIT_BIN" -C "$REPO_DIR" "$@"
-}
-
-daemon_sync_repo() {
-  if [[ "$HOOK_MODE" != "daemon" ]]; then
-    return 0
-  fi
-  for _ in $(seq 1 50); do
-    if (
-      cd "$REPO_DIR"
-      GIT_AI_DEBUG=0 GIT_AI_DEBUG_PERFORMANCE=0 "$GIT_AI_BIN" daemon reconcile --repo "$REPO_DIR" >/dev/null 2>&1
-    ); then
-      return 0
-    fi
-    sleep 0.05
-  done
-  echo "error: daemon did not reconcile for repo $REPO_DIR" >&2
-  exit 1
 }
 
 generate_file() {
@@ -212,7 +212,6 @@ run_rebase_scenario() {
 
   ensure_clean_rebase_state
   g checkout "$branch" >/dev/null
-  daemon_sync_repo
 
   local start_ns
   local end_ns
@@ -225,7 +224,6 @@ run_rebase_scenario() {
   fi
   end_ns="$(now_ns)"
   duration_s="$(seconds_from_ns_delta "$start_ns" "$end_ns")"
-  daemon_sync_repo
 
   if [[ "$status" == "fail" ]]; then
     ensure_clean_rebase_state
@@ -445,7 +443,6 @@ SIDE_TIP="$(g rev-parse HEAD)"
 g checkout -B bench-feature-merge "$FEATURE_TIP" >/dev/null
 g merge --no-ff --no-edit bench-side >/dev/null
 MERGE_FEATURE_TIP="$(g rev-parse HEAD)"
-daemon_sync_repo
 
 echo
 echo "Running rebase scenarios..."

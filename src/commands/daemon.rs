@@ -1,6 +1,10 @@
-use crate::daemon::{CheckpointRunRequest, ControlRequest, DaemonConfig, send_control_request};
-use serde_json::Value;
+use crate::daemon::{ControlRequest, DaemonConfig, send_control_request};
+use interprocess::local_socket::LocalSocketStream;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 pub fn handle_daemon(args: &[String]) {
     if args.is_empty() || is_help(args[0].as_str()) {
@@ -9,9 +13,15 @@ pub fn handle_daemon(args: &[String]) {
     }
 
     match args[0].as_str() {
-        "start" | "run" => {
+        "start" => {
             if let Err(e) = handle_start(&args[1..]) {
                 eprintln!("Failed to start daemon: {}", e);
+                std::process::exit(1);
+            }
+        }
+        "run" => {
+            if let Err(e) = handle_run(&args[1..]) {
+                eprintln!("Failed to run daemon: {}", e);
                 std::process::exit(1);
             }
         }
@@ -28,30 +38,6 @@ pub fn handle_daemon(args: &[String]) {
                 std::process::exit(1);
             }
         }
-        "trace" => {
-            if let Err(e) = handle_trace(&args[1..]) {
-                eprintln!("Failed to ingest trace payload: {}", e);
-                std::process::exit(1);
-            }
-        }
-        "checkpoint" => {
-            if let Err(e) = handle_checkpoint(&args[1..]) {
-                eprintln!("Failed to ingest checkpoint payload: {}", e);
-                std::process::exit(1);
-            }
-        }
-        "barrier" => {
-            if let Err(e) = handle_barrier(&args[1..]) {
-                eprintln!("Failed waiting for barrier: {}", e);
-                std::process::exit(1);
-            }
-        }
-        "reconcile" => {
-            if let Err(e) = handle_reconcile(&args[1..]) {
-                eprintln!("Failed to reconcile family: {}", e);
-                std::process::exit(1);
-            }
-        }
         _ => {
             eprintln!("Unknown daemon subcommand: {}", args[0]);
             print_help();
@@ -64,6 +50,13 @@ fn handle_start(args: &[String]) -> Result<(), String> {
     if has_flag(args, "--mode") {
         return Err("--mode is no longer supported; daemon always runs in write mode".to_string());
     }
+    ensure_daemon_running(Duration::from_secs(2)).map(|_| ())
+}
+
+fn handle_run(args: &[String]) -> Result<(), String> {
+    if has_flag(args, "--mode") {
+        return Err("--mode is no longer supported; daemon always runs in write mode".to_string());
+    }
     let config = DaemonConfig::from_default_paths().map_err(|e| e.to_string())?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -72,6 +65,70 @@ fn handle_start(args: &[String]) -> Result<(), String> {
     runtime
         .block_on(async move { crate::daemon::run_daemon(config).await })
         .map_err(|e| e.to_string())
+}
+
+pub(crate) fn ensure_daemon_running(timeout: Duration) -> Result<DaemonConfig, String> {
+    let config = DaemonConfig::from_default_paths().map_err(|e| e.to_string())?;
+    if daemon_is_up(&config) {
+        return Ok(config);
+    }
+
+    spawn_daemon_run_detached()?;
+    if wait_for_daemon_up(&config, timeout) {
+        return Ok(config);
+    }
+
+    Err(format!(
+        "timed out after {:?} waiting for daemon socket {}",
+        timeout,
+        config.control_socket_path.display()
+    ))
+}
+
+fn daemon_is_up(config: &DaemonConfig) -> bool {
+    if !config.control_socket_path.exists() {
+        return false;
+    }
+
+    let socket_path = config.control_socket_path.to_string_lossy().to_string();
+    let (tx, rx) = mpsc::sync_channel(1);
+    let spawn_result = thread::Builder::new()
+        .name("git-ai-daemon-liveness-probe".to_string())
+        .spawn(move || {
+            let ready = LocalSocketStream::connect(socket_path.as_str()).is_ok();
+            let _ = tx.send(ready);
+        });
+    if spawn_result.is_err() {
+        return false;
+    }
+
+    matches!(rx.recv_timeout(Duration::from_millis(100)), Ok(true))
+}
+
+fn wait_for_daemon_up(config: &DaemonConfig, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if daemon_is_up(config) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn spawn_daemon_run_detached() -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let mut child = Command::new(exe);
+    child
+        .arg("daemon")
+        .arg("run")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    child.spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
 fn handle_status(repo_working_dir: String) -> Result<(), String> {
@@ -97,76 +154,6 @@ fn handle_shutdown() -> Result<(), String> {
     Ok(())
 }
 
-fn handle_trace(args: &[String]) -> Result<(), String> {
-    let payload = parse_json_arg(args)?;
-    let wait = has_flag(args, "--wait");
-    let config = DaemonConfig::from_default_paths().map_err(|e| e.to_string())?;
-    let request = ControlRequest::TraceIngest {
-        payload,
-        wait: Some(wait),
-    };
-    let response =
-        send_control_request(&config.control_socket_path, &request).map_err(|e| e.to_string())?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&response).map_err(|e| e.to_string())?
-    );
-    Ok(())
-}
-
-fn handle_checkpoint(args: &[String]) -> Result<(), String> {
-    let repo = parse_repo_arg(args).ok_or_else(|| "--repo is required".to_string())?;
-    let payload = parse_json_arg(args)?;
-    let mut request: CheckpointRunRequest =
-        serde_json::from_value(payload).map_err(|e| e.to_string())?;
-    request.repo_working_dir = repo;
-    let wait = has_flag(args, "--wait");
-    let config = DaemonConfig::from_default_paths().map_err(|e| e.to_string())?;
-    let request = ControlRequest::CheckpointRun {
-        request,
-        wait: Some(wait),
-    };
-    let response =
-        send_control_request(&config.control_socket_path, &request).map_err(|e| e.to_string())?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&response).map_err(|e| e.to_string())?
-    );
-    Ok(())
-}
-
-fn handle_barrier(args: &[String]) -> Result<(), String> {
-    let repo = parse_repo_arg(args).ok_or_else(|| "--repo is required".to_string())?;
-    let seq = parse_seq_arg(args)?;
-    let config = DaemonConfig::from_default_paths().map_err(|e| e.to_string())?;
-    let request = ControlRequest::BarrierAppliedThroughSeq {
-        repo_working_dir: repo,
-        seq,
-    };
-    let response =
-        send_control_request(&config.control_socket_path, &request).map_err(|e| e.to_string())?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&response).map_err(|e| e.to_string())?
-    );
-    Ok(())
-}
-
-fn handle_reconcile(args: &[String]) -> Result<(), String> {
-    let repo = parse_repo_arg(args).unwrap_or_else(default_repo_path);
-    let config = DaemonConfig::from_default_paths().map_err(|e| e.to_string())?;
-    let request = ControlRequest::ReconcileFamily {
-        repo_working_dir: repo,
-    };
-    let response =
-        send_control_request(&config.control_socket_path, &request).map_err(|e| e.to_string())?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&response).map_err(|e| e.to_string())?
-    );
-    Ok(())
-}
-
 fn parse_repo_arg(args: &[String]) -> Option<String> {
     let mut i = 0;
     while i < args.len() {
@@ -176,30 +163,6 @@ fn parse_repo_arg(args: &[String]) -> Option<String> {
         i += 1;
     }
     None
-}
-
-fn parse_json_arg(args: &[String]) -> Result<Value, String> {
-    let mut i = 0;
-    while i < args.len() {
-        if args[i] == "--json" && i + 1 < args.len() {
-            return serde_json::from_str(&args[i + 1]).map_err(|e| e.to_string());
-        }
-        i += 1;
-    }
-    Err("--json '<payload>' is required".to_string())
-}
-
-fn parse_seq_arg(args: &[String]) -> Result<u64, String> {
-    let mut i = 0;
-    while i < args.len() {
-        if args[i] == "--seq" && i + 1 < args.len() {
-            return args[i + 1]
-                .parse::<u64>()
-                .map_err(|e| format!("invalid --seq value: {}", e));
-        }
-        i += 1;
-    }
-    Err("--seq <number> is required".to_string())
 }
 
 fn has_flag(args: &[String], flag: &str) -> bool {
@@ -223,10 +186,7 @@ fn print_help() {
     eprintln!();
     eprintln!("Usage:");
     eprintln!("  git-ai daemon start");
+    eprintln!("  git-ai daemon run");
     eprintln!("  git-ai daemon status [--repo <path>]");
     eprintln!("  git-ai daemon shutdown");
-    eprintln!("  git-ai daemon trace --json '<payload>' [--wait]");
-    eprintln!("  git-ai daemon checkpoint --repo <path> --json '<payload>' [--wait]");
-    eprintln!("  git-ai daemon barrier --repo <path> --seq <n>");
-    eprintln!("  git-ai daemon reconcile [--repo <path>]");
 }
