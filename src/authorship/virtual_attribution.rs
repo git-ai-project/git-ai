@@ -385,34 +385,123 @@ impl VirtualAttributions {
                     continue;
                 }
 
-                // Get the latest file content from working directory
-                if let Ok(workdir) = repo.workdir() {
+                // Get the current working directory content for this file
+                let current_content = if let Ok(workdir) = repo.workdir() {
                     let abs_path = workdir.join(&entry.file);
-                    let file_content = if abs_path.exists() {
+                    if abs_path.exists() {
                         std::fs::read_to_string(&abs_path).unwrap_or_default()
                     } else {
                         String::new()
-                    };
-                    file_contents.insert(entry.file.clone(), file_content);
-                }
-
-                // Prefer persisted line attributions. Fall back to converting char attributions
-                // for compatibility with older checkpoint data.
-                let file_content = file_contents.get(&entry.file).cloned().unwrap_or_default();
-                let line_attrs = if entry.line_attributions.is_empty() {
-                    crate::authorship::attribution_tracker::attributions_to_line_attributions(
-                        &entry.attributions,
-                        &file_content,
-                    )
+                    }
                 } else {
-                    entry.line_attributions.clone()
+                    String::new()
                 };
+
+                // Try to retrieve the content that was present when the checkpoint was taken.
+                // The blob_sha (SHA256 of file at checkpoint time) lets us look up the stored
+                // snapshot. When the user has modified the file since the checkpoint, we must
+                // remap attributions from the old content to the new one; otherwise line numbers
+                // from the checkpoint get applied to the wrong lines in the current content.
+                let checkpoint_content = if !entry.blob_sha.is_empty() {
+                    working_log.get_file_version(&entry.blob_sha).ok()
+                } else {
+                    None
+                };
+
+                let (char_attrs, line_attrs) =
+                    if let Some(chk_content) = &checkpoint_content {
+                        if chk_content != &current_content {
+                            // Content changed since checkpoint: remap attributions through a diff
+                            // so that only lines that still exist in the current file are
+                            // attributed to AI (replaced/cleared lines become human).
+                            let chk_line_attrs = if entry.line_attributions.is_empty() {
+                                crate::authorship::attribution_tracker::attributions_to_line_attributions(
+                                    &entry.attributions,
+                                    chk_content,
+                                )
+                            } else {
+                                entry.line_attributions.clone()
+                            };
+
+                            if chk_line_attrs.is_empty() {
+                                file_contents.insert(entry.file.clone(), current_content);
+                                continue;
+                            }
+
+                            let chk_char_attrs = line_attributions_to_attributions(
+                                &chk_line_attrs,
+                                chk_content,
+                                0,
+                            );
+
+                            let tracker = crate::authorship::attribution_tracker::AttributionTracker::new();
+                            match transform_attributions_to_final(
+                                &tracker,
+                                chk_content,
+                                &chk_char_attrs,
+                                &current_content,
+                                0,
+                            ) {
+                                Ok(current_char_attrs) => {
+                                    let current_line_attrs = crate::authorship::attribution_tracker::attributions_to_line_attributions(
+                                        &current_char_attrs,
+                                        &current_content,
+                                    );
+                                    (current_char_attrs, current_line_attrs)
+                                }
+                                Err(_) => {
+                                    file_contents.insert(entry.file.clone(), current_content);
+                                    continue;
+                                }
+                            }
+                        } else {
+                            // Content unchanged: apply checkpoint line attrs directly (fast path)
+                            let line_attrs = if entry.line_attributions.is_empty() {
+                                crate::authorship::attribution_tracker::attributions_to_line_attributions(
+                                    &entry.attributions,
+                                    &current_content,
+                                )
+                            } else {
+                                entry.line_attributions.clone()
+                            };
+                            if line_attrs.is_empty() {
+                                file_contents.insert(entry.file.clone(), current_content);
+                                continue;
+                            }
+                            let char_attrs = line_attributions_to_attributions(
+                                &line_attrs,
+                                &current_content,
+                                0,
+                            );
+                            (char_attrs, line_attrs)
+                        }
+                    } else {
+                        // No blob available (old checkpoint format): fall back to applying line
+                        // attrs directly against the current content.
+                        let line_attrs = if entry.line_attributions.is_empty() {
+                            crate::authorship::attribution_tracker::attributions_to_line_attributions(
+                                &entry.attributions,
+                                &current_content,
+                            )
+                        } else {
+                            entry.line_attributions.clone()
+                        };
+                        if line_attrs.is_empty() {
+                            file_contents.insert(entry.file.clone(), current_content);
+                            continue;
+                        }
+                        let char_attrs =
+                            line_attributions_to_attributions(&line_attrs, &current_content, 0);
+                        (char_attrs, line_attrs)
+                    };
+
+                // Always store current working dir content so direct callers (status, hooks)
+                // see the right content for display and diff purposes.
+                file_contents.insert(entry.file.clone(), current_content);
 
                 if line_attrs.is_empty() {
                     continue;
                 }
-
-                let char_attrs = line_attributions_to_attributions(&line_attrs, &file_content, 0);
 
                 attributions.insert(entry.file.clone(), (char_attrs, line_attrs));
             }
