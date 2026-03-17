@@ -4,13 +4,42 @@ use repos::test_file::ExpectedLineExt;
 use repos::test_repo::TestRepo;
 use std::fs;
 
+fn configure_diff_settings(repo: &TestRepo, settings: &[(&str, &str)]) {
+    for (key, value) in settings {
+        repo.git_og(&["config", key, value])
+            .unwrap_or_else(|err| panic!("setting {key}={value} should succeed: {err}"));
+    }
+}
+
+fn run_simple_additions_with_diff_settings(settings: &[(&str, &str)]) {
+    let repo = TestRepo::new();
+    configure_diff_settings(&repo, settings);
+
+    let mut file = repo.filename("test.txt");
+    file.set_contents(lines!["Base line 1", "Base line 2"]);
+    repo.stage_all_and_commit("Base commit").unwrap();
+
+    file.insert_at(
+        2,
+        lines!["NEW LINEs From Claude!".ai(), "Hello".ai(), "World".ai(),],
+    );
+    repo.stage_all_and_commit("AI additions").unwrap();
+
+    file.assert_lines_and_blame(lines![
+        "Base line 1".human(),
+        "Base line 2".human(),
+        "NEW LINEs From Claude!".ai(),
+        "Hello".ai(),
+        "World".ai(),
+    ]);
+}
+
 #[test]
 fn test_simple_additions_empty_repo() {
     let repo = TestRepo::new();
     let mut file = repo.filename("test.txt");
 
     file.set_contents(lines!["Line1", "Line 2".ai(), "Line 3".ai(),]);
-
     repo.stage_all_and_commit("Initial commit").unwrap();
 
     file.assert_lines_and_blame(lines!["Line1".human(), "Line 2".ai(), "Line 3".ai(),]);
@@ -39,6 +68,64 @@ fn test_simple_additions_with_base_commit() {
         "Hello".ai(),
         "World".ai(),
     ]);
+}
+
+#[test]
+fn test_simple_additions_with_base_commit_and_custom_diff_config() {
+    run_simple_additions_with_diff_settings(&[
+        ("diff.wordregex", r"\w+|[^[:space:]]+"),
+        ("diff.mnemonicprefix", "true"),
+        ("diff.renames", "copies"),
+        ("diff.noprefix", "true"),
+    ]);
+}
+
+#[test]
+fn test_simple_additions_with_diff_noprefix_enabled() {
+    run_simple_additions_with_diff_settings(&[("diff.noprefix", "true")]);
+}
+
+#[test]
+fn test_simple_additions_with_diff_mnemonicprefix_enabled() {
+    run_simple_additions_with_diff_settings(&[("diff.mnemonicprefix", "true")]);
+}
+
+#[test]
+fn test_simple_additions_with_diff_renames_copies() {
+    run_simple_additions_with_diff_settings(&[("diff.renames", "copies")]);
+}
+
+#[test]
+fn test_simple_additions_with_diff_relative_enabled() {
+    run_simple_additions_with_diff_settings(&[("diff.relative", "true")]);
+}
+
+#[test]
+fn test_simple_additions_with_custom_diff_prefixes() {
+    run_simple_additions_with_diff_settings(&[
+        ("diff.srcPrefix", "SRC/"),
+        ("diff.dstPrefix", "DST/"),
+    ]);
+}
+
+#[test]
+fn test_simple_additions_with_diff_algorithm_histogram() {
+    run_simple_additions_with_diff_settings(&[("diff.algorithm", "histogram")]);
+}
+
+#[test]
+fn test_simple_additions_with_diff_indent_heuristic_disabled() {
+    run_simple_additions_with_diff_settings(&[("diff.indentHeuristic", "false")]);
+}
+
+#[test]
+fn test_simple_additions_with_diff_inter_hunk_context() {
+    run_simple_additions_with_diff_settings(&[("diff.interHunkContext", "8")]);
+}
+
+#[test]
+fn test_simple_additions_with_color_diff_always() {
+    run_simple_additions_with_diff_settings(&[("color.diff", "always"), ("color.ui", "always")]);
 }
 
 #[test]
@@ -1151,8 +1238,16 @@ fn test_multi_file_batch_commits_preserve_attribution() {
     let file_a_path = repo.path().join("file_a.txt");
     let file_b_path = repo.path().join("file_b.txt");
 
-    fs::write(&file_a_path, "AI content for file A\nLine 2 from AI\nLine 3 from AI\n").unwrap();
-    fs::write(&file_b_path, "AI content for file B\nLine 2 from AI\nLine 3 from AI\n").unwrap();
+    fs::write(
+        &file_a_path,
+        "AI content for file A\nLine 2 from AI\nLine 3 from AI\n",
+    )
+    .unwrap();
+    fs::write(
+        &file_b_path,
+        "AI content for file B\nLine 2 from AI\nLine 3 from AI\n",
+    )
+    .unwrap();
 
     // Single AI checkpoint covers both files (same AI session)
     repo.git_ai(&["checkpoint", "mock_ai"]).unwrap();
@@ -1198,7 +1293,8 @@ fn test_multi_file_batch_commits_modifications() {
     fs::write(&file_b_path, "Original content B\n").unwrap();
 
     repo.git_ai(&["checkpoint"]).unwrap();
-    repo.stage_all_and_commit("Initial commit with both files").unwrap();
+    repo.stage_all_and_commit("Initial commit with both files")
+        .unwrap();
 
     // AI modifies both files in the same session
     fs::write(&file_a_path, "Original content A\nAI added line A\n").unwrap();
@@ -1217,10 +1313,7 @@ fn test_multi_file_batch_commits_modifications() {
 
     // Verify both files have correct AI attribution
     let mut file_a = repo.filename("file_a.txt");
-    file_a.assert_lines_and_blame(lines![
-        "Original content A".human(),
-        "AI added line A".ai(),
-    ]);
+    file_a.assert_lines_and_blame(lines!["Original content A".human(), "AI added line A".ai(),]);
 
     let mut file_b = repo.filename("file_b.txt");
     file_b.assert_lines_and_blame(lines![
@@ -1246,11 +1339,7 @@ fn test_ai_edits_file_with_spaces_in_filename() {
         .unwrap();
 
     // AI adds new lines to the file
-    fs::write(
-        &file_path,
-        "Line 1\nLine 2\nAI Line 1\nAI Line 2\nLine 3\n",
-    )
-    .unwrap();
+    fs::write(&file_path, "Line 1\nLine 2\nAI Line 1\nAI Line 2\nLine 3\n").unwrap();
 
     // Mark the AI-authored content with mock_ai checkpoint
     repo.git_ai(&["checkpoint", "mock_ai", "my test file.txt"])
@@ -1269,3 +1358,16 @@ fn test_ai_edits_file_with_spaces_in_filename() {
         "Line 3".human(),
     ]);
 }
+
+reuse_tests_in_worktree!(
+    test_simple_additions_empty_repo,
+    test_simple_additions_with_base_commit,
+    test_simple_additions_on_top_of_ai_contributions,
+    test_simple_additions_new_file_not_git_added,
+    test_ai_human_interleaved_line_attribution,
+    test_simple_ai_then_human_deletion,
+    test_multiple_ai_checkpoints_with_human_deletions,
+    test_complex_mixed_additions_and_deletions,
+    test_partial_staging_filters_unstaged_lines,
+    test_human_stages_some_ai_lines,
+);

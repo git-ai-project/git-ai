@@ -10,22 +10,23 @@ pub struct OAuthClient {
 }
 
 /// Validate that a URL uses HTTPS (security requirement for OAuth)
-/// Only enforced in release builds - HTTP allowed in debug mode for local dev
+/// In release builds, only HTTPS is accepted — the HTTP path is not compiled in.
+/// In debug builds, HTTP is also allowed for local development.
+#[cfg(not(debug_assertions))]
 fn validate_https_url(url: &str) -> Result<(), String> {
-    #[cfg(not(debug_assertions))]
-    {
-        if !url.starts_with("https://") {
-            return Err(format!(
-                "Security error: OAuth requires HTTPS. URL '{}' is not secure.",
-                url
-            ));
-        }
+    if !url.starts_with("https://") {
+        return Err(format!(
+            "Security error: OAuth requires HTTPS. URL '{}' is not secure.",
+            url
+        ));
     }
-    #[cfg(debug_assertions)]
-    {
-        if !url.starts_with("https://") && !url.starts_with("http://") {
-            return Err(format!("Invalid URL scheme: {}", url));
-        }
+    Ok(())
+}
+
+#[cfg(debug_assertions)]
+fn validate_https_url(url: &str) -> Result<(), String> {
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Err(format!("Invalid URL scheme: {}", url));
     }
     Ok(())
 }

@@ -1,5 +1,6 @@
 use crate::error::GitAiError;
-use crate::git::repository::{Repository, Tree, exec_git};
+use crate::git::repository::{InternalGitProfile, Repository, Tree, exec_git_with_profile};
+use crate::git::status::MAX_PATHSPEC_ARGS;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -126,7 +127,7 @@ impl Repository {
             let mut args = self.global_args_for_exec();
             args.push("rev-parse".to_string());
             args.push("--empty-tree".to_string());
-            let output = exec_git(&args)?;
+            let output = exec_git_with_profile(&args, InternalGitProfile::General)?;
             Some(String::from_utf8(output.stdout)?.trim().to_string())
         } else {
             None
@@ -158,16 +159,33 @@ impl Repository {
         args.push(old_oid);
         args.push(new_oid);
 
-        // Add pathspecs if provided
-        if let Some(paths) = pathspecs {
-            args.push("--".to_string());
-            for path in paths {
-                args.push(path.clone());
+        // Add pathspecs if provided (only as CLI args when under threshold)
+        let needs_post_filter = if let Some(paths) = pathspecs {
+            if paths.len() > MAX_PATHSPEC_ARGS {
+                true
+            } else {
+                args.push("--".to_string());
+                for path in paths {
+                    args.push(path.clone());
+                }
+                false
             }
-        }
+        } else {
+            false
+        };
 
-        let output = exec_git(&args)?;
-        let deltas = parse_diff_raw(&output.stdout)?;
+        let output = exec_git_with_profile(&args, InternalGitProfile::RawDiffParse)?;
+        let mut deltas = parse_diff_raw(&output.stdout)?;
+
+        if needs_post_filter && let Some(paths) = pathspecs {
+            deltas.retain(|delta| {
+                delta
+                    .new_file
+                    .path()
+                    .and_then(|p| p.to_str())
+                    .is_some_and(|p| paths.contains(p))
+            });
+        }
 
         Ok(Diff { deltas })
     }

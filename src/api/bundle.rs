@@ -30,14 +30,14 @@ impl ApiClient {
 
         match status_code {
             200 => {
-                let bundle_response: CreateBundleResponse = serde_json::from_str(body)
-                    .map_err(GitAiError::JsonError)?;
+                let bundle_response: CreateBundleResponse =
+                    serde_json::from_str(body).map_err(GitAiError::JsonError)?;
                 Ok(bundle_response)
             }
             400 => {
                 // Try to parse error response
-                let error_response: ApiErrorResponse = serde_json::from_str(body)
-                    .unwrap_or_else(|_| ApiErrorResponse {
+                let error_response: ApiErrorResponse =
+                    serde_json::from_str(body).unwrap_or_else(|_| ApiErrorResponse {
                         error: "Invalid request body".to_string(),
                         details: Some(serde_json::Value::String(body.to_string())),
                     });
@@ -47,8 +47,8 @@ impl ApiClient {
                 )))
             }
             500 => {
-                let error_response: ApiErrorResponse = serde_json::from_str(body)
-                    .unwrap_or_else(|_| ApiErrorResponse {
+                let error_response: ApiErrorResponse =
+                    serde_json::from_str(body).unwrap_or_else(|_| ApiErrorResponse {
                         error: "Internal server error".to_string(),
                         details: None,
                     });

@@ -314,24 +314,33 @@ fn process_completed_pull_rebase(repository: &mut Repository, original_head: &st
         original_head, new_head
     ));
 
-    let (original_commits, new_commits) =
-        match build_rebase_commit_mappings(repository, original_head, new_head) {
-            Ok(mappings) => {
-                debug_log(&format!(
-                    "Pull rebase mappings: {} original -> {} new commits",
-                    mappings.0.len(),
-                    mappings.1.len()
-                ));
-                mappings
-            }
-            Err(e) => {
-                debug_log(&format!("Failed to build pull rebase mappings: {}", e));
-                return;
-            }
-        };
+    let onto_head = resolve_pull_rebase_onto_head(repository);
+    let (original_commits, new_commits) = match build_rebase_commit_mappings(
+        repository,
+        original_head,
+        new_head,
+        onto_head.as_deref(),
+    ) {
+        Ok(mappings) => {
+            debug_log(&format!(
+                "Pull rebase mappings: {} original -> {} new commits",
+                mappings.0.len(),
+                mappings.1.len()
+            ));
+            mappings
+        }
+        Err(e) => {
+            debug_log(&format!("Failed to build pull rebase mappings: {}", e));
+            return;
+        }
+    };
 
     if original_commits.is_empty() {
         debug_log("No committed changes to rewrite authorship for after pull --rebase");
+        return;
+    }
+    if new_commits.is_empty() {
+        debug_log("No newly rebased commits to rewrite authorship for after pull --rebase");
         return;
     }
 
@@ -353,4 +362,12 @@ fn process_completed_pull_rebase(repository: &mut Repository, original_head: &st
     );
 
     debug_log("Pull --rebase authorship rewrite complete");
+}
+
+fn resolve_pull_rebase_onto_head(repository: &Repository) -> Option<String> {
+    repository
+        .revparse_single("@{upstream}")
+        .and_then(|obj| obj.peel_to_commit())
+        .map(|commit| commit.id())
+        .ok()
 }

@@ -302,10 +302,7 @@ fn show_all_config() -> Result<(), String> {
         );
     }
 
-    effective_config.insert(
-        "quiet".to_string(),
-        Value::Bool(runtime_config.is_quiet()),
-    );
+    effective_config.insert("quiet".to_string(), Value::Bool(runtime_config.is_quiet()));
 
     // Feature flags - show effective flags with defaults applied
     let flags_value = serde_json::to_value(runtime_config.get_feature_flags())
@@ -490,7 +487,9 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
             "update_channel" => {
                 // Validate update channel
                 if value != "latest" && value != "next" {
-                    return Err("Invalid update_channel value. Expected 'latest' or 'next'".to_string());
+                    return Err(
+                        "Invalid update_channel value. Expected 'latest' or 'next'".to_string()
+                    );
                 }
                 file_config.update_channel = Some(value.to_string());
                 crate::config::save_file_config(&file_config)?;
@@ -979,5 +978,310 @@ mod tests {
         let err = result.unwrap_err();
         assert!(err.contains("Invalid boolean value"));
         assert!(err.contains("invalid"));
+    }
+
+    // --- Additional comprehensive tests ---
+
+    #[test]
+    fn test_parse_value_json_string() {
+        let result = parse_value("\"hello\"").unwrap();
+        assert_eq!(result, Value::String("hello".to_string()));
+    }
+
+    #[test]
+    fn test_parse_value_json_number() {
+        let result = parse_value("42").unwrap();
+        assert_eq!(result, Value::Number(serde_json::Number::from(42)));
+    }
+
+    #[test]
+    fn test_parse_value_json_boolean() {
+        let result = parse_value("true").unwrap();
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn test_parse_value_json_array() {
+        let result = parse_value("[1,2,3]").unwrap();
+        assert!(result.is_array());
+        let arr = result.as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+    }
+
+    #[test]
+    fn test_parse_value_json_object() {
+        let result = parse_value(r#"{"key":"value"}"#).unwrap();
+        assert!(result.is_object());
+    }
+
+    #[test]
+    fn test_parse_value_plain_string() {
+        let result = parse_value("plain text").unwrap();
+        assert_eq!(result, Value::String("plain text".to_string()));
+    }
+
+    #[test]
+    fn test_mask_api_key_long() {
+        let key = "abcdefghijklmnop";
+        let masked = mask_api_key(key);
+        assert_eq!(masked, "abcd...mnop");
+    }
+
+    #[test]
+    fn test_mask_api_key_short() {
+        let key = "short";
+        let masked = mask_api_key(key);
+        assert_eq!(masked, "****");
+    }
+
+    #[test]
+    fn test_mask_api_key_exactly_eight() {
+        let key = "12345678";
+        let masked = mask_api_key(key);
+        assert_eq!(masked, "****");
+    }
+
+    #[test]
+    fn test_mask_api_key_nine_chars() {
+        let key = "123456789";
+        let masked = mask_api_key(key);
+        assert_eq!(masked, "1234...6789");
+    }
+
+    #[test]
+    fn test_parse_key_path_single() {
+        let result = parse_key_path("key");
+        assert_eq!(result, vec!["key"]);
+    }
+
+    #[test]
+    fn test_parse_key_path_nested() {
+        let result = parse_key_path("parent.child");
+        assert_eq!(result, vec!["parent", "child"]);
+    }
+
+    #[test]
+    fn test_parse_key_path_deeply_nested() {
+        let result = parse_key_path("a.b.c.d");
+        assert_eq!(result, vec!["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn test_parse_key_path_empty() {
+        let result = parse_key_path("");
+        assert_eq!(result, vec![""]);
+    }
+
+    #[test]
+    fn test_detect_pattern_type_global_wildcard() {
+        assert_eq!(detect_pattern_type("*"), PatternType::GlobalWildcard);
+        assert_eq!(detect_pattern_type(" * "), PatternType::GlobalWildcard);
+    }
+
+    #[test]
+    fn test_detect_pattern_type_http_url() {
+        assert_eq!(
+            detect_pattern_type("http://github.com/org/repo"),
+            PatternType::UrlOrGitProtocol
+        );
+        assert_eq!(
+            detect_pattern_type("https://github.com/org/repo"),
+            PatternType::UrlOrGitProtocol
+        );
+    }
+
+    #[test]
+    fn test_detect_pattern_type_git_ssh() {
+        assert_eq!(
+            detect_pattern_type("git@github.com:org/repo.git"),
+            PatternType::UrlOrGitProtocol
+        );
+    }
+
+    #[test]
+    fn test_detect_pattern_type_ssh_url() {
+        assert_eq!(
+            detect_pattern_type("ssh://git@github.com/org/repo"),
+            PatternType::UrlOrGitProtocol
+        );
+    }
+
+    #[test]
+    fn test_detect_pattern_type_git_protocol() {
+        assert_eq!(
+            detect_pattern_type("git://github.com/org/repo"),
+            PatternType::UrlOrGitProtocol
+        );
+    }
+
+    #[test]
+    fn test_detect_pattern_type_wildcard_in_url() {
+        assert_eq!(
+            detect_pattern_type("https://github.com/org/*"),
+            PatternType::UrlOrGitProtocol
+        );
+    }
+
+    #[test]
+    fn test_detect_pattern_type_question_mark_pattern() {
+        assert_eq!(detect_pattern_type("repo-?"), PatternType::UrlOrGitProtocol);
+    }
+
+    #[test]
+    fn test_detect_pattern_type_bracket_pattern() {
+        assert_eq!(
+            detect_pattern_type("[abc]def"),
+            PatternType::UrlOrGitProtocol
+        );
+    }
+
+    #[test]
+    fn test_detect_pattern_type_file_path_relative() {
+        assert_eq!(detect_pattern_type("./path/to/repo"), PatternType::FilePath);
+        assert_eq!(detect_pattern_type("path/to/repo"), PatternType::FilePath);
+    }
+
+    #[test]
+    fn test_detect_pattern_type_file_path_absolute() {
+        assert_eq!(detect_pattern_type("/path/to/repo"), PatternType::FilePath);
+    }
+
+    #[test]
+    fn test_detect_pattern_type_file_path_home() {
+        assert_eq!(detect_pattern_type("~/repo"), PatternType::FilePath);
+    }
+
+    #[test]
+    fn test_detect_pattern_type_single_dot() {
+        assert_eq!(detect_pattern_type("."), PatternType::FilePath);
+    }
+
+    #[test]
+    fn test_detect_pattern_type_double_dot() {
+        assert_eq!(detect_pattern_type(".."), PatternType::FilePath);
+    }
+
+    #[test]
+    fn test_resolve_repository_value_wildcard() {
+        let result = resolve_repository_value("*").unwrap();
+        assert_eq!(result, vec!["*"]);
+    }
+
+    #[test]
+    fn test_resolve_repository_value_url() {
+        let result = resolve_repository_value("https://github.com/org/repo").unwrap();
+        assert_eq!(result, vec!["https://github.com/org/repo"]);
+    }
+
+    #[test]
+    fn test_resolve_repository_value_git_ssh() {
+        let result = resolve_repository_value("git@github.com:org/repo.git").unwrap();
+        assert_eq!(result, vec!["git@github.com:org/repo.git"]);
+    }
+
+    #[test]
+    fn test_log_array_changes_add_mode() {
+        let items = vec!["item1".to_string(), "item2".to_string()];
+        // Just test that it doesn't panic - output goes to stderr
+        log_array_changes(&items, true);
+    }
+
+    #[test]
+    fn test_log_array_changes_set_mode() {
+        let items = vec!["item1".to_string(), "item2".to_string()];
+        // Just test that it doesn't panic - output goes to stderr
+        log_array_changes(&items, false);
+    }
+
+    #[test]
+    fn test_log_array_removals() {
+        let items = vec!["item1".to_string(), "item2".to_string()];
+        // Just test that it doesn't panic - output goes to stderr
+        log_array_removals(&items);
+    }
+
+    #[test]
+    fn test_log_array_changes_empty() {
+        let items: Vec<String> = vec![];
+        log_array_changes(&items, true);
+        log_array_changes(&items, false);
+    }
+
+    #[test]
+    fn test_log_array_removals_empty() {
+        let items: Vec<String> = vec![];
+        log_array_removals(&items);
+    }
+
+    #[test]
+    fn test_parse_bool_case_insensitive() {
+        assert!(parse_bool("TRUE").unwrap());
+        assert!(parse_bool("True").unwrap());
+        assert!(parse_bool("tRuE").unwrap());
+        assert!(!parse_bool("FALSE").unwrap());
+        assert!(!parse_bool("False").unwrap());
+        assert!(!parse_bool("fAlSe").unwrap());
+    }
+
+    #[test]
+    fn test_parse_bool_numeric() {
+        assert!(parse_bool("1").unwrap());
+        assert!(!parse_bool("0").unwrap());
+    }
+
+    #[test]
+    fn test_parse_bool_word_forms() {
+        assert!(parse_bool("yes").unwrap());
+        assert!(parse_bool("YES").unwrap());
+        assert!(parse_bool("on").unwrap());
+        assert!(parse_bool("ON").unwrap());
+        assert!(!parse_bool("no").unwrap());
+        assert!(!parse_bool("NO").unwrap());
+        assert!(!parse_bool("off").unwrap());
+        assert!(!parse_bool("OFF").unwrap());
+    }
+
+    #[test]
+    fn test_parse_bool_invalid_number() {
+        assert!(parse_bool("2").is_err());
+        assert!(parse_bool("-1").is_err());
+    }
+
+    #[test]
+    fn test_parse_bool_empty_string() {
+        assert!(parse_bool("").is_err());
+    }
+
+    #[test]
+    fn test_parse_bool_whitespace() {
+        // Whitespace is not trimmed by parse_bool
+        assert!(parse_bool(" true").is_err());
+        assert!(parse_bool("true ").is_err());
+    }
+
+    #[test]
+    fn test_pattern_type_combinations() {
+        // Test edge cases with @ and : characters
+        assert_eq!(
+            detect_pattern_type("user@host:path"),
+            PatternType::UrlOrGitProtocol
+        );
+        assert_eq!(detect_pattern_type("@:"), PatternType::UrlOrGitProtocol);
+        // @ but no : means file path
+        assert_eq!(detect_pattern_type("file@name"), PatternType::FilePath);
+        // : but no @ means file path (unless absolute)
+        assert_eq!(detect_pattern_type("file:name"), PatternType::FilePath);
+    }
+
+    #[test]
+    fn test_pattern_type_custom_protocols() {
+        assert_eq!(
+            detect_pattern_type("custom://host/path"),
+            PatternType::UrlOrGitProtocol
+        );
+        assert_eq!(
+            detect_pattern_type("ftp://host/path"),
+            PatternType::UrlOrGitProtocol
+        );
     }
 }

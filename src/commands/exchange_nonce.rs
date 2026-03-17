@@ -7,8 +7,8 @@
 //! On failure, exits with code 1 silently so the install script can fall back
 //! to running `git-ai login`. Errors are recorded server-side for debugging.
 
-use crate::auth::client::OAuthClient;
 use crate::auth::CredentialStore;
+use crate::auth::client::OAuthClient;
 
 /// Handle the exchange-nonce command (internal - called by install scripts)
 ///
@@ -16,7 +16,9 @@ use crate::auth::CredentialStore;
 /// Exits with code 0 on success.
 pub fn handle_exchange_nonce(_args: &[String]) {
     // Read from environment variables (injected by install script)
-    let nonce = std::env::var("INSTALL_NONCE").ok().filter(|s| !s.is_empty());
+    let nonce = std::env::var("INSTALL_NONCE")
+        .ok()
+        .filter(|s| !s.is_empty());
     let api_base = std::env::var("API_BASE").ok().filter(|s| !s.is_empty());
 
     // If no nonce provided, silently exit success (not an error - just means no auto-login)

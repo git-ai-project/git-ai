@@ -74,7 +74,22 @@ function Verify-Checksum {
     }
 
     # Calculate actual checksum
-    $actual = (Get-FileHash -Path $File -Algorithm SHA256).Hash.ToLower()
+    $hashCommand = Get-Command Get-FileHash -ErrorAction SilentlyContinue
+    if ($null -ne $hashCommand) {
+        $actual = (Get-FileHash -Path $File -Algorithm SHA256).Hash.ToLower()
+    } else {
+        $stream = [System.IO.File]::OpenRead($File)
+        try {
+            $sha256 = [System.Security.Cryptography.SHA256]::Create()
+            $hashBytes = $sha256.ComputeHash($stream)
+            $actual = ([System.BitConverter]::ToString($hashBytes)).Replace('-', '').ToLower()
+        } finally {
+            $stream.Dispose()
+            if ($sha256) {
+                $sha256.Dispose()
+            }
+        }
+    }
 
     if ($expected -ne $actual) {
         Remove-Item -Force -ErrorAction SilentlyContinue $File
@@ -238,8 +253,8 @@ function Set-PathPrependBeforeGit {
         Write-Host 'Your PATH was NOT changed. To ensure git-ai takes precedence over Git:' -ForegroundColor Red
         Write-Host ("  1) Run PowerShell as Administrator and re-run this installer; OR") -ForegroundColor Red
         Write-Host ("  2) Manually edit the SYSTEM Path and move '{0}' before any entries containing 'Git' (e.g. '{1}')." -f $PathToAdd, $origGitDir) -ForegroundColor Red
-        Write-Host "     Steps: Start → type 'Environment Variables' → 'Edit the system environment variables' → Environment Variables →" -ForegroundColor Red
-        Write-Host "            Under 'System variables', select 'Path' → Edit → Move '{0}' to the top (before Git) → OK." -f $PathToAdd -ForegroundColor Red
+        Write-Host "     Steps: Start -> type 'Environment Variables' -> 'Edit the system environment variables' -> Environment Variables ->" -ForegroundColor Red
+        Write-Host ("            Under 'System variables', select 'Path' -> Edit -> Move '{0}' to the top (before Git) -> OK." -f $PathToAdd) -ForegroundColor Red
         Write-Host ''
         if ($userStatus -eq 'Updated' -or $userStatus -eq 'AlreadyPresent') {
             Write-Host 'User PATH was updated successfully, so git-ai will still take precedence for this account.' -ForegroundColor Yellow
@@ -272,22 +287,24 @@ $os = 'windows'
 $binaryName = "git-ai-$os-$arch"
 
 # Determine release tag
-# Priority: 1. Pinned version (for release builds), 2. Environment variable, 3. "latest"
-if ($PinnedVersion -ne '__VERSION_PLACEHOLDER__') {
+# Priority: 1. Local binary override, 2. Pinned version (for release builds), 3. Environment variable, 4. "latest"
+if (-not [string]::IsNullOrWhiteSpace($env:GIT_AI_LOCAL_BINARY)) {
+    $releaseTag = 'local'
+} elseif ($PinnedVersion -ne '__VERSION_PLACEHOLDER__') {
     # Version-pinned install script from a release
     $releaseTag = $PinnedVersion
-    $downloadUrlExe = "https://usegitai.com/worker/releases/download/$releaseTag/$binaryName.exe"
-    $downloadUrlNoExt = "https://usegitai.com/worker/releases/download/$releaseTag/$binaryName"
+    $downloadUrlExe = "https://github.com/$Repo/releases/download/$releaseTag/$binaryName.exe"
+    $downloadUrlNoExt = "https://github.com/$Repo/releases/download/$releaseTag/$binaryName"
 } elseif (-not [string]::IsNullOrWhiteSpace($env:GIT_AI_RELEASE_TAG) -and $env:GIT_AI_RELEASE_TAG -ne 'latest') {
     # Environment variable override
     $releaseTag = $env:GIT_AI_RELEASE_TAG
-    $downloadUrlExe = "https://usegitai.com/worker/releases/download/$releaseTag/$binaryName.exe"
-    $downloadUrlNoExt = "https://usegitai.com/worker/releases/download/$releaseTag/$binaryName"
+    $downloadUrlExe = "https://github.com/$Repo/releases/download/$releaseTag/$binaryName.exe"
+    $downloadUrlNoExt = "https://github.com/$Repo/releases/download/$releaseTag/$binaryName"
 } else {
     # Default to latest
     $releaseTag = 'latest'
-    $downloadUrlExe = "https://usegitai.com/worker/releases/download/latest/$binaryName.exe"
-    $downloadUrlNoExt = "https://usegitai.com/worker/releases/download/latest/$binaryName"
+    $downloadUrlExe = "https://github.com/$Repo/releases/latest/download/$binaryName.exe"
+    $downloadUrlNoExt = "https://github.com/$Repo/releases/latest/download/$binaryName"
 }
 
 # Install directory: %USERPROFILE%\.git-ai\bin
@@ -311,7 +328,14 @@ function Try-Download {
 
 # Track which download URL succeeded for checksum verification
 $downloadedBinaryName = $null
-if (Try-Download -Url $downloadUrlExe) {
+if (-not [string]::IsNullOrWhiteSpace($env:GIT_AI_LOCAL_BINARY)) {
+    if (-not (Test-Path -LiteralPath $env:GIT_AI_LOCAL_BINARY)) {
+        Remove-Item -Force -ErrorAction SilentlyContinue $tmpFile
+        Write-ErrorAndExit "Local binary not found at $($env:GIT_AI_LOCAL_BINARY)"
+    }
+    Copy-Item -Force -Path $env:GIT_AI_LOCAL_BINARY -Destination $tmpFile
+    $downloadedBinaryName = "$binaryName.exe"
+} elseif (Try-Download -Url $downloadUrlExe) {
     $downloadedBinaryName = "$binaryName.exe"
 } elseif (Try-Download -Url $downloadUrlNoExt) {
     $downloadedBinaryName = $binaryName
@@ -410,6 +434,72 @@ if ($pathUpdate.MachineStatus -eq 'Updated') {
 Write-Success "Successfully installed git-ai into $installDir"
 Write-Success "You can now run 'git-ai' from your terminal"
 
+# Configure Git Bash shell profiles so git-ai takes precedence over /mingw64/bin/git
+# Git Bash (MSYS2/MinGW) prepends its own directories to PATH, which shadows
+# the Windows PATH entry we set above. Writing to ~/.bashrc ensures git-ai's
+# bin directory is prepended after Git Bash's own PATH setup.
+$gitBashConfigured = $false
+$gitBashAlreadyConfigured = $false
+try {
+    $bashrcPath = Join-Path $HOME '.bashrc'
+    $bashProfilePath = Join-Path $HOME '.bash_profile'
+    $pathCmd = 'export PATH="$HOME/.git-ai/bin:$PATH"'
+    $markerString = '.git-ai/bin'
+
+    # Detect if Git Bash is installed
+    $gitBashInstalled = $false
+    $gitForWindowsPaths = @()
+    if ($env:ProgramFiles) { $gitForWindowsPaths += Join-Path $env:ProgramFiles 'Git\bin\bash.exe' }
+    if (${env:ProgramFiles(x86)}) { $gitForWindowsPaths += Join-Path ${env:ProgramFiles(x86)} 'Git\bin\bash.exe' }
+    if ($env:LOCALAPPDATA) { $gitForWindowsPaths += Join-Path $env:LOCALAPPDATA 'Programs\Git\bin\bash.exe' }
+    foreach ($p in $gitForWindowsPaths) {
+        if ($p -and (Test-Path -LiteralPath $p)) {
+            $gitBashInstalled = $true
+            break
+        }
+    }
+
+    if ($gitBashInstalled) {
+        # Determine which config file to update (prefer .bashrc, fall back to .bash_profile)
+        $targetBashConfig = $null
+        if (Test-Path -LiteralPath $bashrcPath) {
+            $targetBashConfig = $bashrcPath
+        } elseif (Test-Path -LiteralPath $bashProfilePath) {
+            $targetBashConfig = $bashProfilePath
+        } else {
+            # No existing config; create .bashrc
+            $targetBashConfig = $bashrcPath
+        }
+
+        # Check if already configured
+        $alreadyPresent = $false
+        if (Test-Path -LiteralPath $targetBashConfig) {
+            $content = Get-Content -LiteralPath $targetBashConfig -Raw -ErrorAction SilentlyContinue
+            if ($content -and $content.Contains($markerString)) {
+                $alreadyPresent = $true
+            }
+        }
+
+        if ($alreadyPresent) {
+            $gitBashAlreadyConfigured = $true
+        } else {
+            $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+            $appendContent = "`n# Added by git-ai installer on $timestamp`n$pathCmd`n"
+            $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+            [System.IO.File]::AppendAllText($targetBashConfig, $appendContent, $utf8NoBom)
+            $gitBashConfigured = $true
+        }
+    }
+} catch {
+    Write-Host "Warning: Failed to configure Git Bash: $($_.Exception.Message)" -ForegroundColor Yellow
+}
+
+if ($gitBashConfigured) {
+    Write-Success "Successfully configured Git Bash ($targetBashConfig)"
+} elseif ($gitBashAlreadyConfigured) {
+    Write-Success "Git Bash already configured ($targetBashConfig)"
+}
+
 # Write JSON config at %USERPROFILE%\.git-ai\config.json (only if it doesn't exist)
 try {
     $configDir = Join-Path $HOME '.git-ai'
@@ -420,7 +510,8 @@ try {
         $cfg = @{
             git_path = $stdGitPath
         } | ConvertTo-Json -Compress
-        $cfg | Out-File -FilePath $configJsonPath -Encoding UTF8 -Force
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($configJsonPath, $cfg, $utf8NoBom)
     }
 } catch {
     Write-Host "Warning: Failed to write config.json: $($_.Exception.Message)" -ForegroundColor Yellow

@@ -54,7 +54,7 @@ pub fn u64_to_json(field: &PosField<u64>) -> Option<Value> {
 #[allow(dead_code)]
 pub fn sparse_get_string(arr: &SparseArray, pos: usize) -> PosField<String> {
     match arr.get(&pos.to_string()) {
-        None => None, // not-set
+        None => None,                    // not-set
         Some(Value::Null) => Some(None), // explicit null
         Some(Value::String(s)) => Some(Some(s.clone())),
         Some(_) => None, // wrong type, treat as not-set
@@ -148,13 +148,15 @@ pub fn sparse_get_vec_u32(arr: &SparseArray, pos: usize) -> PosField<Vec<u32>> {
         Some(Value::Array(arr)) => {
             let nums: Vec<u32> = arr
                 .iter()
-                .filter_map(|v| v.as_u64().and_then(|n| {
-                    if n <= u32::MAX as u64 {
-                        Some(n as u32)
-                    } else {
-                        None
-                    }
-                }))
+                .filter_map(|v| {
+                    v.as_u64().and_then(|n| {
+                        if n <= u32::MAX as u64 {
+                            Some(n as u32)
+                        } else {
+                            None
+                        }
+                    })
+                })
                 .collect();
             Some(Some(nums))
         }
@@ -411,5 +413,205 @@ mod tests {
 
         arr.insert("1".to_string(), Value::Number(42.into()));
         assert_eq!(sparse_get_u32(&arr, 1), Some(Some(42)));
+    }
+
+    #[test]
+    fn test_u64_to_json() {
+        assert_eq!(u64_to_json(&None), None);
+        assert_eq!(u64_to_json(&Some(None)), Some(Value::Null));
+        assert_eq!(
+            u64_to_json(&Some(Some(12345678901234))),
+            Some(Value::Number(12345678901234u64.into()))
+        );
+    }
+
+    #[test]
+    fn test_sparse_get_u64() {
+        let mut arr = SparseArray::new();
+        assert_eq!(sparse_get_u64(&arr, 0), None);
+
+        arr.insert("0".to_string(), Value::Null);
+        assert_eq!(sparse_get_u64(&arr, 0), Some(None));
+
+        arr.insert("1".to_string(), Value::Number(12345678901234u64.into()));
+        assert_eq!(sparse_get_u64(&arr, 1), Some(Some(12345678901234)));
+
+        // Wrong type
+        arr.insert("2".to_string(), Value::String("not a number".to_string()));
+        assert_eq!(sparse_get_u64(&arr, 2), None);
+    }
+
+    #[test]
+    fn test_vec_string_to_json() {
+        assert_eq!(vec_string_to_json(&None), None);
+        assert_eq!(vec_string_to_json(&Some(None)), Some(Value::Null));
+        assert_eq!(
+            vec_string_to_json(&Some(Some(vec!["a".to_string(), "b".to_string()]))),
+            Some(Value::Array(vec![
+                Value::String("a".to_string()),
+                Value::String("b".to_string())
+            ]))
+        );
+    }
+
+    #[test]
+    fn test_vec_u32_to_json() {
+        assert_eq!(vec_u32_to_json(&None), None);
+        assert_eq!(vec_u32_to_json(&Some(None)), Some(Value::Null));
+        assert_eq!(
+            vec_u32_to_json(&Some(Some(vec![10, 20, 30]))),
+            Some(Value::Array(vec![
+                Value::Number(10.into()),
+                Value::Number(20.into()),
+                Value::Number(30.into())
+            ]))
+        );
+    }
+
+    #[test]
+    fn test_vec_u64_to_json() {
+        assert_eq!(vec_u64_to_json(&None), None);
+        assert_eq!(vec_u64_to_json(&Some(None)), Some(Value::Null));
+        assert_eq!(
+            vec_u64_to_json(&Some(Some(vec![1000000000000u64, 2000000000000u64]))),
+            Some(Value::Array(vec![
+                Value::Number(1000000000000u64.into()),
+                Value::Number(2000000000000u64.into())
+            ]))
+        );
+    }
+
+    #[test]
+    fn test_sparse_get_vec_string() {
+        let mut arr = SparseArray::new();
+        assert_eq!(sparse_get_vec_string(&arr, 0), None);
+
+        arr.insert("0".to_string(), Value::Null);
+        assert_eq!(sparse_get_vec_string(&arr, 0), Some(None));
+
+        arr.insert(
+            "1".to_string(),
+            Value::Array(vec![
+                Value::String("x".to_string()),
+                Value::String("y".to_string()),
+            ]),
+        );
+        assert_eq!(
+            sparse_get_vec_string(&arr, 1),
+            Some(Some(vec!["x".to_string(), "y".to_string()]))
+        );
+
+        // Mixed types - filters out non-strings
+        arr.insert(
+            "2".to_string(),
+            Value::Array(vec![
+                Value::String("a".to_string()),
+                Value::Number(123.into()),
+                Value::String("b".to_string()),
+            ]),
+        );
+        assert_eq!(
+            sparse_get_vec_string(&arr, 2),
+            Some(Some(vec!["a".to_string(), "b".to_string()]))
+        );
+    }
+
+    #[test]
+    fn test_sparse_get_vec_u32() {
+        let mut arr = SparseArray::new();
+        assert_eq!(sparse_get_vec_u32(&arr, 0), None);
+
+        arr.insert("0".to_string(), Value::Null);
+        assert_eq!(sparse_get_vec_u32(&arr, 0), Some(None));
+
+        arr.insert(
+            "1".to_string(),
+            Value::Array(vec![Value::Number(10.into()), Value::Number(20.into())]),
+        );
+        assert_eq!(sparse_get_vec_u32(&arr, 1), Some(Some(vec![10, 20])));
+
+        // Value too large for u32
+        arr.insert(
+            "2".to_string(),
+            Value::Array(vec![
+                Value::Number(10.into()),
+                Value::Number(5000000000u64.into()),
+            ]),
+        );
+        assert_eq!(sparse_get_vec_u32(&arr, 2), Some(Some(vec![10]))); // filters out too-large value
+    }
+
+    #[test]
+    fn test_sparse_get_vec_u64() {
+        let mut arr = SparseArray::new();
+        assert_eq!(sparse_get_vec_u64(&arr, 0), None);
+
+        arr.insert("0".to_string(), Value::Null);
+        assert_eq!(sparse_get_vec_u64(&arr, 0), Some(None));
+
+        arr.insert(
+            "1".to_string(),
+            Value::Array(vec![
+                Value::Number(1000000000000u64.into()),
+                Value::Number(2000000000000u64.into()),
+            ]),
+        );
+        assert_eq!(
+            sparse_get_vec_u64(&arr, 1),
+            Some(Some(vec![1000000000000u64, 2000000000000u64]))
+        );
+    }
+
+    #[test]
+    fn test_sparse_set() {
+        let mut arr = SparseArray::new();
+
+        // Set with Some value
+        sparse_set(&mut arr, 0, Some(Value::String("test".to_string())));
+        assert_eq!(arr.get("0"), Some(&Value::String("test".to_string())));
+
+        // Set with None (no-op)
+        sparse_set(&mut arr, 1, None);
+        assert_eq!(arr.get("1"), None);
+
+        // Set with null value
+        sparse_set(&mut arr, 2, Some(Value::Null));
+        assert_eq!(arr.get("2"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn test_sparse_get_string_wrong_type() {
+        let mut arr = SparseArray::new();
+        arr.insert("0".to_string(), Value::Number(123.into()));
+        // Wrong type should return None (not-set)
+        assert_eq!(sparse_get_string(&arr, 0), None);
+    }
+
+    #[test]
+    fn test_sparse_get_u32_wrong_type() {
+        let mut arr = SparseArray::new();
+        arr.insert("0".to_string(), Value::String("not a number".to_string()));
+        // Wrong type should return None
+        assert_eq!(sparse_get_u32(&arr, 0), None);
+    }
+
+    #[test]
+    fn test_sparse_get_u32_overflow() {
+        let mut arr = SparseArray::new();
+        // Value larger than u32::MAX
+        arr.insert("0".to_string(), Value::Number(5000000000u64.into()));
+        // Should return None for overflow
+        assert_eq!(sparse_get_u32(&arr, 0), None);
+    }
+
+    #[test]
+    fn test_sparse_get_vec_wrong_types() {
+        let mut arr = SparseArray::new();
+
+        // Not an array
+        arr.insert("0".to_string(), Value::String("not an array".to_string()));
+        assert_eq!(sparse_get_vec_string(&arr, 0), None);
+        assert_eq!(sparse_get_vec_u32(&arr, 0), None);
+        assert_eq!(sparse_get_vec_u64(&arr, 0), None);
     }
 }

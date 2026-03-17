@@ -1,0 +1,6 @@
+---
+source: tests/initial_attributions.rs
+assertion_line: 352
+expression: normalized_b
+---
+"COMMIT_SHA (mock_ai TIMESTAMP 1) line 1 in B\nCOMMIT_SHA (mock_ai TIMESTAMP 2) line 2 in B\n"

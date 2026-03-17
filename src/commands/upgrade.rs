@@ -1,9 +1,9 @@
 use crate::api::client::ApiContext;
 use crate::config::{self, UpdateChannel};
 use crate::observability::log_message;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -20,6 +20,7 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 const UPDATE_CHECK_INTERVAL_HOURS: u64 = 24;
 const GIT_AI_RELEASE_ENV: &str = "GIT_AI_RELEASE_TAG";
 const BACKGROUND_SPAWN_THROTTLE_SECS: u64 = 60;
+const ENV_BACKGROUND_UPGRADE_WORKER: &str = "GIT_AI_BACKGROUND_UPGRADE_WORKER";
 
 static UPDATE_NOTICE_EMITTED: AtomicBool = AtomicBool::new(false);
 static LAST_BACKGROUND_SPAWN: AtomicU64 = AtomicU64::new(0);
@@ -143,11 +144,7 @@ fn semver_from_tag(tag: &str) -> String {
         .trim()
         .trim_start_matches("enterprise-")
         .trim_start_matches('v');
-    trimmed
-        .split(['-', '+'])
-        .next()
-        .unwrap_or("")
-        .to_string()
+    trimmed.split(['-', '+']).next().unwrap_or("").to_string()
 }
 
 fn determine_action(force: bool, release: &ChannelRelease, current_version: &str) -> UpgradeAction {
@@ -233,8 +230,7 @@ fn fetch_and_verify_checksums(
         ));
     }
 
-    let content = response
-        .as_bytes();
+    let content = response.as_bytes();
 
     verify_sha256(content, expected_checksum)
         .map_err(|e| format!("SHA256SUMS verification failed: {}", e))?;
@@ -343,10 +339,7 @@ fn release_from_response(
 }
 
 #[cfg(test)]
-fn try_mock_releases(
-    base: &str,
-    channel: UpdateChannel,
-) -> Option<Result<ChannelRelease, String>> {
+fn try_mock_releases(base: &str, channel: UpdateChannel) -> Option<Result<ChannelRelease, String>> {
     let json = base.strip_prefix("mock://")?;
     Some(
         serde_json::from_str::<ReleasesResponse>(json)
@@ -403,22 +396,28 @@ fn run_install_script(script_content: &str, tag: &str, silent: bool) -> Result<(
             log_path_str, script_path_str, script_path_str
         );
 
-        let mut cmd = Command::new("powershell");
-        cmd.arg("-NoProfile")
-            .arg("-ExecutionPolicy")
-            .arg("Bypass")
-            .arg("-Command")
-            .arg(&ps_wrapper)
-            .env(GIT_AI_RELEASE_ENV, tag);
+        let spawn_powershell = |exe: &str| -> std::io::Result<std::process::Child> {
+            let mut cmd = Command::new(exe);
+            cmd.arg("-NoProfile")
+                .arg("-ExecutionPolicy")
+                .arg("Bypass")
+                .arg("-Command")
+                .arg(&ps_wrapper)
+                .env(GIT_AI_RELEASE_ENV, tag);
 
-        // Hide the spawned console to prevent any host/UI bleed-through
-        cmd.creation_flags(CREATE_NO_WINDOW);
+            // Hide the spawned console to prevent any host/UI bleed-through
+            cmd.creation_flags(CREATE_NO_WINDOW);
 
-        if silent {
-            cmd.stdout(Stdio::null()).stderr(Stdio::null());
-        }
+            if silent {
+                cmd.stdout(Stdio::null()).stderr(Stdio::null());
+            }
 
-        match cmd.spawn() {
+            cmd.spawn()
+        };
+
+        let spawn_result = spawn_powershell("pwsh").or_else(|_| spawn_powershell("powershell"));
+
+        match spawn_result {
             Ok(_) => {
                 if !silent {
                     println!(
@@ -443,8 +442,13 @@ fn run_install_script(script_content: &str, tag: &str, silent: bool) -> Result<(
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
-        // Write script to a temp file
-        let temp_dir = std::env::temp_dir();
+        // Write script to ~/.git-ai/tmp/ to avoid /tmp noexec or permission issues.
+        // Fall back to the system temp dir if the home-based path is unavailable.
+        let temp_dir = crate::config::git_ai_dir_path()
+            .map(|p| p.join("tmp"))
+            .unwrap_or_else(std::env::temp_dir);
+        fs::create_dir_all(&temp_dir)
+            .map_err(|e| format!("Failed to create temp directory: {}", e))?;
         let script_path = temp_dir.join(format!("git-ai-install-{}.sh", std::process::id()));
 
         // Write and make executable
@@ -590,31 +594,33 @@ fn run_impl_with_url(
     println!("Fetching and verifying release artifacts...");
 
     // Fetch and verify SHA256SUMS against the release's master checksum
-    let checksums = match fetch_and_verify_checksums(api_base_url, channel.as_str(), &release.checksum) {
-        Ok(checksums) => {
-            println!("\x1b[1;32m✓\x1b[0m SHA256SUMS verified");
-            checksums
-        }
-        Err(err) => {
-            eprintln!("Failed to fetch/verify checksums: {}", err);
-            std::process::exit(1);
-        }
-    };
+    let checksums =
+        match fetch_and_verify_checksums(api_base_url, channel.as_str(), &release.checksum) {
+            Ok(checksums) => {
+                println!("\x1b[1;32m✓\x1b[0m SHA256SUMS verified");
+                checksums
+            }
+            Err(err) => {
+                eprintln!("Failed to fetch/verify checksums: {}", err);
+                std::process::exit(1);
+            }
+        };
 
     // Fetch and verify the install script
-    let script_content = match fetch_and_verify_install_script(api_base_url, channel.as_str(), &checksums) {
-        Ok(content) => {
-            #[cfg(windows)]
-            println!("\x1b[1;32m✓\x1b[0m install.ps1 verified");
-            #[cfg(not(windows))]
-            println!("\x1b[1;32m✓\x1b[0m install.sh verified");
-            content
-        }
-        Err(err) => {
-            eprintln!("Failed to fetch/verify install script: {}", err);
-            std::process::exit(1);
-        }
-    };
+    let script_content =
+        match fetch_and_verify_install_script(api_base_url, channel.as_str(), &checksums) {
+            Ok(content) => {
+                #[cfg(windows)]
+                println!("\x1b[1;32m✓\x1b[0m install.ps1 verified");
+                #[cfg(not(windows))]
+                println!("\x1b[1;32m✓\x1b[0m install.sh verified");
+                content
+            }
+            Err(err) => {
+                eprintln!("Failed to fetch/verify install script: {}", err);
+                std::process::exit(1);
+            }
+        };
 
     println!();
     println!("Running installation script...");
@@ -690,9 +696,11 @@ pub fn maybe_schedule_background_update_check() {
 
     if config.auto_updates_disabled()
         && let Some(cache) = cache.as_ref()
-            && cache.matches_channel(channel) && cache.update_available() {
-                print_cached_notice(cache);
-            }
+        && cache.matches_channel(channel)
+        && cache.update_available()
+    {
+        print_cached_notice(cache);
+    }
 
     if !should_check_for_updates(channel, cache.as_ref()) {
         return;
@@ -710,17 +718,12 @@ pub fn maybe_schedule_background_update_check() {
 }
 
 fn spawn_background_upgrade_process() -> bool {
-    match crate::utils::current_git_ai_exe() {
-        Ok(exe) => {
-            let mut cmd = Command::new(exe);
-            cmd.arg("upgrade")
-                .arg("--background")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-            cmd.spawn().is_ok()
-        }
-        Err(_) => false,
-    }
+    crate::utils::spawn_internal_git_ai_subcommand(
+        "upgrade",
+        &["--background"],
+        ENV_BACKGROUND_UPGRADE_WORKER,
+        &[],
+    )
 }
 
 fn is_newer_version(latest: &str, current: &str) -> bool {
@@ -1058,5 +1061,323 @@ mod tests {
         assert!(checksums.contains_key("file1"));
         assert!(checksums.contains_key("file3"));
         assert!(!checksums.contains_key("file2"));
+    }
+
+    // --- Additional comprehensive tests ---
+
+    #[test]
+    fn test_update_cache_new() {
+        let cache = UpdateCache::new(UpdateChannel::Latest);
+        assert_eq!(cache.last_checked_at, 0);
+        assert!(cache.available_tag.is_none());
+        assert!(cache.available_semver.is_none());
+        assert_eq!(cache.channel, "latest");
+        assert!(!cache.update_available());
+        assert!(cache.matches_channel(UpdateChannel::Latest));
+        assert!(!cache.matches_channel(UpdateChannel::Next));
+    }
+
+    #[test]
+    fn test_update_cache_update_available() {
+        let mut cache = UpdateCache::new(UpdateChannel::Latest);
+        cache.available_semver = Some("2.0.0".to_string());
+        assert!(cache.update_available());
+    }
+
+    #[test]
+    fn test_update_cache_matches_channel_enterprise() {
+        let cache_latest = UpdateCache::new(UpdateChannel::EnterpriseLatest);
+        assert!(cache_latest.matches_channel(UpdateChannel::EnterpriseLatest));
+        assert!(!cache_latest.matches_channel(UpdateChannel::EnterpriseNext));
+        assert!(!cache_latest.matches_channel(UpdateChannel::Latest));
+    }
+
+    #[test]
+    fn test_determine_action_force() {
+        let release = ChannelRelease {
+            tag: "v1.0.0".to_string(),
+            semver: "1.0.0".to_string(),
+            checksum: "abc".to_string(),
+        };
+        let action = determine_action(true, &release, "1.0.0");
+        assert_eq!(action, UpgradeAction::ForceReinstall);
+    }
+
+    #[test]
+    fn test_determine_action_already_latest() {
+        let release = ChannelRelease {
+            tag: "v1.0.0".to_string(),
+            semver: "1.0.0".to_string(),
+            checksum: "abc".to_string(),
+        };
+        let action = determine_action(false, &release, "1.0.0");
+        assert_eq!(action, UpgradeAction::AlreadyLatest);
+    }
+
+    #[test]
+    fn test_determine_action_upgrade_available() {
+        let release = ChannelRelease {
+            tag: "v2.0.0".to_string(),
+            semver: "2.0.0".to_string(),
+            checksum: "abc".to_string(),
+        };
+        let action = determine_action(false, &release, "1.0.0");
+        assert_eq!(action, UpgradeAction::UpgradeAvailable);
+    }
+
+    #[test]
+    fn test_determine_action_running_newer() {
+        let release = ChannelRelease {
+            tag: "v1.0.0".to_string(),
+            semver: "1.0.0".to_string(),
+            checksum: "abc".to_string(),
+        };
+        let action = determine_action(false, &release, "2.0.0");
+        assert_eq!(action, UpgradeAction::RunningNewerVersion);
+    }
+
+    #[test]
+    fn test_upgrade_action_to_string() {
+        assert_eq!(
+            UpgradeAction::UpgradeAvailable.to_string(),
+            "upgrade_available"
+        );
+        assert_eq!(UpgradeAction::AlreadyLatest.to_string(), "already_latest");
+        assert_eq!(
+            UpgradeAction::RunningNewerVersion.to_string(),
+            "running_newer_version"
+        );
+        assert_eq!(UpgradeAction::ForceReinstall.to_string(), "force_reinstall");
+    }
+
+    #[test]
+    fn test_semver_from_tag_enterprise_prefix() {
+        assert_eq!(semver_from_tag("enterprise-v1.2.3"), "1.2.3");
+        assert_eq!(semver_from_tag("enterprise-1.2.3"), "1.2.3");
+    }
+
+    #[test]
+    fn test_semver_from_tag_with_build_metadata() {
+        assert_eq!(semver_from_tag("v1.2.3+build123"), "1.2.3");
+        assert_eq!(semver_from_tag("1.2.3+build123"), "1.2.3");
+    }
+
+    #[test]
+    fn test_semver_from_tag_empty() {
+        assert_eq!(semver_from_tag(""), "");
+        assert_eq!(semver_from_tag("v"), "");
+        assert_eq!(semver_from_tag("enterprise-v"), "");
+    }
+
+    #[test]
+    fn test_is_newer_version_major() {
+        assert!(is_newer_version("2.0.0", "1.9.9"));
+        assert!(!is_newer_version("1.9.9", "2.0.0"));
+    }
+
+    #[test]
+    fn test_is_newer_version_minor() {
+        assert!(is_newer_version("1.2.0", "1.1.9"));
+        assert!(!is_newer_version("1.1.9", "1.2.0"));
+    }
+
+    #[test]
+    fn test_is_newer_version_patch() {
+        assert!(is_newer_version("1.0.1", "1.0.0"));
+        assert!(!is_newer_version("1.0.0", "1.0.1"));
+    }
+
+    #[test]
+    fn test_is_newer_version_empty_parts() {
+        assert!(is_newer_version("1", "0.9.9"));
+        assert!(!is_newer_version("0.9.9", "1"));
+    }
+
+    #[test]
+    fn test_is_newer_version_equal() {
+        assert!(!is_newer_version("1.0.0", "1.0.0"));
+        assert!(!is_newer_version("2.5.10", "2.5.10"));
+    }
+
+    #[test]
+    fn test_parse_checksums_multiple_spaces() {
+        // Format requires exactly two spaces between hash and filename
+        // More spaces should still work because split_once("  ") matches the first occurrence
+        let content = "abc123  file_with_spaces.txt";
+        let checksums = parse_checksums(content);
+        assert_eq!(checksums.len(), 1);
+        assert_eq!(
+            checksums.get("file_with_spaces.txt"),
+            Some(&"abc123".to_string())
+        );
+    }
+
+    #[test]
+    fn test_verify_sha256_with_binary_content() {
+        let content = b"\x00\x01\x02\x03\xff\xfe";
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(content);
+        let expected = format!("{:x}", hasher.finalize());
+        assert!(verify_sha256(content, &expected).is_ok());
+    }
+
+    #[test]
+    fn test_release_from_response_missing_channel() {
+        let releases = ReleasesResponse {
+            channels: HashMap::new(),
+        };
+        let result = release_from_response(releases, UpdateChannel::Latest);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[test]
+    fn test_release_from_response_empty_tag() {
+        let mut channels = HashMap::new();
+        channels.insert(
+            "latest".to_string(),
+            ChannelInfo {
+                version: "".to_string(),
+                checksum: "abc123".to_string(),
+            },
+        );
+        let releases = ReleasesResponse { channels };
+        let result = release_from_response(releases, UpdateChannel::Latest);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[test]
+    fn test_release_from_response_empty_checksum() {
+        let mut channels = HashMap::new();
+        channels.insert(
+            "latest".to_string(),
+            ChannelInfo {
+                version: "v1.0.0".to_string(),
+                checksum: "".to_string(),
+            },
+        );
+        let releases = ReleasesResponse { channels };
+        let result = release_from_response(releases, UpdateChannel::Latest);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Checksum"));
+    }
+
+    #[test]
+    fn test_release_from_response_invalid_semver() {
+        let mut channels = HashMap::new();
+        channels.insert(
+            "latest".to_string(),
+            ChannelInfo {
+                version: "v-invalid-version".to_string(),
+                checksum: "abc123".to_string(),
+            },
+        );
+        let releases = ReleasesResponse { channels };
+        let result = release_from_response(releases, UpdateChannel::Latest);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("semver"));
+    }
+
+    #[test]
+    fn test_release_from_response_success() {
+        let mut channels = HashMap::new();
+        channels.insert(
+            "latest".to_string(),
+            ChannelInfo {
+                version: "v1.2.3".to_string(),
+                checksum: "abc123def456".to_string(),
+            },
+        );
+        let releases = ReleasesResponse { channels };
+        let result = release_from_response(releases, UpdateChannel::Latest);
+        assert!(result.is_ok());
+        let release = result.unwrap();
+        assert_eq!(release.tag, "v1.2.3");
+        assert_eq!(release.semver, "1.2.3");
+        assert_eq!(release.checksum, "abc123def456");
+    }
+
+    #[test]
+    fn test_should_check_for_updates_no_cache() {
+        assert!(should_check_for_updates(UpdateChannel::Latest, None));
+    }
+
+    #[test]
+    fn test_should_check_for_updates_zero_last_checked() {
+        let cache = UpdateCache {
+            last_checked_at: 0,
+            available_tag: None,
+            available_semver: None,
+            channel: "latest".to_string(),
+        };
+        assert!(should_check_for_updates(
+            UpdateChannel::Latest,
+            Some(&cache)
+        ));
+    }
+
+    #[test]
+    fn test_should_check_for_updates_channel_mismatch() {
+        let now = current_timestamp();
+        let cache = UpdateCache {
+            last_checked_at: now,
+            available_tag: None,
+            available_semver: None,
+            channel: "latest".to_string(),
+        };
+        assert!(should_check_for_updates(UpdateChannel::Next, Some(&cache)));
+    }
+
+    #[test]
+    fn test_update_cache_serialization() {
+        // Test serialization/deserialization without file I/O
+        let mut cache = UpdateCache::new(UpdateChannel::Latest);
+        cache.last_checked_at = 1234567890;
+        cache.available_tag = Some("v1.0.0".to_string());
+        cache.available_semver = Some("1.0.0".to_string());
+
+        let json = serde_json::to_vec(&cache).unwrap();
+        let deserialized: UpdateCache = serde_json::from_slice(&json).unwrap();
+
+        assert_eq!(deserialized.last_checked_at, 1234567890);
+        assert_eq!(deserialized.available_tag, Some("v1.0.0".to_string()));
+        assert_eq!(deserialized.available_semver, Some("1.0.0".to_string()));
+        assert_eq!(deserialized.channel, "latest");
+    }
+
+    #[test]
+    fn test_persist_update_state_creates_cache_object() {
+        // Test that persist_update_state creates correct UpdateCache structure
+        // without relying on file I/O
+        let release = ChannelRelease {
+            tag: "v1.5.0".to_string(),
+            semver: "1.5.0".to_string(),
+            checksum: "test".to_string(),
+        };
+
+        // Manually construct what persist_update_state would create
+        let mut cache = UpdateCache::new(UpdateChannel::Next);
+        cache.last_checked_at = current_timestamp();
+        cache.available_tag = Some(release.tag.clone());
+        cache.available_semver = Some(release.semver.clone());
+
+        assert_eq!(cache.available_tag, Some("v1.5.0".to_string()));
+        assert_eq!(cache.available_semver, Some("1.5.0".to_string()));
+        assert_eq!(cache.channel, "next");
+        assert!(cache.last_checked_at > 0);
+    }
+
+    #[test]
+    fn test_persist_update_state_no_release_structure() {
+        // Test that persist_update_state without release creates correct structure
+        let mut cache = UpdateCache::new(UpdateChannel::Latest);
+        cache.last_checked_at = current_timestamp();
+        // No available_tag or available_semver set
+
+        assert!(cache.available_tag.is_none());
+        assert!(cache.available_semver.is_none());
+        assert_eq!(cache.channel, "latest");
+        assert!(cache.last_checked_at > 0);
     }
 }

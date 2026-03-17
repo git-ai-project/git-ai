@@ -2,7 +2,7 @@ use crate::api::{ApiClient, ApiContext, ApiFileRecord};
 use crate::api::{BundleData, CreateBundleRequest};
 use crate::authorship::prompt_utils::find_prompt_with_db_fallback;
 use crate::authorship::secrets::redact_secrets_from_prompts;
-use crate::commands::diff::{get_diff_json_filtered, DiffOptions};
+use crate::commands::diff::{DiffOptions, get_diff_json_filtered};
 use crate::git::find_repository;
 use std::collections::{BTreeMap, HashMap};
 
@@ -41,13 +41,14 @@ fn handle_share_cli(parsed: ParsedArgs) {
     let repo = find_repository(&Vec::<String>::new()).ok();
 
     // Find the prompt (DB first, then repository)
-    let (_commit_sha, prompt_record) = match find_prompt_with_db_fallback(&parsed.prompt_id, repo.as_ref()) {
-        Ok((sha, prompt)) => (sha, prompt),
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            std::process::exit(1);
-        }
-    };
+    let (_commit_sha, prompt_record) =
+        match find_prompt_with_db_fallback(&parsed.prompt_id, repo.as_ref()) {
+            Ok((sha, prompt)) => (sha, prompt),
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        };
 
     // Generate a title if not provided
     let title = parsed.title.unwrap_or_else(|| {
@@ -56,9 +57,10 @@ fn handle_share_cli(parsed: ParsedArgs) {
 
         if let Ok(db) = InternalDatabase::global()
             && let Ok(db_guard) = db.lock()
-                && let Ok(Some(db_record)) = db_guard.get_prompt(&parsed.prompt_id) {
-                    return db_record.first_message_snippet(60);
-                }
+            && let Ok(Some(db_record)) = db_guard.get_prompt(&parsed.prompt_id)
+        {
+            return db_record.first_message_snippet(60);
+        }
 
         // Fallback if not in database
         format!("Prompt {}", parsed.prompt_id)
@@ -137,15 +139,14 @@ pub fn create_bundle(
     let commit_sha = db_record.as_ref().and_then(|r| r.commit_sha.clone());
 
     // If include_all_in_commit, fetch all prompts with same commit_sha
-    if include_all_in_commit
-        && let Some(ref sha) = commit_sha {
-            // Get all prompts for this commit
-            let commit_prompts = db_guard.get_prompts_by_commit(sha)?;
+    if include_all_in_commit && let Some(ref sha) = commit_sha {
+        // Get all prompts for this commit
+        let commit_prompts = db_guard.get_prompts_by_commit(sha)?;
 
-            for p in commit_prompts {
-                prompts.insert(p.id.clone(), p.to_prompt_record());
-            }
+        for p in commit_prompts {
+            prompts.insert(p.id.clone(), p.to_prompt_record());
         }
+    }
 
     // Drop the db guard before we do other work
     drop(db_guard);
@@ -202,4 +203,3 @@ pub fn create_bundle(
     let client = ApiClient::new(context);
     client.create_bundle(bundle_request)
 }
-

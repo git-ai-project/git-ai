@@ -1,0 +1,93 @@
+name: Install Scripts (Nightly)
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  install-nightly-unix:
+    name: Nightly install.sh on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Prepare test home and fake Claude Code
+        run: |
+          TEST_HOME="$RUNNER_TEMP/git-ai-home"
+          mkdir -p "$TEST_HOME/.config/fish" "$TEST_HOME/.claude"
+          touch "$TEST_HOME/.bashrc" "$TEST_HOME/.zshrc" "$TEST_HOME/.config/fish/config.fish"
+          echo "HOME=$TEST_HOME" >> "$GITHUB_ENV"
+
+          BIN_DIR="$RUNNER_TEMP/fake-bin"
+          mkdir -p "$BIN_DIR"
+          cat > "$BIN_DIR/claude" <<'EOF'
+          #!/bin/sh
+          echo "2.0.0 (Claude Code)"
+          EOF
+          chmod +x "$BIN_DIR/claude"
+          echo "$BIN_DIR" >> "$GITHUB_PATH"
+
+      - name: Run install.sh from usegitai.com
+        run: curl -fsSL https://usegitai.com/install.sh | bash
+
+      - name: Verify shell configs and Claude hooks
+        run: |
+          INSTALL_DIR="$HOME/.git-ai/bin"
+          test -x "$INSTALL_DIR/git-ai"
+          grep -F "$INSTALL_DIR" "$HOME/.bashrc"
+          grep -F "$INSTALL_DIR" "$HOME/.zshrc"
+          grep -F "fish_add_path -g \"$INSTALL_DIR\"" "$HOME/.config/fish/config.fish"
+          grep -F "checkpoint claude" "$HOME/.claude/settings.json"
+
+  install-nightly-windows:
+    name: Nightly install.ps1 on windows-latest
+    runs-on: windows-latest
+
+    steps:
+      - name: Prepare test home and fake Claude Code
+        shell: pwsh
+        run: |
+          $testHome = Join-Path $env:RUNNER_TEMP "git-ai-home"
+          New-Item -ItemType Directory -Force -Path $testHome | Out-Null
+          $homeDrive = [System.IO.Path]::GetPathRoot($testHome).TrimEnd('\')
+          $homePath = $testHome.Substring($homeDrive.Length)
+          Add-Content -Path $env:GITHUB_ENV -Value "TEST_HOME=$testHome"
+          Add-Content -Path $env:GITHUB_ENV -Value "TEST_HOME_DRIVE=$homeDrive"
+          Add-Content -Path $env:GITHUB_ENV -Value "TEST_HOME_PATH=$homePath"
+
+          $claudeDir = Join-Path $testHome ".claude"
+          New-Item -ItemType Directory -Force -Path $claudeDir | Out-Null
+
+          $binDir = Join-Path $env:RUNNER_TEMP "fake-bin"
+          New-Item -ItemType Directory -Force -Path $binDir | Out-Null
+          $claudeCmd = Join-Path $binDir "claude.cmd"
+          "@echo 2.0.0 (Claude Code)" | Out-File -FilePath $claudeCmd -Encoding ASCII -Force
+          Add-Content -Path $env:GITHUB_PATH -Value $binDir
+
+      - name: Run install.ps1 from usegitai.com
+        shell: pwsh
+        env:
+          HOME: ${{ env.TEST_HOME }}
+          USERPROFILE: ${{ env.TEST_HOME }}
+          HOMEDRIVE: ${{ env.TEST_HOME_DRIVE }}
+          HOMEPATH: ${{ env.TEST_HOME_PATH }}
+        run: |
+          Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
+          Invoke-WebRequest -UseBasicParsing https://usegitai.com/install.ps1 | Invoke-Expression
+
+      - name: Verify Claude hooks
+        shell: pwsh
+        env:
+          HOME: ${{ env.TEST_HOME }}
+          USERPROFILE: ${{ env.TEST_HOME }}
+          HOMEDRIVE: ${{ env.TEST_HOME_DRIVE }}
+          HOMEPATH: ${{ env.TEST_HOME_PATH }}
+        run: |
+          $installDir = Join-Path $env:USERPROFILE ".git-ai\bin"
+          if (-not (Test-Path -LiteralPath (Join-Path $installDir "git-ai.exe"))) { throw "git-ai.exe not installed" }
+          $settings = Join-Path $env:USERPROFILE ".claude\settings.json"
+          if (-not (Select-String -Path $settings -Pattern "checkpoint claude")) { throw "Claude hooks not configured" }

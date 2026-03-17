@@ -1,8 +1,6 @@
 //! Common attributes shared across all metric events.
 
-use super::pos_encoded::{
-    sparse_set, string_to_json, sparse_get_string, PosEncoded, PosField,
-};
+use super::pos_encoded::{PosEncoded, PosField, sparse_get_string, sparse_set, string_to_json};
 use super::types::SparseArray;
 
 /// Attribute positions (shared across all events).
@@ -17,6 +15,7 @@ pub mod attr_pos {
     pub const MODEL: usize = 21;
     pub const PROMPT_ID: usize = 22;
     pub const EXTERNAL_PROMPT_ID: usize = 23;
+    pub const CUSTOM_ATTRIBUTES: usize = 30;
 }
 
 /// Common attributes for all events.
@@ -33,6 +32,7 @@ pub mod attr_pos {
 /// | 21 | model | String | No (nullable) |
 /// | 22 | prompt_id | String | No (nullable) |
 /// | 23 | external_prompt_id | String | No (nullable) |
+/// | 30 | custom_attributes | String (JSON) | No (nullable) |
 #[derive(Debug, Clone, Default)]
 pub struct EventAttributes {
     pub git_ai_version: PosField<String>,
@@ -45,6 +45,7 @@ pub struct EventAttributes {
     pub model: PosField<String>,
     pub prompt_id: PosField<String>,
     pub external_prompt_id: PosField<String>,
+    pub custom_attributes: PosField<String>,
 }
 
 impl EventAttributes {
@@ -181,21 +182,69 @@ impl EventAttributes {
         self.external_prompt_id = Some(None);
         self
     }
+
+    // Builder methods for custom_attributes
+    pub fn custom_attributes(mut self, value: impl Into<String>) -> Self {
+        self.custom_attributes = Some(Some(value.into()));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn custom_attributes_null(mut self) -> Self {
+        self.custom_attributes = Some(None);
+        self
+    }
+
+    pub fn custom_attributes_map(self, attrs: &std::collections::HashMap<String, String>) -> Self {
+        if attrs.is_empty() {
+            self
+        } else {
+            match serde_json::to_string(attrs) {
+                Ok(json) => self.custom_attributes(json),
+                Err(_) => self,
+            }
+        }
+    }
 }
 
 impl PosEncoded for EventAttributes {
     fn to_sparse(&self) -> SparseArray {
         let mut map = SparseArray::new();
-        sparse_set(&mut map, attr_pos::GIT_AI_VERSION, string_to_json(&self.git_ai_version));
+        sparse_set(
+            &mut map,
+            attr_pos::GIT_AI_VERSION,
+            string_to_json(&self.git_ai_version),
+        );
         sparse_set(&mut map, attr_pos::REPO_URL, string_to_json(&self.repo_url));
         sparse_set(&mut map, attr_pos::AUTHOR, string_to_json(&self.author));
-        sparse_set(&mut map, attr_pos::COMMIT_SHA, string_to_json(&self.commit_sha));
-        sparse_set(&mut map, attr_pos::BASE_COMMIT_SHA, string_to_json(&self.base_commit_sha));
+        sparse_set(
+            &mut map,
+            attr_pos::COMMIT_SHA,
+            string_to_json(&self.commit_sha),
+        );
+        sparse_set(
+            &mut map,
+            attr_pos::BASE_COMMIT_SHA,
+            string_to_json(&self.base_commit_sha),
+        );
         sparse_set(&mut map, attr_pos::BRANCH, string_to_json(&self.branch));
         sparse_set(&mut map, attr_pos::TOOL, string_to_json(&self.tool));
         sparse_set(&mut map, attr_pos::MODEL, string_to_json(&self.model));
-        sparse_set(&mut map, attr_pos::PROMPT_ID, string_to_json(&self.prompt_id));
-        sparse_set(&mut map, attr_pos::EXTERNAL_PROMPT_ID, string_to_json(&self.external_prompt_id));
+        sparse_set(
+            &mut map,
+            attr_pos::PROMPT_ID,
+            string_to_json(&self.prompt_id),
+        );
+        sparse_set(
+            &mut map,
+            attr_pos::EXTERNAL_PROMPT_ID,
+            string_to_json(&self.external_prompt_id),
+        );
+        sparse_set(
+            &mut map,
+            attr_pos::CUSTOM_ATTRIBUTES,
+            string_to_json(&self.custom_attributes),
+        );
         map
     }
 
@@ -211,6 +260,7 @@ impl PosEncoded for EventAttributes {
             model: sparse_get_string(arr, attr_pos::MODEL),
             prompt_id: sparse_get_string(arr, attr_pos::PROMPT_ID),
             external_prompt_id: sparse_get_string(arr, attr_pos::EXTERNAL_PROMPT_ID),
+            custom_attributes: sparse_get_string(arr, attr_pos::CUSTOM_ATTRIBUTES),
         }
     }
 }
@@ -233,10 +283,16 @@ mod tests {
             .prompt_id("prompt-123");
 
         assert_eq!(attrs.git_ai_version, Some(Some("1.0.0".to_string())));
-        assert_eq!(attrs.repo_url, Some(Some("https://github.com/user/repo".to_string())));
+        assert_eq!(
+            attrs.repo_url,
+            Some(Some("https://github.com/user/repo".to_string()))
+        );
         assert_eq!(attrs.author, Some(Some("user@example.com".to_string())));
         assert_eq!(attrs.commit_sha, Some(Some("commit-123".to_string())));
-        assert_eq!(attrs.base_commit_sha, Some(Some("base-commit-123".to_string())));
+        assert_eq!(
+            attrs.base_commit_sha,
+            Some(Some("base-commit-123".to_string()))
+        );
         assert_eq!(attrs.branch, Some(Some("main".to_string())));
         assert_eq!(attrs.tool, Some(Some("claude-code".to_string())));
         assert_eq!(attrs.model, Some(None)); // explicitly null
@@ -258,9 +314,15 @@ mod tests {
         assert_eq!(sparse.get("3"), None); // not set
         assert_eq!(sparse.get("4"), None); // not set
         assert_eq!(sparse.get("5"), None); // not set
-        assert_eq!(sparse.get("20"), Some(&Value::String("test-tool".to_string())));
+        assert_eq!(
+            sparse.get("20"),
+            Some(&Value::String("test-tool".to_string()))
+        );
         assert_eq!(sparse.get("21"), Some(&Value::Null)); // explicitly null
-        assert_eq!(sparse.get("22"), Some(&Value::String("prompt-123".to_string())));
+        assert_eq!(
+            sparse.get("22"),
+            Some(&Value::String("prompt-123".to_string()))
+        );
     }
 
     #[test]
@@ -279,5 +341,184 @@ mod tests {
         assert_eq!(attrs.tool, Some(Some("my-tool".to_string())));
         assert_eq!(attrs.model, None); // not set
         assert_eq!(attrs.prompt_id, Some(Some("prompt-123".to_string())));
+    }
+
+    #[test]
+    fn test_event_attributes_all_fields() {
+        let attrs = EventAttributes::with_version("1.2.3")
+            .repo_url("https://github.com/user/repo")
+            .author("dev@example.com")
+            .commit_sha("abc123")
+            .base_commit_sha("def456")
+            .branch("feature-branch")
+            .tool("cursor")
+            .model("gpt-4")
+            .prompt_id("prompt-456")
+            .external_prompt_id("ext-789");
+
+        assert_eq!(attrs.git_ai_version, Some(Some("1.2.3".to_string())));
+        assert_eq!(
+            attrs.repo_url,
+            Some(Some("https://github.com/user/repo".to_string()))
+        );
+        assert_eq!(attrs.author, Some(Some("dev@example.com".to_string())));
+        assert_eq!(attrs.commit_sha, Some(Some("abc123".to_string())));
+        assert_eq!(attrs.base_commit_sha, Some(Some("def456".to_string())));
+        assert_eq!(attrs.branch, Some(Some("feature-branch".to_string())));
+        assert_eq!(attrs.tool, Some(Some("cursor".to_string())));
+        assert_eq!(attrs.model, Some(Some("gpt-4".to_string())));
+        assert_eq!(attrs.prompt_id, Some(Some("prompt-456".to_string())));
+        assert_eq!(attrs.external_prompt_id, Some(Some("ext-789".to_string())));
+    }
+
+    #[test]
+    fn test_event_attributes_all_nulls() {
+        let attrs = EventAttributes::new()
+            .git_ai_version_null()
+            .repo_url_null()
+            .author_null()
+            .commit_sha_null()
+            .base_commit_sha_null()
+            .branch_null()
+            .tool_null()
+            .model_null()
+            .prompt_id_null()
+            .external_prompt_id_null();
+
+        assert_eq!(attrs.git_ai_version, Some(None));
+        assert_eq!(attrs.repo_url, Some(None));
+        assert_eq!(attrs.author, Some(None));
+        assert_eq!(attrs.commit_sha, Some(None));
+        assert_eq!(attrs.base_commit_sha, Some(None));
+        assert_eq!(attrs.branch, Some(None));
+        assert_eq!(attrs.tool, Some(None));
+        assert_eq!(attrs.model, Some(None));
+        assert_eq!(attrs.prompt_id, Some(None));
+        assert_eq!(attrs.external_prompt_id, Some(None));
+    }
+
+    #[test]
+    fn test_event_attributes_to_sparse_all_fields() {
+        let attrs = EventAttributes::with_version("1.0.0")
+            .repo_url("https://github.com/test/repo")
+            .author("author@test.com")
+            .commit_sha("commit-sha")
+            .base_commit_sha("base-sha")
+            .branch("main")
+            .tool("test-tool")
+            .model("test-model")
+            .prompt_id("prompt-id")
+            .external_prompt_id("ext-id");
+
+        let sparse = attrs.to_sparse();
+
+        assert_eq!(sparse.get("0"), Some(&Value::String("1.0.0".to_string())));
+        assert_eq!(
+            sparse.get("1"),
+            Some(&Value::String("https://github.com/test/repo".to_string()))
+        );
+        assert_eq!(
+            sparse.get("2"),
+            Some(&Value::String("author@test.com".to_string()))
+        );
+        assert_eq!(
+            sparse.get("3"),
+            Some(&Value::String("commit-sha".to_string()))
+        );
+        assert_eq!(
+            sparse.get("4"),
+            Some(&Value::String("base-sha".to_string()))
+        );
+        assert_eq!(sparse.get("5"), Some(&Value::String("main".to_string())));
+        assert_eq!(
+            sparse.get("20"),
+            Some(&Value::String("test-tool".to_string()))
+        );
+        assert_eq!(
+            sparse.get("21"),
+            Some(&Value::String("test-model".to_string()))
+        );
+        assert_eq!(
+            sparse.get("22"),
+            Some(&Value::String("prompt-id".to_string()))
+        );
+        assert_eq!(sparse.get("23"), Some(&Value::String("ext-id".to_string())));
+    }
+
+    #[test]
+    fn test_event_attributes_roundtrip() {
+        let original = EventAttributes::with_version("2.5.0")
+            .repo_url("https://gitlab.com/org/repo")
+            .author_null()
+            .commit_sha("sha123")
+            .tool("copilot");
+
+        let sparse = original.to_sparse();
+        let restored = EventAttributes::from_sparse(&sparse);
+
+        assert_eq!(restored.git_ai_version, Some(Some("2.5.0".to_string())));
+        assert_eq!(
+            restored.repo_url,
+            Some(Some("https://gitlab.com/org/repo".to_string()))
+        );
+        assert_eq!(restored.author, Some(None)); // explicitly null
+        assert_eq!(restored.commit_sha, Some(Some("sha123".to_string())));
+        assert_eq!(restored.tool, Some(Some("copilot".to_string())));
+        assert_eq!(restored.base_commit_sha, None); // not set
+        assert_eq!(restored.model, None); // not set
+    }
+
+    #[test]
+    fn test_event_attributes_partial_sparse() {
+        let mut sparse = SparseArray::new();
+        sparse.insert("0".to_string(), Value::String("3.0.0".to_string()));
+        sparse.insert("20".to_string(), Value::String("windsurf".to_string()));
+
+        let attrs = EventAttributes::from_sparse(&sparse);
+
+        assert_eq!(attrs.git_ai_version, Some(Some("3.0.0".to_string())));
+        assert_eq!(attrs.repo_url, None); // not set
+        assert_eq!(attrs.author, None); // not set
+        assert_eq!(attrs.tool, Some(Some("windsurf".to_string())));
+        assert_eq!(attrs.branch, None); // not set
+    }
+
+    #[test]
+    fn test_event_attributes_default() {
+        let attrs = EventAttributes::default();
+
+        assert_eq!(attrs.git_ai_version, None);
+        assert_eq!(attrs.repo_url, None);
+        assert_eq!(attrs.author, None);
+        assert_eq!(attrs.commit_sha, None);
+        assert_eq!(attrs.base_commit_sha, None);
+        assert_eq!(attrs.branch, None);
+        assert_eq!(attrs.tool, None);
+        assert_eq!(attrs.model, None);
+        assert_eq!(attrs.prompt_id, None);
+        assert_eq!(attrs.external_prompt_id, None);
+    }
+
+    #[test]
+    fn test_event_attributes_git_ai_version_builder() {
+        let attrs = EventAttributes::new().git_ai_version("4.0.0");
+        assert_eq!(attrs.git_ai_version, Some(Some("4.0.0".to_string())));
+    }
+
+    #[test]
+    fn test_event_attributes_sparse_positions() {
+        // Verify the position constants match expected values
+        use super::attr_pos::*;
+
+        assert_eq!(GIT_AI_VERSION, 0);
+        assert_eq!(REPO_URL, 1);
+        assert_eq!(AUTHOR, 2);
+        assert_eq!(COMMIT_SHA, 3);
+        assert_eq!(BASE_COMMIT_SHA, 4);
+        assert_eq!(BRANCH, 5);
+        assert_eq!(TOOL, 20);
+        assert_eq!(MODEL, 21);
+        assert_eq!(PROMPT_ID, 22);
+        assert_eq!(EXTERNAL_PROMPT_ID, 23);
     }
 }

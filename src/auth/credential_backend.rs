@@ -133,8 +133,7 @@ impl FileBackend {
 impl CredentialBackend for FileBackend {
     fn store(&self, value: &str) -> Result<(), String> {
         if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create directory: {}", e))?;
+            fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {}", e))?;
         }
 
         fs::write(&self.path, value)

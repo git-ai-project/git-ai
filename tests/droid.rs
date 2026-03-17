@@ -124,9 +124,7 @@ fn test_droid_preset_extracts_edited_filepath() {
     assert!(result.edited_filepaths.is_some());
     let edited = result.edited_filepaths.unwrap();
     assert_eq!(edited.len(), 1);
-    assert_eq!(
-        edited[0], "/Users/testuser/projects/testing-git/index.ts"
-    );
+    assert_eq!(edited[0], "/Users/testuser/projects/testing-git/index.ts");
 }
 
 #[test]
@@ -137,11 +135,7 @@ fn test_droid_preset_extracts_applypatch_filepath() {
 
     // Create minimal valid JSONL and settings
     fs::write(&jsonl_path, "").unwrap();
-    fs::write(
-        &settings_path,
-        r#"{"model":"test-model"}"#,
-    )
-    .unwrap();
+    fs::write(&settings_path, r#"{"model":"test-model"}"#).unwrap();
 
     let hook_input = json!({
         "cwd": "/Users/testuser/projects/testing-git",
@@ -206,10 +200,7 @@ fn test_droid_preset_stores_metadata_paths() {
         metadata.contains_key("settings_path"),
         "Metadata should contain settings_path"
     );
-    assert_eq!(
-        metadata["transcript_path"],
-        jsonl_path.to_str().unwrap()
-    );
+    assert_eq!(metadata["transcript_path"], jsonl_path.to_str().unwrap());
 }
 
 #[test]
@@ -431,7 +422,8 @@ fn test_droid_preset_pretooluse_returns_human_checkpoint() {
 
     let will_edit = result.will_edit_filepaths.unwrap();
     assert_eq!(
-        will_edit[0], "/Users/testuser/projects/testing-git/index.ts"
+        will_edit[0],
+        "/Users/testuser/projects/testing-git/index.ts"
     );
 
     assert!(
@@ -462,10 +454,7 @@ fn test_droid_settings_missing_model_field() {
     temp.write_all(b"{}").unwrap();
     let result =
         DroidPreset::model_from_droid_settings_json(temp.path().to_str().unwrap()).unwrap();
-    assert!(
-        result.is_none(),
-        "Missing model field should return None"
-    );
+    assert!(result.is_none(), "Missing model field should return None");
 }
 
 #[test]
@@ -475,8 +464,7 @@ fn test_droid_jsonl_parses_thinking_blocks() {
     let mut temp = NamedTempFile::new().unwrap();
     temp.write_all(jsonl.as_bytes()).unwrap();
     let (transcript, _) =
-        DroidPreset::transcript_and_model_from_droid_jsonl(temp.path().to_str().unwrap())
-            .unwrap();
+        DroidPreset::transcript_and_model_from_droid_jsonl(temp.path().to_str().unwrap()).unwrap();
     assert_eq!(
         transcript.messages().len(),
         2,
@@ -497,3 +485,19 @@ fn test_droid_jsonl_parses_thinking_blocks() {
         "Second message should be Assistant text"
     );
 }
+
+reuse_tests_in_worktree!(
+    test_parse_droid_jsonl_transcript,
+    test_parse_droid_settings_model,
+    test_droid_preset_extracts_edited_filepath,
+    test_droid_preset_extracts_applypatch_filepath,
+    test_droid_preset_stores_metadata_paths,
+    test_droid_preset_uses_raw_session_id,
+    test_droid_jsonl_skips_non_message_entries,
+    test_droid_tool_results_are_not_parsed_as_user_messages,
+    test_droid_e2e_prefers_latest_checkpoint_for_prompts,
+    test_droid_preset_pretooluse_returns_human_checkpoint,
+    test_droid_session_paths_derivation,
+    test_droid_settings_missing_model_field,
+    test_droid_jsonl_parses_thinking_blocks,
+);

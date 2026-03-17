@@ -1,9 +1,9 @@
-use crate::auth::credential_backend::{CredentialBackend, FileBackend};
 #[cfg(all(not(test), feature = "keyring"))]
 use crate::auth::credential_backend::KeyringBackend;
+use crate::auth::credential_backend::{CredentialBackend, FileBackend};
+use crate::auth::types::StoredCredentials;
 #[cfg(not(test))]
 use crate::config::Config;
-use crate::auth::types::StoredCredentials;
 use std::path::PathBuf;
 
 #[cfg(all(not(test), feature = "keyring"))]
@@ -92,9 +92,11 @@ impl CredentialStore {
         let thread_id = format!("{:?}", std::thread::current().id());
         // Extract just digits from "ThreadId(N)" format
         let thread_num: String = thread_id.chars().filter(|c| c.is_ascii_digit()).collect();
-        std::env::temp_dir()
-            .join("git-ai-test")
-            .join(format!("credentials-{}-{}", std::process::id(), thread_num))
+        std::env::temp_dir().join("git-ai-test").join(format!(
+            "credentials-{}-{}",
+            std::process::id(),
+            thread_num
+        ))
     }
 
     /// Store credentials securely
@@ -179,7 +181,10 @@ mod tests {
         let loaded = store.load().unwrap().unwrap();
         assert_eq!(loaded.access_token, creds.access_token);
         assert_eq!(loaded.refresh_token, creds.refresh_token);
-        assert_eq!(loaded.access_token_expires_at, creds.access_token_expires_at);
+        assert_eq!(
+            loaded.access_token_expires_at,
+            creds.access_token_expires_at
+        );
         assert_eq!(
             loaded.refresh_token_expires_at,
             creds.refresh_token_expires_at
@@ -284,7 +289,10 @@ mod tests {
         // Verify fields match
         assert_eq!(creds.access_token, loaded.access_token);
         assert_eq!(creds.refresh_token, loaded.refresh_token);
-        assert_eq!(creds.access_token_expires_at, loaded.access_token_expires_at);
+        assert_eq!(
+            creds.access_token_expires_at,
+            loaded.access_token_expires_at
+        );
         assert_eq!(
             creds.refresh_token_expires_at,
             loaded.refresh_token_expires_at

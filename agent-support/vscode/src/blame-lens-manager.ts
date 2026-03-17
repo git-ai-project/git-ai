@@ -1,6 +1,8 @@
 import * as vscode from "vscode";
-import { BlameService, BlameResult, LineBlameInfo } from "./blame-service";
+import { BlameService, BlameResult, BlameMetadata, LineBlameInfo } from "./blame-service";
 import { Config, BlameMode } from "./utils/config";
+import { findRepoForFile } from "./utils/git-api";
+import { resolveGitAiBinary } from "./utils/binary-path";
 
 export class BlameLensManager {
   private context: vscode.ExtensionContext;
@@ -29,6 +31,9 @@ export class BlameLensManager {
   
   // After-text decoration for showing "[View $MODEL Thread]" on AI lines
   private afterTextDecoration: vscode.TextEditorDecorationType | null = null;
+
+  // Track in-flight CAS prompt fetches to avoid duplicate requests
+  private casFetchInProgress: Set<string> = new Set();
   
   // Minimum contrast ratio for WCAG AA compliance (3:1 for UI elements)
   private static readonly MIN_CONTRAST_RATIO = 3.0;
@@ -206,7 +211,33 @@ export class BlameLensManager {
       })
     );
 
+    // Proactively trigger decorations for the already-open editor.
+    // VS Code does not reliably fire onDidChangeActiveTextEditor for an
+    // editor that is already active when the extension activates.
+    // We call requestBlameForFullFile / updateStatusBar directly instead
+    // of handleActiveEditorChange to avoid the border-clearing logic
+    // which would race with any VS Code activation events.
+    const initialEditor = vscode.window.activeTextEditor;
+    if (initialEditor) {
+      if (this.blameMode === 'all') {
+        this.requestBlameForFullFile(initialEditor);
+      }
+      this.updateStatusBar(initialEditor);
+    }
+
     console.log('[git-ai] BlameLensManager activated');
+
+    // Resolve git-ai binary path early (uses login shell to get full user PATH)
+    resolveGitAiBinary().then((path) => {
+      if (path) {
+        const { execFile } = require('child_process');
+        execFile(path, ['--version'], (err: Error | null, stdout: string) => {
+          if (!err) {
+            console.log('[git-ai] Version:', stdout.trim());
+          }
+        });
+      }
+    });
   }
 
   /**
@@ -222,22 +253,23 @@ export class BlameLensManager {
     if (this.currentDocumentUri === documentUri) {
       this.currentBlameResult = null;
       this.pendingBlameRequest = null;
-      
+      this.casFetchInProgress.clear();
+
       const activeEditor = vscode.window.activeTextEditor;
       if (activeEditor && activeEditor.document.uri.toString() === documentUri) {
         // Clear existing colored borders
         this.clearColoredBorders(activeEditor);
-        
+
         // Re-fetch blame if mode is 'all'
         if (this.blameMode === 'all') {
           this.requestBlameForFullFile(activeEditor);
         }
-        
+
         // Update status bar
         this.updateStatusBar(activeEditor);
       }
     }
-    
+
     console.log('[git-ai] Document saved, invalidated blame cache for:', document.uri.fsPath);
   }
 
@@ -321,26 +353,29 @@ export class BlameLensManager {
    * Handle active editor change - update status bar and decorations.
    */
   private handleActiveEditorChange(editor: vscode.TextEditor | undefined): void {
-    // Clear colored borders from previous editor
-    const previousEditor = vscode.window.visibleTextEditors.find(
-      e => e.document.uri.toString() === this.currentDocumentUri
-    );
-    if (previousEditor) {
-      this.clearColoredBorders(previousEditor);
-    }
-    
-    // If the new editor is a different document, reset our state
-    if (editor && editor.document.uri.toString() !== this.currentDocumentUri) {
+    const newDocumentUri = editor?.document.uri.toString() ?? null;
+
+    // Only clear borders and reset state when switching to a different document.
+    // Re-firing for the same document (e.g. VS Code activation event) must not
+    // clear decorations that were just applied.
+    if (newDocumentUri !== this.currentDocumentUri) {
+      const previousEditor = vscode.window.visibleTextEditors.find(
+        e => e.document.uri.toString() === this.currentDocumentUri
+      );
+      if (previousEditor) {
+        this.clearColoredBorders(previousEditor);
+      }
+
       this.currentBlameResult = null;
       this.currentDocumentUri = null;
       this.pendingBlameRequest = null;
     }
-    
+
     // If mode is 'all', automatically request blame for the new editor
     if (this.blameMode === 'all' && editor) {
       this.requestBlameForFullFile(editor);
     }
-    
+
     // Update status bar for the new editor
     this.updateStatusBar(editor);
   }
@@ -491,7 +526,10 @@ export class BlameLensManager {
 
       if (result) {
         this.currentBlameResult = result;
-        
+
+        // Trigger async CAS fetches for prompts with messages_url but no messages
+        this.triggerCASFetches(result, document.uri);
+
         // Check if editor is still active and mode is still 'all'
         const currentEditor = vscode.window.activeTextEditor;
         if (this.blameMode === 'all' && currentEditor && currentEditor.document.uri.toString() === documentUri) {
@@ -510,17 +548,14 @@ export class BlameLensManager {
    * Used when Toggle AI Code is enabled.
    */
   private applyFullFileDecorations(editor: vscode.TextEditor, blameResult: BlameResult): void {
-    // Clear existing decorations first
-    this.clearColoredBorders(editor);
-
     // Collect all AI-authored lines grouped by color
     const colorToRanges = new Map<number, vscode.Range[]>();
-    
+
     for (const [gitLine, lineInfo] of blameResult.lineAuthors) {
       if (lineInfo?.isAiAuthored) {
         const colorIndex = this.getColorIndexForPromptId(lineInfo.commitHash);
         const line = gitLine - 1; // Convert to 0-indexed
-        
+
         if (!colorToRanges.has(colorIndex)) {
           colorToRanges.set(colorIndex, []);
         }
@@ -528,10 +563,11 @@ export class BlameLensManager {
       }
     }
 
-    // Apply decorations grouped by color
-    colorToRanges.forEach((ranges, colorIndex) => {
-      const decoration = this.colorDecorations[colorIndex];
-      editor.setDecorations(decoration, ranges);
+    // Set all decoration types in a single pass: ranges for used colors,
+    // empty for unused. Avoids clear-then-set on the same type which
+    // VS Code can optimize away when only one decoration type changes.
+    this.colorDecorations.forEach((decoration, index) => {
+      editor.setDecorations(decoration, colorToRanges.get(index) || []);
     });
   }
 
@@ -571,6 +607,10 @@ export class BlameLensManager {
           this.pendingBlameRequest = null;
           if (result) {
             this.currentBlameResult = result;
+
+            // Trigger async CAS fetches for prompts with messages_url but no messages
+            this.triggerCASFetches(result, document.uri);
+
             // Re-update status bar now that we have blame
             const activeEditor = vscode.window.activeTextEditor;
             if (activeEditor && activeEditor.document.uri.toString() === documentUri) {
@@ -649,9 +689,6 @@ export class BlameLensManager {
    * Used when cursor is on an AI-authored line to highlight all lines from that prompt.
    */
   private applyDecorationsForPrompt(editor: vscode.TextEditor, commitHash: string, blameResult: BlameResult): void {
-    // Clear existing decorations first
-    this.clearColoredBorders(editor);
-
     // Get the color for this prompt
     const colorIndex = this.getColorIndexForPromptId(commitHash);
     const ranges: vscode.Range[] = [];
@@ -664,9 +701,11 @@ export class BlameLensManager {
       }
     }
 
-    // Apply the decoration
-    const decoration = this.colorDecorations[colorIndex];
-    editor.setDecorations(decoration, ranges);
+    // Set all decoration types in a single pass: ranges for this prompt's
+    // color, empty for all others. Avoids clear-then-set on the same type.
+    this.colorDecorations.forEach((decoration, index) => {
+      editor.setDecorations(decoration, index === colorIndex ? ranges : []);
+    });
   }
 
   /**
@@ -947,7 +986,7 @@ export class BlameLensManager {
     });
 
     // Build hover content (reuse existing method)
-    const hoverContent = this.buildHoverContent(lineInfo, documentUri);
+    const hoverContent = this.buildHoverContent(lineInfo, documentUri, this.currentBlameResult ?? undefined);
 
     // Apply decoration to current line with hover
     const currentLine = editor.selection.active.line;
@@ -1112,7 +1151,19 @@ export class BlameLensManager {
    * Shows a polished chat-style conversation view with clear visual hierarchy.
    * Each message is shown individually with its own header and timestamp.
    */
-  private buildHoverContent(lineInfo: LineBlameInfo | undefined, documentUri?: vscode.Uri): vscode.MarkdownString {
+  /**
+   * Extract email from a "Name <email>" format string.
+   * Returns the email if found, or null.
+   */
+  private extractEmail(authorString: string | null | undefined): string | null {
+    if (!authorString) {
+      return null;
+    }
+    const match = authorString.match(/<([^>]+)>/);
+    return match ? match[1] : null;
+  }
+
+  private buildHoverContent(lineInfo: LineBlameInfo | undefined, documentUri?: vscode.Uri, blameResult?: BlameResult): vscode.MarkdownString {
     const md = new vscode.MarkdownString();
     md.isTrusted = true;
     md.supportHtml = true;
@@ -1154,11 +1205,36 @@ export class BlameLensManager {
     }
     md.appendMarkdown(`---\n\n`);
 
-    // Fallback if no messages saved
+    // Fallback if no messages saved - show contextual message
     if (!hasMessages) {
-      md.appendMarkdown('🔒 *Transcript not saved*\n\n');
-      md.appendMarkdown('Enable prompt saving:\n');
-      md.appendCodeblock('git-ai config set --add share_prompts_in_repositories "*"', 'bash');
+      // Common prefix: always mention /ask skill
+      md.appendMarkdown('💡 *Ask this agent about this code with `/ask`*\n\n');
+
+      const metadata = blameResult?.metadata;
+      const hasMessagesUrl = !!record?.messages_url;
+
+      if (hasMessagesUrl) {
+        // Has messages_url but messages not loaded yet - CAS fetch in progress
+        md.appendMarkdown('*Loading prompt from cloud...*\n');
+      } else if (metadata?.is_logged_in) {
+        // Logged in but no prompt/messages_url - prompt wasn't saved
+        md.appendMarkdown('*Prompt was not saved.* Prompt Storage is enabled. Future prompts will be saved.\n');
+      } else if (!metadata?.is_logged_in && metadata !== undefined) {
+        // Not logged in - check if this is a teammate's code
+        const currentEmail = this.extractEmail(metadata.current_user);
+        const authorEmail = this.extractEmail(record?.human_author);
+        const isDifferentUser = currentEmail && authorEmail && currentEmail !== authorEmail;
+
+        if (isDifferentUser) {
+          md.appendMarkdown('🔒 *Login to see prompt summaries from your teammates*\n\n');
+          md.appendCodeblock('git-ai login', 'bash');
+        } else {
+          md.appendMarkdown('*No prompt saved.*');
+        }
+      } else {
+        // No metadata available (backward compat) - show generic message
+        md.appendMarkdown('🔒 *Transcript not saved*\n\n');
+      }
       return md;
     }
 
@@ -1436,6 +1512,69 @@ export class BlameLensManager {
     }
   }
 
+  /**
+   * Get the workspace cwd for running git-ai commands against a document.
+   */
+  private getWorkspaceCwd(documentUri: vscode.Uri): string | undefined {
+    const repo = findRepoForFile(documentUri);
+    if (repo?.rootUri) {
+      return repo.rootUri.fsPath;
+    }
+    const workspaceFolder = vscode.workspace.getWorkspaceFolder(documentUri);
+    return workspaceFolder?.uri.fsPath;
+  }
+
+  /**
+   * Trigger async CAS fetches for prompts that have messages_url but no messages.
+   * Updates blame result in-place and re-renders when fetches complete.
+   */
+  private triggerCASFetches(blameResult: BlameResult, documentUri: vscode.Uri): void {
+    const cwd = this.getWorkspaceCwd(documentUri);
+    if (!cwd) {
+      return;
+    }
+
+    // Find prompts with messages_url but empty messages
+    const promptsToFetch: Array<{ promptId: string; record: import("./blame-service").PromptRecord }> = [];
+    for (const [promptId, record] of blameResult.prompts) {
+      const hasMessages = record.messages && record.messages.length > 0 && record.messages.some(m => m.text);
+      if (!hasMessages && record.messages_url && !this.casFetchInProgress.has(promptId)) {
+        promptsToFetch.push({ promptId, record });
+      }
+    }
+
+    // Cap concurrent fetches at 3
+    const toFetch = promptsToFetch.slice(0, 3);
+
+    for (const { promptId, record } of toFetch) {
+      this.casFetchInProgress.add(promptId);
+
+      this.blameService.fetchPromptFromCAS(promptId, cwd).then((messages) => {
+        this.casFetchInProgress.delete(promptId);
+
+        if (messages && this.currentBlameResult === blameResult) {
+          // Update record in-place
+          record.messages = messages;
+
+          // Also update all LineBlameInfo that reference this prompt
+          for (const [, lineInfo] of blameResult.lineAuthors) {
+            if (lineInfo.commitHash === promptId && lineInfo.promptRecord) {
+              lineInfo.promptRecord.messages = messages;
+            }
+          }
+
+          // Re-render if still the active document
+          const activeEditor = vscode.window.activeTextEditor;
+          if (activeEditor && activeEditor.document.uri.toString() === this.currentDocumentUri) {
+            this.updateStatusBar(activeEditor);
+          }
+        }
+      }).catch(() => {
+        this.casFetchInProgress.delete(promptId);
+      });
+    }
+  }
+
   public dispose(): void {
     // Clear any pending document change timer
     if (this.documentChangeTimer) {
@@ -1449,6 +1588,7 @@ export class BlameLensManager {
       this.notificationTimeout = null;
     }
     
+    this.casFetchInProgress.clear();
     this.blameService.dispose();
     this.statusBarItem.dispose();
     this._onDidChangeVirtualDocument.dispose();

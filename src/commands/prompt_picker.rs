@@ -2,17 +2,19 @@ use crate::authorship::internal_db::{InternalDatabase, PromptDbRecord};
 use crate::error::GitAiError;
 use crate::git::repository::Repository;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
+    Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap},
-    Frame, Terminal,
 };
 use std::io;
 
@@ -51,11 +53,9 @@ struct PromptPickerState {
 
 impl PromptPickerState {
     fn new(repo: Option<Repository>, title: String) -> Result<Self, GitAiError> {
-        let current_workdir = repo.as_ref().and_then(|r| {
-            r.workdir()
-                .ok()
-                .map(|p| p.to_string_lossy().to_string())
-        });
+        let current_workdir = repo
+            .as_ref()
+            .and_then(|r| r.workdir().ok().map(|p| p.to_string_lossy().to_string()));
 
         let mut state = Self {
             prompts: Vec::new(),
@@ -335,17 +335,21 @@ fn render(f: &mut Frame, state: &PromptPickerState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),  // Title
-            Constraint::Length(3),  // Tabs
-            Constraint::Length(3),  // Search
-            Constraint::Min(10),    // List
-            Constraint::Length(3),  // Footer
+            Constraint::Length(1), // Title
+            Constraint::Length(3), // Tabs
+            Constraint::Length(3), // Search
+            Constraint::Min(10),   // List
+            Constraint::Length(3), // Footer
         ])
         .split(f.area());
 
     // Render title
     let title = Paragraph::new(state.title.clone())
-        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
         .alignment(Alignment::Center);
     f.render_widget(title, chunks[0]);
 
@@ -371,14 +375,24 @@ fn render_tabs(f: &mut Frame, area: Rect, state: &PromptPickerState) {
 
     let selected_tab = match state.current_tab {
         Tab::CurrentRepo => 0,
-        Tab::All => if state.current_workdir.is_some() { 1 } else { 0 },
+        Tab::All => {
+            if state.current_workdir.is_some() {
+                1
+            } else {
+                0
+            }
+        }
     };
 
     let tabs = Tabs::new(tab_titles)
         .block(Block::default().borders(Borders::ALL).title("View"))
         .select(selected_tab)
         .style(Style::default().fg(Color::White))
-        .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+        .highlight_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
 
     f.render_widget(tabs, area);
 }
@@ -430,7 +444,10 @@ fn render_prompt_list(f: &mut Frame, area: Rect, state: &PromptPickerState) {
 
             let lines = vec![
                 Line::from(snippet),
-                Line::from(Span::styled(info_line, Style::default().fg(Color::DarkGray))),
+                Line::from(Span::styled(
+                    info_line,
+                    Style::default().fg(Color::DarkGray),
+                )),
             ];
 
             ListItem::new(Text::from(lines))
@@ -530,9 +547,9 @@ fn render_preview_page(f: &mut Frame, state: &PromptPickerState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5),  // Header with metadata
-            Constraint::Min(10),    // Messages
-            Constraint::Length(3),  // Footer
+            Constraint::Length(5), // Header with metadata
+            Constraint::Min(10),   // Messages
+            Constraint::Length(3), // Footer
         ])
         .split(f.area());
 
@@ -547,14 +564,22 @@ fn render_preview_page(f: &mut Frame, state: &PromptPickerState) {
             Style::default().fg(Color::Cyan),
         )),
         Line::from(Span::styled(
-            format!("Messages: {} | Created: {}", prompt.message_count(), prompt.relative_time()),
+            format!(
+                "Messages: {} | Created: {}",
+                prompt.message_count(),
+                prompt.relative_time()
+            ),
             Style::default().fg(Color::Cyan),
         )),
     ];
 
     let header = Paragraph::new(header_text)
         .block(Block::default().borders(Borders::ALL).title("Preview"))
-        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+        .style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        );
     f.render_widget(header, chunks[0]);
 
     // Render messages

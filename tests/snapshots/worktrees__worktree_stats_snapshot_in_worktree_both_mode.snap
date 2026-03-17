@@ -1,0 +1,26 @@
+---
+source: tests/worktrees.rs
+assertion_line: 346
+expression: stats
+---
+CommitStats {
+    human_additions: 1,
+    mixed_additions: 0,
+    ai_additions: 2,
+    ai_accepted: 2,
+    total_ai_additions: 2,
+    total_ai_deletions: 2,
+    time_waiting_for_ai: 0,
+    git_diff_deleted_lines: 0,
+    git_diff_added_lines: 3,
+    tool_model_breakdown: {
+        "mock_ai::unknown": ToolModelHeadlineStats {
+            ai_additions: 2,
+            mixed_additions: 0,
+            ai_accepted: 2,
+            total_ai_additions: 2,
+            total_ai_deletions: 2,
+            time_waiting_for_ai: 0,
+        },
+    },
+}

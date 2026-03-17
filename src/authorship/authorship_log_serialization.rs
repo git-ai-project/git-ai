@@ -592,9 +592,10 @@ fn parse_attestation_section(
         } else {
             // File path line (not indented)
             if let Some(file_attestation) = current_file.take()
-                && !file_attestation.entries.is_empty() {
-                    attestations.push(file_attestation);
-                }
+                && !file_attestation.entries.is_empty()
+            {
+                attestations.push(file_attestation);
+            }
 
             // Parse file path, handling quoted paths
             let file_path = if line.starts_with('"') && line.ends_with('"') {
@@ -611,9 +612,10 @@ fn parse_attestation_section(
 
     // Don't forget the last file
     if let Some(file_attestation) = current_file
-        && !file_attestation.entries.is_empty() {
-            attestations.push(file_attestation);
-        }
+        && !file_attestation.entries.is_empty()
+    {
+        attestations.push(file_attestation);
+    }
 
     Ok(attestations)
 }
@@ -773,6 +775,7 @@ mod tests {
                 accepted_lines: 0,
                 overriden_lines: 0,
                 messages_url: None,
+                custom_attributes: None,
             },
         );
 
@@ -840,6 +843,7 @@ mod tests {
                 accepted_lines: 0,
                 overriden_lines: 0,
                 messages_url: None,
+                custom_attributes: None,
             },
         );
 
@@ -889,6 +893,7 @@ mod tests {
                 accepted_lines: 0,
                 overriden_lines: 0,
                 messages_url: None,
+                custom_attributes: None,
             },
         );
 
@@ -1068,6 +1073,7 @@ mod tests {
                 accepted_lines: 11,
                 overriden_lines: 0,
                 messages_url: None,
+                custom_attributes: None,
             },
         );
 
@@ -1239,6 +1245,7 @@ mod tests {
                 accepted_lines: 10,
                 overriden_lines: 0,
                 messages_url: None,
+                custom_attributes: None,
             },
         );
 
@@ -1263,6 +1270,7 @@ mod tests {
                 accepted_lines: 20,
                 overriden_lines: 0,
                 messages_url: None,
+                custom_attributes: None,
             },
         );
 

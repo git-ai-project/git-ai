@@ -1,0 +1,18 @@
+{
+  "sessionId": "fixture-chat-session-json",
+  "inputState": {
+    "selectedModel": {
+      "identifier": "copilot/gpt-4o-mini"
+    }
+  },
+  "requests": [
+    {
+      "requestId": "r1",
+      "result": {
+        "metadata": {
+          "sessionId": "fixture-session-id"
+        }
+      }
+    }
+  ]
+}

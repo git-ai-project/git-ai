@@ -2,45 +2,41 @@ use std::collections::HashSet;
 
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::error::GitAiError;
-use crate::git::repository::{Repository, exec_git, exec_git_stdin};
+use crate::git::refs::{commits_with_authorship_notes, note_blob_oids_for_commits};
+#[cfg(test)]
+use crate::git::repository::exec_git;
+use crate::git::repository::{Repository, exec_git_stdin};
 
 pub async fn load_ai_touched_files_for_commits(
     repo: &Repository,
     commit_shas: Vec<String>,
 ) -> Result<HashSet<String>, GitAiError> {
-    let global_args = repo.global_args_for_exec();
+    let repo = repo.clone();
 
     smol::unblock(move || {
         if commit_shas.is_empty() {
             return Ok(HashSet::new());
         }
 
-        // Get all notes mappings (note_sha -> commit_sha) using git notes list
-        let note_mappings = get_notes_list(&global_args)?;
-
-        if note_mappings.is_empty() {
+        let note_blob_map = note_blob_oids_for_commits(&repo, &commit_shas)?;
+        if note_blob_map.is_empty() {
             return Ok(HashSet::new());
         }
 
-        // Filter to only notes for commits we care about
-        let commit_set: HashSet<&str> = commit_shas.iter().map(|s| s.as_str()).collect();
-        let filtered_blob_shas: Vec<String> = note_mappings
-            .into_iter()
-            .filter(|(_, commit_sha)| commit_set.contains(commit_sha.as_str()))
-            .map(|(note_sha, _)| note_sha)
-            .collect();
-
-        if filtered_blob_shas.is_empty() {
-            return Ok(HashSet::new());
+        let mut unique_blob_oids = HashSet::new();
+        for blob_oid in note_blob_map.values() {
+            unique_blob_oids.insert(blob_oid.clone());
         }
+        let mut blob_oids: Vec<String> = unique_blob_oids.into_iter().collect();
+        blob_oids.sort();
 
-        // Use cat-file --batch to read the filtered blobs efficiently
-        let blob_contents = batch_read_blobs(&global_args, &filtered_blob_shas)?;
+        let blob_contents = batch_read_blobs_with_oids(&repo.global_args_for_exec(), &blob_oids)?;
 
-        // Extract file paths from all blob contents
         let mut all_files = HashSet::new();
-        for content in blob_contents {
-            extract_file_paths_from_note(&content, &mut all_files);
+        for blob_oid in note_blob_map.into_values() {
+            if let Some(content) = blob_contents.get(&blob_oid) {
+                extract_file_paths_from_note(content, &mut all_files);
+            }
         }
 
         Ok(all_files)
@@ -57,19 +53,11 @@ pub fn commits_have_authorship_notes(
         return Ok(false);
     }
 
-    let global_args = repo.global_args_for_exec();
-    let note_mappings = get_notes_list(&global_args)?;
-    if note_mappings.is_empty() {
-        return Ok(false);
-    }
-
-    let commit_set: HashSet<&str> = commit_shas.iter().map(|s| s.as_str()).collect();
-    Ok(note_mappings
-        .iter()
-        .any(|(_, commit_sha)| commit_set.contains(commit_sha.as_str())))
+    Ok(!commits_with_authorship_notes(repo, commit_shas)?.is_empty())
 }
 
 /// Get all notes as (note_blob_sha, commit_sha) pairs
+#[cfg(test)]
 fn get_notes_list(global_args: &[String]) -> Result<Vec<(String, String)>, GitAiError> {
     let mut args = global_args.to_vec();
     args.push("notes".to_string());
@@ -102,60 +90,45 @@ fn get_notes_list(global_args: &[String]) -> Result<Vec<(String, String)>, GitAi
     Ok(mappings)
 }
 
-/// Read multiple blobs efficiently using cat-file --batch
-fn batch_read_blobs(
+fn batch_read_blobs_with_oids(
     global_args: &[String],
-    blob_shas: &[String],
-) -> Result<Vec<String>, GitAiError> {
-    if blob_shas.is_empty() {
-        return Ok(Vec::new());
+    blob_oids: &[String],
+) -> Result<std::collections::HashMap<String, String>, GitAiError> {
+    if blob_oids.is_empty() {
+        return Ok(std::collections::HashMap::new());
     }
 
     let mut args = global_args.to_vec();
     args.push("cat-file".to_string());
     args.push("--batch".to_string());
 
-    // Prepare stdin: one SHA per line
-    let stdin_data = blob_shas.join("\n") + "\n";
-
+    let stdin_data = blob_oids.join("\n") + "\n";
     let output = exec_git_stdin(&args, stdin_data.as_bytes())?;
 
-    // Parse batch output
-    // Format for each object:
-    // <sha> <type> <size>\n
-    // <content>\n
-    parse_cat_file_batch_output(&output.stdout)
+    parse_cat_file_batch_output_with_oids(&output.stdout)
 }
 
-/// Parse the output of git cat-file --batch
-///
-/// Format:
-/// <sha> <type> <size>\n
-/// <content bytes>\n
-/// (repeat for each object)
-fn parse_cat_file_batch_output(data: &[u8]) -> Result<Vec<String>, GitAiError> {
-    let mut results = Vec::new();
-    let mut pos = 0;
+fn parse_cat_file_batch_output_with_oids(
+    data: &[u8],
+) -> Result<std::collections::HashMap<String, String>, GitAiError> {
+    let mut results = std::collections::HashMap::new();
+    let mut pos = 0usize;
 
     while pos < data.len() {
-        // Find the header line ending with \n
         let header_end = match data[pos..].iter().position(|&b| b == b'\n') {
             Some(idx) => pos + idx,
             None => break,
         };
 
-        let header = std::str::from_utf8(&data[pos..header_end])
-            .map_err(|e| GitAiError::Generic(format!("Invalid UTF-8 in header: {}", e)))?;
-
-        // Parse header: "<sha> <type> <size>" or "<sha> missing"
+        let header = std::str::from_utf8(&data[pos..header_end])?;
         let parts: Vec<&str> = header.split_whitespace().collect();
         if parts.len() < 2 {
             pos = header_end + 1;
             continue;
         }
 
+        let oid = parts[0].to_string();
         if parts[1] == "missing" {
-            // Object doesn't exist, skip
             pos = header_end + 1;
             continue;
         }
@@ -169,21 +142,21 @@ fn parse_cat_file_batch_output(data: &[u8]) -> Result<Vec<String>, GitAiError> {
             .parse()
             .map_err(|e| GitAiError::Generic(format!("Invalid size in cat-file output: {}", e)))?;
 
-        // Content starts after the header newline
         let content_start = header_end + 1;
         let content_end = content_start + size;
-
         if content_end > data.len() {
-            break;
+            return Err(GitAiError::Generic(
+                "Malformed cat-file --batch output: truncated content".to_string(),
+            ));
         }
 
-        // Try to parse content as UTF-8
-        if let Ok(content) = std::str::from_utf8(&data[content_start..content_end]) {
-            results.push(content.to_string());
-        }
+        let content = String::from_utf8_lossy(&data[content_start..content_end]).to_string();
+        results.insert(oid, content);
 
-        // Move past content and the trailing newline
-        pos = content_end + 1;
+        pos = content_end;
+        if pos < data.len() && data[pos] == b'\n' {
+            pos += 1;
+        }
     }
 
     Ok(results)
@@ -290,5 +263,130 @@ mod tests {
                 "Should return empty set for non-existent commits"
             );
         });
+    }
+
+    #[test]
+    fn test_load_ai_touched_files_empty_commits() {
+        smol::block_on(async {
+            let repo = find_repository_in_path(".").unwrap();
+
+            let files = load_ai_touched_files_for_commits(&repo, vec![])
+                .await
+                .unwrap();
+
+            assert!(files.is_empty(), "Should return empty set for empty input");
+        });
+    }
+
+    #[test]
+    fn test_commits_have_authorship_notes_empty() {
+        let repo = find_repository_in_path(".").unwrap();
+
+        let result = commits_have_authorship_notes(&repo, &[]).unwrap();
+
+        assert!(!result, "Empty list should return false");
+    }
+
+    #[test]
+    fn test_commits_have_authorship_notes_nonexistent() {
+        let repo = find_repository_in_path(".").unwrap();
+
+        let fake_commits = vec![
+            "0000000000000000000000000000000000000000".to_string(),
+            "1111111111111111111111111111111111111111".to_string(),
+        ];
+
+        let result = commits_have_authorship_notes(&repo, &fake_commits).unwrap();
+
+        // Non-existent commits don't have notes
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_parse_cat_file_batch_output_empty() {
+        let result = parse_cat_file_batch_output_with_oids(b"").unwrap();
+        assert!(result.is_empty(), "Empty input should return empty map");
+    }
+
+    #[test]
+    fn test_parse_cat_file_batch_output_missing() {
+        let data = b"abc123 missing\n";
+        let result = parse_cat_file_batch_output_with_oids(data).unwrap();
+        assert!(
+            result.is_empty(),
+            "Missing blobs should not be included in result"
+        );
+    }
+
+    #[test]
+    fn test_parse_cat_file_batch_output_single_blob() {
+        let data = b"abc123 blob 11\nhello world\n";
+        let result = parse_cat_file_batch_output_with_oids(data).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.get("abc123"), Some(&"hello world".to_string()));
+    }
+
+    #[test]
+    fn test_parse_cat_file_batch_output_multiple_blobs() {
+        let data = b"abc123 blob 5\nhello\ndef456 blob 5\nworld\n";
+        let result = parse_cat_file_batch_output_with_oids(data).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.get("abc123"), Some(&"hello".to_string()));
+        assert_eq!(result.get("def456"), Some(&"world".to_string()));
+    }
+
+    #[test]
+    fn test_parse_cat_file_batch_output_truncated() {
+        // Size says 20 bytes but only 5 provided
+        let data = b"abc123 blob 20\nhello";
+        let result = parse_cat_file_batch_output_with_oids(data);
+        assert!(result.is_err(), "Truncated content should return error");
+    }
+
+    #[test]
+    fn test_parse_cat_file_batch_output_invalid_size() {
+        let data = b"abc123 blob notanumber\n";
+        let result = parse_cat_file_batch_output_with_oids(data);
+        assert!(result.is_err(), "Invalid size should return error");
+    }
+
+    #[test]
+    fn test_parse_cat_file_batch_output_malformed_header() {
+        let data = b"abc123\n";
+        let result = parse_cat_file_batch_output_with_oids(data).unwrap();
+        assert!(result.is_empty(), "Malformed header should skip that entry");
+    }
+
+    #[test]
+    fn test_batch_read_blobs_with_oids_empty() {
+        let repo = find_repository_in_path(".").unwrap();
+        let result = batch_read_blobs_with_oids(&repo.global_args_for_exec(), &[]).unwrap();
+        assert!(result.is_empty(), "Empty OID list should return empty map");
+    }
+
+    #[test]
+    fn test_extract_file_paths_from_note_empty() {
+        let mut files = HashSet::new();
+        extract_file_paths_from_note("", &mut files);
+        assert!(files.is_empty(), "Empty note should extract no files");
+    }
+
+    #[test]
+    fn test_extract_file_paths_from_note_no_divider() {
+        let mut files = HashSet::new();
+        extract_file_paths_from_note("some content without divider", &mut files);
+        assert!(
+            files.is_empty(),
+            "Note without divider should extract no files"
+        );
+    }
+
+    #[test]
+    fn test_extract_file_paths_from_note_invalid_format() {
+        let mut files = HashSet::new();
+        let content = "invalid attestation\n---\n{\"metadata\":\"test\"}";
+        extract_file_paths_from_note(content, &mut files);
+        // Should not crash, might extract nothing or handle gracefully
+        // This tests error handling path
     }
 }

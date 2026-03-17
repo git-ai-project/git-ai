@@ -1,7 +1,12 @@
 use crate::error::GitAiError;
-use crate::git::repository::{Repository, exec_git};
+use crate::git::repository::{InternalGitProfile, Repository, exec_git_with_profile};
 use std::collections::HashSet;
 use std::str;
+
+/// Maximum number of pathspec arguments to pass on the command line.
+/// Beyond this threshold, we run git without pathspecs and post-filter
+/// in Rust to avoid OS `ARG_MAX` / E2BIG errors.
+pub const MAX_PATHSPEC_ARGS: usize = 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusCode {
@@ -61,8 +66,9 @@ impl Repository {
         args.push("--cached".to_string());
         args.push("--name-only".to_string());
         args.push("-z".to_string()); // NUL-separated output for proper UTF-8 handling
+        args.push("--no-renames".to_string());
 
-        let output = exec_git(&args)?;
+        let output = exec_git_with_profile(&args, InternalGitProfile::RawDiffParse)?;
 
         if !output.status.success() {
             return Err(GitAiError::Generic(format!(
@@ -89,7 +95,7 @@ impl Repository {
         args.push("--porcelain=v2".to_string());
         args.push("-z".to_string());
 
-        let output = exec_git(&args)?;
+        let output = exec_git_with_profile(&args, InternalGitProfile::General)?;
 
         if !output.status.success() {
             return Err(GitAiError::Generic(format!(
@@ -122,7 +128,10 @@ impl Repository {
             staged_filenames
         };
 
-        if combined_pathspecs.is_empty() {
+        // When no explicit pathspecs are provided and nothing is staged,
+        // we still need a full status scan to capture unstaged changes.
+        let should_full_scan = pathspecs.is_none() && combined_pathspecs.is_empty();
+        if combined_pathspecs.is_empty() && !should_full_scan {
             return Ok(Vec::new());
         }
 
@@ -135,15 +144,17 @@ impl Repository {
             args.push("--untracked-files=no".to_string());
         }
 
-        // Add combined pathspecs (staged files + provided paths)
-        if !combined_pathspecs.is_empty() {
+        // Add combined pathspecs as CLI args only if under the threshold;
+        // otherwise run without pathspecs and post-filter to avoid E2BIG.
+        let needs_post_filter = !should_full_scan && combined_pathspecs.len() > MAX_PATHSPEC_ARGS;
+        if !should_full_scan && !needs_post_filter && !combined_pathspecs.is_empty() {
             args.push("--".to_string());
             for path in &combined_pathspecs {
                 args.push(path.clone());
             }
         }
 
-        let output = exec_git(&args)?;
+        let output = exec_git_with_profile(&args, InternalGitProfile::General)?;
 
         if !output.status.success() {
             return Err(GitAiError::Generic(format!(
@@ -152,7 +163,18 @@ impl Repository {
             )));
         }
 
-        parse_porcelain_v2(&output.stdout)
+        let mut entries = parse_porcelain_v2(&output.stdout)?;
+
+        if needs_post_filter {
+            entries.retain(|e| {
+                combined_pathspecs.contains(&e.path)
+                    || e.orig_path
+                        .as_ref()
+                        .is_some_and(|op| combined_pathspecs.contains(op))
+            });
+        }
+
+        Ok(entries)
     }
 }
 

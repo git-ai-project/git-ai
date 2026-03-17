@@ -2,35 +2,35 @@
 # yarn lockfile v1
 
 
-"@opencode-ai/plugin@^1.0.141":
-  version "1.0.141"
-  resolved "https://registry.yarnpkg.com/@opencode-ai/plugin/-/plugin-1.0.141.tgz#23b9df5fd470d76b6a9b7b2c39f42a3d331029f5"
-  integrity sha512-JRrAhGXdUqGgH050+pfz6O7Y+QVoCWZA8apzoizvC0t3SWEUeZUXQOZLwTZIoNPtitxK7pvUylJ+gHg/6h5n8Q==
+"@opencode-ai/plugin@^1.2.27":
+  version "1.2.27"
+  resolved "https://registry.yarnpkg.com/@opencode-ai/plugin/-/plugin-1.2.27.tgz#6b06dd89b302e56bcd172a17547ecf4397612132"
+  integrity sha512-h+8Bw9v9nghMg7T+SUCTzxlIhOrsTqXW7U0HVLGQST5DjbN7uyCUM51roZWZ8LRjGxzbzFhvPnY1bj8i+ioZyw==
   dependencies:
-    "@opencode-ai/sdk" "1.0.141"
+    "@opencode-ai/sdk" "1.2.27"
     zod "4.1.8"
 
-"@opencode-ai/sdk@1.0.141":
-  version "1.0.141"
-  resolved "https://registry.yarnpkg.com/@opencode-ai/sdk/-/sdk-1.0.141.tgz#084ed73d7fd03defca982c99738d465b08c806a7"
-  integrity sha512-eQ9jnPFLiAIJK7+HfvaHuYVDFyZGjeDZTVGHnc6GhDSu/e6H4JmNMLfZjZ7cAWEhQFcMO36BVIBUT2UI10Y3RQ==
+"@opencode-ai/sdk@1.2.27":
+  version "1.2.27"
+  resolved "https://registry.yarnpkg.com/@opencode-ai/sdk/-/sdk-1.2.27.tgz#29bd91f5af0c7329d69232cd117586d778ec4bec"
+  integrity sha512-Wk0o/I+Fo+wE3zgvlJDs8Fb67KlKqX0PrV8dK5adSDkANq6r4Z25zXJg2iOir+a8ntg3rAcpel1OY4FV/TwRUA==
 
-"@types/node@^20.x":
-  version "20.19.26"
-  resolved "https://registry.yarnpkg.com/@types/node/-/node-20.19.26.tgz#2e8085b493a4f8b9e61e2b1a9d59a219bdc0e373"
-  integrity sha512-0l6cjgF0XnihUpndDhk+nyD3exio3iKaYROSgvh/qSevPXax3L8p5DBRFjbvalnwatGgHEQn2R88y2fA3g4irg==
+"@types/node@^25.x":
+  version "25.5.0"
+  resolved "https://registry.yarnpkg.com/@types/node/-/node-25.5.0.tgz#5c99f37c443d9ccc4985866913f1ed364217da31"
+  integrity sha512-jp2P3tQMSxWugkCUKLRPVUpGaL5MVFwF8RDuSRztfwgN1wmqJeMSbKlnEtQqU8UrhTmzEmZdu2I6v2dpp7XIxw==
   dependencies:
-    undici-types "~6.21.0"
+    undici-types "~7.18.0"
 
 typescript@^5.8.3:
   version "5.9.3"
   resolved "https://registry.yarnpkg.com/typescript/-/typescript-5.9.3.tgz#5b4f59e15310ab17a216f5d6cf53ee476ede670f"
   integrity sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==
 
-undici-types@~6.21.0:
-  version "6.21.0"
-  resolved "https://registry.yarnpkg.com/undici-types/-/undici-types-6.21.0.tgz#691d00af3909be93a7faa13be61b3a5b50ef12cb"
-  integrity sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==
+undici-types@~7.18.0:
+  version "7.18.2"
+  resolved "https://registry.yarnpkg.com/undici-types/-/undici-types-7.18.2.tgz#29357a89e7b7ca4aef3bf0fd3fd0cd73884229e9"
+  integrity sha512-AsuCzffGHJybSaRrmr5eHr81mwJU3kjw6M+uprWvCXiNeN9SOGwQ3Jn8jb8m3Z6izVgknn1R0FTCEAP2QrLY/w==
 
 zod@4.1.8:
   version "4.1.8"

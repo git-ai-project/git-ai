@@ -202,11 +202,7 @@ fn benchmark_extract_tokens(text: &str, iterations: usize) -> Vec<Duration> {
 }
 
 /// Benchmark is_random on extracted tokens
-fn benchmark_is_random(
-    text: &str,
-    tokens: &[(usize, usize)],
-    iterations: usize,
-) -> Vec<Duration> {
+fn benchmark_is_random(text: &str, tokens: &[(usize, usize)], iterations: usize) -> Vec<Duration> {
     let mut durations = Vec::with_capacity(iterations);
 
     for _ in 0..iterations {
@@ -221,11 +217,7 @@ fn benchmark_is_random(
 }
 
 /// Benchmark p_random (the core probability calculation) on tokens
-fn benchmark_p_random(
-    text: &str,
-    tokens: &[(usize, usize)],
-    iterations: usize,
-) -> Vec<Duration> {
+fn benchmark_p_random(text: &str, tokens: &[(usize, usize)], iterations: usize) -> Vec<Duration> {
     let mut durations = Vec::with_capacity(iterations);
 
     for _ in 0..iterations {
@@ -267,14 +259,19 @@ fn test_secrets_benchmark() {
     // Generate test data
     println!("\nGenerating test data...");
     let text = generate_test_data(TEXT_SIZE_KB);
-    println!("Generated {} bytes ({:.1}KB) of test data", text.len(), text.len() as f64 / 1024.0);
+    println!(
+        "Generated {} bytes ({:.1}KB) of test data",
+        text.len(),
+        text.len() as f64 / 1024.0
+    );
 
     // Extract tokens once for analysis
     let tokens = extract_tokens(&text);
     println!("Extracted {} potential secret tokens", tokens.len());
 
     // Show token length distribution
-    let mut length_counts: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    let mut length_counts: std::collections::HashMap<usize, usize> =
+        std::collections::HashMap::new();
     for &(start, end) in &tokens {
         *length_counts.entry(end - start).or_insert(0) += 1;
     }
@@ -303,18 +300,23 @@ fn test_secrets_benchmark() {
 
     // Per-token stats
     if !tokens.is_empty() {
-        let avg_per_token_us = p_random_stats.average.as_secs_f64() * 1_000_000.0 / tokens.len() as f64;
+        let avg_per_token_us =
+            p_random_stats.average.as_secs_f64() * 1_000_000.0 / tokens.len() as f64;
         println!("  Per token: {:.2}µs", avg_per_token_us);
     }
 
     // Benchmark 3: is_random (includes p_random + additional checks)
-    println!("\n--- Benchmarking is_random on {} tokens ---", tokens.len());
+    println!(
+        "\n--- Benchmarking is_random on {} tokens ---",
+        tokens.len()
+    );
     let is_random_durations = benchmark_is_random(&text, &tokens, ITERATIONS);
     let is_random_stats = DurationStats::from_durations(&is_random_durations);
     is_random_stats.print("is_random (all tokens)");
 
     if !tokens.is_empty() {
-        let avg_per_token_us = is_random_stats.average.as_secs_f64() * 1_000_000.0 / tokens.len() as f64;
+        let avg_per_token_us =
+            is_random_stats.average.as_secs_f64() * 1_000_000.0 / tokens.len() as f64;
         println!("  Per token: {:.2}µs", avg_per_token_us);
     }
 
@@ -332,14 +334,32 @@ fn test_secrets_benchmark() {
     println!("\n========================================");
     println!("SUMMARY");
     println!("========================================");
-    println!("\nFor {}KB of text with {} tokens:", TEXT_SIZE_KB, tokens.len());
-    println!("  Token extraction: {:.2}ms", extract_stats.average.as_secs_f64() * 1000.0);
-    println!("  p_random (all tokens): {:.2}ms", p_random_stats.average.as_secs_f64() * 1000.0);
-    println!("  is_random (all tokens): {:.2}ms", is_random_stats.average.as_secs_f64() * 1000.0);
-    println!("  Full redaction: {:.2}ms", redact_stats.average.as_secs_f64() * 1000.0);
+    println!(
+        "\nFor {}KB of text with {} tokens:",
+        TEXT_SIZE_KB,
+        tokens.len()
+    );
+    println!(
+        "  Token extraction: {:.2}ms",
+        extract_stats.average.as_secs_f64() * 1000.0
+    );
+    println!(
+        "  p_random (all tokens): {:.2}ms",
+        p_random_stats.average.as_secs_f64() * 1000.0
+    );
+    println!(
+        "  is_random (all tokens): {:.2}ms",
+        is_random_stats.average.as_secs_f64() * 1000.0
+    );
+    println!(
+        "  Full redaction: {:.2}ms",
+        redact_stats.average.as_secs_f64() * 1000.0
+    );
     println!("\nBreakdown:");
-    let token_extraction_pct = extract_stats.average.as_secs_f64() / redact_stats.average.as_secs_f64() * 100.0;
-    let is_random_pct = is_random_stats.average.as_secs_f64() / redact_stats.average.as_secs_f64() * 100.0;
+    let token_extraction_pct =
+        extract_stats.average.as_secs_f64() / redact_stats.average.as_secs_f64() * 100.0;
+    let is_random_pct =
+        is_random_stats.average.as_secs_f64() / redact_stats.average.as_secs_f64() * 100.0;
     println!("  Token extraction: {:.1}% of total", token_extraction_pct);
     println!("  is_random checks: {:.1}% of total", is_random_pct);
     println!("\n========================================\n");
@@ -355,10 +375,10 @@ fn test_secrets_micro_benchmark() {
 
     // Test with tokens of varying lengths to understand scaling
     let test_tokens = [
-        "sk_test_4eC39HqLyjWDarjtT1zdp7dc", // 28 chars
-        "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", // 40 chars
+        "sk_test_4eC39HqLyjWDarjtT1zdp7dc",          // 28 chars
+        "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",  // 40 chars
         "xvz1evFS4wEEPTGEFPHBog5TYbN4a4rBxoffvXwgY", // 43 chars
-        "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", // 40 chars
+        "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",  // 40 chars
         "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9eyJzdWIiOiIxMjM0NTY3ODkwIn0", // 64 chars
         "VeryLongTokenThatMightBeSlowerToProcessBecauseOfItsLengthAAAABBBBCCCC", // 68 chars
     ];

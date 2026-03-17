@@ -1,7 +1,7 @@
 #[macro_use]
 mod repos;
 
-use rand::{distributions::Alphanumeric, Rng};
+use rand::{Rng, distributions::Alphanumeric};
 use repos::test_repo::TestRepo;
 use std::{fs, time::Instant};
 
@@ -24,9 +24,7 @@ fn test_checkpoint_size_logging_large_ai_rewrites() {
     let file_path = repo.path().join("large_ai_file.txt");
 
     for (config_idx, (target_lines, iterations)) in configs.iter().copied().enumerate() {
-        eprintln!(
-            "config {config_idx}: target_lines={target_lines}, iterations={iterations}"
-        );
+        eprintln!("config {config_idx}: target_lines={target_lines}, iterations={iterations}");
 
         let mut durations = Vec::with_capacity(iterations);
 
@@ -34,9 +32,8 @@ fn test_checkpoint_size_logging_large_ai_rewrites() {
             // Build a fresh file with random AI-authored content for this iteration.
             let mut content = String::with_capacity(target_lines * 48);
             for line_idx in 0..target_lines {
-                let random_fragment: String = (0..24)
-                    .map(|_| rng.sample(Alphanumeric) as char)
-                    .collect();
+                let random_fragment: String =
+                    (0..24).map(|_| rng.sample(Alphanumeric) as char).collect();
                 content.push_str(&format!(
                     "ai_line_{config_idx}_{iteration}_{line_idx}_{random_fragment}\n"
                 ));
@@ -48,7 +45,8 @@ fn test_checkpoint_size_logging_large_ai_rewrites() {
             fs::write(&file_path, &content).expect("should write large file");
 
             // Mark the entire rewrite as AI-authored for this iteration.
-            let git_ai_output = repo.git_ai(&["checkpoint", "mock_ai", "large_ai_file.txt"])
+            let git_ai_output = repo
+                .git_ai(&["checkpoint", "mock_ai", "large_ai_file.txt"])
                 .expect("git-ai checkpoint should succeed");
 
             eprintln!("git-ai checkpoint output:\n{git_ai_output}\n");
@@ -90,3 +88,5 @@ fn test_checkpoint_size_logging_large_ai_rewrites() {
         );
     }
 }
+
+reuse_tests_in_worktree!(test_checkpoint_size_logging_large_ai_rewrites,);

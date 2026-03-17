@@ -4,9 +4,9 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::metrics::{MetricEvent, METRICS_API_VERSION};
+use crate::metrics::{METRICS_API_VERSION, MetricEvent};
 
 pub mod flush;
 pub mod wrapper_performance_targets;
@@ -87,6 +87,7 @@ struct ObservabilityInner {
 }
 
 static OBSERVABILITY: OnceLock<Mutex<ObservabilityInner>> = OnceLock::new();
+const ENV_FLUSH_LOGS_WORKER: &str = "GIT_AI_FLUSH_LOGS_WORKER";
 
 fn get_observability() -> &'static Mutex<ObservabilityInner> {
     OBSERVABILITY.get_or_init(|| {
@@ -114,7 +115,6 @@ fn get_observability() -> &'static Mutex<ObservabilityInner> {
     })
 }
 
-
 /// Append an envelope (buffer if no repo context, write to disk if context set)
 fn append_envelope(envelope: LogEnvelope) {
     let mut obs = get_observability().lock().unwrap();
@@ -128,9 +128,10 @@ fn append_envelope(envelope: LogEnvelope) {
             drop(obs); // Release lock before file I/O
 
             if let Some(json) = envelope.to_json()
-                && let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
-                    let _ = writeln!(file, "{}", json);
-                }
+                && let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path)
+            {
+                let _ = writeln!(file, "{}", json);
+            }
         }
     }
 }
@@ -189,19 +190,52 @@ pub fn spawn_background_flush() {
     // to isolate their database, so we use that as the test detection mechanism.
     // This check is compiled out of release builds since tests only run in debug mode.
     #[cfg(debug_assertions)]
-    if std::env::var("GIT_AI_TEST_DB_PATH").is_ok() {
+    if std::env::var("GIT_AI_TEST_DB_PATH").is_ok() || std::env::var("GITAI_TEST_DB_PATH").is_ok() {
         return;
     }
 
-    use std::process::Command;
-
-    if let Ok(exe) = crate::utils::current_git_ai_exe() {
-        let _ = Command::new(exe)
-            .arg("flush-logs")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
+    if !should_spawn_background_flush() {
+        return;
     }
+
+    let _ = crate::utils::spawn_internal_git_ai_subcommand(
+        "flush-logs",
+        &[],
+        ENV_FLUSH_LOGS_WORKER,
+        &[],
+    );
+}
+
+/// Debounce background flushes to avoid process/request storms when checkpoints
+/// run in quick succession. In background agents, always flush immediately.
+fn should_spawn_background_flush() -> bool {
+    if crate::utils::is_in_background_agent() {
+        return true;
+    }
+
+    const MIN_FLUSH_INTERVAL_SECS: u64 = 60;
+
+    let Some(home) = dirs::home_dir() else {
+        return true;
+    };
+    let internal_dir = home.join(".git-ai").join("internal");
+    let _ = std::fs::create_dir_all(&internal_dir);
+
+    let marker = internal_dir.join("last_flush_trigger_ts");
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    if let Ok(previous) = std::fs::read_to_string(&marker)
+        && let Ok(previous_secs) = previous.trim().parse::<u64>()
+        && now_secs.saturating_sub(previous_secs) < MIN_FLUSH_INTERVAL_SECS
+    {
+        return false;
+    }
+
+    let _ = std::fs::write(&marker, now_secs.to_string());
+    true
 }
 
 /// Log a batch of metric events to the observability log file.
@@ -209,20 +243,167 @@ pub fn spawn_background_flush() {
 /// Events are batched into envelopes of up to 250 events each.
 /// The flush-logs command will then upload them to the API or
 /// store them in SQLite for later upload.
-pub fn log_metrics(events: Vec<MetricEvent>) {
-    if events.is_empty() {
-        return;
+pub fn log_metrics(
+    #[cfg_attr(any(test, feature = "test-support"), allow(unused))] events: Vec<MetricEvent>,
+) {
+    #[cfg(any(test, feature = "test-support"))]
+    return;
+
+    #[cfg(not(any(test, feature = "test-support")))]
+    {
+        if events.is_empty() {
+            return;
+        }
+
+        // Split into chunks of MAX_METRICS_PER_ENVELOPE
+        for chunk in events.chunks(MAX_METRICS_PER_ENVELOPE) {
+            let envelope = MetricsEnvelope {
+                event_type: "metrics".to_string(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                version: METRICS_API_VERSION,
+                events: chunk.to_vec(),
+            };
+
+            append_envelope(LogEnvelope::Metrics(envelope));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    // Test error logging
+    #[test]
+    fn test_log_error_no_panic() {
+        use std::io;
+        let error = io::Error::new(io::ErrorKind::NotFound, "test error");
+        log_error(&error, None);
     }
 
-    // Split into chunks of MAX_METRICS_PER_ENVELOPE
-    for chunk in events.chunks(MAX_METRICS_PER_ENVELOPE) {
+    #[test]
+    fn test_log_error_with_context() {
+        use serde_json::json;
+        use std::io;
+        let error = io::Error::new(io::ErrorKind::PermissionDenied, "access denied");
+        let context = json!({"file": "test.txt", "operation": "read"});
+        log_error(&error, Some(context));
+    }
+
+    // Test performance logging
+    #[test]
+    fn test_log_performance_basic() {
+        log_performance("test_operation", Duration::from_millis(100), None, None);
+    }
+
+    #[test]
+    fn test_log_performance_with_context() {
+        use serde_json::json;
+        let context = json!({"files": 5, "lines": 100});
+        log_performance("test_op", Duration::from_secs(1), Some(context), None);
+    }
+
+    #[test]
+    fn test_log_performance_with_tags() {
+        let mut tags = HashMap::new();
+        tags.insert("command".to_string(), "commit".to_string());
+        tags.insert("repo".to_string(), "test".to_string());
+        log_performance("commit_op", Duration::from_millis(500), None, Some(tags));
+    }
+
+    // Test message logging
+    #[test]
+    fn test_log_message_basic() {
+        log_message("test message", "info", None);
+    }
+
+    #[test]
+    fn test_log_message_with_context() {
+        use serde_json::json;
+        let context = json!({"user": "test", "action": "login"});
+        log_message("user logged in", "info", Some(context));
+    }
+
+    #[test]
+    fn test_log_message_warning() {
+        log_message("warning message", "warning", None);
+    }
+
+    // Test metrics logging
+    #[test]
+    fn test_log_metrics_empty() {
+        log_metrics(vec![]);
+    }
+
+    // Test spawn_background_flush
+    #[test]
+    fn test_spawn_background_flush_no_panic() {
+        // In test mode, this should exit early due to GIT_AI_TEST_DB_PATH check
+        spawn_background_flush();
+    }
+
+    // Test constants
+    #[test]
+    fn test_max_metrics_per_envelope() {
+        assert_eq!(MAX_METRICS_PER_ENVELOPE, 250);
+    }
+
+    // Test envelope serialization
+    #[test]
+    fn test_error_envelope_to_json() {
+        let envelope = ErrorEnvelope {
+            event_type: "error".to_string(),
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
+            message: "test error".to_string(),
+            context: None,
+        };
+        let log_envelope = LogEnvelope::Error(envelope);
+        let json = log_envelope.to_json();
+        assert!(json.is_some());
+    }
+
+    #[test]
+    fn test_performance_envelope_to_json() {
+        let envelope = PerformanceEnvelope {
+            event_type: "performance".to_string(),
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
+            operation: "test_op".to_string(),
+            duration_ms: 100,
+            context: None,
+            tags: None,
+        };
+        let log_envelope = LogEnvelope::Performance(envelope);
+        let json = log_envelope.to_json();
+        assert!(json.is_some());
+    }
+
+    #[test]
+    fn test_message_envelope_to_json() {
+        let envelope = MessageEnvelope {
+            event_type: "message".to_string(),
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
+            message: "test message".to_string(),
+            level: "info".to_string(),
+            context: None,
+        };
+        let log_envelope = LogEnvelope::Message(envelope);
+        let json = log_envelope.to_json();
+        assert!(json.is_some());
+    }
+
+    #[test]
+    fn test_metrics_envelope_to_json() {
+        // Test empty metrics envelope
         let envelope = MetricsEnvelope {
             event_type: "metrics".to_string(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            version: METRICS_API_VERSION,
-            events: chunk.to_vec(),
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
+            version: 1,
+            events: vec![],
         };
-
-        append_envelope(LogEnvelope::Metrics(envelope));
+        let log_envelope = LogEnvelope::Metrics(envelope);
+        let json = log_envelope.to_json();
+        assert!(json.is_some());
     }
 }

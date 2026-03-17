@@ -81,15 +81,15 @@
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
-    "@types/node": "20.x",
+    "@types/node": "25.x",
     "@types/vscode": "1.99.1",
     "@typescript-eslint/eslint-plugin": "^8.31.1",
     "@typescript-eslint/parser": "^8.31.1",
-    "@vscode/test-cli": "^0.0.11",
+    "@vscode/test-cli": "^0.0.12",
     "@vscode/test-electron": "^2.5.2",
-    "@vscode/vsce": "3.6.0",
+    "@vscode/vsce": "3.7.1",
     "eslint": "^9.25.1",
-    "ovsx": "0.10.4",
+    "ovsx": "0.10.9",
     "typescript": "^5.8.3"
   },
   "resolutions": {
@@ -98,6 +98,6 @@
     "test-exclude": ">=7.0.0"
   },
   "dependencies": {
-    "posthog-node": "^5.18.1"
+    "posthog-node": "^5.28.2"
   }
 }

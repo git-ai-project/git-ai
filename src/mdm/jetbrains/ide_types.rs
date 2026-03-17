@@ -6,7 +6,8 @@ pub const MIN_INTELLIJ_BUILD: u32 = 252;
 pub const PLUGIN_ID: &str = "com.usegitai.plugins.jetbrains";
 
 /// JetBrains Marketplace URL for manual installation
-pub const MARKETPLACE_URL: &str = "https://plugins.jetbrains.com/plugin/com.usegitai.plugins.jetbrains";
+pub const MARKETPLACE_URL: &str =
+    "https://plugins.jetbrains.com/plugin/com.usegitai.plugins.jetbrains";
 
 /// Definition of a JetBrains IDE
 #[derive(Debug, Clone)]

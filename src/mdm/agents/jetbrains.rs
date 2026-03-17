@@ -3,9 +3,9 @@ use crate::mdm::hook_installer::{
     HookCheckResult, HookInstaller, HookInstallerParams, InstallResult, UninstallResult,
 };
 use crate::mdm::jetbrains::{
-    download_plugin_from_marketplace, find_jetbrains_installations, install_plugin_to_directory,
-    install_plugin_via_cli, is_plugin_installed, DetectedIde, MARKETPLACE_URL, MIN_INTELLIJ_BUILD,
-    PLUGIN_ID,
+    DetectedIde, MARKETPLACE_URL, MIN_INTELLIJ_BUILD, PLUGIN_ID, download_plugin_from_marketplace,
+    find_jetbrains_installations, install_plugin_to_directory, install_plugin_via_cli,
+    is_plugin_installed,
 };
 use crate::utils::debug_log;
 
@@ -79,8 +79,11 @@ impl JetBrainsInstaller {
 
         // Try direct download from Marketplace
         if let Some(build_number) = &detected.build_number {
-            match download_plugin_from_marketplace(PLUGIN_ID, detected.ide.product_code, build_number)
-            {
+            match download_plugin_from_marketplace(
+                PLUGIN_ID,
+                detected.ide.product_code,
+                build_number,
+            ) {
                 Ok(zip_data) => {
                     match install_plugin_to_directory(&zip_data, &detected.plugins_dir) {
                         Ok(()) => {

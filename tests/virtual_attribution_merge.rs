@@ -79,3 +79,5 @@ fn test_merge_prompts_picking_newest_sums_totals_on_collision() {
     // Newest record should still win for non-accumulated fields.
     assert_eq!(merged_record.agent_id, record2.agent_id);
 }
+
+reuse_tests_in_worktree!(test_merge_prompts_picking_newest_sums_totals_on_collision,);

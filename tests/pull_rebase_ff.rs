@@ -154,6 +154,75 @@ fn setup_divergent_pull_test() -> DivergentPullTestSetup {
     }
 }
 
+/// Creates a setup where local has one AI commit and upstream has an equivalent patch
+/// under a different commit hash plus additional upstream commits.
+/// A subsequent `pull --rebase` should skip the local commit and not map all upstream history
+/// as "new rebased commits".
+fn setup_pull_rebase_skip_test() -> (TestRepo, TestRepo, String) {
+    let (local, upstream) = TestRepo::new_with_remote();
+
+    // Initial commit and push
+    let mut readme = local.filename("README.md");
+    readme.set_contents(vec!["# Test Repo".to_string()]);
+    let initial = local
+        .stage_all_and_commit("initial commit")
+        .expect("initial commit should succeed");
+    local
+        .git(&["push", "-u", "origin", "HEAD"])
+        .expect("push initial commit should succeed");
+
+    // Local AI commit (this is the one that should be skipped during pull --rebase)
+    let mut ai_file = local.filename("ai_feature.txt");
+    ai_file.set_contents(vec![
+        "AI generated feature line 1".ai(),
+        "AI generated feature line 2".ai(),
+    ]);
+    let local_ai = local
+        .stage_all_and_commit("local ai commit")
+        .expect("local ai commit should succeed");
+
+    let branch = local.current_branch();
+
+    // Simulate upstream history with equivalent patch under a different commit hash.
+    // Reset to initial, re-commit same file content with different message, then add extra commits.
+    local
+        .git(&["reset", "--hard", &initial.commit_sha])
+        .expect("reset to initial should succeed");
+
+    ai_file.set_contents(vec![
+        "AI generated feature line 1".ai(),
+        "AI generated feature line 2".ai(),
+    ]);
+    local
+        .stage_all_and_commit("upstream equivalent ai commit")
+        .expect("upstream equivalent ai commit should succeed");
+
+    let mut upstream_file = local.filename("upstream_only.txt");
+    upstream_file.set_contents(vec!["upstream extra 1".to_string()]);
+    local
+        .stage_all_and_commit("upstream extra 1")
+        .expect("upstream extra 1 should succeed");
+    upstream_file.set_contents(vec![
+        "upstream extra 1".to_string(),
+        "upstream extra 2".to_string(),
+    ]);
+    local
+        .stage_all_and_commit("upstream extra 2")
+        .expect("upstream extra 2 should succeed");
+
+    // Force-push divergent upstream state
+    local
+        .git(&["push", "--force", "origin", &format!("HEAD:{}", branch)])
+        .expect("force push upstream state should succeed");
+
+    // Restore local branch to the original local AI commit (now divergent from upstream)
+    local
+        .git(&["reset", "--hard", &local_ai.commit_sha])
+        .expect("reset back to local ai commit should succeed");
+
+    (local, upstream, local_ai.commit_sha)
+}
+
 // =============================================================================
 // Fast-forward pull tests
 // =============================================================================
@@ -171,6 +240,14 @@ fn test_fast_forward_pull_preserves_ai_attribution() {
         .git_ai(&["checkpoint", "mock_ai"])
         .expect("checkpoint should succeed");
 
+    // Configure git pull behavior for Git 2.52.0+ compatibility
+    local
+        .git(&["config", "pull.rebase", "false"])
+        .expect("config should succeed");
+    local
+        .git(&["config", "pull.ff", "only"])
+        .expect("config should succeed");
+
     // Perform fast-forward pull
     local.git(&["pull"]).expect("pull should succeed");
 
@@ -178,7 +255,6 @@ fn test_fast_forward_pull_preserves_ai_attribution() {
     local
         .stage_all_and_commit("commit after pull")
         .expect("commit should succeed");
-
     ai_file.assert_lines_and_blame(vec!["AI generated line 1".ai(), "AI generated line 2".ai()]);
 }
 
@@ -186,6 +262,11 @@ fn test_fast_forward_pull_preserves_ai_attribution() {
 fn test_fast_forward_pull_without_local_changes() {
     let setup = setup_pull_test();
     let local = setup.local;
+
+    // Configure git pull behavior
+    local
+        .git(&["config", "pull.ff", "only"])
+        .expect("config should succeed");
 
     // No local changes - just a clean fast-forward pull
     local.git(&["pull"]).expect("pull should succeed");
@@ -425,3 +506,43 @@ fn test_pull_rebase_committed_and_autostash_preserves_all_authorship() {
     // Verify uncommitted AI authorship survived the autostash cycle
     uncommitted_ai.assert_lines_and_blame(vec!["Uncommitted AI line".ai()]);
 }
+
+#[test]
+fn test_pull_rebase_skip_commit_does_not_map_entire_upstream_history() {
+    let (local, _upstream, local_ai_sha) = setup_pull_rebase_skip_test();
+
+    let output = local
+        .git(&["pull", "--rebase"])
+        .expect("pull --rebase should succeed");
+
+    // Local commit was duplicated upstream via equivalent patch, so rebase should skip it.
+    // We expect no newly rebased commits to map, rather than traversing all upstream commits.
+    assert!(
+        output.contains("Commit mapping: 1 original -> 0 new"),
+        "Expected skipped-commit pull --rebase mapping to be 1 original -> 0 new. Output:\n{}",
+        output
+    );
+
+    // HEAD should move away from original local commit onto upstream tip.
+    let new_head = local
+        .git(&["rev-parse", "HEAD"])
+        .expect("rev-parse should succeed")
+        .trim()
+        .to_string();
+    assert_ne!(
+        new_head, local_ai_sha,
+        "HEAD should have moved to upstream history after skipped rebase"
+    );
+}
+
+reuse_tests_in_worktree!(
+    test_fast_forward_pull_preserves_ai_attribution,
+    test_fast_forward_pull_without_local_changes,
+    test_pull_rebase_preserves_committed_ai_authorship,
+    test_pull_rebase_via_git_config_preserves_committed_ai_authorship,
+    test_pull_rebase_autostash_preserves_uncommitted_ai_attribution,
+    test_pull_rebase_autostash_with_mixed_attribution,
+    test_pull_rebase_autostash_via_git_config,
+    test_pull_rebase_committed_and_autostash_preserves_all_authorship,
+    test_pull_rebase_skip_commit_does_not_map_entire_upstream_history,
+);

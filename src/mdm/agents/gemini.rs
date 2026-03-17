@@ -3,7 +3,7 @@ use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerPa
 use crate::mdm::utils::{
     binary_exists, generate_diff, home_dir, is_git_ai_checkpoint_command, write_atomic,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::fs;
 use std::path::PathBuf;
 
@@ -83,7 +83,7 @@ impl HookInstaller for GeminiInstaller {
 
     fn install_hooks(
         &self,
-        _params: &HookInstallerParams,
+        params: &HookInstallerParams,
         dry_run: bool,
     ) -> Result<Option<String>, GitAiError> {
         let settings_path = Self::settings_path();
@@ -107,9 +107,13 @@ impl HookInstaller for GeminiInstaller {
             serde_json::from_str(&existing_content)?
         };
 
-        // Desired hooks - Gemini doesn't need absolute paths, uses shell properly
-        let before_tool_cmd = format!("git-ai {}", GEMINI_BEFORE_TOOL_CMD);
-        let after_tool_cmd = format!("git-ai {}", GEMINI_AFTER_TOOL_CMD);
+        // Build commands with absolute path
+        let before_tool_cmd = format!(
+            "{} {}",
+            params.binary_path.display(),
+            GEMINI_BEFORE_TOOL_CMD
+        );
+        let after_tool_cmd = format!("{} {}", params.binary_path.display(), GEMINI_AFTER_TOOL_CMD);
 
         let desired_hooks = json!({
             "BeforeTool": {
@@ -152,10 +156,11 @@ impl HookInstaller for GeminiInstaller {
             let mut found_matcher_idx: Option<usize> = None;
             for (idx, item) in hook_type_array.iter().enumerate() {
                 if let Some(matcher) = item.get("matcher").and_then(|m| m.as_str())
-                    && matcher == desired_matcher {
-                        found_matcher_idx = Some(idx);
-                        break;
-                    }
+                    && matcher == desired_matcher
+                {
+                    found_matcher_idx = Some(idx);
+                    break;
+                }
             }
 
             let matcher_idx = match found_matcher_idx {
@@ -183,12 +188,13 @@ impl HookInstaller for GeminiInstaller {
             for (idx, hook) in hooks_array.iter().enumerate() {
                 if let Some(cmd) = hook.get("command").and_then(|c| c.as_str())
                     && is_git_ai_checkpoint_command(cmd)
-                        && found_idx.is_none() {
-                            found_idx = Some(idx);
-                            if cmd != desired_cmd {
-                                needs_update = true;
-                            }
-                        }
+                    && found_idx.is_none()
+                {
+                    found_idx = Some(idx);
+                    if cmd != desired_cmd {
+                        needs_update = true;
+                    }
+                }
             }
 
             match found_idx {
@@ -203,7 +209,6 @@ impl HookInstaller for GeminiInstaller {
                     let keep_idx = idx;
                     let mut current_idx = 0;
                     hooks_array.retain(|hook| {
-                        
                         if current_idx == keep_idx {
                             current_idx += 1;
                             true
@@ -284,9 +289,14 @@ impl HookInstaller for GeminiInstaller {
 
         // Remove git-ai checkpoint commands from both BeforeTool and AfterTool
         for hook_type in &["BeforeTool", "AfterTool"] {
-            if let Some(hook_type_array) = hooks_obj.get_mut(*hook_type).and_then(|v| v.as_array_mut()) {
+            if let Some(hook_type_array) =
+                hooks_obj.get_mut(*hook_type).and_then(|v| v.as_array_mut())
+            {
                 for matcher_block in hook_type_array.iter_mut() {
-                    if let Some(hooks_array) = matcher_block.get_mut("hooks").and_then(|h| h.as_array_mut()) {
+                    if let Some(hooks_array) = matcher_block
+                        .get_mut("hooks")
+                        .and_then(|h| h.as_array_mut())
+                    {
                         let original_len = hooks_array.len();
                         hooks_array.retain(|hook| {
                             if let Some(cmd) = hook.get("command").and_then(|c| c.as_str()) {
@@ -335,9 +345,14 @@ mod tests {
         (temp_dir, settings_path)
     }
 
+    fn create_test_binary_path() -> PathBuf {
+        PathBuf::from("/usr/local/bin/git-ai")
+    }
+
     #[test]
     fn test_gemini_install_hooks_creates_file_from_scratch() {
         let (_temp_dir, settings_path) = setup_test_env();
+        let binary_path = create_test_binary_path();
 
         if let Some(parent) = settings_path.parent() {
             fs::create_dir_all(parent).unwrap();
@@ -354,7 +369,7 @@ mod tests {
                         "hooks": [
                             {
                                 "type": "command",
-                                "command": format!("git-ai {}", GEMINI_BEFORE_TOOL_CMD)
+                                "command": format!("{} {}", binary_path.display(), GEMINI_BEFORE_TOOL_CMD)
                             }
                         ]
                     }
@@ -365,7 +380,7 @@ mod tests {
                         "hooks": [
                             {
                                 "type": "command",
-                                "command": format!("git-ai {}", GEMINI_AFTER_TOOL_CMD)
+                                "command": format!("{} {}", binary_path.display(), GEMINI_AFTER_TOOL_CMD)
                             }
                         ]
                     }
@@ -373,9 +388,14 @@ mod tests {
             }
         });
 
-        fs::write(&settings_path, serde_json::to_string_pretty(&result).unwrap()).unwrap();
+        fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&result).unwrap(),
+        )
+        .unwrap();
 
-        let content: Value = serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
+        let content: Value =
+            serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
 
         assert_eq!(
             content.get("tools").unwrap().get("enableHooks").unwrap(),
@@ -446,18 +466,35 @@ mod tests {
             }
         });
 
-        fs::write(&settings_path, serde_json::to_string_pretty(&existing).unwrap()).unwrap();
+        fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&existing).unwrap(),
+        )
+        .unwrap();
 
-        let mut content: Value = serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
+        let mut content: Value =
+            serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
 
-        let before_tool_cmd = format!("git-ai {}", GEMINI_BEFORE_TOOL_CMD);
-        let after_tool_cmd = format!("git-ai {}", GEMINI_AFTER_TOOL_CMD);
+        let binary_path = create_test_binary_path();
+        let before_tool_cmd = format!("{} {}", binary_path.display(), GEMINI_BEFORE_TOOL_CMD);
+        let after_tool_cmd = format!("{} {}", binary_path.display(), GEMINI_AFTER_TOOL_CMD);
 
-        for (hook_type, desired_cmd) in &[("BeforeTool", before_tool_cmd), ("AfterTool", after_tool_cmd)] {
+        for (hook_type, desired_cmd) in &[
+            ("BeforeTool", before_tool_cmd),
+            ("AfterTool", after_tool_cmd),
+        ] {
             let hooks_obj = content.get_mut("hooks").unwrap();
-            let hook_type_array = hooks_obj.get_mut(*hook_type).unwrap().as_array_mut().unwrap();
+            let hook_type_array = hooks_obj
+                .get_mut(*hook_type)
+                .unwrap()
+                .as_array_mut()
+                .unwrap();
             let matcher_block = &mut hook_type_array[0];
-            let hooks_array = matcher_block.get_mut("hooks").unwrap().as_array_mut().unwrap();
+            let hooks_array = matcher_block
+                .get_mut("hooks")
+                .unwrap()
+                .as_array_mut()
+                .unwrap();
 
             let mut found_idx: Option<usize> = None;
             let mut needs_update = false;
@@ -465,21 +502,23 @@ mod tests {
             for (idx, hook) in hooks_array.iter().enumerate() {
                 if let Some(cmd) = hook.get("command").and_then(|c| c.as_str())
                     && is_git_ai_checkpoint_command(cmd)
-                        && found_idx.is_none() {
-                            found_idx = Some(idx);
-                            if cmd != *desired_cmd {
-                                needs_update = true;
-                            }
-                        }
+                    && found_idx.is_none()
+                {
+                    found_idx = Some(idx);
+                    if cmd != *desired_cmd {
+                        needs_update = true;
+                    }
+                }
             }
 
             if let Some(idx) = found_idx
-                && needs_update {
-                    hooks_array[idx] = json!({
-                        "type": "command",
-                        "command": desired_cmd
-                    });
-                }
+                && needs_update
+            {
+                hooks_array[idx] = json!({
+                    "type": "command",
+                    "command": desired_cmd
+                });
+            }
 
             let first_idx = found_idx;
             if let Some(keep_idx) = first_idx {
@@ -498,9 +537,14 @@ mod tests {
             }
         }
 
-        fs::write(&settings_path, serde_json::to_string_pretty(&content).unwrap()).unwrap();
+        fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&content).unwrap(),
+        )
+        .unwrap();
 
-        let result: Value = serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
+        let result: Value =
+            serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
         let hooks = result.get("hooks").unwrap();
 
         for hook_type in &["BeforeTool", "AfterTool"] {

@@ -1,13 +1,17 @@
-use crate::authorship::stats::{CommitStats, write_stats_to_terminal};
+use crate::authorship::ignore::{
+    IgnoreMatcher, build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher,
+};
+use crate::authorship::stats::{CommitStats, stats_from_authorship_log, write_stats_to_terminal};
 use crate::authorship::virtual_attribution::VirtualAttributions;
 use crate::authorship::working_log::CheckpointKind;
 use crate::commands::checkpoint;
 use crate::error::GitAiError;
 use crate::git::find_repository;
 use crate::git::repo_storage::InitialAttributions;
-use crate::git::repository::Repository;
+use crate::git::repository::{InternalGitProfile, Repository, exec_git_with_profile};
+use crate::git::status::MAX_PATHSPEC_ARGS;
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Serialize)]
@@ -44,11 +48,10 @@ pub fn handle_status(args: &[String]) {
 
 fn run_status(json: bool) -> Result<(), GitAiError> {
     let repo = find_repository(&[])?;
+    let ignore_patterns = effective_ignore_patterns(&repo, &[], &[]);
+    let ignore_matcher = build_ignore_matcher(&ignore_patterns);
 
-    let default_user_name = match repo.config_get_str("user.name") {
-        Ok(Some(name)) if !name.trim().is_empty() => name,
-        _ => "unknown".to_string(),
-    };
+    let default_user_name = repo.git_author_identity().name_or_unknown();
 
     let _ = checkpoint::run(
         &repo,
@@ -126,6 +129,7 @@ fn run_status(json: bool) -> Result<(), GitAiError> {
     let pathspecs: HashSet<String> = checkpoints
         .iter()
         .flat_map(|cp| cp.entries.iter().map(|e| e.file.clone()))
+        .filter(|file| !should_ignore_file_with_matcher(file, &ignore_matcher))
         .collect();
 
     let (authorship_log, initial) = working_va.to_authorship_log_and_initial_working_log(
@@ -136,18 +140,20 @@ fn run_status(json: bool) -> Result<(), GitAiError> {
     )?;
 
     // Get actual git diff stats between HEAD and working directory (like post_commit does)
-    let (total_additions, total_deletions) = get_working_dir_diff_stats(&repo, Some(&pathspecs))?;
+    let (total_additions, total_deletions) =
+        get_working_dir_diff_stats(&repo, Some(&pathspecs), &ignore_matcher)?;
 
     // For status (uncommitted changes), the AI attributions are in `initial` (uncommitted),
     // not in authorship_log.attestations (which is for committed changes).
     // Count AI lines from the uncommitted attributions.
-    let ai_accepted = count_ai_lines_from_initial(&initial);
+    let ai_accepted = count_ai_lines_from_initial(&initial, &ignore_matcher);
 
-    let stats = stats_from_authorship_log_with_override(
+    let stats = stats_from_authorship_log(
         Some(&authorship_log),
         total_additions,
         total_deletions,
         ai_accepted,
+        &BTreeMap::new(),
     );
 
     if json {
@@ -221,6 +227,7 @@ fn capitalize(s: &str) -> String {
 fn get_working_dir_diff_stats(
     repo: &Repository,
     pathspecs: Option<&HashSet<String>>,
+    ignore_matcher: &IgnoreMatcher,
 ) -> Result<(u32, u32), GitAiError> {
     let mut args = repo.global_args_for_exec();
     args.push("diff".to_string());
@@ -228,15 +235,30 @@ fn get_working_dir_diff_stats(
     args.push("HEAD".to_string());
 
     // Add pathspecs if provided to scope the diff to specific files
-    if let Some(paths) = pathspecs
-        && !paths.is_empty() {
+    // Only pass as CLI args when under threshold to avoid E2BIG
+    let needs_post_filter = if let Some(paths) = pathspecs {
+        if paths.is_empty() {
+            return Ok((0, 0));
+        }
+        if paths.len() > MAX_PATHSPEC_ARGS {
+            // Disable rename detection so git reports renames as separate
+            // delete + add entries with clean filenames. Without this,
+            // numstat outputs "old => new" arrow notation in the filename
+            // field, which won't match pathspec entries.
+            args.push("--no-renames".to_string());
+            true
+        } else {
             args.push("--".to_string());
             for path in paths {
                 args.push(path.clone());
             }
+            false
         }
+    } else {
+        false
+    };
 
-    let output = crate::git::repository::exec_git(&args)?;
+    let output = exec_git_with_profile(&args, InternalGitProfile::NumstatParse)?;
     let stdout = String::from_utf8(output.stdout)?;
 
     let mut added_lines = 0u32;
@@ -251,6 +273,19 @@ fn get_working_dir_diff_stats(
         // Parse numstat format: "added\tdeleted\tfilename"
         let parts: Vec<&str> = line.split('\t').collect();
         if parts.len() >= 3 {
+            // Post-filter by pathspec when we couldn't pass them as CLI args
+            if needs_post_filter
+                && let Some(paths) = pathspecs
+                && !paths.contains(parts[2])
+            {
+                continue;
+            }
+
+            let file_path = parts[2];
+            if should_ignore_file_with_matcher(file_path, ignore_matcher) {
+                continue;
+            }
+
             // Parse added lines
             if let Ok(added) = parts[0].parse::<u32>() {
                 added_lines += added;
@@ -258,9 +293,10 @@ fn get_working_dir_diff_stats(
 
             // Parse deleted lines (handle "-" for binary files)
             if parts[1] != "-"
-                && let Ok(deleted) = parts[1].parse::<u32>() {
-                    deleted_lines += deleted;
-                }
+                && let Ok(deleted) = parts[1].parse::<u32>()
+            {
+                deleted_lines += deleted;
+            }
         }
     }
 
@@ -268,10 +304,17 @@ fn get_working_dir_diff_stats(
 }
 
 /// Count AI-attributed lines from InitialAttributions (uncommitted changes)
-fn count_ai_lines_from_initial(initial: &InitialAttributions) -> u32 {
+fn count_ai_lines_from_initial(
+    initial: &InitialAttributions,
+    ignore_matcher: &IgnoreMatcher,
+) -> u32 {
     let mut ai_lines = 0u32;
 
-    for line_attrs in initial.files.values() {
+    for (file_path, line_attrs) in &initial.files {
+        if should_ignore_file_with_matcher(file_path, ignore_matcher) {
+            continue;
+        }
+
         for line_attr in line_attrs {
             // Check if this author_id corresponds to an AI prompt (not human)
             if initial.prompts.contains_key(&line_attr.author_id) {
@@ -285,95 +328,217 @@ fn count_ai_lines_from_initial(initial: &InitialAttributions) -> u32 {
     ai_lines
 }
 
-/// Create CommitStats for uncommitted changes with a known ai_accepted count
-/// This is used by status where we calculate ai_accepted from InitialAttributions
-fn stats_from_authorship_log_with_override(
-    authorship_log: Option<&crate::authorship::authorship_log_serialization::AuthorshipLog>,
-    git_diff_added_lines: u32,
-    git_diff_deleted_lines: u32,
-    ai_accepted_override: u32,
-) -> CommitStats {
-    let mut stats = CommitStats {
-        git_diff_added_lines,
-        git_diff_deleted_lines,
-        ai_accepted: ai_accepted_override,
-        ai_additions: ai_accepted_override, // For uncommitted, ai_additions = ai_accepted (no mixed tracking)
-        human_additions: git_diff_added_lines.saturating_sub(ai_accepted_override),
-        ..Default::default()
-    };
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::git::status::MAX_PATHSPEC_ARGS;
+    use crate::git::test_utils::TmpRepo;
 
-    // Still extract total_ai_additions/deletions and time_waiting from prompts if available
-    if let Some(log) = authorship_log {
-        for prompt_record in log.metadata.prompts.values() {
-            stats.total_ai_additions += prompt_record.total_additions;
-            stats.total_ai_deletions += prompt_record.total_deletions;
-
-            // Calculate time waiting for AI from transcript
-            let transcript = crate::authorship::transcript::AiTranscript {
-                messages: prompt_record.messages.clone(),
-            };
-            stats.time_waiting_for_ai += calculate_waiting_time(&transcript);
+    /// Pad a set of real paths with non-existent paths to exceed MAX_PATHSPEC_ARGS.
+    fn padded_pathspecs(real_paths: &[&str]) -> HashSet<String> {
+        let mut set: HashSet<String> = real_paths.iter().map(|s| s.to_string()).collect();
+        let needed = MAX_PATHSPEC_ARGS + 1 - set.len();
+        for i in 0..needed {
+            set.insert(format!("nonexistent/padding_{:04}.txt", i));
         }
+        set
     }
 
-    stats
-}
+    #[test]
+    fn test_get_working_dir_diff_stats_post_filter_equivalence() {
+        let repo = TmpRepo::new().unwrap();
+        repo.write_file("a.txt", "L1\nL2\nL3\n", true).unwrap();
+        repo.write_file("b.txt", "hello\n", true).unwrap();
+        repo.commit_with_message("initial").unwrap();
 
-/// Calculate time waiting for AI from transcript messages
-fn calculate_waiting_time(transcript: &crate::authorship::transcript::AiTranscript) -> u64 {
-    use crate::authorship::transcript::Message;
+        // Modify both in working dir
+        std::fs::write(repo.path().join("a.txt"), "L1\nL2\nL3\nL4\nL5\n").unwrap();
+        std::fs::write(repo.path().join("b.txt"), "hello\nworld\n").unwrap();
 
-    let mut total_waiting_time = 0u64;
-    let messages = transcript.messages();
+        let gitai_repo = repo.gitai_repo();
+        let ignore_matcher = build_ignore_matcher(&[]);
 
-    if messages.len() <= 1 {
-        return 0;
+        // Small pathspec (CLI-arg path) - only a.txt
+        let small: HashSet<String> = ["a.txt".to_string()].into_iter().collect();
+        let (added_small, _deleted_small) =
+            get_working_dir_diff_stats(gitai_repo, Some(&small), &ignore_matcher).unwrap();
+
+        // Padded pathspec (post-filter path) - only a.txt + padding
+        let large = padded_pathspecs(&["a.txt"]);
+        let (added_large, _deleted_large) =
+            get_working_dir_diff_stats(gitai_repo, Some(&large), &ignore_matcher).unwrap();
+
+        assert_eq!(added_small, 2, "small pathspec: a.txt adds 2 lines");
+        assert_eq!(
+            added_small, added_large,
+            "post-filter should produce same result as CLI-arg path"
+        );
     }
 
-    // Check if last message is from human (don't count time if so)
-    let last_message_is_human = matches!(messages.last(), Some(Message::User { .. }));
-    if last_message_is_human {
-        return 0;
+    #[test]
+    fn test_get_working_dir_diff_stats_post_filter_exclusion() {
+        let repo = TmpRepo::new().unwrap();
+        repo.write_file("a.txt", "L1\nL2\nL3\n", true).unwrap();
+        repo.write_file("b.txt", "hello\n", true).unwrap();
+        repo.commit_with_message("initial").unwrap();
+
+        // Modify both in working dir
+        std::fs::write(repo.path().join("a.txt"), "L1\nL2\nL3\nL4\nL5\n").unwrap();
+        std::fs::write(repo.path().join("b.txt"), "hello\nworld\n").unwrap();
+
+        let gitai_repo = repo.gitai_repo();
+        let ignore_matcher = build_ignore_matcher(&[]);
+
+        // Padded pathspec containing only "a.txt"
+        let large = padded_pathspecs(&["a.txt"]);
+        let (added, _deleted) =
+            get_working_dir_diff_stats(gitai_repo, Some(&large), &ignore_matcher).unwrap();
+
+        // a.txt adds 2 lines; b.txt adds 1 line but should be excluded
+        assert_eq!(added, 2, "should only count a.txt additions, not b.txt");
     }
 
-    // Sum time between user and AI messages
-    let mut i = 0;
-    while i < messages.len() - 1 {
-        if let (
-            Message::User {
-                timestamp: Some(user_ts),
-                ..
+    #[test]
+    fn test_get_working_dir_diff_stats_none_pathspecs() {
+        let repo = TmpRepo::new().unwrap();
+        repo.write_file("a.txt", "L1\nL2\nL3\n", true).unwrap();
+        repo.write_file("b.txt", "hello\n", true).unwrap();
+        repo.commit_with_message("initial").unwrap();
+
+        // Modify both in working dir
+        std::fs::write(repo.path().join("a.txt"), "L1\nL2\nL3\nL4\nL5\n").unwrap();
+        std::fs::write(repo.path().join("b.txt"), "hello\nworld\n").unwrap();
+
+        let gitai_repo = repo.gitai_repo();
+        let ignore_matcher = build_ignore_matcher(&[]);
+
+        // None pathspecs = all lines counted
+        let (added, _deleted) =
+            get_working_dir_diff_stats(gitai_repo, None, &ignore_matcher).unwrap();
+
+        // a.txt adds 2 lines + b.txt adds 1 line = 3 total
+        assert_eq!(added, 3, "None pathspecs should count all additions");
+    }
+
+    #[test]
+    fn test_get_working_dir_diff_stats_empty_pathspecs_returns_zero() {
+        let repo = TmpRepo::new().unwrap();
+        repo.write_file("a.txt", "L1\nL2\n", true).unwrap();
+        repo.commit_with_message("initial").unwrap();
+        std::fs::write(repo.path().join("a.txt"), "L1\nL2\nL3\n").unwrap();
+
+        let gitai_repo = repo.gitai_repo();
+        let ignore_matcher = build_ignore_matcher(&[]);
+        let empty: HashSet<String> = HashSet::new();
+        let (added, deleted) =
+            get_working_dir_diff_stats(gitai_repo, Some(&empty), &ignore_matcher).unwrap();
+        assert_eq!(added, 0);
+        assert_eq!(deleted, 0);
+    }
+
+    #[test]
+    fn test_get_working_dir_diff_stats_post_filter_with_rename() {
+        let repo = TmpRepo::new().unwrap();
+        repo.write_file("old_name.txt", "L1\nL2\nL3\n", true)
+            .unwrap();
+        repo.write_file("other.txt", "hello\n", true).unwrap();
+        repo.commit_with_message("initial").unwrap();
+
+        // Rename old_name.txt -> new_name.txt and add a line.
+        // Stage the rename so git diff HEAD sees it.
+        std::fs::remove_file(repo.path().join("old_name.txt")).unwrap();
+        std::fs::write(repo.path().join("new_name.txt"), "L1\nL2\nL3\nL4\n").unwrap();
+        // Also modify other.txt
+        std::fs::write(repo.path().join("other.txt"), "hello\nworld\n").unwrap();
+        // Stage everything so git diff HEAD picks up the rename + other changes
+        repo.git_command(&["add", "-A"]).unwrap();
+
+        let gitai_repo = repo.gitai_repo();
+        let ignore_matcher = build_ignore_matcher(&[]);
+
+        // Padded pathspec referencing the NEW name — with --no-renames,
+        // git reports this as a delete of old_name.txt + add of new_name.txt,
+        // so "new_name.txt" matches cleanly against parts[2].
+        let large = padded_pathspecs(&["new_name.txt"]);
+        let (added, _deleted) =
+            get_working_dir_diff_stats(gitai_repo, Some(&large), &ignore_matcher).unwrap();
+
+        // new_name.txt has 4 lines (all added since it's a new file after --no-renames)
+        // other.txt should be excluded
+        assert_eq!(
+            added, 4,
+            "should count new_name.txt additions only, not other.txt"
+        );
+    }
+
+    #[test]
+    fn test_get_working_dir_diff_stats_respects_ignore_patterns() {
+        let repo = TmpRepo::new().unwrap();
+        repo.write_file("src/lib.rs", "pub fn a() {}\n", true)
+            .unwrap();
+        repo.write_file("Cargo.lock", "# lock\n", true).unwrap();
+        repo.commit_with_message("initial").unwrap();
+
+        std::fs::write(
+            repo.path().join("src/lib.rs"),
+            "pub fn a() {}\npub fn b() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.path().join("Cargo.lock"),
+            "# lock\n# lock-2\n# lock-3\n",
+        )
+        .unwrap();
+
+        let ignore_matcher = build_ignore_matcher(&["Cargo.lock".to_string()]);
+        let (added, _deleted) =
+            get_working_dir_diff_stats(repo.gitai_repo(), None, &ignore_matcher).unwrap();
+        assert_eq!(added, 1, "Cargo.lock additions should be ignored");
+    }
+
+    #[test]
+    fn test_count_ai_lines_from_initial_respects_ignore_patterns() {
+        let mut initial = InitialAttributions::default();
+        initial.prompts.insert(
+            "prompt-1".to_string(),
+            crate::authorship::authorship_log::PromptRecord {
+                agent_id: crate::authorship::working_log::AgentId {
+                    tool: "cursor".to_string(),
+                    id: "session".to_string(),
+                    model: "gpt-4".to_string(),
+                },
+                human_author: None,
+                messages: vec![],
+                total_additions: 0,
+                total_deletions: 0,
+                accepted_lines: 0,
+                overriden_lines: 0,
+                messages_url: None,
+                custom_attributes: None,
             },
-            Message::Assistant {
-                timestamp: Some(ai_ts),
-                ..
-            }
-            | Message::Thinking {
-                timestamp: Some(ai_ts),
-                ..
-            }
-            | Message::Plan {
-                timestamp: Some(ai_ts),
-                ..
-            },
-        ) = (&messages[i], &messages[i + 1])
-        {
-            // Parse timestamps and calculate difference
-            if let (Ok(user_time), Ok(ai_time)) = (
-                chrono::DateTime::parse_from_rfc3339(user_ts),
-                chrono::DateTime::parse_from_rfc3339(ai_ts),
-            ) {
-                let duration = ai_time.signed_duration_since(user_time);
-                if duration.num_seconds() > 0 {
-                    total_waiting_time += duration.num_seconds() as u64;
-                }
-            }
+        );
 
-            i += 2; // Skip to next user message
-        } else {
-            i += 1;
-        }
+        initial.files.insert(
+            "src/lib.rs".to_string(),
+            vec![crate::authorship::attribution_tracker::LineAttribution {
+                start_line: 1,
+                end_line: 2,
+                author_id: "prompt-1".to_string(),
+                overrode: None,
+            }],
+        );
+        initial.files.insert(
+            "Cargo.lock".to_string(),
+            vec![crate::authorship::attribution_tracker::LineAttribution {
+                start_line: 1,
+                end_line: 100,
+                author_id: "prompt-1".to_string(),
+                overrode: None,
+            }],
+        );
+
+        let ignore_matcher = build_ignore_matcher(&["Cargo.lock".to_string()]);
+        let ai_lines = count_ai_lines_from_initial(&initial, &ignore_matcher);
+        assert_eq!(ai_lines, 2);
     }
-
-    total_waiting_time
 }

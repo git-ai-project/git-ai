@@ -1,0 +1,6 @@
+---
+source: tests/worktrees.rs
+assertion_line: 334
+expression: normalized
+---
+"COMMIT_SHA (AUTHOR TIMESTAMP 1) a\nCOMMIT_SHA (AUTHOR TIMESTAMP 2) b\n"

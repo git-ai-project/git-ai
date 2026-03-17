@@ -49,10 +49,11 @@ pub fn commit_post_command_hook(
     }
 
     if let Some(pre_commit_hook_result) = command_hooks_context.pre_commit_hook_result
-        && !pre_commit_hook_result {
-            debug_log("Skipping git-ai post-commit hook because pre-commit hook failed");
-            return;
-        }
+        && !pre_commit_hook_result
+    {
+        debug_log("Skipping git-ai post-commit hook because pre-commit hook failed");
+        return;
+    }
 
     let supress_output = parsed_args.has_command_flag("--porcelain")
         || parsed_args.has_command_flag("--quiet")
@@ -101,60 +102,37 @@ pub fn get_commit_default_author(repo: &Repository, args: &[String]) -> String {
     // According to git commit manual, --author flag overrides all other author information
     if let Some(author_spec) = extract_author_from_args(args)
         && let Ok(Some(resolved_author)) = repo.resolve_author_spec(&author_spec)
-            && !resolved_author.trim().is_empty() {
-                return resolved_author.trim().to_string();
-            }
+        && !resolved_author.trim().is_empty()
+    {
+        return resolved_author.trim().to_string();
+    }
 
-    // Normal precedence when --author is not specified:
-    // Name precedence: GIT_AUTHOR_NAME env > user.name config > extract from EMAIL env > "unknown"
-    // Email precedence: GIT_AUTHOR_EMAIL env > user.email config > EMAIL env > None
-
-    let mut author_name: Option<String> = None;
-    let mut author_email: Option<String> = None;
-
-    // Check GIT_AUTHOR_NAME environment variable
-    if let Ok(name) = std::env::var("GIT_AUTHOR_NAME")
-        && !name.trim().is_empty() {
-            author_name = Some(name.trim().to_string());
-        }
-
-    // Fall back to git config user.name
-    if author_name.is_none()
-        && let Ok(Some(name)) = repo.config_get_str("user.name")
-            && !name.trim().is_empty() {
-                author_name = Some(name.trim().to_string());
-            }
-
-    // Check GIT_AUTHOR_EMAIL environment variable
-    if let Ok(email) = std::env::var("GIT_AUTHOR_EMAIL")
-        && !email.trim().is_empty() {
-            author_email = Some(email.trim().to_string());
-        }
-
-    // Fall back to git config user.email
-    if author_email.is_none()
-        && let Ok(Some(email)) = repo.config_get_str("user.email")
-            && !email.trim().is_empty() {
-                author_email = Some(email.trim().to_string());
-            }
+    // Use git_commit_author_identity() which resolves via `git var GIT_AUTHOR_IDENT`
+    // (respects full author precedence: GIT_AUTHOR_NAME/EMAIL env > user.name/email config > system defaults)
+    // then falls back to git config user.name/user.email.
+    let identity = repo.git_commit_author_identity();
+    let mut author_name = identity.name;
+    let mut author_email = identity.email;
 
     // Check EMAIL environment variable as fallback for both name and email
     if (author_name.is_none() || author_email.is_none())
         && let Ok(email) = std::env::var("EMAIL")
-            && !email.trim().is_empty() {
-                // Extract name part from email if we don't have a name yet
-                if author_name.is_none()
-                    && let Some(at_pos) = email.find('@') {
-                        let name_part = &email[..at_pos];
-                        if !name_part.is_empty() {
-                            author_name = Some(name_part.to_string());
-                        }
-                    }
-                // Use as email if we don't have an email yet
-                if author_email.is_none() {
-                    author_email = Some(email.trim().to_string());
-                }
+        && !email.trim().is_empty()
+    {
+        // Extract name part from email if we don't have a name yet
+        if author_name.is_none()
+            && let Some(at_pos) = email.find('@')
+        {
+            let name_part = &email[..at_pos];
+            if !name_part.is_empty() {
+                author_name = Some(name_part.to_string());
             }
+        }
+        // Use as email if we don't have an email yet
+        if author_email.is_none() {
+            author_email = Some(email.trim().to_string());
+        }
+    }
 
     // Format the author string based on what we have
     match (author_name, author_email) {

@@ -1,4 +1,4 @@
-use crate::ci::ci_context::{CiContext, CiEvent, CiRunResult};
+use crate::ci::ci_context::{CiContext, CiEvent, CiRunOptions, CiRunResult};
 use crate::ci::github::{get_github_ci_context, install_github_ci_workflow};
 use crate::ci::gitlab::{get_gitlab_ci_context, print_gitlab_ci_yaml};
 use crate::git::repository::find_repository_in_path;
@@ -171,6 +171,7 @@ fn handle_ci_local(args: &[String]) {
 
     let event = args[0].as_str();
     let event_args: &[String] = &args[1..];
+    let has_bool_flag = |name: &str| event_args.iter().any(|arg| arg == name);
 
     // Simple flag parser over remaining args: --key value
     let flag = |name: &str| -> Option<String> {
@@ -200,6 +201,10 @@ fn handle_ci_local(args: &[String]) {
 
     match event {
         "merge" => {
+            let skip_fetch_all = has_bool_flag("--skip-fetch");
+            let skip_fetch_notes = skip_fetch_all || has_bool_flag("--skip-fetch-notes");
+            let skip_fetch_base = skip_fetch_all || has_bool_flag("--skip-fetch-base");
+
             // Required inputs for merge
             let merge_commit_sha = match flag("--merge-commit-sha") {
                 Some(v) => v,
@@ -256,7 +261,10 @@ fn handle_ci_local(args: &[String]) {
             };
 
             debug_log(&format!("Local CI context: {:?}", ctx));
-            match ctx.run() {
+            match ctx.run_with_options(CiRunOptions {
+                skip_fetch_notes,
+                skip_fetch_base,
+            }) {
                 Ok(result) => {
                     debug_log(&format!("Local CI result: {:?}", result));
                     print_ci_result(&result, "Local CI (merge)");
@@ -293,6 +301,9 @@ fn print_ci_help_and_exit() -> ! {
     eprintln!(
         "                     merge  --merge-commit-sha <sha> --base-ref <ref> --head-ref <ref> --head-sha <sha> --base-sha <sha>"
     );
+    eprintln!(
+        "                            [--skip-fetch-notes] [--skip-fetch-base] [--skip-fetch]"
+    );
     std::process::exit(1);
 }
 
@@ -305,6 +316,7 @@ fn print_ci_local_help_and_exit() -> ! {
     eprintln!(
         "  merge  --merge-commit-sha <sha> --base-ref <ref> --head-ref <ref> --head-sha <sha> --base-sha <sha>"
     );
+    eprintln!("         [--skip-fetch-notes] [--skip-fetch-base] [--skip-fetch]");
     std::process::exit(1);
 }
 

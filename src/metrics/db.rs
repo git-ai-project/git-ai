@@ -4,20 +4,27 @@
 //! Server handles idempotency - no retry/queue logic needed.
 
 use crate::error::GitAiError;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 /// Current schema version (must match MIGRATIONS.len())
-const SCHEMA_VERSION: usize = 1;
+const SCHEMA_VERSION: usize = 2;
 
 /// Database migrations - each migration upgrades the schema by one version
 const MIGRATIONS: &[&str] = &[
     // Migration 0 -> 1: Initial schema with metrics table
     r#"
-    CREATE TABLE metrics (
+    CREATE TABLE IF NOT EXISTS metrics (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         event_json TEXT NOT NULL
+    );
+    "#,
+    // Migration 1 -> 2: Persistent rate limiter state for agent_usage events
+    r#"
+    CREATE TABLE IF NOT EXISTS agent_usage_throttle (
+        prompt_id TEXT PRIMARY KEY,
+        last_sent_ts INTEGER NOT NULL
     );
     "#,
 ];
@@ -151,17 +158,17 @@ impl MetricsDatabase {
         for target_version in current_version..SCHEMA_VERSION {
             self.apply_migration(target_version)?;
 
-            if target_version == 0 {
-                self.conn.execute(
-                    "INSERT INTO schema_metadata (key, value) VALUES ('version', ?1)",
-                    params![(target_version + 1).to_string()],
-                )?;
-            } else {
-                self.conn.execute(
-                    "UPDATE schema_metadata SET value = ?1 WHERE key = 'version'",
-                    params![(target_version + 1).to_string()],
-                )?;
-            }
+            // Use an upsert so concurrent initializers do not race on version row creation.
+            self.conn.execute(
+                r#"
+                INSERT INTO schema_metadata (key, value)
+                VALUES ('version', ?1)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value
+                WHERE CAST(schema_metadata.value AS INTEGER) < CAST(excluded.value AS INTEGER)
+                "#,
+                params![(target_version + 1).to_string()],
+            )?;
         }
 
         Ok(())
@@ -194,9 +201,7 @@ impl MetricsDatabase {
         let tx = self.conn.transaction()?;
 
         {
-            let mut stmt = tx.prepare_cached(
-                "INSERT INTO metrics (event_json) VALUES (?1)",
-            )?;
+            let mut stmt = tx.prepare_cached("INSERT INTO metrics (event_json) VALUES (?1)")?;
 
             for event_json in events {
                 stmt.execute(params![event_json])?;
@@ -209,9 +214,9 @@ impl MetricsDatabase {
 
     /// Get batch of events (oldest first)
     pub fn get_batch(&self, limit: usize) -> Result<Vec<MetricRecord>, GitAiError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, event_json FROM metrics ORDER BY id ASC LIMIT ?1",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, event_json FROM metrics ORDER BY id ASC LIMIT ?1")?;
 
         let rows = stmt.query_map(params![limit], |row| {
             Ok(MetricRecord {
@@ -237,9 +242,7 @@ impl MetricsDatabase {
         let tx = self.conn.transaction()?;
 
         {
-            let mut stmt = tx.prepare_cached(
-                "DELETE FROM metrics WHERE id = ?1",
-            )?;
+            let mut stmt = tx.prepare_cached("DELETE FROM metrics WHERE id = ?1")?;
 
             for id in ids {
                 stmt.execute(params![id])?;
@@ -252,12 +255,51 @@ impl MetricsDatabase {
 
     /// Get count of pending metrics
     pub fn count(&self) -> Result<usize, GitAiError> {
-        let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM metrics",
-            [],
-            |row| row.get(0),
-        )?;
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM metrics", [], |row| row.get(0))?;
         Ok(count as usize)
+    }
+
+    /// Returns whether an `agent_usage` event should be emitted for this prompt_id.
+    ///
+    /// If emitted, this method also updates the prompt's last-sent timestamp.
+    pub fn should_emit_agent_usage(
+        &mut self,
+        prompt_id: &str,
+        now_ts: u64,
+        min_interval_secs: u64,
+    ) -> Result<bool, GitAiError> {
+        if prompt_id.is_empty() {
+            return Ok(true);
+        }
+
+        let tx = self.conn.transaction()?;
+        let existing_ts: Option<i64> = tx
+            .query_row(
+                "SELECT last_sent_ts FROM agent_usage_throttle WHERE prompt_id = ?1",
+                params![prompt_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let should_emit = existing_ts
+            .map(|prev_ts| now_ts.saturating_sub(prev_ts as u64) >= min_interval_secs)
+            .unwrap_or(true);
+
+        if should_emit {
+            tx.execute(
+                r#"
+                INSERT INTO agent_usage_throttle (prompt_id, last_sent_ts)
+                VALUES (?1, ?2)
+                ON CONFLICT(prompt_id) DO UPDATE SET last_sent_ts = excluded.last_sent_ts
+                "#,
+                params![prompt_id, now_ts as i64],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(should_emit)
     }
 }
 
@@ -303,7 +345,45 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "1");
+        assert_eq!(version, "2");
+    }
+
+    #[test]
+    fn test_initialize_schema_handles_preexisting_agent_usage_table() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("concurrent-init.db");
+        let conn = Connection::open(&db_path).unwrap();
+
+        // Simulate a partial migration state from a concurrent process:
+        // schema version indicates agent_usage_throttle is missing, but it already exists.
+        conn.execute_batch(
+            r#"
+            CREATE TABLE schema_metadata (
+                key TEXT PRIMARY KEY NOT NULL,
+                value TEXT NOT NULL
+            );
+            INSERT INTO schema_metadata (key, value) VALUES ('version', '1');
+            CREATE TABLE agent_usage_throttle (
+                tool TEXT PRIMARY KEY NOT NULL,
+                agent_last_seen_at INTEGER NOT NULL,
+                command_last_seen_at INTEGER NOT NULL
+            );
+            "#,
+        )
+        .unwrap();
+
+        let mut db = MetricsDatabase { conn };
+        db.initialize_schema().unwrap();
+
+        let version: String = db
+            .conn
+            .query_row(
+                "SELECT value FROM schema_metadata WHERE key = 'version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "2");
     }
 
     #[test]
@@ -396,5 +476,27 @@ mod tests {
         assert!(path.to_string_lossy().contains(".git-ai"));
         assert!(path.to_string_lossy().contains("internal"));
         assert!(path.to_string_lossy().ends_with("metrics-db"));
+    }
+
+    #[test]
+    fn test_should_emit_agent_usage_rate_limit() {
+        let (mut db, _temp_dir) = create_test_db();
+        let prompt_id = "prompt-123";
+
+        // First event for a prompt should be allowed.
+        assert!(
+            db.should_emit_agent_usage(prompt_id, 1_700_000_000, 300)
+                .unwrap()
+        );
+        // Subsequent event inside the window should be throttled.
+        assert!(
+            !db.should_emit_agent_usage(prompt_id, 1_700_000_120, 300)
+                .unwrap()
+        );
+        // Event outside the window should be allowed again.
+        assert!(
+            db.should_emit_agent_usage(prompt_id, 1_700_000_301, 300)
+                .unwrap()
+        );
     }
 }

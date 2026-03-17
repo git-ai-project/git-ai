@@ -1,5 +1,7 @@
+use crate::auth::CredentialStore;
 use crate::authorship::authorship_log::PromptRecord;
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
+use crate::authorship::prompt_utils::enrich_prompt_messages;
 use crate::authorship::working_log::CheckpointKind;
 use crate::error::GitAiError;
 use crate::git::refs::get_reference_as_authorship_log_v3;
@@ -8,8 +10,8 @@ use crate::git::repository::{exec_git, exec_git_stdin};
 #[cfg(windows)]
 use crate::utils::normalize_to_posix;
 use chrono::{DateTime, FixedOffset, TimeZone, Utc};
-use serde::Serialize;
-use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::sync::LazyLock;
@@ -22,7 +24,7 @@ pub static OLDEST_AI_BLAME_DATE: LazyLock<DateTime<FixedOffset>> = LazyLock::new
         .unwrap()
 });
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct BlameHunk {
     /// Line range [start, end] (inclusive) - current line numbers in the file
     pub range: (u32, u32),
@@ -55,7 +57,22 @@ pub struct BlameHunk {
     pub is_boundary: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+pub struct BlameAnalysisResult {
+    pub line_authors: HashMap<u32, String>,
+    pub prompt_records: HashMap<String, PromptRecord>,
+    pub blame_hunks: Vec<BlameHunk>,
+}
+
+struct PreparedBlameRequest {
+    relative_file_path: String,
+    file_content: String,
+    line_ranges: Vec<(u32, u32)>,
+    options: GitAiBlameOptions,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct GitAiBlameOptions {
     // Line range options
     pub line_ranges: Vec<(u32, u32)>,
@@ -63,6 +80,9 @@ pub struct GitAiBlameOptions {
     pub newest_commit: Option<String>,
     pub oldest_commit: Option<String>,
     pub oldest_date: Option<DateTime<FixedOffset>>,
+    /// Raw git --since value (e.g. "2 weeks ago", "2026-01-01"), used when callers
+    /// need idiomatic git date parsing without pre-parsing to RFC3339.
+    pub oldest_date_spec: Option<String>,
 
     // Output format options
     pub porcelain: bool,
@@ -137,6 +157,9 @@ pub struct GitAiBlameOptions {
     // Mark lines from commits without authorship logs as "Unknown"
     pub mark_unknown: bool,
 
+    // Show prompt hashes inline and dump prompts when piped
+    pub show_prompt: bool,
+
     // Split hunks when lines have different AI human authors
     // When true, a single git blame hunk may be split into multiple hunks
     // if different lines were authored by different humans working with AI
@@ -151,6 +174,7 @@ impl Default for GitAiBlameOptions {
             newest_commit: None,
             oldest_commit: None,
             oldest_date: None,
+            oldest_date_spec: None,
             line_porcelain: false,
             incremental: false,
             show_name: false,
@@ -184,30 +208,26 @@ impl Default for GitAiBlameOptions {
             ignore_whitespace: false,
             json: false,
             mark_unknown: false,
+            show_prompt: false,
             split_hunks_by_ai_author: true,
         }
     }
 }
 
 impl Repository {
-    #[allow(clippy::type_complexity)]
-    pub fn blame(
-        &self,
-        file_path: &str,
-        options: &GitAiBlameOptions,
-    ) -> Result<(HashMap<u32, String>, HashMap<String, PromptRecord>), GitAiError> {
-        // Use repo root for file system operations
-        let repo_root = self.workdir().map_err(|e| GitAiError::Generic(format!(
-                "Repository has no working directory: {}",
-                e
-            )))?;
+    const BLAME_ABBREV_BATCH_SIZE: usize = 256;
 
-        // Normalize the file path to be relative to repo root
-        // This is important for AI authorship lookup which stores paths relative to repo root
+    fn normalize_blame_file_path(&self, file_path: &str) -> Result<String, GitAiError> {
+        let repo_root = self.workdir().map_err(|e| {
+            GitAiError::Generic(format!("Repository has no working directory: {}", e))
+        })?;
+
+        // Normalize the file path to be relative to repo root.
+        // This is important for AI authorship lookup which stores paths relative to repo root.
         let file_path_buf = std::path::Path::new(file_path);
         let relative_file_path = if file_path_buf.is_absolute() {
-            // Convert absolute path to relative path
-            // Canonicalize both paths to handle symlinks (e.g., /var -> /private/var on macOS)
+            // Convert absolute path to relative path.
+            // Canonicalize both paths to handle symlinks (e.g., /var -> /private/var on macOS).
             let canonical_file_path = file_path_buf.canonicalize().map_err(|e| {
                 GitAiError::Generic(format!(
                     "Failed to canonicalize file path '{}': {}",
@@ -237,11 +257,10 @@ impl Repository {
             file_path.to_string()
         };
 
-        // Normalize the file path before use
+        // Normalize path separators and leading ./.
         #[cfg(windows)]
         let relative_file_path = {
             let normalized = normalize_to_posix(&relative_file_path);
-            // Strip leading ./ or .\ if present
             normalized
                 .strip_prefix("./")
                 .unwrap_or(&normalized)
@@ -250,65 +269,75 @@ impl Repository {
 
         #[cfg(not(windows))]
         let relative_file_path = {
-            // Also strip leading ./ on non-Windows for consistency
             relative_file_path
                 .strip_prefix("./")
                 .unwrap_or(&relative_file_path)
                 .to_string()
         };
 
+        Ok(relative_file_path)
+    }
+
+    fn effective_blame_options(options: &GitAiBlameOptions) -> GitAiBlameOptions {
         // For JSON output, default to HEAD to exclude uncommitted changes
-        // and use prompt hashes as names so we can correlate with prompt_records
-        let options = if options.json {
+        // and use prompt hashes as names so we can correlate with prompt_records.
+        if options.json {
             let mut opts = options.clone();
             if opts.newest_commit.is_none() {
                 opts.newest_commit = Some("HEAD".to_string());
             }
             opts.use_prompt_hashes_as_names = true;
             opts
+        } else if options.show_prompt {
+            let mut opts = options.clone();
+            opts.use_prompt_hashes_as_names = true;
+            opts
         } else {
             options.clone()
-        };
+        }
+    }
 
+    fn read_blame_file_content(
+        &self,
+        relative_file_path: &str,
+        options: &GitAiBlameOptions,
+    ) -> Result<String, GitAiError> {
         // Read file content from one of:
         // 1. Provided contents_data (from --contents flag)
         // 2. A specific commit
         // 3. The working directory
-        let (file_content, total_lines) = if let Some(ref data) = options.contents_data {
+        if let Some(ref data) = options.contents_data {
             // Use pre-read contents data (from --contents stdin or file)
-            let content = String::from_utf8_lossy(data).to_string();
-            let lines_count = content.lines().count() as u32;
-            (content, lines_count)
+            Ok(String::from_utf8_lossy(data).to_string())
         } else if let Some(ref commit) = options.newest_commit {
-            // Read file content from the specified commit
-            // This ensures blame is independent of which branch is checked out
+            // Read file content from the specified commit.
+            // This ensures blame is independent of which branch is checked out.
             let commit_obj = self.find_commit(commit.clone())?;
             let tree = commit_obj.tree()?;
 
-            match tree.get_path(std::path::Path::new(&relative_file_path)) {
+            match tree.get_path(std::path::Path::new(relative_file_path)) {
                 Ok(entry) => {
                     if let Ok(blob) = self.find_blob(entry.id()) {
                         let blob_content = blob.content().unwrap_or_default();
-                        let content = String::from_utf8_lossy(&blob_content).to_string();
-                        let lines_count = content.lines().count() as u32;
-                        (content, lines_count)
+                        Ok(String::from_utf8_lossy(&blob_content).to_string())
                     } else {
-                        return Err(GitAiError::Generic(format!(
+                        Err(GitAiError::Generic(format!(
                             "File '{}' is not a blob in commit {}",
                             relative_file_path, commit
-                        )));
+                        )))
                     }
                 }
-                Err(_) => {
-                    return Err(GitAiError::Generic(format!(
-                        "File '{}' not found in commit {}",
-                        relative_file_path, commit
-                    )));
-                }
+                Err(_) => Err(GitAiError::Generic(format!(
+                    "File '{}' not found in commit {}",
+                    relative_file_path, commit
+                ))),
             }
         } else {
-            // Read from working directory (existing behavior)
-            let abs_file_path = repo_root.join(&relative_file_path);
+            // Read from working directory.
+            let repo_root = self.workdir().map_err(|e| {
+                GitAiError::Generic(format!("Repository has no working directory: {}", e))
+            })?;
+            let abs_file_path = repo_root.join(relative_file_path);
 
             if !abs_file_path.exists() {
                 return Err(GitAiError::Generic(format!(
@@ -317,21 +346,29 @@ impl Repository {
                 )));
             }
 
-            let content = fs::read_to_string(&abs_file_path)?;
-            let lines_count = content.lines().count() as u32;
-            (content, lines_count)
-        };
+            let raw_bytes = fs::read(&abs_file_path)?;
+            Ok(String::from_utf8_lossy(&raw_bytes).into_owned())
+        }
+    }
 
-        let lines: Vec<&str> = file_content.lines().collect();
+    fn prepare_blame_request(
+        &self,
+        file_path: &str,
+        options: &GitAiBlameOptions,
+    ) -> Result<PreparedBlameRequest, GitAiError> {
+        let relative_file_path = self.normalize_blame_file_path(file_path)?;
+        let options = Self::effective_blame_options(options);
+        let file_content = self.read_blame_file_content(&relative_file_path, &options)?;
+        let total_lines = file_content.lines().count() as u32;
 
-        // Determine the line ranges to process
+        // Determine the line ranges to process.
         let line_ranges = if options.line_ranges.is_empty() {
             vec![(1, total_lines)]
         } else {
             options.line_ranges.clone()
         };
 
-        // Validate line ranges
+        // Validate line ranges.
         for (start, end) in &line_ranges {
             if *start == 0 || *end == 0 || start > end || *end > total_lines {
                 return Err(GitAiError::Generic(format!(
@@ -341,60 +378,233 @@ impl Repository {
             }
         }
 
-        // Step 1: Get Git's native blame for all ranges
-        let mut all_blame_hunks = Vec::new();
-        for (start_line, end_line) in &line_ranges {
-            let hunks = self.blame_hunks(&relative_file_path, *start_line, *end_line, &options)?;
-            all_blame_hunks.extend(hunks);
+        Ok(PreparedBlameRequest {
+            relative_file_path,
+            file_content,
+            line_ranges,
+            options,
+        })
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn run_blame_analysis_pipeline(
+        &self,
+        relative_file_path: &str,
+        line_ranges: &[(u32, u32)],
+        options: &GitAiBlameOptions,
+    ) -> Result<
+        (
+            BlameAnalysisResult,
+            Vec<AuthorshipLog>,
+            HashMap<String, Vec<String>>,
+            std::collections::HashSet<String>, // commits with real authorship notes
+        ),
+        GitAiError,
+    > {
+        // Step 1: Get Git's native blame for all ranges in one invocation.
+        let blame_hunks = self.blame_hunks_for_ranges(relative_file_path, line_ranges, options)?;
+
+        // Step 2: Overlay AI authorship information.
+        let (line_authors, prompt_records, authorship_logs, prompt_commits, commits_with_notes) =
+            overlay_ai_authorship(self, &blame_hunks, relative_file_path, options)?;
+
+        Ok((
+            BlameAnalysisResult {
+                line_authors,
+                prompt_records,
+                blame_hunks,
+            },
+            authorship_logs,
+            prompt_commits,
+            commits_with_notes,
+        ))
+    }
+
+    fn blame_requested_abbrev_len(options: &GitAiBlameOptions, is_boundary: bool) -> usize {
+        let base_len = options.abbrev.unwrap_or(7).max(1) as usize;
+        if is_boundary && !options.show_root {
+            base_len
+        } else {
+            (base_len + 1).min(40)
+        }
+    }
+
+    fn fallback_blame_abbrev_sha(commit_sha: &str, requested_len: usize) -> String {
+        if requested_len < commit_sha.len() {
+            commit_sha[..requested_len].to_string()
+        } else {
+            commit_sha.to_string()
+        }
+    }
+
+    fn resolve_blame_abbrev_shas_batched(
+        &self,
+        requests_by_len: &HashMap<usize, Vec<String>>,
+    ) -> HashMap<(String, usize), String> {
+        let mut resolved: HashMap<(String, usize), String> = HashMap::new();
+
+        for (&requested_len, commit_shas) in requests_by_len {
+            if commit_shas.is_empty() {
+                continue;
+            }
+
+            for commit_sha_batch in commit_shas.chunks(Self::BLAME_ABBREV_BATCH_SIZE) {
+                let mut args = self.global_args_for_exec();
+                args.push("rev-parse".to_string());
+                args.push(format!("--short={requested_len}"));
+                args.extend(commit_sha_batch.iter().cloned());
+
+                let batched_result = exec_git(&args)
+                    .ok()
+                    .and_then(|output| String::from_utf8(output.stdout).ok())
+                    .map(|stdout| {
+                        stdout
+                            .lines()
+                            .map(str::trim)
+                            .filter(|line| !line.is_empty())
+                            .map(str::to_string)
+                            .collect::<Vec<_>>()
+                    });
+
+                if let Some(short_shas) = batched_result
+                    && short_shas.len() == commit_sha_batch.len()
+                {
+                    for (commit_sha, short_sha) in commit_sha_batch.iter().zip(short_shas) {
+                        resolved.insert((commit_sha.clone(), requested_len), short_sha);
+                    }
+                    continue;
+                }
+
+                for commit_sha in commit_sha_batch {
+                    resolved
+                        .entry((commit_sha.clone(), requested_len))
+                        .or_insert_with(|| {
+                            Self::fallback_blame_abbrev_sha(commit_sha, requested_len)
+                        });
+                }
+            }
         }
 
-        // Step 2: Overlay AI authorship information
-        let (line_authors, prompt_records, authorship_logs, prompt_commits) =
-            overlay_ai_authorship(self, &all_blame_hunks, &relative_file_path, &options)?;
+        resolved
+    }
 
-        if options.no_output {
+    fn populate_hunk_abbrev_shas(&self, hunks: &mut [BlameHunk], options: &GitAiBlameOptions) {
+        if options.long_rev {
+            for hunk in hunks {
+                hunk.abbrev_sha = hunk.commit_sha.clone();
+            }
+            return;
+        }
+
+        let mut requests_by_len: HashMap<usize, Vec<String>> = HashMap::new();
+        let mut seen_by_len: HashMap<usize, HashSet<String>> = HashMap::new();
+
+        for hunk in hunks.iter() {
+            let requested_len = Self::blame_requested_abbrev_len(options, hunk.is_boundary);
+            let seen = seen_by_len.entry(requested_len).or_default();
+            if seen.insert(hunk.commit_sha.clone()) {
+                requests_by_len
+                    .entry(requested_len)
+                    .or_default()
+                    .push(hunk.commit_sha.clone());
+            }
+        }
+
+        let resolved = self.resolve_blame_abbrev_shas_batched(&requests_by_len);
+
+        for hunk in hunks.iter_mut() {
+            let requested_len = Self::blame_requested_abbrev_len(options, hunk.is_boundary);
+            hunk.abbrev_sha = resolved
+                .get(&(hunk.commit_sha.clone(), requested_len))
+                .cloned()
+                .unwrap_or_else(|| {
+                    Self::fallback_blame_abbrev_sha(&hunk.commit_sha, requested_len)
+                });
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub fn blame(
+        &self,
+        file_path: &str,
+        options: &GitAiBlameOptions,
+    ) -> Result<(HashMap<u32, String>, HashMap<String, PromptRecord>), GitAiError> {
+        let request = self.prepare_blame_request(file_path, options)?;
+        let lines: Vec<&str> = request.file_content.lines().collect();
+        let (analysis, authorship_logs, prompt_commits, commits_with_notes) = self
+            .run_blame_analysis_pipeline(
+                &request.relative_file_path,
+                &request.line_ranges,
+                &request.options,
+            )?;
+        let BlameAnalysisResult {
+            line_authors,
+            prompt_records,
+            blame_hunks: _,
+        } = analysis;
+
+        if request.options.no_output {
             return Ok((line_authors, prompt_records));
         }
 
         // Output based on format
         if options.json {
             output_json_format(
+                self,
                 &line_authors,
                 &prompt_records,
                 &authorship_logs,
                 &prompt_commits,
-                &relative_file_path,
+                &request.relative_file_path,
             )?;
-        } else if options.porcelain || options.line_porcelain {
+        } else if request.options.porcelain || request.options.line_porcelain {
             output_porcelain_format(
                 self,
                 &line_authors,
-                &relative_file_path,
+                &request.relative_file_path,
                 &lines,
-                &line_ranges,
-                &options,
+                &request.line_ranges,
+                &request.options,
+                &commits_with_notes,
             )?;
-        } else if options.incremental {
+        } else if request.options.incremental {
             output_incremental_format(
                 self,
                 &line_authors,
-                &relative_file_path,
+                &request.relative_file_path,
                 &lines,
-                &line_ranges,
-                &options,
+                &request.line_ranges,
+                &request.options,
+                &commits_with_notes,
             )?;
         } else {
             output_default_format(
                 self,
                 &line_authors,
-                &relative_file_path,
+                &prompt_records,
+                &request.relative_file_path,
                 &lines,
-                &line_ranges,
-                &options,
+                &request.line_ranges,
+                &request.options,
             )?;
         }
 
         Ok((line_authors, prompt_records))
+    }
+
+    pub fn blame_analysis(
+        &self,
+        file_path: &str,
+        options: &GitAiBlameOptions,
+    ) -> Result<BlameAnalysisResult, GitAiError> {
+        let request = self.prepare_blame_request(file_path, options)?;
+        let (analysis, _authorship_logs, _prompt_commits, _commits_with_notes) = self
+            .run_blame_analysis_pipeline(
+                &request.relative_file_path,
+                &request.line_ranges,
+                &request.options,
+            )?;
+        Ok(analysis)
     }
 
     pub fn blame_hunks(
@@ -404,6 +614,19 @@ impl Repository {
         end_line: u32,
         options: &GitAiBlameOptions,
     ) -> Result<Vec<BlameHunk>, GitAiError> {
+        self.blame_hunks_for_ranges(file_path, &[(start_line, end_line)], options)
+    }
+
+    pub fn blame_hunks_for_ranges(
+        &self,
+        file_path: &str,
+        line_ranges: &[(u32, u32)],
+        options: &GitAiBlameOptions,
+    ) -> Result<Vec<BlameHunk>, GitAiError> {
+        if line_ranges.is_empty() {
+            return Ok(Vec::new());
+        }
+
         // Build git blame --line-porcelain command
         let mut args = self.global_args_for_exec();
         args.push("blame".to_string());
@@ -424,13 +647,18 @@ impl Repository {
             args.push(file.clone());
         }
 
-        // Limit to specified range
-        args.push("-L".to_string());
-        args.push(format!("{},{}", start_line, end_line));
+        // Limit to the specified ranges (git blame supports multiple -L flags).
+        for (start_line, end_line) in line_ranges {
+            args.push("-L".to_string());
+            args.push(format!("{},{}", start_line, end_line));
+        }
 
         // Add --since flag if oldest_date is specified
         // This controls the absolute lower bound of how far back to look
-        if let Some(ref date) = options.oldest_date {
+        if let Some(ref date_spec) = options.oldest_date_spec {
+            args.push("--since".to_string());
+            args.push(date_spec.clone());
+        } else if let Some(ref date) = options.oldest_date {
             args.push("--since".to_string());
             args.push(date.to_rfc3339());
         }
@@ -471,7 +699,7 @@ impl Repository {
         } else {
             exec_git(&args)?
         };
-        let stdout = String::from_utf8(output.stdout)?;
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
 
         // Parser state for current hunk
         #[derive(Default)]
@@ -587,22 +815,11 @@ impl Repository {
                         orig_start
                     };
 
-                    let abbrev_len = if options.long_rev {
-                        40
-                    } else {
-                        options.abbrev.unwrap_or(7) as usize
-                    };
-                    let abbrev = if abbrev_len < prev_sha.len() {
-                        prev_sha[..abbrev_len].to_string()
-                    } else {
-                        prev_sha.clone()
-                    };
-
                     hunks.push(BlameHunk {
                         range: (start, end),
                         orig_range: (orig_start, orig_end),
                         commit_sha: prev_sha,
-                        abbrev_sha: abbrev,
+                        abbrev_sha: String::new(),
                         original_author: cur_meta.author.clone(),
                         author_email: cur_meta.author_mail.clone(),
                         author_time: cur_meta.author_time,
@@ -656,22 +873,11 @@ impl Repository {
                 orig_start
             };
 
-            let abbrev_len = if options.long_rev {
-                40
-            } else {
-                options.abbrev.unwrap_or(7) as usize
-            };
-            let abbrev = if abbrev_len < prev_sha.len() {
-                prev_sha[..abbrev_len].to_string()
-            } else {
-                prev_sha.clone()
-            };
-
             hunks.push(BlameHunk {
                 range: (start, end),
                 orig_range: (orig_start, orig_end),
                 commit_sha: prev_sha,
-                abbrev_sha: abbrev,
+                abbrev_sha: String::new(),
                 original_author: cur_meta.author.clone(),
                 author_email: cur_meta.author_mail.clone(),
                 author_time: cur_meta.author_time,
@@ -684,6 +890,8 @@ impl Repository {
                 is_boundary: cur_meta.boundary,
             });
         }
+
+        self.populate_hunk_abbrev_shas(&mut hunks, options);
 
         // Post-process hunks to populate ai_human_author from authorship logs
         let hunks = self.populate_ai_human_authors(hunks, file_path, options)?;
@@ -735,8 +943,7 @@ impl Repository {
                             file_path,
                             orig_line_num,
                             &mut foreign_prompts_cache,
-                        )
-                    {
+                        ) {
                         prompt_record.human_author.clone()
                     } else {
                         None
@@ -808,7 +1015,8 @@ fn overlay_ai_authorship(
         HashMap<u32, String>,
         HashMap<String, PromptRecord>,
         Vec<AuthorshipLog>,
-        HashMap<String, Vec<String>>, // prompt_hash -> commit_shas
+        HashMap<String, Vec<String>>,      // prompt_hash -> commit_shas
+        std::collections::HashSet<String>, // commit SHAs with real authorship notes
     ),
     GitAiError,
 > {
@@ -816,9 +1024,16 @@ fn overlay_ai_authorship(
     let mut prompt_records: HashMap<String, PromptRecord> = HashMap::new();
     // Track which commits contain each prompt hash
     let mut prompt_commits: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+    // Track commit SHAs that have real (non-simulated) authorship notes
+    let mut commits_with_notes: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     // Group hunks by commit SHA to avoid repeated lookups
     let mut commit_authorship_cache: HashMap<String, Option<AuthorshipLog>> = HashMap::new();
+    // Simulated authorship logs for agent commits without notes. We keep these separate
+    // from commit_authorship_cache so a single agent commit can be handled across multiple
+    // blame hunks without being limited to the first hunk's line range.
+    let mut simulated_authorship_logs: HashMap<String, AuthorshipLog> = HashMap::new();
     // Cache for foreign prompts to avoid repeated grepping
     let mut foreign_prompts_cache: HashMap<String, Option<PromptRecord>> = HashMap::new();
 
@@ -835,6 +1050,7 @@ fn overlay_ai_authorship(
 
         // If we have AI authorship data, look up the author for lines in this hunk
         if let Some(authorship_log) = authorship_log {
+            commits_with_notes.insert(hunk.commit_sha.clone());
             // Check each line in this hunk for AI authorship using compact schema
             // IMPORTANT: Use the original line numbers from the commit, not the current line numbers
             let num_lines = hunk.range.1 - hunk.range.0 + 1;
@@ -884,8 +1100,71 @@ fn overlay_ai_authorship(
                     }
                 }
             }
+        } else if let Some(tool) =
+            crate::authorship::agent_detection::match_email_to_agent(&hunk.author_email)
+        {
+            // No authorship log, but commit author email matches a known AI agent.
+            // Simulate authorship data so this commit is attributed to the agent.
+            let (simulated_log, prompt_hash) =
+                crate::authorship::agent_detection::simulate_agent_authorship(
+                    &hunk.commit_sha,
+                    tool,
+                    file_path,
+                    hunk.range.0,
+                    hunk.range.1,
+                );
+
+            // Merge this hunk's simulated data into a per-commit simulated log.
+            // (A single agent commit can produce multiple non-contiguous blame hunks.)
+            simulated_authorship_logs
+                .entry(hunk.commit_sha.clone())
+                .and_modify(|existing| {
+                    // Merge attestation entries for this file
+                    if let Some(file_attestation) = simulated_log.attestations.first() {
+                        for entry in &file_attestation.entries {
+                            existing
+                                .get_or_create_file(file_path)
+                                .add_entry(entry.clone());
+                        }
+                    }
+
+                    // Merge prompt stats (sum line counts across hunks)
+                    if let Some(pr) = simulated_log.metadata.prompts.get(&prompt_hash) {
+                        if let Some(existing_pr) = existing.metadata.prompts.get_mut(&prompt_hash) {
+                            existing_pr.total_additions += pr.total_additions;
+                            existing_pr.accepted_lines += pr.accepted_lines;
+                        } else {
+                            existing
+                                .metadata
+                                .prompts
+                                .insert(prompt_hash.clone(), pr.clone());
+                        }
+                    }
+                })
+                .or_insert_with(|| simulated_log.clone());
+
+            // Insert (merged) prompt record and track commits
+            if let Some(pr) = simulated_authorship_logs
+                .get(&hunk.commit_sha)
+                .and_then(|log| log.metadata.prompts.get(&prompt_hash))
+            {
+                prompt_records.insert(prompt_hash.clone(), pr.clone());
+                prompt_commits
+                    .entry(prompt_hash.clone())
+                    .or_default()
+                    .insert(hunk.commit_sha.clone());
+            }
+
+            // Mark all lines in this hunk as AI-authored by the detected tool
+            for line_num in hunk.range.0..=hunk.range.1 {
+                if options.use_prompt_hashes_as_names {
+                    line_authors.insert(line_num, prompt_hash.clone());
+                } else {
+                    line_authors.insert(line_num, tool.to_string());
+                }
+            }
         } else {
-            // No authorship log for this commit
+            // No authorship log for this commit and not a known agent
             for line_num in hunk.range.0..=hunk.range.1 {
                 if options.mark_unknown {
                     // User wants explicit distinction - mark as Unknown
@@ -900,10 +1179,11 @@ fn overlay_ai_authorship(
     }
 
     // Collect all authorship logs we've seen (for JSON output to find other files)
-    let authorship_logs: Vec<AuthorshipLog> = commit_authorship_cache
+    let mut authorship_logs: Vec<AuthorshipLog> = commit_authorship_cache
         .into_iter()
         .filter_map(|(_, log)| log)
         .collect();
+    authorship_logs.extend(simulated_authorship_logs.into_values());
 
     // Convert HashSet to Vec and sort for deterministic output
     let prompt_commits_vec: HashMap<String, Vec<String>> = prompt_commits
@@ -920,7 +1200,15 @@ fn overlay_ai_authorship(
         prompt_records,
         authorship_logs,
         prompt_commits_vec,
+        commits_with_notes,
     ))
+}
+
+/// Metadata about user's auth state and git identity
+#[derive(Debug, Serialize)]
+struct BlameMetadata {
+    is_logged_in: bool,
+    current_user: Option<String>,
 }
 
 /// JSON output structure for blame
@@ -928,6 +1216,7 @@ fn overlay_ai_authorship(
 struct JsonBlameOutput {
     lines: std::collections::BTreeMap<String, String>,
     prompts: HashMap<String, PromptRecordWithOtherFiles>,
+    metadata: BlameMetadata,
 }
 
 /// Read model that patches PromptRecord with other_files and commits fields
@@ -972,6 +1261,7 @@ fn get_files_for_prompt_hash(
 }
 
 fn output_json_format(
+    repo: &Repository,
     line_authors: &HashMap<u32, String>,
     prompt_records: &HashMap<String, PromptRecord>,
     authorship_logs: &[AuthorshipLog],
@@ -1028,8 +1318,12 @@ fn output_json_format(
     // Only include prompts that are actually referenced in lines
     let referenced_prompt_ids: std::collections::HashSet<&String> = lines_map.values().collect();
 
+    // Enrich prompts that have empty messages by falling back through storage layers
+    let mut enriched_prompts = prompt_records.clone();
+    enrich_prompt_messages(&mut enriched_prompts, &referenced_prompt_ids);
+
     // Create read models with other_files and commits populated
-    let filtered_prompts: HashMap<String, PromptRecordWithOtherFiles> = prompt_records
+    let filtered_prompts: HashMap<String, PromptRecordWithOtherFiles> = enriched_prompts
         .iter()
         .filter(|(k, _)| referenced_prompt_ids.contains(k))
         .map(|(k, v)| {
@@ -1046,9 +1340,23 @@ fn output_json_format(
         })
         .collect();
 
+    // Compute metadata
+    let is_logged_in = CredentialStore::new()
+        .load()
+        .ok()
+        .flatten()
+        .map(|creds| !creds.is_refresh_token_expired())
+        .unwrap_or(false);
+
+    let current_user = repo.git_author_identity().formatted();
+
     let output = JsonBlameOutput {
         lines: lines_map,
         prompts: filtered_prompts,
+        metadata: BlameMetadata {
+            is_logged_in,
+            current_user,
+        },
     };
 
     let json_str = serde_json::to_string_pretty(&output)
@@ -1065,6 +1373,7 @@ fn output_porcelain_format(
     lines: &[&str],
     line_ranges: &[(u32, u32)],
     options: &GitAiBlameOptions,
+    commits_with_notes: &std::collections::HashSet<String>,
 ) -> Result<(), GitAiError> {
     // Use options that don't split hunks to match git's native porcelain output
     let mut no_split_options = options.clone();
@@ -1072,82 +1381,105 @@ fn output_porcelain_format(
 
     // Build a map from line number to BlameHunk for fast lookup
     let mut line_to_hunk: HashMap<u32, BlameHunk> = HashMap::new();
-    for (start_line, end_line) in line_ranges {
-        let h = repo.blame_hunks(file_path, *start_line, *end_line, &no_split_options)?;
-        for hunk in h {
-            for line_num in hunk.range.0..=hunk.range.1 {
-                line_to_hunk.insert(line_num, hunk.clone());
-            }
+    let hunks = repo.blame_hunks_for_ranges(file_path, line_ranges, &no_split_options)?;
+    for hunk in hunks {
+        for line_num in hunk.range.0..=hunk.range.1 {
+            line_to_hunk.insert(line_num, hunk.clone());
         }
     }
+    let mut requested_lines: Vec<u32> = line_to_hunk.keys().copied().collect();
+    requested_lines.sort_unstable();
 
     let mut last_hunk_id = None;
-    for (start_line, end_line) in line_ranges {
-        for line_num in *start_line..=*end_line {
-            let line_index = (line_num - 1) as usize;
-            let line_content = if line_index < lines.len() {
-                lines[line_index]
+    let mut commit_summaries: HashMap<String, String> = HashMap::new();
+    let mut seen_commits: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for line_num in requested_lines {
+        let line_index = (line_num - 1) as usize;
+        let line_content = if line_index < lines.len() {
+            lines[line_index]
+        } else {
+            ""
+        };
+
+        if let Some(hunk) = line_to_hunk.get(&line_num) {
+            // For agent-detected commits (email matches known agent, no authorship note),
+            // override the author name with the tool name. Otherwise use git's original author.
+            // Only apply agent detection when no real authorship note exists for this commit.
+            let author_name = if !commits_with_notes.contains(&hunk.commit_sha) {
+                crate::authorship::agent_detection::match_email_to_agent(&hunk.author_email)
+                    .map(|t| t.to_string())
             } else {
-                ""
+                None
             };
+            let author_name = author_name.as_deref().unwrap_or(&hunk.original_author);
+            let commit_sha = &hunk.commit_sha;
+            let author_email = &hunk.author_email;
+            let author_time = hunk.author_time;
+            let author_tz = &hunk.author_tz;
+            let committer_name = &hunk.committer;
+            let committer_email = &hunk.committer_email;
+            let committer_time = hunk.committer_time;
+            let committer_tz = &hunk.committer_tz;
+            let boundary = hunk.is_boundary;
+            let filename = file_path;
 
-            if let Some(hunk) = line_to_hunk.get(&line_num) {
-                let author_name = &hunk.original_author;
-                let commit_sha = &hunk.commit_sha;
-                let author_email = &hunk.author_email;
-                let author_time = hunk.author_time;
-                let author_tz = &hunk.author_tz;
-                let committer_name = &hunk.committer;
-                let committer_email = &hunk.committer_email;
-                let committer_time = hunk.committer_time;
-                let committer_tz = &hunk.committer_tz;
-                let boundary = hunk.is_boundary;
-                let filename = file_path;
-
-                // Retrieve the commit summary directly from the commit object
-                let commit = repo.find_commit(commit_sha.clone())?;
-                let summary = commit.summary()?;
-
-                let hunk_id = (commit_sha.clone(), hunk.range.0);
-                if options.line_porcelain {
-                    if last_hunk_id.as_ref() != Some(&hunk_id) {
-                        // First line of hunk: 4-field header
-                        println!(
-                            "{} {} {} {}",
-                            commit_sha,
-                            line_num,
-                            line_num,
-                            hunk.range.1 - hunk.range.0 + 1
-                        );
-                        last_hunk_id = Some(hunk_id);
-                    } else {
-                        // Subsequent lines: 3-field header
-                        println!("{} {} {}", commit_sha, line_num, line_num);
-                    }
-                    println!("author {}", author_name);
-                    println!("author-mail <{}>", author_email);
-                    println!("author-time {}", author_time);
-                    println!("author-tz {}", author_tz);
-                    println!("committer {}", committer_name);
-                    println!("committer-mail <{}>", committer_email);
-                    println!("committer-time {}", committer_time);
-                    println!("committer-tz {}", committer_tz);
-                    println!("summary {}", summary);
-                    if boundary {
-                        println!("boundary");
-                    }
-                    println!("filename {}", filename);
-                    println!("\t{}", line_content);
-                } else if options.porcelain {
-                    if last_hunk_id.as_ref() != Some(&hunk_id) {
-                        // Print full block for first line of hunk
-                        println!(
-                            "{} {} {} {}",
-                            commit_sha,
-                            line_num,
-                            line_num,
-                            hunk.range.1 - hunk.range.0 + 1
-                        );
+            let hunk_id = (commit_sha.clone(), hunk.range.0);
+            if options.line_porcelain {
+                let summary = if let Some(summary) = commit_summaries.get(commit_sha) {
+                    summary.clone()
+                } else {
+                    let commit = repo.find_commit(commit_sha.clone())?;
+                    let summary = commit.summary()?;
+                    commit_summaries.insert(commit_sha.clone(), summary.clone());
+                    summary
+                };
+                if last_hunk_id.as_ref() != Some(&hunk_id) {
+                    // First line of hunk: 4-field header
+                    println!(
+                        "{} {} {} {}",
+                        commit_sha,
+                        line_num,
+                        line_num,
+                        hunk.range.1 - hunk.range.0 + 1
+                    );
+                    last_hunk_id = Some(hunk_id);
+                } else {
+                    // Subsequent lines: 3-field header
+                    println!("{} {} {}", commit_sha, line_num, line_num);
+                }
+                println!("author {}", author_name);
+                println!("author-mail <{}>", author_email);
+                println!("author-time {}", author_time);
+                println!("author-tz {}", author_tz);
+                println!("committer {}", committer_name);
+                println!("committer-mail <{}>", committer_email);
+                println!("committer-time {}", committer_time);
+                println!("committer-tz {}", committer_tz);
+                println!("summary {}", summary);
+                if boundary {
+                    println!("boundary");
+                }
+                println!("filename {}", filename);
+                println!("\t{}", line_content);
+            } else if options.porcelain {
+                if last_hunk_id.as_ref() != Some(&hunk_id) {
+                    // First line of hunk.
+                    println!(
+                        "{} {} {} {}",
+                        commit_sha,
+                        line_num,
+                        line_num,
+                        hunk.range.1 - hunk.range.0 + 1
+                    );
+                    if !seen_commits.contains(commit_sha) {
+                        let summary = if let Some(summary) = commit_summaries.get(commit_sha) {
+                            summary.clone()
+                        } else {
+                            let commit = repo.find_commit(commit_sha.clone())?;
+                            let summary = commit.summary()?;
+                            commit_summaries.insert(commit_sha.clone(), summary.clone());
+                            summary
+                        };
                         println!("author {}", author_name);
                         println!("author-mail <{}>", author_email);
                         println!("author-time {}", author_time);
@@ -1161,13 +1493,14 @@ fn output_porcelain_format(
                             println!("boundary");
                         }
                         println!("filename {}", filename);
-                        println!("\t{}", line_content);
-                        last_hunk_id = Some(hunk_id);
-                    } else {
-                        // For subsequent lines, print only the header and content (no metadata block)
-                        println!("{} {} {}", commit_sha, line_num, line_num);
-                        println!("\t{}", line_content);
+                        seen_commits.insert(commit_sha.clone());
                     }
+                    println!("\t{}", line_content);
+                    last_hunk_id = Some(hunk_id);
+                } else {
+                    // For subsequent lines, print only the header and content (no metadata block)
+                    println!("{} {} {}", commit_sha, line_num, line_num);
+                    println!("\t{}", line_content);
                 }
             }
         }
@@ -1182,6 +1515,7 @@ fn output_incremental_format(
     _lines: &[&str],
     line_ranges: &[(u32, u32)],
     options: &GitAiBlameOptions,
+    commits_with_notes: &std::collections::HashSet<String>,
 ) -> Result<(), GitAiError> {
     // Use options that don't split hunks to match git's native incremental output
     let mut no_split_options = options.clone();
@@ -1189,41 +1523,59 @@ fn output_incremental_format(
 
     // Build a map from line number to BlameHunk for fast lookup
     let mut line_to_hunk: HashMap<u32, BlameHunk> = HashMap::new();
-    for (start_line, end_line) in line_ranges {
-        let h = repo.blame_hunks(file_path, *start_line, *end_line, &no_split_options)?;
-        for hunk in h {
-            for line_num in hunk.range.0..=hunk.range.1 {
-                line_to_hunk.insert(line_num, hunk.clone());
-            }
+    let hunks = repo.blame_hunks_for_ranges(file_path, line_ranges, &no_split_options)?;
+    for hunk in hunks {
+        for line_num in hunk.range.0..=hunk.range.1 {
+            line_to_hunk.insert(line_num, hunk.clone());
         }
     }
+    let mut requested_lines: Vec<u32> = line_to_hunk.keys().copied().collect();
+    requested_lines.sort_unstable();
 
     let mut last_hunk_id = None;
-    for (start_line, end_line) in line_ranges {
-        for line_num in *start_line..=*end_line {
-            if let Some(hunk) = line_to_hunk.get(&line_num) {
-                // For incremental format, use the original git author, not AI authorship
-                let author_name = &hunk.original_author;
-                let commit_sha = &hunk.commit_sha;
-                let author_email = &hunk.author_email;
-                let author_time = hunk.author_time;
-                let author_tz = &hunk.author_tz;
-                let committer_name = &hunk.committer;
-                let committer_email = &hunk.committer_email;
-                let committer_time = hunk.committer_time;
-                let committer_tz = &hunk.committer_tz;
+    let mut commit_summaries: HashMap<String, String> = HashMap::new();
+    let mut seen_commits: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for line_num in requested_lines {
+        if let Some(hunk) = line_to_hunk.get(&line_num) {
+            // For agent-detected commits (email matches known agent, no authorship note),
+            // override the author name with the tool name. Otherwise use git's original author.
+            // Only apply agent detection when no real authorship note exists for this commit.
+            let author_name = if !commits_with_notes.contains(&hunk.commit_sha) {
+                crate::authorship::agent_detection::match_email_to_agent(&hunk.author_email)
+                    .map(|t| t.to_string())
+            } else {
+                None
+            };
+            let author_name = author_name.as_deref().unwrap_or(&hunk.original_author);
+            let commit_sha = &hunk.commit_sha;
+            let author_email = &hunk.author_email;
+            let author_time = hunk.author_time;
+            let author_tz = &hunk.author_tz;
+            let committer_name = &hunk.committer;
+            let committer_email = &hunk.committer_email;
+            let committer_time = hunk.committer_time;
+            let committer_tz = &hunk.committer_tz;
 
-                // Only print the full block for the first line of a hunk
-                let hunk_id = (hunk.commit_sha.clone(), hunk.range.0);
-                if last_hunk_id.as_ref() != Some(&hunk_id) {
-                    // Print full block - match git's format exactly
-                    println!(
-                        "{} {} {} {}",
-                        commit_sha,
-                        line_num,
-                        line_num,
-                        hunk.range.1 - hunk.range.0 + 1
-                    );
+            // Only print the full block for the first line of a hunk
+            let hunk_id = (hunk.commit_sha.clone(), hunk.range.0);
+            if last_hunk_id.as_ref() != Some(&hunk_id) {
+                // Print first line for this hunk.
+                println!(
+                    "{} {} {} {}",
+                    commit_sha,
+                    line_num,
+                    line_num,
+                    hunk.range.1 - hunk.range.0 + 1
+                );
+                if !seen_commits.contains(commit_sha) {
+                    let summary = if let Some(summary) = commit_summaries.get(commit_sha) {
+                        summary.clone()
+                    } else {
+                        let commit = repo.find_commit(commit_sha.clone())?;
+                        let summary = commit.summary()?;
+                        commit_summaries.insert(commit_sha.clone(), summary.clone());
+                        summary
+                    };
                     println!("author {}", author_name);
                     println!("author-mail <{}>", author_email);
                     println!("author-time {}", author_time);
@@ -1232,31 +1584,32 @@ fn output_incremental_format(
                     println!("committer-mail <{}>", committer_email);
                     println!("committer-time {}", committer_time);
                     println!("committer-tz {}", committer_tz);
-                    println!("summary Initial commit");
+                    println!("summary {}", summary);
                     if hunk.is_boundary {
                         println!("boundary");
                     }
-                    println!("filename {}", file_path);
-                    last_hunk_id = Some(hunk_id);
+                    seen_commits.insert(commit_sha.clone());
                 }
-                // For incremental, no content lines (no \tLine)
-            } else {
-                // Fallback for lines without blame info
-                println!(
-                    "0000000000000000000000000000000000000000 {} {} 1",
-                    line_num, line_num
-                );
-                println!("author unknown");
-                println!("author-mail <unknown@example.com>");
-                println!("author-time 0");
-                println!("author-tz +0000");
-                println!("committer unknown");
-                println!("committer-mail <unknown@example.com>");
-                println!("committer-time 0");
-                println!("committer-tz +0000");
-                println!("summary unknown");
                 println!("filename {}", file_path);
+                last_hunk_id = Some(hunk_id);
             }
+            // For incremental, no content lines (no \tLine)
+        } else {
+            // Fallback for lines without blame info
+            println!(
+                "0000000000000000000000000000000000000000 {} {} 1",
+                line_num, line_num
+            );
+            println!("author unknown");
+            println!("author-mail <unknown@example.com>");
+            println!("author-time 0");
+            println!("author-tz +0000");
+            println!("committer unknown");
+            println!("committer-mail <unknown@example.com>");
+            println!("committer-time 0");
+            println!("committer-tz +0000");
+            println!("summary unknown");
+            println!("filename {}", file_path);
         }
     }
     Ok(())
@@ -1265,6 +1618,7 @@ fn output_incremental_format(
 fn output_default_format(
     repo: &Repository,
     line_authors: &HashMap<u32, String>,
+    prompt_records: &HashMap<String, PromptRecord>,
     file_path: &str,
     lines: &[&str],
     line_ranges: &[(u32, u32)],
@@ -1276,16 +1630,17 @@ fn output_default_format(
     let mut no_split_options = options.clone();
     no_split_options.split_hunks_by_ai_author = false;
 
+    let hunks = repo.blame_hunks_for_ranges(file_path, line_ranges, &no_split_options)?;
+
     // Build a map from line number to BlameHunk for fast lookup
     let mut line_to_hunk: HashMap<u32, BlameHunk> = HashMap::new();
-    for (start_line, end_line) in line_ranges {
-        let h = repo.blame_hunks(file_path, *start_line, *end_line, &no_split_options)?;
-        for hunk in h {
-            for line_num in hunk.range.0..=hunk.range.1 {
-                line_to_hunk.insert(line_num, hunk.clone());
-            }
+    for hunk in &hunks {
+        for line_num in hunk.range.0..=hunk.range.1 {
+            line_to_hunk.insert(line_num, hunk.clone());
         }
     }
+    let mut requested_lines: Vec<u32> = line_to_hunk.keys().copied().collect();
+    requested_lines.sort_unstable();
 
     // Calculate the maximum line number width for proper padding
     let max_line_num = lines.len() as u32;
@@ -1293,146 +1648,145 @@ fn output_default_format(
 
     // Calculate the maximum author name width for proper padding
     let mut max_author_width = 0;
-    for (start_line, end_line) in line_ranges {
-        let h = repo.blame_hunks(file_path, *start_line, *end_line, &no_split_options)?;
-        for hunk in h {
-            let author = line_authors
-                .get(&hunk.range.0)
-                .unwrap_or(&hunk.original_author);
+    for hunk in &hunks {
+        let author = line_authors
+            .get(&hunk.range.0)
+            .unwrap_or(&hunk.original_author);
+        let author_display = if options.suppress_author {
+            "".to_string()
+        } else if options.show_prompt && prompt_records.contains_key(author) {
+            let prompt = &prompt_records[author];
+            let short_hash = &author[..7.min(author.len())];
+            format!("{} [{}]", prompt.agent_id.tool, short_hash)
+        } else if options.show_email {
+            format!("{} <{}>", author, &hunk.author_email)
+        } else {
+            author.to_string()
+        };
+        max_author_width = max_author_width.max(author_display.len());
+    }
+
+    let blank_boundary_hash_width = if options.long_rev {
+        40
+    } else {
+        ((options.abbrev.unwrap_or(7).max(1) as usize) + 1).min(40)
+    };
+
+    for line_num in requested_lines {
+        let line_index = (line_num - 1) as usize;
+        let line_content = if line_index < lines.len() {
+            lines[line_index]
+        } else {
+            ""
+        };
+
+        if let Some(hunk) = line_to_hunk.get(&line_num) {
+            let sha = &hunk.abbrev_sha;
+
+            // Match git blame boundary formatting:
+            // - default boundary: prefix abbreviated hash with '^'
+            // - -b/--blank-boundary: print a blank hash column
+            let full_sha = if hunk.is_boundary && options.blank_boundary && !options.show_root {
+                " ".repeat(blank_boundary_hash_width)
+            } else {
+                let boundary_marker = if hunk.is_boundary && !options.show_root {
+                    "^"
+                } else {
+                    ""
+                };
+                format!("{}{}", boundary_marker, sha)
+            };
+
+            // Get the author for this line (AI authorship or original)
+            let author = line_authors.get(&line_num).unwrap_or(&hunk.original_author);
+
+            // Format date according to options
+            let date_str = format_blame_date(hunk.author_time, &hunk.author_tz, options);
+
+            // Handle different output formats based on flags
             let author_display = if options.suppress_author {
                 "".to_string()
+            } else if options.show_prompt && prompt_records.contains_key(author) {
+                let prompt = &prompt_records[author];
+                let short_hash = &author[..7.min(author.len())];
+                format!("{} [{}]", prompt.agent_id.tool, short_hash)
             } else if options.show_email {
                 format!("{} <{}>", author, &hunk.author_email)
             } else {
                 author.to_string()
             };
-            max_author_width = max_author_width.max(author_display.len());
-        }
-    }
 
-    for (start_line, end_line) in line_ranges {
-        for line_num in *start_line..=*end_line {
-            let line_index = (line_num - 1) as usize;
-            let line_content = if line_index < lines.len() {
-                lines[line_index]
+            // Pad author name to consistent width
+            let padded_author = if max_author_width > 0 {
+                format!("{:<width$}", author_display, width = max_author_width)
             } else {
-                ""
+                author_display
             };
 
-            if let Some(hunk) = line_to_hunk.get(&line_num) {
-                // Determine hash length - match git blame default (7 chars)
-                let hash_len = if options.long_rev {
-                    40 // Full hash for long revision
-                } else if let Some(abbrev) = options.abbrev {
-                    abbrev as usize
-                } else {
-                    7 // Default 7 chars
-                };
-                let sha = if hash_len < hunk.commit_sha.len() {
-                    &hunk.commit_sha[..hash_len]
-                } else {
-                    &hunk.commit_sha
-                };
+            let _filename_display = if options.show_name {
+                format!("{} ", file_path)
+            } else {
+                "".to_string()
+            };
 
-                // Add boundary marker if this is a boundary commit
-                let boundary_marker = if hunk.is_boundary && options.blank_boundary {
-                    "^"
-                } else {
-                    ""
-                };
-                let full_sha = if hunk.is_boundary && options.blank_boundary {
-                    format!("{}{}", boundary_marker, "        ") // Empty hash for boundary
-                } else {
-                    format!("{}{}", boundary_marker, sha)
-                };
+            let _number_display = if options.show_number {
+                format!("{} ", line_num)
+            } else {
+                "".to_string()
+            };
 
-                // Get the author for this line (AI authorship or original)
-                let author = line_authors.get(&line_num).unwrap_or(&hunk.original_author);
-
-                // Format date according to options
-                let date_str = format_blame_date(hunk.author_time, &hunk.author_tz, options);
-
-                // Handle different output formats based on flags
-                let author_display = if options.suppress_author {
-                    "".to_string()
-                } else if options.show_email {
-                    format!("{} <{}>", author, &hunk.author_email)
-                } else {
-                    author.to_string()
-                };
-
-                // Pad author name to consistent width
-                let padded_author = if max_author_width > 0 {
-                    format!("{:<width$}", author_display, width = max_author_width)
-                } else {
-                    author_display
-                };
-
-                let _filename_display = if options.show_name {
-                    format!("{} ", file_path)
-                } else {
-                    "".to_string()
-                };
-
-                let _number_display = if options.show_number {
-                    format!("{} ", line_num)
-                } else {
-                    "".to_string()
-                };
-
-                // Format exactly like git blame: sha (author date line) code
-                if options.suppress_author {
-                    // Suppress author format: sha line_number) code
-                    output.push_str(&format!("{} {}) {}\n", full_sha, line_num, line_content));
+            // Format exactly like git blame: sha (author date line) code
+            if options.suppress_author {
+                // Suppress author format: sha line_number) code
+                output.push_str(&format!("{} {}) {}\n", full_sha, line_num, line_content));
+            } else {
+                // Normal format: sha (author date line) code
+                if options.show_name {
+                    // Show filename format: sha filename (author date line) code
+                    output.push_str(&format!(
+                        "{} {} ({} {} {:>width$}) {}\n",
+                        full_sha,
+                        file_path,
+                        padded_author,
+                        date_str,
+                        line_num,
+                        line_content,
+                        width = line_num_width
+                    ));
+                } else if options.show_number {
+                    // Show number format: sha line_number (author date line) code (matches git's -n output)
+                    output.push_str(&format!(
+                        "{} {} ({} {} {:>width$}) {}\n",
+                        full_sha,
+                        line_num,
+                        padded_author,
+                        date_str,
+                        line_num,
+                        line_content,
+                        width = line_num_width
+                    ));
                 } else {
                     // Normal format: sha (author date line) code
-                    if options.show_name {
-                        // Show filename format: sha filename (author date line) code
-                        output.push_str(&format!(
-                            "{} {} ({} {} {:>width$}) {}\n",
-                            full_sha,
-                            file_path,
-                            padded_author,
-                            date_str,
-                            line_num,
-                            line_content,
-                            width = line_num_width
-                        ));
-                    } else if options.show_number {
-                        // Show number format: sha line_number (author date line) code (matches git's -n output)
-                        output.push_str(&format!(
-                            "{} {} ({} {} {:>width$}) {}\n",
-                            full_sha,
-                            line_num,
-                            padded_author,
-                            date_str,
-                            line_num,
-                            line_content,
-                            width = line_num_width
-                        ));
-                    } else {
-                        // Normal format: sha (author date line) code
-                        output.push_str(&format!(
-                            "{} ({} {} {:>width$}) {}\n",
-                            full_sha,
-                            padded_author,
-                            date_str,
-                            line_num,
-                            line_content,
-                            width = line_num_width
-                        ));
-                    }
+                    output.push_str(&format!(
+                        "{} ({} {} {:>width$}) {}\n",
+                        full_sha,
+                        padded_author,
+                        date_str,
+                        line_num,
+                        line_content,
+                        width = line_num_width
+                    ));
                 }
-            } else {
-                // Fallback for lines without blame info
-                output.push_str(&format!(
-                    "{:<8} (unknown        1970-01-01 00:00:00 +0000    {:>width$}) {}\n",
-                    "????????",
-                    line_num,
-                    line_content,
-                    width = line_num_width
-                ));
             }
+        } else {
+            // Fallback for lines without blame info
+            output.push_str(&format!(
+                "{:<8} (unknown        1970-01-01 00:00:00 +0000    {:>width$}) {}\n",
+                "????????",
+                line_num,
+                line_content,
+                width = line_num_width
+            ));
         }
     }
 
@@ -1441,6 +1795,39 @@ fn output_default_format(
         // Append git-like stats lines to output string
         let stats = "num read blob: 1\nnum get patch: 0\nnum commits: 0\n";
         output.push_str(stats);
+    }
+
+    // Append prompt dump for --show-prompt in non-interactive (piped) mode
+    if options.show_prompt && !io::stdout().is_terminal() {
+        let mut referenced_ids: std::collections::HashSet<&String> =
+            std::collections::HashSet::new();
+        for author in line_authors.values() {
+            if prompt_records.contains_key(author) {
+                referenced_ids.insert(author);
+            }
+        }
+
+        if !referenced_ids.is_empty() {
+            let mut enriched_prompts = prompt_records.clone();
+            enrich_prompt_messages(&mut enriched_prompts, &referenced_ids);
+
+            output.push_str("---\n");
+
+            let mut sorted_ids: Vec<&String> = referenced_ids.into_iter().collect();
+            sorted_ids.sort();
+
+            for id in sorted_ids {
+                let short_hash = &id[..7.min(id.len())];
+                output.push_str(&format!("Prompt [{}]\n", short_hash));
+                if let Some(prompt) = enriched_prompts.get(id) {
+                    let json = serde_json::to_string(&prompt.messages)
+                        .unwrap_or_else(|_| "[]".to_string());
+                    output.push_str(&json);
+                    output.push('\n');
+                }
+                output.push('\n');
+            }
+        }
     }
 
     // Output handling - respect pager environment variables
@@ -1752,12 +2139,10 @@ pub fn parse_blame_args(args: &[String]) -> Result<(String, GitAiBlameOptions), 
                         "Missing argument for --since".to_string(),
                     ));
                 }
-                options.oldest_date = Some(
-                    DateTime::parse_from_rfc3339(&args[i + 1])
-                        .map_err(|e| {
-                            GitAiError::Generic(format!("Invalid date format for --since: {}", e))
-                        })?,
-                );
+                options.oldest_date =
+                    Some(DateTime::parse_from_rfc3339(&args[i + 1]).map_err(|e| {
+                        GitAiError::Generic(format!("Invalid date format for --since: {}", e))
+                    })?);
                 i += 2;
             }
             // JSON output format
@@ -1769,6 +2154,12 @@ pub fn parse_blame_args(args: &[String]) -> Result<(String, GitAiBlameOptions), 
             // Mark unknown authorship
             "--mark-unknown" => {
                 options.mark_unknown = true;
+                i += 1;
+            }
+
+            // Show prompt hashes inline
+            "--show-prompt" => {
+                options.show_prompt = true;
                 i += 1;
             }
 

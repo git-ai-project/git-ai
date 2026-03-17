@@ -1,10 +1,13 @@
 use crate::api::{ApiClient, ApiContext};
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
+use crate::authorship::ignore::{
+    build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher,
+};
 use crate::authorship::prompt_utils::{PromptUpdateResult, update_prompt_from_tool};
 use crate::authorship::secrets::{redact_secrets_from_prompts, strip_prompt_messages};
 use crate::authorship::stats::{stats_for_commit_stats, write_stats_to_terminal};
 use crate::authorship::virtual_attribution::VirtualAttributions;
-use crate::authorship::working_log::{Checkpoint, CheckpointKind};
+use crate::authorship::working_log::{Checkpoint, CheckpointKind, WorkingLogEntry};
 use crate::config::{Config, PromptStorageMode};
 use crate::error::GitAiError;
 use crate::git::refs::notes_add;
@@ -12,6 +15,39 @@ use crate::git::repository::Repository;
 use crate::utils::debug_log;
 use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
+
+/// Skip expensive post-commit stats when this threshold is exceeded.
+/// High hunk density is the strongest predictor of slow diff_ai_accepted_stats.
+const STATS_SKIP_MAX_HUNKS: usize = 1000;
+/// Skip expensive stats for very large net additions even if hunks are moderate.
+const STATS_SKIP_MAX_ADDED_LINES: usize = 6000;
+/// Skip expensive stats for extremely wide commits touching many added-line files.
+const STATS_SKIP_MAX_FILES_WITH_ADDITIONS: usize = 200;
+
+#[derive(Debug, Clone, Copy)]
+struct StatsCostEstimate {
+    files_with_additions: usize,
+    added_lines: usize,
+    hunk_ranges: usize,
+}
+
+fn checkpoint_entry_requires_post_processing(
+    checkpoint: &Checkpoint,
+    entry: &WorkingLogEntry,
+) -> bool {
+    if checkpoint.kind != CheckpointKind::Human {
+        return true;
+    }
+
+    entry
+        .line_attributions
+        .iter()
+        .any(|attr| attr.author_id != CheckpointKind::Human.to_str() || attr.overrode.is_some())
+        || entry
+            .attributions
+            .iter()
+            .any(|attr| attr.author_id != CheckpointKind::Human.to_str())
+}
 
 pub fn post_commit(
     repo: &Repository,
@@ -67,13 +103,17 @@ pub fn post_commit(
         Some(human_author.clone()),
     )?;
 
-    // Get pathspecs for files in the working log - include ALL files from checkpoints,
-    // not just committed files. This ensures uncommitted files get proper INITIAL attributions.
-    // See issue #356: batch commits lose attribution for files committed later.
-    let mut pathspecs: HashSet<String> = parent_working_log
-        .iter()
-        .flat_map(|cp| cp.entries.iter().map(|e| e.file.clone()))
-        .collect();
+    // Build pathspecs from AI-relevant checkpoint entries only.
+    // Human-only entries with no AI attribution do not affect authorship output and should not
+    // trigger expensive post-commit diff work across large commits.
+    let mut pathspecs: HashSet<String> = HashSet::new();
+    for checkpoint in &parent_working_log {
+        for entry in &checkpoint.entries {
+            if checkpoint_entry_requires_post_processing(checkpoint, entry) {
+                pathspecs.insert(entry.file.clone());
+            }
+        }
+    }
 
     // Also include files from INITIAL attributions (uncommitted files from previous commits)
     // These files may not have checkpoints but still need their attribution preserved
@@ -94,6 +134,14 @@ pub fn post_commit(
 
     authorship_log.metadata.base_commit_sha = commit_sha.clone();
 
+    // Inject custom attributes into all PromptRecords
+    let custom_attrs = Config::get().custom_attributes();
+    if !custom_attrs.is_empty() {
+        for pr in authorship_log.metadata.prompts.values_mut() {
+            pr.custom_attributes = Some(custom_attrs.clone());
+        }
+    }
+
     // Handle prompts based on effective prompt storage mode for this repository
     // The effective mode considers include/exclude lists and fallback settings
     let effective_storage = Config::get().effective_prompt_storage(&Some(repo.clone()));
@@ -113,12 +161,13 @@ pub fn post_commit(
         PromptStorageMode::Default => {
             // "default" - attempt CAS upload, NEVER keep messages in notes
             // Check conditions for CAS upload:
-            // - user is logged in OR using custom API URL
+            // - user is logged in OR has API key OR using custom API URL
             let context = ApiContext::new(None);
             let client = ApiClient::new(context);
             let using_custom_api =
                 Config::get().api_base_url() != crate::config::DEFAULT_API_BASE_URL;
-            let should_enqueue_cas = client.is_logged_in() || using_custom_api;
+            let should_enqueue_cas =
+                client.is_logged_in() || client.has_api_key() || using_custom_api;
 
             if should_enqueue_cas {
                 // Redact secrets before uploading to CAS
@@ -156,11 +205,61 @@ pub fn post_commit(
 
     notes_add(repo, &commit_sha, &authorship_json)?;
 
-    // Compute stats once (needed for both metrics and terminal output)
-    let stats = stats_for_commit_stats(repo, &commit_sha, &[])?;
+    // Compute stats once (needed for both metrics and terminal output), unless preflight
+    // estimate predicts this would be too expensive for the commit hook path.
+    let mut stats: Option<crate::authorship::stats::CommitStats> = None;
+    let is_merge_commit = repo
+        .find_commit(commit_sha.clone())
+        .map(|commit| commit.parent_count().unwrap_or(0) > 1)
+        .unwrap_or(false);
+    let ignore_patterns = effective_ignore_patterns(repo, &[], &[]);
+    let skip_reason = if is_merge_commit {
+        Some(StatsSkipReason::MergeCommit)
+    } else {
+        estimate_stats_cost(repo, &parent_sha, &commit_sha, &ignore_patterns)
+            .ok()
+            .and_then(|estimate| {
+                if should_skip_expensive_post_commit_stats(&estimate) {
+                    Some(StatsSkipReason::Expensive(estimate))
+                } else {
+                    None
+                }
+            })
+    };
 
-    // Record metrics for this commit
-    record_commit_metrics(repo, &commit_sha, &parent_sha, &human_author, &authorship_log, &stats, &parent_working_log);
+    if skip_reason.is_none() {
+        let computed = stats_for_commit_stats(repo, &commit_sha, &ignore_patterns)?;
+        // Record metrics only when we have full stats.
+        record_commit_metrics(
+            repo,
+            &commit_sha,
+            &parent_sha,
+            &human_author,
+            &authorship_log,
+            &computed,
+            &parent_working_log,
+        );
+        stats = Some(computed);
+    } else {
+        match skip_reason.as_ref() {
+            Some(StatsSkipReason::MergeCommit) => {
+                debug_log(&format!(
+                    "Skipping post-commit stats for merge commit {}",
+                    commit_sha
+                ));
+            }
+            Some(StatsSkipReason::Expensive(estimate)) => {
+                debug_log(&format!(
+                    "Skipping expensive post-commit stats for {} (files_with_additions={}, added_lines={}, hunks={})",
+                    commit_sha,
+                    estimate.files_with_additions,
+                    estimate.added_lines,
+                    estimate.hunk_ranges
+                ));
+            }
+            None => {}
+        }
+    }
 
     // Write INITIAL file for uncommitted AI attributions (if any)
     if !initial_attributions.files.is_empty() {
@@ -175,9 +274,96 @@ pub fn post_commit(
     if !supress_output && !Config::get().is_quiet() {
         // Only print stats if we're in an interactive terminal and quiet mode is disabled
         let is_interactive = std::io::stdout().is_terminal();
-        write_stats_to_terminal(&stats, is_interactive);
+        if let Some(stats) = stats.as_ref() {
+            write_stats_to_terminal(stats, is_interactive);
+        } else {
+            match skip_reason.as_ref() {
+                Some(StatsSkipReason::MergeCommit) => {
+                    eprintln!(
+                        "[git-ai] Skipped git-ai stats for merge commit {}.",
+                        commit_sha
+                    );
+                }
+                Some(StatsSkipReason::Expensive(estimate)) => {
+                    eprintln!(
+                        "[git-ai] Skipped git-ai stats for large commit (files_with_additions={}, added_lines={}, hunks={}). Run `git-ai stats {}` to compute stats on demand.",
+                        estimate.files_with_additions,
+                        estimate.added_lines,
+                        estimate.hunk_ranges,
+                        commit_sha
+                    );
+                }
+                None => {}
+            }
+        }
     }
     Ok((commit_sha.to_string(), authorship_log))
+}
+
+#[derive(Debug, Clone)]
+enum StatsSkipReason {
+    MergeCommit,
+    Expensive(StatsCostEstimate),
+}
+
+fn should_skip_expensive_post_commit_stats(estimate: &StatsCostEstimate) -> bool {
+    estimate.hunk_ranges >= STATS_SKIP_MAX_HUNKS
+        || estimate.added_lines >= STATS_SKIP_MAX_ADDED_LINES
+        || estimate.files_with_additions >= STATS_SKIP_MAX_FILES_WITH_ADDITIONS
+}
+
+fn estimate_stats_cost(
+    repo: &Repository,
+    parent_sha: &str,
+    commit_sha: &str,
+    ignore_patterns: &[String],
+) -> Result<StatsCostEstimate, GitAiError> {
+    let mut added_lines_by_file = repo.diff_added_lines(parent_sha, commit_sha, None)?;
+    let ignore_matcher = build_ignore_matcher(ignore_patterns);
+    added_lines_by_file
+        .retain(|file_path, _| !should_ignore_file_with_matcher(file_path, &ignore_matcher));
+
+    let files_with_additions = added_lines_by_file
+        .values()
+        .filter(|lines| !lines.is_empty())
+        .count();
+
+    let mut added_lines = 0usize;
+    let mut hunk_ranges = 0usize;
+
+    for (_file, lines) in added_lines_by_file {
+        if lines.is_empty() {
+            continue;
+        }
+        added_lines += lines.len();
+        hunk_ranges += count_line_ranges(&lines);
+    }
+
+    Ok(StatsCostEstimate {
+        files_with_additions,
+        added_lines,
+        hunk_ranges,
+    })
+}
+
+fn count_line_ranges(lines: &[u32]) -> usize {
+    if lines.is_empty() {
+        return 0;
+    }
+
+    let mut sorted = lines.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+
+    let mut ranges = 1usize;
+    let mut prev = sorted[0];
+    for &line in &sorted[1..] {
+        if line != prev + 1 {
+            ranges += 1;
+        }
+        prev = line;
+    }
+    ranges
 }
 
 /// Update prompts/transcripts in working log checkpoints to their latest versions.
@@ -193,10 +379,7 @@ fn update_prompts_to_latest(checkpoints: &mut [Checkpoint]) -> Result<(), GitAiE
     for (idx, checkpoint) in checkpoints.iter().enumerate() {
         if let Some(agent_id) = &checkpoint.agent_id {
             let key = format!("{}:{}", agent_id.tool, agent_id.id);
-            agent_checkpoint_indices
-                .entry(key)
-                .or_default()
-                .push(idx);
+            agent_checkpoint_indices.entry(key).or_default().push(idx);
         }
     }
 
@@ -336,9 +519,10 @@ fn enqueue_prompt_messages_to_cas(
         });
 
     if let Some(url) = repo_url
-        && let Ok(normalized) = crate::repo_url::normalize_repo_url(&url) {
-            metadata.insert("repo_url".to_string(), normalized);
-        }
+        && let Ok(normalized) = crate::repo_url::normalize_repo_url(&url)
+    {
+        metadata.insert("repo_url".to_string(), normalized);
+    }
 
     // Get API base URL for constructing messages_url
     let api_base_url = Config::get().api_base_url();
@@ -375,7 +559,7 @@ fn record_commit_metrics(
     stats: &crate::authorship::stats::CommitStats,
     checkpoints: &[Checkpoint],
 ) {
-    use crate::metrics::{record, CommittedValues, EventAttributes};
+    use crate::metrics::{CommittedValues, EventAttributes, record};
 
     // Build parallel arrays: index 0 = "all" (aggregate), index 1+ = per tool/model
     let mut tool_model_pairs: Vec<String> = vec!["all".to_string()];
@@ -434,23 +618,29 @@ fn record_commit_metrics(
     // Build attributes - start with version
     let mut attrs = EventAttributes::with_version(env!("CARGO_PKG_VERSION"));
 
-    attrs = attrs.author(human_author)
+    attrs = attrs
+        .author(human_author)
         .commit_sha(commit_sha)
         .base_commit_sha(parent_sha);
 
     // Get repo URL from default remote
     if let Ok(Some(remote_name)) = repo.get_default_remote()
         && let Ok(remotes) = repo.remotes_with_urls()
-            && let Some((_, url)) = remotes.into_iter().find(|(n, _)| n == &remote_name)
-                && let Ok(normalized) = crate::repo_url::normalize_repo_url(&url) {
-                    attrs = attrs.repo_url(normalized);
-                }
+        && let Some((_, url)) = remotes.into_iter().find(|(n, _)| n == &remote_name)
+        && let Ok(normalized) = crate::repo_url::normalize_repo_url(&url)
+    {
+        attrs = attrs.repo_url(normalized);
+    }
 
     // Get current branch
     if let Ok(head_ref) = repo.head()
-        && let Ok(short_branch) = head_ref.shorthand() {
-            attrs = attrs.branch(short_branch);
-        }
+        && let Ok(short_branch) = head_ref.shorthand()
+    {
+        attrs = attrs.branch(short_branch);
+    }
+
+    // Attach custom attributes
+    attrs = attrs.custom_attributes_map(Config::get().custom_attributes());
 
     // Record the metric
     record(values, attrs);
@@ -458,7 +648,52 @@ fn record_commit_metrics(
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        STATS_SKIP_MAX_ADDED_LINES, STATS_SKIP_MAX_FILES_WITH_ADDITIONS, STATS_SKIP_MAX_HUNKS,
+        StatsCostEstimate, count_line_ranges, should_skip_expensive_post_commit_stats,
+    };
     use crate::git::test_utils::TmpRepo;
+
+    #[test]
+    fn test_count_line_ranges_handles_scattered_and_contiguous_lines() {
+        assert_eq!(count_line_ranges(&[]), 0);
+        assert_eq!(count_line_ranges(&[1]), 1);
+        assert_eq!(count_line_ranges(&[1, 2, 3]), 1);
+        assert_eq!(count_line_ranges(&[1, 3, 5]), 3);
+        // Includes unsorted and duplicate values.
+        assert_eq!(count_line_ranges(&[5, 3, 3, 4, 10]), 2);
+    }
+
+    #[test]
+    fn test_should_skip_expensive_post_commit_stats_thresholds() {
+        let below_threshold = StatsCostEstimate {
+            files_with_additions: STATS_SKIP_MAX_FILES_WITH_ADDITIONS - 1,
+            added_lines: STATS_SKIP_MAX_ADDED_LINES - 1,
+            hunk_ranges: STATS_SKIP_MAX_HUNKS - 1,
+        };
+        assert!(!should_skip_expensive_post_commit_stats(&below_threshold));
+
+        let by_hunks = StatsCostEstimate {
+            files_with_additions: 1,
+            added_lines: 1,
+            hunk_ranges: STATS_SKIP_MAX_HUNKS,
+        };
+        assert!(should_skip_expensive_post_commit_stats(&by_hunks));
+
+        let by_added_lines = StatsCostEstimate {
+            files_with_additions: 1,
+            added_lines: STATS_SKIP_MAX_ADDED_LINES,
+            hunk_ranges: 1,
+        };
+        assert!(should_skip_expensive_post_commit_stats(&by_added_lines));
+
+        let by_files = StatsCostEstimate {
+            files_with_additions: STATS_SKIP_MAX_FILES_WITH_ADDITIONS,
+            added_lines: 1,
+            hunk_ranges: 1,
+        };
+        assert!(should_skip_expensive_post_commit_stats(&by_files));
+    }
 
     #[test]
     fn test_post_commit_empty_repo_with_checkpoint() {
@@ -523,27 +758,114 @@ mod tests {
     }
 
     #[test]
+    fn test_count_line_ranges_single_element() {
+        assert_eq!(count_line_ranges(&[42]), 1);
+    }
+
+    #[test]
+    fn test_count_line_ranges_all_contiguous() {
+        assert_eq!(count_line_ranges(&[1, 2, 3, 4, 5]), 1);
+    }
+
+    #[test]
+    fn test_count_line_ranges_all_scattered() {
+        assert_eq!(count_line_ranges(&[1, 10, 20, 30]), 4);
+    }
+
+    #[test]
+    fn test_count_line_ranges_duplicates() {
+        assert_eq!(count_line_ranges(&[5, 5, 5]), 1);
+    }
+
+    #[test]
+    fn test_count_line_ranges_unsorted() {
+        // After sort+dedup: [1, 2, 5, 6, 10] -> ranges: [1,2], [5,6], [10]
+        assert_eq!(count_line_ranges(&[10, 5, 6, 1, 2]), 3);
+    }
+
+    #[test]
+    fn test_count_line_ranges_two_ranges() {
+        assert_eq!(count_line_ranges(&[1, 2, 3, 10, 11, 12]), 2);
+    }
+
+    #[test]
+    fn test_should_skip_stats_exactly_at_thresholds() {
+        // Exactly at the hunks threshold alone should trigger skip.
+        let at_hunks = StatsCostEstimate {
+            files_with_additions: 0,
+            added_lines: 0,
+            hunk_ranges: STATS_SKIP_MAX_HUNKS,
+        };
+        assert!(
+            should_skip_expensive_post_commit_stats(&at_hunks),
+            "Exactly at hunk threshold should skip"
+        );
+
+        // Exactly at added-lines threshold alone should trigger skip.
+        let at_added = StatsCostEstimate {
+            files_with_additions: 0,
+            added_lines: STATS_SKIP_MAX_ADDED_LINES,
+            hunk_ranges: 0,
+        };
+        assert!(
+            should_skip_expensive_post_commit_stats(&at_added),
+            "Exactly at added-lines threshold should skip"
+        );
+
+        // Exactly at files-with-additions threshold alone should trigger skip.
+        let at_files = StatsCostEstimate {
+            files_with_additions: STATS_SKIP_MAX_FILES_WITH_ADDITIONS,
+            added_lines: 0,
+            hunk_ranges: 0,
+        };
+        assert!(
+            should_skip_expensive_post_commit_stats(&at_files),
+            "Exactly at files-with-additions threshold should skip"
+        );
+
+        // All at zero should NOT skip.
+        let all_zero = StatsCostEstimate {
+            files_with_additions: 0,
+            added_lines: 0,
+            hunk_ranges: 0,
+        };
+        assert!(
+            !should_skip_expensive_post_commit_stats(&all_zero),
+            "All zero values should not skip"
+        );
+    }
+
+    #[test]
     fn test_post_commit_utf8_filename_with_ai_attribution() {
         // Create a repo with an initial commit
         let tmp_repo = TmpRepo::new().unwrap();
 
         // Create initial file and commit
         tmp_repo.write_file("README.md", "# Test\n", true).unwrap();
-        tmp_repo.trigger_checkpoint_with_author("test_user").unwrap();
+        tmp_repo
+            .trigger_checkpoint_with_author("test_user")
+            .unwrap();
         tmp_repo.commit_with_message("Initial commit").unwrap();
 
         // Create a file with Chinese characters in the filename
         let chinese_filename = "中文文件.txt";
-        tmp_repo.write_file(chinese_filename, "Hello, 世界!\n", true).unwrap();
+        tmp_repo
+            .write_file(chinese_filename, "Hello, 世界!\n", true)
+            .unwrap();
 
         // Trigger AI checkpoint
-        tmp_repo.trigger_checkpoint_with_ai("mock_ai", None, None).unwrap();
+        tmp_repo
+            .trigger_checkpoint_with_ai("mock_ai", None, None)
+            .unwrap();
 
         // Commit
         let authorship_log = tmp_repo.commit_with_message("Add Chinese file").unwrap();
 
         // Debug output
-        println!("Authorship log attestations: {:?}", authorship_log.attestations);
+        println!(
+            "Authorship log attestations: {:?}",
+            authorship_log.attestations
+        );
 
         // The attestation should include the Chinese filename
         assert_eq!(
@@ -552,8 +874,7 @@ mod tests {
             "Should have 1 attestation for the Chinese-named file"
         );
         assert_eq!(
-            authorship_log.attestations[0].file_path,
-            chinese_filename,
+            authorship_log.attestations[0].file_path, chinese_filename,
             "File path should be the UTF-8 filename"
         );
     }

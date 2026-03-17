@@ -239,9 +239,11 @@ pub fn parse_git_cli_args(args: &[String]) -> ParsedGitInvocation {
 
         // Long form with '=' (e.g. --git-dir=/x, --exec-path=/x, --config-env=name=ENV).
         if let Some(eq) = tok.find('=')
-            && eq > 0 && tok.starts_with("--") {
-                return (vec![tok.clone()], 1);
-            }
+            && eq > 0
+            && tok.starts_with("--")
+        {
+            return (vec![tok.clone()], 1);
+        }
 
         // Short sticky for -Cpath / -cname=value
         if key == "-C" && tok != "-C" && tok.starts_with("-C") {
@@ -556,7 +558,9 @@ fn derive_directory_from_url(url: &str) -> Option<String> {
     }
 
     // Strip .git suffix if present
-    let dir_name = last_component.strip_suffix(".git").unwrap_or(last_component);
+    let dir_name = last_component
+        .strip_suffix(".git")
+        .unwrap_or(last_component);
 
     if dir_name.is_empty() {
         None

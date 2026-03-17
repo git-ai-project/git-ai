@@ -1,7 +1,30 @@
 #[macro_use]
 mod repos;
+use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 use repos::test_file::ExpectedLineExt;
 use repos::test_repo::TestRepo;
+use std::collections::HashMap;
+use std::process::Command;
+
+fn read_authorship_note(repo: &TestRepo, commit_sha: &str) -> Option<String> {
+    let output = Command::new("git")
+        .args([
+            "-C",
+            repo.path().to_str().unwrap(),
+            "notes",
+            "--ref",
+            "ai",
+            "show",
+            commit_sha,
+        ])
+        .output()
+        .expect("failed to run git notes show");
+    if output.status.success() {
+        Some(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        None
+    }
+}
 
 /// Test amending a commit by adding AI-authored lines at the top of the file.
 #[test]
@@ -441,3 +464,133 @@ fn test_amend_with_unstaged_middle_section() {
         "// AI section 3 line 2".ai()
     ]);
 }
+
+#[test]
+fn test_amend_repeated_round_trips_preserve_exact_line_authorship() {
+    let repo = TestRepo::new();
+    let mut file = repo.filename("code.js");
+
+    file.set_contents(lines![
+        "function example() {".ai(),
+        "  return 42;".ai(),
+        "}".ai()
+    ]);
+    repo.stage_all_and_commit("Add example function").unwrap();
+
+    file.insert_at(0, lines!["// Header comment".ai()]);
+    file.insert_at(2, lines!["  // Added documentation".ai()]);
+    file.insert_at(5, lines!["// Footer".ai()]);
+    repo.git(&["add", "-A"]).unwrap();
+    repo.git(&[
+        "commit",
+        "--amend",
+        "-m",
+        "Add example function (amended 1)",
+    ])
+    .unwrap();
+
+    // Re-amend the same commit with mixed authorship changes.
+    file.insert_at(0, lines!["// Human TODO".human()]);
+    file.insert_at(7, lines!["// AI trailing note".ai()]);
+    repo.git(&["add", "-A"]).unwrap();
+    repo.git(&[
+        "commit",
+        "--amend",
+        "-m",
+        "Add example function (amended 2)",
+    ])
+    .unwrap();
+
+    file.assert_lines_and_blame(lines![
+        "// Human TODO".human(),
+        "// Header comment".ai(),
+        "function example() {".ai(),
+        "  // Added documentation".ai(),
+        "  return 42;".ai(),
+        "}".ai(),
+        "// Footer".ai(),
+        "// AI trailing note".ai()
+    ]);
+}
+
+/// Test that custom attributes set via config are preserved through an amend
+/// when the real post-commit pipeline injects them.
+#[test]
+fn test_amend_preserves_custom_attributes_from_config() {
+    let mut repo = TestRepo::new();
+
+    // Configure custom attributes via config patch
+    let mut attrs = HashMap::new();
+    attrs.insert("employee_id".to_string(), "E202".to_string());
+    attrs.insert("team".to_string(), "security".to_string());
+    repo.patch_git_ai_config(|patch| {
+        patch.custom_attributes = Some(attrs.clone());
+    });
+
+    // Create initial commit with AI content
+    let mut file = repo.filename("code.txt");
+    file.set_contents(lines![
+        "// AI generated code".ai(),
+        "function init() {}".ai()
+    ]);
+    repo.stage_all_and_commit("Initial AI commit").unwrap();
+
+    // Verify custom attributes were set on the original commit
+    let original_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let original_note = read_authorship_note(&repo, &original_sha)
+        .expect("original commit should have authorship note");
+    let original_log =
+        AuthorshipLog::deserialize_from_string(&original_note).expect("parse original note");
+    for (_id, prompt) in &original_log.metadata.prompts {
+        assert_eq!(
+            prompt.custom_attributes.as_ref(),
+            Some(&attrs),
+            "precondition: original commit should have custom_attributes from config"
+        );
+    }
+
+    // Amend the commit with additional AI lines
+    file.insert_at(2, lines!["// More AI code".ai()]);
+    repo.git(&["add", "-A"]).unwrap();
+    repo.git(&["commit", "--amend", "-m", "Initial AI commit (amended)"])
+        .unwrap();
+
+    // Verify custom attributes survived the amend
+    let amended_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let amended_note = read_authorship_note(&repo, &amended_sha)
+        .expect("amended commit should have authorship note");
+    let amended_log =
+        AuthorshipLog::deserialize_from_string(&amended_note).expect("parse amended note");
+    assert!(
+        !amended_log.metadata.prompts.is_empty(),
+        "amended commit should have prompt records"
+    );
+    for (_id, prompt) in &amended_log.metadata.prompts {
+        assert_eq!(
+            prompt.custom_attributes.as_ref(),
+            Some(&attrs),
+            "custom_attributes should be preserved through amend"
+        );
+    }
+
+    // Also verify the AI attribution itself survived
+    file.assert_lines_and_blame(lines![
+        "// AI generated code".ai(),
+        "function init() {}".ai(),
+        "// More AI code".ai()
+    ]);
+}
+
+reuse_tests_in_worktree!(
+    test_amend_add_lines_at_top,
+    test_amend_add_lines_in_middle,
+    test_amend_add_lines_at_bottom,
+    test_amend_multiple_changes,
+    test_amend_with_unstaged_ai_code_in_other_file,
+    test_amend_preserves_unstaged_ai_attribution,
+    test_amend_with_multiple_files_mixed_staging,
+    test_amend_with_partially_staged_ai_file,
+    test_amend_with_partially_staged_mixed_content,
+    test_amend_with_unstaged_middle_section,
+    test_amend_repeated_round_trips_preserve_exact_line_authorship,
+);

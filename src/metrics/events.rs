@@ -1,9 +1,9 @@
 //! Event-specific value structs for metrics.
 
 use super::pos_encoded::{
-    sparse_get_string, sparse_get_u32, sparse_get_u64, sparse_get_vec_string, sparse_get_vec_u32,
-    sparse_get_vec_u64, sparse_set, string_to_json, u32_to_json, u64_to_json, vec_string_to_json,
-    vec_u32_to_json, vec_u64_to_json, PosEncoded, PosField,
+    PosEncoded, PosField, sparse_get_string, sparse_get_u32, sparse_get_u64, sparse_get_vec_string,
+    sparse_get_vec_u32, sparse_get_vec_u64, sparse_set, string_to_json, u32_to_json, u64_to_json,
+    vec_string_to_json, vec_u32_to_json, vec_u64_to_json,
 };
 use super::types::{EventValues, MetricEventId, SparseArray};
 
@@ -383,9 +383,9 @@ impl EventValues for AgentUsageValues {
 /// Value positions for "install_hooks" event.
 /// One event per tool attempted during install-hooks.
 pub mod install_hooks_pos {
-    pub const TOOL_ID: usize = 0;   // String - tool id (e.g., "cursor", "fork")
-    pub const STATUS: usize = 1;    // String - "not_found", "installed", "already_installed", "failed"
-    pub const MESSAGE: usize = 2;   // Option<String> - error message or warnings
+    pub const TOOL_ID: usize = 0; // String - tool id (e.g., "cursor", "fork")
+    pub const STATUS: usize = 1; // String - "not_found", "installed", "already_installed", "failed"
+    pub const MESSAGE: usize = 2; // Option<String> - error message or warnings
 }
 
 /// Values for Event ID 3: install_hooks
@@ -608,11 +608,7 @@ impl PosEncoded for CheckpointValues {
             checkpoint_pos::CHECKPOINT_TS,
             u64_to_json(&self.checkpoint_ts),
         );
-        sparse_set(
-            &mut map,
-            checkpoint_pos::KIND,
-            string_to_json(&self.kind),
-        );
+        sparse_set(&mut map, checkpoint_pos::KIND, string_to_json(&self.kind));
         sparse_set(
             &mut map,
             checkpoint_pos::FILE_PATH,
@@ -691,7 +687,10 @@ mod tests {
         assert_eq!(values.human_additions, Some(Some(50)));
         assert_eq!(
             values.tool_model_pairs,
-            Some(Some(vec!["all".to_string(), "claude-code:claude-3".to_string()]))
+            Some(Some(vec![
+                "all".to_string(),
+                "claude-code:claude-3".to_string()
+            ]))
         );
         assert_eq!(values.ai_additions, Some(Some(vec![100, 70])));
     }
@@ -761,5 +760,278 @@ mod tests {
     fn test_committed_values_event_id() {
         assert_eq!(CommittedValues::event_id(), MetricEventId::Committed);
         assert_eq!(CommittedValues::event_id() as u16, 1);
+    }
+
+    #[test]
+    fn test_committed_values_null_fields() {
+        let values = CommittedValues::new()
+            .human_additions_null()
+            .git_diff_deleted_lines_null()
+            .tool_model_pairs_null();
+
+        assert_eq!(values.human_additions, Some(None));
+        assert_eq!(values.git_diff_deleted_lines, Some(None));
+        assert_eq!(values.tool_model_pairs, Some(None));
+    }
+
+    #[test]
+    fn test_committed_values_with_commit_info() {
+        let values = CommittedValues::new()
+            .human_additions(10)
+            .first_checkpoint_ts(1704067200)
+            .commit_subject("Initial commit")
+            .commit_body("This is the commit body\n\nWith multiple lines");
+
+        assert_eq!(values.first_checkpoint_ts, Some(Some(1704067200)));
+        assert_eq!(
+            values.commit_subject,
+            Some(Some("Initial commit".to_string()))
+        );
+        assert_eq!(
+            values.commit_body,
+            Some(Some(
+                "This is the commit body\n\nWith multiple lines".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn test_committed_values_roundtrip_with_new_fields() {
+        use super::PosEncoded;
+
+        let original = CommittedValues::new()
+            .human_additions(25)
+            .first_checkpoint_ts(1700000000)
+            .commit_subject("Test commit")
+            .commit_body_null();
+
+        let sparse = PosEncoded::to_sparse(&original);
+        let restored = <CommittedValues as PosEncoded>::from_sparse(&sparse);
+
+        assert_eq!(restored.human_additions, Some(Some(25)));
+        assert_eq!(restored.first_checkpoint_ts, Some(Some(1700000000)));
+        assert_eq!(
+            restored.commit_subject,
+            Some(Some("Test commit".to_string()))
+        );
+        assert_eq!(restored.commit_body, Some(None));
+    }
+
+    #[test]
+    fn test_agent_usage_values() {
+        let values = AgentUsageValues::new();
+        assert_eq!(AgentUsageValues::event_id(), MetricEventId::AgentUsage);
+        assert_eq!(AgentUsageValues::event_id() as u16, 2);
+
+        // Should produce empty sparse array
+        let sparse = PosEncoded::to_sparse(&values);
+        assert!(sparse.is_empty());
+    }
+
+    #[test]
+    fn test_agent_usage_values_roundtrip() {
+        use super::PosEncoded;
+
+        let original = AgentUsageValues::new();
+        let sparse = PosEncoded::to_sparse(&original);
+        let restored = <AgentUsageValues as PosEncoded>::from_sparse(&sparse);
+
+        // Both should be empty
+        assert!(PosEncoded::to_sparse(&restored).is_empty());
+    }
+
+    #[test]
+    fn test_install_hooks_values_builder() {
+        let values = InstallHooksValues::new()
+            .tool_id("cursor".to_string())
+            .status("installed".to_string())
+            .message("Successfully installed".to_string());
+
+        assert_eq!(values.tool_id, Some(Some("cursor".to_string())));
+        assert_eq!(values.status, Some(Some("installed".to_string())));
+        assert_eq!(
+            values.message,
+            Some(Some("Successfully installed".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_install_hooks_values_with_null_message() {
+        let values = InstallHooksValues::new()
+            .tool_id("fork".to_string())
+            .status("not_found".to_string())
+            .message_null();
+
+        assert_eq!(values.message, Some(None));
+    }
+
+    #[test]
+    fn test_install_hooks_values_to_sparse() {
+        use super::PosEncoded;
+
+        let values = InstallHooksValues::new()
+            .tool_id("copilot".to_string())
+            .status("failed".to_string())
+            .message("Error: permission denied".to_string());
+
+        let sparse = PosEncoded::to_sparse(&values);
+
+        assert_eq!(sparse.get("0"), Some(&Value::String("copilot".to_string())));
+        assert_eq!(sparse.get("1"), Some(&Value::String("failed".to_string())));
+        assert_eq!(
+            sparse.get("2"),
+            Some(&Value::String("Error: permission denied".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_install_hooks_values_from_sparse() {
+        use super::PosEncoded;
+
+        let mut sparse = SparseArray::new();
+        sparse.insert("0".to_string(), Value::String("windsurf".to_string()));
+        sparse.insert(
+            "1".to_string(),
+            Value::String("already_installed".to_string()),
+        );
+        sparse.insert("2".to_string(), Value::Null);
+
+        let values = <InstallHooksValues as PosEncoded>::from_sparse(&sparse);
+
+        assert_eq!(values.tool_id, Some(Some("windsurf".to_string())));
+        assert_eq!(values.status, Some(Some("already_installed".to_string())));
+        assert_eq!(values.message, Some(None));
+    }
+
+    #[test]
+    fn test_install_hooks_event_id() {
+        assert_eq!(InstallHooksValues::event_id(), MetricEventId::InstallHooks);
+        assert_eq!(InstallHooksValues::event_id() as u16, 3);
+    }
+
+    #[test]
+    fn test_checkpoint_values_builder() {
+        let values = CheckpointValues::new()
+            .checkpoint_ts(1704067200)
+            .kind("ai_agent")
+            .file_path("src/main.rs")
+            .lines_added(50)
+            .lines_deleted(10)
+            .lines_added_sloc(45)
+            .lines_deleted_sloc(8);
+
+        assert_eq!(values.checkpoint_ts, Some(Some(1704067200)));
+        assert_eq!(values.kind, Some(Some("ai_agent".to_string())));
+        assert_eq!(values.file_path, Some(Some("src/main.rs".to_string())));
+        assert_eq!(values.lines_added, Some(Some(50)));
+        assert_eq!(values.lines_deleted, Some(Some(10)));
+        assert_eq!(values.lines_added_sloc, Some(Some(45)));
+        assert_eq!(values.lines_deleted_sloc, Some(Some(8)));
+    }
+
+    #[test]
+    fn test_checkpoint_values_with_nulls() {
+        let values = CheckpointValues::new()
+            .checkpoint_ts_null()
+            .kind_null()
+            .file_path_null()
+            .lines_added_null();
+
+        assert_eq!(values.checkpoint_ts, Some(None));
+        assert_eq!(values.kind, Some(None));
+        assert_eq!(values.file_path, Some(None));
+        assert_eq!(values.lines_added, Some(None));
+    }
+
+    #[test]
+    fn test_checkpoint_values_to_sparse() {
+        use super::PosEncoded;
+
+        let values = CheckpointValues::new()
+            .checkpoint_ts(1700000000)
+            .kind("human")
+            .file_path("tests/test.rs")
+            .lines_added(100)
+            .lines_deleted(20);
+
+        let sparse = PosEncoded::to_sparse(&values);
+
+        assert_eq!(sparse.get("0"), Some(&Value::Number(1700000000.into())));
+        assert_eq!(sparse.get("1"), Some(&Value::String("human".to_string())));
+        assert_eq!(
+            sparse.get("2"),
+            Some(&Value::String("tests/test.rs".to_string()))
+        );
+        assert_eq!(sparse.get("3"), Some(&Value::Number(100.into())));
+        assert_eq!(sparse.get("4"), Some(&Value::Number(20.into())));
+    }
+
+    #[test]
+    fn test_checkpoint_values_from_sparse() {
+        use super::PosEncoded;
+
+        let mut sparse = SparseArray::new();
+        sparse.insert("0".to_string(), Value::Number(1704067200.into()));
+        sparse.insert("1".to_string(), Value::String("ai_tab".to_string()));
+        sparse.insert("2".to_string(), Value::String("lib.rs".to_string()));
+        sparse.insert("3".to_string(), Value::Number(75.into()));
+        sparse.insert("4".to_string(), Value::Number(15.into()));
+        sparse.insert("5".to_string(), Value::Number(70.into()));
+        sparse.insert("6".to_string(), Value::Number(12.into()));
+
+        let values = <CheckpointValues as PosEncoded>::from_sparse(&sparse);
+
+        assert_eq!(values.checkpoint_ts, Some(Some(1704067200)));
+        assert_eq!(values.kind, Some(Some("ai_tab".to_string())));
+        assert_eq!(values.file_path, Some(Some("lib.rs".to_string())));
+        assert_eq!(values.lines_added, Some(Some(75)));
+        assert_eq!(values.lines_deleted, Some(Some(15)));
+        assert_eq!(values.lines_added_sloc, Some(Some(70)));
+        assert_eq!(values.lines_deleted_sloc, Some(Some(12)));
+    }
+
+    #[test]
+    fn test_checkpoint_event_id() {
+        assert_eq!(CheckpointValues::event_id(), MetricEventId::Checkpoint);
+        assert_eq!(CheckpointValues::event_id() as u16, 4);
+    }
+
+    #[test]
+    fn test_committed_values_with_all_arrays() {
+        let values = CommittedValues::new()
+            .tool_model_pairs(vec!["all".to_string(), "cursor:gpt-4".to_string()])
+            .mixed_additions(vec![10, 5])
+            .ai_additions(vec![100, 50])
+            .ai_accepted(vec![80, 40])
+            .total_ai_additions(vec![120, 60])
+            .total_ai_deletions(vec![20, 10])
+            .time_waiting_for_ai(vec![5000, 3000]);
+
+        assert_eq!(
+            values.tool_model_pairs,
+            Some(Some(vec!["all".to_string(), "cursor:gpt-4".to_string()]))
+        );
+        assert_eq!(values.mixed_additions, Some(Some(vec![10, 5])));
+        assert_eq!(values.ai_additions, Some(Some(vec![100, 50])));
+        assert_eq!(values.ai_accepted, Some(Some(vec![80, 40])));
+        assert_eq!(values.total_ai_additions, Some(Some(vec![120, 60])));
+        assert_eq!(values.total_ai_deletions, Some(Some(vec![20, 10])));
+        assert_eq!(values.time_waiting_for_ai, Some(Some(vec![5000, 3000])));
+    }
+
+    #[test]
+    fn test_committed_values_array_nulls() {
+        let values = CommittedValues::new()
+            .mixed_additions_null()
+            .ai_accepted_null()
+            .total_ai_additions_null()
+            .total_ai_deletions_null()
+            .time_waiting_for_ai_null();
+
+        assert_eq!(values.mixed_additions, Some(None));
+        assert_eq!(values.ai_accepted, Some(None));
+        assert_eq!(values.total_ai_additions, Some(None));
+        assert_eq!(values.total_ai_deletions, Some(None));
+        assert_eq!(values.time_waiting_for_ai, Some(None));
     }
 }

@@ -8,10 +8,11 @@ pub fn handle_login(_args: &[String]) {
 
     // Check if already logged in
     if let Ok(Some(creds)) = store.load()
-        && !creds.is_refresh_token_expired() {
-            eprintln!("Already logged in. Use 'git-ai logout' to log out first.");
-            std::process::exit(0);
-        }
+        && !creds.is_refresh_token_expired()
+    {
+        eprintln!("Already logged in. Use 'git-ai logout' to log out first.");
+        std::process::exit(0);
+    }
 
     let client = OAuthClient::new();
 
@@ -67,13 +68,14 @@ pub fn handle_login(_args: &[String]) {
             // Check if there's queued metrics data to sync
             if let Ok(db) = MetricsDatabase::global()
                 && let Ok(db_lock) = db.lock()
-                    && let Ok(count) = db_lock.count()
-                        && count > 0 {
-                            // Spawn background metrics flush now that we're logged in
-                            spawn_background_metrics_db_flush();
-                            // Inform the user
-                            eprintln!("Syncing your Git AI dashboard in the background...");
-                        }
+                && let Ok(count) = db_lock.count()
+                && count > 0
+            {
+                // Spawn background metrics flush now that we're logged in
+                spawn_background_metrics_db_flush();
+                // Inform the user
+                eprintln!("Syncing your Git AI dashboard in the background...");
+            }
         }
         Err(e) => {
             eprintln!("\nAuthorization failed: {}", e);
@@ -85,28 +87,30 @@ pub fn handle_login(_args: &[String]) {
 /// Attempt to open a URL in the system's default browser
 fn open_browser(url: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .arg(url)
-            .spawn()
-            .map_err(|e| e.to_string())?;
-    }
+    let mut cmd = {
+        let mut cmd = std::process::Command::new("open");
+        cmd.arg(url);
+        cmd
+    };
 
     #[cfg(target_os = "linux")]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(url)
-            .spawn()
-            .map_err(|e| e.to_string())?;
-    }
+    let mut cmd = {
+        let mut cmd = std::process::Command::new("xdg-open");
+        cmd.arg(url);
+        cmd
+    };
 
     #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .spawn()
-            .map_err(|e| e.to_string())?;
-    }
+    let mut cmd = {
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.args(["/C", "start", "", url]);
+        cmd
+    };
+
+    cmd.stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| e.to_string())?;
 
     Ok(())
 }

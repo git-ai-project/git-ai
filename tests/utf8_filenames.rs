@@ -29,11 +29,7 @@ fn test_chinese_filename_ai_attribution() {
 
     // AI creates a file with Chinese characters in the filename
     let mut chinese_file = repo.filename("中文文件.txt");
-    chinese_file.set_contents(lines![
-        "第一行".ai(),
-        "第二行".ai(),
-        "第三行".ai(),
-    ]);
+    chinese_file.set_contents(lines!["第一行".ai(), "第二行".ai(), "第三行".ai(),]);
 
     // Commit the Chinese-named file
     let commit = repo.stage_all_and_commit("Add Chinese file").unwrap();
@@ -45,8 +41,7 @@ fn test_chinese_filename_ai_attribution() {
         "Should have 1 attestation for the Chinese-named file"
     );
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "中文文件.txt",
+        commit.authorship_log.attestations[0].file_path, "中文文件.txt",
         "File path should be the actual UTF-8 filename"
     );
 
@@ -102,8 +97,7 @@ fn test_emoji_filename_ai_attribution() {
         "Should have 1 attestation for the emoji-named file"
     );
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "🚀rocket_launch.txt",
+        commit.authorship_log.attestations[0].file_path, "🚀rocket_launch.txt",
         "File path should be the actual UTF-8 filename with emoji"
     );
 
@@ -142,22 +136,13 @@ fn test_mixed_ascii_and_utf8_filenames() {
 
     // AI creates multiple files - one with ASCII name, one with Chinese, one with emoji
     let mut ascii_file = repo.filename("normal_file.txt");
-    ascii_file.set_contents(lines![
-        "Normal line 1".ai(),
-        "Normal line 2".ai(),
-    ]);
+    ascii_file.set_contents(lines!["Normal line 1".ai(), "Normal line 2".ai(),]);
 
     let mut chinese_file = repo.filename("配置文件.txt");
-    chinese_file.set_contents(lines![
-        "设置一".ai(),
-        "设置二".ai(),
-        "设置三".ai(),
-    ]);
+    chinese_file.set_contents(lines!["设置一".ai(), "设置二".ai(), "设置三".ai(),]);
 
     let mut emoji_file = repo.filename("🎉celebration.txt");
-    emoji_file.set_contents(lines![
-        "Party time!".ai(),
-    ]);
+    emoji_file.set_contents(lines!["Party time!".ai(),]);
 
     // Commit all files together
     let commit = repo.stage_all_and_commit("Add mixed files").unwrap();
@@ -307,8 +292,7 @@ fn test_nested_directory_with_utf8_filename() {
     // Verify the authorship log contains the correct path
     assert_eq!(commit.authorship_log.attestations.len(), 1);
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "src/模块/组件.ts",
+        commit.authorship_log.attestations[0].file_path, "src/模块/组件.ts",
         "File path should preserve UTF-8 in both directory and file names"
     );
 
@@ -354,10 +338,7 @@ fn test_utf8_filename_with_human_and_ai_lines() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(
-        stats.ai_additions, 2,
-        "2 lines should be attributed to AI"
-    );
+    assert_eq!(stats.ai_additions, 2, "2 lines should be attributed to AI");
     assert_eq!(
         stats.ai_accepted, 2,
         "2 AI lines should be counted as accepted"
@@ -394,7 +375,9 @@ fn test_japanese_hiragana_katakana_filename() {
     ]);
 
     // Commit the Japanese-named file
-    let commit = repo.stage_all_and_commit("Add Japanese hiragana/katakana file").unwrap();
+    let commit = repo
+        .stage_all_and_commit("Add Japanese hiragana/katakana file")
+        .unwrap();
 
     // Verify the authorship log contains the Japanese filename
     assert_eq!(
@@ -403,8 +386,7 @@ fn test_japanese_hiragana_katakana_filename() {
         "Should have 1 attestation for the Japanese-named file"
     );
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "ひらがな_カタカナ.txt",
+        commit.authorship_log.attestations[0].file_path, "ひらがな_カタカナ.txt",
         "File path should be the actual UTF-8 filename with Hiragana and Katakana"
     );
 
@@ -441,11 +423,12 @@ fn test_japanese_kanji_filename() {
     ]);
 
     // Commit the Kanji-named file
-    let commit = repo.stage_all_and_commit("Add Japanese kanji file").unwrap();
+    let commit = repo
+        .stage_all_and_commit("Add Japanese kanji file")
+        .unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "漢字ファイル.rs",
+        commit.authorship_log.attestations[0].file_path, "漢字ファイル.rs",
         "File path should preserve Japanese Kanji characters"
     );
 
@@ -453,8 +436,14 @@ fn test_japanese_kanji_filename() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 3, "All 3 lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 3,
+        "All 3 lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 // =============================================================================
@@ -480,11 +469,12 @@ fn test_filename_with_all_unicode_categories() {
     ]);
 
     // Commit the multi-category file
-    let commit = repo.stage_all_and_commit("Add multi-category file").unwrap();
+    let commit = repo
+        .stage_all_and_commit("Add multi-category file")
+        .unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "Test_中文_🚀_العربية_Русский.txt",
+        commit.authorship_log.attestations[0].file_path, "Test_中文_🚀_العربية_Русский.txt",
         "File path should preserve all Unicode categories"
     );
 
@@ -492,8 +482,14 @@ fn test_filename_with_all_unicode_categories() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 3, "All 3 lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 3,
+        "All 3 lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 #[test]
@@ -516,8 +512,7 @@ fn test_deeply_nested_utf8_directories() {
     let commit = repo.stage_all_and_commit("Add deeply nested file").unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "src/日本/中国/한국/भारत/العربية/file.txt",
+        commit.authorship_log.attestations[0].file_path, "src/日本/中国/한국/भारत/العربية/file.txt",
         "File path should preserve all nested UTF-8 directories"
     );
 
@@ -525,8 +520,14 @@ fn test_deeply_nested_utf8_directories() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 2, "Both lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 2,
+        "Both lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 #[test]
@@ -570,8 +571,14 @@ fn test_many_utf8_files_in_single_commit() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 6, "All 6 lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 6,
+        "All 6 lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 #[test]
@@ -585,16 +592,13 @@ fn test_filename_starting_with_emoji() {
 
     // AI creates a file that starts with emoji
     let mut emoji_start = repo.filename("🚀_project.txt");
-    emoji_start.set_contents(lines![
-        "File starting with emoji".ai(),
-    ]);
+    emoji_start.set_contents(lines!["File starting with emoji".ai(),]);
 
     // Commit the file
     let commit = repo.stage_all_and_commit("Add emoji-start file").unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "🚀_project.txt",
+        commit.authorship_log.attestations[0].file_path, "🚀_project.txt",
         "File path starting with emoji should be preserved"
     );
 
@@ -603,7 +607,10 @@ fn test_filename_starting_with_emoji() {
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
     assert_eq!(stats.ai_additions, 1, "The line should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 #[test]
@@ -617,16 +624,13 @@ fn test_filename_ending_with_emoji() {
 
     // AI creates a file that ends with emoji
     let mut emoji_end = repo.filename("project_🚀.txt");
-    emoji_end.set_contents(lines![
-        "File ending with emoji".ai(),
-    ]);
+    emoji_end.set_contents(lines!["File ending with emoji".ai(),]);
 
     // Commit the file
     let commit = repo.stage_all_and_commit("Add emoji-end file").unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "project_🚀.txt",
+        commit.authorship_log.attestations[0].file_path, "project_🚀.txt",
         "File path ending with emoji should be preserved"
     );
 
@@ -635,7 +639,10 @@ fn test_filename_ending_with_emoji() {
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
     assert_eq!(stats.ai_additions, 1, "The line should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 #[test]
@@ -649,16 +656,15 @@ fn test_filename_only_non_ascii() {
 
     // AI creates a file with only non-ASCII characters (no extension)
     let mut only_nonascii = repo.filename("中文日本語한글");
-    only_nonascii.set_contents(lines![
-        "File with only non-ASCII name".ai(),
-    ]);
+    only_nonascii.set_contents(lines!["File with only non-ASCII name".ai(),]);
 
     // Commit the file
-    let commit = repo.stage_all_and_commit("Add non-ASCII only file").unwrap();
+    let commit = repo
+        .stage_all_and_commit("Add non-ASCII only file")
+        .unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "中文日本語한글",
+        commit.authorship_log.attestations[0].file_path, "中文日本語한글",
         "File path with only non-ASCII should be preserved"
     );
 
@@ -667,7 +673,10 @@ fn test_filename_only_non_ascii() {
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
     assert_eq!(stats.ai_additions, 1, "The line should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 // =============================================================================
@@ -706,8 +715,14 @@ fn test_precomposed_nfc_filename() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 2, "Both lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 2,
+        "Both lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 #[test]
@@ -740,8 +755,14 @@ fn test_decomposed_nfd_filename() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 2, "Both lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 2,
+        "Both lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 #[test]
@@ -762,7 +783,9 @@ fn test_combining_diacritical_marks() {
     ]);
 
     // Commit the file with combining marks
-    let commit = repo.stage_all_and_commit("Add combining marks file").unwrap();
+    let commit = repo
+        .stage_all_and_commit("Add combining marks file")
+        .unwrap();
 
     assert_eq!(
         commit.authorship_log.attestations.len(),
@@ -774,8 +797,14 @@ fn test_combining_diacritical_marks() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 2, "Both lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 2,
+        "Both lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 #[test]
@@ -790,10 +819,7 @@ fn test_swedish_angstrom() {
     // AI creates a file with Swedish Å (A with ring above)
     // This is a common normalization test case
     let mut swedish_file = repo.filename("Ångström.txt");
-    swedish_file.set_contents(lines![
-        "Swedish Ångström".ai(),
-        "Length unit".ai(),
-    ]);
+    swedish_file.set_contents(lines!["Swedish Ångström".ai(), "Length unit".ai(),]);
 
     // Commit the Swedish file
     let commit = repo.stage_all_and_commit("Add Swedish file").unwrap();
@@ -808,8 +834,14 @@ fn test_swedish_angstrom() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 2, "Both lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 2,
+        "Both lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 // =============================================================================
@@ -837,8 +869,7 @@ fn test_mathematical_symbols_filename() {
     let commit = repo.stage_all_and_commit("Add math symbols file").unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "∑_integral_√.txt",
+        commit.authorship_log.attestations[0].file_path, "∑_integral_√.txt",
         "File path should preserve mathematical symbols"
     );
 
@@ -846,8 +877,14 @@ fn test_mathematical_symbols_filename() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 3, "All 3 lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 3,
+        "All 3 lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 #[test]
@@ -870,11 +907,12 @@ fn test_currency_symbols_filename() {
     ]);
 
     // Commit the currency symbols file
-    let commit = repo.stage_all_and_commit("Add currency symbols file").unwrap();
+    let commit = repo
+        .stage_all_and_commit("Add currency symbols file")
+        .unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "€£¥₹₿_prices.txt",
+        commit.authorship_log.attestations[0].file_path, "€£¥₹₿_prices.txt",
         "File path should preserve currency symbols"
     );
 
@@ -882,8 +920,14 @@ fn test_currency_symbols_filename() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 5, "All 5 lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 5,
+        "All 5 lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 #[test]
@@ -897,18 +941,13 @@ fn test_box_drawing_characters_filename() {
 
     // AI creates a file with box drawing characters
     let mut box_file = repo.filename("┌─┐│└┘_box.txt");
-    box_file.set_contents(lines![
-        "┌───────┐".ai(),
-        "│ Box   │".ai(),
-        "└───────┘".ai(),
-    ]);
+    box_file.set_contents(lines!["┌───────┐".ai(), "│ Box   │".ai(), "└───────┘".ai(),]);
 
     // Commit the box drawing file
     let commit = repo.stage_all_and_commit("Add box drawing file").unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "┌─┐│└┘_box.txt",
+        commit.authorship_log.attestations[0].file_path, "┌─┐│└┘_box.txt",
         "File path should preserve box drawing characters"
     );
 
@@ -916,8 +955,14 @@ fn test_box_drawing_characters_filename() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 3, "All 3 lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 3,
+        "All 3 lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 #[test]
@@ -942,8 +987,7 @@ fn test_dingbats_and_symbols_filename() {
     let commit = repo.stage_all_and_commit("Add dingbats file").unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "✓✗★☆♠♣♥♦.txt",
+        commit.authorship_log.attestations[0].file_path, "✓✗★☆♠♣♥♦.txt",
         "File path should preserve dingbats and symbols"
     );
 
@@ -951,8 +995,14 @@ fn test_dingbats_and_symbols_filename() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 4, "All 4 lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 4,
+        "All 4 lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 // =============================================================================
@@ -977,11 +1027,12 @@ fn test_emoji_with_skin_tone_modifiers() {
     ]);
 
     // Commit the emoji file with skin tone modifier
-    let commit = repo.stage_all_and_commit("Add emoji with skin tone").unwrap();
+    let commit = repo
+        .stage_all_and_commit("Add emoji with skin tone")
+        .unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "👋🏽wave.txt",
+        commit.authorship_log.attestations[0].file_path, "👋🏽wave.txt",
         "File path should preserve emoji with skin tone modifier"
     );
 
@@ -989,8 +1040,14 @@ fn test_emoji_with_skin_tone_modifiers() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 2, "Both lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 2,
+        "Both lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 #[test]
@@ -1014,8 +1071,7 @@ fn test_emoji_zwj_sequences() {
     let commit = repo.stage_all_and_commit("Add ZWJ emoji file").unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "👨‍👩‍👧‍👦_family.txt",
+        commit.authorship_log.attestations[0].file_path, "👨‍👩‍👧‍👦_family.txt",
         "File path should preserve ZWJ emoji sequences"
     );
 
@@ -1023,8 +1079,14 @@ fn test_emoji_zwj_sequences() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 2, "Both lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 2,
+        "Both lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 #[test]
@@ -1048,8 +1110,7 @@ fn test_emoji_flag_sequences() {
     let commit = repo.stage_all_and_commit("Add flag emoji file").unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "🇺🇸_usa.txt",
+        commit.authorship_log.attestations[0].file_path, "🇺🇸_usa.txt",
         "File path should preserve flag emoji (regional indicator sequences)"
     );
 
@@ -1057,8 +1118,14 @@ fn test_emoji_flag_sequences() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 2, "Both lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 2,
+        "Both lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 #[test]
@@ -1082,8 +1149,7 @@ fn test_multiple_complex_emoji_filename() {
     let commit = repo.stage_all_and_commit("Add multi-emoji file").unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "🚀🎉🌟💻🔥_launch.txt",
+        commit.authorship_log.attestations[0].file_path, "🚀🎉🌟💻🔥_launch.txt",
         "File path should preserve multiple emoji"
     );
 
@@ -1091,8 +1157,14 @@ fn test_multiple_complex_emoji_filename() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 3, "All 3 lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 3,
+        "All 3 lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 #[test]
@@ -1112,11 +1184,12 @@ fn test_emoji_in_directory_names() {
     ]);
 
     // Commit the file in emoji-named directories
-    let commit = repo.stage_all_and_commit("Add file in emoji directories").unwrap();
+    let commit = repo
+        .stage_all_and_commit("Add file in emoji directories")
+        .unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "src/🔧tools/📝notes.txt",
+        commit.authorship_log.attestations[0].file_path, "src/🔧tools/📝notes.txt",
         "File path should preserve emoji in directory names"
     );
 
@@ -1124,8 +1197,14 @@ fn test_emoji_in_directory_names() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 2, "Both lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 2,
+        "Both lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 // =============================================================================
@@ -1143,18 +1222,13 @@ fn test_russian_cyrillic_filename() {
 
     // AI creates a file with Russian Cyrillic characters in the filename
     let mut russian_file = repo.filename("Русский.txt");
-    russian_file.set_contents(lines![
-        "Привет мир".ai(),
-        "Спасибо".ai(),
-        "Россия".ai(),
-    ]);
+    russian_file.set_contents(lines!["Привет мир".ai(), "Спасибо".ai(), "Россия".ai(),]);
 
     // Commit the Russian-named file
     let commit = repo.stage_all_and_commit("Add Russian file").unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "Русский.txt",
+        commit.authorship_log.attestations[0].file_path, "Русский.txt",
         "File path should preserve Russian Cyrillic characters"
     );
 
@@ -1162,8 +1236,14 @@ fn test_russian_cyrillic_filename() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 3, "All 3 lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 3,
+        "All 3 lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 #[test]
@@ -1178,18 +1258,13 @@ fn test_ukrainian_cyrillic_filename() {
     // AI creates a file with Ukrainian Cyrillic characters in the filename
     // Ukrainian has unique letters like ї, і, є, ґ
     let mut ukrainian_file = repo.filename("Українська.txt");
-    ukrainian_file.set_contents(lines![
-        "Привіт".ai(),
-        "Дякую".ai(),
-        "Україна".ai(),
-    ]);
+    ukrainian_file.set_contents(lines!["Привіт".ai(), "Дякую".ai(), "Україна".ai(),]);
 
     // Commit the Ukrainian-named file
     let commit = repo.stage_all_and_commit("Add Ukrainian file").unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "Українська.txt",
+        commit.authorship_log.attestations[0].file_path, "Українська.txt",
         "File path should preserve Ukrainian Cyrillic characters"
     );
 
@@ -1197,8 +1272,14 @@ fn test_ukrainian_cyrillic_filename() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 3, "All 3 lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 3,
+        "All 3 lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 #[test]
@@ -1212,18 +1293,13 @@ fn test_greek_filename() {
 
     // AI creates a file with Greek characters in the filename
     let mut greek_file = repo.filename("Ελληνικά.txt");
-    greek_file.set_contents(lines![
-        "Γειά σου".ai(),
-        "Ευχαριστώ".ai(),
-        "Ελλάδα".ai(),
-    ]);
+    greek_file.set_contents(lines!["Γειά σου".ai(), "Ευχαριστώ".ai(), "Ελλάδα".ai(),]);
 
     // Commit the Greek-named file
     let commit = repo.stage_all_and_commit("Add Greek file").unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "Ελληνικά.txt",
+        commit.authorship_log.attestations[0].file_path, "Ελληνικά.txt",
         "File path should preserve Greek characters"
     );
 
@@ -1231,8 +1307,14 @@ fn test_greek_filename() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 3, "All 3 lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 3,
+        "All 3 lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 #[test]
@@ -1246,17 +1328,15 @@ fn test_greek_polytonic_filename() {
 
     // AI creates a file with Greek polytonic (with diacritics) characters in the filename
     let mut polytonic_file = repo.filename("Ἑλληνική.txt");
-    polytonic_file.set_contents(lines![
-        "Ἀθῆναι".ai(),
-        "φιλοσοφία".ai(),
-    ]);
+    polytonic_file.set_contents(lines!["Ἀθῆναι".ai(), "φιλοσοφία".ai(),]);
 
     // Commit the Greek polytonic-named file
-    let commit = repo.stage_all_and_commit("Add Greek polytonic file").unwrap();
+    let commit = repo
+        .stage_all_and_commit("Add Greek polytonic file")
+        .unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "Ἑλληνική.txt",
+        commit.authorship_log.attestations[0].file_path, "Ἑλληνική.txt",
         "File path should preserve Greek polytonic characters with diacritics"
     );
 
@@ -1264,8 +1344,14 @@ fn test_greek_polytonic_filename() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 2, "Both lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 2,
+        "Both lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 // =============================================================================
@@ -1283,18 +1369,13 @@ fn test_thai_filename() {
 
     // AI creates a file with Thai characters in the filename
     let mut thai_file = repo.filename("ภาษาไทย.txt");
-    thai_file.set_contents(lines![
-        "สวัสดี".ai(),
-        "ขอบคุณ".ai(),
-        "ประเทศไทย".ai(),
-    ]);
+    thai_file.set_contents(lines!["สวัสดี".ai(), "ขอบคุณ".ai(), "ประเทศไทย".ai(),]);
 
     // Commit the Thai-named file
     let commit = repo.stage_all_and_commit("Add Thai file").unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "ภาษาไทย.txt",
+        commit.authorship_log.attestations[0].file_path, "ภาษาไทย.txt",
         "File path should preserve Thai characters"
     );
 
@@ -1302,8 +1383,14 @@ fn test_thai_filename() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 3, "All 3 lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 3,
+        "All 3 lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 #[test]
@@ -1317,18 +1404,13 @@ fn test_vietnamese_filename() {
 
     // AI creates a file with Vietnamese characters (with tone marks) in the filename
     let mut vietnamese_file = repo.filename("tiếng_việt.txt");
-    vietnamese_file.set_contents(lines![
-        "Xin chào".ai(),
-        "Cảm ơn".ai(),
-        "Việt Nam".ai(),
-    ]);
+    vietnamese_file.set_contents(lines!["Xin chào".ai(), "Cảm ơn".ai(), "Việt Nam".ai(),]);
 
     // Commit the Vietnamese-named file
     let commit = repo.stage_all_and_commit("Add Vietnamese file").unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "tiếng_việt.txt",
+        commit.authorship_log.attestations[0].file_path, "tiếng_việt.txt",
         "File path should preserve Vietnamese tone marks"
     );
 
@@ -1336,8 +1418,14 @@ fn test_vietnamese_filename() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 3, "All 3 lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 3,
+        "All 3 lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 #[test]
@@ -1351,17 +1439,13 @@ fn test_khmer_filename() {
 
     // AI creates a file with Khmer (Cambodian) characters in the filename
     let mut khmer_file = repo.filename("ភាសាខ្មែរ.txt");
-    khmer_file.set_contents(lines![
-        "សួស្តី".ai(),
-        "អរគុណ".ai(),
-    ]);
+    khmer_file.set_contents(lines!["សួស្តី".ai(), "អរគុណ".ai(),]);
 
     // Commit the Khmer-named file
     let commit = repo.stage_all_and_commit("Add Khmer file").unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "ភាសាខ្មែរ.txt",
+        commit.authorship_log.attestations[0].file_path, "ភាសាខ្មែរ.txt",
         "File path should preserve Khmer characters"
     );
 
@@ -1369,8 +1453,14 @@ fn test_khmer_filename() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 2, "Both lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 2,
+        "Both lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 #[test]
@@ -1384,17 +1474,13 @@ fn test_lao_filename() {
 
     // AI creates a file with Lao characters in the filename
     let mut lao_file = repo.filename("ພາສາລາວ.txt");
-    lao_file.set_contents(lines![
-        "ສະບາຍດີ".ai(),
-        "ຂອບໃຈ".ai(),
-    ]);
+    lao_file.set_contents(lines!["ສະບາຍດີ".ai(), "ຂອບໃຈ".ai(),]);
 
     // Commit the Lao-named file
     let commit = repo.stage_all_and_commit("Add Lao file").unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "ພາສາລາວ.txt",
+        commit.authorship_log.attestations[0].file_path, "ພາສາລາວ.txt",
         "File path should preserve Lao characters"
     );
 
@@ -1402,8 +1488,14 @@ fn test_lao_filename() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 2, "Both lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 2,
+        "Both lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 // =============================================================================
@@ -1421,18 +1513,13 @@ fn test_hindi_devanagari_filename() {
 
     // AI creates a file with Hindi/Devanagari characters in the filename
     let mut hindi_file = repo.filename("हिंदी.txt");
-    hindi_file.set_contents(lines![
-        "नमस्ते".ai(),
-        "धन्यवाद".ai(),
-        "भारत".ai(),
-    ]);
+    hindi_file.set_contents(lines!["नमस्ते".ai(), "धन्यवाद".ai(), "भारत".ai(),]);
 
     // Commit the Hindi-named file
     let commit = repo.stage_all_and_commit("Add Hindi file").unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "हिंदी.txt",
+        commit.authorship_log.attestations[0].file_path, "हिंदी.txt",
         "File path should preserve Hindi/Devanagari characters"
     );
 
@@ -1440,8 +1527,14 @@ fn test_hindi_devanagari_filename() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 3, "All 3 lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 3,
+        "All 3 lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 #[test]
@@ -1455,17 +1548,13 @@ fn test_tamil_filename() {
 
     // AI creates a file with Tamil characters in the filename
     let mut tamil_file = repo.filename("தமிழ்.txt");
-    tamil_file.set_contents(lines![
-        "வணக்கம்".ai(),
-        "நன்றி".ai(),
-    ]);
+    tamil_file.set_contents(lines!["வணக்கம்".ai(), "நன்றி".ai(),]);
 
     // Commit the Tamil-named file
     let commit = repo.stage_all_and_commit("Add Tamil file").unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "தமிழ்.txt",
+        commit.authorship_log.attestations[0].file_path, "தமிழ்.txt",
         "File path should preserve Tamil characters"
     );
 
@@ -1473,8 +1562,14 @@ fn test_tamil_filename() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 2, "Both lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 2,
+        "Both lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 #[test]
@@ -1488,17 +1583,13 @@ fn test_bengali_filename() {
 
     // AI creates a file with Bengali characters in the filename
     let mut bengali_file = repo.filename("বাংলা.txt");
-    bengali_file.set_contents(lines![
-        "নমস্কার".ai(),
-        "ধন্যবাদ".ai(),
-    ]);
+    bengali_file.set_contents(lines!["নমস্কার".ai(), "ধন্যবাদ".ai(),]);
 
     // Commit the Bengali-named file
     let commit = repo.stage_all_and_commit("Add Bengali file").unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "বাংলা.txt",
+        commit.authorship_log.attestations[0].file_path, "বাংলা.txt",
         "File path should preserve Bengali characters"
     );
 
@@ -1506,8 +1597,14 @@ fn test_bengali_filename() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 2, "Both lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 2,
+        "Both lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 #[test]
@@ -1521,17 +1618,13 @@ fn test_telugu_filename() {
 
     // AI creates a file with Telugu characters in the filename
     let mut telugu_file = repo.filename("తెలుగు.txt");
-    telugu_file.set_contents(lines![
-        "నమస్కారం".ai(),
-        "ధన్యవాదాలు".ai(),
-    ]);
+    telugu_file.set_contents(lines!["నమస్కారం".ai(), "ధన్యవాదాలు".ai(),]);
 
     // Commit the Telugu-named file
     let commit = repo.stage_all_and_commit("Add Telugu file").unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "తెలుగు.txt",
+        commit.authorship_log.attestations[0].file_path, "తెలుగు.txt",
         "File path should preserve Telugu characters"
     );
 
@@ -1539,8 +1632,14 @@ fn test_telugu_filename() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 2, "Both lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 2,
+        "Both lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 #[test]
@@ -1554,17 +1653,13 @@ fn test_gujarati_filename() {
 
     // AI creates a file with Gujarati characters in the filename
     let mut gujarati_file = repo.filename("ગુજરાતી.txt");
-    gujarati_file.set_contents(lines![
-        "નમસ્તે".ai(),
-        "આભાર".ai(),
-    ]);
+    gujarati_file.set_contents(lines!["નમસ્તે".ai(), "આભાર".ai(),]);
 
     // Commit the Gujarati-named file
     let commit = repo.stage_all_and_commit("Add Gujarati file").unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "ગુજરાતી.txt",
+        commit.authorship_log.attestations[0].file_path, "ગુજરાતી.txt",
         "File path should preserve Gujarati characters"
     );
 
@@ -1572,8 +1667,14 @@ fn test_gujarati_filename() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 2, "Both lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 2,
+        "Both lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 #[test]
@@ -1588,17 +1689,15 @@ fn test_devanagari_combining_chars() {
     // AI creates a file with Devanagari combining vowel marks
     // The word "किताब" (kitaab = book) uses combining vowels
     let mut combining_file = repo.filename("किताब.txt");
-    combining_file.set_contents(lines![
-        "पुस्तक".ai(),
-        "अध्याय".ai(),
-    ]);
+    combining_file.set_contents(lines!["पुस्तक".ai(), "अध्याय".ai(),]);
 
     // Commit the file with combining characters
-    let commit = repo.stage_all_and_commit("Add file with combining chars").unwrap();
+    let commit = repo
+        .stage_all_and_commit("Add file with combining chars")
+        .unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "किताब.txt",
+        commit.authorship_log.attestations[0].file_path, "किताब.txt",
         "File path should preserve Devanagari combining characters"
     );
 
@@ -1606,8 +1705,14 @@ fn test_devanagari_combining_chars() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 2, "Both lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 2,
+        "Both lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 #[test]
@@ -1621,17 +1726,13 @@ fn test_korean_hangul_filename() {
 
     // AI creates a file with Korean Hangul in the filename
     let mut korean_file = repo.filename("한글파일.txt");
-    korean_file.set_contents(lines![
-        "안녕하세요".ai(),
-        "감사합니다".ai(),
-    ]);
+    korean_file.set_contents(lines!["안녕하세요".ai(), "감사합니다".ai(),]);
 
     // Commit the Korean-named file
     let commit = repo.stage_all_and_commit("Add Korean hangul file").unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "한글파일.txt",
+        commit.authorship_log.attestations[0].file_path, "한글파일.txt",
         "File path should preserve Korean Hangul characters"
     );
 
@@ -1639,8 +1740,14 @@ fn test_korean_hangul_filename() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 2, "Both lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 2,
+        "Both lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 #[test]
@@ -1654,18 +1761,15 @@ fn test_chinese_traditional_filename() {
 
     // AI creates a file with Traditional Chinese in the filename
     let mut traditional_file = repo.filename("繁體中文.txt");
-    traditional_file.set_contents(lines![
-        "傳統字體".ai(),
-        "正體中文".ai(),
-        "臺灣".ai(),
-    ]);
+    traditional_file.set_contents(lines!["傳統字體".ai(), "正體中文".ai(), "臺灣".ai(),]);
 
     // Commit the Traditional Chinese-named file
-    let commit = repo.stage_all_and_commit("Add Traditional Chinese file").unwrap();
+    let commit = repo
+        .stage_all_and_commit("Add Traditional Chinese file")
+        .unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "繁體中文.txt",
+        commit.authorship_log.attestations[0].file_path, "繁體中文.txt",
         "File path should preserve Traditional Chinese characters"
     );
 
@@ -1673,8 +1777,14 @@ fn test_chinese_traditional_filename() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 3, "All 3 lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 3,
+        "All 3 lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 #[test]
@@ -1699,8 +1809,7 @@ fn test_mixed_cjk_filename() {
     let commit = repo.stage_all_and_commit("Add mixed CJK file").unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "日本語_中文_한글.txt",
+        commit.authorship_log.attestations[0].file_path, "日本語_中文_한글.txt",
         "File path should preserve mixed CJK characters"
     );
 
@@ -1708,8 +1817,14 @@ fn test_mixed_cjk_filename() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 4, "All 4 lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 4,
+        "All 4 lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 // =============================================================================
@@ -1742,8 +1857,7 @@ fn test_arabic_filename() {
         "Should have 1 attestation for the Arabic-named file"
     );
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "مرحبا.txt",
+        commit.authorship_log.attestations[0].file_path, "مرحبا.txt",
         "File path should preserve Arabic characters"
     );
 
@@ -1751,8 +1865,14 @@ fn test_arabic_filename() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 3, "All 3 lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 3,
+        "All 3 lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 #[test]
@@ -1766,17 +1886,13 @@ fn test_hebrew_filename() {
 
     // AI creates a file with Hebrew characters in the filename
     let mut hebrew_file = repo.filename("שלום.txt");
-    hebrew_file.set_contents(lines![
-        "שלום עולם".ai(),
-        "תודה רבה".ai(),
-    ]);
+    hebrew_file.set_contents(lines!["שלום עולם".ai(), "תודה רבה".ai(),]);
 
     // Commit the Hebrew-named file
     let commit = repo.stage_all_and_commit("Add Hebrew file").unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "שלום.txt",
+        commit.authorship_log.attestations[0].file_path, "שלום.txt",
         "File path should preserve Hebrew characters"
     );
 
@@ -1784,8 +1900,14 @@ fn test_hebrew_filename() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 2, "Both lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 2,
+        "Both lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 #[test]
@@ -1799,18 +1921,13 @@ fn test_persian_filename() {
 
     // AI creates a file with Persian/Farsi characters in the filename
     let mut persian_file = repo.filename("فارسی.txt");
-    persian_file.set_contents(lines![
-        "سلام".ai(),
-        "خوش آمدید".ai(),
-        "ممنون".ai(),
-    ]);
+    persian_file.set_contents(lines!["سلام".ai(), "خوش آمدید".ai(), "ممنون".ai(),]);
 
     // Commit the Persian-named file
     let commit = repo.stage_all_and_commit("Add Persian file").unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "فارسی.txt",
+        commit.authorship_log.attestations[0].file_path, "فارسی.txt",
         "File path should preserve Persian characters"
     );
 
@@ -1818,8 +1935,14 @@ fn test_persian_filename() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 3, "All 3 lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 3,
+        "All 3 lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 #[test]
@@ -1833,17 +1956,13 @@ fn test_urdu_filename() {
 
     // AI creates a file with Urdu characters in the filename
     let mut urdu_file = repo.filename("اردو.txt");
-    urdu_file.set_contents(lines![
-        "السلام علیکم".ai(),
-        "شکریہ".ai(),
-    ]);
+    urdu_file.set_contents(lines!["السلام علیکم".ai(), "شکریہ".ai(),]);
 
     // Commit the Urdu-named file
     let commit = repo.stage_all_and_commit("Add Urdu file").unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "اردو.txt",
+        commit.authorship_log.attestations[0].file_path, "اردو.txt",
         "File path should preserve Urdu characters"
     );
 
@@ -1851,8 +1970,14 @@ fn test_urdu_filename() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 2, "Both lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 2,
+        "Both lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 #[test]
@@ -1866,17 +1991,13 @@ fn test_rtl_with_ltr_mixed_filename() {
 
     // AI creates a file with mixed RTL (Arabic) and LTR (English) in the filename
     let mut mixed_file = repo.filename("test_مرحبا_file.txt");
-    mixed_file.set_contents(lines![
-        "Mixed RTL and LTR content".ai(),
-        "محتوى مختلط".ai(),
-    ]);
+    mixed_file.set_contents(lines!["Mixed RTL and LTR content".ai(), "محتوى مختلط".ai(),]);
 
     // Commit the mixed RTL/LTR-named file
     let commit = repo.stage_all_and_commit("Add mixed RTL/LTR file").unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "test_مرحبا_file.txt",
+        commit.authorship_log.attestations[0].file_path, "test_مرحبا_file.txt",
         "File path should preserve mixed RTL/LTR characters"
     );
 
@@ -1884,8 +2005,14 @@ fn test_rtl_with_ltr_mixed_filename() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 2, "Both lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 2,
+        "Both lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
 
 #[test]
@@ -1906,11 +2033,12 @@ fn test_rtl_directory_path() {
     ]);
 
     // Commit the file in RTL-named directory
-    let commit = repo.stage_all_and_commit("Add file in Arabic directory").unwrap();
+    let commit = repo
+        .stage_all_and_commit("Add file in Arabic directory")
+        .unwrap();
 
     assert_eq!(
-        commit.authorship_log.attestations[0].file_path,
-        "src/العربية/ملف.rs",
+        commit.authorship_log.attestations[0].file_path, "src/العربية/ملف.rs",
         "File path should preserve Arabic characters in both directory and file names"
     );
 
@@ -1918,6 +2046,66 @@ fn test_rtl_directory_path() {
     let json = extract_json_object(&raw);
     let stats: CommitStats = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(stats.ai_additions, 3, "All 3 lines should be attributed to AI");
-    assert_eq!(stats.human_additions, 0, "No lines should be attributed to human");
+    assert_eq!(
+        stats.ai_additions, 3,
+        "All 3 lines should be attributed to AI"
+    );
+    assert_eq!(
+        stats.human_additions, 0,
+        "No lines should be attributed to human"
+    );
 }
+
+reuse_tests_in_worktree!(
+    test_chinese_filename_ai_attribution,
+    test_emoji_filename_ai_attribution,
+    test_mixed_ascii_and_utf8_filenames,
+    test_utf8_content_in_file,
+    test_utf8_filename_blame,
+    test_nested_directory_with_utf8_filename,
+    test_utf8_filename_with_human_and_ai_lines,
+    test_japanese_hiragana_katakana_filename,
+    test_japanese_kanji_filename,
+    test_filename_with_all_unicode_categories,
+    test_deeply_nested_utf8_directories,
+    test_many_utf8_files_in_single_commit,
+    test_filename_starting_with_emoji,
+    test_filename_ending_with_emoji,
+    test_filename_only_non_ascii,
+    test_precomposed_nfc_filename,
+    test_decomposed_nfd_filename,
+    test_combining_diacritical_marks,
+    test_swedish_angstrom,
+    test_mathematical_symbols_filename,
+    test_currency_symbols_filename,
+    test_box_drawing_characters_filename,
+    test_dingbats_and_symbols_filename,
+    test_emoji_with_skin_tone_modifiers,
+    test_emoji_zwj_sequences,
+    test_emoji_flag_sequences,
+    test_multiple_complex_emoji_filename,
+    test_emoji_in_directory_names,
+    test_russian_cyrillic_filename,
+    test_ukrainian_cyrillic_filename,
+    test_greek_filename,
+    test_greek_polytonic_filename,
+    test_thai_filename,
+    test_vietnamese_filename,
+    test_khmer_filename,
+    test_lao_filename,
+    test_hindi_devanagari_filename,
+    test_tamil_filename,
+    test_bengali_filename,
+    test_telugu_filename,
+    test_gujarati_filename,
+    test_devanagari_combining_chars,
+    test_korean_hangul_filename,
+    test_chinese_traditional_filename,
+    test_mixed_cjk_filename,
+    test_arabic_filename,
+    test_hebrew_filename,
+    test_persian_filename,
+    test_urdu_filename,
+    test_rtl_with_ltr_mixed_filename,
+    test_rtl_directory_path,
+);

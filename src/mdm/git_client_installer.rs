@@ -31,7 +31,10 @@ pub trait GitClientInstaller: Send + Sync {
     fn is_platform_supported(&self) -> bool;
 
     /// Check if the client is installed and preference status
-    fn check_client(&self, params: &GitClientInstallerParams) -> Result<GitClientCheckResult, GitAiError>;
+    fn check_client(
+        &self,
+        params: &GitClientInstallerParams,
+    ) -> Result<GitClientCheckResult, GitAiError>;
 
     /// Install or update preferences to use git-ai
     /// Returns Ok(Some(diff)) if changes were made, Ok(None) if already up to date

@@ -3,11 +3,14 @@ use crate::{
         transcript::{AiTranscript, Message},
         working_log::{AgentId, CheckpointKind},
     },
-    commands::checkpoint_agent::agent_presets::{AgentCheckpointFlags, AgentCheckpointPreset, AgentRunResult},
+    commands::checkpoint_agent::agent_presets::{
+        AgentCheckpointFlags, AgentCheckpointPreset, AgentRunResult,
+    },
     error::GitAiError,
     observability::log_error,
 };
 use chrono::DateTime;
+use rusqlite::{Connection, OpenFlags};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -29,11 +32,11 @@ struct ToolInput {
     file_path: Option<String>,
 }
 
-/// Message metadata from message/{session_id}/{msg_id}.json
+/// Message metadata from legacy file storage message/{session_id}/{msg_id}.json
 #[derive(Debug, Deserialize)]
 struct OpenCodeMessage {
     id: String,
-    #[serde(rename = "sessionID")]
+    #[serde(rename = "sessionID", default)]
     #[allow(dead_code)]
     session_id: String,
     role: String, // "user" | "assistant"
@@ -51,6 +54,27 @@ struct OpenCodeTime {
     completed: Option<i64>,
 }
 
+/// SQLite message payload from message.data
+#[derive(Debug, Deserialize)]
+struct OpenCodeDbMessageData {
+    role: String,
+    #[serde(default)]
+    time: Option<OpenCodeTime>,
+    #[serde(rename = "modelID")]
+    model_id: Option<String>,
+    #[serde(rename = "providerID")]
+    provider_id: Option<String>,
+}
+
+#[derive(Debug)]
+struct TranscriptSourceMessage {
+    id: String,
+    role: String,
+    created: i64,
+    model_id: Option<String>,
+    provider_id: Option<String>,
+}
+
 /// Tool state object containing status and nested data
 #[derive(Debug, Deserialize)]
 struct ToolState {
@@ -66,15 +90,15 @@ struct ToolState {
     time: Option<OpenCodePartTime>,
 }
 
-/// Part content from part/{msg_id}/{prt_id}.json
+/// Part content from either legacy part/{msg_id}/{prt_id}.json or sqlite part.data
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 #[allow(clippy::large_enum_variant)]
 enum OpenCodePart {
     Text {
-        #[serde(rename = "messageID")]
+        #[serde(rename = "messageID", default)]
         #[allow(dead_code)]
-        message_id: String,
+        message_id: Option<String>,
         text: String,
         time: Option<OpenCodePartTime>,
         #[allow(dead_code)]
@@ -83,9 +107,9 @@ enum OpenCodePart {
         id: Option<String>,
     },
     Tool {
-        #[serde(rename = "messageID")]
+        #[serde(rename = "messageID", default)]
         #[allow(dead_code)]
-        message_id: String,
+        message_id: Option<String>,
         tool: String,
         #[serde(rename = "callID")]
         #[allow(dead_code)]
@@ -99,18 +123,18 @@ enum OpenCodePart {
         id: Option<String>,
     },
     StepStart {
-        #[serde(rename = "messageID")]
+        #[serde(rename = "messageID", default)]
         #[allow(dead_code)]
-        message_id: String,
+        message_id: Option<String>,
         #[allow(dead_code)]
         time: Option<OpenCodePartTime>,
         #[allow(dead_code)]
         id: Option<String>,
     },
     StepFinish {
-        #[serde(rename = "messageID")]
+        #[serde(rename = "messageID", default)]
         #[allow(dead_code)]
-        message_id: String,
+        message_id: Option<String>,
         #[allow(dead_code)]
         time: Option<OpenCodePartTime>,
         #[allow(dead_code)]
@@ -148,16 +172,16 @@ impl AgentCheckpointPreset for OpenCodePreset {
             .and_then(|ti| ti.file_path)
             .map(|path| vec![path]);
 
-        // Determine storage path - check for test override first
-        let storage_path = if let Ok(test_path) = std::env::var("GIT_AI_OPENCODE_STORAGE_PATH") {
+        // Determine OpenCode path (test override can point to either root or legacy storage path)
+        let opencode_path = if let Ok(test_path) = std::env::var("GIT_AI_OPENCODE_STORAGE_PATH") {
             PathBuf::from(test_path)
         } else {
-            Self::opencode_storage_path()?
+            Self::opencode_data_path()?
         };
 
-        // Fetch transcript and model from storage
+        // Fetch transcript and model from sqlite first, then fallback to legacy storage
         let (transcript, model) =
-            match Self::transcript_and_model_from_storage(&storage_path, &session_id) {
+            match Self::transcript_and_model_from_storage(&opencode_path, &session_id) {
                 Ok((transcript, model)) => (transcript, model),
                 Err(e) => {
                     eprintln!("[Warning] Failed to parse OpenCode storage: {e}");
@@ -181,7 +205,7 @@ impl AgentCheckpointPreset for OpenCodePreset {
         // Store session_id in metadata for post-commit refetch
         let mut agent_metadata = HashMap::new();
         agent_metadata.insert("session_id".to_string(), session_id);
-        // Store test storage path if set, for subprocess access
+        // Store test path if set, for subprocess access in tests
         if let Ok(test_path) = std::env::var("GIT_AI_OPENCODE_STORAGE_PATH") {
             agent_metadata.insert("__test_storage_path".to_string(), test_path);
         }
@@ -215,35 +239,41 @@ impl AgentCheckpointPreset for OpenCodePreset {
 }
 
 impl OpenCodePreset {
-    /// Get the OpenCode storage path based on platform
-    pub fn opencode_storage_path() -> Result<PathBuf, GitAiError> {
+    /// Get the OpenCode data directory based on platform.
+    /// Expected layout: {data_dir}/opencode.db and {data_dir}/storage
+    pub fn opencode_data_path() -> Result<PathBuf, GitAiError> {
         #[cfg(target_os = "macos")]
         {
             let home = dirs::home_dir().ok_or_else(|| {
                 GitAiError::Generic("Could not determine home directory".to_string())
             })?;
-            Ok(home.join(".local").join("share").join("opencode").join("storage"))
+            Ok(home.join(".local").join("share").join("opencode"))
         }
 
         #[cfg(target_os = "linux")]
         {
             // Try XDG_DATA_HOME first, then fall back to ~/.local/share
             if let Ok(xdg_data) = std::env::var("XDG_DATA_HOME") {
-                Ok(PathBuf::from(xdg_data).join("opencode").join("storage"))
+                Ok(PathBuf::from(xdg_data).join("opencode"))
             } else {
                 let home = dirs::home_dir().ok_or_else(|| {
                     GitAiError::Generic("Could not determine home directory".to_string())
                 })?;
-                Ok(home.join(".local").join("share").join("opencode").join("storage"))
+                Ok(home.join(".local").join("share").join("opencode"))
             }
         }
 
         #[cfg(target_os = "windows")]
         {
-            let local_app_data = std::env::var("LOCALAPPDATA").map_err(|e| {
-                GitAiError::Generic(format!("LOCALAPPDATA not set: {}", e))
-            })?;
-            Ok(PathBuf::from(local_app_data).join("opencode").join("storage"))
+            if let Ok(app_data) = std::env::var("APPDATA") {
+                Ok(PathBuf::from(app_data).join("opencode"))
+            } else if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+                Ok(PathBuf::from(local_app_data).join("opencode"))
+            } else {
+                Err(GitAiError::Generic(
+                    "Neither APPDATA nor LOCALAPPDATA is set".to_string(),
+                ))
+            }
         }
 
         #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -254,40 +284,208 @@ impl OpenCodePreset {
         }
     }
 
-    /// Public API for fetching transcript from session_id (uses default storage path)
+    /// Public API for fetching transcript from session_id (uses default OpenCode data path)
     pub fn transcript_and_model_from_session(
         session_id: &str,
     ) -> Result<(AiTranscript, Option<String>), GitAiError> {
-        let storage_path = Self::opencode_storage_path()?;
-        Self::transcript_and_model_from_storage(&storage_path, session_id)
+        let opencode_path = Self::opencode_data_path()?;
+        Self::transcript_and_model_from_storage(&opencode_path, session_id)
     }
 
-    /// Fetch transcript and model from OpenCode storage for a given session
+    /// Fetch transcript and model from OpenCode path (sqlite first, fallback to legacy storage)
+    ///
+    /// `opencode_path` may be one of:
+    /// - OpenCode data dir (contains `opencode.db` and optional `storage/`)
+    /// - Legacy storage dir (contains `message/` and `part/`)
+    /// - Direct path to `opencode.db`
     pub fn transcript_and_model_from_storage(
+        opencode_path: &Path,
+        session_id: &str,
+    ) -> Result<(AiTranscript, Option<String>), GitAiError> {
+        if !opencode_path.exists() {
+            return Err(GitAiError::PresetError(format!(
+                "OpenCode path does not exist: {:?}",
+                opencode_path
+            )));
+        }
+
+        let mut sqlite_empty_result: Option<(AiTranscript, Option<String>)> = None;
+        let mut sqlite_error: Option<GitAiError> = None;
+
+        if let Some(db_path) = Self::resolve_sqlite_db_path(opencode_path) {
+            match Self::transcript_and_model_from_sqlite(&db_path, session_id) {
+                Ok((transcript, model)) => {
+                    if !transcript.messages().is_empty() || model.is_some() {
+                        return Ok((transcript, model));
+                    }
+                    sqlite_empty_result = Some((transcript, model));
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[Warning] Failed to parse OpenCode sqlite db {:?}: {}",
+                        db_path, e
+                    );
+                    sqlite_error = Some(e);
+                }
+            }
+        }
+
+        if let Some(storage_path) = Self::resolve_legacy_storage_path(opencode_path) {
+            match Self::transcript_and_model_from_legacy_storage(&storage_path, session_id) {
+                Ok((transcript, model)) => {
+                    if !transcript.messages().is_empty() || model.is_some() {
+                        return Ok((transcript, model));
+                    }
+                    if let Some(result) = sqlite_empty_result.take() {
+                        return Ok(result);
+                    }
+                    return Ok((transcript, model));
+                }
+                Err(e) => {
+                    if let Some(result) = sqlite_empty_result.take() {
+                        return Ok(result);
+                    }
+                    if let Some(sqlite_err) = sqlite_error {
+                        return Err(sqlite_err);
+                    }
+                    return Err(e);
+                }
+            }
+        }
+
+        if let Some(result) = sqlite_empty_result {
+            return Ok(result);
+        }
+
+        if let Some(sqlite_err) = sqlite_error {
+            return Err(sqlite_err);
+        }
+
+        Err(GitAiError::PresetError(format!(
+            "No OpenCode sqlite database or legacy storage found under {:?}",
+            opencode_path
+        )))
+    }
+
+    fn resolve_sqlite_db_path(path: &Path) -> Option<PathBuf> {
+        if path.is_file() {
+            return path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| *name == "opencode.db")
+                .map(|_| path.to_path_buf());
+        }
+
+        if !path.is_dir() {
+            return None;
+        }
+
+        let direct_db = path.join("opencode.db");
+        if direct_db.exists() {
+            return Some(direct_db);
+        }
+
+        // If caller passed legacy storage path, check sibling opencode.db
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name == "storage")
+        {
+            let sibling_db = path.parent()?.join("opencode.db");
+            if sibling_db.exists() {
+                return Some(sibling_db);
+            }
+        }
+
+        None
+    }
+
+    fn resolve_legacy_storage_path(path: &Path) -> Option<PathBuf> {
+        if path.is_file() {
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == "opencode.db")
+            {
+                let storage = path.parent()?.join("storage");
+                if storage.exists() {
+                    return Some(storage);
+                }
+            }
+            return None;
+        }
+
+        if !path.is_dir() {
+            return None;
+        }
+
+        if path.join("message").exists() || path.join("part").exists() {
+            return Some(path.to_path_buf());
+        }
+
+        let nested_storage = path.join("storage");
+        if nested_storage.exists() {
+            return Some(nested_storage);
+        }
+
+        None
+    }
+
+    fn open_sqlite_readonly(path: &Path) -> Result<Connection, GitAiError> {
+        Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| GitAiError::Generic(format!("Failed to open {:?}: {}", path, e)))
+    }
+
+    fn transcript_and_model_from_sqlite(
+        db_path: &Path,
+        session_id: &str,
+    ) -> Result<(AiTranscript, Option<String>), GitAiError> {
+        let conn = Self::open_sqlite_readonly(db_path)?;
+        let messages = Self::read_session_messages_from_sqlite(&conn, session_id)?;
+
+        if messages.is_empty() {
+            return Ok((AiTranscript::new(), None));
+        }
+
+        Self::build_transcript_from_messages(messages, |message_id| {
+            Self::read_message_parts_from_sqlite(&conn, session_id, message_id)
+        })
+    }
+
+    fn transcript_and_model_from_legacy_storage(
         storage_path: &Path,
         session_id: &str,
     ) -> Result<(AiTranscript, Option<String>), GitAiError> {
         if !storage_path.exists() {
             return Err(GitAiError::PresetError(format!(
-                "OpenCode storage path does not exist: {:?}",
+                "OpenCode legacy storage path does not exist: {:?}",
                 storage_path
             )));
         }
 
-        // Read all messages for this session
         let messages = Self::read_session_messages(storage_path, session_id)?;
         if messages.is_empty() {
             return Ok((AiTranscript::new(), None));
         }
 
-        // Sort messages by creation time
-        let mut sorted_messages = messages;
-        sorted_messages.sort_by_key(|m| m.time.created);
+        Self::build_transcript_from_messages(messages, |message_id| {
+            Self::read_message_parts(storage_path, message_id)
+        })
+    }
+
+    fn build_transcript_from_messages<F>(
+        mut messages: Vec<TranscriptSourceMessage>,
+        mut read_parts: F,
+    ) -> Result<(AiTranscript, Option<String>), GitAiError>
+    where
+        F: FnMut(&str) -> Result<Vec<OpenCodePart>, GitAiError>,
+    {
+        messages.sort_by_key(|m| m.created);
 
         let mut transcript = AiTranscript::new();
         let mut model: Option<String> = None;
 
-        for message in &sorted_messages {
+        for message in &messages {
             // Extract model from first assistant message
             if model.is_none() && message.role == "assistant" {
                 if let (Some(provider_id), Some(model_id)) =
@@ -299,12 +497,11 @@ impl OpenCodePreset {
                 }
             }
 
-            // Read parts for this message
-            let parts = Self::read_message_parts(storage_path, &message.id)?;
+            let parts = read_parts(&message.id)?;
 
             // Convert Unix ms to RFC3339 timestamp
-            let timestamp = DateTime::from_timestamp_millis(message.time.created)
-                .map(|dt| dt.to_rfc3339());
+            let timestamp =
+                DateTime::from_timestamp_millis(message.created).map(|dt| dt.to_rfc3339());
 
             for part in parts {
                 match part {
@@ -325,10 +522,7 @@ impl OpenCodePreset {
                         }
                     }
                     OpenCodePart::Tool {
-                        tool,
-                        input,
-                        state,
-                        ..
+                        tool, input, state, ..
                     } => {
                         // Only include tool calls from assistant messages
                         if message.role == "assistant" {
@@ -356,11 +550,34 @@ impl OpenCodePreset {
         Ok((transcript, model))
     }
 
-    /// Read all message files for a session
+    fn part_created_for_sort(part: &OpenCodePart, fallback: i64) -> i64 {
+        match part {
+            OpenCodePart::Text { time, .. } => time.as_ref().map(|t| t.start).unwrap_or(fallback),
+            OpenCodePart::Tool { time, state, .. } => time
+                .as_ref()
+                .map(|t| t.start)
+                .or_else(|| {
+                    state
+                        .as_ref()
+                        .and_then(|s| s.time.as_ref())
+                        .map(|t| t.start)
+                })
+                .unwrap_or(fallback),
+            OpenCodePart::StepStart { time, .. } => {
+                time.as_ref().map(|t| t.start).unwrap_or(fallback)
+            }
+            OpenCodePart::StepFinish { time, .. } => {
+                time.as_ref().map(|t| t.start).unwrap_or(fallback)
+            }
+            OpenCodePart::Unknown => fallback,
+        }
+    }
+
+    /// Read all legacy message files for a session
     fn read_session_messages(
         storage_path: &Path,
         session_id: &str,
-    ) -> Result<Vec<OpenCodeMessage>, GitAiError> {
+    ) -> Result<Vec<TranscriptSourceMessage>, GitAiError> {
         let message_dir = storage_path.join("message").join(session_id);
         if !message_dir.exists() {
             return Ok(Vec::new());
@@ -368,9 +585,7 @@ impl OpenCodePreset {
 
         let mut messages = Vec::new();
 
-        let entries = std::fs::read_dir(&message_dir).map_err(|e| {
-            GitAiError::IoError(e)
-        })?;
+        let entries = std::fs::read_dir(&message_dir).map_err(GitAiError::IoError)?;
 
         for entry in entries {
             let entry = entry.map_err(GitAiError::IoError)?;
@@ -378,17 +593,21 @@ impl OpenCodePreset {
 
             if path.extension().is_some_and(|ext| ext == "json") {
                 match std::fs::read_to_string(&path) {
-                    Ok(content) => {
-                        match serde_json::from_str::<OpenCodeMessage>(&content) {
-                            Ok(message) => messages.push(message),
-                            Err(e) => {
-                                eprintln!(
-                                    "[Warning] Failed to parse OpenCode message file {:?}: {}",
-                                    path, e
-                                );
-                            }
+                    Ok(content) => match serde_json::from_str::<OpenCodeMessage>(&content) {
+                        Ok(message) => messages.push(TranscriptSourceMessage {
+                            id: message.id,
+                            role: message.role,
+                            created: message.time.created,
+                            model_id: message.model_id,
+                            provider_id: message.provider_id,
+                        }),
+                        Err(e) => {
+                            eprintln!(
+                                "[Warning] Failed to parse OpenCode message file {:?}: {}",
+                                path, e
+                            );
                         }
-                    }
+                    },
                     Err(e) => {
                         eprintln!(
                             "[Warning] Failed to read OpenCode message file {:?}: {}",
@@ -402,7 +621,7 @@ impl OpenCodePreset {
         Ok(messages)
     }
 
-    /// Read all part files for a message
+    /// Read all legacy part files for a message
     fn read_message_parts(
         storage_path: &Path,
         message_id: &str,
@@ -413,10 +632,7 @@ impl OpenCodePreset {
         }
 
         let mut parts: Vec<(i64, OpenCodePart)> = Vec::new();
-
-        let entries = std::fs::read_dir(&part_dir).map_err(|e| {
-            GitAiError::IoError(e)
-        })?;
+        let entries = std::fs::read_dir(&part_dir).map_err(GitAiError::IoError)?;
 
         for entry in entries {
             let entry = entry.map_err(GitAiError::IoError)?;
@@ -424,44 +640,18 @@ impl OpenCodePreset {
 
             if path.extension().is_some_and(|ext| ext == "json") {
                 match std::fs::read_to_string(&path) {
-                    Ok(content) => {
-                        match serde_json::from_str::<OpenCodePart>(&content) {
-                            Ok(part) => {
-                                // Extract creation time for sorting (handles optional time fields)
-                                let created = match &part {
-                                    OpenCodePart::Text { time, .. } => {
-                                        time.as_ref().map(|t| t.start).unwrap_or(0)
-                                    }
-                                    OpenCodePart::Tool { time, state, .. } => {
-                                        // Try part time first, then state time as fallback
-                                        time.as_ref()
-                                            .map(|t| t.start)
-                                            .or_else(|| {
-                                                state
-                                                    .as_ref()
-                                                    .and_then(|s| s.time.as_ref())
-                                                    .map(|t| t.start)
-                                            })
-                                            .unwrap_or(0)
-                                    }
-                                    OpenCodePart::StepStart { time, .. } => {
-                                        time.as_ref().map(|t| t.start).unwrap_or(0)
-                                    }
-                                    OpenCodePart::StepFinish { time, .. } => {
-                                        time.as_ref().map(|t| t.start).unwrap_or(0)
-                                    }
-                                    OpenCodePart::Unknown => 0,
-                                };
-                                parts.push((created, part));
-                            }
-                            Err(e) => {
-                                eprintln!(
-                                    "[Warning] Failed to parse OpenCode part file {:?}: {}",
-                                    path, e
-                                );
-                            }
+                    Ok(content) => match serde_json::from_str::<OpenCodePart>(&content) {
+                        Ok(part) => {
+                            let created = Self::part_created_for_sort(&part, 0);
+                            parts.push((created, part));
                         }
-                    }
+                        Err(e) => {
+                            eprintln!(
+                                "[Warning] Failed to parse OpenCode part file {:?}: {}",
+                                path, e
+                            );
+                        }
+                    },
                     Err(e) => {
                         eprintln!(
                             "[Warning] Failed to read OpenCode part file {:?}: {}",
@@ -474,7 +664,113 @@ impl OpenCodePreset {
 
         // Sort parts by creation time
         parts.sort_by_key(|(created, _)| *created);
+        Ok(parts.into_iter().map(|(_, part)| part).collect())
+    }
 
+    fn read_session_messages_from_sqlite(
+        conn: &Connection,
+        session_id: &str,
+    ) -> Result<Vec<TranscriptSourceMessage>, GitAiError> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, time_created, data FROM message WHERE session_id = ? ORDER BY time_created ASC, id ASC",
+            )
+            .map_err(|e| GitAiError::Generic(format!("SQLite query prepare failed: {}", e)))?;
+
+        let mut rows = stmt
+            .query([session_id])
+            .map_err(|e| GitAiError::Generic(format!("SQLite query failed: {}", e)))?;
+
+        let mut messages = Vec::new();
+
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| GitAiError::Generic(format!("SQLite row read failed: {}", e)))?
+        {
+            let id: String = row
+                .get(0)
+                .map_err(|e| GitAiError::Generic(format!("SQLite field read failed: {}", e)))?;
+            let created_column: i64 = row
+                .get(1)
+                .map_err(|e| GitAiError::Generic(format!("SQLite field read failed: {}", e)))?;
+            let data_text: String = row
+                .get(2)
+                .map_err(|e| GitAiError::Generic(format!("SQLite field read failed: {}", e)))?;
+
+            match serde_json::from_str::<OpenCodeDbMessageData>(&data_text) {
+                Ok(data) => {
+                    let OpenCodeDbMessageData {
+                        role,
+                        time,
+                        model_id,
+                        provider_id,
+                    } = data;
+                    messages.push(TranscriptSourceMessage {
+                        id,
+                        role,
+                        created: time.map(|t| t.created).unwrap_or(created_column),
+                        model_id,
+                        provider_id,
+                    });
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[Warning] Failed to parse OpenCode sqlite message row {}: {}",
+                        id, e
+                    );
+                }
+            }
+        }
+
+        Ok(messages)
+    }
+
+    fn read_message_parts_from_sqlite(
+        conn: &Connection,
+        session_id: &str,
+        message_id: &str,
+    ) -> Result<Vec<OpenCodePart>, GitAiError> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, time_created, data FROM part WHERE session_id = ? AND message_id = ? ORDER BY id ASC",
+            )
+            .map_err(|e| GitAiError::Generic(format!("SQLite query prepare failed: {}", e)))?;
+
+        let mut rows = stmt
+            .query([session_id, message_id])
+            .map_err(|e| GitAiError::Generic(format!("SQLite query failed: {}", e)))?;
+
+        let mut parts: Vec<(i64, OpenCodePart)> = Vec::new();
+
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| GitAiError::Generic(format!("SQLite row read failed: {}", e)))?
+        {
+            let part_id: String = row
+                .get(0)
+                .map_err(|e| GitAiError::Generic(format!("SQLite field read failed: {}", e)))?;
+            let created_column: i64 = row
+                .get(1)
+                .map_err(|e| GitAiError::Generic(format!("SQLite field read failed: {}", e)))?;
+            let data_text: String = row
+                .get(2)
+                .map_err(|e| GitAiError::Generic(format!("SQLite field read failed: {}", e)))?;
+
+            match serde_json::from_str::<OpenCodePart>(&data_text) {
+                Ok(part) => {
+                    let created = Self::part_created_for_sort(&part, created_column);
+                    parts.push((created, part));
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[Warning] Failed to parse OpenCode sqlite part row {}: {}",
+                        part_id, e
+                    );
+                }
+            }
+        }
+
+        parts.sort_by_key(|(created, _)| *created);
         Ok(parts.into_iter().map(|(_, part)| part).collect())
     }
 }

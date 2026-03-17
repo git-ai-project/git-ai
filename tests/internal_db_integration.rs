@@ -109,10 +109,7 @@ fn test_checkpoint_saves_prompt_to_internal_db() {
     let prompt = &prompts[0];
     assert_eq!(prompt.tool, "claude", "Tool should be 'claude'");
     // Model may be "unknown" at checkpoint time - gets updated correctly at commit time
-    assert!(
-        prompt.workdir.is_some(),
-        "Workdir should be set"
-    );
+    assert!(prompt.workdir.is_some(), "Workdir should be set");
     assert!(
         prompt.commit_sha.is_none(),
         "Commit SHA should be None before commit"
@@ -237,7 +234,9 @@ fn test_post_commit_uses_latest_transcript_messages() {
     // Parse messages and verify they're from the real transcript (not empty)
     let messages: serde_json::Value =
         serde_json::from_str(&prompt.messages_json).expect("Messages should be valid JSON");
-    let messages_array = messages["messages"].as_array().expect("Should have messages array");
+    let messages_array = messages["messages"]
+        .as_array()
+        .expect("Should have messages array");
 
     assert!(
         !messages_array.is_empty(),
@@ -354,7 +353,10 @@ fn test_different_sessions_create_separate_prompts() {
     );
 
     // Verify they have different external_thread_ids
-    let ids: Vec<&str> = prompts.iter().map(|p| p.external_thread_id.as_str()).collect();
+    let ids: Vec<&str> = prompts
+        .iter()
+        .map(|p| p.external_thread_id.as_str())
+        .collect();
     assert_ne!(ids[0], ids[1], "External thread IDs should be different");
 }
 
@@ -415,11 +417,7 @@ fn test_line_stats_saved_to_db_after_commit() {
         2,
         "Should have 2 additions"
     );
-    assert_eq!(
-        prompt.total_deletions.unwrap(),
-        1,
-        "Should have 1 deletion"
-    );
+    assert_eq!(prompt.total_deletions.unwrap(), 1, "Should have 1 deletion");
 }
 
 /// Test 7: Human author is saved after commit
@@ -517,10 +515,7 @@ fn test_workdir_saved_to_db() {
 
     // The workdir should contain part of the repo path
     // Note: exact paths may differ due to canonicalization
-    assert!(
-        !workdir.is_empty(),
-        "Workdir should not be empty"
-    );
+    assert!(!workdir.is_empty(), "Workdir should not be empty");
 }
 
 /// Test 9: Verify mock_ai checkpoint (non-claude) also saves to internal db
@@ -607,7 +602,9 @@ fn test_thinking_transcript_saves_to_internal_db_after_commit() {
     // Verify messages were parsed
     let messages: serde_json::Value =
         serde_json::from_str(&prompt.messages_json).expect("Messages should be valid JSON");
-    let messages_array = messages["messages"].as_array().expect("Should have messages array");
+    let messages_array = messages["messages"]
+        .as_array()
+        .expect("Should have messages array");
 
     // Should have 6 messages (1 user + 2 thinking + 2 text + 1 tool_use, tool_result skipped)
     assert_eq!(
@@ -616,3 +613,16 @@ fn test_thinking_transcript_saves_to_internal_db_after_commit() {
         "Should have all messages including thinking"
     );
 }
+
+reuse_tests_in_worktree!(
+    test_checkpoint_saves_prompt_to_internal_db,
+    test_commit_updates_prompt_with_commit_sha_and_model,
+    test_post_commit_uses_latest_transcript_messages,
+    test_multiple_checkpoints_same_session_deduplicated,
+    test_different_sessions_create_separate_prompts,
+    test_line_stats_saved_to_db_after_commit,
+    test_human_author_saved_to_db_after_commit,
+    test_workdir_saved_to_db,
+    test_mock_ai_checkpoint_saves_to_internal_db,
+    test_thinking_transcript_saves_to_internal_db_after_commit,
+);

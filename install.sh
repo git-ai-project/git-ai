@@ -3,6 +3,44 @@
 set -euo pipefail
 IFS=$'\n\t'
 
+# ============================================================
+# Ensure HOME is set when running via MDMs (e.g. JAMF) or other environments where HOME may be unbound.
+# ============================================================
+INSTALL_USER=""
+
+if [ -z "${HOME:-}" ]; then
+    if command -v scutil >/dev/null 2>&1; then
+        CURRENT_USER=$( /usr/sbin/scutil <<< "show State:/Users/ConsoleUser" | awk '/Name :/ { print $3 }' || true )
+        if [ -n "${CURRENT_USER:-}" ] && [ "$CURRENT_USER" != "loginwindow" ] && [ "$CURRENT_USER" != "_mbsetupuser" ]; then
+            export HOME=$( /usr/bin/dscl . -read "/Users/$CURRENT_USER" NFSHomeDirectory | awk '{print $2}' )
+            INSTALL_USER="$CURRENT_USER"
+        else
+            echo "Error: No console user logged in. Deferring installation." >&2
+            exit 1
+        fi
+    elif id -un >/dev/null 2>&1; then
+        INSTALL_USER="$(id -un)"
+        export HOME=$(getent passwd "$INSTALL_USER" | cut -d: -f6)
+        if [ -z "$HOME" ]; then
+            export HOME="/root"
+        fi
+    else
+        export HOME="/root"
+    fi
+fi
+
+# Ensure SHELL is set (also may be unbound in JAMF)
+if [ -z "${SHELL:-}" ]; then
+    if command -v zsh >/dev/null 2>&1; then
+        SHELL="$(command -v zsh)"
+    elif command -v bash >/dev/null 2>&1; then
+        SHELL="$(command -v bash)"
+    else
+        SHELL="/bin/sh"
+    fi
+    export SHELL
+fi
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -111,7 +149,7 @@ detect_all_shells() {
     # If no configs found, fall back to $SHELL detection and create config for that shell only
     if [ -z "$shells" ]; then
         local login_shell=""
-        if [ -n "$SHELL" ]; then
+        if [ -n "${SHELL:-}" ]; then
             login_shell=$(basename "$SHELL")
         fi
         case "$login_shell" in
@@ -216,19 +254,22 @@ esac
 BINARY_NAME="git-ai-${OS}-${ARCH}"
 
 # Determine release tag
-# Priority: 1. Pinned version (for release builds), 2. Environment variable, 3. "latest"
-if [ "$PINNED_VERSION" != "__VERSION_PLACEHOLDER__" ]; then
+# Priority: 1. Local binary override, 2. Pinned version (for release builds), 3. Environment variable, 4. "latest"
+if [ -n "${GIT_AI_LOCAL_BINARY:-}" ]; then
+    RELEASE_TAG="local"
+    DOWNLOAD_URL=""
+elif [ "$PINNED_VERSION" != "__VERSION_PLACEHOLDER__" ]; then
     # Version-pinned install script from a release
     RELEASE_TAG="$PINNED_VERSION"
-    DOWNLOAD_URL="https://usegitai.com/worker/releases/download/${RELEASE_TAG}/${BINARY_NAME}"
+    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${BINARY_NAME}"
 elif [ -n "${GIT_AI_RELEASE_TAG:-}" ] && [ "${GIT_AI_RELEASE_TAG:-}" != "latest" ]; then
     # Environment variable override
     RELEASE_TAG="$GIT_AI_RELEASE_TAG"
-    DOWNLOAD_URL="https://usegitai.com/worker/releases/download/${RELEASE_TAG}/${BINARY_NAME}"
+    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${BINARY_NAME}"
 else
     # Default to latest
     RELEASE_TAG="latest"
-    DOWNLOAD_URL="https://usegitai.com/worker/releases/download/latest/${BINARY_NAME}"
+    DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/${BINARY_NAME}"
 fi
 
 # Install into the user's bin directory ~/.git-ai/bin
@@ -238,11 +279,19 @@ INSTALL_DIR="$HOME/.git-ai/bin"
 mkdir -p "$INSTALL_DIR"
 
 # Download and install
-echo "Downloading git-ai (release: ${RELEASE_TAG})..."
 TMP_FILE="${INSTALL_DIR}/git-ai.tmp.$$"
-if ! curl --fail --location --silent --show-error -o "$TMP_FILE" "$DOWNLOAD_URL"; then
-    rm -f "$TMP_FILE" 2>/dev/null || true
-    error "Failed to download binary (HTTP error)"
+if [ -n "${GIT_AI_LOCAL_BINARY:-}" ]; then
+    echo "Using local git-ai binary (release: ${RELEASE_TAG})..."
+    if [ ! -f "$GIT_AI_LOCAL_BINARY" ]; then
+        error "Local binary not found at $GIT_AI_LOCAL_BINARY"
+    fi
+    cp "$GIT_AI_LOCAL_BINARY" "$TMP_FILE"
+else
+    echo "Downloading git-ai (release: ${RELEASE_TAG})..."
+    if ! curl --fail --location --silent --show-error -o "$TMP_FILE" "$DOWNLOAD_URL"; then
+        rm -f "$TMP_FILE" 2>/dev/null || true
+        error "Failed to download binary (HTTP error)"
+    fi
 fi
 
 # Basic validation: ensure file is not empty
@@ -267,6 +316,14 @@ ln -sf "$STD_GIT_PATH" "${INSTALL_DIR}/git-og"
 # Remove quarantine attribute on macOS
 if [ "$OS" = "macos" ]; then
     xattr -d com.apple.quarantine "${INSTALL_DIR}/git-ai" 2>/dev/null || true
+fi
+
+# Create ~/.local/bin/git-ai symlink for systems where ~/.local/bin is already on PATH
+LOCAL_BIN_DIR="$HOME/.local/bin"
+if mkdir -p "$LOCAL_BIN_DIR" 2>/dev/null && ln -sf "${INSTALL_DIR}/git-ai" "${LOCAL_BIN_DIR}/git-ai" 2>/dev/null; then
+    success "Created symlink at ${LOCAL_BIN_DIR}/git-ai"
+else
+    warn "Failed to create ~/.local/bin/git-ai symlink. This is non-fatal."
 fi
 
 success "Successfully installed git-ai into ${INSTALL_DIR}"
@@ -309,6 +366,7 @@ fi
 # Add to PATH in all detected shell configurations
 SHELLS_CONFIGURED=""
 SHELLS_ALREADY_CONFIGURED=""
+CREATED_SHELL_PATHS=""
 
 while IFS='|' read -r shell_name config_file; do
     [ -z "$shell_name" ] && continue
@@ -317,12 +375,19 @@ while IFS='|' read -r shell_name config_file; do
     if [ "$shell_name" = "fish" ]; then
         path_cmd="fish_add_path -g \"$INSTALL_DIR\""
         # Create fish config directory if it doesn't exist (for fallback case)
-        mkdir -p "$(dirname "$config_file")"
+        config_dir="$(dirname "$config_file")"
+        if [ ! -d "$config_dir" ]; then
+            mkdir -p "$config_dir"
+            CREATED_SHELL_PATHS="${CREATED_SHELL_PATHS}${config_dir}\n"
+        fi
     else
         path_cmd="export PATH=\"$INSTALL_DIR:\$PATH\""
     fi
     
     # Create config file if it doesn't exist (for fallback case when no configs found)
+    if [ ! -f "$config_file" ]; then
+        CREATED_SHELL_PATHS="${CREATED_SHELL_PATHS}${config_file}\n"
+    fi
     touch "$config_file"
     
     # Append if not already present
@@ -371,6 +436,17 @@ if [ -z "$SHELLS_CONFIGURED" ] && [ -z "$SHELLS_ALREADY_CONFIGURED" ]; then
     echo "Could not detect any shell config files."
     echo "Please add the following line to your shell config and restart:"
     echo "  export PATH=\"$INSTALL_DIR:\$PATH\""
+fi
+
+# Fix file ownership when running as root for a different user (MDM deployments)
+if [ "$(id -u)" = "0" ] && [ -n "$INSTALL_USER" ]; then
+    chown -R "$INSTALL_USER" "$HOME/.git-ai" 2>/dev/null || true
+    if [ -n "$CREATED_SHELL_PATHS" ]; then
+        printf '%b' "$CREATED_SHELL_PATHS" | while IFS= read -r created_path; do
+            [ -z "$created_path" ] && continue
+            chown "$INSTALL_USER" "$created_path" 2>/dev/null || true
+        done
+    fi
 fi
 
 echo ""

@@ -12,7 +12,11 @@ const AI_AUTHOR_NAMES: &[&str] = &[
     "gpt",
     "copilot",
     "cursor",
+    "codex",
     "gemini",
+    "amp",
+    "windsurf",
+    "devin",
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -184,24 +188,25 @@ impl<'a> TestFile<'a> {
     /// Static version of parse_blame_line for use in from_existing_file
     fn parse_blame_line_static(line: &str) -> (String, String) {
         if let Some(start_paren) = line.find('(')
-            && let Some(end_paren) = line.find(')') {
-                let author_section = &line[start_paren + 1..end_paren];
-                let content = line[end_paren + 1..].trim();
+            && let Some(end_paren) = line.find(')')
+        {
+            let author_section = &line[start_paren + 1..end_paren];
+            let content = line[end_paren + 1..].trim();
 
-                // Extract author name (everything before the date)
-                let parts: Vec<&str> = author_section.split_whitespace().collect();
-                let mut author_parts = Vec::new();
-                for part in parts {
-                    // Stop when we hit what looks like a date (starts with digit)
-                    if part.chars().next().unwrap_or('a').is_ascii_digit() {
-                        break;
-                    }
-                    author_parts.push(part);
+            // Extract author name (everything before the date)
+            let parts: Vec<&str> = author_section.split_whitespace().collect();
+            let mut author_parts = Vec::new();
+            for part in parts {
+                // Stop when we hit what looks like a date (starts with digit)
+                if part.chars().next().unwrap_or('a').is_ascii_digit() {
+                    break;
                 }
-                let author = author_parts.join(" ");
-
-                return (author, content.to_string());
+                author_parts.push(part);
             }
+            let author = author_parts.join(" ");
+
+            return (author, content.to_string());
+        }
         ("unknown".to_string(), line.to_string())
     }
 
@@ -420,24 +425,25 @@ impl<'a> TestFile<'a> {
     /// Format: sha (author date line_num) content
     pub fn parse_blame_line(&self, line: &str) -> (String, String) {
         if let Some(start_paren) = line.find('(')
-            && let Some(end_paren) = line.find(')') {
-                let author_section = &line[start_paren + 1..end_paren];
-                let content = line[end_paren + 1..].trim();
+            && let Some(end_paren) = line.find(')')
+        {
+            let author_section = &line[start_paren + 1..end_paren];
+            let content = line[end_paren + 1..].trim();
 
-                // Extract author name (everything before the date)
-                let parts: Vec<&str> = author_section.split_whitespace().collect();
-                let mut author_parts = Vec::new();
-                for part in parts {
-                    // Stop when we hit what looks like a date (starts with digit)
-                    if part.chars().next().unwrap_or('a').is_ascii_digit() {
-                        break;
-                    }
-                    author_parts.push(part);
+            // Extract author name (everything before the date)
+            let parts: Vec<&str> = author_section.split_whitespace().collect();
+            let mut author_parts = Vec::new();
+            for part in parts {
+                // Stop when we hit what looks like a date (starts with digit)
+                if part.chars().next().unwrap_or('a').is_ascii_digit() {
+                    break;
                 }
-                let author = author_parts.join(" ");
-
-                return (author, content.to_string());
+                author_parts.push(part);
             }
+            let author = author_parts.join(" ");
+
+            return (author, content.to_string());
+        }
         ("unknown".to_string(), line.to_string())
     }
 
@@ -723,8 +729,7 @@ impl<'a> TestFile<'a> {
     }
 
     pub fn contents(&self) -> String {
-        self
-            .lines
+        self.lines
             .iter()
             .map(|s| s.contents.clone())
             .collect::<Vec<String>>()

@@ -2,6 +2,7 @@ use crate::error::GitAiError;
 use crate::git::diff_tree_to_tree::Diff;
 use std::io::IsTerminal;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 
 /// Check if debug logging is enabled via environment variable
 ///
@@ -9,6 +10,7 @@ use std::path::PathBuf;
 static DEBUG_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static DEBUG_PERFORMANCE_LEVEL: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
 static IS_TERMINAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static IS_IN_BACKGROUND_AGENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 fn is_debug_enabled() -> bool {
     *DEBUG_ENABLED.get_or_init(|| {
@@ -97,8 +99,8 @@ pub fn normalize_to_posix(path: &str) -> String {
     path.replace('\\', "/")
 }
 
-pub fn current_git_ai_exe() -> Result<PathBuf, GitAiError> {
-    let path = std::env::current_exe()?;
+fn resolve_git_ai_exe_from_invocation_path(path: PathBuf) -> PathBuf {
+    let canonical_path = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
 
     // Get platform-specific executable names
     let git_name = if cfg!(windows) { "git.exe" } else { "git" };
@@ -108,26 +110,158 @@ pub fn current_git_ai_exe() -> Result<PathBuf, GitAiError> {
         "git-ai"
     };
 
-    // Check if the filename matches the git executable name for this platform
-    if let Some(file_name) = path.file_name().and_then(|n| n.to_str())
-        && file_name == git_name {
-            // Try replacing with git-ai executable name for this platform
-            let git_ai_path = path.with_file_name(git_ai_name);
+    let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+        return canonical_path;
+    };
 
-            // Check if the git-ai file exists
-            if git_ai_path.exists() {
-                return Ok(git_ai_path);
-            }
-
-            // If it doesn't exist, return the git-ai executable name as a PathBuf
-            return Ok(PathBuf::from(git_ai_name));
+    if file_name == git_name {
+        let sibling = path.with_file_name(git_ai_name);
+        if sibling.exists() {
+            return sibling;
         }
 
-    Ok(path)
+        let canonical_sibling = canonical_path.with_file_name(git_ai_name);
+        if canonical_sibling.exists() {
+            return canonical_sibling;
+        }
+
+        return PathBuf::from(git_ai_name);
+    }
+
+    let hook_candidate = file_name.strip_suffix(".exe").unwrap_or(file_name);
+    if crate::commands::git_hook_handlers::is_git_hook_binary_name(hook_candidate) {
+        if canonical_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|name| name == git_ai_name)
+        {
+            return canonical_path;
+        }
+
+        let sibling = path.with_file_name(git_ai_name);
+        if sibling.exists() {
+            return sibling;
+        }
+
+        let canonical_sibling = canonical_path.with_file_name(git_ai_name);
+        if canonical_sibling.exists() {
+            return canonical_sibling;
+        }
+
+        return PathBuf::from(git_ai_name);
+    }
+
+    canonical_path
+}
+
+fn current_git_ai_exe() -> Result<PathBuf, GitAiError> {
+    let path = std::env::current_exe()?;
+    Ok(resolve_git_ai_exe_from_invocation_path(path))
+}
+
+fn internal_git_ai_command_with_exe(exe: PathBuf, subcommand: &str) -> Command {
+    let mut cmd = Command::new(exe);
+    cmd.arg(subcommand)
+        .env(crate::commands::git_hook_handlers::ENV_SKIP_ALL_HOOKS, "1");
+    cmd
+}
+
+pub fn spawn_internal_git_ai_subcommand(
+    subcommand: &str,
+    extra_args: &[&str],
+    guard_env: &str,
+    extra_env: &[(&str, &str)],
+) -> bool {
+    if guard_env.is_empty() || std::env::var(guard_env).as_deref() == Ok("1") {
+        return false;
+    }
+
+    let Ok(exe) = current_git_ai_exe() else {
+        return false;
+    };
+    let mut cmd = internal_git_ai_command_with_exe(exe, subcommand);
+    cmd.args(extra_args);
+
+    cmd.env(guard_env, "1");
+    for (key, value) in extra_env {
+        cmd.env(key, value);
+    }
+
+    cmd.stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .is_ok()
 }
 
 pub fn is_interactive_terminal() -> bool {
     *IS_TERMINAL.get_or_init(|| std::io::stdin().is_terminal())
+}
+
+/// Returns true if the process is running inside a background AI agent environment.
+pub fn is_in_background_agent() -> bool {
+    *IS_IN_BACKGROUND_AGENT.get_or_init(|| {
+        // Claude Code remote agent (Anthropic)
+        std::env::var("CLAUDE_CODE_REMOTE").map(|v| v == "true").unwrap_or(false)
+            // Cursor background agent
+            || std::env::var("CURSOR_AGENT").map(|v| v == "1").unwrap_or(false)
+            // Cloud agent environment (CLOUD_AGENT_* prefix)
+            || std::env::vars().any(|(k, _)| k.starts_with("CLOUD_AGENT_"))
+            || std::path::Path::new("/opt/.devin").is_dir()
+    })
+}
+
+/// A cross-platform exclusive file lock.
+///
+/// Holds an exclusive advisory lock (Unix) or exclusive-access file handle (Windows)
+/// for the lifetime of the struct. The lock is automatically released when dropped
+/// or when the process exits.
+pub struct LockFile {
+    _file: std::fs::File,
+}
+
+impl LockFile {
+    /// Try to acquire an exclusive lock on the given path.
+    /// Returns `Some(LockFile)` if successful, `None` if another process holds the lock.
+    pub fn try_acquire(path: &std::path::Path) -> Option<Self> {
+        let file = try_lock_exclusive(path)?;
+        Some(Self { _file: file })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for LockFile {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+        unsafe { libc::flock(self._file.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+#[cfg(unix)]
+#[allow(clippy::suspicious_open_options)]
+fn try_lock_exclusive(path: &std::path::Path) -> Option<std::fs::File> {
+    use std::os::unix::io::AsRawFd;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(path)
+        .ok()?;
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc != 0 {
+        return None;
+    }
+    Some(file)
+}
+
+#[cfg(windows)]
+#[allow(clippy::suspicious_open_options)]
+fn try_lock_exclusive(path: &std::path::Path) -> Option<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .share_mode(0)
+        .open(path)
+        .ok()
 }
 
 /// Windows-specific flag to prevent console window creation
@@ -237,6 +371,164 @@ pub fn unescape_git_path(path: &str) -> String {
 mod tests {
     use super::*;
 
+    // =========================================================================
+    // LockFile Tests
+    // =========================================================================
+
+    #[test]
+    fn test_lockfile_acquire_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join("test.lock");
+        let lock = LockFile::try_acquire(&lock_path);
+        assert!(lock.is_some(), "should acquire lock on a fresh path");
+    }
+
+    #[test]
+    fn test_lockfile_second_acquire_blocked() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join("test.lock");
+        let _first = LockFile::try_acquire(&lock_path).expect("first acquire should succeed");
+        let second = LockFile::try_acquire(&lock_path);
+        assert!(second.is_none(), "second acquire should be blocked");
+    }
+
+    #[test]
+    fn test_lockfile_released_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join("test.lock");
+        {
+            let _lock = LockFile::try_acquire(&lock_path).expect("first acquire should succeed");
+            // _lock is dropped here
+        }
+        let second = LockFile::try_acquire(&lock_path);
+        assert!(
+            second.is_some(),
+            "should acquire lock after previous holder is dropped"
+        );
+    }
+
+    #[test]
+    fn test_lockfile_nonexistent_parent_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join("no_such_dir").join("test.lock");
+        let lock = LockFile::try_acquire(&lock_path);
+        assert!(
+            lock.is_none(),
+            "should return None when parent directory does not exist"
+        );
+    }
+
+    #[test]
+    fn test_resolve_git_ai_exe_from_git_sibling_prefers_git_ai() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = dir
+            .path()
+            .join(if cfg!(windows) { "git.exe" } else { "git" });
+        let git_ai = dir.path().join(if cfg!(windows) {
+            "git-ai.exe"
+        } else {
+            "git-ai"
+        });
+        std::fs::write(&git, "").unwrap();
+        std::fs::write(&git_ai, "").unwrap();
+
+        let resolved = resolve_git_ai_exe_from_invocation_path(git);
+        assert_eq!(resolved, git_ai);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_git_ai_exe_from_hook_symlink_uses_canonical_git_ai() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let git_ai = dir.path().join("git-ai");
+        let hook = dir.path().join("pre-push");
+        std::fs::write(&git_ai, "").unwrap();
+        symlink(&git_ai, &hook).unwrap();
+
+        let resolved = resolve_git_ai_exe_from_invocation_path(hook);
+        assert_eq!(
+            std::fs::canonicalize(resolved).unwrap(),
+            std::fs::canonicalize(git_ai).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_resolve_git_ai_exe_from_hook_without_target_falls_back_to_git_ai_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let hook = dir.path().join(if cfg!(windows) {
+            "pre-push.exe"
+        } else {
+            "pre-push"
+        });
+        std::fs::write(&hook, "").unwrap();
+
+        let resolved = resolve_git_ai_exe_from_invocation_path(hook);
+        let expected = if cfg!(windows) {
+            "git-ai.exe"
+        } else {
+            "git-ai"
+        };
+        assert_eq!(resolved, PathBuf::from(expected));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_resolve_git_ai_exe_from_hook_exe_name_falls_back_to_git_ai_exe() {
+        let dir = tempfile::tempdir().unwrap();
+        let hook = dir.path().join("pre-push.exe");
+        std::fs::write(&hook, "").unwrap();
+
+        let resolved = resolve_git_ai_exe_from_invocation_path(hook);
+        assert_eq!(resolved, PathBuf::from("git-ai.exe"));
+    }
+
+    #[test]
+    fn test_internal_git_ai_command_sets_skip_all_hooks_env() {
+        let exe = PathBuf::from("/tmp/git-ai-test");
+        let cmd = internal_git_ai_command_with_exe(exe.clone(), "flush-cas");
+
+        assert_eq!(cmd.get_program(), exe.as_os_str());
+        assert_eq!(
+            cmd.get_args().collect::<Vec<_>>(),
+            vec![std::ffi::OsStr::new("flush-cas")]
+        );
+        assert!(
+            cmd.get_envs().any(|(k, v)| {
+                k == std::ffi::OsStr::new(crate::commands::git_hook_handlers::ENV_SKIP_ALL_HOOKS)
+                    && v == Some(std::ffi::OsStr::new("1"))
+            }),
+            "internal command must always set GIT_AI_SKIP_ALL_HOOKS=1"
+        );
+    }
+
+    #[test]
+    fn test_spawn_internal_git_ai_subcommand_respects_guard_env() {
+        let key = "GIT_AI_TEST_WORKER_GUARD";
+        unsafe {
+            std::env::set_var(key, "1");
+        }
+        let spawned = spawn_internal_git_ai_subcommand("flush-cas", &[], key, &[]);
+        unsafe {
+            std::env::remove_var(key);
+        }
+        assert!(
+            !spawned,
+            "spawn should be skipped when guard env is already set"
+        );
+    }
+
+    #[test]
+    fn test_spawn_internal_git_ai_subcommand_requires_non_empty_guard_env() {
+        let spawned = spawn_internal_git_ai_subcommand("flush-cas", &[], "", &[]);
+        assert!(!spawned, "spawn should be skipped when guard env is empty");
+    }
+
+    // =========================================================================
+    // unescape_git_path Tests
+    // =========================================================================
+
     #[test]
     fn test_unescape_git_path_simple() {
         // Unquoted path - no change
@@ -278,16 +570,10 @@ mod tests {
     #[test]
     fn test_unescape_git_path_emoji() {
         // Emoji "🚀" (rocket) = U+1F680 = \360\237\232\200 in octal UTF-8
-        assert_eq!(
-            unescape_git_path("\"\\360\\237\\232\\200.txt\""),
-            "🚀.txt"
-        );
+        assert_eq!(unescape_git_path("\"\\360\\237\\232\\200.txt\""), "🚀.txt");
 
         // Emoji "😀" (grinning face) = U+1F600 = \360\237\230\200 in octal UTF-8
-        assert_eq!(
-            unescape_git_path("\"\\360\\237\\230\\200.txt\""),
-            "😀.txt"
-        );
+        assert_eq!(unescape_git_path("\"\\360\\237\\230\\200.txt\""), "😀.txt");
 
         // Mixed: "test_🎉_file.txt" where 🎉 = \360\237\216\211
         assert_eq!(
@@ -299,7 +585,10 @@ mod tests {
     #[test]
     fn test_unescape_git_path_escaped_characters() {
         // Escaped backslash
-        assert_eq!(unescape_git_path("\"path\\\\with\\\\slashes\""), "path\\with\\slashes");
+        assert_eq!(
+            unescape_git_path("\"path\\\\with\\\\slashes\""),
+            "path\\with\\slashes"
+        );
 
         // Escaped quotes
         assert_eq!(unescape_git_path("\"file\\\"name.txt\""), "file\"name.txt");
@@ -326,7 +615,9 @@ mod tests {
     fn test_unescape_japanese_hiragana() {
         // Japanese Hiragana "ひらがな" = \343\201\262\343\202\211\343\201\214\343\201\252
         assert_eq!(
-            unescape_git_path("\"\\343\\201\\262\\343\\202\\211\\343\\201\\214\\343\\201\\252.txt\""),
+            unescape_git_path(
+                "\"\\343\\201\\262\\343\\202\\211\\343\\201\\214\\343\\201\\252.txt\""
+            ),
             "ひらがな.txt"
         );
     }
@@ -335,7 +626,9 @@ mod tests {
     fn test_unescape_japanese_katakana() {
         // Japanese Katakana "カタカナ" = \343\202\253\343\202\277\343\202\253\343\203\212
         assert_eq!(
-            unescape_git_path("\"\\343\\202\\253\\343\\202\\277\\343\\202\\253\\343\\203\\212.txt\""),
+            unescape_git_path(
+                "\"\\343\\202\\253\\343\\202\\277\\343\\202\\253\\343\\203\\212.txt\""
+            ),
             "カタカナ.txt"
         );
     }
@@ -416,7 +709,9 @@ mod tests {
     fn test_unescape_mixed_rtl_ltr() {
         // Mixed RTL/LTR: "test_مرحبا_file" (ASCII + Arabic + ASCII)
         assert_eq!(
-            unescape_git_path("\"test_\\331\\205\\330\\261\\330\\255\\330\\250\\330\\247_file.txt\""),
+            unescape_git_path(
+                "\"test_\\331\\205\\330\\261\\330\\255\\330\\250\\330\\247_file.txt\""
+            ),
             "test_مرحبا_file.txt"
         );
     }
@@ -430,7 +725,9 @@ mod tests {
         // Hindi "हिंदी" (Hindi in Devanagari script)
         // ह = \340\244\271, ि = \340\244\277, ं = \340\244\202, द = \340\244\246, ी = \340\245\200
         assert_eq!(
-            unescape_git_path("\"\\340\\244\\271\\340\\244\\277\\340\\244\\202\\340\\244\\246\\340\\245\\200.txt\""),
+            unescape_git_path(
+                "\"\\340\\244\\271\\340\\244\\277\\340\\244\\202\\340\\244\\246\\340\\245\\200.txt\""
+            ),
             "हिंदी.txt"
         );
     }
@@ -440,7 +737,9 @@ mod tests {
         // Tamil "தமிழ்" (Tamil)
         // த = \340\256\244, ம = \340\256\256, ி = \340\256\277, ழ = \340\256\264, ் = \340\257\215
         assert_eq!(
-            unescape_git_path("\"\\340\\256\\244\\340\\256\\256\\340\\256\\277\\340\\256\\264\\340\\257\\215.txt\""),
+            unescape_git_path(
+                "\"\\340\\256\\244\\340\\256\\256\\340\\256\\277\\340\\256\\264\\340\\257\\215.txt\""
+            ),
             "தமிழ்.txt"
         );
     }
@@ -450,7 +749,9 @@ mod tests {
         // Bengali "বাংলা" (Bangla)
         // ব = \340\246\254, া = \340\246\276, ং = \340\246\202, ল = \340\246\262, া = \340\246\276
         assert_eq!(
-            unescape_git_path("\"\\340\\246\\254\\340\\246\\276\\340\\246\\202\\340\\246\\262\\340\\246\\276.txt\""),
+            unescape_git_path(
+                "\"\\340\\246\\254\\340\\246\\276\\340\\246\\202\\340\\246\\262\\340\\246\\276.txt\""
+            ),
             "বাংলা.txt"
         );
     }
@@ -460,7 +761,9 @@ mod tests {
         // Telugu "తెలుగు" (Telugu)
         // త = \340\260\244, ె = \340\261\206, ల = \340\260\262, ు = \340\261\201, గ = \340\260\227, ు = \340\261\201
         assert_eq!(
-            unescape_git_path("\"\\340\\260\\244\\340\\261\\206\\340\\260\\262\\340\\261\\201\\340\\260\\227\\340\\261\\201.txt\""),
+            unescape_git_path(
+                "\"\\340\\260\\244\\340\\261\\206\\340\\260\\262\\340\\261\\201\\340\\260\\227\\340\\261\\201.txt\""
+            ),
             "తెలుగు.txt"
         );
     }
@@ -470,7 +773,9 @@ mod tests {
         // Gujarati "ગુજરાતી" (Gujarati)
         // ગ = \340\252\227, ુ = \340\253\201, જ = \340\252\234, ર = \340\252\260, ા = \340\252\276, ત = \340\252\244, ી = \340\253\200
         assert_eq!(
-            unescape_git_path("\"\\340\\252\\227\\340\\253\\201\\340\\252\\234\\340\\252\\260\\340\\252\\276\\340\\252\\244\\340\\253\\200.txt\""),
+            unescape_git_path(
+                "\"\\340\\252\\227\\340\\253\\201\\340\\252\\234\\340\\252\\260\\340\\252\\276\\340\\252\\244\\340\\253\\200.txt\""
+            ),
             "ગુજરાતી.txt"
         );
     }
@@ -504,7 +809,9 @@ mod tests {
         // Khmer "ខ្មែរ" (Khmer)
         // ខ = \341\236\201, ្ = \341\237\222, ម = \341\236\230, ែ = \341\237\202, រ = \341\236\232
         assert_eq!(
-            unescape_git_path("\"\\341\\236\\201\\341\\237\\222\\341\\236\\230\\341\\237\\202\\341\\236\\232.txt\""),
+            unescape_git_path(
+                "\"\\341\\236\\201\\341\\237\\222\\341\\236\\230\\341\\237\\202\\341\\236\\232.txt\""
+            ),
             "ខ្មែរ.txt"
         );
     }
@@ -528,7 +835,9 @@ mod tests {
         // Russian "Русский" (Russian)
         // Р = \320\240, у = \321\203, с = \321\201, к = \320\272, и = \320\270, й = \320\271
         assert_eq!(
-            unescape_git_path("\"\\320\\240\\321\\203\\321\\201\\321\\201\\320\\272\\320\\270\\320\\271.txt\""),
+            unescape_git_path(
+                "\"\\320\\240\\321\\203\\321\\201\\321\\201\\320\\272\\320\\270\\320\\271.txt\""
+            ),
             "Русский.txt"
         );
     }
@@ -538,7 +847,9 @@ mod tests {
         // Ukrainian "Україна" (Ukraine)
         // У = \320\243, к = \320\272, р = \321\200, а = \320\260, ї = \321\227, н = \320\275, а = \320\260
         assert_eq!(
-            unescape_git_path("\"\\320\\243\\320\\272\\321\\200\\320\\260\\321\\227\\320\\275\\320\\260.txt\""),
+            unescape_git_path(
+                "\"\\320\\243\\320\\272\\321\\200\\320\\260\\321\\227\\320\\275\\320\\260.txt\""
+            ),
             "Україна.txt"
         );
     }
@@ -548,7 +859,9 @@ mod tests {
         // Greek "Ελλάδα" (Greece)
         // Ε = \316\225, λ = \316\273, λ = \316\273, ά = \316\254, δ = \316\264, α = \316\261
         assert_eq!(
-            unescape_git_path("\"\\316\\225\\316\\273\\316\\273\\316\\254\\316\\264\\316\\261.txt\""),
+            unescape_git_path(
+                "\"\\316\\225\\316\\273\\316\\273\\316\\254\\316\\264\\316\\261.txt\""
+            ),
             "Ελλάδα.txt"
         );
     }
@@ -558,7 +871,9 @@ mod tests {
         // Greek polytonic "Ἑλληνική" (Hellenic with diacritics)
         // Ἑ = \341\274\231, λ = \316\273, λ = \316\273, η = \316\267, ν = \316\275, ι = \316\271, κ = \316\272, ή = \316\256
         assert_eq!(
-            unescape_git_path("\"\\341\\274\\231\\316\\273\\316\\273\\316\\267\\316\\275\\316\\271\\316\\272\\316\\256.txt\""),
+            unescape_git_path(
+                "\"\\341\\274\\231\\316\\273\\316\\273\\316\\267\\316\\275\\316\\271\\316\\272\\316\\256.txt\""
+            ),
             "Ἑλληνική.txt"
         );
     }
@@ -614,37 +929,25 @@ mod tests {
     #[test]
     fn test_unescape_math_symbols() {
         // Math symbols: ∑ (summation) = \342\210\221
-        assert_eq!(
-            unescape_git_path("\"\\342\\210\\221.txt\""),
-            "∑.txt"
-        );
+        assert_eq!(unescape_git_path("\"\\342\\210\\221.txt\""), "∑.txt");
     }
 
     #[test]
     fn test_unescape_currency_symbols() {
         // Currency: € (euro) = \342\202\254
-        assert_eq!(
-            unescape_git_path("\"\\342\\202\\254.txt\""),
-            "€.txt"
-        );
+        assert_eq!(unescape_git_path("\"\\342\\202\\254.txt\""), "€.txt");
     }
 
     #[test]
     fn test_unescape_box_drawing() {
         // Box drawing: ┌ (box drawings light down and right) = \342\224\214
-        assert_eq!(
-            unescape_git_path("\"\\342\\224\\214.txt\""),
-            "┌.txt"
-        );
+        assert_eq!(unescape_git_path("\"\\342\\224\\214.txt\""), "┌.txt");
     }
 
     #[test]
     fn test_unescape_dingbats() {
         // Dingbats: ✓ (check mark) = \342\234\223
-        assert_eq!(
-            unescape_git_path("\"\\342\\234\\223.txt\""),
-            "✓.txt"
-        );
+        assert_eq!(unescape_git_path("\"\\342\\234\\223.txt\""), "✓.txt");
     }
 
     // =========================================================================
@@ -654,10 +957,7 @@ mod tests {
     #[test]
     fn test_unescape_nfc_precomposed() {
         // NFC precomposed: é (U+00E9) = \303\251
-        assert_eq!(
-            unescape_git_path("\"caf\\303\\251.txt\""),
-            "café.txt"
-        );
+        assert_eq!(unescape_git_path("\"caf\\303\\251.txt\""), "café.txt");
     }
 
     #[test]
@@ -685,5 +985,143 @@ mod tests {
             unescape_git_path("\"\\303\\205ngstr\\303\\266m.txt\""),
             "Ångström.txt"
         );
+    }
+
+    // =========================================================================
+    // Phase 9: Escape Sequence Edge Cases
+    // =========================================================================
+
+    #[test]
+    fn test_unescape_incomplete_octal() {
+        // Incomplete octal at end of string
+        assert_eq!(unescape_git_path("\"file\\34\""), "file\x1c");
+        assert_eq!(unescape_git_path("\"file\\3\""), "file\x03");
+    }
+
+    #[test]
+    fn test_unescape_invalid_octal() {
+        // Invalid octal digit (8 and 9 are not valid octal)
+        assert_eq!(
+            unescape_git_path("\"file\\389.txt\""),
+            "file\x038\u{0039}.txt"
+        );
+    }
+
+    #[test]
+    fn test_unescape_backslash_only() {
+        // Backslash at end without following character
+        assert_eq!(unescape_git_path("\"file\\\""), "file\\");
+    }
+
+    #[test]
+    fn test_unescape_mixed_escapes() {
+        // Mix of different escape types
+        assert_eq!(
+            unescape_git_path("\"path\\nwith\\ttab\\\\and\\344\\270\\255.txt\""),
+            "path\nwith\ttab\\and中.txt"
+        );
+    }
+
+    #[test]
+    fn test_unescape_empty_quoted() {
+        // Empty quoted string
+        assert_eq!(unescape_git_path("\"\""), "");
+    }
+
+    #[test]
+    fn test_unescape_unmatched_quotes() {
+        // Unmatched quotes - returned as-is
+        assert_eq!(unescape_git_path("\"unmatched"), "\"unmatched");
+        assert_eq!(unescape_git_path("unmatched\""), "unmatched\"");
+    }
+
+    // =========================================================================
+    // normalize_to_posix Tests
+    // =========================================================================
+
+    #[test]
+    fn test_normalize_to_posix_no_change() {
+        // Already POSIX paths
+        assert_eq!(normalize_to_posix("path/to/file.txt"), "path/to/file.txt");
+        assert_eq!(normalize_to_posix("src/main.rs"), "src/main.rs");
+    }
+
+    #[test]
+    fn test_normalize_to_posix_windows() {
+        // Windows paths
+        assert_eq!(normalize_to_posix("path\\to\\file.txt"), "path/to/file.txt");
+        assert_eq!(normalize_to_posix("C:\\Users\\file"), "C:/Users/file");
+    }
+
+    #[test]
+    fn test_normalize_to_posix_mixed() {
+        // Mixed separators
+        assert_eq!(
+            normalize_to_posix("path/to\\some\\file.txt"),
+            "path/to/some/file.txt"
+        );
+    }
+
+    #[test]
+    fn test_normalize_to_posix_empty() {
+        assert_eq!(normalize_to_posix(""), "");
+    }
+
+    // =========================================================================
+    // Debug Logging Tests
+    // =========================================================================
+
+    #[test]
+    fn test_debug_log_no_panic() {
+        // Debug logging should not panic
+        debug_log("test message");
+    }
+
+    #[test]
+    fn test_debug_performance_log_no_panic() {
+        debug_performance_log("test performance message");
+    }
+
+    #[test]
+    fn test_debug_performance_log_structured_no_panic() {
+        use serde_json::json;
+        debug_performance_log_structured(json!({
+            "operation": "test",
+            "duration_ms": 100,
+        }));
+    }
+
+    // =========================================================================
+    // current_git_ai_exe Tests
+    // =========================================================================
+
+    #[test]
+    fn test_current_git_ai_exe_returns_path() {
+        // Should return a path (either current exe or git-ai)
+        let result = current_git_ai_exe();
+        assert!(result.is_ok(), "current_git_ai_exe should not fail");
+        let path = result.unwrap();
+        assert!(!path.as_os_str().is_empty(), "path should not be empty");
+    }
+
+    // =========================================================================
+    // is_interactive_terminal Tests
+    // =========================================================================
+
+    #[test]
+    fn test_is_interactive_terminal() {
+        // Just call it to ensure it doesn't panic
+        let _ = is_interactive_terminal();
+    }
+
+    // =========================================================================
+    // Platform-specific constants
+    // =========================================================================
+
+    #[cfg(windows)]
+    #[test]
+    fn test_create_no_window_constant() {
+        // Verify the Windows constant is correct
+        assert_eq!(CREATE_NO_WINDOW, 0x08000000);
     }
 }

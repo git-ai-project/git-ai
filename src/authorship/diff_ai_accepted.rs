@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
-use crate::authorship::range_authorship::should_ignore_file;
+use crate::authorship::ignore::{build_ignore_matcher, should_ignore_file_with_matcher};
 use crate::commands::blame::GitAiBlameOptions;
 use crate::error::GitAiError;
 use crate::git::repository::Repository;
@@ -20,11 +20,12 @@ pub fn diff_ai_accepted_stats(
     ignore_patterns: &[String],
 ) -> Result<DiffAiAcceptedStats, GitAiError> {
     let added_lines_by_file = repo.diff_added_lines(from_ref, to_ref, None)?;
+    let ignore_matcher = build_ignore_matcher(ignore_patterns);
 
     let mut stats = DiffAiAcceptedStats::default();
 
     for (file_path, mut lines) in added_lines_by_file {
-        if should_ignore_file(&file_path, ignore_patterns) {
+        if should_ignore_file_with_matcher(&file_path, &ignore_matcher) {
             continue;
         }
 
@@ -43,11 +44,11 @@ pub fn diff_ai_accepted_stats(
         let mut options = GitAiBlameOptions::default();
         #[allow(clippy::field_reassign_with_default)]
         {
-        options.oldest_commit = oldest_commit.map(|value| value.to_string());
-        options.newest_commit = Some(to_ref.to_string());
-        options.line_ranges = line_ranges;
-        options.no_output = true;
-        options.use_prompt_hashes_as_names = true;
+            options.oldest_commit = oldest_commit.map(|value| value.to_string());
+            options.newest_commit = Some(to_ref.to_string());
+            options.line_ranges = line_ranges;
+            options.no_output = true;
+            options.use_prompt_hashes_as_names = true;
         }
 
         let blame_result = repo.blame(&file_path, &options);
@@ -64,16 +65,14 @@ pub fn diff_ai_accepted_stats(
 
         for line in &lines {
             if let Some(prompt_hash) = line_authors.get(line)
-                && prompt_records.contains_key(prompt_hash) {
-                    stats.total_ai_accepted += 1;
-                    *stats
-                        .per_prompt
-                        .entry(prompt_hash.clone())
-                        .or_insert(0) += 1;
-                    if let Some(tool_model) = prompt_tool_map.get(prompt_hash) {
-                        *stats.per_tool_model.entry(tool_model.clone()).or_insert(0) += 1;
-                    }
+                && prompt_records.contains_key(prompt_hash)
+            {
+                stats.total_ai_accepted += 1;
+                *stats.per_prompt.entry(prompt_hash.clone()).or_insert(0) += 1;
+                if let Some(tool_model) = prompt_tool_map.get(prompt_hash) {
+                    *stats.per_tool_model.entry(tool_model.clone()).or_insert(0) += 1;
                 }
+            }
         }
     }
 
@@ -102,4 +101,91 @@ fn lines_to_ranges(lines: &[u32]) -> Vec<(u32, u32)> {
     ranges.push((start, end));
 
     ranges
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_lines_to_ranges_empty() {
+        let lines = vec![];
+        let ranges = lines_to_ranges(&lines);
+        assert_eq!(ranges.len(), 0);
+    }
+
+    #[test]
+    fn test_lines_to_ranges_single() {
+        let lines = vec![5];
+        let ranges = lines_to_ranges(&lines);
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0], (5, 5));
+    }
+
+    #[test]
+    fn test_lines_to_ranges_consecutive() {
+        let lines = vec![1, 2, 3, 4, 5];
+        let ranges = lines_to_ranges(&lines);
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0], (1, 5));
+    }
+
+    #[test]
+    fn test_lines_to_ranges_non_consecutive() {
+        let lines = vec![1, 3, 5, 7];
+        let ranges = lines_to_ranges(&lines);
+        assert_eq!(ranges.len(), 4);
+        assert_eq!(ranges[0], (1, 1));
+        assert_eq!(ranges[1], (3, 3));
+        assert_eq!(ranges[2], (5, 5));
+        assert_eq!(ranges[3], (7, 7));
+    }
+
+    #[test]
+    fn test_lines_to_ranges_mixed() {
+        let lines = vec![1, 2, 3, 5, 6, 10];
+        let ranges = lines_to_ranges(&lines);
+        assert_eq!(ranges.len(), 3);
+        assert_eq!(ranges[0], (1, 3));
+        assert_eq!(ranges[1], (5, 6));
+        assert_eq!(ranges[2], (10, 10));
+    }
+
+    #[test]
+    fn test_lines_to_ranges_two_groups() {
+        let lines = vec![1, 2, 3, 10, 11, 12];
+        let ranges = lines_to_ranges(&lines);
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(ranges[0], (1, 3));
+        assert_eq!(ranges[1], (10, 12));
+    }
+
+    #[test]
+    fn test_lines_to_ranges_large_numbers() {
+        let lines = vec![100, 101, 102, 200, 201];
+        let ranges = lines_to_ranges(&lines);
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(ranges[0], (100, 102));
+        assert_eq!(ranges[1], (200, 201));
+    }
+
+    #[test]
+    fn test_diff_ai_accepted_stats_default() {
+        let stats = DiffAiAcceptedStats::default();
+        assert_eq!(stats.total_ai_accepted, 0);
+        assert_eq!(stats.per_tool_model.len(), 0);
+        assert_eq!(stats.per_prompt.len(), 0);
+    }
+
+    #[test]
+    fn test_diff_ai_accepted_stats_debug() {
+        let stats = DiffAiAcceptedStats {
+            total_ai_accepted: 10,
+            per_tool_model: BTreeMap::new(),
+            per_prompt: BTreeMap::new(),
+        };
+        let debug_str = format!("{:?}", stats);
+        assert!(debug_str.contains("DiffAiAcceptedStats"));
+        assert!(debug_str.contains("10"));
+    }
 }

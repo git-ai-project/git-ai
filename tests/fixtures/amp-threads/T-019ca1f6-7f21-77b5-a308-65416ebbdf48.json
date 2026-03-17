@@ -1,0 +1,262 @@
+{
+  "v": 85,
+  "id": "T-019ca1f6-7f21-77b5-a308-65416ebbdf48",
+  "created": 1772243812131,
+  "messages": [
+    {
+      "role": "user",
+      "messageId": 0,
+      "content": [
+        {
+          "type": "text",
+          "text": "Read jokes.csv and append one new joke row"
+        }
+      ],
+      "userState": {
+        "currentlyVisibleFiles": []
+      },
+      "agentMode": "smart",
+      "meta": {
+        "sentAt": 1772243812139
+      }
+    },
+    {
+      "role": "assistant",
+      "messageId": 1,
+      "content": [
+        {
+          "type": "tool_use",
+          "complete": true,
+          "id": "toolu_vrtx_01AQL5rdWBkJNHqAXfxyiARm",
+          "name": "Read",
+          "input": {
+            "path": "/Users/svarlamov/projects/testing-git-amp/jokes.csv"
+          }
+        }
+      ],
+      "state": {
+        "type": "complete",
+        "stopReason": "tool_use"
+      },
+      "usage": {
+        "model": "claude-opus-4-6",
+        "maxInputTokens": 168000,
+        "inputTokens": 3,
+        "outputTokens": 70,
+        "cacheCreationInputTokens": 1601,
+        "cacheReadInputTokens": 13248,
+        "totalInputTokens": 14852,
+        "timestamp": "2026-02-28T01:56:54.783Z"
+      }
+    },
+    {
+      "role": "user",
+      "messageId": 2,
+      "content": [
+        {
+          "type": "tool_result",
+          "toolUseID": "toolu_vrtx_01AQL5rdWBkJNHqAXfxyiARm",
+          "run": {
+            "status": "done",
+            "progress": {},
+            "result": {
+              "absolutePath": "/Users/svarlamov/projects/testing-git-amp/jokes.csv",
+              "content": "1: id,setup,punchline\n2: 1,Why do programmers prefer dark mode?,Because light attracts bugs.\n3: 2,Why did the developer go broke?,Because he used up all his cache.\n4: 3,Why do Java developers wear glasses?,Because they can't C#.\n5: 4,What's a programmer's favorite hangout place?,Foo Bar.\n6: 5,Why was the JavaScript developer sad?,Because he didn't Node how to Express himself.\n7: 6,How many programmers does it take to change a light bulb?,None. That's a hardware problem.\n8: 7,What did the router say to the doctor?,It hurts when IP.\n9: 8,Why do Python programmers have low self-esteem?,They're constantly comparing themselves to others.\n10: 9,What's the object-oriented way to become wealthy?,Inheritance.\n11: 10,Why did the functions stop calling each other?,Because they got too many arguments.\n12: 11,What do you call a snake that's 3.14 meters long?,A Pi-thon.\n13: 12,Why did the SQL query go to therapy?,It had too many inner joins and couldn't form outer relationships.\n14: 13,Why do programmers always mix up Halloween and Christmas?,Because Oct 31 == Dec 25."
+            },
+            "trackFiles": [
+              "file:///Users/svarlamov/projects/testing-git-amp/jokes.csv"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "messageId": 3,
+      "content": [
+        {
+          "type": "tool_use",
+          "complete": true,
+          "id": "toolu_vrtx_01TJD3myjs6gdrDRVn6ZbNME",
+          "name": "edit_file",
+          "input": {
+            "path": "/Users/svarlamov/projects/testing-git-amp/jokes.csv",
+            "old_str": "13,Why do programmers always mix up Halloween and Christmas?,Because Oct 31 == Dec 25.",
+            "new_str": "13,Why do programmers always mix up Halloween and Christmas?,Because Oct 31 == Dec 25.\n14,Why do programmers hate nature?,It has too many bugs and no documentation."
+          }
+        }
+      ],
+      "state": {
+        "type": "complete",
+        "stopReason": "tool_use"
+      },
+      "usage": {
+        "model": "claude-opus-4-6",
+        "maxInputTokens": 168000,
+        "inputTokens": 1,
+        "outputTokens": 170,
+        "cacheCreationInputTokens": 427,
+        "cacheReadInputTokens": 14849,
+        "totalInputTokens": 15277,
+        "timestamp": "2026-02-28T01:56:58.208Z"
+      }
+    },
+    {
+      "role": "user",
+      "messageId": 4,
+      "content": [
+        {
+          "type": "tool_result",
+          "toolUseID": "toolu_vrtx_01TJD3myjs6gdrDRVn6ZbNME",
+          "run": {
+            "status": "done",
+            "progress": {},
+            "result": {
+              "diff": "```diff\nIndex: /Users/svarlamov/projects/testing-git-amp/jokes.csv\n===================================================================\n--- /Users/svarlamov/projects/testing-git-amp/jokes.csv\toriginal\n+++ /Users/svarlamov/projects/testing-git-amp/jokes.csv\tmodified\n@@ -11,4 +11,5 @@\n 10,Why did the functions stop calling each other?,Because they got too many arguments.\n 11,What do you call a snake that's 3.14 meters long?,A Pi-thon.\n 12,Why did the SQL query go to therapy?,It had too many inner joins and couldn't form outer relationships.\n 13,Why do programmers always mix up Halloween and Christmas?,Because Oct 31 == Dec 25.\n+14,Why do programmers hate nature?,It has too many bugs and no documentation.\n```",
+              "lineRange": [
+                14,
+                15
+              ]
+            },
+            "trackFiles": [
+              "file:///Users/svarlamov/projects/testing-git-amp/jokes.csv"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "messageId": 5,
+      "content": [
+        {
+          "type": "text",
+          "text": "Appended joke #14: *\"Why do programmers hate nature? — It has too many bugs and no documentation.\"*"
+        }
+      ],
+      "state": {
+        "type": "complete",
+        "stopReason": "end_turn"
+      },
+      "usage": {
+        "model": "claude-opus-4-6",
+        "maxInputTokens": 168000,
+        "inputTokens": 1,
+        "outputTokens": 30,
+        "cacheCreationInputTokens": 15683,
+        "cacheReadInputTokens": 0,
+        "totalInputTokens": 15684,
+        "timestamp": "2026-02-28T01:57:00.163Z"
+      },
+      "turnElapsedMs": 8023
+    }
+  ],
+  "agentMode": "smart",
+  "nextMessageId": 6,
+  "meta": {
+    "traces": [
+      {
+        "name": "agent",
+        "id": "O6pPX",
+        "startTime": "2026-02-28T01:56:52.140Z",
+        "context": {
+          "messageId": 0
+        },
+        "endTime": "2026-02-28T01:57:00.164Z"
+      },
+      {
+        "name": "inference",
+        "id": "amFhj",
+        "parent": "O6pPX",
+        "startTime": "2026-02-28T01:56:52.141Z",
+        "context": {
+          "messageId": 0
+        },
+        "endTime": "2026-02-28T01:56:54.784Z"
+      },
+      {
+        "name": "tools",
+        "id": "zupWo",
+        "parent": "O6pPX",
+        "startTime": "2026-02-28T01:56:54.783Z",
+        "context": {
+          "messageId": 1
+        },
+        "endTime": "2026-02-28T01:56:54.788Z"
+      },
+      {
+        "name": "inference",
+        "id": "W8IBP",
+        "parent": "O6pPX",
+        "startTime": "2026-02-28T01:56:54.788Z",
+        "context": {
+          "messageId": 0
+        },
+        "endTime": "2026-02-28T01:56:58.209Z"
+      },
+      {
+        "name": "tools",
+        "id": "k90JS",
+        "parent": "O6pPX",
+        "startTime": "2026-02-28T01:56:58.209Z",
+        "context": {
+          "messageId": 3
+        },
+        "endTime": "2026-02-28T01:56:58.215Z"
+      },
+      {
+        "name": "inference",
+        "id": "NvKCJ",
+        "parent": "O6pPX",
+        "startTime": "2026-02-28T01:56:58.216Z",
+        "context": {
+          "messageId": 0
+        },
+        "endTime": "2026-02-28T01:57:00.164Z"
+      }
+    ]
+  },
+  "env": {
+    "initial": {
+      "trees": [
+        {
+          "displayName": "testing-git-amp",
+          "uri": "file:///Users/svarlamov/projects/testing-git-amp",
+          "repository": {
+            "type": "git",
+            "url": "https://github.com/svarlamov/testing-git",
+            "ref": "refs/heads/master",
+            "sha": "6be354d80ba6ad3af3e22c2e1a0d8e93da1577fa"
+          }
+        }
+      ],
+      "platform": {
+        "os": "darwin",
+        "osVersion": "26.2",
+        "cpuArchitecture": "arm64",
+        "webBrowser": false,
+        "client": "CLI Execute Mode",
+        "clientVersion": "0.0.1772237000-g924883",
+        "clientType": "cli",
+        "installationID": "27b4c6de-6024-4d53-a27e-d9f1ecaf9053",
+        "deviceFingerprint": "v1:fp_4add571e6e0a29461fc96a756d94cd6bbe73fb50a535b7832f81fc16c67f97ae"
+      },
+      "tags": [
+        "model:claude-opus-4-6"
+      ]
+    }
+  },
+  "title": "Read jokes CSV and append new row",
+  "~debug": {
+    "lastInferenceUsage": {
+      "model": "claude-opus-4-6",
+      "maxInputTokens": 168000,
+      "inputTokens": 3,
+      "outputTokens": 170,
+      "cacheCreationInputTokens": 15683,
+      "cacheReadInputTokens": 14849,
+      "totalInputTokens": 15684,
+      "timestamp": "2026-02-28T01:57:00.163Z"
+    }
+  }
+}

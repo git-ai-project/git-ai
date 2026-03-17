@@ -68,9 +68,11 @@ pub fn get_github_ci_context() -> Result<Option<CiContext>, GitAiError> {
     // Authenticate the clone URL with GITHUB_TOKEN if available
     let authenticated_url = if let Ok(token) = std::env::var("GITHUB_TOKEN") {
         // Replace https://github.com/ with https://x-access-token:TOKEN@github.com/
-        clone_url.replace(
-            "https://github.com/",
-            &format!("https://x-access-token:{}@github.com/", token),
+        // Supports both public and enterprise github instances.
+        format!(
+            "https://x-access-token:{}@{}",
+            token,
+            clone_url.strip_prefix("https://").unwrap_or(&clone_url)
         )
     } else {
         clone_url

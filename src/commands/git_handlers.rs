@@ -1,6 +1,9 @@
 use std::collections::HashSet;
 
 use crate::authorship::virtual_attribution::VirtualAttributions;
+use crate::commands::git_hook_handlers::{
+    ENV_SKIP_MANAGED_HOOKS, has_repo_hook_state, resolve_previous_non_managed_hooks_path,
+};
 use crate::commands::hooks::checkout_hooks;
 use crate::commands::hooks::cherry_pick_hooks;
 use crate::commands::hooks::clone_hooks;
@@ -15,10 +18,12 @@ use crate::commands::hooks::switch_hooks;
 use crate::config;
 use crate::git::cli_parser::{ParsedGitInvocation, parse_git_cli_args};
 use crate::git::find_repository;
-use crate::git::repository::Repository;
+use crate::git::repository::{Repository, disable_internal_git_hooks};
 use crate::observability;
 
 use crate::observability::wrapper_performance_targets::log_performance_target_if_violated;
+#[cfg(windows)]
+use crate::utils::CREATE_NO_WINDOW;
 use crate::utils::debug_log;
 #[cfg(windows)]
 use crate::utils::is_interactive_terminal;
@@ -28,8 +33,6 @@ use std::os::unix::process::CommandExt;
 use std::os::unix::process::ExitStatusExt;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
-#[cfg(windows)]
-use crate::utils::CREATE_NO_WINDOW;
 use std::process::Command;
 #[cfg(unix)]
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -37,6 +40,10 @@ use std::time::Instant;
 
 #[cfg(unix)]
 static CHILD_PGID: AtomicI32 = AtomicI32::new(0);
+
+// Windows NTSTATUS for Ctrl+C interruption (STATUS_CONTROL_C_EXIT, 0xC000013A) from Windows API docs.
+#[cfg(windows)]
+const NTSTATUS_CONTROL_C_EXIT: u32 = 0xC000013A;
 
 /// Error type for hook panics
 #[derive(Debug)]
@@ -85,7 +92,7 @@ fn uninstall_forwarding_handlers() {
 pub struct CommandHooksContext {
     pub pre_commit_hook_result: Option<bool>,
     pub rebase_original_head: Option<String>,
-    pub _rebase_onto: Option<String>,
+    pub rebase_onto: Option<String>,
     pub fetch_authorship_handle: Option<std::thread::JoinHandle<()>>,
     pub stash_sha: Option<String>,
     pub push_authorship_handle: Option<std::thread::JoinHandle<()>>,
@@ -99,7 +106,7 @@ pub fn handle_git(args: &[String]) {
     // and delegate directly to the real git so existing completion scripts work.
     if in_shell_completion_context() {
         let orig_args: Vec<String> = std::env::args().skip(1).collect();
-        proxy_to_git(&orig_args, true);
+        proxy_to_git(&orig_args, true, None);
         return;
     }
 
@@ -107,7 +114,7 @@ pub fn handle_git(args: &[String]) {
     // This is useful for CI pipelines, scripts, or debugging.
     if std::env::var("GIT_AI_DISABLED").is_ok() || std::env::var("GIT_AI_PASSTHROUGH").is_ok() {
         let orig_args: Vec<String> = std::env::args().skip(1).collect();
-        proxy_to_git(&orig_args, true);
+        proxy_to_git(&orig_args, true, None);
         return;
     }
 
@@ -132,7 +139,10 @@ pub fn handle_git(args: &[String]) {
     // Note: clone aliases (e.g., alias.cl = clone) won't trigger clone hooks because
     // alias resolution requires a Repository object, which doesn't exist yet for clone.
     if parsed_args.command.as_deref() == Some("clone") && !parsed_args.is_help && !skip_hooks {
-        let exit_status = proxy_to_git(&parsed_args.to_invocation_vec(), false);
+        let exit_status = proxy_to_git(&parsed_args.to_invocation_vec(), false, None);
+        if exit_status_was_interrupted(&exit_status) {
+            exit_with_status(exit_status);
+        }
         clone_hooks::post_clone_hook(&parsed_args, exit_status);
         exit_with_status(exit_status);
     }
@@ -142,7 +152,7 @@ pub fn handle_git(args: &[String]) {
         let mut command_hooks_context = CommandHooksContext {
             pre_commit_hook_result: None,
             rebase_original_head: None,
-            _rebase_onto: None,
+            rebase_onto: None,
             fetch_authorship_handle: None,
             stash_sha: None,
             push_authorship_handle: None,
@@ -159,8 +169,17 @@ pub fn handle_git(args: &[String]) {
         run_pre_command_hooks(&mut command_hooks_context, &mut parsed_args, repository);
         let pre_command_duration = pre_command_start.elapsed();
 
+        let child_hooks_path_override =
+            resolve_child_git_hooks_path_override(&parsed_args, Some(repository));
         let git_start = Instant::now();
-        let exit_status = proxy_to_git(&parsed_args.to_invocation_vec(), false);
+        let exit_status = proxy_to_git(
+            &parsed_args.to_invocation_vec(),
+            false,
+            child_hooks_path_override.as_deref(),
+        );
+        if exit_status_was_interrupted(&exit_status) {
+            exit_with_status(exit_status);
+        }
         let git_duration = git_start.elapsed();
 
         let post_command_start = Instant::now();
@@ -182,7 +201,13 @@ pub fn handle_git(args: &[String]) {
         exit_status
     } else {
         // run without hooks
-        proxy_to_git(&parsed_args.to_invocation_vec(), false)
+        let child_hooks_path_override =
+            resolve_child_git_hooks_path_override(&parsed_args, repository_option.as_ref());
+        proxy_to_git(
+            &parsed_args.to_invocation_vec(),
+            false,
+            child_hooks_path_override.as_deref(),
+        )
     };
     exit_with_status(exit_status);
 }
@@ -317,6 +342,7 @@ fn run_pre_command_hooks(
     parsed_args: &mut ParsedGitInvocation,
     repository: &mut Repository,
 ) {
+    let _disable_hooks_guard = disable_internal_git_hooks();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // Pre-command hooks
         match parsed_args.command.as_deref() {
@@ -393,6 +419,7 @@ fn run_post_command_hooks(
     exit_status: std::process::ExitStatus,
     repository: &mut Repository,
 ) {
+    let _disable_hooks_guard = disable_internal_git_hooks();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // Post-command hooks
         match parsed_args.command.as_deref() {
@@ -489,7 +516,66 @@ fn run_post_command_hooks(
     }
 }
 
-fn proxy_to_git(args: &[String], exit_on_completion: bool) -> std::process::ExitStatus {
+#[cfg(windows)]
+fn platform_null_hooks_path() -> &'static str {
+    "NUL"
+}
+
+#[cfg(not(windows))]
+fn platform_null_hooks_path() -> &'static str {
+    "/dev/null"
+}
+
+fn command_uses_managed_hooks(command: Option<&str>) -> bool {
+    matches!(
+        command,
+        Some(
+            "commit"
+                | "rebase"
+                | "cherry-pick"
+                | "reset"
+                | "stash"
+                | "merge"
+                | "checkout"
+                | "switch"
+                | "pull"
+                | "fetch"
+                | "push"
+        )
+    )
+}
+
+fn has_explicit_hooks_path_override(args: &[String]) -> bool {
+    args.windows(2)
+        .any(|pair| pair[0] == "-c" && pair[1].starts_with("core.hooksPath="))
+        || args.iter().any(|arg| {
+            arg.starts_with("-ccore.hooksPath=") || arg.starts_with("--config=core.hooksPath=")
+        })
+}
+
+fn resolve_child_git_hooks_path_override(
+    parsed_args: &ParsedGitInvocation,
+    repository: Option<&Repository>,
+) -> Option<String> {
+    if !command_uses_managed_hooks(parsed_args.command.as_deref()) {
+        return None;
+    }
+    if !has_repo_hook_state(repository) {
+        return None;
+    }
+
+    let hooks_path = resolve_previous_non_managed_hooks_path(repository)
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_else(|| platform_null_hooks_path().to_string());
+
+    Some(hooks_path)
+}
+
+fn proxy_to_git(
+    args: &[String],
+    exit_on_completion: bool,
+    child_hooks_path_override: Option<&str>,
+) -> std::process::ExitStatus {
     // debug_log(&format!("proxying to git with args: {:?}", args));
     // debug_log(&format!("prepended global args: {:?}", prepend_global(args)));
     // Use spawn for interactive commands
@@ -503,7 +589,13 @@ fn proxy_to_git(args: &[String], exit_on_completion: bool) -> std::process::Exit
             let should_setpgid = !is_interactive;
 
             let mut cmd = Command::new(config::Config::get().git_cmd());
+            if let Some(hooks_path) = child_hooks_path_override
+                && !has_explicit_hooks_path_override(args)
+            {
+                cmd.arg("-c").arg(format!("core.hooksPath={}", hooks_path));
+            }
             cmd.args(args);
+            cmd.env(ENV_SKIP_MANAGED_HOOKS, "1");
             unsafe {
                 let setpgid_flag = should_setpgid;
                 cmd.pre_exec(move || {
@@ -523,7 +615,13 @@ fn proxy_to_git(args: &[String], exit_on_completion: bool) -> std::process::Exit
         #[cfg(not(unix))]
         {
             let mut cmd = Command::new(config::Config::get().git_cmd());
+            if let Some(hooks_path) = child_hooks_path_override
+                && !has_explicit_hooks_path_override(args)
+            {
+                cmd.arg("-c").arg(format!("core.hooksPath={}", hooks_path));
+            }
             cmd.args(args);
+            cmd.env(ENV_SKIP_MANAGED_HOOKS, "1");
 
             #[cfg(windows)]
             {
@@ -591,7 +689,7 @@ fn proxy_to_git(args: &[String], exit_on_completion: bool) -> std::process::Exit
                     if exit_on_completion {
                         exit_with_status(status);
                     }
-                    return status;
+                    status
                 }
                 Err(e) => {
                     eprintln!("Failed to wait for git process: {}", e);
@@ -622,6 +720,22 @@ fn exit_with_status(status: std::process::ExitStatus) -> ! {
     std::process::exit(status.code().unwrap_or(1));
 }
 
+#[cfg(unix)]
+fn exit_status_was_interrupted(status: &std::process::ExitStatus) -> bool {
+    matches!(status.signal(), Some(libc::SIGINT))
+}
+
+#[cfg(windows)]
+fn exit_status_was_interrupted(status: &std::process::ExitStatus) -> bool {
+    // Reinterpret the signed exit code as u32 to compare against the NTSTATUS value.
+    status.code().map(|code| code as u32) == Some(NTSTATUS_CONTROL_C_EXIT)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn exit_status_was_interrupted(_status: &std::process::ExitStatus) -> bool {
+    false
+}
+
 // Detect if current process invocation is coming from shell completion machinery
 // (bash, zsh via bashcompinit). If so, we should proxy directly to the real git
 // without any extra behavior that could interfere with completion scripts.
@@ -634,6 +748,10 @@ fn in_shell_completion_context() -> bool {
 #[cfg(test)]
 mod tests {
     use super::parse_alias_tokens;
+    use super::{parse_git_cli_args, resolve_child_git_hooks_path_override};
+    use crate::git::find_repository_in_path;
+    use std::process::Command;
+    use tempfile::tempdir;
 
     #[test]
     fn parse_alias_tokens_empty_string() {
@@ -731,5 +849,78 @@ mod tests {
                 "-5".to_string()
             ])
         );
+    }
+
+    #[test]
+    fn resolve_child_hooks_path_override_no_state_file_returns_none() {
+        let temp = tempdir().expect("tempdir should create");
+        let output = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(temp.path())
+            .output()
+            .expect("git init should run");
+        assert!(
+            output.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let repo = find_repository_in_path(&temp.path().to_string_lossy())
+            .expect("repository should be discovered");
+        let parsed = parse_git_cli_args(&["commit".to_string()]);
+
+        assert_eq!(
+            resolve_child_git_hooks_path_override(&parsed, Some(&repo)),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exit_status_was_interrupted_on_sigint() {
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("kill -s INT $$")
+            .status()
+            .expect("failed to run signal test");
+        assert!(super::exit_status_was_interrupted(&status));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exit_status_was_interrupted_false_on_success() {
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .status()
+            .expect("failed to run success test");
+        assert!(!super::exit_status_was_interrupted(&status));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn exit_status_was_interrupted_on_windows_ctrl_c_code() {
+        // Simulate a Ctrl+C NTSTATUS exit code via cmd's exit value.
+        let status = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("exit")
+            .arg("/B")
+            .arg(super::NTSTATUS_CONTROL_C_EXIT.to_string())
+            .status()
+            .expect("failed to run ctrl+c status test");
+        assert!(super::exit_status_was_interrupted(&status));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn exit_status_was_interrupted_false_on_success_windows() {
+        let status = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("exit")
+            .arg("/B")
+            .arg("0")
+            .status()
+            .expect("failed to run success test");
+        assert!(!super::exit_status_was_interrupted(&status));
     }
 }

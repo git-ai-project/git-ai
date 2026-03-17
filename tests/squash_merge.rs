@@ -1,8 +1,31 @@
 #[macro_use]
 mod repos;
+use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 use repos::test_file::ExpectedLineExt;
 use repos::test_repo::TestRepo;
+use std::collections::HashMap;
+use std::process::Command;
 use std::time::Duration;
+
+fn read_authorship_note(repo: &TestRepo, commit_sha: &str) -> Option<String> {
+    let output = Command::new("git")
+        .args([
+            "-C",
+            repo.path().to_str().unwrap(),
+            "notes",
+            "--ref",
+            "ai",
+            "show",
+            commit_sha,
+        ])
+        .output()
+        .expect("failed to run git notes show");
+    if output.status.success() {
+        Some(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        None
+    }
+}
 
 /// Test merge --squash with a simple feature branch containing AI and human edits
 #[test]
@@ -293,3 +316,88 @@ fn test_prepare_working_log_squash_with_mixed_additions() {
         "Sum of accepted_lines across prompts should match ai_accepted stat"
     );
 }
+
+/// Test that custom attributes set via config are preserved through a squash merge
+/// when the real post-commit pipeline injects them.
+#[test]
+fn test_squash_merge_preserves_custom_attributes_from_config() {
+    let mut repo = TestRepo::new();
+
+    // Configure custom attributes via config patch
+    let mut attrs = HashMap::new();
+    attrs.insert("employee_id".to_string(), "E303".to_string());
+    attrs.insert("team".to_string(), "data".to_string());
+    repo.patch_git_ai_config(|patch| {
+        patch.custom_attributes = Some(attrs.clone());
+    });
+
+    // Create initial commit on default branch
+    let mut file = repo.filename("main.txt");
+    file.set_contents(lines!["line 1", "line 2", "line 3", ""]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    let default_branch = repo.current_branch();
+
+    // Create feature branch with AI commit
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    file.insert_at(3, lines!["// AI feature line".ai()]);
+    repo.stage_all_and_commit("Add AI feature").unwrap();
+
+    std::thread::sleep(Duration::from_secs(1));
+
+    // Add another AI commit on the feature branch
+    file.insert_at(4, lines!["// AI feature line 2".ai()]);
+    repo.stage_all_and_commit("Add AI feature 2").unwrap();
+
+    // Verify custom attributes were set on the feature commits
+    let feature_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let feature_note = read_authorship_note(&repo, &feature_sha)
+        .expect("feature commit should have authorship note");
+    let feature_log =
+        AuthorshipLog::deserialize_from_string(&feature_note).expect("parse feature note");
+    for (_id, prompt) in &feature_log.metadata.prompts {
+        assert_eq!(
+            prompt.custom_attributes.as_ref(),
+            Some(&attrs),
+            "precondition: feature commit should have custom_attributes from config"
+        );
+    }
+
+    // Go back to default branch and squash merge
+    repo.git(&["checkout", &default_branch]).unwrap();
+    repo.git(&["merge", "--squash", "feature"]).unwrap();
+    repo.commit("Squashed feature").unwrap();
+
+    // Verify custom attributes survived the squash merge
+    let squash_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let squash_note = read_authorship_note(&repo, &squash_sha)
+        .expect("squash commit should have authorship note");
+    let squash_log =
+        AuthorshipLog::deserialize_from_string(&squash_note).expect("parse squash note");
+    assert!(
+        !squash_log.metadata.prompts.is_empty(),
+        "squash commit should have prompt records"
+    );
+    for (_id, prompt) in &squash_log.metadata.prompts {
+        assert_eq!(
+            prompt.custom_attributes.as_ref(),
+            Some(&attrs),
+            "custom_attributes should be preserved through squash merge"
+        );
+    }
+
+    // Also verify the AI attribution itself survived
+    file.assert_lines_and_blame(lines![
+        "line 1".human(),
+        "line 2".human(),
+        "line 3".human(),
+        "// AI feature line".ai(),
+        "// AI feature line 2".ai()
+    ]);
+}
+
+reuse_tests_in_worktree!(
+    test_prepare_working_log_simple_squash,
+    test_prepare_working_log_squash_with_main_changes,
+    test_prepare_working_log_squash_multiple_sessions,
+    test_prepare_working_log_squash_with_mixed_additions,
+);

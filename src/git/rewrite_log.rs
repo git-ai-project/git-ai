@@ -205,13 +205,29 @@ impl MergeSquashEvent {
 pub struct RebaseStartEvent {
     pub original_head: String,
     pub is_interactive: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onto_head: Option<String>,
 }
 
 impl RebaseStartEvent {
+    #[allow(dead_code)]
     pub fn new(original_head: String, is_interactive: bool) -> Self {
         Self {
             original_head,
             is_interactive,
+            onto_head: None,
+        }
+    }
+
+    pub fn new_with_onto(
+        original_head: String,
+        is_interactive: bool,
+        onto_head: Option<String>,
+    ) -> Self {
+        Self {
+            original_head,
+            is_interactive,
+            onto_head,
         }
     }
 }

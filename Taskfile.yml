@@ -49,3 +49,70 @@ tasks:
     deps: [build]
     cmds:
       - bats tests/e2e/user-scenarios.bats
+
+  test:
+    desc: Run unit tests
+    cmds:
+      - cargo test
+
+  lint:
+    desc: Run cargo check and clippy
+    cmds:
+      - cargo check
+      - cargo clippy
+
+  bench:
+    desc: Run benchmarks
+    cmds:
+      - cargo bench
+
+  doc:
+    desc: Build documentation
+    cmds:
+      - cargo doc
+
+  format:
+    desc: Format code with rustfmt
+    cmds:
+      - cargo fmt
+
+  format:check:
+    desc: Check code formatting (CI)
+    cmds:
+      - cargo fmt -- --check
+
+  coverage:
+    desc: Run tests with coverage and show summary
+    cmds:
+      - cargo llvm-cov test --ignore-filename-regex='tests/.*|benches/.*|examples/.*'
+
+  coverage:html:
+    desc: Generate HTML coverage report and open in browser
+    cmds:
+      - cargo llvm-cov test --ignore-filename-regex='tests/.*|benches/.*|examples/.*' --html --open
+
+  coverage:lcov:
+    desc: Generate LCOV coverage report
+    cmds:
+      - cargo llvm-cov test --ignore-filename-regex='tests/.*|benches/.*|examples/.*' --lcov --output-path lcov.info
+
+  coverage:check:
+    desc: Run coverage and fail if below threshold
+    cmds:
+      - cargo llvm-cov test --ignore-filename-regex='tests/.*|benches/.*|examples/.*' --fail-under-lines {{.COVERAGE_THRESHOLD}}
+    vars:
+      COVERAGE_THRESHOLD: '{{.COVERAGE_THRESHOLD | default "50"}}'
+
+  update:
+    desc: Update dependencies
+    cmds:
+      - cargo update
+
+  all:
+    desc: Build, test, lint, and generate docs
+    deps: [build, test, lint, doc]
+
+  install:
+    desc: Install dependencies using Cargo
+    cmds:
+      - cargo install --path .

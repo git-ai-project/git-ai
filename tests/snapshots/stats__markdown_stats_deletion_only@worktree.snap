@@ -1,0 +1,6 @@
+---
+source: tests/stats.rs
+assertion_line: 250
+expression: markdown
+---
+"(no additions)\n"

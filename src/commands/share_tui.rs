@@ -3,17 +3,20 @@ use crate::commands::prompt_picker;
 use crate::error::GitAiError;
 use crate::git::find_repository;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers,
+    },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
+    Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
-    Frame, Terminal,
 };
 use std::io;
 
@@ -163,7 +166,9 @@ fn handle_config_key_event(
                 0 => {
                     // Title editing
                     // Handle Ctrl+U to clear title
-                    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('u') {
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && key.code == KeyCode::Char('u')
+                    {
                         config.title.clear();
                         config.title_cursor = 0;
                         return ConfigKeyResult::Continue;
@@ -255,7 +260,11 @@ fn render_config_screen(f: &mut Frame, config: &ShareConfig, focused_field: usiz
     // Header
     let header = Paragraph::new("Share Prompt")
         .block(Block::default().borders(Borders::ALL))
-        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
         .alignment(Alignment::Center);
     f.render_widget(header, chunks[0]);
 
@@ -303,7 +312,11 @@ fn render_config_screen(f: &mut Frame, config: &ShareConfig, focused_field: usiz
         });
 
     // Checkbox 0: Share all prompts in commit
-    let commit_marker = if config.share_all_in_commit { "[x]" } else { "[ ]" };
+    let commit_marker = if config.share_all_in_commit {
+        "[x]"
+    } else {
+        "[ ]"
+    };
     let commit_focused = options_focused && config.focused_checkbox == 0;
     let commit_style = if !config.can_share_commit {
         Style::default().fg(Color::DarkGray)

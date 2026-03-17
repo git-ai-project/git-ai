@@ -111,7 +111,6 @@ fn get_bigram_set_len() -> usize {
     BIGRAMS.len()
 }
 
-
 /// Statistics collected in a single pass over the token.
 struct CharStats {
     distinct_count: usize,
@@ -256,11 +255,7 @@ fn erfc_approx(x: f64) -> f64 {
         * (0.254829592
             + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
     let result = poly * (-x * x).exp(); // Single exp() call
-    if x >= 0.0 {
-        result
-    } else {
-        2.0 - result
-    }
+    if x >= 0.0 { result } else { 2.0 - result }
 }
 
 /// Calculate binomial probability (cumulative tail probability).
@@ -362,7 +357,6 @@ fn stirling(n: usize, k: usize) -> f64 {
     }
     get_stirling_table()[n][k]
 }
-
 
 /// Check if a string is likely a random/secret string.
 /// Returns true if the string appears to be a secret.
@@ -543,9 +537,11 @@ mod tests {
         let tokens = extract_tokens(text);
         assert!(!tokens.is_empty());
         // The token should be extracted (API_KEY is 7 chars, too short; the secret is 32 chars)
-        assert!(tokens
-            .iter()
-            .any(|&(start, end)| &text[start..end] == "sk_test_4eC39HqLyjWDarjtT1zdp7dc"));
+        assert!(
+            tokens
+                .iter()
+                .any(|&(start, end)| &text[start..end] == "sk_test_4eC39HqLyjWDarjtT1zdp7dc")
+        );
     }
 
     #[test]

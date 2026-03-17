@@ -1,0 +1,3 @@
+{"kind":0,"v":{"version":3,"creationDate":1770580242421,"requests":[],"inputState":{"selectedModel":{"identifier":"copilot/gpt-4o","metadata":{"id":"gpt-4o","vendor":"copilot","name":"GPT-4o"}},"inputText":""}}}
+{"kind":2,"k":["requests"],"v":[{"requestId":"request_patched_001","timestamp":1770580260000,"message":{"text":"What is the meaning of life?","parts":[{"text":"What is the meaning of life?","kind":"text"}]},"variableData":{"variables":[]},"response":[{"value":"The meaning of life is 42.","supportThemeIcons":false}],"responseId":"response_patched_001","result":{"timings":{"firstProgress":500,"totalElapsed":1500}}}]}
+{"kind":1,"k":["inputState","inputText"],"v":"follow up question"}

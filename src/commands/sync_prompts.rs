@@ -1,5 +1,5 @@
 use crate::authorship::internal_db::{InternalDatabase, PromptDbRecord};
-use crate::authorship::prompt_utils::{update_prompt_from_tool, PromptUpdateResult};
+use crate::authorship::prompt_utils::{PromptUpdateResult, update_prompt_from_tool};
 use crate::error::GitAiError;
 use crate::observability::log_error;
 use chrono::{DateTime, NaiveDate};
@@ -92,10 +92,7 @@ fn parse_since_arg(since_str: &str) -> Result<i64, GitAiError> {
     )))
 }
 
-fn sync_prompts(
-    since_timestamp: Option<i64>,
-    workdir: Option<&str>,
-) -> Result<(), GitAiError> {
+fn sync_prompts(since_timestamp: Option<i64>, workdir: Option<&str>) -> Result<(), GitAiError> {
     eprintln!("Starting prompt sync...");
 
     let db = InternalDatabase::global()?;
@@ -121,10 +118,7 @@ fn sync_prompts(
 
     // Deduplicate by agent_id (keep latest per conversation)
     let prompts_to_update = deduplicate_by_agent_id(&prompts);
-    eprintln!(
-        "Updating {} unique conversations",
-        prompts_to_update.len()
-    );
+    eprintln!("Updating {} unique conversations", prompts_to_update.len());
 
     // Update each prompt
     let mut updated_records = Vec::new();
@@ -199,9 +193,7 @@ fn deduplicate_by_agent_id(prompts: &[PromptDbRecord]) -> Vec<PromptDbRecord> {
     latest_by_agent.into_values().collect()
 }
 
-fn update_prompt_record(
-    record: &PromptDbRecord,
-) -> Result<Option<PromptDbRecord>, GitAiError> {
+fn update_prompt_record(record: &PromptDbRecord) -> Result<Option<PromptDbRecord>, GitAiError> {
     // Use shared update_prompt_from_tool from prompt_updater module
     let result = update_prompt_from_tool(
         &record.tool,
@@ -218,12 +210,14 @@ fn update_prompt_record(
             }
 
             // Use last message timestamp for updated_at, fall back to now if unavailable
-            let updated_at = new_transcript.last_message_timestamp_unix().unwrap_or_else(|| {
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs() as i64
-            });
+            let updated_at = new_transcript
+                .last_message_timestamp_unix()
+                .unwrap_or_else(|| {
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs() as i64
+                });
 
             let mut updated_record = record.clone();
             updated_record.messages = new_transcript;

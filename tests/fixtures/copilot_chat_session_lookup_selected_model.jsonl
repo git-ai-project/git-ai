@@ -1,0 +1,2 @@
+{"kind":0,"v":{"sessionId":"fixture-chat-session-selected","inputState":{"selectedModel":{"identifier":"copilot/claude-sonnet-4"}},"requests":[]}}
+{"kind":2,"k":["requests"],"v":[{"requestId":"r1","result":{"metadata":{"sessionId":"fixture-session-id"}}}]}

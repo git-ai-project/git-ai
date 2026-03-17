@@ -40,9 +40,10 @@ fn truncate_checkpoint_hashes(repo: &TestRepo, commit_sha: &str) {
                     for attr in attributions {
                         if let Some(author_id) =
                             attr.get_mut("author_id").and_then(|id| id.as_str())
-                            && author_id.len() == 16 {
-                                attr["author_id"] = Value::String(author_id[..7].to_string());
-                            }
+                            && author_id.len() == 16
+                        {
+                            attr["author_id"] = Value::String(author_id[..7].to_string());
+                        }
                     }
                 }
 
@@ -54,15 +55,17 @@ fn truncate_checkpoint_hashes(repo: &TestRepo, commit_sha: &str) {
                     for line_attr in line_attrs {
                         if let Some(author_id) =
                             line_attr.get_mut("author_id").and_then(|id| id.as_str())
-                            && author_id.len() == 16 {
-                                line_attr["author_id"] = Value::String(author_id[..7].to_string());
-                            }
+                            && author_id.len() == 16
+                        {
+                            line_attr["author_id"] = Value::String(author_id[..7].to_string());
+                        }
                         // Also truncate overrode field if present
                         if let Some(overrode) =
                             line_attr.get_mut("overrode").and_then(|o| o.as_str())
-                            && overrode.len() == 16 {
-                                line_attr["overrode"] = Value::String(overrode[..7].to_string());
-                            }
+                            && overrode.len() == 16
+                        {
+                            line_attr["overrode"] = Value::String(overrode[..7].to_string());
+                        }
                     }
                 }
             }
@@ -332,3 +335,9 @@ fn test_prompt_hash_migration_unstaged_ai_lines_saved_to_working_log() {
         "ai_line7".ai(),
     ]);
 }
+
+reuse_tests_in_worktree!(
+    test_prompt_hash_migration_ai_adds_lines_multiple_commits,
+    test_prompt_hash_migration_ai_adds_then_commits_in_batches,
+    test_prompt_hash_migration_unstaged_ai_lines_saved_to_working_log,
+);

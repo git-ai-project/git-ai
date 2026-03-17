@@ -29,9 +29,9 @@ pub fn ensure_git_symlinks() -> Result<(), GitAiError> {
     let exec_path = PathBuf::from(exec_path);
 
     // Get the libexec directory (parent of git-core)
-    let libexec_target = exec_path
-        .parent()
-        .ok_or_else(|| GitAiError::Generic("Cannot get libexec directory from exec-path".to_string()))?;
+    let libexec_target = exec_path.parent().ok_or_else(|| {
+        GitAiError::Generic("Cannot get libexec directory from exec-path".to_string())
+    })?;
 
     // Create symlink: base_dir/libexec -> /usr/libexec
     let symlink_path = base_dir.join("libexec");
@@ -61,7 +61,10 @@ pub fn ensure_git_symlinks() -> Result<(), GitAiError> {
 
 /// Create a directory junction on Windows (doesn't require admin privileges)
 #[cfg(windows)]
-fn create_junction(junction_path: &std::path::Path, target: &std::path::Path) -> Result<(), GitAiError> {
+fn create_junction(
+    junction_path: &std::path::Path,
+    target: &std::path::Path,
+) -> Result<(), GitAiError> {
     use std::process::Command;
 
     // Use mklink /J to create a junction - this doesn't require admin privileges

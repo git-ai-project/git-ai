@@ -15,7 +15,7 @@ pub mod types;
 pub use attrs::EventAttributes;
 pub use events::{AgentUsageValues, CheckpointValues, CommittedValues, InstallHooksValues};
 pub use pos_encoded::PosEncoded;
-pub use types::{EventValues, MetricEvent, MetricsBatch, METRICS_API_VERSION};
+pub use types::{EventValues, METRICS_API_VERSION, MetricEvent, MetricsBatch};
 
 /// Record an event with values and attributes.
 ///
@@ -65,7 +65,9 @@ mod tests {
             .tool_model_pairs(vec!["all".to_string()])
             .ai_additions(vec![10]);
 
-        let attrs = EventAttributes::with_version("1.0.0").tool("test").commit_sha("test-commit");
+        let attrs = EventAttributes::with_version("1.0.0")
+            .tool("test")
+            .commit_sha("test-commit");
 
         // Create the event manually to verify structure
         let event = MetricEvent::new(&values, attrs.to_sparse());

@@ -146,3 +146,135 @@ pub fn log_performance_for_checkpoint(
         ));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_performance_floor_constant() {
+        assert_eq!(PERFORMANCE_FLOOR_MS.as_millis(), 270);
+    }
+
+    #[test]
+    fn test_log_performance_target_commit_within_target() {
+        let pre = Duration::from_millis(50);
+        let git = Duration::from_millis(1000);
+        let post = Duration::from_millis(50);
+        // Total overhead = 100ms < PERFORMANCE_FLOOR_MS (270ms), so should be within target
+        log_performance_target_if_violated("commit", pre, git, post);
+    }
+
+    #[test]
+    fn test_log_performance_target_commit_violated() {
+        let pre = Duration::from_millis(200);
+        let git = Duration::from_millis(100);
+        let post = Duration::from_millis(200);
+        // Total overhead = 400ms, git*1.1 = 110ms, so violated
+        log_performance_target_if_violated("commit", pre, git, post);
+    }
+
+    #[test]
+    fn test_log_performance_target_rebase_within() {
+        let pre = Duration::from_millis(50);
+        let git = Duration::from_millis(500);
+        let post = Duration::from_millis(50);
+        log_performance_target_if_violated("rebase", pre, git, post);
+    }
+
+    #[test]
+    fn test_log_performance_target_cherry_pick() {
+        let pre = Duration::from_millis(100);
+        let git = Duration::from_millis(200);
+        let post = Duration::from_millis(100);
+        log_performance_target_if_violated("cherry-pick", pre, git, post);
+    }
+
+    #[test]
+    fn test_log_performance_target_reset() {
+        let pre = Duration::from_millis(50);
+        let git = Duration::from_millis(150);
+        let post = Duration::from_millis(50);
+        log_performance_target_if_violated("reset", pre, git, post);
+    }
+
+    #[test]
+    fn test_log_performance_target_fetch() {
+        let pre = Duration::from_millis(100);
+        let git = Duration::from_millis(2000);
+        let post = Duration::from_millis(100);
+        // fetch allows 1.5x git duration, so 2000*1.5=3000 vs 2200 total
+        log_performance_target_if_violated("fetch", pre, git, post);
+    }
+
+    #[test]
+    fn test_log_performance_target_pull() {
+        let pre = Duration::from_millis(150);
+        let git = Duration::from_millis(1000);
+        let post = Duration::from_millis(150);
+        log_performance_target_if_violated("pull", pre, git, post);
+    }
+
+    #[test]
+    fn test_log_performance_target_push() {
+        let pre = Duration::from_millis(100);
+        let git = Duration::from_millis(1500);
+        let post = Duration::from_millis(100);
+        log_performance_target_if_violated("push", pre, git, post);
+    }
+
+    #[test]
+    fn test_log_performance_target_generic_command() {
+        let pre = Duration::from_millis(100);
+        let git = Duration::from_millis(500);
+        let post = Duration::from_millis(100);
+        // Generic commands use PERFORMANCE_FLOOR_MS (270ms)
+        log_performance_target_if_violated("status", pre, git, post);
+    }
+
+    #[test]
+    fn test_log_performance_target_unknown_command() {
+        let pre = Duration::from_millis(50);
+        let git = Duration::from_millis(200);
+        let post = Duration::from_millis(50);
+        log_performance_target_if_violated("unknown-cmd", pre, git, post);
+    }
+
+    #[test]
+    fn test_log_performance_checkpoint_within_target() {
+        // Target: 50ms per file, so 5 files = 250ms target
+        log_performance_for_checkpoint(5, Duration::from_millis(200), CheckpointKind::AiAgent);
+    }
+
+    #[test]
+    fn test_log_performance_checkpoint_violated() {
+        // Target: 50ms per file, so 2 files = 100ms target
+        log_performance_for_checkpoint(2, Duration::from_millis(150), CheckpointKind::AiTab);
+    }
+
+    #[test]
+    fn test_log_performance_checkpoint_zero_files() {
+        // Zero files means 0ms target, any duration violates
+        log_performance_for_checkpoint(0, Duration::from_millis(10), CheckpointKind::Human);
+    }
+
+    #[test]
+    fn test_log_performance_checkpoint_many_files() {
+        // 100 files = 5000ms target
+        log_performance_for_checkpoint(100, Duration::from_millis(4000), CheckpointKind::AiAgent);
+    }
+
+    #[test]
+    fn test_benchmark_result_fields() {
+        let result = BenchmarkResult {
+            total_duration: Duration::from_millis(1000),
+            git_duration: Duration::from_millis(800),
+            post_command_duration: Duration::from_millis(100),
+            pre_command_duration: Duration::from_millis(100),
+        };
+        assert_eq!(result.total_duration.as_millis(), 1000);
+        assert_eq!(result.git_duration.as_millis(), 800);
+        assert_eq!(result.post_command_duration.as_millis(), 100);
+        assert_eq!(result.pre_command_duration.as_millis(), 100);
+    }
+}

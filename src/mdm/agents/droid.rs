@@ -1,9 +1,7 @@
 use crate::error::GitAiError;
 use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerParams};
-use crate::mdm::utils::{
-    generate_diff, home_dir, is_git_ai_checkpoint_command, write_atomic,
-};
-use serde_json::{json, Value};
+use crate::mdm::utils::{generate_diff, home_dir, is_git_ai_checkpoint_command, write_atomic};
+use serde_json::{Value, json};
 use std::fs;
 use std::path::PathBuf;
 
@@ -132,10 +130,11 @@ impl HookInstaller for DroidInstaller {
             let mut found_matcher_idx: Option<usize> = None;
             for (idx, item) in hook_type_array.iter().enumerate() {
                 if let Some(matcher) = item.get("matcher").and_then(|m| m.as_str())
-                    && matcher == desired_matcher {
-                        found_matcher_idx = Some(idx);
-                        break;
-                    }
+                    && matcher == desired_matcher
+                {
+                    found_matcher_idx = Some(idx);
+                    break;
+                }
             }
 
             let matcher_idx = match found_matcher_idx {
@@ -161,12 +160,13 @@ impl HookInstaller for DroidInstaller {
             for (idx, hook) in hooks_array.iter().enumerate() {
                 if let Some(cmd) = hook.get("command").and_then(|c| c.as_str())
                     && is_git_ai_checkpoint_command(cmd)
-                        && found_idx.is_none() {
-                            found_idx = Some(idx);
-                            if cmd != desired_cmd {
-                                needs_update = true;
-                            }
-                        }
+                    && found_idx.is_none()
+                {
+                    found_idx = Some(idx);
+                    if cmd != desired_cmd {
+                        needs_update = true;
+                    }
+                }
             }
 
             match found_idx {
@@ -180,7 +180,6 @@ impl HookInstaller for DroidInstaller {
                     let keep_idx = idx;
                     let mut current_idx = 0;
                     hooks_array.retain(|hook| {
-                        
                         if current_idx == keep_idx {
                             current_idx += 1;
                             true
@@ -217,9 +216,10 @@ impl HookInstaller for DroidInstaller {
 
         // Add claudeHooksImported flag if it doesn't exist
         if let Some(hooks) = merged.get_mut("hooks").and_then(|h| h.as_object_mut())
-            && !hooks.contains_key("claudeHooksImported") {
-                hooks.insert("claudeHooksImported".to_string(), json!(true));
-            }
+            && !hooks.contains_key("claudeHooksImported")
+        {
+            hooks.insert("claudeHooksImported".to_string(), json!(true));
+        }
 
         if existing == merged {
             return Ok(None);
@@ -258,9 +258,14 @@ impl HookInstaller for DroidInstaller {
         let mut changed = false;
 
         for hook_type in &["PreToolUse", "PostToolUse"] {
-            if let Some(hook_type_array) = hooks_obj.get_mut(*hook_type).and_then(|v| v.as_array_mut()) {
+            if let Some(hook_type_array) =
+                hooks_obj.get_mut(*hook_type).and_then(|v| v.as_array_mut())
+            {
                 for matcher_block in hook_type_array.iter_mut() {
-                    if let Some(hooks_array) = matcher_block.get_mut("hooks").and_then(|h| h.as_array_mut()) {
+                    if let Some(hooks_array) = matcher_block
+                        .get_mut("hooks")
+                        .and_then(|h| h.as_array_mut())
+                    {
                         let original_len = hooks_array.len();
                         hooks_array.retain(|hook| {
                             if let Some(cmd) = hook.get("command").and_then(|c| c.as_str()) {
@@ -343,9 +348,14 @@ mod tests {
             }
         });
 
-        fs::write(&settings_path, serde_json::to_string_pretty(&result).unwrap()).unwrap();
+        fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&result).unwrap(),
+        )
+        .unwrap();
 
-        let content: Value = serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
+        let content: Value =
+            serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
         let hooks = content.get("hooks").unwrap();
 
         let pre_tool = hooks.get("PreToolUse").unwrap().as_array().unwrap();
@@ -399,26 +409,54 @@ mod tests {
             }
         });
 
-        fs::write(&settings_path, serde_json::to_string_pretty(&existing).unwrap()).unwrap();
+        fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&existing).unwrap(),
+        )
+        .unwrap();
 
-        let mut content: Value = serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
+        let mut content: Value =
+            serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
         let hooks_obj = content.get_mut("hooks").unwrap();
 
-        let pre_array = hooks_obj.get_mut("PreToolUse").unwrap().as_array_mut().unwrap();
-        pre_array[0].get_mut("hooks").unwrap().as_array_mut().unwrap().push(json!({
-            "type": "command",
-            "command": format!("git-ai {}", DROID_PRE_TOOL_CMD)
-        }));
+        let pre_array = hooks_obj
+            .get_mut("PreToolUse")
+            .unwrap()
+            .as_array_mut()
+            .unwrap();
+        pre_array[0]
+            .get_mut("hooks")
+            .unwrap()
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "type": "command",
+                "command": format!("git-ai {}", DROID_PRE_TOOL_CMD)
+            }));
 
-        let post_array = hooks_obj.get_mut("PostToolUse").unwrap().as_array_mut().unwrap();
-        post_array[0].get_mut("hooks").unwrap().as_array_mut().unwrap().push(json!({
-            "type": "command",
-            "command": format!("git-ai {}", DROID_POST_TOOL_CMD)
-        }));
+        let post_array = hooks_obj
+            .get_mut("PostToolUse")
+            .unwrap()
+            .as_array_mut()
+            .unwrap();
+        post_array[0]
+            .get_mut("hooks")
+            .unwrap()
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "type": "command",
+                "command": format!("git-ai {}", DROID_POST_TOOL_CMD)
+            }));
 
-        fs::write(&settings_path, serde_json::to_string_pretty(&content).unwrap()).unwrap();
+        fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&content).unwrap(),
+        )
+        .unwrap();
 
-        let result: Value = serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
+        let result: Value =
+            serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
         let hooks = result.get("hooks").unwrap();
 
         let pre_hooks = hooks.get("PreToolUse").unwrap().as_array().unwrap()[0]
@@ -435,7 +473,13 @@ mod tests {
         assert_eq!(pre_hooks.len(), 2);
         assert_eq!(post_hooks.len(), 2);
 
-        assert_eq!(pre_hooks[0].get("command").unwrap().as_str().unwrap(), "echo 'before write'");
-        assert_eq!(post_hooks[0].get("command").unwrap().as_str().unwrap(), "prettier --write");
+        assert_eq!(
+            pre_hooks[0].get("command").unwrap().as_str().unwrap(),
+            "echo 'before write'"
+        );
+        assert_eq!(
+            post_hooks[0].get("command").unwrap().as_str().unwrap(),
+            "prettier --write"
+        );
     }
 }

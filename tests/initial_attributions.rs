@@ -63,6 +63,7 @@ fn test_initial_only_no_blame_data() {
             accepted_lines: 0,
             overriden_lines: 0,
             messages_url: None,
+            custom_attributes: None,
         },
     );
 
@@ -151,6 +152,7 @@ fn test_initial_wins_overlaps() {
             accepted_lines: 0,
             overriden_lines: 0,
             messages_url: None,
+            custom_attributes: None,
         },
     );
 
@@ -228,6 +230,7 @@ fn test_initial_and_blame_merge() {
             accepted_lines: 0,
             overriden_lines: 0,
             messages_url: None,
+            custom_attributes: None,
         },
     );
     prompts.insert(
@@ -245,6 +248,7 @@ fn test_initial_and_blame_merge() {
             accepted_lines: 0,
             overriden_lines: 0,
             messages_url: None,
+            custom_attributes: None,
         },
     );
 
@@ -315,6 +319,7 @@ fn test_partial_file_coverage() {
             accepted_lines: 0,
             overriden_lines: 0,
             messages_url: None,
+            custom_attributes: None,
         },
     );
 
@@ -403,6 +408,7 @@ fn test_initial_attributions_in_subsequent_checkpoint() {
             accepted_lines: 0,
             overriden_lines: 0,
             messages_url: None,
+            custom_attributes: None,
         },
     );
 
@@ -442,3 +448,11 @@ fn test_initial_attributions_in_subsequent_checkpoint() {
 
     assert_debug_snapshot!(normalized_b);
 }
+
+reuse_tests_in_worktree!(
+    test_initial_only_no_blame_data,
+    test_initial_wins_overlaps,
+    test_initial_and_blame_merge,
+    test_partial_file_coverage,
+    test_initial_attributions_in_subsequent_checkpoint,
+);

@@ -1,0 +1,19 @@
+# Core Git tests to run against git-ai in CI.
+# One test script per line, relative to the git repository's t/ directory.
+
+t0000-basic.sh
+t0001-init.sh
+t0002-gitfile.sh
+t0003-attributes.sh
+t0008-ignores.sh
+t2014-checkout-switch.sh
+t2200-add-update.sh
+t2202-add-addremove.sh
+t3200-branch.sh
+t4002-diff-basic.sh
+t4202-log.sh
+t7501-commit-basic-functionality.sh
+t7508-status.sh
+t7600-merge.sh
+t3400-rebase.sh
+t7102-reset.sh

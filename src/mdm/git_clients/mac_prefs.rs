@@ -12,10 +12,7 @@ use std::process::Command;
 /// Returns the path to the app bundle if found.
 pub fn find_app_by_bundle_id(bundle_id: &str) -> Option<PathBuf> {
     let query = format!("kMDItemCFBundleIdentifier == '{}'", bundle_id);
-    let output = Command::new("mdfind")
-        .arg(&query)
-        .output()
-        .ok()?;
+    let output = Command::new("mdfind").arg(&query).output().ok()?;
 
     if output.status.success() {
         let path = String::from_utf8_lossy(&output.stdout)

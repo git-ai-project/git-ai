@@ -3,17 +3,12 @@ use crate::authorship::internal_db::{CasSyncRecord, InternalDatabase};
 use crate::observability::log_error;
 use std::collections::HashMap;
 
+const ENV_CAS_FLUSH_WORKER: &str = "GIT_AI_CAS_FLUSH_WORKER";
+
 /// Spawn a background process to flush CAS objects to the server
 pub fn spawn_background_cas_flush() {
-    use std::process::Command;
-
-    if let Ok(exe) = crate::utils::current_git_ai_exe() {
-        let _ = Command::new(exe)
-            .arg("flush-cas")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-    }
+    let _ =
+        crate::utils::spawn_internal_git_ai_subcommand("flush-cas", &[], ENV_CAS_FLUSH_WORKER, &[]);
 }
 
 /// Handle the flush-cas command
@@ -25,7 +20,7 @@ pub fn handle_flush_cas(_args: &[String]) {
 
     // Skip if using default API and not logged in
     let using_default_api = api_base_url == crate::config::DEFAULT_API_BASE_URL;
-    if using_default_api && !client.is_logged_in() {
+    if using_default_api && !client.is_logged_in() && !client.has_api_key() {
         eprintln!("Skipping CAS sync: not logged in and using default API");
         return;
     }
@@ -73,10 +68,8 @@ pub fn handle_flush_cas(_args: &[String]) {
                 Err(e) => {
                     // Mark as failed if we can't parse the JSON
                     let mut db_lock = db.lock().unwrap();
-                    let _ = db_lock.update_cas_sync_failure(
-                        record.id,
-                        &format!("JSON parse error: {}", e),
-                    );
+                    let _ = db_lock
+                        .update_cas_sync_failure(record.id, &format!("JSON parse error: {}", e));
                     eprintln!(
                         "  ✗ Failed {} (parse error): {}",
                         &record.hash[..16.min(record.hash.len())],
@@ -120,8 +113,7 @@ pub fn handle_flush_cas(_args: &[String]) {
                             }
                         } else {
                             // Failed - update error
-                            let error =
-                                result.error.unwrap_or_else(|| "Unknown error".to_string());
+                            let error = result.error.unwrap_or_else(|| "Unknown error".to_string());
 
                             // Log to Sentry
                             log_error(
@@ -169,10 +161,12 @@ pub fn handle_flush_cas(_args: &[String]) {
                 let mut db_lock = db.lock().unwrap();
                 for record in batch.iter() {
                     let hash_short = &record.hash[..16.min(record.hash.len())];
-                    if let Err(update_err) =
-                        db_lock.update_cas_sync_failure(record.id, &error_msg)
+                    if let Err(update_err) = db_lock.update_cas_sync_failure(record.id, &error_msg)
                     {
-                        eprintln!("  ✗ Failed to update error for {}: {}", hash_short, update_err);
+                        eprintln!(
+                            "  ✗ Failed to update error for {}: {}",
+                            hash_short, update_err
+                        );
                     } else {
                         eprintln!(
                             "  ✗ Failed {} (attempt {}): {}",

@@ -4,7 +4,7 @@ use crate::commands::git_handlers::CommandHooksContext;
 use crate::commands::hooks::commit_hooks::get_commit_default_author;
 use crate::error::GitAiError;
 use crate::git::cli_parser::ParsedGitInvocation;
-use crate::git::repository::{Repository, exec_git};
+use crate::git::repository::{Repository, exec_git, exec_git_stdin};
 use crate::utils::debug_log;
 
 pub fn pre_stash_hook(
@@ -264,19 +264,12 @@ fn save_stash_note(repo: &Repository, stash_sha: &str, content: &str) -> Result<
     args.push("--ref=ai-stash".to_string());
     args.push("add".to_string());
     args.push("-f".to_string()); // Force overwrite if exists
-    args.push("-m".to_string());
-    args.push(content.to_string());
+    args.push("-F".to_string());
+    args.push("-".to_string()); // Read note content from stdin
     args.push(stash_sha.to_string());
 
-    let output = exec_git(&args)?;
-
-    if !output.status.success() {
-        return Err(GitAiError::Generic(format!(
-            "Failed to save stash note: git notes exited with status {}",
-            output.status
-        )));
-    }
-
+    // Use stdin to provide the note content to avoid command line length limits
+    exec_git_stdin(&args, content.as_bytes())?;
     Ok(())
 }
 
@@ -407,9 +400,10 @@ fn file_matches_pathspecs(file: &str, pathspecs: &[String], _repo: &Repository) 
 
         // Simple glob matching - check if path starts with prefix before *
         if let Some(prefix) = pathspec.strip_suffix('*')
-            && file.starts_with(prefix) {
-                return true;
-            }
+            && file.starts_with(prefix)
+        {
+            return true;
+        }
     }
 
     false
@@ -442,4 +436,60 @@ fn delete_working_log_for_files(
     // The files were stashed, so we just remove them from the initial attributions
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::git::test_utils::TmpRepo;
+
+    #[test]
+    fn test_save_stash_note_roundtrip() {
+        let repo = TmpRepo::new().unwrap();
+        // Need at least one commit to attach notes to
+        repo.write_file("dummy.txt", "content\n", true).unwrap();
+        repo.commit_with_message("initial").unwrap();
+
+        let gitai_repo = repo.gitai_repo();
+
+        // Create a stash so we have a valid stash SHA
+        // Modify a file and stash it
+        std::fs::write(repo.path().join("dummy.txt"), "modified\n").unwrap();
+        repo.git_command(&["stash"]).unwrap();
+
+        let stash_sha = resolve_stash_to_sha(gitai_repo, "stash@{0}").unwrap();
+
+        // Save and read back
+        let content = "test content";
+        save_stash_note(gitai_repo, &stash_sha, content).unwrap();
+        let read_back = read_stash_note(gitai_repo, &stash_sha).unwrap();
+
+        assert_eq!(read_back.trim(), content, "roundtrip content should match");
+    }
+
+    #[test]
+    fn test_save_stash_note_large_content() {
+        let repo = TmpRepo::new().unwrap();
+        repo.write_file("dummy.txt", "content\n", true).unwrap();
+        repo.commit_with_message("initial").unwrap();
+
+        let gitai_repo = repo.gitai_repo();
+
+        // Modify a file and stash it
+        std::fs::write(repo.path().join("dummy.txt"), "modified\n").unwrap();
+        repo.git_command(&["stash"]).unwrap();
+
+        let stash_sha = resolve_stash_to_sha(gitai_repo, "stash@{0}").unwrap();
+
+        // 100KB string - this is the kind of content that triggered the original E2BIG bug
+        let large_content = "x".repeat(100_000);
+        save_stash_note(gitai_repo, &stash_sha, &large_content).unwrap();
+        let read_back = read_stash_note(gitai_repo, &stash_sha).unwrap();
+
+        assert_eq!(
+            read_back.trim(),
+            large_content,
+            "large content roundtrip should match"
+        );
+    }
 }
