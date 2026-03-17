@@ -1558,7 +1558,7 @@ fn daemon_pure_trace_socket_pull_fast_forward_tracks_pull_command_and_ref_reconc
         remote_clone_str.as_str(),
         "push",
         "origin",
-        default_branch.as_str(),
+        format!("HEAD:{}", default_branch).as_str(),
     ]);
 
     repo.git_og_with_env(
@@ -1683,7 +1683,7 @@ fn daemon_pure_trace_socket_pull_rebase_tracks_pull_and_rebase_completion() {
         remote_clone_str.as_str(),
         "push",
         "origin",
-        default_branch.as_str(),
+        format!("HEAD:{}", default_branch).as_str(),
     ]);
 
     fs::write(repo.path().join("local-only.txt"), "local\n").expect("failed to write local file");
@@ -1817,7 +1817,7 @@ fn daemon_pure_trace_socket_pull_autostash_preserves_local_changes_and_tracks_co
         remote_clone_str.as_str(),
         "push",
         "origin",
-        default_branch.as_str(),
+        format!("HEAD:{}", default_branch).as_str(),
     ]);
 
     fs::write(
