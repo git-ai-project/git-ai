@@ -1528,7 +1528,13 @@ fn daemon_pure_trace_socket_pull_fast_forward_tracks_pull_command_and_ref_reconc
     )
     .expect("pushing base branch should succeed");
 
-    run_git(&["clone", bare_remote_str.as_str(), remote_clone_str.as_str()]);
+    run_git(&[
+        "clone",
+        "--branch",
+        default_branch.as_str(),
+        bare_remote_str.as_str(),
+        remote_clone_str.as_str(),
+    ]);
     run_git(&[
         "-C",
         remote_clone_str.as_str(),
@@ -1653,7 +1659,13 @@ fn daemon_pure_trace_socket_pull_rebase_tracks_pull_and_rebase_completion() {
     )
     .expect("pushing base branch should succeed");
 
-    run_git(&["clone", bare_remote_str.as_str(), remote_clone_str.as_str()]);
+    run_git(&[
+        "clone",
+        "--branch",
+        default_branch.as_str(),
+        bare_remote_str.as_str(),
+        remote_clone_str.as_str(),
+    ]);
     run_git(&[
         "-C",
         remote_clone_str.as_str(),
@@ -1782,7 +1794,13 @@ fn daemon_pure_trace_socket_pull_autostash_preserves_local_changes_and_tracks_co
     )
     .expect("pushing base branch should succeed");
 
-    run_git(&["clone", bare_remote_str.as_str(), remote_clone_str.as_str()]);
+    run_git(&[
+        "clone",
+        "--branch",
+        default_branch.as_str(),
+        bare_remote_str.as_str(),
+        remote_clone_str.as_str(),
+    ]);
     run_git(&[
         "-C",
         remote_clone_str.as_str(),
