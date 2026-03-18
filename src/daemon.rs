@@ -2444,6 +2444,24 @@ fn handle_trace_connection_actor(
         coordinator: coordinator.clone(),
     };
 
+    // Keep socket reads lightweight: enqueue parsed frames immediately so Git
+    // writers are not blocked behind normalization/reducer work.
+    let (tx, rx) = std::sync::mpsc::channel::<Value>();
+    let ingest_coordinator = coordinator.clone();
+    let ingest_handle = runtime_handle.clone();
+    let ingest_worker = std::thread::spawn(move || {
+        while let Ok(parsed) = rx.recv() {
+            if let Err(error) = ingest_handle.block_on(async {
+                ingest_coordinator
+                    .clone()
+                    .ingest_trace_payload_fast(parsed)
+                    .await
+            }) {
+                debug_log(&format!("daemon trace ingest error: {}", error));
+            }
+        }
+    });
+
     let mut reader = BufReader::new(stream);
     while let Some(line) = read_json_line(&mut reader)? {
         let trimmed = line.trim();
@@ -2454,12 +2472,12 @@ fn handle_trace_connection_actor(
             Ok(v) => v,
             Err(_) => continue,
         };
-        if let Err(error) = runtime_handle
-            .block_on(async { coordinator.clone().ingest_trace_payload_fast(parsed).await })
-        {
-            debug_log(&format!("daemon trace ingest error: {}", error));
+        if tx.send(parsed).is_err() {
+            break;
         }
     }
+    drop(tx);
+    let _ = ingest_worker.join();
     Ok(())
 }
 
