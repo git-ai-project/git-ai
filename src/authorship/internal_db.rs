@@ -1020,10 +1020,7 @@ impl InternalDatabase {
 
     /// Update CAS sync record on failure (release lock, increment attempts, set next retry)
     pub fn update_cas_sync_failure(&mut self, id: i64, error: &str) -> Result<(), GitAiError> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
+        let now = crate::utils::now_unix();
 
         // Get current attempts count to calculate next retry
         let attempts: u32 = self.conn.query_row(
@@ -1032,7 +1029,7 @@ impl InternalDatabase {
             |row| row.get(0),
         )?;
 
-        let next_retry = calculate_next_retry(attempts + 1, now);
+        let next_retry = crate::utils::calculate_next_retry(attempts + 1, now);
 
         self.conn.execute(
             r#"
@@ -1050,19 +1047,6 @@ impl InternalDatabase {
 
         Ok(())
     }
-}
-
-/// Calculate next retry timestamp based on attempt number
-fn calculate_next_retry(attempts: u32, now: i64) -> i64 {
-    let delay_seconds = match attempts {
-        1 => 5 * 60,       // 5 minutes
-        2 => 30 * 60,      // 30 minutes
-        3 => 2 * 60 * 60,  // 2 hours
-        4 => 6 * 60 * 60,  // 6 hours
-        5 => 12 * 60 * 60, // 12 hours
-        _ => 24 * 60 * 60, // 24 hours (attempts >= 6)
-    };
-    now + delay_seconds
 }
 
 #[cfg(test)]
@@ -1767,6 +1751,7 @@ mod tests {
         let now = 1000000i64;
 
         // Test each attempt's backoff
+        use crate::utils::calculate_next_retry;
         assert_eq!(calculate_next_retry(1, now), now + 5 * 60); // 5 min
         assert_eq!(calculate_next_retry(2, now), now + 30 * 60); // 30 min
         assert_eq!(calculate_next_retry(3, now), now + 2 * 60 * 60); // 2 hours

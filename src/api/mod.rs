@@ -5,5 +5,5 @@ pub mod metrics;
 pub mod types;
 
 pub use client::{ApiClient, ApiContext};
-pub use metrics::upload_metrics_with_retry;
+pub use metrics::{mirror_metrics, upload_metrics_with_retry};
 pub use types::*;

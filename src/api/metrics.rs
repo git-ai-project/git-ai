@@ -98,6 +98,14 @@ pub fn upload_metrics_with_retry(
     ))
 }
 
+/// Mirror a metrics batch to the mirror endpoint.
+/// Returns true if mirror succeeded (or not configured), false on failure.
+pub fn mirror_metrics(batch: &MetricsBatch) -> bool {
+    super::client::mirror_upload("metrics", |client| {
+        client.upload_metrics(batch).map(|_| ())
+    })
+}
+
 /// Metrics API endpoints
 impl ApiClient {
     /// Upload metrics batch to the server (max 250 events)

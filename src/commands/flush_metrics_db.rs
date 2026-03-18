@@ -56,6 +56,9 @@ pub fn handle_flush_metrics_db(_args: &[String]) {
         }
     };
 
+    // Build mirror client once (avoids per-batch subprocess for git identity)
+    let mirror_client = ApiContext::mirror().map(ApiClient::new);
+
     let mut total_uploaded = 0usize;
     let mut total_batches = 0usize;
     let mut total_invalid = 0usize;
@@ -111,17 +114,32 @@ pub fn handle_flush_metrics_db(_args: &[String]) {
         // Upload with retry logic (15s, 60s, 3min backoff)
         match upload_metrics_with_retry(&client, &metrics_batch, "flush_metrics_db") {
             Ok(()) => {
-                total_uploaded += event_count;
+                // Mirror to secondary endpoint (no-op if mirror not configured)
+                let mirrored = match &mirror_client {
+                    Some(c) => c.upload_metrics(&metrics_batch).map(|_| ()).is_ok(),
+                    None => true,
+                };
+
                 total_batches += 1;
-                user_log!(
-                    "  ✓ batch {} - uploaded {} events",
-                    total_batches,
-                    event_count
-                );
-                // Success - delete ALL records from this batch
-                // Validation errors are logged to Sentry and won't succeed on retry
-                if let Ok(mut db_lock) = db.lock() {
-                    let _ = db_lock.delete_records(&record_ids);
+                total_uploaded += event_count;
+                // Only delete if mirror also succeeded (or not configured).
+                // If mirror failed, leave records for next cycle — primary is idempotent.
+                if mirrored {
+                    if let Ok(mut db_lock) = db.lock() {
+                        let _ = db_lock.delete_records(&record_ids);
+                    }
+                    user_log!(
+                        "  ✓ batch {} - uploaded {} events",
+                        total_batches,
+                        event_count
+                    );
+                } else {
+                    user_log!(
+                        "  ⚠ batch {} - uploaded to primary, mirror failed (keeping {} events for retry)",
+                        total_batches,
+                        event_count
+                    );
+                    break;
                 }
             }
             Err(e) => {

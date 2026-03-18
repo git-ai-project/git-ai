@@ -36,6 +36,9 @@ pub fn handle_flush_cas(_args: &[String]) {
         }
     };
 
+    // Build mirror client once (avoids per-batch subprocess for git identity)
+    let mirror_client = ApiContext::mirror().map(ApiClient::new);
+
     let mut total_synced = 0;
 
     loop {
@@ -96,21 +99,31 @@ pub fn handle_flush_cas(_args: &[String]) {
             objects: cas_objects,
         };
 
-        match client.upload_cas(request) {
+        match client.upload_cas(&request) {
             Ok(response) => {
+                // Mirror to secondary endpoint (no-op if mirror not configured)
+                let mirrored = match &mirror_client {
+                    Some(c) => c.upload_cas(&request).map(|_| ()).is_ok(),
+                    None => true,
+                };
+
                 // Process each result
                 let mut db_lock = db.lock().unwrap();
                 for result in response.results {
                     if let Some(record) = record_map.get(&result.hash) {
                         let hash_short = &result.hash[..16.min(result.hash.len())];
-                        if result.status == "ok" {
-                            // Success - delete from queue
+                        if result.status == "ok" && mirrored {
+                            // Both primary and mirror succeeded - delete from queue
                             if let Err(e) = db_lock.delete_cas_sync_record(record.id) {
                                 eprintln!("  ✗ Failed to delete record for {}: {}", hash_short, e);
                             } else {
                                 eprintln!("  ✓ Synced {}", hash_short);
                                 total_synced += 1;
                             }
+                        } else if result.status == "ok" {
+                            // Primary ok but mirror failed — leave in processing,
+                            // stale lock recovery will reset to pending for retry
+                            eprintln!("  ⚠ {} uploaded but mirror failed, keeping for retry", hash_short);
                         } else {
                             // Failed - update error
                             let error = result.error.unwrap_or_else(|| "Unknown error".to_string());

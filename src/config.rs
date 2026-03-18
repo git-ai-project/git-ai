@@ -80,6 +80,9 @@ pub struct Config {
     default_prompt_storage: Option<String>,
     #[serde(serialize_with = "serialize_masked_api_key")]
     api_key: Option<String>,
+    mirror_url: Option<String>,
+    #[serde(serialize_with = "serialize_masked_api_key")]
+    mirror_api_key: Option<String>,
     quiet: bool,
     custom_attributes: HashMap<String, String>,
 }
@@ -147,6 +150,10 @@ pub struct FileConfig {
     pub default_prompt_storage: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror_api_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quiet: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -388,6 +395,16 @@ impl Config {
         self.api_key.as_deref()
     }
 
+    /// Returns the mirror URL if configured
+    pub fn mirror_url(&self) -> Option<&str> {
+        self.mirror_url.as_deref()
+    }
+
+    /// Returns the mirror API key if configured
+    pub fn mirror_api_key(&self) -> Option<&str> {
+        self.mirror_api_key.as_deref()
+    }
+
     /// Returns true if quiet mode is enabled (suppresses chart output after commits)
     pub fn is_quiet(&self) -> bool {
         self.quiet
@@ -624,6 +641,28 @@ fn build_config() -> Config {
                 .filter(|s| !s.is_empty())
         });
 
+    // Get mirror URL from env var or config file (env var takes precedence)
+    let mirror_url = env::var("GIT_AI_MIRROR_URL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            file_cfg
+                .as_ref()
+                .and_then(|c| c.mirror_url.clone())
+                .filter(|s| !s.is_empty())
+        });
+
+    // Get mirror API key from env var or config file (env var takes precedence)
+    let mirror_api_key = env::var("GIT_AI_MIRROR_API_KEY")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            file_cfg
+                .as_ref()
+                .and_then(|c| c.mirror_api_key.clone())
+                .filter(|s| !s.is_empty())
+        });
+
     // Get quiet setting (defaults to false)
     let quiet = file_cfg.as_ref().and_then(|c| c.quiet).unwrap_or(false);
 
@@ -648,6 +687,8 @@ fn build_config() -> Config {
             prompt_storage,
             default_prompt_storage,
             api_key,
+            mirror_url: mirror_url.clone(),
+            mirror_api_key: mirror_api_key.clone(),
             quiet,
             custom_attributes: custom_attributes.clone(),
         };
@@ -672,6 +713,8 @@ fn build_config() -> Config {
         prompt_storage,
         default_prompt_storage,
         api_key,
+        mirror_url,
+        mirror_api_key,
         quiet,
         custom_attributes,
     }
@@ -987,6 +1030,8 @@ mod tests {
             prompt_storage: "default".to_string(),
             default_prompt_storage: None,
             api_key: None,
+            mirror_url: None,
+            mirror_api_key: None,
             quiet: false,
             custom_attributes: HashMap::new(),
         }
@@ -1095,6 +1140,8 @@ mod tests {
             prompt_storage: "default".to_string(),
             default_prompt_storage: None,
             api_key: None,
+            mirror_url: None,
+            mirror_api_key: None,
             quiet: false,
             custom_attributes: HashMap::new(),
         }
@@ -1212,6 +1259,8 @@ mod tests {
             prompt_storage: prompt_storage.to_string(),
             default_prompt_storage: default_prompt_storage.map(|s| s.to_string()),
             api_key: None,
+            mirror_url: None,
+            mirror_api_key: None,
             quiet: false,
             custom_attributes: HashMap::new(),
         }

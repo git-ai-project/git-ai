@@ -1,4 +1,4 @@
-use crate::api::{ApiClient, ApiContext, upload_metrics_with_retry};
+use crate::api::{ApiClient, ApiContext, mirror_metrics, upload_metrics_with_retry};
 use crate::config::{Config, get_or_create_distinct_id};
 use crate::git::find_repository_in_path;
 use crate::metrics::db::MetricsDatabase;
@@ -795,7 +795,13 @@ fn send_metrics_events(events: &[MetricEvent], uploader: &MetricsUploader) -> bo
         && let Some(client) = &uploader.client
     {
         match upload_metrics_with_retry(client, &batch, "flush_logs") {
-            Ok(()) => return true,
+            Ok(()) => {
+                // Best-effort mirror — if this fails, the events were already
+                // persisted to primary. No retry here; flush_metrics_db handles
+                // mirror retries for events that go through the DB path.
+                let _ = mirror_metrics(&batch);
+                return true;
+            }
             Err(_) => {
                 store_metrics_in_db(events);
                 return true;

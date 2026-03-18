@@ -4,6 +4,28 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
+/// Current unix timestamp in seconds.
+pub fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+/// Exponential backoff delay for retry queues.
+/// Returns the next retry unix timestamp given the attempt number (1-indexed).
+pub fn calculate_next_retry(attempts: u32, now: i64) -> i64 {
+    let delay_seconds: i64 = match attempts {
+        1 => 5 * 60,       // 5 minutes
+        2 => 30 * 60,      // 30 minutes
+        3 => 2 * 60 * 60,  // 2 hours
+        4 => 6 * 60 * 60,  // 6 hours
+        5 => 12 * 60 * 60, // 12 hours
+        _ => 24 * 60 * 60, // 24 hours
+    };
+    now + delay_seconds
+}
+
 /// Check if debug logging is enabled via environment variable
 ///
 /// This is checked once at module initialization to avoid repeated environment variable lookups.

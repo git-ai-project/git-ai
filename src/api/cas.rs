@@ -14,8 +14,8 @@ impl ApiClient {
     /// # Returns
     /// * `Ok(CasUploadResponse)` - Success response
     /// * `Err(GitAiError)` - Error response
-    pub fn upload_cas(&self, request: CasUploadRequest) -> Result<CasUploadResponse, GitAiError> {
-        let response = self.context().post_json("/worker/cas/upload", &request)?;
+    pub fn upload_cas(&self, request: &CasUploadRequest) -> Result<CasUploadResponse, GitAiError> {
+        let response = self.context().post_json("/worker/cas/upload", request)?;
         let status_code = response.status_code;
 
         let body = response

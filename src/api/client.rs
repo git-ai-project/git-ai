@@ -180,6 +180,27 @@ impl ApiContext {
         }
     }
 
+    /// Create an API context for the mirror endpoint, if configured.
+    /// Uses mirror_url and mirror_api_key from config.
+    /// Returns None if mirror_url is not set.
+    pub fn mirror() -> Option<Self> {
+        let cfg = config::Config::get();
+        let mirror_url = cfg.mirror_url()?.to_string();
+        let mirror_api_key = cfg.mirror_api_key().map(|s| s.to_string());
+        let author_identity = if mirror_api_key.is_some() {
+            resolve_git_identity()
+        } else {
+            None
+        };
+        Some(Self {
+            base_url: mirror_url,
+            auth_token: None,
+            api_key: mirror_api_key,
+            author_identity,
+            timeout_secs: Some(10),
+        })
+    }
+
     /// Set a custom timeout
     pub fn with_timeout(mut self, timeout_secs: u64) -> Self {
         self.timeout_secs = Some(timeout_secs);
@@ -257,6 +278,26 @@ impl ApiContext {
             .map_err(|e| GitAiError::Generic(format!("HTTP request failed: {}", e)))?;
 
         Ok(response)
+    }
+}
+
+/// Send a request to the mirror endpoint if configured.
+/// Returns true if mirror succeeded or is not configured, false on failure.
+pub fn mirror_upload<F>(label: &str, upload: F) -> bool
+where
+    F: FnOnce(&ApiClient) -> Result<(), GitAiError>,
+{
+    match ApiContext::mirror() {
+        Some(ctx) => {
+            let client = ApiClient::new(ctx);
+            if let Err(e) = upload(&client) {
+                eprintln!("[mirror] {} upload failed: {}", label, e);
+                false
+            } else {
+                true
+            }
+        }
+        None => true,
     }
 }
 
