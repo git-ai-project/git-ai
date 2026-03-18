@@ -70,10 +70,10 @@ impl<B: GitBackend> TraceNormalizer<B> {
         let argv_primary = argv_primary_command(raw_argv);
         let selected = select_primary_command(root_cmd_name, observed_child_commands, raw_argv)
             .or_else(|| argv_primary.clone());
-        if let (Some(worktree), Some(_family)) = (worktree, family_key) {
-            if let Some(resolved) = self.backend.resolve_primary_command(worktree, raw_argv)? {
-                return Ok(Some(resolved));
-            }
+        if let (Some(worktree), Some(_family)) = (worktree, family_key)
+            && let Some(resolved) = self.backend.resolve_primary_command(worktree, raw_argv)?
+        {
+            return Ok(Some(resolved));
         }
         Ok(selected)
     }
