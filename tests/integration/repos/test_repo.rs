@@ -7,7 +7,6 @@ use git_ai::feature_flags::FeatureFlags;
 use git_ai::git::repo_storage::PersistedWorkingLog;
 use git_ai::git::repository as GitAiRepository;
 use git_ai::observability::wrapper_performance_targets::BenchmarkResult;
-use git2::Repository;
 use insta::{Settings, assert_debug_snapshot};
 use rand::Rng;
 use std::cell::Cell;
@@ -335,14 +334,9 @@ impl TestRepo {
         let path = base.join(n.to_string());
         let test_home = base.join(format!("{}-home", n));
         let test_db_path = resolve_test_db_path(&base, n, &test_home, git_mode);
-        let repo = Repository::init(&path).expect("failed to initialize git2 repository");
-        let mut config = Repository::config(&repo).expect("failed to initialize git2 repository");
-        config
-            .set_str("user.name", "Test User")
-            .expect("failed to initialize git2 repository");
-        config
-            .set_str("user.email", "test@example.com")
-            .expect("failed to initialize git2 repository");
+
+        // Clone from cached template (git init + config + symbolic-ref already done)
+        clone_template_to(&path);
 
         let mut repo = Self {
             path,
@@ -354,10 +348,6 @@ impl TestRepo {
             _base_repo_path: None,
             _base_test_db_path: None,
         };
-
-        // Ensure the default branch is named "main" for consistency across Git versions
-        // This is important because Git 2.28+ defaults to "main" while older versions use "master"
-        let _ = repo.git(&["symbolic-ref", "HEAD", "refs/heads/main"]);
 
         repo.apply_default_config_patch();
         repo.setup_git_hooks_mode();
@@ -378,25 +368,8 @@ impl TestRepo {
         let test_home = base.join(format!("{}-home", n));
         let test_db_path = resolve_test_db_path(&base, n, &test_home, git_mode);
 
-        let main_repo = Repository::init(&main_path).expect("failed to initialize main repository");
-        let mut main_config =
-            Repository::config(&main_repo).expect("failed to initialize main repository config");
-        main_config
-            .set_str("user.name", "Test User")
-            .expect("failed to set main user.name");
-        main_config
-            .set_str("user.email", "test@example.com")
-            .expect("failed to set main user.email");
-
-        let _ = Command::new(real_git_executable())
-            .args([
-                "-C",
-                main_path.to_str().unwrap(),
-                "symbolic-ref",
-                "HEAD",
-                "refs/heads/main",
-            ])
-            .output();
+        // Clone from cached template (git init + config + symbolic-ref already done)
+        clone_template_to(&main_path);
 
         let initial_commit_output = Command::new(real_git_executable())
             .args([
@@ -466,7 +439,8 @@ impl TestRepo {
         let test_home = base.join(format!("{}-home", n));
         let test_db_path = resolve_test_db_path(&base, n, &test_home, git_mode);
 
-        Repository::init_bare(&path).expect("failed to init bare repository");
+        // Clone from cached bare template
+        clone_bare_template_to(&path);
 
         let repo = Self {
             path,
@@ -512,7 +486,7 @@ impl TestRepo {
         let upstream_test_home = base.join(format!("{}-home", upstream_n));
         let upstream_test_db_path =
             resolve_test_db_path(&base, upstream_n, &upstream_test_home, git_mode);
-        Repository::init_bare(&upstream_path).expect("failed to init bare upstream repository");
+        clone_bare_template_to(&upstream_path);
 
         let mut upstream = Self {
             path: upstream_path.clone(),
@@ -552,16 +526,7 @@ impl TestRepo {
         }
 
         // Configure mirror with user credentials
-        let mirror_repo =
-            Repository::open(&mirror_path).expect("failed to open cloned mirror repository");
-        let mut config =
-            Repository::config(&mirror_repo).expect("failed to get mirror repository config");
-        config
-            .set_str("user.name", "Test User")
-            .expect("failed to set user.name in mirror");
-        config
-            .set_str("user.email", "test@example.com")
-            .expect("failed to set user.email in mirror");
+        set_repo_user_config(&mirror_path);
 
         let mut mirror = Self {
             path: mirror_path,
@@ -594,14 +559,10 @@ impl TestRepo {
         let db_n: u64 = rng.gen_range(0..10000000000);
         let test_home = std::env::temp_dir().join(format!("{}-home", db_n));
         let test_db_path = resolve_test_db_path(&std::env::temp_dir(), db_n, &test_home, git_mode);
-        let repo = Repository::init(path).expect("failed to initialize git2 repository");
-        let mut config = Repository::config(&repo).expect("failed to initialize git2 repository");
-        config
-            .set_str("user.name", "Test User")
-            .expect("failed to initialize git2 repository");
-        config
-            .set_str("user.email", "test@example.com")
-            .expect("failed to initialize git2 repository");
+
+        // Clone from cached template (git init + config + symbolic-ref already done)
+        clone_template_to(path);
+
         let mut repo = Self {
             path: path.clone(),
             feature_flags: FeatureFlags::default(),
@@ -612,9 +573,6 @@ impl TestRepo {
             _base_repo_path: None,
             _base_test_db_path: None,
         };
-
-        // Ensure the default branch is named "main" for consistency across Git versions
-        let _ = repo.git(&["symbolic-ref", "HEAD", "refs/heads/main"]);
 
         repo.apply_default_config_patch();
         repo.setup_git_hooks_mode();
@@ -1268,9 +1226,109 @@ impl NewCommit {
 }
 
 static DEFAULT_BRANCH_NAME: OnceLock<String> = OnceLock::new();
+static TEMPLATE_REPO: OnceLock<PathBuf> = OnceLock::new();
+static TEMPLATE_BARE_REPO: OnceLock<PathBuf> = OnceLock::new();
 
 pub(crate) fn real_git_executable() -> &'static str {
     git_ai::config::Config::get().git_cmd()
+}
+
+/// Create a pre-initialized template repo (cached across all tests in the process).
+/// Subsequent calls to `clone_template_to()` copy this instead of running git init.
+fn init_template_repo() -> PathBuf {
+    let path = std::env::temp_dir().join(format!("git-ai-test-template-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&path);
+
+    let p = path.to_str().unwrap();
+    let git = real_git_executable();
+
+    let output = Command::new(git)
+        .args(["init", p])
+        .output()
+        .expect("failed to init template repo");
+    assert!(output.status.success(), "template git init failed");
+
+    for args in [
+        vec!["-C", p, "config", "user.name", "Test User"],
+        vec!["-C", p, "config", "user.email", "test@example.com"],
+        vec!["-C", p, "symbolic-ref", "HEAD", "refs/heads/main"],
+    ] {
+        let output = Command::new(git)
+            .args(&args)
+            .output()
+            .expect("failed to configure template repo");
+        assert!(output.status.success(), "template config failed: {:?}", args);
+    }
+
+    path
+}
+
+fn init_bare_template_repo() -> PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "git-ai-test-template-bare-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&path);
+
+    let p = path.to_str().unwrap();
+    let git = real_git_executable();
+
+    let output = Command::new(git)
+        .args(["init", "--bare", p])
+        .output()
+        .expect("failed to init bare template repo");
+    assert!(output.status.success(), "bare template git init failed");
+
+    let output = Command::new(git)
+        .args(["-C", p, "symbolic-ref", "HEAD", "refs/heads/main"])
+        .output()
+        .expect("failed to set HEAD in bare template");
+    assert!(output.status.success());
+
+    path
+}
+
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let dest = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_recursive(&entry.path(), &dest)?;
+        } else {
+            fs::copy(entry.path(), &dest)?;
+        }
+    }
+    Ok(())
+}
+
+/// Clone the cached template repo to a new destination path.
+fn clone_template_to(dest: &std::path::Path) {
+    let template = TEMPLATE_REPO.get_or_init(init_template_repo);
+    copy_dir_recursive(template, dest).expect("failed to copy template repo");
+}
+
+/// Clone the cached bare template repo to a new destination path.
+fn clone_bare_template_to(dest: &std::path::Path) {
+    let template = TEMPLATE_BARE_REPO.get_or_init(init_bare_template_repo);
+    copy_dir_recursive(template, dest).expect("failed to copy bare template repo");
+}
+
+/// Set user.name and user.email on a repo using git CLI (no git2 needed).
+fn set_repo_user_config(repo_path: &std::path::Path) {
+    let p = repo_path.to_str().unwrap();
+    let git = real_git_executable();
+    for args in [
+        vec!["-C", p, "config", "user.name", "Test User"],
+        vec!["-C", p, "config", "user.email", "test@example.com"],
+    ] {
+        let output = Command::new(git)
+            .args(&args)
+            .output()
+            .expect("failed to set user config");
+        assert!(output.status.success());
+    }
 }
 
 fn get_default_branch_name() -> String {
