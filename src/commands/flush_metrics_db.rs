@@ -121,10 +121,10 @@ pub fn handle_flush_metrics_db(_args: &[String]) {
                 };
 
                 total_batches += 1;
-                total_uploaded += event_count;
                 // Only delete if mirror also succeeded (or not configured).
                 // If mirror failed, leave records for next cycle — primary is idempotent.
                 if mirrored {
+                    total_uploaded += event_count;
                     if let Ok(mut db_lock) = db.lock() {
                         let _ = db_lock.delete_records(&record_ids);
                     }
