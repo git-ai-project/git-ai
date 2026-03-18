@@ -24,6 +24,8 @@ const AGENT_EMAIL_MAPPINGS: &[(&str, &str)] = &[
     ),
     ("noreply@anthropic.com", "claude"),
     ("noreply@openai.com", "codex"),
+    ("noreply@moonshot.cn", "kimi-code"),
+    ("noreply@kimi.ai", "kimi-code"),
 ];
 
 /// Known GitHub username mappings: (username, platform)
@@ -31,11 +33,12 @@ const AGENT_USERNAME_MAPPINGS: &[(&str, &str)] = &[
     ("copilot-swe-agent[bot]", "github-copilot"),
     ("devin-ai-integration[bot]", "devin"),
     ("cursor[bot]", "cursor"),
+    ("kimi-code[bot]", "kimi-code"),
 ];
 
 /// Match a commit author email to a known AI agent tool name.
 ///
-/// Returns the tool name (e.g. "cursor", "github-copilot", "devin", "claude", "codex")
+/// Returns the tool name (e.g. "cursor", "github-copilot", "devin", "claude", "codex", "kimi-code")
 /// if the email matches a known agent pattern, or `None` otherwise.
 ///
 /// # Examples
@@ -194,6 +197,22 @@ mod tests {
     }
 
     #[test]
+    fn test_match_email_kimi_code_moonshot() {
+        assert_eq!(
+            match_email_to_agent("noreply@moonshot.cn"),
+            Some("kimi-code")
+        );
+    }
+
+    #[test]
+    fn test_match_email_kimi_code_kimi() {
+        assert_eq!(
+            match_email_to_agent("noreply@kimi.ai"),
+            Some("kimi-code")
+        );
+    }
+
+    #[test]
     fn test_match_email_case_insensitive() {
         assert_eq!(
             match_email_to_agent("CursorAgent@Cursor.com"),
@@ -235,6 +254,14 @@ mod tests {
     #[test]
     fn test_match_username_cursor() {
         assert_eq!(match_username_to_platform("cursor[bot]"), Some("cursor"));
+    }
+
+    #[test]
+    fn test_match_username_kimi_code() {
+        assert_eq!(
+            match_username_to_platform("kimi-code[bot]"),
+            Some("kimi-code")
+        );
     }
 
     #[test]
