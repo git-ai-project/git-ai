@@ -206,10 +206,7 @@ mod tests {
 
     #[test]
     fn test_match_email_kimi_code_kimi() {
-        assert_eq!(
-            match_email_to_agent("noreply@kimi.ai"),
-            Some("kimi-code")
-        );
+        assert_eq!(match_email_to_agent("noreply@kimi.ai"), Some("kimi-code"));
     }
 
     #[test]
