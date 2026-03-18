@@ -17,6 +17,7 @@ pub fn reduce_family_command(
     // Analyze against pre-command state so history/ref analyzers can infer old->new correctly.
     let analysis = analyzers.analyze(&cmd, AnalysisView { refs: &state.refs })?;
     apply_ref_changes(state, &cmd);
+    apply_post_repo_refs(state, &cmd);
     apply_worktree_state(state, &cmd);
 
     state.applied_seq = state.applied_seq.saturating_add(1);
@@ -85,6 +86,30 @@ fn apply_ref_changes(state: &mut FamilyState, cmd: &NormalizedCommand) {
                 .refs
                 .insert(change.reference.clone(), change.new.clone());
         }
+    }
+}
+
+fn apply_post_repo_refs(state: &mut FamilyState, cmd: &NormalizedCommand) {
+    let Some(post_repo) = cmd.post_repo.as_ref() else {
+        return;
+    };
+    let Some(head) = post_repo
+        .head
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+
+    let head = head.to_string();
+    if let Some(branch) = post_repo
+        .branch
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        state.refs.insert(format!("refs/heads/{}", branch), head);
     }
 }
 
@@ -180,6 +205,27 @@ mod tests {
         assert_eq!(
             state.refs.get("refs/heads/main").map(String::as_str),
             Some("abc")
+        );
+    }
+
+    #[test]
+    fn reducer_tracks_head_from_post_repo_snapshot() {
+        let mut state = family_state();
+        let registry = AnalyzerRegistry::new();
+        let mut cmd = normalized();
+        cmd.ref_changes.clear();
+        cmd.post_repo = Some(crate::daemon::domain::RepoContext {
+            head: Some("def".to_string()),
+            branch: Some("main".to_string()),
+            detached: false,
+            cherry_pick_head: None,
+        });
+
+        let (_applied, _analysis) = reduce_family_command(&mut state, cmd, &registry).unwrap();
+
+        assert_eq!(
+            state.refs.get("refs/heads/main").map(String::as_str),
+            Some("def")
         );
     }
 

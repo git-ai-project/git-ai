@@ -1022,6 +1022,13 @@ impl ActorDaemonCoordinator {
         Ok(*map.get(family).unwrap_or(&0))
     }
 
+    fn pending_ordered_effect_depth(&self, family: &str) -> Result<usize, GitAiError> {
+        let map = self.ordered_side_effects_by_family.lock().map_err(|_| {
+            GitAiError::Generic("ordered side effect map lock poisoned".to_string())
+        })?;
+        Ok(map.get(family).map(|state| state.pending.len()).unwrap_or(0))
+    }
+
     fn trace_connection_opened(&self) {
         self.active_trace_connections.fetch_add(1, Ordering::SeqCst);
     }
@@ -1068,11 +1075,30 @@ impl ActorDaemonCoordinator {
         seq: u64,
         entry: OrderedSideEffectEntry,
     ) -> Result<(), GitAiError> {
+        self.enqueue_ordered_family_side_effect_entry_internal(family, seq, entry, true)
+            .await
+    }
+
+    async fn enqueue_ordered_family_side_effect_entry_no_drain(
+        &self,
+        family: &str,
+        seq: u64,
+        entry: OrderedSideEffectEntry,
+    ) -> Result<(), GitAiError> {
+        self.enqueue_ordered_family_side_effect_entry_internal(family, seq, entry, false)
+            .await
+    }
+
+    async fn enqueue_ordered_family_side_effect_entry_internal(
+        &self,
+        family: &str,
+        seq: u64,
+        entry: OrderedSideEffectEntry,
+        drain_now: bool,
+    ) -> Result<(), GitAiError> {
         let exec_lock = self.side_effect_exec_lock(family)?;
         let _guard = exec_lock.lock().await;
 
-        let mut ready: Vec<OrderedSideEffectEntry> = Vec::new();
-        let mut progressed = false;
         {
             let mut map = self.ordered_side_effects_by_family.lock().map_err(|_| {
                 GitAiError::Generic("ordered side effect map lock poisoned".to_string())
@@ -1095,6 +1121,41 @@ impl ActorDaemonCoordinator {
                     seq, family
                 )));
             }
+        }
+
+        if drain_now {
+            self.drain_ready_ordered_family_side_effect_entries_locked(family)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn drain_ordered_family_side_effect_entries(
+        &self,
+        family: &str,
+    ) -> Result<(), GitAiError> {
+        let exec_lock = self.side_effect_exec_lock(family)?;
+        let _guard = exec_lock.lock().await;
+        self.drain_ready_ordered_family_side_effect_entries_locked(family)
+            .await
+    }
+
+    async fn drain_ready_ordered_family_side_effect_entries_locked(
+        &self,
+        family: &str,
+    ) -> Result<(), GitAiError> {
+        let mut ready: Vec<OrderedSideEffectEntry> = Vec::new();
+        let mut progressed = false;
+        {
+            let mut map = self.ordered_side_effects_by_family.lock().map_err(|_| {
+                GitAiError::Generic("ordered side effect map lock poisoned".to_string())
+            })?;
+            let state = map
+                .entry(family.to_string())
+                .or_insert_with(|| FamilySideEffectState {
+                    next_seq: 1,
+                    pending: BTreeMap::new(),
+                });
             while let Some(next_entry) = state.pending.remove(&state.next_seq) {
                 ready.push(next_entry);
                 state.next_seq = state.next_seq.saturating_add(1);
@@ -1713,11 +1774,43 @@ impl ActorDaemonCoordinator {
             }
         }
 
-        let mut rewrite_events = self.rewrite_events_from_semantic_events(family, cmd, events);
+        let mut rewrite_events =
+            if cmd.exit_code == 0 && cmd.primary_command.as_deref() == Some("commit") {
+                fallback_commit_rewrite_event(cmd).into_iter().collect::<Vec<_>>()
+            } else {
+                self.rewrite_events_from_semantic_events(family, cmd, events)
+            };
         if rewrite_events.is_empty()
             && let Some(fallback) = fallback_commit_rewrite_event(cmd)
         {
             rewrite_events.push(fallback);
+        }
+        if rewrite_events.is_empty() && cmd.exit_code == 0 {
+            if cmd.primary_command.as_deref() == Some("rebase")
+                && cmd.invoked_args.iter().any(|arg| arg == "--abort")
+                && let Some(worktree) = cmd.worktree.as_ref()
+                && let Ok(head) =
+                    run_git_capture(&worktree.to_string_lossy(), &["rev-parse", "HEAD"])
+                && is_valid_oid(&head)
+                && !is_zero_oid(&head)
+            {
+                rewrite_events.push(RewriteLogEvent::rebase_abort(RebaseAbortEvent::new(head)));
+            }
+            if cmd.primary_command.as_deref() == Some("cherry-pick")
+                && cmd.invoked_args.iter().any(|arg| arg == "--abort")
+                && let Some(worktree) = cmd.worktree.as_ref()
+                && let Ok(head) =
+                    run_git_capture(&worktree.to_string_lossy(), &["rev-parse", "HEAD"])
+                && is_valid_oid(&head)
+                && !is_zero_oid(&head)
+            {
+                rewrite_events.push(RewriteLogEvent::cherry_pick_abort(
+                    CherryPickAbortEvent::new(head),
+                ));
+                if let Some(family) = family {
+                    let _ = self.clear_pending_cherry_pick_sources_for_family(family);
+                }
+            }
         }
 
         let mut emitted_rewrite_event = false;
@@ -1831,6 +1924,45 @@ impl ActorDaemonCoordinator {
         ))
     }
 
+    async fn ingest_trace_payload_fast(self: Arc<Self>, payload: Value) -> Result<(), GitAiError> {
+        if !is_relevant_trace_payload(&payload) {
+            return Ok(());
+        }
+
+        let emitted = {
+            let mut normalizer = self.normalizer.lock().await;
+            normalizer.ingest_payload(&payload)?
+        };
+
+        let Some(command) = emitted else {
+            return Ok(());
+        };
+
+        let applied = self.coordinator.route_command(command).await?;
+        if let Some(family) = applied.command.family_key.as_ref().map(|key| key.0.clone()) {
+            self.enqueue_ordered_family_side_effect_entry_no_drain(
+                &family,
+                applied.seq,
+                OrderedSideEffectEntry::Command(applied),
+            )
+            .await?;
+            let coordinator = self.clone();
+            tokio::spawn(async move {
+                if let Err(error) = coordinator
+                    .drain_ordered_family_side_effect_entries(&family)
+                    .await
+                {
+                    debug_log(&format!(
+                        "daemon async side-effect drain error for family {}: {}",
+                        family, error
+                    ));
+                }
+            });
+        }
+
+        Ok(())
+    }
+
     async fn ingest_checkpoint_payload(
         &self,
         request: CheckpointRunRequest,
@@ -1915,12 +2047,13 @@ impl ActorDaemonCoordinator {
         let cursor = latest_seq.saturating_sub(pending_total);
         let backlog = latest_seq.saturating_sub(cursor);
         let inflight_effects = self.inflight_effect_depth(&family.0)?;
+        let pending_ordered_effects = self.pending_ordered_effect_depth(&family.0)?;
         Ok(FamilyStatus {
             family_key: family.0,
             latest_seq,
             cursor,
             backlog,
-            effect_queue_depth: inflight_effects,
+            effect_queue_depth: inflight_effects.saturating_add(pending_ordered_effects),
             active_trace_connections: active_connections as usize,
             pending_roots: pending_roots as usize,
             deferred_root_exits: deferred_root_exits as usize,
@@ -2169,8 +2302,8 @@ fn handle_trace_connection_actor(
             Ok(v) => v,
             Err(_) => continue,
         };
-        if let Err(error) =
-            runtime_handle.block_on(async { coordinator.ingest_trace_payload(parsed, false).await })
+        if let Err(error) = runtime_handle
+            .block_on(async { coordinator.clone().ingest_trace_payload_fast(parsed).await })
         {
             debug_log(&format!("daemon trace ingest error: {}", error));
         }

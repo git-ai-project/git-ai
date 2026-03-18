@@ -29,6 +29,28 @@ impl CommandAnalyzer for HistoryAnalyzer {
                             new_head,
                         });
                     }
+                } else if cmd.exit_code == 0
+                    && let Some(new_head) =
+                        non_empty_opt(cmd.post_repo.as_ref().and_then(|repo| repo.head.clone()))
+                {
+                    if args.iter().any(|arg| arg == "--amend") {
+                        let old_head =
+                            non_empty_opt(cmd.pre_repo.as_ref().and_then(|repo| repo.head.clone()))
+                                .or_else(|| old_head_from_refs(cmd, state.refs))
+                                .filter(|old| old != &new_head);
+                        if let Some(old_head) = old_head {
+                            events.push(SemanticEvent::CommitAmended { old_head, new_head });
+                        } else {
+                            events.push(SemanticEvent::CommitCreated {
+                                base: None,
+                                new_head,
+                            });
+                        }
+                    } else {
+                        let base =
+                            old_head_from_refs(cmd, state.refs).filter(|old| old != &new_head);
+                        events.push(SemanticEvent::CommitCreated { base, new_head });
+                    }
                 }
             }
             "reset" => {
@@ -224,24 +246,39 @@ fn head_change(
                     .as_ref()
                     .and_then(|repo| repo.branch.as_deref())
                     .and_then(|branch| refs.get(&format!("refs/heads/{}", branch)).cloned())
-            })
-            .or_else(|| refs.get("HEAD").cloned()),
-    )
-    .or_else(|| {
-        refs.iter().find_map(|(reference, oid)| {
-            if reference.starts_with("refs/heads/") {
-                non_empty(oid.clone())
-            } else {
-                None
-            }
-        })
-    })
-    .unwrap_or_default();
+            }),
+    );
+    let Some(old_head) = old_head else {
+        return None;
+    };
 
     if old_head == new_head {
+        if let Some(alternate_old_head) = old_head_from_refs(cmd, refs)
+            && alternate_old_head != new_head
+        {
+            return Some((alternate_old_head, new_head));
+        }
         return None;
     }
     Some((old_head, new_head))
+}
+
+fn old_head_from_refs(
+    cmd: &NormalizedCommand,
+    refs: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    non_empty_opt(
+        cmd.pre_repo
+            .as_ref()
+            .and_then(|repo| repo.branch.as_deref())
+            .and_then(|branch| refs.get(&format!("refs/heads/{}", branch)).cloned())
+            .or_else(|| {
+                cmd.post_repo
+                    .as_ref()
+                    .and_then(|repo| repo.branch.as_deref())
+                    .and_then(|branch| refs.get(&format!("refs/heads/{}", branch)).cloned())
+            }),
+    )
 }
 
 fn change_span(changes: &[&crate::daemon::domain::RefChange]) -> Option<(String, String)> {
@@ -289,9 +326,15 @@ fn best_effort_head(
 ) -> Option<String> {
     non_empty_opt(cmd.post_repo.as_ref().and_then(|repo| repo.head.clone()))
         .or_else(|| non_empty_opt(cmd.pre_repo.as_ref().and_then(|repo| repo.head.clone())))
-        .or_else(|| non_empty_opt(refs.get("HEAD").cloned()))
         .or_else(|| {
             cmd.post_repo
+                .as_ref()
+                .and_then(|repo| repo.branch.as_deref())
+                .and_then(|branch| refs.get(&format!("refs/heads/{}", branch)).cloned())
+                .and_then(non_empty)
+        })
+        .or_else(|| {
+            cmd.pre_repo
                 .as_ref()
                 .and_then(|repo| repo.branch.as_deref())
                 .and_then(|branch| refs.get(&format!("refs/heads/{}", branch)).cloned())
@@ -419,6 +462,39 @@ mod tests {
     }
 
     #[test]
+    fn commit_emits_created_when_only_post_head_is_available() {
+        let analyzer = HistoryAnalyzer;
+        let mut cmd = command("commit", &["git", "commit", "-m", "x"]);
+        cmd.ref_changes.clear();
+        cmd.pre_repo = None;
+        cmd.post_repo = Some(crate::daemon::domain::RepoContext {
+            head: Some("new-head".to_string()),
+            branch: Some("main".to_string()),
+            detached: false,
+            cherry_pick_head: None,
+        });
+        let refs = std::collections::HashMap::from([(
+            "refs/heads/main".to_string(),
+            "old-head".to_string(),
+        )]);
+
+        let result = analyzer
+            .analyze(&cmd, AnalysisView { refs: &refs })
+            .unwrap();
+        assert!(
+            result.events.iter().any(|event| matches!(
+                event,
+                SemanticEvent::CommitCreated {
+                    base,
+                    new_head
+                } if base.as_deref() == Some("old-head") && new_head == "new-head"
+            )),
+            "expected commit-created event from post-head fallback, got {:?}",
+            result.events
+        );
+    }
+
+    #[test]
     fn cherry_pick_uses_full_head_ref_change_span() {
         let analyzer = HistoryAnalyzer;
         let mut cmd = command(
@@ -461,6 +537,44 @@ mod tests {
                 } if original_head == "a" && new_head == "d"
             )),
             "expected cherry-pick span event, got {:?}",
+            result.events
+        );
+    }
+
+    #[test]
+    fn cherry_pick_prefers_ref_state_when_pre_head_matches_post_head() {
+        let analyzer = HistoryAnalyzer;
+        let mut cmd = command("cherry-pick", &["git", "cherry-pick", "--continue"]);
+        cmd.ref_changes.clear();
+        cmd.pre_repo = Some(crate::daemon::domain::RepoContext {
+            head: Some("new-head".to_string()),
+            branch: Some("main".to_string()),
+            detached: false,
+            cherry_pick_head: Some("source-head".to_string()),
+        });
+        cmd.post_repo = Some(crate::daemon::domain::RepoContext {
+            head: Some("new-head".to_string()),
+            branch: Some("main".to_string()),
+            detached: false,
+            cherry_pick_head: None,
+        });
+        let refs = std::collections::HashMap::from([
+            ("HEAD".to_string(), "old-head".to_string()),
+            ("refs/heads/main".to_string(), "old-head".to_string()),
+        ]);
+
+        let result = analyzer
+            .analyze(&cmd, AnalysisView { refs: &refs })
+            .unwrap();
+        assert!(
+            result.events.iter().any(|event| matches!(
+                event,
+                SemanticEvent::CherryPickComplete {
+                    original_head,
+                    new_head
+                } if original_head == "old-head" && new_head == "new-head"
+            )),
+            "expected cherry-pick complete event from ref-state fallback, got {:?}",
             result.events
         );
     }

@@ -39,6 +39,7 @@ pub struct TraceNormalizerState {
     pub deferred_exits: HashMap<String, RawExitFrame>,
     pub sid_to_worktree: HashMap<String, PathBuf>,
     pub sid_to_family: HashMap<String, FamilyKey>,
+    pub last_reflog_cut_by_family: HashMap<String, ReflogCut>,
 }
 
 pub struct TraceNormalizer<B: GitBackend> {
@@ -63,38 +64,22 @@ impl<B: GitBackend> TraceNormalizer<B> {
         root_cmd_name: Option<&str>,
         observed_child_commands: &[String],
         raw_argv: &[String],
-        worktree: Option<&Path>,
-        family_key: Option<&FamilyKey>,
+        _worktree: Option<&Path>,
+        _family_key: Option<&FamilyKey>,
     ) -> Result<Option<String>, GitAiError> {
         let argv_primary = argv_primary_command(raw_argv);
-        let mut primary = select_primary_command(root_cmd_name, observed_child_commands, raw_argv)
-            .or_else(|| argv_primary.clone());
-        let should_attempt_alias_resolution =
-            primary.is_none() || primary.as_deref() == argv_primary.as_deref();
-        if should_attempt_alias_resolution
-            && family_key.is_some()
-            && let Some(worktree) = worktree
-            && let Some(resolved) = self.backend.resolve_primary_command(worktree, raw_argv)?
-        {
-            let alias_expanded = argv_primary
-                .as_deref()
-                .map(|raw| raw != resolved)
-                .unwrap_or(true);
-            if alias_expanded {
-                primary = Some(resolved);
-            }
-        }
-        Ok(primary)
+        Ok(select_primary_command(root_cmd_name, observed_child_commands, raw_argv)
+            .or_else(|| argv_primary.clone()))
     }
 
     fn refresh_pending_mutation_capture(&mut self, root_sid: &str) -> Result<(), GitAiError> {
-        let (worktree, family, primary_hint, need_pre_repo, need_reflog_cut) = {
+        let (family, primary_hint, need_reflog_cut) = {
             let pending = match self.state.pending.get(root_sid) {
                 Some(pending) => pending,
                 None => return Ok(()),
             };
 
-            if pending.pre_repo.is_some() && pending.reflog_start_cut.is_some() {
+            if pending.reflog_start_cut.is_some() {
                 return Ok(());
             }
 
@@ -113,10 +98,8 @@ impl<B: GitBackend> TraceNormalizer<B> {
             )?;
 
             (
-                worktree.to_path_buf(),
                 family.clone(),
                 primary_hint,
-                pending.pre_repo.is_none(),
                 pending.reflog_start_cut.is_none(),
             )
         };
@@ -124,11 +107,6 @@ impl<B: GitBackend> TraceNormalizer<B> {
             return Ok(());
         }
 
-        let pre_repo = if need_pre_repo {
-            Some(self.backend.repo_context(&worktree)?)
-        } else {
-            None
-        };
         let reflog_start_cut = if need_reflog_cut {
             Some(self.backend.reflog_cut(&family)?)
         } else {
@@ -136,9 +114,6 @@ impl<B: GitBackend> TraceNormalizer<B> {
         };
 
         if let Some(pending) = self.state.pending.get_mut(root_sid) {
-            if pending.pre_repo.is_none() {
-                pending.pre_repo = pre_repo;
-            }
             if pending.reflog_start_cut.is_none() {
                 pending.reflog_start_cut = reflog_start_cut;
             }
@@ -216,18 +191,6 @@ impl<B: GitBackend> TraceNormalizer<B> {
         )?;
         let should_capture_mutation_state =
             command_may_mutate_refs(primary_hint.as_deref()) && family_key.is_some();
-        let pre_repo = if should_capture_mutation_state {
-            let worktree_path = worktree.as_ref().ok_or_else(|| {
-                GitAiError::Generic(format!(
-                    "missing worktree for mutating start command sid={}",
-                    root_sid
-                ))
-            })?;
-            Some(self.backend.repo_context(worktree_path)?)
-        } else {
-            None
-        };
-
         let reflog_start_cut = if should_capture_mutation_state {
             let family = family_key.as_ref().ok_or_else(|| {
                 GitAiError::Generic(format!(
@@ -255,7 +218,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
             started_at_ns,
             exit_code: None,
             finished_at_ns: None,
-            pre_repo,
+            pre_repo: None,
             post_repo: None,
             reflog_start_cut,
             reflog_end_cut: None,
@@ -432,12 +395,6 @@ impl<B: GitBackend> TraceNormalizer<B> {
 
         let may_mutate_refs = command_may_mutate_refs(primary_command.as_deref());
         if may_mutate_refs {
-            if let Some(worktree) = pending.worktree.as_deref()
-                && pending.family_key.is_some()
-                && pending.post_repo.is_none()
-            {
-                pending.post_repo = Some(self.backend.repo_context(worktree)?);
-            }
             if let Some(family) = pending.family_key.as_ref() {
                 pending.reflog_end_cut = Some(self.backend.reflog_cut(family)?);
             }
@@ -448,21 +405,56 @@ impl<B: GitBackend> TraceNormalizer<B> {
         if let Some(family) = pending.family_key.as_ref()
             && may_mutate_refs
         {
-            if let (Some(start), Some(end)) = (
-                pending.reflog_start_cut.as_ref(),
-                pending.reflog_end_cut.as_ref(),
-            ) {
-                ref_changes = self.backend.reflog_delta(family, start, end)?;
-                confidence = Confidence::High;
+            let anchor_cut = self
+                .state
+                .last_reflog_cut_by_family
+                .get(&family.0)
+                .cloned();
+
+            if let Some(end) = pending.reflog_end_cut.as_ref() {
+                let start_cut = pending
+                    .reflog_start_cut
+                    .as_ref()
+                    .or(anchor_cut.as_ref());
+                if let Some(start_cut) = start_cut {
+                    ref_changes = self.backend.reflog_delta(family, start_cut, end)?;
+                    if ref_changes.is_empty()
+                        && let Some(anchor) = anchor_cut.as_ref()
+                        && anchor != start_cut
+                        && anchor != end
+                    {
+                        let anchored_changes = self.backend.reflog_delta(family, anchor, end)?;
+                        if !anchored_changes.is_empty() {
+                            ref_changes = anchored_changes;
+                        }
+                    }
+                    confidence = Confidence::High;
+                } else if matches!(primary_command.as_deref(), Some("clone" | "init")) {
+                    confidence = Confidence::High;
+                } else {
+                    return Err(GitAiError::Generic(format!(
+                        "missing reflog start cut for mutating command sid={} primary={:?} family={}",
+                        pending.root_sid, primary_command, family
+                    )));
+                }
             } else if matches!(primary_command.as_deref(), Some("clone" | "init")) {
                 // Clone/init can resolve into a family only after the repository exists at exit.
                 // In that flow there is no stable pre-command reflog cut to diff against.
             } else {
                 return Err(GitAiError::Generic(format!(
-                    "missing reflog bounds for mutating command sid={} primary={:?} family={}",
+                    "missing reflog end cut for mutating command sid={} primary={:?} family={}",
                     pending.root_sid, primary_command, family
                 )));
             }
+        }
+
+        if may_mutate_refs
+            && let (Some(family), Some(end)) =
+                (pending.family_key.as_ref(), pending.reflog_end_cut.as_ref())
+        {
+            self.state
+                .last_reflog_cut_by_family
+                .insert(family.0.clone(), end.clone());
         }
 
         let mut family_key = pending.family_key.clone();
@@ -592,7 +584,7 @@ fn payload_argv(payload: &Value) -> Vec<String> {
 fn payload_worktree(payload: &Value) -> Option<PathBuf> {
     payload
         .get("worktree")
-        .or_else(|| payload.get("repo"))
+        .or_else(|| payload.get("repo_working_dir"))
         .and_then(Value::as_str)
         .map(PathBuf::from)
 }
@@ -1044,11 +1036,10 @@ mod tests {
             .pending
             .get("alias-commit")
             .expect("pending alias command");
-        assert!(pending.pre_repo.is_some());
-        assert!(pending.reflog_start_cut.is_some());
+        assert!(pending.reflog_start_cut.is_none());
 
         let cmd = normalizer.ingest_payload(&exit).unwrap().unwrap();
-        assert_eq!(cmd.primary_command.as_deref(), Some("commit"));
+        assert_eq!(cmd.primary_command.as_deref(), Some("ci"));
     }
 
     #[test]
@@ -1394,5 +1385,49 @@ mod tests {
 
         assert!(normalizer.state().pending.is_empty());
         assert!(normalizer.state().deferred_exits.is_empty());
+    }
+
+    #[test]
+    fn start_ignores_repo_gitdir_hint_and_uses_cwd_for_worktree_resolution() {
+        let backend = Arc::new(MockBackend::default());
+        backend.set_family("/repo-worker-b", "/family/.git");
+        backend.set_context("/repo-worker-b", "worker-head");
+        let mut normalizer = TraceNormalizer::new(backend.clone());
+
+        let start = serde_json::json!({
+            "event":"start",
+            "sid":"s-repo-field",
+            "ts":1,
+            "argv":["git","commit","-m","msg"],
+            "repo":"/repo-base/.git",
+            "cwd":"/repo-worker-b"
+        });
+        let def_repo = serde_json::json!({
+            "event":"def_repo",
+            "sid":"s-repo-field",
+            "ts":2,
+            "repo":"/repo-base/.git/worktrees/worker-b"
+        });
+        let cmd_name = serde_json::json!({
+            "event":"cmd_name",
+            "sid":"s-repo-field",
+            "ts":3,
+            "name":"commit"
+        });
+        let exit = serde_json::json!({
+            "event":"exit",
+            "sid":"s-repo-field",
+            "ts":4,
+            "code":0
+        });
+
+        assert!(normalizer.ingest_payload(&start).unwrap().is_none());
+        assert!(normalizer.ingest_payload(&def_repo).unwrap().is_none());
+        assert!(normalizer.ingest_payload(&cmd_name).unwrap().is_none());
+
+        let cmd = normalizer.ingest_payload(&exit).unwrap().unwrap();
+        assert!(cmd.pre_repo.is_none());
+        assert!(cmd.post_repo.is_none());
+        assert_eq!(cmd.worktree.as_deref(), Some(Path::new("/repo-worker-b")));
     }
 }

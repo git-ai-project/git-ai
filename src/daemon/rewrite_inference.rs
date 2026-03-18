@@ -30,23 +30,11 @@ pub(crate) fn fallback_commit_rewrite_event(cmd: &NormalizedCommand) -> Option<R
         return None;
     }
 
-    let base = cmd
-        .pre_repo
-        .as_ref()
-        .and_then(|repo| repo.head.clone())
-        .filter(|sha| is_valid_oid(sha) && !is_zero_oid(sha) && sha != &new_head)
-        .or_else(|| {
-            run_git_capture(&worktree, &["rev-parse", "HEAD@{1}"])
-                .ok()
-                .filter(|sha| is_valid_oid(sha) && !is_zero_oid(sha) && sha != &new_head)
-        })
-        .or_else(|| {
-            run_git_capture(&worktree, &["rev-parse", "HEAD^"])
-                .ok()
-                .filter(|sha| is_valid_oid(sha) && !is_zero_oid(sha) && sha != &new_head)
-        });
+    let base = run_git_capture(&worktree, &["rev-parse", "HEAD^"])
+        .ok()
+        .filter(|sha| is_valid_oid(sha) && !is_zero_oid(sha) && sha != &new_head);
 
-    // Root commits on fresh branches can lack both `HEAD@{1}` and `HEAD^`.
+    // Root commits on fresh branches do not have a parent commit.
     // Preserve the rewrite event with `base_commit = None` so replay treats
     // the commit as based on `initial`.
     Some(RewriteLogEvent::commit(base, new_head))
