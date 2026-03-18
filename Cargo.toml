@@ -54,3 +54,7 @@ paste = "1.0"
 
 [profile.dev]
 split-debuginfo = "unpacked"
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"
+harness = true
