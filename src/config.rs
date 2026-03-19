@@ -82,6 +82,7 @@ pub struct Config {
     api_key: Option<String>,
     quiet: bool,
     custom_attributes: HashMap<String, String>,
+    git_ai_hooks: HashMap<String, Vec<String>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize)]
@@ -151,6 +152,8 @@ pub struct FileConfig {
     pub quiet: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_attributes: Option<HashMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_ai_hooks: Option<HashMap<String, Vec<String>>>,
 }
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
@@ -398,6 +401,16 @@ impl Config {
         &self.custom_attributes
     }
 
+    /// Returns all configured git-ai hook commands.
+    pub fn git_ai_hooks(&self) -> &HashMap<String, Vec<String>> {
+        &self.git_ai_hooks
+    }
+
+    /// Returns configured shell commands for a specific hook.
+    pub fn git_ai_hook_commands(&self, hook_name: &str) -> Option<&Vec<String>> {
+        self.git_ai_hooks.get(hook_name)
+    }
+
     /// Serialize the effective runtime config into pretty JSON.
     /// Sensitive values are redacted via field serializers.
     pub fn to_printable_json_pretty(&self) -> Result<String, String> {
@@ -630,6 +643,30 @@ fn build_config() -> Config {
     // Build custom attributes: file config as base, env var overrides
     let custom_attributes = build_custom_attributes(&file_cfg);
 
+    let git_ai_hooks = file_cfg
+        .as_ref()
+        .and_then(|c| c.git_ai_hooks.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(hook_name, commands)| {
+            let hook_name = hook_name.trim().to_string();
+            if hook_name.is_empty() {
+                return None;
+            }
+
+            let commands: Vec<String> = commands
+                .into_iter()
+                .map(|command| command.trim().to_string())
+                .filter(|command| !command.is_empty())
+                .collect();
+            if commands.is_empty() {
+                return None;
+            }
+
+            Some((hook_name, commands))
+        })
+        .collect::<HashMap<String, Vec<String>>>();
+
     #[cfg(any(test, feature = "test-support"))]
     {
         let mut config = Config {
@@ -650,6 +687,7 @@ fn build_config() -> Config {
             api_key,
             quiet,
             custom_attributes: custom_attributes.clone(),
+            git_ai_hooks: git_ai_hooks.clone(),
         };
         apply_test_config_patch(&mut config);
         config
@@ -674,6 +712,7 @@ fn build_config() -> Config {
         api_key,
         quiet,
         custom_attributes,
+        git_ai_hooks,
     }
 }
 
@@ -989,6 +1028,7 @@ mod tests {
             api_key: None,
             quiet: false,
             custom_attributes: HashMap::new(),
+            git_ai_hooks: HashMap::new(),
         }
     }
 
@@ -1097,6 +1137,7 @@ mod tests {
             api_key: None,
             quiet: false,
             custom_attributes: HashMap::new(),
+            git_ai_hooks: HashMap::new(),
         }
     }
 
@@ -1214,6 +1255,7 @@ mod tests {
             api_key: None,
             quiet: false,
             custom_attributes: HashMap::new(),
+            git_ai_hooks: HashMap::new(),
         }
     }
 

@@ -1948,6 +1948,7 @@ fn remap_notes_for_commit_pairs(
 
     let count = entries.len();
     crate::git::refs::notes_add_batch(repo, &entries)?;
+
     Ok(count)
 }
 
@@ -2081,6 +2082,7 @@ fn try_fast_path_rebase_note_remap(
     let remapped_count = remapped_note_entries.len();
     let write_start = std::time::Instant::now();
     crate::git::refs::notes_add_batch(repo, &remapped_note_entries)?;
+
     debug_performance_log(&format!(
         "Fast-path rebase note remap: wrote {} remapped notes in {}ms",
         remapped_count,
@@ -2170,6 +2172,7 @@ fn try_fast_path_cherry_pick_note_remap(
     let remapped_count = remapped_note_entries.len();
     let write_start = std::time::Instant::now();
     crate::git::refs::notes_add_batch(repo, &remapped_note_entries)?;
+
     debug_performance_log(&format!(
         "Fast-path cherry-pick note remap: wrote {} remapped notes in {}ms",
         remapped_count,
