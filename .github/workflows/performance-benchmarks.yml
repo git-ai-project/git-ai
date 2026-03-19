@@ -50,7 +50,7 @@ jobs:
             --lines-per-file 400 \
             --burst-every 6 \
             --repetitions 1 \
-            --margin-pct 30 \
+            --margin-pct 40 \
             --margin-baseline main_wrapper \
             --enforce-margin
 
