@@ -6,6 +6,7 @@ use crate::commands::checkpoint_agent::agent_presets::{
     GithubCopilotPreset, WindsurfPreset,
 };
 use crate::commands::checkpoint_agent::amp_preset::AmpPreset;
+use crate::commands::checkpoint_agent::kilo_code_preset::KiloCodePreset;
 use crate::commands::checkpoint_agent::opencode_preset::OpenCodePreset;
 use crate::error::GitAiError;
 use crate::git::refs::{get_authorship, grep_ai_notes};
@@ -178,6 +179,7 @@ pub fn update_prompt_from_tool(
         "droid" => update_droid_prompt(agent_metadata, current_model),
         "amp" => update_amp_prompt(external_thread_id, agent_metadata, current_model),
         "opencode" => update_opencode_prompt(external_thread_id, agent_metadata, current_model),
+        "kilo-code" => update_kilo_code_prompt(external_thread_id, agent_metadata, current_model),
         "windsurf" => update_windsurf_prompt(agent_metadata, current_model),
         _ => {
             debug_log(&format!("Unknown tool: {}", tool));
@@ -572,6 +574,49 @@ fn update_opencode_prompt(
                 &e,
                 Some(serde_json::json!({
                     "agent_tool": "opencode",
+                    "operation": "transcript_and_model_from_storage"
+                })),
+            );
+            PromptUpdateResult::Failed(e)
+        }
+    }
+}
+
+/// Update Kilo Code prompt by fetching latest transcript from storage
+fn update_kilo_code_prompt(
+    session_id: &str,
+    metadata: Option<&HashMap<String, String>>,
+    current_model: &str,
+) -> PromptUpdateResult {
+    // Check for test storage path override in metadata or env var
+    let storage_path = if let Ok(env_path) = std::env::var("GIT_AI_KILO_CODE_STORAGE_PATH") {
+        Some(std::path::PathBuf::from(env_path))
+    } else {
+        metadata
+            .and_then(|m| m.get("__test_storage_path"))
+            .map(std::path::PathBuf::from)
+    };
+
+    let result = if let Some(path) = storage_path {
+        KiloCodePreset::transcript_and_model_from_storage(&path, session_id)
+    } else {
+        KiloCodePreset::transcript_and_model_from_session(session_id)
+    };
+
+    match result {
+        Ok((transcript, model)) => PromptUpdateResult::Updated(
+            transcript,
+            model.unwrap_or_else(|| current_model.to_string()),
+        ),
+        Err(e) => {
+            debug_log(&format!(
+                "Failed to fetch Kilo Code transcript for session {}: {}",
+                session_id, e
+            ));
+            log_error(
+                &e,
+                Some(serde_json::json!({
+                    "agent_tool": "kilo-code",
                     "operation": "transcript_and_model_from_storage"
                 })),
             );
