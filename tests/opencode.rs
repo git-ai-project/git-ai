@@ -482,7 +482,7 @@ fn test_opencode_tool_use_only_from_assistant() {
 fn test_opencode_e2e_checkpoint_and_commit() {
     use repos::test_repo::TestRepo;
 
-    let mut repo = TestRepo::new();
+    let mut repo = TestRepo::new_dedicated_daemon();
 
     repo.patch_git_ai_config(|patch| {
         patch.exclude_prompts_in_repositories = Some(vec![]);

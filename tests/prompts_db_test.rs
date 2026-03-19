@@ -125,7 +125,7 @@ fn verify_schema(conn: &Connection) {
 
 #[test]
 fn test_populate_creates_database_with_schema() {
-    let mut repo = TestRepo::new();
+    let mut repo = TestRepo::new_dedicated_daemon();
 
     // Enable prompt sharing for testing
     repo.patch_git_ai_config(|patch| {
@@ -175,7 +175,7 @@ fn test_populate_creates_database_with_schema() {
 
 #[test]
 fn test_populate_with_since_filter() {
-    let mut repo = TestRepo::new();
+    let mut repo = TestRepo::new_dedicated_daemon();
 
     repo.patch_git_ai_config(|patch| {
         patch.exclude_prompts_in_repositories = Some(vec![]);
@@ -220,7 +220,7 @@ fn test_populate_with_since_filter() {
 
 #[test]
 fn test_populate_with_author_filter() {
-    let mut repo = TestRepo::new();
+    let mut repo = TestRepo::new_dedicated_daemon();
 
     repo.patch_git_ai_config(|patch| {
         patch.exclude_prompts_in_repositories = Some(vec![]);
@@ -287,7 +287,7 @@ fn test_populate_with_author_filter() {
 
 #[test]
 fn test_populate_with_all_authors_flag() {
-    let mut repo = TestRepo::new();
+    let mut repo = TestRepo::new_dedicated_daemon();
 
     repo.patch_git_ai_config(|patch| {
         patch.exclude_prompts_in_repositories = Some(vec![]);
@@ -328,7 +328,7 @@ fn test_populate_with_all_authors_flag() {
 
 #[test]
 fn test_list_command_outputs_tsv() {
-    let mut repo = TestRepo::new();
+    let mut repo = TestRepo::new_dedicated_daemon();
 
     repo.patch_git_ai_config(|patch| {
         patch.exclude_prompts_in_repositories = Some(vec![]);
@@ -381,7 +381,7 @@ fn test_list_command_outputs_tsv() {
 
 #[test]
 fn test_list_command_with_custom_columns() {
-    let mut repo = TestRepo::new();
+    let mut repo = TestRepo::new_dedicated_daemon();
 
     repo.patch_git_ai_config(|patch| {
         patch.exclude_prompts_in_repositories = Some(vec![]);
@@ -424,7 +424,7 @@ fn test_list_command_with_custom_columns() {
 
 #[test]
 fn test_next_command_returns_json() {
-    let mut repo = TestRepo::new();
+    let mut repo = TestRepo::new_dedicated_daemon();
 
     repo.patch_git_ai_config(|patch| {
         patch.exclude_prompts_in_repositories = Some(vec![]);
@@ -480,7 +480,7 @@ fn test_next_command_returns_json() {
 
 #[test]
 fn test_next_command_advances_pointer() {
-    let mut repo = TestRepo::new();
+    let mut repo = TestRepo::new_dedicated_daemon();
 
     repo.patch_git_ai_config(|patch| {
         patch.exclude_prompts_in_repositories = Some(vec![]);
@@ -549,7 +549,7 @@ fn test_next_command_advances_pointer() {
 
 #[test]
 fn test_next_command_no_more_prompts() {
-    let mut repo = TestRepo::new();
+    let mut repo = TestRepo::new_dedicated_daemon();
 
     repo.patch_git_ai_config(|patch| {
         patch.exclude_prompts_in_repositories = Some(vec![]);
@@ -596,7 +596,7 @@ fn test_next_command_no_more_prompts() {
 
 #[test]
 fn test_reset_command() {
-    let mut repo = TestRepo::new();
+    let mut repo = TestRepo::new_dedicated_daemon();
 
     repo.patch_git_ai_config(|patch| {
         patch.exclude_prompts_in_repositories = Some(vec![]);
@@ -666,7 +666,7 @@ fn test_reset_command() {
 
 #[test]
 fn test_count_command() {
-    let mut repo = TestRepo::new();
+    let mut repo = TestRepo::new_dedicated_daemon();
 
     repo.patch_git_ai_config(|patch| {
         patch.exclude_prompts_in_repositories = Some(vec![]);
@@ -708,7 +708,7 @@ fn test_count_command() {
 
 #[test]
 fn test_exec_command_select_query() {
-    let mut repo = TestRepo::new();
+    let mut repo = TestRepo::new_dedicated_daemon();
 
     repo.patch_git_ai_config(|patch| {
         patch.exclude_prompts_in_repositories = Some(vec![]);
@@ -757,7 +757,7 @@ fn test_exec_command_select_query() {
 
 #[test]
 fn test_exec_command_update_query() {
-    let mut repo = TestRepo::new();
+    let mut repo = TestRepo::new_dedicated_daemon();
 
     repo.patch_git_ai_config(|patch| {
         patch.exclude_prompts_in_repositories = Some(vec![]);
@@ -804,7 +804,7 @@ fn test_exec_command_update_query() {
 
 #[test]
 fn test_database_not_found_error() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::new_dedicated_daemon();
 
     // Try to list without populating first
     let result = repo.git_ai(&["prompts", "list"]);
@@ -822,7 +822,7 @@ fn test_database_not_found_error() {
 
 #[test]
 fn test_upsert_deduplicates_prompts() {
-    let mut repo = TestRepo::new();
+    let mut repo = TestRepo::new_dedicated_daemon();
 
     repo.patch_git_ai_config(|patch| {
         patch.exclude_prompts_in_repositories = Some(vec![]);
@@ -863,7 +863,7 @@ fn test_upsert_deduplicates_prompts() {
 
 #[test]
 fn test_populate_aggregates_from_git_notes() {
-    let mut repo = TestRepo::new();
+    let mut repo = TestRepo::new_dedicated_daemon();
 
     repo.patch_git_ai_config(|patch| {
         patch.exclude_prompts_in_repositories = Some(vec![]);
@@ -916,7 +916,7 @@ fn test_populate_aggregates_from_git_notes() {
 
 #[test]
 fn test_prompt_messages_field_contains_transcript() {
-    let mut repo = TestRepo::new();
+    let mut repo = TestRepo::new_dedicated_daemon();
 
     repo.patch_git_ai_config(|patch| {
         patch.exclude_prompts_in_repositories = Some(vec![]);
@@ -964,7 +964,7 @@ fn test_prompt_messages_field_contains_transcript() {
 
 #[test]
 fn test_accepted_rate_calculation() {
-    let mut repo = TestRepo::new();
+    let mut repo = TestRepo::new_dedicated_daemon();
 
     repo.patch_git_ai_config(|patch| {
         patch.exclude_prompts_in_repositories = Some(vec![]);
@@ -1006,7 +1006,7 @@ fn test_accepted_rate_calculation() {
 
 #[test]
 fn test_timestamp_fields_populated() {
-    let mut repo = TestRepo::new();
+    let mut repo = TestRepo::new_dedicated_daemon();
 
     repo.patch_git_ai_config(|patch| {
         patch.exclude_prompts_in_repositories = Some(vec![]);
@@ -1063,7 +1063,7 @@ fn test_timestamp_fields_populated() {
 
 #[test]
 fn test_exec_invalid_sql_error() {
-    let mut repo = TestRepo::new();
+    let mut repo = TestRepo::new_dedicated_daemon();
 
     repo.patch_git_ai_config(|patch| {
         patch.exclude_prompts_in_repositories = Some(vec![]);
@@ -1091,7 +1091,7 @@ fn test_exec_invalid_sql_error() {
 
 #[test]
 fn test_commit_sha_field_populated() {
-    let mut repo = TestRepo::new();
+    let mut repo = TestRepo::new_dedicated_daemon();
 
     repo.patch_git_ai_config(|patch| {
         patch.exclude_prompts_in_repositories = Some(vec![]);
@@ -1138,7 +1138,7 @@ fn test_commit_sha_field_populated() {
 
 #[test]
 fn test_workdir_field_populated() {
-    let mut repo = TestRepo::new();
+    let mut repo = TestRepo::new_dedicated_daemon();
 
     repo.patch_git_ai_config(|patch| {
         patch.exclude_prompts_in_repositories = Some(vec![]);
@@ -1184,7 +1184,7 @@ fn test_workdir_field_populated() {
 
 #[test]
 fn test_seq_id_auto_increments() {
-    let mut repo = TestRepo::new();
+    let mut repo = TestRepo::new_dedicated_daemon();
 
     repo.patch_git_ai_config(|patch| {
         patch.exclude_prompts_in_repositories = Some(vec![]);
@@ -1234,7 +1234,7 @@ fn test_seq_id_auto_increments() {
 
 #[test]
 fn test_unique_constraint_on_id() {
-    let mut repo = TestRepo::new();
+    let mut repo = TestRepo::new_dedicated_daemon();
 
     repo.patch_git_ai_config(|patch| {
         patch.exclude_prompts_in_repositories = Some(vec![]);

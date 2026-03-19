@@ -2517,7 +2517,7 @@ pub fn find_repository(global_args: &[String]) -> Result<Repository, GitAiError>
 }
 
 fn resolve_command_base_dir(global_args: &[String]) -> Result<PathBuf, GitAiError> {
-    let mut base = std::env::current_dir().map_err(GitAiError::IoError)?;
+    let mut base: Option<PathBuf> = None;
     let mut idx = 0usize;
 
     while idx < global_args.len() {
@@ -2527,18 +2527,25 @@ fn resolve_command_base_dir(global_args: &[String]) -> Result<PathBuf, GitAiErro
             })?;
 
             let next_base = PathBuf::from(path_arg);
-            base = if next_base.is_absolute() {
+            base = Some(if next_base.is_absolute() {
                 next_base
             } else {
-                base.join(next_base)
-            };
+                let current = match &base {
+                    Some(existing) => existing.clone(),
+                    None => std::env::current_dir().map_err(GitAiError::IoError)?,
+                };
+                current.join(next_base)
+            });
             idx += 2;
             continue;
         }
         idx += 1;
     }
 
-    Ok(base)
+    match base {
+        Some(base) => Ok(base),
+        None => std::env::current_dir().map_err(GitAiError::IoError),
+    }
 }
 
 fn worktree_storage_ai_dir(git_dir: &Path, git_common_dir: &Path) -> PathBuf {

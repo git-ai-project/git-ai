@@ -321,7 +321,7 @@ fn test_prepare_working_log_squash_with_mixed_additions() {
 /// when the real post-commit pipeline injects them.
 #[test]
 fn test_squash_merge_preserves_custom_attributes_from_config() {
-    let mut repo = TestRepo::new();
+    let mut repo = TestRepo::new_dedicated_daemon();
 
     // Configure custom attributes via config patch
     let mut attrs = HashMap::new();

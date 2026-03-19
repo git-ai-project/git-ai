@@ -175,7 +175,7 @@ fn test_amp_preset_posttooluse_returns_ai_checkpoint() {
 fn test_amp_e2e_checkpoint_and_commit() {
     use repos::test_repo::TestRepo;
 
-    let mut repo = TestRepo::new();
+    let mut repo = TestRepo::new_dedicated_daemon();
     repo.patch_git_ai_config(|patch| {
         patch.exclude_prompts_in_repositories = Some(vec![]);
     });
@@ -253,7 +253,7 @@ fn test_amp_e2e_checkpoint_and_commit() {
 fn test_amp_post_commit_resyncs_latest_thread_transcript() {
     use repos::test_repo::TestRepo;
 
-    let mut repo = TestRepo::new();
+    let mut repo = TestRepo::new_dedicated_daemon();
     repo.patch_git_ai_config(|patch| {
         patch.exclude_prompts_in_repositories = Some(vec![]);
     });

@@ -69,10 +69,7 @@ macro_rules! subdir_test_variants {
                             command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
                         }
                         if mode.uses_daemon() {
-                            let trace_socket = git_ai::daemon::DaemonConfig::from_home(
-                                self.inner.test_home_path(),
-                            )
-                            .trace_socket_path;
+                            let trace_socket = self.inner.daemon_trace_socket_path();
                             let nesting = std::env::var("GIT_AI_TEST_TRACE2_NESTING")
                                 .unwrap_or_else(|_| "10".to_string());
                             command.env(
@@ -148,10 +145,7 @@ macro_rules! subdir_test_variants {
                                 command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
                             }
                             if mode.uses_daemon() {
-                                let trace_socket = git_ai::daemon::DaemonConfig::from_home(
-                                    self.inner.test_home_path(),
-                                )
-                                .trace_socket_path;
+                                let trace_socket = self.inner.daemon_trace_socket_path();
                                 let nesting = std::env::var("GIT_AI_TEST_TRACE2_NESTING")
                                     .unwrap_or_else(|_| "10".to_string());
                                 command.env(

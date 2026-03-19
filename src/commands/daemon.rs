@@ -58,6 +58,9 @@ fn handle_run(args: &[String]) -> Result<(), String> {
         return Err("--mode is no longer supported; daemon always runs in write mode".to_string());
     }
     let config = DaemonConfig::from_default_paths().map_err(|e| e.to_string())?;
+    let runtime_dir = daemon_runtime_dir(&config)?;
+    std::env::set_current_dir(&runtime_dir)
+        .map_err(|e| format!("failed to set daemon runtime cwd to {}: {}", runtime_dir.display(), e))?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -73,7 +76,7 @@ pub(crate) fn ensure_daemon_running(timeout: Duration) -> Result<DaemonConfig, S
         return Ok(config);
     }
 
-    spawn_daemon_run_detached()?;
+    spawn_daemon_run_detached(&config)?;
     if wait_for_daemon_up(&config, timeout) {
         return Ok(config);
     }
@@ -118,12 +121,23 @@ fn wait_for_daemon_up(config: &DaemonConfig, timeout: Duration) -> bool {
     }
 }
 
-fn spawn_daemon_run_detached() -> Result<(), String> {
+fn daemon_runtime_dir(config: &DaemonConfig) -> Result<PathBuf, String> {
+    config.ensure_parent_dirs().map_err(|e| e.to_string())?;
+    config
+        .lock_path
+        .parent()
+        .map(PathBuf::from)
+        .ok_or_else(|| "daemon lock path has no parent".to_string())
+}
+
+fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let runtime_dir = daemon_runtime_dir(config)?;
     let mut child = Command::new(exe);
     child
         .arg("daemon")
         .arg("run")
+        .current_dir(&runtime_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());

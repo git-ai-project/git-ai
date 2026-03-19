@@ -517,7 +517,7 @@ fn test_amend_repeated_round_trips_preserve_exact_line_authorship() {
 /// when the real post-commit pipeline injects them.
 #[test]
 fn test_amend_preserves_custom_attributes_from_config() {
-    let mut repo = TestRepo::new();
+    let mut repo = TestRepo::new_dedicated_daemon();
 
     // Configure custom attributes via config patch
     let mut attrs = HashMap::new();

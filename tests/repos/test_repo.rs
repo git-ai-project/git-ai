@@ -17,7 +17,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -61,9 +61,17 @@ impl GitTestMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DaemonTestScope {
+    Shared,
+    Dedicated,
+}
+
 #[derive(Debug, Clone)]
 struct DaemonProcess {
     pid: u32,
+    daemon_home: PathBuf,
+    test_db_path: PathBuf,
     control_socket_path: PathBuf,
     trace_socket_path: PathBuf,
     stderr_log_path: PathBuf,
@@ -103,7 +111,7 @@ impl DaemonProcess {
         command
             .arg("daemon")
             .arg("run")
-            .current_dir(repo_path)
+            .current_dir(test_home)
             .env("HOME", test_home)
             .env("GIT_CONFIG_GLOBAL", test_home.join(".gitconfig"))
             .env("GIT_AI_TEST_DB_PATH", test_db_path)
@@ -122,6 +130,8 @@ impl DaemonProcess {
 
         let daemon = Self {
             pid,
+            daemon_home: test_home.to_path_buf(),
+            test_db_path: test_db_path.to_path_buf(),
             control_socket_path,
             trace_socket_path,
             stderr_log_path,
@@ -368,6 +378,21 @@ impl DaemonProcess {
     }
 }
 
+static SHARED_DAEMON_PROCESS: OnceLock<Arc<DaemonProcess>> = OnceLock::new();
+
+fn shared_daemon_process(repo_path: &Path) -> Arc<DaemonProcess> {
+    SHARED_DAEMON_PROCESS
+        .get_or_init(|| {
+            let mut rng = rand::thread_rng();
+            let n: u64 = rng.gen_range(0..10_000_000_000);
+            let base = std::env::temp_dir();
+            let daemon_home = base.join(format!("git-ai-shared-daemon-{}-home", n));
+            let test_db_path = base.join(format!("git-ai-shared-daemon-{}-db", n));
+            Arc::new(DaemonProcess::start(repo_path, &daemon_home, &test_db_path))
+        })
+        .clone()
+}
+
 impl Drop for DaemonProcess {
     fn drop(&mut self) {
         self.shutdown();
@@ -434,7 +459,8 @@ pub struct TestRepo {
     test_db_path: PathBuf,
     test_home: PathBuf,
     git_mode: GitTestMode,
-    daemon_process: Option<DaemonProcess>,
+    daemon_scope: DaemonTestScope,
+    daemon_process: Option<Arc<DaemonProcess>>,
     /// When this TestRepo is backed by a linked worktree, holds the base repo path
     /// so we can clean it up on drop.
     _base_repo_path: Option<PathBuf>,
@@ -450,6 +476,17 @@ impl Default for TestRepo {
 }
 
 impl TestRepo {
+    pub fn new_with_daemon_scope(daemon_scope: DaemonTestScope) -> Self {
+        if WORKTREE_MODE.with(|flag| flag.get()) {
+            return Self::new_worktree_variant_with_daemon_scope(daemon_scope);
+        }
+        Self::new_with_mode_and_daemon_scope(GitTestMode::from_env(), daemon_scope)
+    }
+
+    pub fn new_dedicated_daemon() -> Self {
+        Self::new_with_daemon_scope(DaemonTestScope::Dedicated)
+    }
+
     fn sync_daemon_env_overrides(&self, envs: &[(&str, &str)]) {
         if !self.git_mode.uses_daemon() || envs.is_empty() {
             return;
@@ -492,11 +529,7 @@ impl TestRepo {
         }
     }
 
-    fn sync_test_home_config_for_hooks(&self) {
-        if !self.git_mode.uses_hooks() && !self.git_mode.uses_daemon() {
-            return;
-        }
-
+    fn write_test_config_to_home(&self, home: &Path) {
         let Some(patch) = &self.config_patch else {
             return;
         };
@@ -549,11 +582,23 @@ impl TestRepo {
             );
         }
 
-        let config_dir = self.test_home.join(".git-ai");
+        let config_dir = home.join(".git-ai");
         fs::create_dir_all(&config_dir).expect("failed to create test HOME config directory");
         let config_path = config_dir.join("config.json");
         let serialized = serde_json::to_string(&config).expect("failed to serialize test config");
         fs::write(&config_path, serialized).expect("failed to write test HOME config");
+    }
+
+    fn sync_test_home_config_for_hooks(&self) {
+        if !self.git_mode.uses_hooks() && !self.git_mode.uses_daemon() {
+            return;
+        }
+        self.write_test_config_to_home(&self.test_home);
+        if let Some(daemon) = &self.daemon_process
+            && daemon.daemon_home != self.test_home
+        {
+            self.write_test_config_to_home(&daemon.daemon_home);
+        }
     }
 
     fn apply_default_config_patch(&mut self) {
@@ -564,17 +609,18 @@ impl TestRepo {
     }
 
     pub fn new() -> Self {
-        if WORKTREE_MODE.with(|flag| flag.get()) {
-            return Self::new_worktree_variant();
-        }
-        Self::new_with_mode(GitTestMode::from_env())
+        Self::new_with_daemon_scope(DaemonTestScope::Shared)
     }
 
     /// Create a worktree-backed TestRepo.
     /// This creates a normal base repo and then adds an orphan linked worktree
     /// so tests keep empty-repo semantics (the first real commit is still a root commit).
     fn new_worktree_variant() -> Self {
-        let mut base = Self::new_with_mode(GitTestMode::from_env());
+        Self::new_worktree_variant_with_daemon_scope(DaemonTestScope::Shared)
+    }
+
+    fn new_worktree_variant_with_daemon_scope(daemon_scope: DaemonTestScope) -> Self {
+        let mut base = Self::new_with_mode_and_daemon_scope(GitTestMode::from_env(), daemon_scope);
 
         let default_branch = default_branchname();
         let base_branch = base.current_branch();
@@ -671,6 +717,7 @@ impl TestRepo {
         let feature_flags = base.feature_flags.clone();
         let config_patch = base.config_patch.clone();
         let git_mode = base.git_mode;
+        let daemon_scope = base.daemon_scope;
         let daemon_process = base.daemon_process.take();
 
         // Prevent base Drop from running - we manage cleanup in the worktree Drop
@@ -692,6 +739,7 @@ impl TestRepo {
             test_db_path: wt_test_db_path,
             test_home: base_test_home,
             git_mode,
+            daemon_scope,
             daemon_process,
             _base_repo_path: Some(base_path),
             _base_test_db_path: Some(base_test_db_path),
@@ -703,6 +751,13 @@ impl TestRepo {
     }
 
     pub fn new_with_mode(git_mode: GitTestMode) -> Self {
+        Self::new_with_mode_and_daemon_scope(git_mode, DaemonTestScope::Shared)
+    }
+
+    pub fn new_with_mode_and_daemon_scope(
+        git_mode: GitTestMode,
+        daemon_scope: DaemonTestScope,
+    ) -> Self {
         let mut rng = rand::thread_rng();
         let n: u64 = rng.gen_range(0..10000000000);
         let base = std::env::temp_dir();
@@ -725,6 +780,7 @@ impl TestRepo {
             test_db_path,
             test_home,
             git_mode,
+            daemon_scope,
             daemon_process: None,
             _base_repo_path: None,
             _base_test_db_path: None,
@@ -746,6 +802,13 @@ impl TestRepo {
     }
 
     pub fn new_worktree_with_mode(git_mode: GitTestMode) -> Self {
+        Self::new_worktree_with_mode_and_daemon_scope(git_mode, DaemonTestScope::Shared)
+    }
+
+    pub fn new_worktree_with_mode_and_daemon_scope(
+        git_mode: GitTestMode,
+        daemon_scope: DaemonTestScope,
+    ) -> Self {
         let mut rng = rand::thread_rng();
         let n: u64 = rng.gen_range(0..10000000000);
         let base = std::env::temp_dir();
@@ -819,6 +882,7 @@ impl TestRepo {
             test_db_path,
             test_home,
             git_mode,
+            daemon_scope,
             daemon_process: None,
             _base_repo_path: Some(main_path),
             _base_test_db_path: None,
@@ -837,6 +901,13 @@ impl TestRepo {
 
     /// Create a standalone bare repository for testing
     pub fn new_bare_with_mode(git_mode: GitTestMode) -> Self {
+        Self::new_bare_with_mode_and_daemon_scope(git_mode, DaemonTestScope::Shared)
+    }
+
+    pub fn new_bare_with_mode_and_daemon_scope(
+        git_mode: GitTestMode,
+        daemon_scope: DaemonTestScope,
+    ) -> Self {
         let mut rng = rand::thread_rng();
         let n: u64 = rng.gen_range(0..10000000000);
         let base = std::env::temp_dir();
@@ -853,6 +924,7 @@ impl TestRepo {
             test_db_path,
             test_home,
             git_mode,
+            daemon_scope,
             daemon_process: None,
             _base_repo_path: None,
             _base_test_db_path: None,
@@ -884,6 +956,13 @@ impl TestRepo {
     }
 
     pub fn new_with_remote_with_mode(git_mode: GitTestMode) -> (Self, Self) {
+        Self::new_with_remote_with_mode_and_daemon_scope(git_mode, DaemonTestScope::Shared)
+    }
+
+    pub fn new_with_remote_with_mode_and_daemon_scope(
+        git_mode: GitTestMode,
+        daemon_scope: DaemonTestScope,
+    ) -> (Self, Self) {
         let mut rng = rand::thread_rng();
         let base = std::env::temp_dir();
 
@@ -902,6 +981,7 @@ impl TestRepo {
             test_db_path: upstream_test_db_path,
             test_home: upstream_test_home,
             git_mode,
+            daemon_scope,
             daemon_process: None,
             _base_repo_path: None,
             _base_test_db_path: None,
@@ -952,6 +1032,7 @@ impl TestRepo {
             test_db_path: mirror_test_db_path,
             test_home: mirror_test_home,
             git_mode,
+            daemon_scope,
             daemon_process: None,
             _base_repo_path: None,
             _base_test_db_path: None,
@@ -975,6 +1056,14 @@ impl TestRepo {
     }
 
     pub fn new_at_path_with_mode(path: &PathBuf, git_mode: GitTestMode) -> Self {
+        Self::new_at_path_with_mode_and_daemon_scope(path, git_mode, DaemonTestScope::Shared)
+    }
+
+    pub fn new_at_path_with_mode_and_daemon_scope(
+        path: &PathBuf,
+        git_mode: GitTestMode,
+        daemon_scope: DaemonTestScope,
+    ) -> Self {
         let mut rng = rand::thread_rng();
         let db_n: u64 = rng.gen_range(0..10000000000);
         let test_home = std::env::temp_dir().join(format!("{}-home", db_n));
@@ -994,6 +1083,7 @@ impl TestRepo {
             test_db_path,
             test_home,
             git_mode,
+            daemon_scope,
             daemon_process: None,
             _base_repo_path: None,
             _base_test_db_path: None,
@@ -1012,12 +1102,18 @@ impl TestRepo {
         self.feature_flags = feature_flags;
     }
 
-    fn daemon_control_socket_path(&self) -> PathBuf {
-        DaemonProcess::control_socket_path_for_home(&self.test_home)
+    pub(crate) fn daemon_control_socket_path(&self) -> PathBuf {
+        self.daemon_process
+            .as_ref()
+            .map(|daemon| daemon.control_socket_path.clone())
+            .unwrap_or_else(|| DaemonProcess::control_socket_path_for_home(&self.test_home))
     }
 
-    fn daemon_trace_socket_path(&self) -> PathBuf {
-        DaemonProcess::trace_socket_path_for_home(&self.test_home)
+    pub(crate) fn daemon_trace_socket_path(&self) -> PathBuf {
+        self.daemon_process
+            .as_ref()
+            .map(|daemon| daemon.trace_socket_path.clone())
+            .unwrap_or_else(|| DaemonProcess::trace_socket_path_for_home(&self.test_home))
     }
 
     fn trace2_nesting_value() -> String {
@@ -1031,8 +1127,17 @@ impl TestRepo {
         if self.daemon_process.is_some() {
             return;
         }
-        let daemon = DaemonProcess::start(&self.path, &self.test_home, &self.test_db_path);
+        let daemon = match self.daemon_scope {
+            DaemonTestScope::Shared => shared_daemon_process(&self.path),
+            DaemonTestScope::Dedicated => Arc::new(DaemonProcess::start(
+                &self.path,
+                &self.test_home,
+                &self.test_db_path,
+            )),
+        };
+        self.test_db_path = daemon.test_db_path.clone();
         self.daemon_process = Some(daemon);
+        self.sync_test_home_config_for_hooks();
     }
 
     fn wait_for_daemon_idle(&self) {
@@ -1686,9 +1791,13 @@ impl Drop for TestRepo {
             return;
         }
 
-        if let Some(daemon) = self.daemon_process.take() {
+        if self.daemon_scope == DaemonTestScope::Dedicated
+            && let Some(daemon) = self.daemon_process.take()
+        {
             daemon.shutdown();
         }
+
+        let remove_test_db = !(self.git_mode.uses_daemon() && self.daemon_scope == DaemonTestScope::Shared);
 
         if let Some(base_path) = &self._base_repo_path {
             let _ = Command::new(real_git_executable())
@@ -1706,10 +1815,14 @@ impl Drop for TestRepo {
             let _ = remove_dir_all_with_retry(base_path, 80, Duration::from_millis(50));
 
             if let Some(base_db_path) = &self._base_test_db_path {
-                let _ = remove_dir_all_with_retry(base_db_path, 40, Duration::from_millis(25));
+                if remove_test_db {
+                    let _ = remove_dir_all_with_retry(base_db_path, 40, Duration::from_millis(25));
+                }
             }
 
-            let _ = remove_dir_all_with_retry(&self.test_db_path, 40, Duration::from_millis(25));
+            if remove_test_db {
+                let _ = remove_dir_all_with_retry(&self.test_db_path, 40, Duration::from_millis(25));
+            }
             let _ = remove_dir_all_with_retry(&self.test_home, 40, Duration::from_millis(25));
             return;
         }
@@ -1717,7 +1830,9 @@ impl Drop for TestRepo {
         remove_dir_all_with_retry(&self.path, 80, Duration::from_millis(50))
             .expect("failed to remove test repo");
         // Also clean up the test database directory (may not exist if no DB operations were done)
-        let _ = remove_dir_all_with_retry(&self.test_db_path, 40, Duration::from_millis(25));
+        if remove_test_db {
+            let _ = remove_dir_all_with_retry(&self.test_db_path, 40, Duration::from_millis(25));
+        }
         let _ = remove_dir_all_with_retry(&self.test_home, 40, Duration::from_millis(25));
     }
 }

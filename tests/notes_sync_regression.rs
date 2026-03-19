@@ -1,8 +1,8 @@
 #[macro_use]
 mod repos;
 
-use git_ai::daemon::{ControlRequest, DaemonConfig, send_control_request};
-use repos::test_repo::{GitTestMode, real_git_executable};
+use git_ai::daemon::{ControlRequest, send_control_request};
+use repos::test_repo::{GitTestMode, TestRepo, real_git_executable};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -34,16 +34,16 @@ fn run_git(args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-fn daemon_control_socket_path(test_home: &Path) -> PathBuf {
-    DaemonConfig::from_home(test_home).control_socket_path
+fn daemon_control_socket_path(repo: &TestRepo) -> PathBuf {
+    repo.daemon_control_socket_path()
 }
 
-fn sync_daemon_repo_if_needed(mode: GitTestMode, test_home: &Path, repo_working_dir: &Path) {
+fn sync_daemon_repo_if_needed(mode: GitTestMode, repo: &TestRepo, repo_working_dir: &Path) {
     if !mode.uses_daemon() {
         return;
     }
 
-    let socket_path = daemon_control_socket_path(test_home);
+    let socket_path = daemon_control_socket_path(repo);
     let repo_working_dir = repo_working_dir.to_string_lossy().to_string();
     let mut last_latest_seq = 0_u64;
     let mut stable_idle_polls = 0_u8;
@@ -248,7 +248,7 @@ worktree_test_wrappers! {
             .git(&["clone", upstream_str.as_str(), clone_dir_str.as_str()])
             .expect("clone should succeed");
 
-        sync_daemon_repo_if_needed(TestRepo::git_mode(), local.test_home_path(), &clone_dir);
+        sync_daemon_repo_if_needed(TestRepo::git_mode(), &local, &clone_dir);
 
         let cloned_note = read_note_from_worktree(&clone_dir, &seed_sha);
         assert!(
@@ -317,7 +317,7 @@ worktree_test_wrappers! {
             clone_dir.display()
         );
 
-        sync_daemon_repo_if_needed(TestRepo::git_mode(), local.test_home_path(), &clone_dir);
+        sync_daemon_repo_if_needed(TestRepo::git_mode(), &local, &clone_dir);
 
         let cloned_note = read_note_from_worktree(&clone_dir, &seed_sha);
         assert!(
@@ -378,7 +378,7 @@ worktree_test_wrappers! {
             .git(&["fetch", "origin"])
             .expect("fetch should succeed");
 
-        sync_daemon_repo_if_needed(TestRepo::git_mode(), local.test_home_path(), local.path());
+        sync_daemon_repo_if_needed(TestRepo::git_mode(), &local, local.path());
 
         let fetched_note = read_note_from_worktree(local.path(), &seed_sha);
         assert!(
@@ -474,7 +474,7 @@ worktree_test_wrappers! {
             .git(&["pull", "--ff-only", "origin", default_branch.as_str()])
             .expect("pull --ff-only should succeed");
 
-        sync_daemon_repo_if_needed(TestRepo::git_mode(), local.test_home_path(), local.path());
+        sync_daemon_repo_if_needed(TestRepo::git_mode(), &local, local.path());
 
         let pulled_note = read_note_from_worktree(local.path(), &remote_sha);
         assert!(
@@ -579,7 +579,7 @@ worktree_test_wrappers! {
             .git(&["pull", "--rebase", "origin", default_branch.as_str()])
             .expect("pull --rebase should succeed");
 
-        sync_daemon_repo_if_needed(TestRepo::git_mode(), local.test_home_path(), local.path());
+        sync_daemon_repo_if_needed(TestRepo::git_mode(), &local, local.path());
 
         let pulled_note = read_note_from_worktree(local.path(), &remote_sha);
         assert!(
@@ -624,7 +624,7 @@ worktree_test_wrappers! {
             .git(&["push", "-u", "origin", "HEAD"])
             .expect("push should succeed");
 
-        sync_daemon_repo_if_needed(TestRepo::git_mode(), local.test_home_path(), local.path());
+        sync_daemon_repo_if_needed(TestRepo::git_mode(), &local, local.path());
 
         let remote_note = read_note_from_bare_repo(upstream.path(), &seed_sha);
         assert!(

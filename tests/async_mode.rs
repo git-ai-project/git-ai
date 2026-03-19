@@ -1,10 +1,12 @@
 mod repos;
 
 use git_ai::daemon::{ControlRequest, DaemonConfig, send_control_request};
-use repos::test_repo::{GitTestMode, TestRepo, real_git_executable};
+use repos::test_repo::{GitTestMode, TestRepo, get_binary_path, real_git_executable};
+use serde_json::Value;
 use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::thread;
 use std::time::Duration;
 
@@ -62,6 +64,74 @@ fn wait_for_daemon_sockets(repo: &TestRepo) {
         control.display(),
         trace.display()
     );
+}
+
+fn daemon_command_output(repo: &TestRepo, args: &[&str], cwd: &Path) -> Output {
+    Command::new(get_binary_path())
+        .args(args)
+        .current_dir(cwd)
+        .env("HOME", repo.test_home_path())
+        .env(
+            "GIT_CONFIG_GLOBAL",
+            repo.test_home_path().join(".gitconfig"),
+        )
+        .output()
+        .expect("failed to invoke git-ai daemon command")
+}
+
+fn daemon_status_response(home_repo: &TestRepo, target_repo: &TestRepo) -> Value {
+    let output = daemon_command_output(
+        home_repo,
+        &[
+            "daemon",
+            "status",
+            "--repo",
+            target_repo.canonical_path().to_string_lossy().as_ref(),
+        ],
+        target_repo.path(),
+    );
+    assert!(
+        output.status.success(),
+        "daemon status command should succeed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("daemon status output should be valid JSON")
+}
+
+fn assert_daemon_status_ok_after_launch_repo_removed(home_repo: &TestRepo, target_repo: &TestRepo) {
+    let response = daemon_status_response(home_repo, target_repo);
+    assert!(
+        response.get("ok").and_then(Value::as_bool) == Some(true),
+        "daemon status should remain ok after deleting launch repo cwd: {}",
+        response
+    );
+}
+
+fn shutdown_daemon(home_repo: &TestRepo) {
+    let output = daemon_command_output(
+        home_repo,
+        &["daemon", "shutdown"],
+        home_repo.test_home_path(),
+    );
+    assert!(
+        output.status.success(),
+        "daemon shutdown command should succeed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn wait_for_child_exit(child: &mut Child) {
+    for _ in 0..100 {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) => thread::sleep(Duration::from_millis(20)),
+            Err(_) => break,
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 #[test]
@@ -240,4 +310,53 @@ fn daemon_status_does_not_self_emit_trace2_events() {
     }
     let _ = daemon.kill();
     let _ = daemon.wait();
+}
+
+#[test]
+fn daemon_run_survives_deleted_launch_repo_cwd() {
+    let launch_repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let target_repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+
+    let mut daemon = Command::new(get_binary_path())
+        .arg("daemon")
+        .arg("run")
+        .current_dir(launch_repo.path())
+        .env("HOME", launch_repo.test_home_path())
+        .env(
+            "GIT_CONFIG_GLOBAL",
+            launch_repo.test_home_path().join(".gitconfig"),
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to start daemon");
+
+    wait_for_daemon_sockets(&launch_repo);
+    fs::remove_dir_all(launch_repo.path()).expect("failed to remove launch repo");
+
+    assert_daemon_status_ok_after_launch_repo_removed(&launch_repo, &target_repo);
+
+    shutdown_daemon(&launch_repo);
+    wait_for_child_exit(&mut daemon);
+}
+
+#[test]
+fn daemon_start_survives_deleted_launch_repo_cwd() {
+    let launch_repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let target_repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+
+    let output = daemon_command_output(&launch_repo, &["daemon", "start"], launch_repo.path());
+    assert!(
+        output.status.success(),
+        "daemon start should succeed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    wait_for_daemon_sockets(&launch_repo);
+    fs::remove_dir_all(launch_repo.path()).expect("failed to remove launch repo");
+
+    assert_daemon_status_ok_after_launch_repo_removed(&launch_repo, &target_repo);
+
+    shutdown_daemon(&launch_repo);
 }

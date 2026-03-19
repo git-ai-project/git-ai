@@ -81,7 +81,7 @@ fn checkpoint_with_empty_transcript(repo: &TestRepo, edited_files: Vec<String>) 
 
 #[test]
 fn test_checkpoint_with_prompt_sharing_enabled() {
-    let mut repo = TestRepo::new();
+    let mut repo = TestRepo::new_dedicated_daemon();
 
     // Enable prompt sharing for all repositories (empty blacklist = share everywhere)
     // Use prompt_storage: "notes" to explicitly store messages in git notes for testing
@@ -132,7 +132,7 @@ fn test_checkpoint_with_prompt_sharing_enabled() {
 
 #[test]
 fn test_checkpoint_with_prompt_sharing_disabled_strips_messages() {
-    let mut repo = TestRepo::new();
+    let mut repo = TestRepo::new_dedicated_daemon();
 
     // Prompt sharing is disabled by default (empty list), but let's be explicit
     repo.patch_git_ai_config(|patch| {
@@ -194,7 +194,7 @@ fn test_checkpoint_with_prompt_sharing_disabled_strips_messages() {
 
 #[test]
 fn test_multiple_checkpoints_with_messages() {
-    let mut repo = TestRepo::new();
+    let mut repo = TestRepo::new_dedicated_daemon();
 
     // Enable prompt sharing for all repositories (empty blacklist = share everywhere)
     repo.patch_git_ai_config(|patch| {
@@ -279,7 +279,7 @@ fn test_multiple_checkpoints_with_messages() {
 
 #[test]
 fn test_prompt_sharing_disabled_with_empty_transcript() {
-    let mut repo = TestRepo::new();
+    let mut repo = TestRepo::new_dedicated_daemon();
 
     // Disable prompt sharing (default behavior)
     repo.patch_git_ai_config(|patch| {

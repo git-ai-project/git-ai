@@ -198,7 +198,7 @@ fn test_claude_preset_does_not_ignore_when_transcript_path_is_claude() {
 fn test_claude_e2e_prefers_latest_checkpoint_for_prompts() {
     use repos::test_repo::TestRepo;
 
-    let mut repo = TestRepo::new();
+    let mut repo = TestRepo::new_dedicated_daemon();
 
     // Enable prompt sharing for all repositories (empty blacklist = no exclusions)
     repo.patch_git_ai_config(|patch| {
