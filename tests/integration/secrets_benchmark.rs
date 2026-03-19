@@ -9,6 +9,7 @@
 //! (~329KB of text across 92 messages).
 
 use git_ai::authorship::secrets::{extract_tokens, is_random, p_random, redact_secrets_in_text};
+use serial_test::serial;
 use std::time::{Duration, Instant};
 
 /// Statistics for a set of duration measurements
@@ -426,6 +427,7 @@ fn test_secrets_micro_benchmark() {
 /// The test uses the same 329KB data size as the full benchmark to ensure
 /// realistic performance measurement.
 #[test]
+#[serial]
 fn test_secrets_performance_regression() {
     const TEXT_SIZE_KB: usize = 329; // Same as full benchmark
 
@@ -464,6 +466,7 @@ fn test_secrets_performance_regression() {
 /// Compares 329KB vs 5x (1645KB) and verifies time ratio is ~5x.
 /// This ensures the implementation is O(n) and not O(n²) or worse.
 #[test]
+#[serial]
 fn test_secrets_linear_scaling() {
     const BASE_SIZE_KB: usize = 329;
     const SCALE_FACTOR: usize = 5;
