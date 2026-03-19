@@ -8,6 +8,7 @@ use crate::commands::hooks::stash_hooks;
 use crate::config;
 use crate::error::GitAiError;
 use crate::git::cli_parser::ParsedGitInvocation;
+use crate::git::repo_state::resolve_squash_source_head_from_git_dir;
 use crate::git::repository::{Repository, disable_internal_git_hooks};
 use crate::git::sync_authorship::fetch_authorship_notes;
 use crate::utils::{debug_log, debug_performance_log_structured};
@@ -1427,6 +1428,7 @@ fn parse_hook_stdin(stdin: &[u8]) -> Vec<(String, String)> {
         .collect()
 }
 
+#[cfg(test)]
 fn is_valid_git_oid(value: &str) -> bool {
     (value.len() == 40 || value.len() == 64) && value.chars().all(|c| c.is_ascii_hexdigit())
 }
@@ -1440,33 +1442,7 @@ fn is_null_oid(value: &str) -> bool {
 }
 
 fn resolve_squash_source_head(repo: &Repository) -> Option<String> {
-    // Some Git versions keep MERGE_HEAD for --squash, others do not.
-    let merge_head_path = repo.path().join("MERGE_HEAD");
-    if let Ok(contents) = fs::read_to_string(merge_head_path)
-        && let Some(candidate) = contents
-            .lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-        && is_valid_git_oid(candidate)
-    {
-        return Some(candidate.to_string());
-    }
-
-    // SQUASH_MSG is created by `git merge --squash` and includes the squashed tip commit(s).
-    // We use the first commit entry, which corresponds to the source head.
-    let squash_msg_path = repo.path().join("SQUASH_MSG");
-    if let Ok(contents) = fs::read_to_string(squash_msg_path) {
-        for line in contents.lines() {
-            if let Some(rest) = line.trim_start().strip_prefix("commit ")
-                && let Some(candidate) = rest.split_whitespace().next()
-                && is_valid_git_oid(candidate)
-            {
-                return Some(candidate.to_string());
-            }
-        }
-    }
-
-    None
+    resolve_squash_source_head_from_git_dir(repo.path())
 }
 
 fn parsed_invocation(command: &str, command_args: Vec<String>) -> ParsedGitInvocation {

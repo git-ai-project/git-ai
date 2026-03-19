@@ -3,6 +3,7 @@ use crate::daemon::domain::{
     AnalysisResult, CommandClass, Confidence, NormalizedCommand, ResetKind, SemanticEvent,
 };
 use crate::error::GitAiError;
+use crate::git::cli_parser::parse_git_cli_args;
 use std::path::Path;
 
 #[derive(Default)]
@@ -102,6 +103,14 @@ impl CommandAnalyzer for HistoryAnalyzer {
             }
             "merge" => {
                 if args.iter().any(|arg| arg == "--squash") {
+                    let source_ref = merge_source_ref(&args).ok_or_else(|| {
+                        GitAiError::Generic("merge --squash missing source ref".to_string())
+                    })?;
+                    let source_head = cmd.merge_squash_source_head.clone().ok_or_else(|| {
+                        GitAiError::Generic(
+                            "merge --squash missing resolved source head".to_string(),
+                        )
+                    })?;
                     events.push(SemanticEvent::MergeSquash {
                         base_branch: cmd.pre_repo.as_ref().and_then(|repo| repo.branch.clone()),
                         base_head: cmd
@@ -109,7 +118,8 @@ impl CommandAnalyzer for HistoryAnalyzer {
                             .as_ref()
                             .and_then(|repo| repo.head.clone())
                             .unwrap_or_default(),
-                        source: args.last().cloned().unwrap_or_default(),
+                        source_ref,
+                        source_head,
                     });
                 } else if let Some((old_head, new_head)) = head_change(cmd, state.refs) {
                     events.push(SemanticEvent::RefUpdated {
@@ -160,6 +170,12 @@ fn normalized_args(argv: &[String]) -> Vec<String> {
     } else {
         argv.to_vec()
     }
+}
+
+fn merge_source_ref(args: &[String]) -> Option<String> {
+    let mut invocation = vec!["merge".to_string()];
+    invocation.extend(args.iter().cloned());
+    parse_git_cli_args(&invocation).pos_command(0)
 }
 
 fn non_empty(value: String) -> Option<String> {
@@ -496,6 +512,7 @@ mod tests {
             pre_repo: None,
             post_repo: None,
             inflight_rebase_original_head: None,
+            merge_squash_source_head: None,
             ref_changes: vec![RefChange {
                 reference: "HEAD".to_string(),
                 old: "a".to_string(),
@@ -826,6 +843,46 @@ mod tests {
                 } if original_head == "old-head" && new_head == "new-head"
             )),
             "expected cherry-pick complete event from ref-state fallback, got {:?}",
+            result.events
+        );
+    }
+
+    #[test]
+    fn merge_squash_emits_resolved_source_ref_and_head() {
+        let analyzer = HistoryAnalyzer;
+        let mut cmd = command("merge", &["git", "merge", "--squash", "feature"]);
+        cmd.pre_repo = Some(crate::daemon::domain::RepoContext {
+            head: Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string()),
+            branch: Some("main".to_string()),
+            detached: false,
+        });
+        cmd.merge_squash_source_head = Some(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+        );
+
+        let result = analyzer
+            .analyze(
+                &cmd,
+                AnalysisView {
+                    refs: &Default::default(),
+                },
+            )
+            .unwrap();
+
+        assert!(
+            result.events.iter().any(|event| matches!(
+                event,
+                SemanticEvent::MergeSquash {
+                    base_branch,
+                    base_head,
+                    source_ref,
+                    source_head,
+                } if base_branch.as_deref() == Some("main")
+                    && base_head == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                    && source_ref == "feature"
+                    && source_head == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            )),
+            "expected merge-squash event with resolved source head, got {:?}",
             result.events
         );
     }

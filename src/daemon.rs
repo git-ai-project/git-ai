@@ -2306,26 +2306,22 @@ impl ActorDaemonCoordinator {
                 crate::daemon::domain::SemanticEvent::MergeSquash {
                     base_branch,
                     base_head,
-                    source,
+                    source_ref,
+                    source_head,
                 } => {
-                    if base_head.is_empty() || source.is_empty() {
+                    if base_head.is_empty() || source_ref.is_empty() || source_head.is_empty() {
                         return Err(GitAiError::Generic(
                             "merge squash event missing base or source".to_string(),
                         ));
                     }
-                    let source_head = if is_valid_oid(source) && !is_zero_oid(source) {
-                        source.clone()
-                    } else {
-                        String::new()
-                    };
-                    if source_head.is_empty() {
+                    if !is_valid_oid(source_head) || is_zero_oid(source_head) {
                         return Err(GitAiError::Generic(
                             "merge squash source is not a concrete commit id".to_string(),
                         ));
                     }
                     out.push(RewriteLogEvent::merge_squash(MergeSquashEvent::new(
-                        source.clone(),
-                        source_head,
+                        source_ref.clone(),
+                        source_head.clone(),
                         base_branch.clone().unwrap_or_else(|| "HEAD".to_string()),
                         base_head.clone(),
                     )));

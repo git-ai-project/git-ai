@@ -61,6 +61,7 @@ pub struct NormalizedCommand {
     pub pre_repo: Option<RepoContext>,
     pub post_repo: Option<RepoContext>,
     pub inflight_rebase_original_head: Option<String>,
+    pub merge_squash_source_head: Option<String>,
     pub ref_changes: Vec<RefChange>,
     pub confidence: Confidence,
     pub wrapper_mirror: bool,
@@ -141,7 +142,8 @@ pub enum SemanticEvent {
     MergeSquash {
         base_branch: Option<String>,
         base_head: String,
-        source: String,
+        source_ref: String,
+        source_head: String,
     },
     RefUpdated {
         reference: String,

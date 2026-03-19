@@ -173,6 +173,7 @@ mod tests {
             pre_repo: None,
             post_repo: None,
             inflight_rebase_original_head: None,
+            merge_squash_source_head: None,
             ref_changes: vec![RefChange {
                 reference: "refs/heads/main".to_string(),
                 old: "".to_string(),

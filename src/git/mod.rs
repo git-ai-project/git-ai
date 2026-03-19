@@ -1,5 +1,6 @@
 pub mod cli_parser;
 pub mod diff_tree_to_tree;
+pub mod repo_state;
 pub mod refs;
 pub mod repository;
 

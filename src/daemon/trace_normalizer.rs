@@ -4,6 +4,7 @@ use crate::daemon::domain::{
 use crate::daemon::git_backend::{GitBackend, ReflogCut};
 use crate::error::GitAiError;
 use crate::git::cli_parser::parse_git_cli_args;
+use crate::git::repo_state::{git_dir_for_worktree, resolve_squash_source_head_for_worktree};
 use crate::observability;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -735,6 +736,26 @@ impl<B: GitBackend> TraceNormalizer<B> {
             .as_ref()
             .and_then(|family| pending_rebase_original_head_from_inflight(&self.state, family))
             .or(pending.rebase_original_head_hint.clone());
+        let merge_squash_source_head = if exit_code == 0
+            && primary_command.as_deref() == Some("merge")
+            && invoked_args.iter().any(|arg| arg == "--squash")
+        {
+            let worktree = pending.worktree.as_deref().ok_or_else(|| {
+                GitAiError::Generic(format!(
+                    "merge --squash missing worktree sid={}",
+                    pending.root_sid
+                ))
+            })?;
+            Some(resolve_squash_source_head_for_worktree(worktree).ok_or_else(|| {
+                GitAiError::Generic(format!(
+                    "merge --squash missing source head from MERGE_HEAD/SQUASH_MSG sid={} worktree={}",
+                    pending.root_sid,
+                    worktree.display()
+                ))
+            })?)
+        } else {
+            None
+        };
 
         let normalized = NormalizedCommand {
             scope,
@@ -752,6 +773,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
             pre_repo: pending.pre_repo,
             post_repo: pending.post_repo,
             inflight_rebase_original_head,
+            merge_squash_source_head,
             ref_changes,
             confidence,
             wrapper_mirror: pending.wrapper_mirror,
@@ -779,23 +801,6 @@ fn trace_debug_lifecycle(message: &str) {
     if std::env::var("GIT_AI_DEBUG_DAEMON_TRACE").is_ok() {
         eprintln!("\u{1b}[1;33m[git-ai]\u{1b}[0m {}", message);
     }
-}
-
-fn git_dir_for_worktree(worktree: &Path) -> Option<PathBuf> {
-    let dot_git = worktree.join(".git");
-    if dot_git.is_dir() {
-        return Some(dot_git);
-    }
-    if !dot_git.is_file() {
-        return None;
-    }
-    let contents = fs::read_to_string(&dot_git).ok()?;
-    let pointer = contents.strip_prefix("gitdir:")?.trim();
-    let candidate = PathBuf::from(pointer);
-    if candidate.is_absolute() {
-        return Some(candidate);
-    }
-    Some(worktree.join(candidate))
 }
 
 fn is_valid_oid(value: &str) -> bool {
@@ -1279,7 +1284,6 @@ mod tests {
     use super::*;
     use crate::daemon::domain::RefChange;
     use std::collections::HashMap;
-    use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
