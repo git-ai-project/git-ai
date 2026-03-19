@@ -241,7 +241,10 @@ fn test_prompt_hash_migration_ai_adds_then_commits_in_batches() {
     repo.stage_all_and_commit("Initial commit").unwrap();
 
     // AI adds first batch of lines
-    file.insert_at(4, crate::lines!["ai_line5".ai(), "ai_line6".ai(), "ai_line7".ai()]);
+    file.insert_at(
+        4,
+        crate::lines!["ai_line5".ai(), "ai_line6".ai(), "ai_line7".ai()],
+    );
     file.stage();
 
     let first_commit = repo.commit("Add lines 5-7").unwrap();

@@ -1,4 +1,3 @@
-
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
 use serde_json::json;

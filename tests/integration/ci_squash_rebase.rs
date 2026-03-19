@@ -1,7 +1,7 @@
-use git_ai::git::refs::get_reference_as_authorship_log_v3;
-use git_ai::git::repository as GitAiRepository;
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
+use git_ai::git::refs::get_reference_as_authorship_log_v3;
+use git_ai::git::repository as GitAiRepository;
 
 /// Test basic squash merge via CI - AI code from feature branch squashed into main
 #[test]
@@ -430,7 +430,10 @@ fn test_ci_rebase_merge_multiple_commits() {
     repo.stage_all_and_commit("Add AI function 2").unwrap();
 
     // Third commit: Human adds function
-    file.insert_at(5, crate::lines!["// Human function", "function human() { }"]);
+    file.insert_at(
+        5,
+        crate::lines!["// Human function", "function human() { }"],
+    );
     let feature_commit = repo.stage_all_and_commit("Add human function").unwrap();
     let feature_sha = feature_commit.commit_sha;
 

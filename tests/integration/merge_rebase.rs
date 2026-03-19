@@ -17,7 +17,10 @@ fn test_blame_after_merge_with_ai_contributions() {
     repo.git(&["checkout", "-b", "feature"]).unwrap();
 
     // Make AI changes on feature branch (insert after line 3)
-    file.insert_at(3, crate::lines!["FEATURE LINE 1".ai(), "FEATURE LINE 2".ai()]);
+    file.insert_at(
+        3,
+        crate::lines!["FEATURE LINE 1".ai(), "FEATURE LINE 2".ai()],
+    );
     repo.stage_all_and_commit("feature branch changes").unwrap();
 
     // Switch back to default branch and make human changes
@@ -119,7 +122,10 @@ fn test_blame_after_complex_merge_scenario() {
     repo.git(&["checkout", &default_branch]).unwrap();
     file = repo.filename("test.txt"); // Reload file from default branch
     // Insert at beginning to avoid conflicts
-    file.insert_at(0, crate::lines!["MAIN COMPLEX LINE 1", "MAIN COMPLEX LINE 2", ""]);
+    file.insert_at(
+        0,
+        crate::lines!["MAIN COMPLEX LINE 1", "MAIN COMPLEX LINE 2", ""],
+    );
     repo.stage_all_and_commit("main complex changes").unwrap();
 
     // Merge feature-a into default branch

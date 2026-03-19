@@ -1,14 +1,13 @@
-
+use crate::repos::test_file::ExpectedLineExt;
+use crate::repos::test_repo::TestRepo;
+use crate::test_utils::fixture_path;
 use git_ai::authorship::transcript::Message;
 use git_ai::commands::checkpoint_agent::agent_presets::{
     AgentCheckpointFlags, AgentCheckpointPreset, GeminiPreset,
 };
-use crate::repos::test_file::ExpectedLineExt;
-use crate::repos::test_repo::TestRepo;
 use serde_json::json;
 use std::fs;
 use std::io::Write;
-use crate::test_utils::fixture_path;
 
 #[test]
 fn test_parse_example_gemini_json_with_model() {

@@ -1,11 +1,10 @@
-
+use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::attribution_tracker::LineAttribution;
 use git_ai::authorship::authorship_log::PromptRecord;
 use git_ai::authorship::transcript::Message;
 use git_ai::authorship::working_log::AgentId;
 use insta::assert_debug_snapshot;
 use regex::Regex;
-use crate::repos::test_repo::TestRepo;
 use std::collections::HashMap;
 
 /// Normalize blame output for snapshot testing by replacing non-deterministic

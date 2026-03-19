@@ -1,6 +1,5 @@
-
-use git_ai::authorship::transcript::{AiTranscript, Message};
 use crate::repos::test_repo::TestRepo;
+use git_ai::authorship::transcript::{AiTranscript, Message};
 use std::fs;
 
 /// Helper to create a simple agent_v1 AI checkpoint with a transcript

@@ -40,6 +40,8 @@ mod diff_ignore_binary;
 mod droid;
 mod e2big_post_filter;
 mod gemini;
+#[cfg(unix)]
+mod git_ai_hooks;
 mod git_alias_resolution;
 mod git_cli_arg_parsing;
 mod git_repository_comprehensive;

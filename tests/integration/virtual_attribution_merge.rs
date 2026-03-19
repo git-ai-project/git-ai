@@ -1,9 +1,8 @@
-
 use std::collections::BTreeMap;
 
-use git_ai::authorship::virtual_attribution::VirtualAttributions;
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
+use git_ai::authorship::virtual_attribution::VirtualAttributions;
 
 #[test]
 fn test_merge_prompts_picking_newest_sums_totals_on_collision() {

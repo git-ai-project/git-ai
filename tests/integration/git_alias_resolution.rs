@@ -1,9 +1,8 @@
-
+use crate::repos::test_file::ExpectedLineExt;
+use crate::repos::test_repo::TestRepo;
 use git_ai::commands::git_handlers::resolve_alias_invocation;
 use git_ai::git::cli_parser::{ParsedGitInvocation, parse_git_cli_args};
 use git_ai::git::find_repository_in_path;
-use crate::repos::test_file::ExpectedLineExt;
-use crate::repos::test_repo::TestRepo;
 
 fn args(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| s.to_string()).collect()

@@ -1,8 +1,7 @@
-
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
-use rusqlite::{Connection, OpenFlags};
 use crate::test_utils::fixture_path;
+use rusqlite::{Connection, OpenFlags};
 
 const TEST_CONVERSATION_ID: &str = "00812842-49fe-4699-afae-bb22cda3f6e1";
 

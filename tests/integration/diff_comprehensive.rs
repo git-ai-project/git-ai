@@ -3,7 +3,6 @@
 //! These tests complement the existing tests/diff.rs with additional edge cases
 //! and scenarios to push coverage toward 95%.
 
-
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
 use serde_json::Value;
@@ -113,7 +112,11 @@ fn test_diff_json_annotations_format() {
     file.set_contents(crate::lines!["Line 1".human()]);
     repo.stage_all_and_commit("Initial").unwrap();
 
-    file.set_contents(crate::lines!["Line 1".human(), "Line 2".ai(), "Line 3".ai()]);
+    file.set_contents(crate::lines![
+        "Line 1".human(),
+        "Line 2".ai(),
+        "Line 3".ai()
+    ]);
     let commit = repo.stage_all_and_commit("Add AI lines").unwrap();
 
     // Run diff with --json
@@ -361,7 +364,9 @@ fn test_diff_with_special_regex_chars() {
 
     // Create file with special characters that might affect regex
     let mut file = repo.filename("special.txt");
-    file.set_contents(crate::lines!["Line with $pecial [chars] (and) {braces}".human()]);
+    file.set_contents(crate::lines![
+        "Line with $pecial [chars] (and) {braces}".human()
+    ]);
     repo.stage_all_and_commit("Special chars").unwrap();
 
     // Modify
@@ -392,7 +397,11 @@ fn test_diff_whitespace_only_changes() {
     repo.stage_all_and_commit("Initial").unwrap();
 
     // Change whitespace only
-    file.set_contents(crate::lines!["fn test() {".human(), "    ".human(), "}".human()]);
+    file.set_contents(crate::lines![
+        "fn test() {".human(),
+        "    ".human(),
+        "}".human()
+    ]);
     let commit = repo.stage_all_and_commit("Add whitespace").unwrap();
 
     // Run diff
@@ -491,7 +500,11 @@ fn test_diff_range_multiple_commits() {
     file.set_contents(crate::lines!["Line 1".human(), "Line 2".ai()]);
     repo.stage_all_and_commit("Commit 2").unwrap();
 
-    file.set_contents(crate::lines!["Line 1".human(), "Line 2".ai(), "Line 3".human()]);
+    file.set_contents(crate::lines![
+        "Line 1".human(),
+        "Line 2".ai(),
+        "Line 3".human()
+    ]);
     repo.stage_all_and_commit("Commit 3").unwrap();
 
     file.set_contents(crate::lines![

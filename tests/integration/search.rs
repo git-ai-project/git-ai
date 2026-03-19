@@ -3,13 +3,12 @@
 //! These tests verify the search command's ability to find AI prompts by commit,
 //! file, pattern, and prompt ID, with various output formats and filters.
 
-
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
+use crate::test_utils::fixture_path;
 use serde_json::json;
 use std::fs;
 use std::io::Write;
-use crate::test_utils::fixture_path;
 
 // ============================================================================
 // Test helpers

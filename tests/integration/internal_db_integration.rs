@@ -5,12 +5,11 @@
 //! 2. On commit, the latest prompts are saved into the database
 //! 3. The post-commit update logic fetches and saves the latest messages
 
-
 use crate::repos::test_repo::TestRepo;
+use crate::test_utils::fixture_path;
 use rusqlite::Connection;
 use serde_json::json;
 use std::fs;
-use crate::test_utils::fixture_path;
 
 /// Helper to open a connection to the test database
 fn open_test_db(repo: &TestRepo) -> Connection {

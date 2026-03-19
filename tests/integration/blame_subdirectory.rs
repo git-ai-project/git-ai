@@ -139,7 +139,10 @@ fn test_blame_from_subdirectory_preserves_ai_authorship() {
     fs::create_dir_all(&subdir).unwrap();
 
     let mut file = repo.filename("src/code.rs");
-    file.set_contents(crate::lines!["fn human_code() {}".human(), "fn ai_code() {}".ai()]);
+    file.set_contents(crate::lines![
+        "fn human_code() {}".human(),
+        "fn ai_code() {}".ai()
+    ]);
     repo.stage_all_and_commit("Mixed commit").unwrap();
 
     let root_output = repo

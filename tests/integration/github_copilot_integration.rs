@@ -267,7 +267,10 @@ fn test_github_copilot_human_checkpoint_with_clean_file() {
     repo.stage_all_and_commit("Add y").unwrap();
 
     // The new line should be human
-    file.assert_lines_and_blame(crate::lines!["const x = 1;".human(), "const y = 2;".human(),]);
+    file.assert_lines_and_blame(crate::lines![
+        "const x = 1;".human(),
+        "const y = 2;".human(),
+    ]);
 }
 
 crate::reuse_tests_in_worktree!(

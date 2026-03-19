@@ -1,9 +1,4 @@
-#![cfg(unix)]
-
-#[macro_use]
-mod repos;
-
-use repos::test_repo::{GitTestMode, TestRepo};
+use crate::repos::test_repo::{GitTestMode, TestRepo};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::fs;

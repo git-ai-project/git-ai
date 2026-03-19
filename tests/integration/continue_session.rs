@@ -6,15 +6,14 @@
 //! Note: tests/continue_cli.rs tests the Continue CLI agent preset checkpoint flow.
 //! This file tests the `git-ai continue` command itself.
 
-
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
+use crate::test_utils::fixture_path;
 use serde_json::json;
 use std::fs;
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use crate::test_utils::fixture_path;
 
 // ============================================================================
 // Test helpers

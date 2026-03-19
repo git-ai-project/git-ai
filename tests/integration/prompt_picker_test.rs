@@ -13,10 +13,9 @@
 //! Note: The TUI rendering and terminal interaction is tested via integration tests
 //! that use the actual commands. These unit tests focus on state management logic.
 
-
+use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::internal_db::{InternalDatabase, PromptDbRecord};
 use git_ai::authorship::transcript::{AiTranscript, Message};
-use crate::repos::test_repo::TestRepo;
 use std::collections::HashMap;
 use std::fs;
 use std::sync::atomic::{AtomicU64, Ordering};

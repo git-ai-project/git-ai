@@ -9,8 +9,8 @@ use std::process::Command;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use git_ai::observability::wrapper_performance_targets::BenchmarkResult;
 use crate::repos::test_repo::TestRepo;
+use git_ai::observability::wrapper_performance_targets::BenchmarkResult;
 
 fn setup() {
     git_ai::config::Config::clear_test_feature_flags();

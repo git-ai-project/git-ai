@@ -6,12 +6,11 @@
 //!
 //! Run with: cargo test test_simple_ai_checkpoint_and_commit --release -- --nocapture --ignored
 
-
 use crate::repos::test_repo::TestRepo;
+use crate::test_utils::fixture_path;
 use serde_json::json;
 use std::fs;
 use std::time::{Duration, Instant};
-use crate::test_utils::fixture_path;
 
 /// Timing data for a single benchmark iteration
 #[derive(Debug, Clone)]

@@ -1,6 +1,5 @@
-
-use rand::{Rng, distributions::Alphanumeric};
 use crate::repos::test_repo::TestRepo;
+use rand::{Rng, distributions::Alphanumeric};
 use std::{fs, time::Instant};
 
 #[test]

@@ -1,4 +1,4 @@
-
+use crate::test_utils::fixture_path;
 use git_ai::authorship::transcript::Message;
 use git_ai::commands::checkpoint_agent::agent_presets::{
     AgentCheckpointFlags, AgentCheckpointPreset, ClaudePreset, extract_plan_from_tool_use,
@@ -8,7 +8,6 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
-use crate::test_utils::fixture_path;
 
 #[test]
 fn test_parse_example_claude_code_jsonl_with_model() {

@@ -57,7 +57,10 @@ fn test_chinese_deletions_and_insertions() {
     repo.stage_all_and_commit("Initial notes").unwrap();
 
     file.delete_range(1, 3);
-    file.insert_at(1, crate::lines!["目标: 完成模块B".ai(), "风险: 资源紧张".ai()]);
+    file.insert_at(
+        1,
+        crate::lines!["目标: 完成模块B".ai(), "风险: 资源紧张".ai()],
+    );
     repo.stage_all_and_commit("AI rewrites plan").unwrap();
 
     file.assert_lines_and_blame(crate::lines![

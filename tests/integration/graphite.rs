@@ -57,7 +57,6 @@
 /// - `gt pop` - Delete branch, retain working tree
 /// - `gt rename` - Rename branch
 /// - `gt track` / `gt untrack` - Metadata tracking
-
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::{TestRepo, get_binary_path};
 use std::path::PathBuf;
@@ -355,12 +354,21 @@ fn test_gt_create_stacked_branches_preserve_attribution() {
         .expect("gt create branch-2 should succeed");
 
     // Verify attribution on both files from the tip of the stack
-    file1.assert_lines_and_blame(crate::lines!["file1 ai line".ai(), "file1 human line".human(),]);
-    file2.assert_lines_and_blame(crate::lines!["file2 ai line".ai(), "file2 human line".human(),]);
+    file1.assert_lines_and_blame(crate::lines![
+        "file1 ai line".ai(),
+        "file1 human line".human(),
+    ]);
+    file2.assert_lines_and_blame(crate::lines![
+        "file2 ai line".ai(),
+        "file2 human line".human(),
+    ]);
 
     // Navigate down and verify attribution still correct on branch-1
     gt(&repo, &["checkout", "branch-1"]).expect("gt checkout should succeed");
-    file1.assert_lines_and_blame(crate::lines!["file1 ai line".ai(), "file1 human line".human(),]);
+    file1.assert_lines_and_blame(crate::lines![
+        "file1 ai line".ai(),
+        "file1 human line".human(),
+    ]);
 }
 
 #[test]
@@ -396,7 +404,10 @@ fn test_gt_modify_amend_preserves_attribution() {
 
     // Create a branch with AI content
     let mut file = repo.filename("modify.txt");
-    file.set_contents(crate::lines!["original ai line".ai(), "original human line"]);
+    file.set_contents(crate::lines![
+        "original ai line".ai(),
+        "original human line"
+    ]);
     repo.git(&["add", "-A"]).unwrap();
     gt(&repo, &["create", "modify-branch", "-m", "initial"]).expect("gt create should succeed");
 
@@ -672,7 +683,10 @@ fn test_gt_fold_preserves_attribution() {
         "parent human line 1".human(),
         "parent human line 2".human(),
     ]);
-    child_file.assert_lines_and_blame(crate::lines!["child ai line".ai(), "child human line".human(),]);
+    child_file.assert_lines_and_blame(crate::lines![
+        "child ai line".ai(),
+        "child human line".human(),
+    ]);
 }
 
 #[test]
@@ -915,7 +929,10 @@ fn test_gt_delete_restacks_children_preserves_attribution() {
     // branch-c should have been restacked onto branch-a
     // Navigate to branch-c and verify attribution
     gt(&repo, &["checkout", "del-c"]).unwrap();
-    file_c.assert_lines_and_blame(crate::lines!["c ai content".ai(), "c human content".human(),]);
+    file_c.assert_lines_and_blame(crate::lines![
+        "c ai content".ai(),
+        "c human content".human(),
+    ]);
 }
 
 #[test]
@@ -1060,7 +1077,10 @@ fn test_gt_full_stack_workflow() {
         .expect("gt create wf-1 should succeed");
 
     let mut file2 = repo.filename("workflow2.txt");
-    file2.set_contents(crate::lines!["workflow2 human line 1", "workflow2 ai line 1".ai(),]);
+    file2.set_contents(crate::lines![
+        "workflow2 human line 1",
+        "workflow2 ai line 1".ai(),
+    ]);
     repo.git(&["add", "-A"]).unwrap();
     gt(&repo, &["create", "wf-2", "-m", "workflow branch 2"])
         .expect("gt create wf-2 should succeed");
@@ -1133,7 +1153,10 @@ fn test_gt_create_then_squash_then_fold() {
     gt(&repo, &["fold"]).expect("gt fold should succeed");
 
     // Verify all attribution on the now-combined branch
-    parent_file.assert_lines_and_blame(crate::lines!["parent line 1".human(), "parent line 2".human(),]);
+    parent_file.assert_lines_and_blame(crate::lines![
+        "parent line 1".human(),
+        "parent line 2".human(),
+    ]);
     child_file.assert_lines_and_blame(crate::lines!["child ai 1".ai(), "child ai 2".ai(),]);
 }
 
@@ -1146,7 +1169,11 @@ fn test_gt_create_with_all_flag() {
 
     // Make changes without staging
     let mut file = repo.filename("all_flag.txt");
-    file.set_contents(crate::lines!["human line 1", "ai line 1".ai(), "human line 2",]);
+    file.set_contents(crate::lines![
+        "human line 1",
+        "ai line 1".ai(),
+        "human line 2",
+    ]);
 
     // Use gt create -a to auto-stage all changes
     gt(

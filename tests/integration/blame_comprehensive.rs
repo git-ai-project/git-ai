@@ -15,6 +15,12 @@
 //! 8. Foreign prompt lookups
 //! 9. File path normalization (absolute vs relative)
 
+use crate::repos::test_file::ExpectedLineExt;
+use crate::repos::test_repo::TestRepo;
+
+
+
+
 
 use git_ai::authorship::authorship_log::{LineRange, PromptRecord};
 use git_ai::authorship::authorship_log_serialization::{
@@ -25,8 +31,6 @@ use git_ai::authorship::working_log::AgentId;
 use git_ai::commands::blame::GitAiBlameOptions;
 use git_ai::git::refs::notes_add;
 use git_ai::git::repository as GitAiRepository;
-use crate::repos::test_file::ExpectedLineExt;
-use crate::repos::test_repo::TestRepo;
 
 // =============================================================================
 // Happy Path Tests - Successful blame operations with AI authorship
@@ -65,7 +69,10 @@ fn test_blame_success_only_human_lines() {
     let repo = TestRepo::new();
     let mut file = repo.filename("human.txt");
 
-    file.set_contents(crate::lines!["Human line 1".human(), "Human line 2".human()]);
+    file.set_contents(crate::lines![
+        "Human line 1".human(),
+        "Human line 2".human()
+    ]);
 
     repo.stage_all_and_commit("All human").unwrap();
 
@@ -100,7 +107,9 @@ fn test_blame_success_with_line_range() {
     let repo = TestRepo::new();
     let mut file = repo.filename("ranges.txt");
 
-    file.set_contents(crate::lines!["Line 1", "Line 2", "Line 3", "Line 4", "Line 5"]);
+    file.set_contents(crate::lines![
+        "Line 1", "Line 2", "Line 3", "Line 4", "Line 5"
+    ]);
 
     repo.stage_all_and_commit("Multi-line file").unwrap();
 
@@ -927,7 +936,9 @@ fn test_blame_multiple_line_ranges() {
     let repo = TestRepo::new();
     let mut file = repo.filename("test.txt");
 
-    file.set_contents(crate::lines!["Line 1", "Line 2", "Line 3", "Line 4", "Line 5"]);
+    file.set_contents(crate::lines![
+        "Line 1", "Line 2", "Line 3", "Line 4", "Line 5"
+    ]);
     repo.stage_all_and_commit("Five lines").unwrap();
 
     let gitai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())

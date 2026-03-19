@@ -1,3 +1,5 @@
+use crate::repos::test_file::ExpectedLineExt;
+use crate::repos::test_repo::TestRepo;
 /// Tests for UTF-8 filename handling with Chinese characters and emojis.
 ///
 /// This tests verifies that files with non-ASCII characters in their filenames
@@ -7,8 +9,6 @@
 /// incorrectly classified as human-written because git outputs such filenames
 /// with octal escape sequences (e.g., `"\344\270\255\346\226\207.txt"` for "中文.txt").
 use git_ai::authorship::stats::CommitStats;
-use crate::repos::test_file::ExpectedLineExt;
-use crate::repos::test_repo::TestRepo;
 
 /// Extract the first complete JSON object from mixed stdout/stderr output.
 fn extract_json_object(output: &str) -> String {
@@ -940,7 +940,11 @@ fn test_box_drawing_characters_filename() {
 
     // AI creates a file with box drawing characters
     let mut box_file = repo.filename("┌─┐│└┘_box.txt");
-    box_file.set_contents(crate::lines!["┌───────┐".ai(), "│ Box   │".ai(), "└───────┘".ai(),]);
+    box_file.set_contents(crate::lines![
+        "┌───────┐".ai(),
+        "│ Box   │".ai(),
+        "└───────┘".ai(),
+    ]);
 
     // Commit the box drawing file
     let commit = repo.stage_all_and_commit("Add box drawing file").unwrap();
@@ -1221,7 +1225,11 @@ fn test_russian_cyrillic_filename() {
 
     // AI creates a file with Russian Cyrillic characters in the filename
     let mut russian_file = repo.filename("Русский.txt");
-    russian_file.set_contents(crate::lines!["Привет мир".ai(), "Спасибо".ai(), "Россия".ai(),]);
+    russian_file.set_contents(crate::lines![
+        "Привет мир".ai(),
+        "Спасибо".ai(),
+        "Россия".ai(),
+    ]);
 
     // Commit the Russian-named file
     let commit = repo.stage_all_and_commit("Add Russian file").unwrap();
@@ -1292,7 +1300,11 @@ fn test_greek_filename() {
 
     // AI creates a file with Greek characters in the filename
     let mut greek_file = repo.filename("Ελληνικά.txt");
-    greek_file.set_contents(crate::lines!["Γειά σου".ai(), "Ευχαριστώ".ai(), "Ελλάδα".ai(),]);
+    greek_file.set_contents(crate::lines![
+        "Γειά σου".ai(),
+        "Ευχαριστώ".ai(),
+        "Ελλάδα".ai(),
+    ]);
 
     // Commit the Greek-named file
     let commit = repo.stage_all_and_commit("Add Greek file").unwrap();
@@ -1403,7 +1415,11 @@ fn test_vietnamese_filename() {
 
     // AI creates a file with Vietnamese characters (with tone marks) in the filename
     let mut vietnamese_file = repo.filename("tiếng_việt.txt");
-    vietnamese_file.set_contents(crate::lines!["Xin chào".ai(), "Cảm ơn".ai(), "Việt Nam".ai(),]);
+    vietnamese_file.set_contents(crate::lines![
+        "Xin chào".ai(),
+        "Cảm ơn".ai(),
+        "Việt Nam".ai(),
+    ]);
 
     // Commit the Vietnamese-named file
     let commit = repo.stage_all_and_commit("Add Vietnamese file").unwrap();
@@ -1990,7 +2006,10 @@ fn test_rtl_with_ltr_mixed_filename() {
 
     // AI creates a file with mixed RTL (Arabic) and LTR (English) in the filename
     let mut mixed_file = repo.filename("test_مرحبا_file.txt");
-    mixed_file.set_contents(crate::lines!["Mixed RTL and LTR content".ai(), "محتوى مختلط".ai(),]);
+    mixed_file.set_contents(crate::lines![
+        "Mixed RTL and LTR content".ai(),
+        "محتوى مختلط".ai(),
+    ]);
 
     // Commit the mixed RTL/LTR-named file
     let commit = repo.stage_all_and_commit("Add mixed RTL/LTR file").unwrap();

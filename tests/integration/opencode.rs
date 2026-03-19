@@ -1,4 +1,4 @@
-
+use crate::test_utils::fixture_path;
 use git_ai::authorship::transcript::Message;
 use git_ai::authorship::working_log::CheckpointKind;
 use git_ai::commands::checkpoint_agent::agent_presets::{
@@ -7,7 +7,6 @@ use git_ai::commands::checkpoint_agent::agent_presets::{
 use git_ai::commands::checkpoint_agent::opencode_preset::OpenCodePreset;
 use serde_json::json;
 use std::fs;
-use crate::test_utils::fixture_path;
 
 fn opencode_storage_fixture_path() -> std::path::PathBuf {
     fixture_path("opencode-storage")

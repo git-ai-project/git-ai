@@ -8,9 +8,8 @@
 //! - Error handling for database operations
 //! - Transaction management
 
-
-use git_ai::authorship::transcript::{AiTranscript, Message};
 use crate::repos::test_repo::TestRepo;
+use git_ai::authorship::transcript::{AiTranscript, Message};
 use rusqlite::Connection;
 use serde_json::Value;
 use std::fs;

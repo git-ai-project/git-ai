@@ -9,6 +9,9 @@
 //! integrated into overlay_ai_authorship.
 
 
+
+
+
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
 
@@ -422,8 +425,11 @@ fn test_agent_blame_assert_lines_mixed_human_agent() {
         "cursor commit",
     );
 
-    let mut file =
-        crate::repos::test_file::TestFile::new_with_filename(repo.path().join("mixed2.rs"), vec![], &repo);
+    let mut file = crate::repos::test_file::TestFile::new_with_filename(
+        repo.path().join("mixed2.rs"),
+        vec![],
+        &repo,
+    );
 
     file.assert_lines_and_blame(vec![
         "human line".human(),

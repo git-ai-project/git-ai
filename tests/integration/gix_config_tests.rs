@@ -1,8 +1,7 @@
-
 use std::collections::HashMap;
 
-use git_ai::git::repository as GitAiRepository;
 use crate::repos::test_repo::TestRepo;
+use git_ai::git::repository as GitAiRepository;
 
 /// Helper to get git config via CLI for comparison
 fn get_git_config_cli(repo: &TestRepo, _command: &str, key: &str) -> Result<String, String> {

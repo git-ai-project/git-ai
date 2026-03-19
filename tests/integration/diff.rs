@@ -1,6 +1,6 @@
-use git_ai::authorship::transcript::{AiTranscript, Message};
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::{NewCommit, TestRepo};
+use git_ai::authorship::transcript::{AiTranscript, Message};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -621,7 +621,11 @@ fn test_diff_commit_range() {
     repo.stage_all_and_commit("Second commit").unwrap();
 
     // Third commit
-    file.set_contents(crate::lines!["Line 1".human(), "Line 2".ai(), "Line 3".human()]);
+    file.set_contents(crate::lines![
+        "Line 1".human(),
+        "Line 2".ai(),
+        "Line 3".human()
+    ]);
     let third = repo.stage_all_and_commit("Third commit").unwrap();
 
     // Run git-ai diff with range
@@ -655,7 +659,11 @@ fn test_diff_two_positional_revisions_uses_git_range_semantics() {
     file.set_contents(crate::lines!["BASE".human()]);
     let from = repo.stage_all_and_commit("Base commit").unwrap();
 
-    file.set_contents(crate::lines!["BASE".human(), "AI line 1".ai(), "AI line 2".ai()]);
+    file.set_contents(crate::lines![
+        "BASE".human(),
+        "AI line 1".ai(),
+        "AI line 2".ai()
+    ]);
     let to = repo.stage_all_and_commit("Append lines").unwrap();
 
     let plain_git_diff = repo
@@ -730,7 +738,10 @@ fn test_diff_shows_human_attribution() {
     repo.stage_all_and_commit("Initial AI").unwrap();
 
     // Human makes changes
-    file.set_contents(crate::lines!["fn new() {}".human(), "fn another() {}".human()]);
+    file.set_contents(crate::lines![
+        "fn new() {}".human(),
+        "fn another() {}".human()
+    ]);
     let commit = repo.stage_all_and_commit("Human changes").unwrap();
 
     // Run diff
@@ -775,7 +786,10 @@ fn test_diff_multiple_files() {
 
     // Modify both files
     file1.set_contents(crate::lines!["File 1 line 1".human(), "File 1 line 2".ai()]);
-    file2.set_contents(crate::lines!["File 2 line 1".human(), "File 2 line 2".human()]);
+    file2.set_contents(crate::lines![
+        "File 2 line 1".human(),
+        "File 2 line 2".human()
+    ]);
     let commit = repo.stage_all_and_commit("Modify both files").unwrap();
 
     // Run diff
@@ -828,7 +842,11 @@ fn test_diff_pure_additions() {
     repo.stage_all_and_commit("Initial").unwrap();
 
     // Add more lines at the end (pure additions)
-    file.set_contents(crate::lines!["Line 1".human(), "Line 2".ai(), "Line 3".ai()]);
+    file.set_contents(crate::lines![
+        "Line 1".human(),
+        "Line 2".ai(),
+        "Line 3".ai()
+    ]);
     let commit = repo.stage_all_and_commit("Add lines").unwrap();
 
     // Run diff
@@ -1008,7 +1026,9 @@ fn test_diff_json_output_with_escaped_newlines() {
         .unwrap();
 
     // Modify to other_text.split("\n\n")
-    file.set_contents(crate::lines![r#"const lines = other_text.split("\n\n")"#.ai()]);
+    file.set_contents(crate::lines![
+        r#"const lines = other_text.split("\n\n")"#.ai()
+    ]);
     let commit = repo
         .stage_all_and_commit("Update split to use double newline")
         .unwrap();
@@ -1648,7 +1668,11 @@ fn test_diff_json_blame_deletions_rename_with_edit_uses_old_path() {
     let repo = TestRepo::new();
 
     let mut old_file = repo.filename("rename_blame_old.txt");
-    old_file.set_contents(crate::lines!["keep".human(), "drop-ai".ai(), "tail".human()]);
+    old_file.set_contents(crate::lines![
+        "keep".human(),
+        "drop-ai".ai(),
+        "tail".human()
+    ]);
     let base_commit = repo.stage_all_and_commit("base with ai line").unwrap();
     let old_line_prompt = prompt_id_for_line_in_commit(&base_commit, "rename_blame_old.txt", 2)
         .expect("line 2 in base commit should be AI-attributed");
@@ -1764,11 +1788,17 @@ fn test_diff_exact_sequence_verification() {
 
     // Initial commit with 2 lines
     let mut file = repo.filename("sequence.rs");
-    file.set_contents(crate::lines!["fn first() {}".human(), "fn second() {}".ai()]);
+    file.set_contents(crate::lines![
+        "fn first() {}".human(),
+        "fn second() {}".ai()
+    ]);
     repo.stage_all_and_commit("Initial").unwrap();
 
     // Modify: delete first, modify second, add third
-    file.set_contents(crate::lines!["fn second_modified() {}".ai(), "fn third() {}".ai()]);
+    file.set_contents(crate::lines![
+        "fn second_modified() {}".ai(),
+        "fn third() {}".ai()
+    ]);
     let commit = repo.stage_all_and_commit("Complex changes").unwrap();
 
     // Run diff
@@ -1806,7 +1836,11 @@ fn test_diff_range_multiple_commits() {
     repo.stage_all_and_commit("Second").unwrap();
 
     // Third commit
-    file.set_contents(crate::lines!["Line 1".human(), "Line 2".ai(), "Line 3".human()]);
+    file.set_contents(crate::lines![
+        "Line 1".human(),
+        "Line 2".ai(),
+        "Line 3".human()
+    ]);
     repo.stage_all_and_commit("Third").unwrap();
 
     // Fourth commit
@@ -2094,7 +2128,11 @@ fn test_diff_blame_deletions_terminal_annotations() {
     let repo = TestRepo::new();
 
     let mut file = repo.filename("deletion_terminal.txt");
-    file.set_contents(crate::lines!["keep".human(), "delete ai".ai(), "tail".human()]);
+    file.set_contents(crate::lines![
+        "keep".human(),
+        "delete ai".ai(),
+        "tail".human()
+    ]);
     repo.stage_all_and_commit("Seed AI deletion line").unwrap();
 
     file.set_contents(crate::lines!["keep".human(), "tail".human()]);
@@ -2141,7 +2179,11 @@ fn test_diff_blame_deletions_since_accepts_git_date_specs() {
     let repo = TestRepo::new();
 
     let mut file = repo.filename("deletion_since.txt");
-    file.set_contents(crate::lines!["keep".human(), "remove me".ai(), "tail".human()]);
+    file.set_contents(crate::lines![
+        "keep".human(),
+        "remove me".ai(),
+        "tail".human()
+    ]);
     repo.stage_all_and_commit("Seed AI line").unwrap();
 
     file.set_contents(crate::lines!["keep".human(), "tail".human()]);

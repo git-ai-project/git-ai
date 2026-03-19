@@ -1263,17 +1263,19 @@ fn init_template_repo() -> PathBuf {
             .args(&args)
             .output()
             .expect("failed to configure template repo");
-        assert!(output.status.success(), "template config failed: {:?}", args);
+        assert!(
+            output.status.success(),
+            "template config failed: {:?}",
+            args
+        );
     }
 
     path
 }
 
 fn init_bare_template_repo() -> PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "git-ai-test-template-bare-{}",
-        std::process::id()
-    ));
+    let path =
+        std::env::temp_dir().join(format!("git-ai-test-template-bare-{}", std::process::id()));
     let _ = fs::remove_dir_all(&path);
 
     let p = path.to_str().unwrap();

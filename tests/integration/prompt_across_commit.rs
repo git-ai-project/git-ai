@@ -1,7 +1,6 @@
-
-use git_ai::authorship::authorship_log::LineRange;
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
+use git_ai::authorship::authorship_log::LineRange;
 
 #[test]
 fn test_change_across_commits() {

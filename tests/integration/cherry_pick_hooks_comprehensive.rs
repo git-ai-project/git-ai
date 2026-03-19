@@ -1,4 +1,3 @@
-
 use crate::repos::test_repo::TestRepo;
 use git_ai::git::rewrite_log::RewriteLogEvent;
 use std::path::PathBuf;

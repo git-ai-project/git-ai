@@ -1,6 +1,6 @@
-use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
+use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 use std::collections::HashMap;
 use std::process::Command;
 use std::time::Duration;
@@ -196,7 +196,11 @@ fn test_prepare_working_log_squash_with_mixed_additions() {
     let mut file = repo.filename("code.txt");
 
     // Create master branch with initial content
-    file.set_contents(crate::lines!["function start() {", "  // initial code", "}"]);
+    file.set_contents(crate::lines![
+        "function start() {",
+        "  // initial code",
+        "}"
+    ]);
     repo.stage_all_and_commit("Initial commit").unwrap();
 
     let default_branch = repo.current_branch();

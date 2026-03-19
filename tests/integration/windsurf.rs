@@ -1,11 +1,10 @@
-
+use crate::repos::test_file::ExpectedLineExt;
+use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::transcript::Message;
 use git_ai::authorship::working_log::CheckpointKind;
 use git_ai::commands::checkpoint_agent::agent_presets::{
     AgentCheckpointFlags, AgentCheckpointPreset, WindsurfPreset,
 };
-use crate::repos::test_file::ExpectedLineExt;
-use crate::repos::test_repo::TestRepo;
 use serde_json::json;
 use std::fs;
 use std::io::Write;
@@ -440,7 +439,10 @@ fn test_windsurf_e2e_human_checkpoint() {
 
     // Human edits should be attributed to human
     let mut file = repo.filename("index.ts");
-    file.assert_lines_and_blame(crate::lines!["const x = 1;".human(), "const y = 2;".human(),]);
+    file.assert_lines_and_blame(crate::lines![
+        "const x = 1;".human(),
+        "const y = 2;".human(),
+    ]);
 
     assert_eq!(
         commit.authorship_log.attestations.len(),

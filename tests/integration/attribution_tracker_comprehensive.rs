@@ -15,12 +15,11 @@
 //! 9. Attribution preservation through renames
 //! 10. Multi-file attribution scenarios
 
-
+use crate::repos::test_file::ExpectedLineExt;
+use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::attribution_tracker::{
     Attribution, AttributionConfig, AttributionTracker, INITIAL_ATTRIBUTION_TS, LineAttribution,
 };
-use crate::repos::test_file::ExpectedLineExt;
-use crate::repos::test_repo::TestRepo;
 
 // =============================================================================
 // Basic Attribution Tests - Core functionality

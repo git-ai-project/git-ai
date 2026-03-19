@@ -1,6 +1,6 @@
-use git_ai::authorship::stats::CommitStats;
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
+use git_ai::authorship::stats::CommitStats;
 use std::fs;
 
 fn extract_json_object(output: &str) -> String {
@@ -326,7 +326,10 @@ fn test_ai_attribution_preserved_with_non_utf8_in_same_commit() {
     repo.stage_all_and_commit("Initial commit").unwrap();
 
     let mut ai_file = repo.filename("ai_output.py");
-    ai_file.set_contents(crate::lines!["def hello():".ai(), "    return 'world'".ai(),]);
+    ai_file.set_contents(crate::lines![
+        "def hello():".ai(),
+        "    return 'world'".ai(),
+    ]);
 
     let gbk_path = repo.path().join("legacy_gbk.txt");
     fs::write(&gbk_path, gbk_multiline()).unwrap();
@@ -709,7 +712,11 @@ fn test_line_attribution_multiple_utf8_files_with_non_utf8_neighbors() {
     let mut file_a = repo.filename("module_a.py");
     let mut file_b = repo.filename("module_b.py");
 
-    file_a.set_contents(crate::lines!["def func_a():".ai(), "    pass".ai(), "# end of a",]);
+    file_a.set_contents(crate::lines![
+        "def func_a():".ai(),
+        "    pass".ai(),
+        "# end of a",
+    ]);
 
     file_b.set_contents(crate::lines![
         "def func_b():".human(),

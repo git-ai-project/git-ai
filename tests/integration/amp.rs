@@ -1,4 +1,4 @@
-
+use crate::test_utils::fixture_path;
 use git_ai::authorship::transcript::Message;
 use git_ai::authorship::working_log::CheckpointKind;
 use git_ai::commands::checkpoint_agent::agent_presets::{
@@ -8,7 +8,6 @@ use git_ai::commands::checkpoint_agent::amp_preset::AmpPreset;
 use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
-use crate::test_utils::fixture_path;
 
 const AMP_SIMPLE_THREAD_ID: &str = "T-019ca1f6-7f21-77b5-a308-65416ebbdf48";
 const AMP_SIMPLE_EDIT_TOOL_USE_ID: &str = "toolu_vrtx_01TJD3myjs6gdrDRVn6ZbNME";

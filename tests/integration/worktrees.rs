@@ -1,4 +1,5 @@
-
+use crate::repos::test_file::ExpectedLineExt;
+use crate::repos::test_repo::GitTestMode;
 use git_ai::authorship::attribution_tracker::LineAttribution;
 use git_ai::authorship::authorship_log::PromptRecord;
 use git_ai::authorship::transcript::Message;
@@ -7,8 +8,6 @@ use git_ai::git::repository as GitAiRepository;
 use insta::assert_debug_snapshot;
 use rand::Rng;
 use regex::Regex;
-use crate::repos::test_file::ExpectedLineExt;
-use crate::repos::test_repo::GitTestMode;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -77,7 +76,11 @@ fn parse_blame_line(line: &str) -> (String, String) {
     ("unknown".to_string(), line.to_string())
 }
 
-fn assert_hooks_line_is_human_or_ai(repo: &crate::repos::test_repo::TestRepo, path: &str, line: &str) {
+fn assert_hooks_line_is_human_or_ai(
+    repo: &crate::repos::test_repo::TestRepo,
+    path: &str,
+    line: &str,
+) {
     let blame_output = repo.git_ai(&["blame", path]).expect("blame should succeed");
     let parsed_lines: Vec<(String, String)> = blame_output
         .lines()
@@ -98,7 +101,11 @@ fn assert_hooks_line_is_human_or_ai(repo: &crate::repos::test_repo::TestRepo, pa
     );
 }
 
-fn assert_file_lines(repo: &crate::repos::test_repo::TestRepo, path: &str, expected_lines: &[&str]) {
+fn assert_file_lines(
+    repo: &crate::repos::test_repo::TestRepo,
+    path: &str,
+    expected_lines: &[&str],
+) {
     let content = fs::read_to_string(repo.path().join(path)).expect("read file");
     let actual_lines: Vec<&str> = content.lines().collect();
     assert_eq!(actual_lines, expected_lines);

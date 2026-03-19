@@ -12,10 +12,9 @@
 //! - Working directory operations
 //! - Bare repository support
 
-
-use git_ai::git::repository::{find_repository, find_repository_in_path};
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
+use git_ai::git::repository::{find_repository, find_repository_in_path};
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
@@ -914,7 +913,11 @@ fn test_commit_range_length() {
     file.set_contents(crate::lines!["line1".human(), "line2".human()]);
     test_repo.stage_all_and_commit("Second").unwrap();
 
-    file.set_contents(crate::lines!["line1".human(), "line2".human(), "line3".human()]);
+    file.set_contents(crate::lines![
+        "line1".human(),
+        "line2".human(),
+        "line3".human()
+    ]);
     let third = test_repo.stage_all_and_commit("Third").unwrap();
 
     let repo = find_repository(&[
@@ -951,7 +954,11 @@ fn test_commit_range_iteration() {
     file.set_contents(crate::lines!["line1".human(), "line2".human()]);
     let second = test_repo.stage_all_and_commit("Second").unwrap();
 
-    file.set_contents(crate::lines!["line1".human(), "line2".human(), "line3".human()]);
+    file.set_contents(crate::lines![
+        "line1".human(),
+        "line2".human(),
+        "line3".human()
+    ]);
     let third = test_repo.stage_all_and_commit("Third").unwrap();
 
     let repo = find_repository(&[
@@ -996,7 +1003,11 @@ fn test_commit_range_all_commits() {
     file.set_contents(crate::lines!["line1".human(), "line2".human()]);
     test_repo.stage_all_and_commit("Second").unwrap();
 
-    file.set_contents(crate::lines!["line1".human(), "line2".human(), "line3".human()]);
+    file.set_contents(crate::lines![
+        "line1".human(),
+        "line2".human(),
+        "line3".human()
+    ]);
     let third = test_repo.stage_all_and_commit("Third").unwrap();
 
     let repo = find_repository(&[

@@ -209,7 +209,9 @@ fn test_simple_ai_then_human_deletion() {
     let repo = TestRepo::new();
     let mut file = repo.filename("test.txt");
 
-    file.set_contents(crate::lines!["Line 1", "Line 2", "Line 3", "Line 4", "Line 5"]);
+    file.set_contents(crate::lines![
+        "Line 1", "Line 2", "Line 3", "Line 4", "Line 5"
+    ]);
 
     repo.stage_all_and_commit("Initial commit").unwrap();
 
@@ -253,7 +255,11 @@ fn test_multiple_ai_checkpoints_with_human_deletions() {
     // Should only have AI2's lines attributed (now at indices 1 and 2 after deletion)
     assert_eq!(commit.authorship_log.attestations.len(), 1);
 
-    file.assert_lines_and_blame(crate::lines!["Base".human(), "AI2 Line 1".ai(), "AI2 Line 2".ai(),]);
+    file.assert_lines_and_blame(crate::lines![
+        "Base".human(),
+        "AI2 Line 1".ai(),
+        "AI2 Line 2".ai(),
+    ]);
 }
 
 #[test]
@@ -348,7 +354,10 @@ fn test_partial_staging_filters_unstaged_lines() {
     file.stage();
 
     // Now AI adds more lines that won't be staged
-    file.insert_at(3, crate::lines!["unstaged_line1".ai(), "unstaged_line2".ai()]);
+    file.insert_at(
+        3,
+        crate::lines!["unstaged_line1".ai(), "unstaged_line2".ai()],
+    );
 
     let commit = repo.commit("Partial staging").unwrap();
 
@@ -455,7 +464,10 @@ fn test_ai_adds_then_commits_in_batches() {
     repo.stage_all_and_commit("Initial commit").unwrap();
 
     // AI adds first batch of lines
-    file.insert_at(4, crate::lines!["ai_line5".ai(), "ai_line6".ai(), "ai_line7".ai()]);
+    file.insert_at(
+        4,
+        crate::lines!["ai_line5".ai(), "ai_line6".ai(), "ai_line7".ai()],
+    );
     file.stage();
 
     repo.commit("Add lines 5-7").unwrap();
@@ -500,7 +512,10 @@ fn test_ai_edits_with_partial_staging() {
     file.stage();
 
     // AI adds more lines that won't be staged
-    file.insert_at(5, crate::lines!["ai_line6".ai(), "ai_line7".ai(), "ai_line8".ai()]);
+    file.insert_at(
+        5,
+        crate::lines!["ai_line6".ai(), "ai_line7".ai(), "ai_line8".ai()],
+    );
 
     let commit = repo.commit("Partial staging").unwrap();
 
@@ -532,7 +547,10 @@ fn test_unstaged_changes_not_committed() {
     file.stage();
 
     // AI adds more lines that won't be staged
-    file.insert_at(5, crate::lines!["unstaged_line6".ai(), "unstaged_line7".ai()]);
+    file.insert_at(
+        5,
+        crate::lines!["unstaged_line6".ai(), "unstaged_line7".ai()],
+    );
 
     let commit = repo.commit("Commit only staged lines").unwrap();
 
@@ -1311,7 +1329,10 @@ fn test_multi_file_batch_commits_modifications() {
 
     // Verify both files have correct AI attribution
     let mut file_a = repo.filename("file_a.txt");
-    file_a.assert_lines_and_blame(crate::lines!["Original content A".human(), "AI added line A".ai(),]);
+    file_a.assert_lines_and_blame(crate::lines![
+        "Original content A".human(),
+        "AI added line A".ai(),
+    ]);
 
     let mut file_b = repo.filename("file_b.txt");
     file_b.assert_lines_and_blame(crate::lines![

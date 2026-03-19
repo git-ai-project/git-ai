@@ -1,4 +1,3 @@
-
 use git_ai::authorship::working_log::CheckpointKind;
 use git_ai::commands::checkpoint_agent::agent_presets::{
     AgentCheckpointFlags, AgentCheckpointPreset, AiTabPreset, ClaudePreset, CodexPreset,

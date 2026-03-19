@@ -1,9 +1,9 @@
+use crate::repos::test_file::ExpectedLineExt;
+use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::authorship_log::PromptRecord;
 use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 use git_ai::authorship::working_log::AgentId;
 use git_ai::git::refs::notes_add;
-use crate::repos::test_file::ExpectedLineExt;
-use crate::repos::test_repo::TestRepo;
 use std::collections::HashMap;
 use std::process::Command;
 
@@ -286,7 +286,10 @@ fn test_rebase_with_human_only_commit_between_ai_commits_preserves_exact_lines()
     repo.git(&["checkout", "feature"]).unwrap();
     repo.git(&["rebase", &default_branch]).unwrap();
 
-    app_file.assert_lines_and_blame(crate::lines!["const base = 0;".ai(), "// AI block 1".ai()]);
+    app_file.assert_lines_and_blame(crate::lines![
+        "const base = 0;".ai(),
+        "// AI block 1".ai()
+    ]);
     generated_file.assert_lines_and_blame(crate::lines!["const generated = 42;".ai()]);
     notes_file.assert_lines_and_blame(crate::lines!["human notes line".human()]);
 }
@@ -504,7 +507,8 @@ fn test_rebase_with_explicit_branch_argument_preserves_authorship() {
     );
 
     // HEAD should now be on feature after the rebase operation; verify AI blame survived.
-    feature_file.assert_lines_and_blame(crate::lines!["// AI feature".ai(), "fn feature() {}".ai()]);
+    feature_file
+        .assert_lines_and_blame(crate::lines!["// AI feature".ai(), "fn feature() {}".ai()]);
 }
 
 /// Test `git rebase --root --onto <base> <branch>` when invoked from another branch.
@@ -550,7 +554,8 @@ fn test_rebase_root_with_explicit_branch_argument_preserves_authorship() {
     );
 
     // HEAD should now be on feature after the rebase operation; verify AI blame survived.
-    feature_file.assert_lines_and_blame(crate::lines!["// AI feature".ai(), "fn feature() {}".ai()]);
+    feature_file
+        .assert_lines_and_blame(crate::lines!["// AI feature".ai(), "fn feature() {}".ai()]);
 }
 
 /// Test interactive rebase with commit reordering - verifies interactive rebase works

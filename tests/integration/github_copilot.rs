@@ -1,9 +1,8 @@
-
+use crate::test_utils::{fixture_path, load_fixture};
 use git_ai::authorship::transcript::Message;
 use git_ai::commands::checkpoint_agent::agent_presets::GithubCopilotPreset;
 use serde_json::json;
 use std::{fs, io::Write};
-use crate::test_utils::{fixture_path, load_fixture};
 
 /// Ensure CODESPACES and REMOTE_CONTAINERS are not set (they cause early return in transcript parsing)
 fn ensure_clean_env() {

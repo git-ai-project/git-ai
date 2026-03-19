@@ -1,9 +1,9 @@
+use crate::repos::test_file::ExpectedLineExt;
+use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::authorship_log::PromptRecord;
 use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 use git_ai::authorship::working_log::AgentId;
 use git_ai::git::refs::notes_add;
-use crate::repos::test_file::ExpectedLineExt;
-use crate::repos::test_repo::TestRepo;
 use std::collections::HashMap;
 use std::process::Command;
 
@@ -53,7 +53,10 @@ fn test_single_commit_cherry_pick() {
     repo.git(&["cherry-pick", &feature_commit]).unwrap();
 
     // Verify final file state - hooks should have preserved AI authorship
-    file.assert_lines_and_blame(crate::lines!["Initial content".ai(), "AI feature line".ai(),]);
+    file.assert_lines_and_blame(crate::lines![
+        "Initial content".ai(),
+        "AI feature line".ai(),
+    ]);
 
     // Verify stats
     let stats = repo.stats().unwrap();
@@ -370,7 +373,10 @@ fn test_cherry_pick_abort() {
     repo.stage_all_and_commit("AI feature").unwrap();
 
     // Assert intermediary blame
-    file.assert_lines_and_blame(crate::lines!["Line 1".human(), "AI modification of line 2".ai(),]);
+    file.assert_lines_and_blame(crate::lines![
+        "Line 1".human(),
+        "AI modification of line 2".ai(),
+    ]);
 
     let feature_commit = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
@@ -644,7 +650,10 @@ fn test_cherry_pick_preserves_custom_attributes_from_config() {
     }
 
     // Also verify the AI attribution itself survived
-    file.assert_lines_and_blame(crate::lines!["Initial content".ai(), "AI feature line".ai()]);
+    file.assert_lines_and_blame(crate::lines![
+        "Initial content".ai(),
+        "AI feature line".ai()
+    ]);
 }
 
 crate::reuse_tests_in_worktree!(

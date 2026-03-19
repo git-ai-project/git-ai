@@ -1,7 +1,7 @@
-use git_ai::authorship::stats::CommitStats;
-use insta::assert_debug_snapshot;
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
+use git_ai::authorship::stats::CommitStats;
+use insta::assert_debug_snapshot;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -520,7 +520,8 @@ fn test_markdown_stats_formatting() {
 #[test]
 fn test_stats_default_ignores_snapshot_files() {
     let repo = TestRepo::new();
-    repo.filename("README.md").set_contents(crate::lines!["# Repo"]);
+    repo.filename("README.md")
+        .set_contents(crate::lines!["# Repo"]);
     repo.stage_all_and_commit("Initial commit").unwrap();
 
     repo.filename("src/main.rs")
@@ -542,7 +543,8 @@ fn test_stats_default_ignores_snapshot_files() {
 #[test]
 fn test_stats_default_ignores_lockfiles_and_generated_files() {
     let repo = TestRepo::new();
-    repo.filename("README.md").set_contents(crate::lines!["# Repo"]);
+    repo.filename("README.md")
+        .set_contents(crate::lines!["# Repo"]);
     repo.stage_all_and_commit("Initial commit").unwrap();
 
     repo.filename("src/lib.rs")
@@ -564,7 +566,8 @@ fn test_stats_ignores_linguist_generated_patterns() {
     let repo = TestRepo::new();
     repo.filename(".gitattributes")
         .set_contents(crate::lines!["generated/** linguist-generated=true"]);
-    repo.filename("README.md").set_contents(crate::lines!["# Repo"]);
+    repo.filename("README.md")
+        .set_contents(crate::lines!["# Repo"]);
     repo.stage_all_and_commit("Initial commit with gitattributes")
         .unwrap();
 
@@ -587,7 +590,8 @@ fn test_stats_keeps_negative_linguist_patterns_counted() {
         "generated/** linguist-generated=true",
         "manual/** linguist-generated=false"
     ]);
-    repo.filename("README.md").set_contents(crate::lines!["# Repo"]);
+    repo.filename("README.md")
+        .set_contents(crate::lines!["# Repo"]);
     repo.stage_all_and_commit("Initial commit with attrs")
         .unwrap();
 
@@ -608,7 +612,8 @@ fn test_stats_in_bare_clone_uses_root_gitattributes_linguist_generated() {
     let repo = TestRepo::new();
     repo.filename(".gitattributes")
         .set_contents(crate::lines!["generated/** linguist-generated=true"]);
-    repo.filename("README.md").set_contents(crate::lines!["# Repo"]);
+    repo.filename("README.md")
+        .set_contents(crate::lines!["# Repo"]);
     repo.stage_all_and_commit("Initial commit with gitattributes")
         .unwrap();
 
@@ -665,7 +670,8 @@ fn test_stats_in_bare_clone_uses_root_gitattributes_linguist_generated() {
 #[test]
 fn test_stats_ignore_flag_is_additive_to_defaults() {
     let repo = TestRepo::new();
-    repo.filename("README.md").set_contents(crate::lines!["# Repo"]);
+    repo.filename("README.md")
+        .set_contents(crate::lines!["# Repo"]);
     repo.stage_all_and_commit("Initial commit").unwrap();
 
     repo.filename("src/main.rs")
@@ -687,7 +693,8 @@ fn test_stats_ignore_flag_is_additive_to_defaults() {
 #[test]
 fn test_stats_range_uses_default_ignores() {
     let repo = TestRepo::new();
-    repo.filename("README.md").set_contents(crate::lines!["# Repo"]);
+    repo.filename("README.md")
+        .set_contents(crate::lines!["# Repo"]);
     let first = repo.stage_all_and_commit("Initial commit").unwrap();
 
     repo.filename("src/main.rs")
@@ -713,7 +720,8 @@ fn test_stats_range_uses_default_ignores() {
 #[test]
 fn test_post_commit_large_ignored_files_do_not_trigger_skip_warning() {
     let repo = TestRepo::new();
-    repo.filename("README.md").set_contents(crate::lines!["# Repo"]);
+    repo.filename("README.md")
+        .set_contents(crate::lines!["# Repo"]);
     repo.stage_all_and_commit("Initial commit").unwrap();
 
     repo.filename("Cargo.lock")

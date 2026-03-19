@@ -1,6 +1,6 @@
-use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
+use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 use std::collections::HashMap;
 use std::process::Command;
 
@@ -31,7 +31,9 @@ fn test_amend_add_lines_at_top() {
     let mut file = repo.filename("test.txt");
 
     // Initial file with human content
-    file.set_contents(crate::lines!["line 1", "line 2", "line 3", "line 4", "line 5"]);
+    file.set_contents(crate::lines![
+        "line 1", "line 2", "line 3", "line 4", "line 5"
+    ]);
 
     repo.git(&["add", "-A"]).unwrap();
 
@@ -68,7 +70,9 @@ fn test_amend_add_lines_in_middle() {
     let mut file = repo.filename("test.txt");
 
     // Initial file with human content
-    file.set_contents(crate::lines!["line 1", "line 2", "line 3", "line 4", "line 5"]);
+    file.set_contents(crate::lines![
+        "line 1", "line 2", "line 3", "line 4", "line 5"
+    ]);
     repo.stage_all_and_commit("Initial commit").unwrap();
 
     // AI adds lines in the middle
@@ -100,7 +104,9 @@ fn test_amend_add_lines_at_bottom() {
     let mut file = repo.filename("test.txt");
 
     // Initial file with human content
-    file.set_contents(crate::lines!["line 1", "line 2", "line 3", "line 4", "line 5"]);
+    file.set_contents(crate::lines![
+        "line 1", "line 2", "line 3", "line 4", "line 5"
+    ]);
     repo.stage_all_and_commit("Initial commit").unwrap();
 
     // AI adds lines at the bottom
@@ -272,7 +278,10 @@ fn test_amend_with_multiple_files_mixed_staging() {
 
     // Create file2 with AI code (unstaged)
     let mut file2 = repo.filename("file2.txt");
-    file2.set_contents_no_stage(crate::lines!["// AI file2 line 1".ai(), "// AI file2 line 2".ai()]);
+    file2.set_contents_no_stage(crate::lines![
+        "// AI file2 line 1".ai(),
+        "// AI file2 line 2".ai()
+    ]);
 
     // Create file3 with mixed AI and human code (unstaged)
     let mut file3 = repo.filename("file3.txt");
@@ -290,7 +299,10 @@ fn test_amend_with_multiple_files_mixed_staging() {
     repo.stage_all_and_commit("Add file2 and file3").unwrap();
 
     // Verify AI authorship is preserved
-    file2.assert_lines_and_blame(crate::lines!["// AI file2 line 1".ai(), "// AI file2 line 2".ai()]);
+    file2.assert_lines_and_blame(crate::lines![
+        "// AI file2 line 1".ai(),
+        "// AI file2 line 2".ai()
+    ]);
 
     file3.assert_lines_and_blame(crate::lines![
         "human line".human(),
