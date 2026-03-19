@@ -127,7 +127,11 @@ fn remove_skill_link(link_path: &PathBuf) -> Result<(), GitAiError> {
 /// Then links each skill to:
 /// - ~/.agents/skills/{skill-name} (symlink on Unix, copy on Windows)
 /// - ~/.claude/skills/{skill-name} (symlink on Unix, copy on Windows)
-pub fn install_skills(dry_run: bool, _verbose: bool, installed_tools: &HashSet<String>) -> Result<SkillsInstallResult, GitAiError> {
+pub fn install_skills(
+    dry_run: bool,
+    _verbose: bool,
+    installed_tools: &HashSet<String>,
+) -> Result<SkillsInstallResult, GitAiError> {
     let skills_base = skills_dir_path().ok_or_else(|| {
         GitAiError::Generic("Could not determine skills directory path".to_string())
     })?;
@@ -444,8 +448,10 @@ mod tests {
         // and don't race with other tests that mutate HOME (e.g. codex tests).
         with_temp_home(|_home| {
             let skills_base = skills_dir_path().unwrap();
-            let all_tools: HashSet<String> =
-                ["claude-code", "cursor"].iter().map(|s| s.to_string()).collect();
+            let all_tools: HashSet<String> = ["claude-code", "cursor"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
 
             // Dry run should not create anything
             let dry_result = install_skills(true, false, &all_tools).unwrap();
