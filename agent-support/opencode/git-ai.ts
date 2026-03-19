@@ -17,70 +17,82 @@
  * @see https://opencode.ai/docs/plugins/
  */
 
-import type { Plugin } from "@opencode-ai/plugin"
-import { dirname } from "path"
+import type { Plugin } from "@opencode-ai/plugin";
+import { dirname } from "path";
 
 // Absolute path to git-ai binary, replaced at install time by `git-ai install-hooks`
-const GIT_AI_BIN = "__GIT_AI_BINARY_PATH__"
+const GIT_AI_BIN = "__GIT_AI_BINARY_PATH__";
 
 // Tools that modify files and should be tracked
-const FILE_EDIT_TOOLS = ["edit", "write", "patch", "multiedit"]
+const FILE_EDIT_TOOLS = ["edit", "write", "patch", "multiedit", "apply_patch"];
 
 export const GitAiPlugin: Plugin = async (ctx) => {
-  const { $ } = ctx
+  const { $ } = ctx;
 
   // Check if git-ai is installed
-  let gitAiInstalled = false
+  let gitAiInstalled = false;
   try {
-    await $`${GIT_AI_BIN} --version`.quiet()
-    gitAiInstalled = true
+    await $`${GIT_AI_BIN} --version`.quiet();
+    gitAiInstalled = true;
   } catch {
     // git-ai not installed, plugin will be a no-op
   }
 
   if (!gitAiInstalled) {
-    return {}
+    return {};
   }
 
   // Track pending edits by callID so we can reference them in the after hook
   // Stores { filePath, repoDir, sessionID } for each pending edit
-  const pendingEdits = new Map<string, { filePath: string; repoDir: string; sessionID: string }>()
+  const pendingEdits = new Map<
+    string,
+    { filePath: string; repoDir: string; sessionID: string }
+  >();
 
   // Helper to find git repo root from a file path
   const findGitRepo = async (filePath: string): Promise<string | null> => {
     try {
-      const dir = dirname(filePath)
-      const result = await $`git -C ${dir} rev-parse --show-toplevel`.quiet()
-      const repoRoot = result.stdout.toString().trim()
-      return repoRoot || null
+      const dir = dirname(filePath);
+      const result = await $`git -C ${dir} rev-parse --show-toplevel`.quiet();
+      const repoRoot = result.stdout.toString().trim();
+      return repoRoot || null;
     } catch {
       // Not a git repo or git not available
-      return null
+      return null;
     }
-  }
+  };
 
   return {
     "tool.execute.before": async (input, output) => {
       // Only intercept file editing tools
       if (!FILE_EDIT_TOOLS.includes(input.tool)) {
-        return
+        return;
       }
 
       // Extract file path from tool arguments (args are in output, not input)
-      const filePath = output.args?.filePath as string | undefined
+      // Patches have the path in patchText only, so this needs to be extracted
+      const filePath = (output.args?.filePath ??
+        (output.args?.patchText as string | undefined)
+          ?.match(/\*\*\* (?:Update|Add) File: (.+?)\n/)?.[1]
+          ?.trim()) as string | undefined;
+
       if (!filePath) {
-        return
+        return;
       }
 
       // Find the git repo for this file
-      const repoDir = await findGitRepo(filePath)
+      const repoDir = await findGitRepo(filePath);
       if (!repoDir) {
         // File is not in a git repo, skip silently
-        return
+        return;
       }
 
       // Store filePath, repoDir, and sessionID for the after hook
-      pendingEdits.set(input.callID, { filePath, repoDir, sessionID: input.sessionID })
+      pendingEdits.set(input.callID, {
+        filePath,
+        repoDir,
+        sessionID: input.sessionID,
+      });
 
       try {
         // Create human checkpoint before AI edit
@@ -90,30 +102,33 @@ export const GitAiPlugin: Plugin = async (ctx) => {
           session_id: input.sessionID,
           cwd: repoDir,
           tool_input: { filePath },
-        })
+        });
 
-        await $`echo ${hookInput} | ${GIT_AI_BIN} checkpoint opencode --hook-input stdin`.quiet()
+        await $`echo ${hookInput} | ${GIT_AI_BIN} checkpoint opencode --hook-input stdin`.quiet();
       } catch (error) {
         // Log to stderr for debugging, but don't throw - git-ai errors shouldn't break the agent
-        console.error("[git-ai] Failed to create human checkpoint:", String(error))
+        console.error(
+          "[git-ai] Failed to create human checkpoint:",
+          String(error)
+        );
       }
     },
 
     "tool.execute.after": async (input, _output) => {
       // Only intercept file editing tools
       if (!FILE_EDIT_TOOLS.includes(input.tool)) {
-        return
+        return;
       }
 
       // Get the filePath and repoDir we stored in the before hook
-      const editInfo = pendingEdits.get(input.callID)
-      pendingEdits.delete(input.callID)
+      const editInfo = pendingEdits.get(input.callID);
+      pendingEdits.delete(input.callID);
 
       if (!editInfo) {
-        return
+        return;
       }
 
-      const { filePath, repoDir, sessionID } = editInfo
+      const { filePath, repoDir, sessionID } = editInfo;
 
       try {
         // Create AI checkpoint after edit
@@ -124,13 +139,16 @@ export const GitAiPlugin: Plugin = async (ctx) => {
           session_id: sessionID,
           cwd: repoDir,
           tool_input: { filePath },
-        })
+        });
 
-        await $`echo ${hookInput} | ${GIT_AI_BIN} checkpoint opencode --hook-input stdin`.quiet()
+        await $`echo ${hookInput} | ${GIT_AI_BIN} checkpoint opencode --hook-input stdin`.quiet();
       } catch (error) {
         // Log to stderr for debugging, but don't throw - git-ai errors shouldn't break the agent
-        console.error("[git-ai] Failed to create AI checkpoint:", String(error))
+        console.error(
+          "[git-ai] Failed to create AI checkpoint:",
+          String(error)
+        );
       }
     },
-  }
-}
+  };
+};
