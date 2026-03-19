@@ -50,11 +50,16 @@ jobs:
       - name: Install Graphite CLI
         run: npm install -g @withgraphite/graphite-cli@stable
 
+      - name: Install mold linker (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y mold
+
       - name: Run tests
         run: cargo test -- --test-threads=8
         env:
           CARGO_INCREMENTAL: 0
           GIT_AI_TEST_GIT_MODE: ${{ matrix.test_mode }}
+          RUSTFLAGS: ${{ runner.os == 'Linux' && '-C link-arg=-fuse-ld=mold' || '' }}
 
   test-ignored:
     name: Test SCM e2e tests on just Ubuntu
@@ -85,6 +90,6 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Run ignored tests
-        run: cargo test --test github_integration -- --ignored
+        run: cargo test --test integration github_integration -- --ignored
         env:
           CARGO_INCREMENTAL: 0
