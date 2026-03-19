@@ -359,8 +359,8 @@ impl PersistedWorkingLog {
                     .and_then(|m| m.get("transcript_path"))
                     .is_none()
             }
-            // opencode can always refetch from its session storage
-            "opencode" => false,
+            // opencode and kilo-code can always refetch from their session storage
+            "opencode" | "kilo-code" => false,
             // github-copilot needs chat_session_path
             "github-copilot" => metadata
                 .as_ref()
