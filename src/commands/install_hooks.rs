@@ -7,7 +7,7 @@ use crate::mdm::hook_installer::HookInstallerParams;
 use crate::mdm::skills_installer;
 use crate::mdm::spinner::{Spinner, print_diff};
 use crate::mdm::utils::{get_current_binary_path, git_shim_path};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Installation status for a tool
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,14 +169,6 @@ async fn async_run_install(
     // Track detailed results for metrics (tool_id, result)
     let mut detailed_results: Vec<(String, InstallResult)> = Vec::new();
 
-    // Install skills first (these are global, not per-agent)
-    // Skills are always nuked and reinstalled fresh (silently)
-    if let Ok(result) = skills_installer::install_skills(dry_run, verbose)
-        && result.changed
-    {
-        has_changes = true;
-    }
-
     // Ensure git symlinks for Fork compatibility
     if let Err(e) = crate::mdm::ensure_git_symlinks() {
         eprintln!("Warning: Failed to create git symlinks: {}", e);
@@ -186,6 +178,7 @@ async fn async_run_install(
     println!("\n\x1b[1mCoding Agents\x1b[0m");
 
     let installers = get_all_installers();
+    let mut installed_tools: HashSet<String> = HashSet::new();
 
     for installer in installers {
         let name = installer.name();
@@ -200,6 +193,7 @@ async fn async_run_install(
                     continue;
                 }
 
+                installed_tools.insert(id.to_string());
                 any_checked = true;
 
                 // Install/update hooks (only for tools that use config file hooks)
@@ -308,6 +302,13 @@ async fn async_run_install(
                 detailed_results.push((id.to_string(), InstallResult::failed(error_msg)));
             }
         }
+    }
+
+    // Install skills for detected agents only
+    if let Ok(result) = skills_installer::install_skills(dry_run, verbose, &installed_tools)
+        && result.changed
+    {
+        has_changes = true;
     }
 
     if !any_checked {
