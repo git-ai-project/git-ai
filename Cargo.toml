@@ -61,8 +61,6 @@ split-debuginfo = "unpacked"
 [profile.dev.build-override]
 opt-level = 2                      # Optimize proc macros and build scripts
 
-[profile.dev]
-split-debuginfo = "unpacked"
 [[test]]
 name = "integration"
 path = "tests/integration/main.rs"
