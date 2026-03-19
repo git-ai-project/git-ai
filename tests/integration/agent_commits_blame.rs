@@ -8,10 +8,6 @@
 //! They should fail initially and pass once agent commit detection is
 //! integrated into overlay_ai_authorship.
 
-
-
-
-
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
 

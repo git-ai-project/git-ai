@@ -18,10 +18,6 @@
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
 
-
-
-
-
 use git_ai::authorship::authorship_log::{LineRange, PromptRecord};
 use git_ai::authorship::authorship_log_serialization::{
     AttestationEntry, AuthorshipLog, FileAttestation,
