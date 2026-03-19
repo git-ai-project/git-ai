@@ -1,4 +1,5 @@
 #[macro_use]
+#[path = "integration/repos/mod.rs"]
 mod repos;
 
 // Graphite-style restacks rewrite commits with `git commit-tree` + `git update-ref`.
