@@ -16,6 +16,12 @@ fn print_ci_result(result: &CiRunResult, prefix: &str) {
         CiRunResult::SkippedSimpleMerge => {
             println!("{}: skipped simple merge (authorship preserved)", prefix);
         }
+        CiRunResult::ForkNotesPreserved => {
+            println!(
+                "{}: fork notes fetched and pushed (merge commit from fork)",
+                prefix
+            );
+        }
         CiRunResult::SkippedFastForward => {
             println!("{}: skipped fast-forward merge", prefix);
         }
@@ -247,6 +253,8 @@ fn handle_ci_local(args: &[String]) {
                 }
             };
 
+            let fork_clone_url = flag("--fork-clone-url");
+
             let ctx = CiContext {
                 repo,
                 event: CiEvent::Merge {
@@ -255,6 +263,7 @@ fn handle_ci_local(args: &[String]) {
                     head_sha,
                     base_ref,
                     base_sha,
+                    fork_clone_url,
                 },
                 // Not used for local runs; teardown not invoked
                 temp_dir: std::path::PathBuf::from("."),
@@ -299,7 +308,7 @@ fn print_ci_help_and_exit() -> ! {
     eprintln!("                   Usage: git-ai ci local <event> [flags]");
     eprintln!("                   Events:");
     eprintln!(
-        "                     merge  --merge-commit-sha <sha> --base-ref <ref> --head-ref <ref> --head-sha <sha> --base-sha <sha>"
+        "                     merge  --merge-commit-sha <sha> --base-ref <ref> --head-ref <ref> --head-sha <sha> --base-sha <sha> [--fork-clone-url <url>]"
     );
     eprintln!(
         "                            [--skip-fetch-notes] [--skip-fetch-base] [--skip-fetch]"
