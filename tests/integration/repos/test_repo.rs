@@ -11,7 +11,7 @@ use insta::{Settings, assert_debug_snapshot};
 use rand::Rng;
 use std::cell::Cell;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -550,11 +550,11 @@ impl TestRepo {
         (mirror, upstream)
     }
 
-    pub fn new_at_path(path: &PathBuf) -> Self {
+    pub fn new_at_path(path: &Path) -> Self {
         Self::new_at_path_with_mode(path, GitTestMode::from_env())
     }
 
-    pub fn new_at_path_with_mode(path: &PathBuf, git_mode: GitTestMode) -> Self {
+    pub fn new_at_path_with_mode(path: &Path, git_mode: GitTestMode) -> Self {
         let mut rng = rand::thread_rng();
         let db_n: u64 = rng.gen_range(0..10000000000);
         let test_home = std::env::temp_dir().join(format!("{}-home", db_n));

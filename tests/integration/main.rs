@@ -2,7 +2,6 @@
 #[macro_use]
 #[allow(dead_code)]
 mod repos;
-#[allow(dead_code)]
 mod test_utils;
 
 // Test modules (one per original test file)
