@@ -291,13 +291,14 @@ impl InternalDatabase {
                         &e,
                         Some(serde_json::json!({"function": "InternalDatabase::global"})),
                     );
-                    // Create a dummy connection that will fail on any operation
-                    // This allows the program to continue even if DB init fails
-                    let temp_path = std::env::temp_dir().join("git-ai-db-failed");
-                    let conn = Connection::open(&temp_path).expect("Failed to create temp DB");
+                    // Create a dummy in-memory connection that will fail on any operation
+                    // (no schema). This allows the program to continue even if DB init
+                    // fails, without touching the filesystem (avoids PermissionDenied panic).
+                    let conn = Connection::open_in_memory()
+                        .expect("Failed to create in-memory fallback DB");
                     Mutex::new(InternalDatabase {
                         conn,
-                        _db_path: temp_path,
+                        _db_path: PathBuf::new(),
                     })
                 }
             }
