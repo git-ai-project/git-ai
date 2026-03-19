@@ -98,7 +98,6 @@ pub fn post_update_ref_hook(
             "Skipping wrapper update-ref rewrite handling for {}: could not derive safe mappings",
             ref_name
         ));
-        return;
     }
 }
 
