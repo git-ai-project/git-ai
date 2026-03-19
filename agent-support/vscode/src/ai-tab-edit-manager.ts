@@ -71,10 +71,21 @@ export class AITabEditManager {
       return;
     }
 
+    // Determine agent type based on active editor scheme
+    let agentType = 'github-copilot-tab';
+    const activeEditor = vscode.window.activeTextEditor;
+    if (activeEditor && activeEditor.document.uri.scheme === 'tongyi-lingma-snapshot') {
+      agentType = 'tongyi-lingma-tab';
+    } else if (activeEditor && activeEditor.document.uri.scheme === 'continue-snapshot') {
+      agentType = 'continue-tab';
+    } else if (activeEditor && activeEditor.document.uri.scheme === 'trae-snapshot') {
+      agentType = 'trae-tab';
+    }
+
     // Before edit checkpoint
     await this.aiEditManager.checkpoint("ai_tab", JSON.stringify({
       hook_event_name: 'before_edit',
-      tool: 'github-copilot-tab',
+      tool: agentType,
       model: 'default',
       will_edit_filepaths: [last.document.uri.fsPath],
       dirty_files: {
@@ -86,7 +97,7 @@ export class AITabEditManager {
     // After edit checkpoint
     await this.aiEditManager.checkpoint("ai_tab", JSON.stringify({
       hook_event_name: 'after_edit',
-      tool: 'github-copilot-tab',
+      tool: agentType,
       model: 'default',
       edited_filepaths: [last.document.uri.fsPath],
       dirty_files: {

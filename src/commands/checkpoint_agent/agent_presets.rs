@@ -1820,6 +1820,428 @@ impl CursorPreset {
 
 pub struct GithubCopilotPreset;
 
+// Trae to checkpoint preset
+pub struct TraePreset;
+
+impl AgentCheckpointPreset for TraePreset {
+    fn run(&self, flags: AgentCheckpointFlags) -> Result<AgentRunResult, GitAiError> {
+        // Parse hook_input as JSON
+        let stdin_json = flags.hook_input.ok_or_else(|| {
+            GitAiError::PresetError("hook_input is required for Trae preset".to_string())
+        })?;
+
+        let hook_data: serde_json::Value = serde_json::from_str(&stdin_json)
+            .map_err(|e| GitAiError::PresetError(format!("Invalid JSON in hook_input: {}", e)))?;
+
+        let session_id = hook_data
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                GitAiError::PresetError("session_id not found in hook_input".to_string())
+            })?;
+
+        let transcript_path = hook_data
+            .get("transcript_path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                GitAiError::PresetError("transcript_path not found in hook_input".to_string())
+            })?;
+
+        let _cwd = hook_data
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| GitAiError::PresetError("cwd not found in hook_input".to_string()))?;
+
+        // Extract model from hook_input
+        let model = hook_data
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        // Parse transcript from JSON file
+        let transcript = match TraePreset::transcript_from_trae_json(transcript_path) {
+            Ok(transcript) => transcript,
+            Err(e) => {
+                eprintln!("[Warning] Failed to parse Trae JSON: {e}");
+                log_error(
+                    &e,
+                    Some(serde_json::json!({
+                        "agent_tool": "trae",
+                        "operation": "transcript_from_trae_json"
+                    })),
+                );
+                crate::authorship::transcript::AiTranscript::new()
+            }
+        };
+
+        // The session_id is the unique identifier for this conversation
+        let agent_id = AgentId {
+            tool: "trae".to_string(),
+            id: session_id.to_string(),
+            model,
+        };
+
+        // Extract file_path from tool_input if present
+        let file_path_as_vec = hook_data
+            .get("tool_input")
+            .and_then(|ti| ti.get("file_path"))
+            .and_then(|v| v.as_str())
+            .map(|path| vec![path.to_string()]);
+
+        // Store transcript_path in metadata
+        let agent_metadata = 
+            HashMap::from([("transcript_path".to_string(), transcript_path.to_string())]);
+
+        // Check if this is a PreToolUse event (human checkpoint)
+        let hook_event_name = hook_data.get("hook_event_name").and_then(|v| v.as_str());
+
+        if hook_event_name == Some("PreToolUse") {
+            // Early return for human checkpoint
+            return Ok(AgentRunResult {
+                agent_id,
+                agent_metadata: None,
+                checkpoint_kind: CheckpointKind::Human,
+                transcript: None,
+                repo_working_dir: None,
+                edited_filepaths: None,
+                will_edit_filepaths: file_path_as_vec,
+                dirty_files: None,
+            });
+        }
+
+        Ok(AgentRunResult {
+            agent_id,
+            agent_metadata: Some(agent_metadata),
+            checkpoint_kind: CheckpointKind::AiAgent,
+            transcript: Some(transcript),
+            // use default.
+            repo_working_dir: None,
+            edited_filepaths: file_path_as_vec,
+            will_edit_filepaths: None,
+            dirty_files: None,
+        })
+    }
+}
+
+impl TraePreset {
+    /// Parse a Trae JSON file into a transcript
+    pub fn transcript_from_trae_json(
+        transcript_path: &str,
+    ) -> Result<AiTranscript, GitAiError> {
+        let json_content = std::fs::read_to_string(transcript_path).map_err(GitAiError::IoError)?;
+        let conversation: serde_json::Value = 
+            serde_json::from_str(&json_content).map_err(GitAiError::JsonError)?;
+
+        let history = conversation
+            .get("history")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| {
+                GitAiError::PresetError("history array not found in Trae JSON".to_string())
+            })?;
+
+        let mut transcript = AiTranscript::new();
+
+        for history_item in history {
+            // Extract the message from the history item
+            let message = match history_item.get("message") {
+                Some(m) => m,
+                None => continue, // Skip items without a message
+            };
+
+            let role = match message.get("role").and_then(|v| v.as_str()) {
+                Some(r) => r,
+                None => continue, // Skip messages without a role
+            };
+
+            // Extract timestamp from message if available
+            let timestamp = message
+                .get("timestamp")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            match role {
+                "user" => {
+                    // Handle user messages - content is a string
+                    if let Some(content) = message.get("content").and_then(|v| v.as_str()) {
+                        let trimmed = content.trim();
+                        if !trimmed.is_empty() {
+                            transcript.add_message(Message::User {
+                                text: trimmed.to_string(),
+                                timestamp: timestamp.clone(),
+                            });
+                        }
+                    }
+                }
+                "assistant" => {
+                    // Handle assistant text content
+                    if let Some(content) = message.get("content").and_then(|v| v.as_str()) {
+                        let trimmed = content.trim();
+                        if !trimmed.is_empty() {
+                            transcript.add_message(Message::Assistant {
+                                text: trimmed.to_string(),
+                                timestamp: timestamp.clone(),
+                            });
+                        }
+                    }
+
+                    // Handle tool calls from the message
+                    if let Some(tool_calls) = message.get("toolCalls").and_then(|v| v.as_array()) {
+                        for tool_call in tool_calls {
+                            if let Some(function) = tool_call.get("function") {
+                                let tool_name = function
+                                    .get("name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown");
+
+                                // Parse the arguments JSON string
+                                let args = if let Some(args_str) = 
+                                    function.get("arguments").and_then(|v| v.as_str())
+                                {
+                                    serde_json::from_str::<serde_json::Value>(args_str)
+                                        .unwrap_or_else(|_| {
+                                            serde_json::Value::Object(serde_json::Map::new())
+                                        })
+                                } else {
+                                    serde_json::Value::Object(serde_json::Map::new())
+                                };
+
+                                let tool_timestamp = tool_call
+                                    .get("timestamp")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string());
+
+                                transcript.add_message(Message::ToolUse {
+                                    name: tool_name.to_string(),
+                                    input: args,
+                                    timestamp: tool_timestamp,
+                                });
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    // Skip unknown roles
+                    continue;
+                }
+            }
+        }
+
+        Ok(transcript)
+    }
+}
+
+// Tongyi Lingma to checkpoint preset
+pub struct TongyiLingmaPreset;
+
+impl AgentCheckpointPreset for TongyiLingmaPreset {
+    fn run(&self, flags: AgentCheckpointFlags) -> Result<AgentRunResult, GitAiError> {
+        // Parse hook_input as JSON
+        let stdin_json = flags.hook_input.ok_or_else(|| {
+            GitAiError::PresetError("hook_input is required for Tongyi Lingma preset".to_string())
+        })?;
+
+        let hook_data: serde_json::Value = serde_json::from_str(&stdin_json)
+            .map_err(|e| GitAiError::PresetError(format!("Invalid JSON in hook_input: {}", e)))?;
+
+        let session_id = hook_data
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                GitAiError::PresetError("session_id not found in hook_input".to_string())
+            })?;
+
+        let transcript_path = hook_data
+            .get("transcript_path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                GitAiError::PresetError("transcript_path not found in hook_input".to_string())
+            })?;
+
+        let _cwd = hook_data
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| GitAiError::PresetError("cwd not found in hook_input".to_string()))?;
+
+        // Extract model from hook_input
+        let model = hook_data
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        // Parse transcript from JSON file
+        let transcript = match TongyiLingmaPreset::transcript_from_tongyi_lingma_json(transcript_path) {
+            Ok(transcript) => transcript,
+            Err(e) => {
+                eprintln!("[Warning] Failed to parse Tongyi Lingma JSON: {e}");
+                log_error(
+                    &e,
+                    Some(serde_json::json!({
+                        "agent_tool": "tongyi-lingma",
+                        "operation": "transcript_from_tongyi_lingma_json"
+                    })),
+                );
+                crate::authorship::transcript::AiTranscript::new()
+            }
+        };
+
+        // The session_id is the unique identifier for this conversation
+        let agent_id = AgentId {
+            tool: "tongyi-lingma".to_string(),
+            id: session_id.to_string(),
+            model,
+        };
+
+        // Extract file_path from tool_input if present
+        let file_path_as_vec = hook_data
+            .get("tool_input")
+            .and_then(|ti| ti.get("file_path"))
+            .and_then(|v| v.as_str())
+            .map(|path| vec![path.to_string()]);
+
+        // Store transcript_path in metadata
+        let agent_metadata = 
+            HashMap::from([("transcript_path".to_string(), transcript_path.to_string())]);
+
+        // Check if this is a PreToolUse event (human checkpoint)
+        let hook_event_name = hook_data.get("hook_event_name").and_then(|v| v.as_str());
+
+        if hook_event_name == Some("PreToolUse") {
+            // Early return for human checkpoint
+            return Ok(AgentRunResult {
+                agent_id,
+                agent_metadata: None,
+                checkpoint_kind: CheckpointKind::Human,
+                transcript: None,
+                repo_working_dir: None,
+                edited_filepaths: None,
+                will_edit_filepaths: file_path_as_vec,
+                dirty_files: None,
+            });
+        }
+
+        Ok(AgentRunResult {
+            agent_id,
+            agent_metadata: Some(agent_metadata),
+            checkpoint_kind: CheckpointKind::AiAgent,
+            transcript: Some(transcript),
+            // use default.
+            repo_working_dir: None,
+            edited_filepaths: file_path_as_vec,
+            will_edit_filepaths: None,
+            dirty_files: None,
+        })
+    }
+}
+
+impl TongyiLingmaPreset {
+    /// Parse a Tongyi Lingma JSON file into a transcript
+    pub fn transcript_from_tongyi_lingma_json(
+        transcript_path: &str,
+    ) -> Result<AiTranscript, GitAiError> {
+        let json_content = std::fs::read_to_string(transcript_path).map_err(GitAiError::IoError)?;
+        let conversation: serde_json::Value = 
+            serde_json::from_str(&json_content).map_err(GitAiError::JsonError)?;
+
+        let history = conversation
+            .get("history")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| {
+                GitAiError::PresetError("history array not found in Tongyi Lingma JSON".to_string())
+            })?;
+
+        let mut transcript = AiTranscript::new();
+
+        for history_item in history {
+            // Extract the message from the history item
+            let message = match history_item.get("message") {
+                Some(m) => m,
+                None => continue, // Skip items without a message
+            };
+
+            let role = match message.get("role").and_then(|v| v.as_str()) {
+                Some(r) => r,
+                None => continue, // Skip messages without a role
+            };
+
+            // Extract timestamp from message if available
+            let timestamp = message
+                .get("timestamp")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            match role {
+                "user" => {
+                    // Handle user messages - content is a string
+                    if let Some(content) = message.get("content").and_then(|v| v.as_str()) {
+                        let trimmed = content.trim();
+                        if !trimmed.is_empty() {
+                            transcript.add_message(Message::User {
+                                text: trimmed.to_string(),
+                                timestamp: timestamp.clone(),
+                            });
+                        }
+                    }
+                }
+                "assistant" => {
+                    // Handle assistant text content
+                    if let Some(content) = message.get("content").and_then(|v| v.as_str()) {
+                        let trimmed = content.trim();
+                        if !trimmed.is_empty() {
+                            transcript.add_message(Message::Assistant {
+                                text: trimmed.to_string(),
+                                timestamp: timestamp.clone(),
+                            });
+                        }
+                    }
+
+                    // Handle tool calls from the message
+                    if let Some(tool_calls) = message.get("toolCalls").and_then(|v| v.as_array()) {
+                        for tool_call in tool_calls {
+                            if let Some(function) = tool_call.get("function") {
+                                let tool_name = function
+                                    .get("name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown");
+
+                                // Parse the arguments JSON string
+                                let args = if let Some(args_str) = 
+                                    function.get("arguments").and_then(|v| v.as_str())
+                                {
+                                    serde_json::from_str::<serde_json::Value>(args_str)
+                                        .unwrap_or_else(|_| {
+                                            serde_json::Value::Object(serde_json::Map::new())
+                                        })
+                                } else {
+                                    serde_json::Value::Object(serde_json::Map::new())
+                                };
+
+                                let tool_timestamp = tool_call
+                                    .get("timestamp")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string());
+
+                                transcript.add_message(Message::ToolUse {
+                                    name: tool_name.to_string(),
+                                    input: args,
+                                    timestamp: tool_timestamp,
+                                });
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    // Skip unknown roles
+                    continue;
+                }
+            }
+        }
+
+        Ok(transcript)
+    }
+}
+
 #[derive(Default)]
 struct CopilotModelCandidates {
     request_non_auto_model_id: Option<String>,
