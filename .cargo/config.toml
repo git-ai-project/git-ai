@@ -1,0 +1,6 @@
+# Linker optimizations are applied via CI environment variables
+# (CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER, RUSTFLAGS)
+# rather than here, to avoid breaking builds without mold installed.
+#
+# For local Linux development, install mold and set:
+#   RUSTFLAGS="-C link-arg=-fuse-ld=mold"
