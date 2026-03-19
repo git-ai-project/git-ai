@@ -1,5 +1,4 @@
 use super::github_test_harness::{GitHubTestRepo, MergeStrategy};
-use crate::lines;
 use crate::repos::test_file::ExpectedLineExt;
 
 #[test]

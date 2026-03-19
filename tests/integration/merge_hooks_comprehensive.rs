@@ -1,5 +1,4 @@
 use git_ai::git::repository;
-use git_ai::git::repository::Repository;
 
 use crate::repos::test_repo::TestRepo;
 use git_ai::commands::hooks::merge_hooks::post_merge_hook;

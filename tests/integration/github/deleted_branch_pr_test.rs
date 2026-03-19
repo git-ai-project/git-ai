@@ -1,5 +1,4 @@
 use super::github_test_harness::{GitHubTestRepo, MergeStrategy};
-use crate::lines;
 use crate::repos::test_file::ExpectedLineExt;
 
 // GitHub deletes the branch after the PR is merged, so we need to test that we can still access the PR commits using PR refs.

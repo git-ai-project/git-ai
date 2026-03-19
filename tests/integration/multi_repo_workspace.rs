@@ -9,7 +9,6 @@
 //! 4. Edge cases with nested git directories
 //! 5. Cross-repo checkpoints: AI edits from one repo to files in another repo
 
-use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
 
 use git_ai::error::GitAiError;
