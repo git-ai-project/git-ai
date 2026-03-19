@@ -182,6 +182,10 @@ fn trace_root_sid(sid: &str) -> &str {
     sid.split('/').next().unwrap_or(sid)
 }
 
+fn is_terminal_root_trace_event(event: &str, sid: &str, root: &str) -> bool {
+    sid == root && matches!(event, "exit" | "atexit")
+}
+
 fn daemon_worktree_from_repo_path(repo_path: &Path) -> Option<PathBuf> {
     if repo_path.file_name().and_then(|name| name.to_str()) == Some(".git") {
         return repo_path.parent().map(PathBuf::from);
@@ -1591,7 +1595,7 @@ impl ActorDaemonCoordinator {
             ingress.root_worktrees.insert(root.clone(), worktree);
         }
         let Some(worktree) = ingress.root_worktrees.get(&root).cloned() else {
-            if event == "exit" && sid == root {
+            if is_terminal_root_trace_event(&event, &sid, &root) {
                 ingress.root_head_reflog_start_offsets.remove(&root);
                 ingress.root_family_reflog_start_offsets.remove(&root);
             }
@@ -1613,8 +1617,7 @@ impl ActorDaemonCoordinator {
                 .insert(root.clone(), offsets);
         }
 
-        if event == "exit"
-            && sid == root
+        if is_terminal_root_trace_event(&event, &sid, &root)
             && let Some(object) = payload.as_object_mut()
         {
             if let Some(start_offset) = ingress.root_head_reflog_start_offsets.get(&root).copied() {
@@ -3063,10 +3066,6 @@ fn handle_trace_connection_actor(
     };
 
     let mut reader = BufReader::new(stream);
-    let mut root_worktrees: HashMap<String, PathBuf> = HashMap::new();
-    let mut root_head_reflog_start_offsets: HashMap<String, u64> = HashMap::new();
-    let mut root_family_reflog_start_offsets: HashMap<String, HashMap<String, u64>> =
-        HashMap::new();
     while let Some(line) = read_json_line(&mut reader)? {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -3076,79 +3075,7 @@ fn handle_trace_connection_actor(
             Ok(v) => v,
             Err(_) => continue,
         };
-
-        let event = parsed
-            .get("event")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let sid = parsed
-            .get("sid")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        if !sid.is_empty() {
-            let root = trace_root_sid(&sid).to_string();
-            if let Some(worktree) = trace_payload_worktree_hint(&parsed) {
-                root_worktrees.insert(root.clone(), worktree);
-            }
-            if let Some(worktree) = root_worktrees.get(&root) {
-                if !root_head_reflog_start_offsets.contains_key(&root)
-                    && let Some(offset) = daemon_worktree_head_reflog_offset(worktree)
-                {
-                    root_head_reflog_start_offsets.insert(root.clone(), offset);
-                }
-                if !root_family_reflog_start_offsets.contains_key(&root)
-                    && let Some(offsets) = daemon_reflog_offsets_for_worktree(worktree)
-                {
-                    root_family_reflog_start_offsets.insert(root.clone(), offsets);
-                }
-            }
-            if event == "exit"
-                && sid == root
-                && let Some(worktree) = root_worktrees.get(&root)
-                && let Some(object) = parsed.as_object_mut()
-            {
-                if let Some(start_offset) = root_head_reflog_start_offsets.get(&root).copied() {
-                    object.insert(
-                        "git_ai_worktree_head_reflog_start".to_string(),
-                        json!(start_offset),
-                    );
-                }
-                if let Some(end_offset) = daemon_worktree_head_reflog_offset(worktree) {
-                    object.insert(
-                        "git_ai_worktree_head_reflog_end".to_string(),
-                        json!(end_offset),
-                    );
-                }
-                if let Some(start_offsets) = root_family_reflog_start_offsets.get(&root) {
-                    object.insert(
-                        "git_ai_family_reflog_start".to_string(),
-                        json!(start_offsets),
-                    );
-                }
-                if let Some(end_offsets) = daemon_reflog_offsets_for_worktree(worktree) {
-                    if let Some(start_offsets) = root_family_reflog_start_offsets.get(&root) {
-                        match daemon_reflog_delta_from_offsets(worktree, start_offsets, &end_offsets)
-                        {
-                            Ok(ref_changes) => {
-                                object.insert(
-                                    "git_ai_family_reflog_changes".to_string(),
-                                    json!(ref_changes),
-                                );
-                            }
-                            Err(error) => {
-                                debug_log(&format!(
-                                    "daemon trace reflog delta capture error sid={}: {}",
-                                    sid, error
-                                ));
-                            }
-                        }
-                    }
-                    object.insert("git_ai_family_reflog_end".to_string(), json!(end_offsets));
-                }
-            }
-        }
+        coordinator.augment_trace_payload_with_reflog_metadata(&mut parsed);
 
         if let Some(object) = parsed.as_object_mut() {
             object.insert(

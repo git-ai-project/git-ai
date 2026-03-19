@@ -3,6 +3,7 @@ mod repos;
 
 use git_ai::authorship::working_log::CheckpointKind;
 use git_ai::daemon::{ControlRequest, ControlResponse, DaemonConfig, DaemonLock, send_control_request};
+use interprocess::local_socket::LocalSocketStream;
 use repos::test_file::ExpectedLineExt;
 use repos::test_repo::{GitTestMode, TestRepo, get_binary_path, real_git_executable};
 use serde_json::Value;
@@ -37,6 +38,21 @@ fn daemon_trace_socket_path(repo: &TestRepo) -> PathBuf {
 
 fn daemon_lock_path(repo: &TestRepo) -> PathBuf {
     DaemonConfig::from_home(repo.test_home_path()).lock_path
+}
+
+fn send_trace_frames(trace_socket_path: &Path, payloads: &[Value]) {
+    let mut stream = LocalSocketStream::connect(trace_socket_path.to_string_lossy().as_ref())
+        .expect("failed to connect to trace socket");
+    for payload in payloads {
+        let raw = serde_json::to_string(payload).expect("failed to serialize trace payload");
+        stream
+            .write_all(raw.as_bytes())
+            .expect("failed to write trace payload");
+        stream
+            .write_all(b"\n")
+            .expect("failed to write trace newline");
+    }
+    stream.flush().expect("failed to flush trace payloads");
 }
 
 fn repo_workdir_string(repo: &TestRepo) -> String {
@@ -693,6 +709,50 @@ fn daemon_pure_trace_socket_commit_after_ai_checkpoint_preserves_ai_replacement_
 
     let mut file = repo.filename("daemon-ai-replace.txt");
     file.assert_lines_and_blame(lines!["new line from ai".ai()]);
+}
+
+#[test]
+#[serial]
+fn daemon_trace_ingest_treats_atexit_as_terminal_for_reflog_capture() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let daemon = DaemonGuard::start(&repo);
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let sid = "atexit-commit";
+
+    send_trace_frames(
+        &trace_socket,
+        &[
+            serde_json::json!({
+                "event":"start",
+                "sid":sid,
+                "ts":1,
+                "argv":["git","commit","-m","x"],
+                "cwd":repo.path().to_string_lossy().to_string(),
+            }),
+            serde_json::json!({
+                "event":"atexit",
+                "sid":sid,
+                "ts":2,
+                "code":1
+            }),
+        ],
+    );
+
+    daemon.latest_seq_and_wait_idle();
+
+    let family_state = daemon.family_state_snapshot();
+    let commands = family_state
+        .get("commands")
+        .and_then(Value::as_array)
+        .expect("family state should contain command history");
+    assert!(
+        commands.iter().any(|command| {
+            command.get("sid").and_then(Value::as_str) == Some(sid)
+                && command.get("name").and_then(Value::as_str) == Some("commit")
+                && command.get("exit_code").and_then(Value::as_i64) == Some(1)
+        }),
+        "atexit terminal frames should still produce a tracked commit command"
+    );
 }
 
 #[test]
