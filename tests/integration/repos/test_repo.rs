@@ -570,7 +570,7 @@ impl TestRepo {
         }
 
         let mut repo = Self {
-            path: path.clone(),
+            path: path.to_path_buf(),
             feature_flags: FeatureFlags::default(),
             config_patch: None,
             test_db_path,
