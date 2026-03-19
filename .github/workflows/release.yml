@@ -358,7 +358,7 @@ jobs:
             release/SHA256SUMS
 
       - name: Create Release
-        uses: softprops/action-gh-release@26e8ad27a09a225049a7075d7ec1caa2df6ff332 # v2
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
         with:
           tag_name: ${{ steps.release-meta.outputs.tag_name }}
           name: ${{ steps.release-meta.outputs.release_name }}
