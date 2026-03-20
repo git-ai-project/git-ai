@@ -141,6 +141,30 @@ impl DaemonConfig {
         Ok(Self::from_internal_dir(internal_dir))
     }
 
+    pub fn from_env_or_default_paths() -> Result<Self, GitAiError> {
+        let mut config = if let Ok(home) = std::env::var("GIT_AI_DAEMON_HOME")
+            && !home.trim().is_empty()
+        {
+            Self::from_home(Path::new(&home))
+        } else {
+            Self::from_default_paths()?
+        };
+
+        if let Ok(path) = std::env::var("GIT_AI_DAEMON_CONTROL_SOCKET")
+            && !path.trim().is_empty()
+        {
+            config.control_socket_path = PathBuf::from(path);
+        }
+
+        if let Ok(path) = std::env::var("GIT_AI_DAEMON_TRACE_SOCKET")
+            && !path.trim().is_empty()
+        {
+            config.trace_socket_path = PathBuf::from(path);
+        }
+
+        Ok(config)
+    }
+
     pub fn ensure_parent_dirs(&self) -> Result<(), GitAiError> {
         let daemon_dir = self
             .lock_path

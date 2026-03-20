@@ -112,16 +112,18 @@ impl DaemonProcess {
             .arg("daemon")
             .arg("run")
             .current_dir(test_home)
-            .env("HOME", test_home)
-            .env("GIT_CONFIG_GLOBAL", test_home.join(".gitconfig"))
             .env("GIT_AI_TEST_DB_PATH", test_db_path)
             .env("GITAI_TEST_DB_PATH", test_db_path)
+            .env("GIT_AI_DAEMON_HOME", test_home)
+            .env("GIT_AI_DAEMON_CONTROL_SOCKET", &control_socket_path)
+            .env("GIT_AI_DAEMON_TRACE_SOCKET", &trace_socket_path)
             .stdout(Stdio::null())
             .stderr(
                 stderr_log
                     .try_clone()
                     .expect("failed to clone daemon stderr log file"),
             );
+        configure_test_home_env(&mut command, test_home);
 
         let mut child = command
             .spawn()
@@ -275,6 +277,17 @@ impl DaemonProcess {
                 .stderr(Stdio::null())
                 .output();
         }
+    }
+}
+
+fn configure_test_home_env(command: &mut Command, test_home: &Path) {
+    command.env("HOME", test_home);
+    command.env("GIT_CONFIG_GLOBAL", test_home.join(".gitconfig"));
+    #[cfg(windows)]
+    {
+        command.env("USERPROFILE", test_home);
+        command.env("APPDATA", test_home.join("AppData").join("Roaming"));
+        command.env("LOCALAPPDATA", test_home.join("AppData").join("Local"));
     }
 }
 
@@ -1070,8 +1083,7 @@ impl TestRepo {
 
     fn configure_command_env(&self, command: &mut Command) {
         // Isolate all git + git-ai config reads from developer machine settings.
-        command.env("HOME", &self.test_home);
-        command.env("GIT_CONFIG_GLOBAL", self.test_home.join(".gitconfig"));
+        configure_test_home_env(command, &self.test_home);
 
         if self.git_mode.uses_daemon() {
             command.env(
@@ -1092,20 +1104,19 @@ impl TestRepo {
 
     fn configure_git_ai_env(&self, command: &mut Command) {
         // Isolate all git + git-ai config reads from developer machine settings.
-        command.env("HOME", &self.test_home);
-        command.env("GIT_CONFIG_GLOBAL", self.test_home.join(".gitconfig"));
+        configure_test_home_env(command, &self.test_home);
+        command.env("GIT_AI_DAEMON_HOME", self.daemon_home_path());
+        command.env(
+            "GIT_AI_DAEMON_CONTROL_SOCKET",
+            self.daemon_control_socket_path(),
+        );
+        command.env(
+            "GIT_AI_DAEMON_TRACE_SOCKET",
+            self.daemon_trace_socket_path(),
+        );
 
         if self.git_mode.uses_daemon() {
             command.env("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true");
-            command.env("GIT_AI_DAEMON_HOME", self.daemon_home_path());
-            command.env(
-                "GIT_AI_DAEMON_CONTROL_SOCKET",
-                self.daemon_control_socket_path(),
-            );
-            command.env(
-                "GIT_AI_DAEMON_TRACE_SOCKET",
-                self.daemon_trace_socket_path(),
-            );
         }
 
         if self.git_mode.uses_hooks() {

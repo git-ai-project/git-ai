@@ -32,15 +32,15 @@ fn git_common_dir(repo: &TestRepo) -> PathBuf {
 }
 
 fn daemon_control_socket_path(repo: &TestRepo) -> PathBuf {
-    DaemonConfig::from_home(repo.test_home_path()).control_socket_path
+    repo.daemon_control_socket_path()
 }
 
 fn daemon_trace_socket_path(repo: &TestRepo) -> PathBuf {
-    DaemonConfig::from_home(repo.test_home_path()).trace_socket_path
+    repo.daemon_trace_socket_path()
 }
 
 fn daemon_lock_path(repo: &TestRepo) -> PathBuf {
-    DaemonConfig::from_home(repo.test_home_path()).lock_path
+    DaemonConfig::from_home(&repo.daemon_home_path()).lock_path
 }
 
 fn send_trace_frames(trace_socket_path: &Path, payloads: &[Value]) {
@@ -80,6 +80,28 @@ fn repo_workdir_string(repo: &TestRepo) -> String {
     repo.path().to_string_lossy().to_string()
 }
 
+fn configure_test_home_env(command: &mut Command, test_home: &Path) {
+    command.env("HOME", test_home);
+    command.env("GIT_CONFIG_GLOBAL", test_home.join(".gitconfig"));
+    #[cfg(windows)]
+    {
+        command.env("USERPROFILE", test_home);
+        command.env("APPDATA", test_home.join("AppData").join("Roaming"));
+        command.env("LOCALAPPDATA", test_home.join("AppData").join("Local"));
+    }
+}
+
+fn configure_test_daemon_env(
+    command: &mut Command,
+    daemon_home: &Path,
+    control_socket_path: &Path,
+    trace_socket_path: &Path,
+) {
+    command.env("GIT_AI_DAEMON_HOME", daemon_home);
+    command.env("GIT_AI_DAEMON_CONTROL_SOCKET", control_socket_path);
+    command.env("GIT_AI_DAEMON_TRACE_SOCKET", trace_socket_path);
+}
+
 struct DaemonGuard {
     child: Child,
     control_socket_path: PathBuf,
@@ -89,28 +111,33 @@ struct DaemonGuard {
 
 impl DaemonGuard {
     fn start(repo: &TestRepo) -> Self {
+        let daemon_home = repo.daemon_home_path();
+        let control_socket_path = daemon_control_socket_path(repo);
+        let trace_socket_path = daemon_trace_socket_path(repo);
         let mut command = Command::new(get_binary_path());
         command
             .arg("daemon")
             .arg("run")
             .current_dir(repo.path())
-            .env("HOME", repo.test_home_path())
-            .env(
-                "GIT_CONFIG_GLOBAL",
-                repo.test_home_path().join(".gitconfig"),
-            )
             .env("GIT_AI_TEST_DB_PATH", repo.test_db_path())
             .env("GITAI_TEST_DB_PATH", repo.test_db_path())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        configure_test_home_env(&mut command, repo.test_home_path());
+        configure_test_daemon_env(
+            &mut command,
+            &daemon_home,
+            &control_socket_path,
+            &trace_socket_path,
+        );
 
         let child = command
             .spawn()
             .expect("failed to spawn git-ai daemon subprocess");
         let mut daemon = Self {
             child,
-            control_socket_path: daemon_control_socket_path(repo),
-            trace_socket_path: daemon_trace_socket_path(repo),
+            control_socket_path,
+            trace_socket_path,
             repo_working_dir: repo_workdir_string(repo),
         };
         daemon.wait_until_ready();
@@ -223,6 +250,8 @@ fn git_trace_env(trace_socket_path: &Path) -> [(&'static str, String); 2] {
 struct WorkdirRaceHarness {
     test_home: PathBuf,
     test_db_path: PathBuf,
+    daemon_home: PathBuf,
+    control_socket_path: PathBuf,
     trace_socket_path: PathBuf,
 }
 
@@ -231,16 +260,17 @@ impl WorkdirRaceHarness {
         Self {
             test_home: repo.test_home_path().to_path_buf(),
             test_db_path: repo.test_db_path().to_path_buf(),
+            daemon_home: repo.daemon_home_path(),
+            control_socket_path: repo.daemon_control_socket_path(),
             trace_socket_path,
         }
     }
 
     fn run_traced_git(&self, workdir: &Path, args: &[&str]) {
-        let output = Command::new(real_git_executable())
-            .args(args)
-            .current_dir(workdir)
-            .env("HOME", &self.test_home)
-            .env("GIT_CONFIG_GLOBAL", self.test_home.join(".gitconfig"))
+        let mut command = Command::new(real_git_executable());
+        command.args(args).current_dir(workdir);
+        configure_test_home_env(&mut command, &self.test_home);
+        let output = command
             .env("GIT_AI_TEST_DB_PATH", &self.test_db_path)
             .env("GITAI_TEST_DB_PATH", &self.test_db_path)
             .env(
@@ -261,11 +291,18 @@ impl WorkdirRaceHarness {
     }
 
     fn run_delegated_checkpoint(&self, workdir: &Path, file_rel: &str) {
-        let output = Command::new(get_binary_path())
+        let mut command = Command::new(get_binary_path());
+        command
             .args(["checkpoint", "mock_ai", file_rel])
-            .current_dir(workdir)
-            .env("HOME", &self.test_home)
-            .env("GIT_CONFIG_GLOBAL", self.test_home.join(".gitconfig"))
+            .current_dir(workdir);
+        configure_test_home_env(&mut command, &self.test_home);
+        configure_test_daemon_env(
+            &mut command,
+            &self.daemon_home,
+            &self.control_socket_path,
+            &self.trace_socket_path,
+        );
+        let output = command
             .env("GIT_AI_TEST_DB_PATH", &self.test_db_path)
             .env("GITAI_TEST_DB_PATH", &self.test_db_path)
             .env("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true")
@@ -446,19 +483,21 @@ impl Drop for DaemonGuard {
 fn daemon_start_spawns_detached_run_process() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
 
-    let output = Command::new(get_binary_path())
+    let mut command = Command::new(get_binary_path());
+    command
         .arg("daemon")
         .arg("start")
         .current_dir(repo.path())
-        .env("HOME", repo.test_home_path())
-        .env(
-            "GIT_CONFIG_GLOBAL",
-            repo.test_home_path().join(".gitconfig"),
-        )
         .env("GIT_AI_TEST_DB_PATH", repo.test_db_path())
-        .env("GITAI_TEST_DB_PATH", repo.test_db_path())
-        .output()
-        .expect("failed to invoke daemon start");
+        .env("GITAI_TEST_DB_PATH", repo.test_db_path());
+    configure_test_home_env(&mut command, repo.test_home_path());
+    configure_test_daemon_env(
+        &mut command,
+        &repo.daemon_home_path(),
+        &daemon_control_socket_path(&repo),
+        &daemon_trace_socket_path(&repo),
+    );
+    let output = command.output().expect("failed to invoke daemon start");
     assert!(
         output.status.success(),
         "daemon start should return success: stdout={} stderr={}",

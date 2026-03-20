@@ -25,16 +25,11 @@ fn git_common_dir(repo: &TestRepo) -> PathBuf {
 }
 
 fn read_global_git_config(repo: &TestRepo, key: &str) -> Option<String> {
-    let output = Command::new(real_git_executable())
-        .args(["config", "--global", "--get", key])
-        .current_dir(repo.path())
-        .env("HOME", repo.test_home_path())
-        .env(
-            "GIT_CONFIG_GLOBAL",
-            repo.test_home_path().join(".gitconfig"),
-        )
-        .output()
-        .expect("failed to read global git config");
+    let mut command = Command::new(real_git_executable());
+    command.args(["config", "--global", "--get", key]);
+    command.current_dir(repo.path());
+    configure_test_home_env(&mut command, repo);
+    let output = command.output().expect("failed to read global git config");
 
     if output.status.success() {
         let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -45,11 +40,40 @@ fn read_global_git_config(repo: &TestRepo, key: &str) -> Option<String> {
 }
 
 fn daemon_trace_socket_path(repo: &TestRepo) -> PathBuf {
-    DaemonConfig::from_home(repo.test_home_path()).trace_socket_path
+    repo.daemon_trace_socket_path()
 }
 
 fn daemon_control_socket_path(repo: &TestRepo) -> PathBuf {
-    DaemonConfig::from_home(repo.test_home_path()).control_socket_path
+    repo.daemon_control_socket_path()
+}
+
+fn configure_test_home_env(command: &mut Command, repo: &TestRepo) {
+    command.env("HOME", repo.test_home_path());
+    command.env(
+        "GIT_CONFIG_GLOBAL",
+        repo.test_home_path().join(".gitconfig"),
+    );
+    #[cfg(windows)]
+    {
+        command.env("USERPROFILE", repo.test_home_path());
+        command.env(
+            "APPDATA",
+            repo.test_home_path().join("AppData").join("Roaming"),
+        );
+        command.env(
+            "LOCALAPPDATA",
+            repo.test_home_path().join("AppData").join("Local"),
+        );
+    }
+}
+
+fn configure_test_daemon_env(command: &mut Command, repo: &TestRepo) {
+    command.env("GIT_AI_DAEMON_HOME", repo.daemon_home_path());
+    command.env(
+        "GIT_AI_DAEMON_CONTROL_SOCKET",
+        daemon_control_socket_path(repo),
+    );
+    command.env("GIT_AI_DAEMON_TRACE_SOCKET", daemon_trace_socket_path(repo));
 }
 
 fn write_async_mode_config(repo: &TestRepo) {
@@ -70,6 +94,21 @@ fn write_async_mode_config(repo: &TestRepo) {
         serde_json::to_vec_pretty(&config).expect("failed to serialize async mode config"),
     )
     .expect("failed to write async mode config");
+}
+
+fn git_ai_with_async_daemon_env(repo: &TestRepo, args: &[&str]) -> Result<String, String> {
+    let daemon_home = repo.daemon_home_path().to_string_lossy().to_string();
+    let control_socket = daemon_control_socket_path(repo)
+        .to_string_lossy()
+        .to_string();
+    let trace_socket = daemon_trace_socket_path(repo).to_string_lossy().to_string();
+    let envs = [
+        ("GIT_AI_ASYNC_MODE", "true"),
+        ("GIT_AI_DAEMON_HOME", daemon_home.as_str()),
+        ("GIT_AI_DAEMON_CONTROL_SOCKET", control_socket.as_str()),
+        ("GIT_AI_DAEMON_TRACE_SOCKET", trace_socket.as_str()),
+    ];
+    repo.git_ai_with_env(args, &envs)
 }
 
 fn wait_for_daemon_sockets(repo: &TestRepo) {
@@ -123,14 +162,11 @@ fn wait_for_daemon_latest_seq(repo: &TestRepo, min_seq: u64) {
 }
 
 fn daemon_command_output(repo: &TestRepo, args: &[&str], cwd: &Path) -> Output {
-    Command::new(get_binary_path())
-        .args(args)
-        .current_dir(cwd)
-        .env("HOME", repo.test_home_path())
-        .env(
-            "GIT_CONFIG_GLOBAL",
-            repo.test_home_path().join(".gitconfig"),
-        )
+    let mut command = Command::new(get_binary_path());
+    command.args(args).current_dir(cwd);
+    configure_test_home_env(&mut command, repo);
+    configure_test_daemon_env(&mut command, repo);
+    command
         .output()
         .expect("failed to invoke git-ai daemon command")
 }
@@ -226,11 +262,7 @@ fn async_mode_wrapper_commit_passthrough_skips_git_ai_side_effects() {
 fn install_hooks_async_mode_sets_daemon_trace2_global_config() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
 
-    let output = repo
-        .git_ai_with_env(
-            &["install-hooks", "--dry-run=false"],
-            &[("GIT_AI_ASYNC_MODE", "true")],
-        )
+    let output = git_ai_with_async_daemon_env(&repo, &["install-hooks", "--dry-run=false"])
         .expect("install-hooks should succeed in async mode");
 
     assert!(
@@ -252,11 +284,8 @@ fn install_hooks_async_mode_sets_daemon_trace2_global_config() {
 fn install_hooks_async_mode_dry_run_does_not_write_trace2_global_config() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
 
-    repo.git_ai_with_env(
-        &["install-hooks", "--dry-run=true"],
-        &[("GIT_AI_ASYNC_MODE", "true")],
-    )
-    .expect("install-hooks dry-run should succeed in async mode");
+    git_ai_with_async_daemon_env(&repo, &["install-hooks", "--dry-run=true"])
+        .expect("install-hooks dry-run should succeed in async mode");
 
     let target = read_global_git_config(&repo, "trace2.eventTarget");
     let nesting = read_global_git_config(&repo, "trace2.eventNesting");
@@ -275,11 +304,8 @@ fn install_hooks_async_mode_dry_run_does_not_write_trace2_global_config() {
 fn install_hooks_async_mode_trace2_target_routes_real_git_trace_to_daemon() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
 
-    repo.git_ai_with_env(
-        &["install-hooks", "--dry-run=false"],
-        &[("GIT_AI_ASYNC_MODE", "true")],
-    )
-    .expect("install-hooks should succeed in async mode");
+    git_ai_with_async_daemon_env(&repo, &["install-hooks", "--dry-run=false"])
+        .expect("install-hooks should succeed in async mode");
 
     let start_output = daemon_command_output(&repo, &["daemon", "start"], repo.path());
     assert!(
@@ -290,14 +316,11 @@ fn install_hooks_async_mode_trace2_target_routes_real_git_trace_to_daemon() {
     );
     wait_for_daemon_sockets(&repo);
 
-    let git_output = Command::new(real_git_executable())
-        .args(["status", "--short"])
-        .current_dir(repo.path())
-        .env("HOME", repo.test_home_path())
-        .env(
-            "GIT_CONFIG_GLOBAL",
-            repo.test_home_path().join(".gitconfig"),
-        )
+    let mut git_command = Command::new(real_git_executable());
+    git_command.args(["status", "--short"]);
+    git_command.current_dir(repo.path());
+    configure_test_home_env(&mut git_command, &repo);
+    let git_output = git_command
         .output()
         .expect("failed to run traced git status");
     assert!(
@@ -348,14 +371,11 @@ fn daemon_status_does_not_self_emit_trace2_events() {
     fs::create_dir_all(repo.test_home_path()).expect("failed to create test HOME directory");
     let trace_target = DaemonConfig::trace2_event_target_for_path(&daemon_trace_socket_path(&repo));
 
-    let set_target = Command::new(real_git_executable())
-        .args(["config", "--global", "trace2.eventTarget", &trace_target])
-        .current_dir(repo.path())
-        .env("HOME", repo.test_home_path())
-        .env(
-            "GIT_CONFIG_GLOBAL",
-            repo.test_home_path().join(".gitconfig"),
-        )
+    let mut set_target_command = Command::new(real_git_executable());
+    set_target_command.args(["config", "--global", "trace2.eventTarget", &trace_target]);
+    set_target_command.current_dir(repo.path());
+    configure_test_home_env(&mut set_target_command, &repo);
+    let set_target = set_target_command
         .output()
         .expect("failed to set global trace2.eventTarget");
     assert!(
@@ -365,14 +385,11 @@ fn daemon_status_does_not_self_emit_trace2_events() {
         String::from_utf8_lossy(&set_target.stderr)
     );
 
-    let set_nesting = Command::new(real_git_executable())
-        .args(["config", "--global", "trace2.eventNesting", "10"])
-        .current_dir(repo.path())
-        .env("HOME", repo.test_home_path())
-        .env(
-            "GIT_CONFIG_GLOBAL",
-            repo.test_home_path().join(".gitconfig"),
-        )
+    let mut set_nesting_command = Command::new(real_git_executable());
+    set_nesting_command.args(["config", "--global", "trace2.eventNesting", "10"]);
+    set_nesting_command.current_dir(repo.path());
+    configure_test_home_env(&mut set_nesting_command, &repo);
+    let set_nesting = set_nesting_command
         .output()
         .expect("failed to set global trace2.eventNesting");
     assert!(
@@ -382,19 +399,16 @@ fn daemon_status_does_not_self_emit_trace2_events() {
         String::from_utf8_lossy(&set_nesting.stderr)
     );
 
-    let mut daemon = Command::new(repos::test_repo::get_binary_path())
+    let mut daemon_cmd = Command::new(repos::test_repo::get_binary_path());
+    daemon_cmd
         .arg("daemon")
         .arg("run")
         .current_dir(repo.path())
-        .env("HOME", repo.test_home_path())
-        .env(
-            "GIT_CONFIG_GLOBAL",
-            repo.test_home_path().join(".gitconfig"),
-        )
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("failed to start daemon");
+        .stderr(Stdio::null());
+    configure_test_home_env(&mut daemon_cmd, &repo);
+    configure_test_daemon_env(&mut daemon_cmd, &repo);
+    let mut daemon = daemon_cmd.spawn().expect("failed to start daemon");
 
     wait_for_daemon_sockets(&repo);
 
@@ -441,19 +455,16 @@ fn daemon_run_survives_deleted_launch_repo_cwd() {
     let launch_repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let target_repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
 
-    let mut daemon = Command::new(get_binary_path())
+    let mut daemon_cmd = Command::new(get_binary_path());
+    daemon_cmd
         .arg("daemon")
         .arg("run")
         .current_dir(launch_repo.path())
-        .env("HOME", launch_repo.test_home_path())
-        .env(
-            "GIT_CONFIG_GLOBAL",
-            launch_repo.test_home_path().join(".gitconfig"),
-        )
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("failed to start daemon");
+        .stderr(Stdio::null());
+    configure_test_home_env(&mut daemon_cmd, &launch_repo);
+    configure_test_daemon_env(&mut daemon_cmd, &launch_repo);
+    let mut daemon = daemon_cmd.spawn().expect("failed to start daemon");
 
     wait_for_daemon_sockets(&launch_repo);
     fs::remove_dir_all(launch_repo.path()).expect("failed to remove launch repo");

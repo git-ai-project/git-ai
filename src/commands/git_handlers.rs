@@ -608,7 +608,7 @@ fn daemon_control_socket_path() -> Option<PathBuf> {
     {
         return Some(PathBuf::from(path));
     }
-    DaemonConfig::from_default_paths()
+    DaemonConfig::from_env_or_default_paths()
         .ok()
         .map(|cfg| cfg.control_socket_path)
 }

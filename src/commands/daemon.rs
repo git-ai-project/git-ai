@@ -1,6 +1,6 @@
 use crate::daemon::{ControlRequest, DaemonConfig, send_control_request};
 use interprocess::local_socket::LocalSocketStream;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
@@ -54,24 +54,7 @@ fn handle_start(args: &[String]) -> Result<(), String> {
 }
 
 fn daemon_config_from_env_or_default_paths() -> Result<DaemonConfig, String> {
-    let mut config = if let Ok(home) = std::env::var("GIT_AI_DAEMON_HOME")
-        && !home.trim().is_empty()
-    {
-        DaemonConfig::from_home(Path::new(&home))
-    } else {
-        DaemonConfig::from_default_paths().map_err(|e| e.to_string())?
-    };
-    if let Ok(path) = std::env::var("GIT_AI_DAEMON_CONTROL_SOCKET")
-        && !path.trim().is_empty()
-    {
-        config.control_socket_path = PathBuf::from(path);
-    }
-    if let Ok(path) = std::env::var("GIT_AI_DAEMON_TRACE_SOCKET")
-        && !path.trim().is_empty()
-    {
-        config.trace_socket_path = PathBuf::from(path);
-    }
-    Ok(config)
+    DaemonConfig::from_env_or_default_paths().map_err(|e| e.to_string())
 }
 
 fn handle_run(args: &[String]) -> Result<(), String> {
