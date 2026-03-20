@@ -87,13 +87,13 @@ pub struct DaemonConfig {
 impl DaemonConfig {
     fn from_internal_dir(internal_dir: PathBuf) -> Self {
         let daemon_dir = internal_dir.join("daemon");
-        let mut lock_path = daemon_dir.join("daemon.lock");
-        let mut trace_socket_path = daemon_dir.join("trace2.sock");
-        let mut control_socket_path = daemon_dir.join("control.sock");
-
         #[cfg(unix)]
-        {
+        let (lock_path, trace_socket_path, control_socket_path) = {
+            let mut lock_path = daemon_dir.join("daemon.lock");
+            let mut trace_socket_path = daemon_dir.join("trace2.sock");
+            let mut control_socket_path = daemon_dir.join("control.sock");
             let too_long = |path: &Path| path.to_string_lossy().len() >= 100;
+
             if too_long(&trace_socket_path) || too_long(&control_socket_path) {
                 let mut hasher = Sha256::new();
                 hasher.update(internal_dir.to_string_lossy().as_bytes());
@@ -104,7 +104,16 @@ impl DaemonConfig {
                 trace_socket_path = short_dir.join("trace.sock");
                 control_socket_path = short_dir.join("control.sock");
             }
-        }
+
+            (lock_path, trace_socket_path, control_socket_path)
+        };
+
+        #[cfg(not(unix))]
+        let (lock_path, trace_socket_path, control_socket_path) = (
+            daemon_dir.join("daemon.lock"),
+            daemon_dir.join("trace2.sock"),
+            daemon_dir.join("control.sock"),
+        );
 
         Self {
             internal_dir,
