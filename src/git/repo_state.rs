@@ -105,20 +105,38 @@ fn read_ref_oid_from_paths(refname: &str, git_dir: &Path, common_dir: &Path) -> 
     None
 }
 
-fn read_reflog_new_oids(common_dir: &Path, refname: &str) -> Option<Vec<String>> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReflogEntry {
+    old: String,
+    new: String,
+}
+
+fn read_reflog_entries(common_dir: &Path, refname: &str) -> Option<Vec<ReflogEntry>> {
     let path = common_dir.join("logs").join(refname);
     let contents = fs::read_to_string(path).ok()?;
-    let mut oids = Vec::new();
+    let mut entries = Vec::new();
     for line in contents.lines() {
         let head = line.split('\t').next().unwrap_or_default();
         let mut parts = head.split_whitespace();
-        let _old = parts.next()?;
+        let old = parts.next()?;
         let new = parts.next()?;
-        if is_valid_git_oid(new) {
-            oids.push(new.to_string());
+        if is_valid_git_oid(old) && is_valid_git_oid(new) {
+            entries.push(ReflogEntry {
+                old: old.to_string(),
+                new: new.to_string(),
+            });
         }
     }
-    Some(oids)
+    Some(entries)
+}
+
+fn read_reflog_new_oids(common_dir: &Path, refname: &str) -> Option<Vec<String>> {
+    Some(
+        read_reflog_entries(common_dir, refname)?
+            .into_iter()
+            .map(|entry| entry.new)
+            .collect(),
+    )
 }
 
 pub fn read_ref_oid_for_worktree(worktree: &Path, refname: &str) -> Option<String> {
@@ -155,6 +173,15 @@ pub fn resolve_stash_target_oid_for_worktree(
     let common_dir = common_dir_for_worktree(worktree)?;
     let oids = read_reflog_new_oids(&common_dir, "refs/stash")?;
     oids.into_iter().rev().nth(index)
+}
+
+pub fn latest_reflog_old_oid_for_worktree(worktree: &Path, refname: &str) -> Option<String> {
+    let common_dir = common_dir_for_worktree(worktree)?;
+    read_reflog_entries(&common_dir, refname)?
+        .into_iter()
+        .rev()
+        .map(|entry| entry.old)
+        .find(|oid| is_valid_git_oid(oid) && !oid.chars().all(|c| c == '0'))
 }
 
 pub fn read_head_state_for_worktree(worktree: &Path) -> Option<HeadState> {
@@ -434,6 +461,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(resolved, "dddddddddddddddddddddddddddddddddddddddd");
+    }
+
+    #[test]
+    fn latest_reflog_old_oid_reads_previous_top_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path();
+        let git_dir = worktree.join(".git");
+        write_file(&git_dir.join("HEAD"), "ref: refs/heads/main\n");
+        write_file(
+            &git_dir.join("logs/refs/stash"),
+            concat!(
+                "0000000000000000000000000000000000000000 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa Test <t@example.com> 0 -0000\tstash: first\n",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb Test <t@example.com> 0 -0000\tstash: second\n",
+            ),
+        );
+
+        let resolved = latest_reflog_old_oid_for_worktree(worktree, "refs/stash").unwrap();
+        assert_eq!(resolved, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     }
 
     #[test]

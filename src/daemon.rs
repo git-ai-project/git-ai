@@ -8,10 +8,10 @@ use crate::git::cli_parser::{
 };
 use crate::git::find_repository_in_path;
 use crate::git::repo_state::{
-    HeadState, common_dir_for_worktree, git_dir_for_worktree, read_head_state_for_worktree,
-    read_ref_oid_for_worktree, resolve_linear_head_commit_chain_for_worktree,
-    resolve_squash_source_head_for_worktree, resolve_stash_target_oid_for_worktree,
-    worktree_root_for_path,
+    HeadState, common_dir_for_worktree, git_dir_for_worktree, latest_reflog_old_oid_for_worktree,
+    read_head_state_for_worktree, read_ref_oid_for_worktree,
+    resolve_linear_head_commit_chain_for_worktree, resolve_squash_source_head_for_worktree,
+    resolve_stash_target_oid_for_worktree, worktree_root_for_path,
 };
 use crate::git::repository::{Repository, exec_git};
 use crate::git::rewrite_log::{
@@ -524,6 +524,69 @@ fn resolve_stash_target_oid_for_command(
     Ok(Some(resolved))
 }
 
+fn stash_target_spec_is_top_of_stack(target_spec: Option<&str>) -> bool {
+    matches!(
+        target_spec.unwrap_or("stash@{0}"),
+        "stash@{0}" | "refs/stash" | "stash"
+    )
+}
+
+fn resolve_stash_target_oid_for_terminal_payload(
+    worktree: &Path,
+    argv: &[String],
+    ref_changes: &[crate::daemon::domain::RefChange],
+) -> Result<Option<String>, GitAiError> {
+    let parsed = parse_git_cli_args(trace_invocation_args(argv));
+    if parsed.command.as_deref() != Some("stash") {
+        return Ok(None);
+    }
+    if !stash_requires_target_resolution(&parsed.command_args) {
+        return Ok(None);
+    }
+
+    let target_spec = stash_target_spec(&parsed.command_args);
+    match parsed.command_args.first().map(String::as_str).unwrap_or("push") {
+        "apply" => resolve_stash_target_oid_for_worktree(worktree, target_spec)
+            .ok_or_else(|| {
+                GitAiError::Generic(format!(
+                    "failed to resolve stash apply target oid from terminal repo state (spec={:?}, worktree={})",
+                    target_spec,
+                    worktree.display()
+                ))
+            })
+            .map(Some),
+        "pop" | "drop" => {
+            if let Some(target_oid) = ref_changes
+                .iter()
+                .rfind(|change| change.reference == "refs/stash")
+                .map(|change| change.old.trim().to_string())
+                .filter(|oid| !oid.is_empty() && !is_zero_oid(oid))
+            {
+                return Ok(Some(target_oid));
+            }
+            if stash_target_spec_is_top_of_stack(target_spec) {
+                return latest_reflog_old_oid_for_worktree(worktree, "refs/stash")
+                    .ok_or_else(|| {
+                        GitAiError::Generic(format!(
+                            "failed to resolve stash {:?} target oid from terminal reflog state (spec={:?}, worktree={})",
+                            parsed.command_args.first().map(String::as_str).unwrap_or("stash"),
+                            target_spec,
+                            worktree.display()
+                        ))
+                    })
+                    .map(Some);
+            }
+            Err(GitAiError::Generic(format!(
+                "failed to resolve stash {:?} target oid from terminal state for non-top stash reference (spec={:?}, worktree={})",
+                parsed.command_args.first().map(String::as_str).unwrap_or("stash"),
+                target_spec,
+                worktree.display()
+            )))
+        }
+        _ => Ok(None),
+    }
+}
+
 fn resolve_rebase_original_head_for_worktree(worktree: &Path) -> Option<String> {
     let git_dir = git_dir_for_worktree(worktree)?;
 
@@ -640,11 +703,7 @@ fn tracked_reflog_refs_for_command(
     ) {
         refs.push("ORIG_HEAD".to_string());
     }
-    if command == Some("stash")
-        && !stash_requires_target_resolution(
-            &parse_git_cli_args(trace_invocation_args(argv)).command_args,
-        )
-    {
+    if command == Some("stash") {
         refs.push("refs/stash".to_string());
     }
     refs.sort();
@@ -2547,6 +2606,7 @@ impl ActorDaemonCoordinator {
         if is_terminal_root_trace_event(&event, &sid, &root)
             && let Some(object) = payload.as_object_mut()
         {
+            let mut terminal_ref_changes: Option<Vec<crate::daemon::domain::RefChange>> = None;
             if let Some(state) = read_head_state_for_worktree(&worktree) {
                 object.insert(
                     "git_ai_post_repo".to_string(),
@@ -2655,8 +2715,9 @@ impl ActorDaemonCoordinator {
                             Ok(ref_changes) => {
                                 object.insert(
                                     "git_ai_family_reflog_changes".to_string(),
-                                    json!(ref_changes),
+                                    json!(&ref_changes),
                                 );
+                                terminal_ref_changes = Some(ref_changes);
                             }
                             Err(error) => {
                                 debug_log(&format!(
@@ -2666,6 +2727,43 @@ impl ActorDaemonCoordinator {
                             }
                         }
                         object.insert("git_ai_family_reflog_end".to_string(), json!(end_offsets));
+                    }
+                }
+            }
+            if object.get("git_ai_stash_target_oid").is_none()
+                && object.get("git_ai_stash_target_oid_error").is_none()
+            {
+                match resolve_stash_target_oid_for_terminal_payload(
+                    &worktree,
+                    &effective_argv,
+                    terminal_ref_changes.as_deref().unwrap_or(&[]),
+                ) {
+                    Ok(Some(stash_target_oid)) => {
+                        object.insert(
+                            "git_ai_stash_target_oid".to_string(),
+                            json!(stash_target_oid),
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        debug_log(&format!(
+                            "daemon terminal stash target resolution failed sid={}: {}",
+                            sid, error
+                        ));
+                        observability::log_error(
+                            &error,
+                            Some(json!({
+                                "component": "daemon",
+                                "phase": "augment_trace_payload_with_reflog_metadata",
+                                "root_sid": root,
+                                "sid": sid,
+                                "argv": effective_argv,
+                            })),
+                        );
+                        object.insert(
+                            "git_ai_stash_target_oid_error".to_string(),
+                            json!(error.to_string()),
+                        );
                     }
                 }
             }
@@ -3273,8 +3371,15 @@ impl ActorDaemonCoordinator {
                 .rfind(|change| change.reference == "refs/stash")
                 .map(|change| change.new.trim().to_string())
                 .filter(|oid| !oid.is_empty() && !is_zero_oid(oid)),
-            StashOperation::Apply | StashOperation::Pop | StashOperation::Drop => {
-                cmd.stash_target_oid.clone()
+            StashOperation::Apply => cmd.stash_target_oid.clone(),
+            StashOperation::Pop | StashOperation::Drop => {
+                cmd.stash_target_oid.clone().or_else(|| {
+                    cmd.ref_changes
+                        .iter()
+                        .rfind(|change| change.reference == "refs/stash")
+                        .map(|change| change.old.trim().to_string())
+                        .filter(|oid| !oid.is_empty() && !is_zero_oid(oid))
+                })
             }
             StashOperation::List => None,
         }
@@ -3663,8 +3768,8 @@ impl ActorDaemonCoordinator {
                     ) && stash_sha.is_none()
                     {
                         return Err(GitAiError::Generic(format!(
-                            "stash {:?} missing pre-command stash target oid sid={}",
-                            operation, cmd.root_sid
+                            "stash {:?} missing resolvable target oid sid={} ref={:?}",
+                            operation, cmd.root_sid, stash_ref
                         )));
                     }
                     if matches!(

@@ -5,7 +5,6 @@ use crate::daemon::git_backend::{GitBackend, ReflogCut};
 use crate::error::GitAiError;
 use crate::git::cli_parser::{
     explicit_rebase_branch_arg, parse_git_cli_args, rebase_has_control_mode,
-    stash_requires_target_resolution,
 };
 use crate::git::repo_state::{
     common_dir_for_repo_path, common_dir_for_worktree, git_dir_for_worktree,
@@ -787,20 +786,6 @@ impl<B: GitBackend> TraceNormalizer<B> {
         if primary_command.is_none() {
             primary_command = invoked_command.clone();
         }
-        if primary_command.as_deref() == Some("stash")
-            && stash_requires_target_resolution(&invoked_args)
-            && pending.stash_target_oid.is_none()
-        {
-            return Err(GitAiError::Generic(
-                pending.stash_target_error.unwrap_or_else(|| {
-                    format!(
-                        "stash command missing pre-command stash target oid sid={} argv={:?}",
-                        pending.root_sid, pending.raw_argv
-                    )
-                }),
-            ));
-        }
-
         let may_mutate_refs = command_may_mutate_refs(primary_command.as_deref());
 
         let mut confidence = Confidence::Low;
@@ -2268,7 +2253,7 @@ mod tests {
     }
 
     #[test]
-    fn destructive_stash_requires_pre_command_target_oid() {
+    fn destructive_stash_can_normalize_without_pre_command_target_oid() {
         let backend = Arc::new(MockBackend::default());
         let mut normalizer = TraceNormalizer::new(backend);
         let temp = tempfile::tempdir().expect("create tempdir");
@@ -2292,16 +2277,11 @@ mod tests {
         });
 
         assert!(normalizer.ingest_payload(&start).unwrap().is_none());
-        let error = normalizer
+        let cmd = normalizer
             .ingest_payload(&exit)
-            .expect_err("missing stash metadata should error");
-        assert!(
-            error
-                .to_string()
-                .contains("missing pre-command stash target oid"),
-            "unexpected error: {}",
-            error
-        );
+            .expect("missing stash metadata should not block normalization")
+            .expect("exit payload should emit a normalized command");
+        assert!(cmd.stash_target_oid.is_none());
     }
 
     #[test]
