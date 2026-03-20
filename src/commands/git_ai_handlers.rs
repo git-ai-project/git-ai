@@ -13,6 +13,7 @@ use crate::commands::checkpoint_agent::agent_presets::{
 use crate::commands::checkpoint_agent::agent_v1_preset::AgentV1Preset;
 use crate::commands::checkpoint_agent::amp_preset::AmpPreset;
 use crate::commands::checkpoint_agent::opencode_preset::OpenCodePreset;
+use crate::commands::checkpoint_agent::zed_preset::ZedPreset;
 use crate::config;
 use crate::git::find_repository;
 use crate::git::find_repository_in_path;
@@ -174,6 +175,9 @@ pub fn handle_git_ai(args: &[String]) {
         "effective-ignore-patterns" => {
             handle_effective_ignore_patterns_internal(&args[1..]);
         }
+        "mcp-server" => {
+            commands::mcp_server::run_mcp_server();
+        }
         "blame-analysis" => {
             handle_blame_analysis_internal(&args[1..]);
         }
@@ -202,7 +206,7 @@ fn print_help() {
     eprintln!("Commands:");
     eprintln!("  checkpoint         Checkpoint working changes and attribute author");
     eprintln!(
-        "    Presets: claude, codex, continue-cli, cursor, gemini, github-copilot, amp, windsurf, opencode, ai_tab, mock_ai"
+        "    Presets: claude, codex, continue-cli, cursor, gemini, github-copilot, amp, windsurf, opencode, zed, ai_tab, mock_ai"
     );
     eprintln!(
         "    --hook-input <json|stdin>   JSON payload required by presets, or 'stdin' to read from stdin"
@@ -292,6 +296,7 @@ fn print_help() {
     eprintln!("    --launch              Launch agent CLI with restored context");
     eprintln!("    --clipboard           Copy context to system clipboard");
     eprintln!("    --json                Output context as structured JSON");
+    eprintln!("  mcp-server         Run as MCP server (for Zed and other MCP-compatible editors)");
     eprintln!("  login              Authenticate with Git AI");
     eprintln!("  logout             Clear stored credentials");
     eprintln!("  whoami             Show auth state and login identity");
@@ -542,6 +547,22 @@ fn handle_checkpoint(args: &[String]) {
                     }
                     Err(e) => {
                         eprintln!("OpenCode preset error: {}", e);
+                        std::process::exit(0);
+                    }
+                }
+            }
+            "zed" => {
+                match ZedPreset.run(AgentCheckpointFlags {
+                    hook_input: hook_input.clone(),
+                }) {
+                    Ok(agent_run) => {
+                        if agent_run.repo_working_dir.is_some() {
+                            repository_working_dir = agent_run.repo_working_dir.clone().unwrap();
+                        }
+                        agent_run_result = Some(agent_run);
+                    }
+                    Err(e) => {
+                        eprintln!("Zed preset error: {}", e);
                         std::process::exit(0);
                     }
                 }

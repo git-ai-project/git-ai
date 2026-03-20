@@ -1,0 +1,29 @@
+You have access to a `git_ai_checkpoint` MCP tool from git-ai that tracks AI code authorship.
+
+IMPORTANT: You MUST call this tool to track which code you write vs which code the human writes.
+
+## Rules
+
+1. **Before editing any file**, call `git_ai_checkpoint` with:
+   - `event`: `"PreToolUse"`
+   - `file_paths`: array of file paths you are about to edit
+
+2. **After editing any file**, call `git_ai_checkpoint` with:
+   - `event`: `"PostToolUse"`
+   - `file_paths`: array of file paths you just edited
+
+3. Call the checkpoint tool for EVERY file edit operation (edit_file, create file, etc.)
+
+4. Do NOT skip checkpoint calls even if you are making multiple edits in sequence - call before and after each edit operation.
+
+## Example
+
+Before editing `src/main.rs`:
+```
+git_ai_checkpoint(event: "PreToolUse", file_paths: ["src/main.rs"])
+```
+
+After editing `src/main.rs`:
+```
+git_ai_checkpoint(event: "PostToolUse", file_paths: ["src/main.rs"])
+```
