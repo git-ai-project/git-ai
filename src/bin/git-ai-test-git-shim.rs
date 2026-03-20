@@ -19,6 +19,22 @@ struct StartedGitInvocationLogEntry {
     cwd: Option<String>,
 }
 
+fn select_target(argv: &[String]) -> Result<(String, bool), String> {
+    let tracked_target = env::var("GIT_AI_TEST_GIT_SHIM_TARGET")
+        .map_err(|_| "GIT_AI_TEST_GIT_SHIM_TARGET is required".to_string())?;
+    let fallback_target =
+        env::var("GIT_AI_TEST_GIT_SHIM_FALLBACK_TARGET").unwrap_or_else(|_| tracked_target.clone());
+    let tracked_target_uses_git_ai =
+        env::var("GIT_AI_TEST_GIT_SHIM_TARGET_USE_GIT_AI").as_deref() == Ok("1");
+    let cwd = env::current_dir().map_err(|e| format!("read shim cwd failed: {e}"))?;
+    let parsed = tracked_parsed_git_invocation_for_test_sync(argv, &cwd);
+    if tracks_parsed_git_invocation_for_test_sync(&parsed) {
+        Ok((tracked_target, tracked_target_uses_git_ai))
+    } else {
+        Ok((fallback_target, false))
+    }
+}
+
 fn append_started_log(log_path: &PathBuf, argv: &[String]) -> Result<(), String> {
     let cwd = env::current_dir().map_err(|e| format!("read shim cwd failed: {e}"))?;
     let parsed = tracked_parsed_git_invocation_for_test_sync(argv, &cwd);
@@ -51,21 +67,29 @@ fn append_started_log(log_path: &PathBuf, argv: &[String]) -> Result<(), String>
 }
 
 #[cfg(unix)]
-fn exec_target(target: &str, argv: &[String]) -> ! {
-    let error = Command::new(target).args(argv).exec();
+fn exec_target(target: &str, argv: &[String], use_git_ai_wrapper_mode: bool) -> ! {
+    let mut command = Command::new(target);
+    command.args(argv);
+    if use_git_ai_wrapper_mode {
+        command.env("GIT_AI", "git");
+    }
+    let error = command.exec();
     eprintln!("git-ai-test-git-shim failed to exec {target}: {error}");
     std::process::exit(127);
 }
 
 #[cfg(not(unix))]
-fn exec_target(target: &str, argv: &[String]) -> ! {
-    match Command::new(target)
+fn exec_target(target: &str, argv: &[String], use_git_ai_wrapper_mode: bool) -> ! {
+    let mut command = Command::new(target);
+    command
         .args(argv)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-    {
+        .stderr(Stdio::inherit());
+    if use_git_ai_wrapper_mode {
+        command.env("GIT_AI", "git");
+    }
+    match command.status() {
         Ok(status) => std::process::exit(status.code().unwrap_or(1)),
         Err(error) => {
             eprintln!("git-ai-test-git-shim failed to spawn {target}: {error}");
@@ -76,28 +100,28 @@ fn exec_target(target: &str, argv: &[String]) -> ! {
 
 #[cfg(unix)]
 fn main() {
-    let target = env::var("GIT_AI_TEST_GIT_SHIM_TARGET")
-        .unwrap_or_else(|_| panic!("GIT_AI_TEST_GIT_SHIM_TARGET is required"));
     let argv = env::args().skip(1).collect::<Vec<_>>();
+    let (target, use_git_ai_wrapper_mode) =
+        select_target(&argv).unwrap_or_else(|error| panic!("{error}"));
     if let Ok(log_path) = env::var("GIT_AI_TEST_SYNC_START_LOG") {
         let log_path = PathBuf::from(log_path);
         if let Err(error) = append_started_log(&log_path, &argv) {
             panic!("git-ai-test-git-shim failed: {error}");
         }
     }
-    exec_target(&target, &argv);
+    exec_target(&target, &argv, use_git_ai_wrapper_mode);
 }
 
 #[cfg(not(unix))]
 fn main() {
-    let target = env::var("GIT_AI_TEST_GIT_SHIM_TARGET")
-        .unwrap_or_else(|_| panic!("GIT_AI_TEST_GIT_SHIM_TARGET is required"));
     let argv = env::args().skip(1).collect::<Vec<_>>();
+    let (target, use_git_ai_wrapper_mode) =
+        select_target(&argv).unwrap_or_else(|error| panic!("{error}"));
     if let Ok(log_path) = env::var("GIT_AI_TEST_SYNC_START_LOG") {
         let log_path = PathBuf::from(log_path);
         if let Err(error) = append_started_log(&log_path, &argv) {
             panic!("git-ai-test-git-shim failed: {error}");
         }
     }
-    exec_target(&target, &argv)
+    exec_target(&target, &argv, use_git_ai_wrapper_mode)
 }

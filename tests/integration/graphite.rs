@@ -267,6 +267,13 @@ fn gt(repo: &TestRepo, args: &[&str]) -> Result<String, String> {
     // target binary.
     command.env("PATH", gt_git_path());
     command.env("GIT_AI_TEST_GIT_SHIM_TARGET", gt_git_target(repo));
+    command.env(
+        "GIT_AI_TEST_GIT_SHIM_FALLBACK_TARGET",
+        real_git_executable(),
+    );
+    if repo.mode().uses_wrapper() {
+        command.env("GIT_AI_TEST_GIT_SHIM_TARGET_USE_GIT_AI", "1");
+    }
     if let Some(started_log_path) = started_log_path.as_ref() {
         command.env("GIT_AI_TEST_SYNC_START_LOG", started_log_path);
     }
