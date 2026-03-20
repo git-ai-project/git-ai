@@ -47,16 +47,26 @@ macro_rules! subdir_test_variants {
 
                         use std::process::Command;
                         use $crate::repos::test_repo::{
-                            get_binary_path, git_command_affects_daemon,
+                            get_binary_path, git_command_routes_to_clone_target,
                             git_command_requires_daemon_sync, GitTestMode,
                         };
 
                         let binary_path = get_binary_path();
                         let mode = GitTestMode::from_env();
+                        let command_affects_daemon = self
+                            .inner
+                            .git_command_affects_daemon_for_tracking(
+                                args,
+                                Some(self.inner.path().as_path()),
+                            );
 
                         if mode.uses_daemon() && git_command_requires_daemon_sync(args) {
                             self.inner.sync_daemon_force();
                         }
+
+                        let daemon_command_pending = mode.uses_daemon()
+                            && command_affects_daemon
+                            && !git_command_routes_to_clone_target(args);
 
                         let mut command = if mode.uses_wrapper() {
                             Command::new(binary_path)
@@ -108,15 +118,13 @@ macro_rules! subdir_test_variants {
                         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
                         if output.status.success() {
-                            if mode.uses_daemon() {
-                                if git_command_affects_daemon(args) {
-                                    self.inner.mark_daemon_family_dirty();
-                                }
+                            if daemon_command_pending {
+                                self.inner.record_daemon_family_expected_completion();
                             }
                             Ok(if stdout.is_empty() { stderr } else { stdout })
                         } else {
-                            if mode.uses_daemon() && git_command_affects_daemon(args) {
-                                self.inner.mark_daemon_family_dirty();
+                            if daemon_command_pending {
+                                self.inner.record_daemon_family_expected_completion();
                             }
                             Err(stderr)
                         }
@@ -137,16 +145,26 @@ macro_rules! subdir_test_variants {
 
                             use std::process::Command;
                             use $crate::repos::test_repo::{
-                                get_binary_path, git_command_affects_daemon,
+                                get_binary_path, git_command_routes_to_clone_target,
                                 git_command_requires_daemon_sync, GitTestMode,
                             };
 
-                            let binary_path = get_binary_path();
-                            let mode = GitTestMode::from_env();
+                        let binary_path = get_binary_path();
+                        let mode = GitTestMode::from_env();
+                        let command_affects_daemon = self
+                            .inner
+                            .git_command_affects_daemon_for_tracking(
+                                args,
+                                Some(self.inner.path().as_path()),
+                            );
 
-                            if mode.uses_daemon() && git_command_requires_daemon_sync(args) {
-                                self.inner.sync_daemon_force();
-                            }
+                        if mode.uses_daemon() && git_command_requires_daemon_sync(args) {
+                            self.inner.sync_daemon_force();
+                        }
+
+                        let daemon_command_pending = mode.uses_daemon()
+                            && command_affects_daemon
+                            && !git_command_routes_to_clone_target(args);
 
                             let mut command = if mode.uses_wrapper() {
                                 Command::new(binary_path)
@@ -202,15 +220,13 @@ macro_rules! subdir_test_variants {
                             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
                             if output.status.success() {
-                                if mode.uses_daemon() {
-                                    if git_command_affects_daemon(args) {
-                                        self.inner.mark_daemon_family_dirty();
-                                    }
+                                if daemon_command_pending {
+                                    self.inner.record_daemon_family_expected_completion();
                                 }
                                 Ok(if stdout.is_empty() { stderr } else { stdout })
                             } else {
-                                if mode.uses_daemon() && git_command_affects_daemon(args) {
-                                    self.inner.mark_daemon_family_dirty();
+                                if daemon_command_pending {
+                                    self.inner.record_daemon_family_expected_completion();
                                 }
                                 Err(stderr)
                             }

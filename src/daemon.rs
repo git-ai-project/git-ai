@@ -52,6 +52,7 @@ pub mod family_actor;
 pub mod git_backend;
 pub mod global_actor;
 pub mod reducer;
+pub mod test_sync;
 pub mod trace_normalizer;
 
 pub use control_api::{CheckpointRunRequest, ControlRequest, ControlResponse, FamilyStatus};
@@ -182,6 +183,18 @@ impl DaemonConfig {
         Self::trace2_event_target_for_path(&self.trace_socket_path)
     }
 
+    pub fn test_completion_log_dir(&self) -> PathBuf {
+        self.internal_dir.join("daemon").join("test-completions")
+    }
+
+    pub fn test_completion_log_path_for_family(&self, family_key: &str) -> PathBuf {
+        let mut hasher = Sha256::new();
+        hasher.update(family_key.as_bytes());
+        let digest = format!("{:x}", hasher.finalize());
+        self.test_completion_log_dir()
+            .join(format!("{}.jsonl", &digest[..16]))
+    }
+
     pub fn trace2_event_target_for_path(path: &Path) -> String {
         #[cfg(unix)]
         {
@@ -198,6 +211,17 @@ impl DaemonConfig {
 struct DaemonPidMeta {
     pid: u32,
     started_at_ns: u128,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TestCompletionLogEntry {
+    seq: u64,
+    family_key: String,
+    kind: String,
+    primary_command: Option<String>,
+    exit_code: Option<i32>,
+    status: String,
+    error: Option<String>,
 }
 
 #[derive(Debug)]
@@ -499,15 +523,39 @@ fn resolve_stash_target_oid_for_command(
     Ok(Some(resolved))
 }
 
+fn resolve_rebase_original_head_for_worktree(worktree: &Path) -> Option<String> {
+    let git_dir = git_dir_for_worktree(worktree)?;
+
+    for candidate in [
+        git_dir.join("rebase-merge").join("orig-head"),
+        git_dir.join("rebase-apply").join("orig-head"),
+        git_dir.join("ORIG_HEAD"),
+    ] {
+        if let Ok(contents) = fs::read_to_string(candidate)
+            && let Some(oid) = contents
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+            && is_valid_oid(oid)
+            && !is_zero_oid(oid)
+        {
+            return Some(oid.to_string());
+        }
+    }
+
+    read_ref_oid_for_worktree(worktree, "ORIG_HEAD")
+        .filter(|oid| is_valid_oid(oid) && !is_zero_oid(oid))
+}
+
 type MergeSquashSnapshot = (String, HashMap<String, String>);
 
 fn capture_merge_squash_staged_file_blobs_for_command(
     worktree: &Path,
-    primary_command: Option<&str>,
+    _primary_command: Option<&str>,
     argv: &[String],
     exit_code: i32,
 ) -> Result<Option<HashMap<String, String>>, GitAiError> {
-    if exit_code != 0 || primary_command != Some("merge") {
+    if exit_code != 0 {
         return Ok(None);
     }
 
@@ -524,11 +572,11 @@ fn capture_merge_squash_staged_file_blobs_for_command(
 
 fn capture_merge_squash_source_head_for_command(
     worktree: &Path,
-    primary_command: Option<&str>,
+    _primary_command: Option<&str>,
     argv: &[String],
     exit_code: i32,
 ) -> Result<Option<String>, GitAiError> {
-    if exit_code != 0 || primary_command != Some("merge") {
+    if exit_code != 0 {
         return Ok(None);
     }
 
@@ -1275,30 +1323,32 @@ fn derive_new_commits_for_rewrite(
     Ok(commits)
 }
 
-fn strict_rebase_mappings_from_repository(
+fn maybe_rebase_mappings_from_repository(
     repository: &Repository,
     old_head: &str,
     new_head: &str,
     onto_head: Option<&str>,
     context: &str,
-) -> Result<(Vec<String>, Vec<String>), GitAiError> {
+) -> Result<Option<(Vec<String>, Vec<String>)>, GitAiError> {
     let (original_commits, new_commits) =
         crate::commands::hooks::rebase_hooks::build_rebase_commit_mappings(
             repository, old_head, new_head, onto_head,
         )?;
     if original_commits.is_empty() {
-        return Err(GitAiError::Generic(format!(
-            "{} missing rebase source commits",
+        debug_log(&format!(
+            "{} produced no rebase source commits; skipping rewrite synthesis",
             context
-        )));
+        ));
+        return Ok(None);
     }
     if new_commits.is_empty() {
-        return Err(GitAiError::Generic(format!(
-            "{} no rebased commits available for rebase mapping",
+        debug_log(&format!(
+            "{} produced no rebased commits; skipping rewrite synthesis",
             context
-        )));
+        ));
+        return Ok(None);
     }
-    Ok((original_commits, new_commits))
+    Ok(Some((original_commits, new_commits)))
 }
 
 fn strict_cherry_pick_mappings_from_command(
@@ -1385,8 +1435,24 @@ fn strict_rebase_original_head_from_command(
     cmd: &crate::daemon::domain::NormalizedCommand,
     semantic_old_head: &str,
 ) -> Option<String> {
+    if let Some(worktree) = cmd.worktree.as_ref()
+        && let Some(old_head) = resolve_rebase_original_head_for_worktree(worktree)
+    {
+        return Some(old_head);
+    }
+
     if is_valid_oid(semantic_old_head) && !is_zero_oid(semantic_old_head) {
         return Some(semantic_old_head.to_string());
+    }
+
+    if !rebase_is_control_mode(cmd)
+        && let Some(old_head) = cmd
+            .pre_repo
+            .as_ref()
+            .and_then(|repo| repo.head.clone())
+            .filter(|head| is_valid_oid(head) && !is_zero_oid(head))
+    {
+        return Some(old_head);
     }
 
     if let Some(branch_spec) = explicit_rebase_branch_arg(&cmd.invoked_args)
@@ -1622,6 +1688,7 @@ struct ActorDaemonCoordinator {
     side_effect_errors_by_family: Mutex<HashMap<String, BTreeMap<u64, String>>>,
     side_effect_progress_notify_by_family: Mutex<HashMap<String, Arc<Notify>>>,
     side_effect_exec_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
+    test_completion_log_dir: Option<PathBuf>,
     trace_ingest_tx: Mutex<Option<mpsc::Sender<Value>>>,
     next_trace_ingest_seq: AtomicUsize,
     next_trace_root_activity_seq: AtomicUsize,
@@ -1651,6 +1718,16 @@ impl ActorDaemonCoordinator {
             side_effect_errors_by_family: Mutex::new(HashMap::new()),
             side_effect_progress_notify_by_family: Mutex::new(HashMap::new()),
             side_effect_exec_locks: Mutex::new(HashMap::new()),
+            test_completion_log_dir: std::env::var("GIT_AI_TEST_DB_PATH")
+                .ok()
+                .or_else(|| std::env::var("GITAI_TEST_DB_PATH").ok())
+                .map(|_| {
+                    DaemonConfig::from_env_or_default_paths()
+                        .map(|config| config.test_completion_log_dir())
+                        .unwrap_or_else(|_| {
+                            std::env::temp_dir().join("git-ai-daemon-test-completions-fallback")
+                        })
+                }),
             trace_ingest_tx: Mutex::new(None),
             next_trace_ingest_seq: AtomicUsize::new(0),
             next_trace_root_activity_seq: AtomicUsize::new(0),
@@ -1754,6 +1831,28 @@ impl ActorDaemonCoordinator {
         Ok(map
             .get(family)
             .and_then(|errors| errors.iter().next_back().map(|(_, error)| error.clone())))
+    }
+
+    fn maybe_append_test_completion_log(
+        &self,
+        family: &str,
+        entry: &TestCompletionLogEntry,
+    ) -> Result<(), GitAiError> {
+        let Some(dir) = self.test_completion_log_dir.as_ref() else {
+            return Ok(());
+        };
+
+        fs::create_dir_all(dir)?;
+        let mut hasher = Sha256::new();
+        hasher.update(family.as_bytes());
+        let digest = format!("{:x}", hasher.finalize());
+        let path = dir.join(format!("{}.jsonl", &digest[..16]));
+        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+        let line = serde_json::to_string(entry).map_err(GitAiError::from)?;
+        file.write_all(line.as_bytes())?;
+        file.write_all(b"\n")?;
+        file.flush()?;
+        Ok(())
     }
 
     fn trace_connection_opened(&self) {
@@ -2174,7 +2273,7 @@ impl ActorDaemonCoordinator {
             ingress.root_worktrees.insert(root.clone(), worktree);
         }
         let payload_argv = trace_payload_argv(payload);
-        if event == "start" && !payload_argv.is_empty() {
+        if event == "start" && sid == root && !payload_argv.is_empty() {
             ingress.root_argv.insert(root.clone(), payload_argv.clone());
         }
         let effective_argv = if payload_argv.is_empty() {
@@ -2632,10 +2731,10 @@ impl ActorDaemonCoordinator {
             match ready_entry {
                 OrderedSideEffectEntry::Command(applied) => {
                     let _ = self.begin_family_effect(family);
-                    if let Err(error) = self
+                    let result = self
                         .maybe_apply_side_effects_for_applied_command(Some(family), &applied)
-                        .await
-                    {
+                        .await;
+                    if let Err(error) = &result {
                         let _ = self.record_side_effect_error(family, seq, &error);
                         debug_log(&format!(
                             "daemon command side effect failed for family {} seq {}: {}",
@@ -2643,10 +2742,40 @@ impl ActorDaemonCoordinator {
                         ));
                     }
                     let _ = self.end_family_effect(family);
+                    if crate::daemon::test_sync::tracks_primary_command_for_test_sync(
+                        applied.command.primary_command.as_deref(),
+                        &applied.command.invoked_args,
+                    ) {
+                        let log_entry = TestCompletionLogEntry {
+                            seq,
+                            family_key: family.to_string(),
+                            kind: "command".to_string(),
+                            primary_command: applied.command.primary_command.clone(),
+                            exit_code: Some(applied.command.exit_code),
+                            status: if result.is_ok() {
+                                "ok".to_string()
+                            } else {
+                                "error".to_string()
+                            },
+                            error: result.err().map(|error| error.to_string()),
+                        };
+                        if let Err(error) =
+                            self.maybe_append_test_completion_log(family, &log_entry)
+                        {
+                            let _ = self.record_side_effect_error(family, seq, &error);
+                            debug_log(&format!(
+                                "daemon command completion log write failed for family {} seq {}: {}",
+                                family, seq, error
+                            ));
+                        }
+                    }
                 }
                 OrderedSideEffectEntry::Checkpoint(request) => {
+                    let should_log_completion =
+                        crate::daemon::test_sync::tracks_checkpoint_request_for_test_sync(&request);
                     let _ = self.begin_family_effect(family);
-                    if let Err(error) = apply_checkpoint_side_effect(*request) {
+                    let result = apply_checkpoint_side_effect(*request);
+                    if let Err(error) = &result {
                         let _ = self.record_side_effect_error(family, seq, &error);
                         debug_log(&format!(
                             "daemon checkpoint side effect failed for family {} seq {}: {}",
@@ -2654,6 +2783,30 @@ impl ActorDaemonCoordinator {
                         ));
                     }
                     let _ = self.end_family_effect(family);
+                    if should_log_completion {
+                        let log_entry = TestCompletionLogEntry {
+                            seq,
+                            family_key: family.to_string(),
+                            kind: "checkpoint".to_string(),
+                            primary_command: Some("checkpoint".to_string()),
+                            exit_code: None,
+                            status: if result.is_ok() {
+                                "ok".to_string()
+                            } else {
+                                "error".to_string()
+                            },
+                            error: result.err().map(|error| error.to_string()),
+                        };
+                        if let Err(error) =
+                            self.maybe_append_test_completion_log(family, &log_entry)
+                        {
+                            let _ = self.record_side_effect_error(family, seq, &error);
+                            debug_log(&format!(
+                                "daemon checkpoint completion log write failed for family {} seq {}: {}",
+                                family, seq, error
+                            ));
+                        }
+                    }
                 }
                 OrderedSideEffectEntry::Marker => {}
             }
@@ -2850,9 +3003,10 @@ impl ActorDaemonCoordinator {
     }
 
     fn rewrite_worktree_key(worktree: &Path) -> String {
-        worktree
+        let normalized = worktree_root_for_path(worktree).unwrap_or_else(|| worktree.to_path_buf());
+        normalized
             .canonicalize()
-            .unwrap_or_else(|_| worktree.to_path_buf())
+            .unwrap_or(normalized)
             .to_string_lossy()
             .to_string()
     }
@@ -3231,20 +3385,15 @@ impl ActorDaemonCoordinator {
                         ));
                     }
                     let semantic_old_valid = is_valid_oid(old_head) && !is_zero_oid(old_head);
-                    let mut mapping_old_head = if semantic_old_valid {
-                        old_head.clone()
-                    } else {
-                        strict_rebase_original_head_from_command(cmd, old_head).ok_or_else(
-                            || {
-                                GitAiError::Generic(
-                                    "rebase complete missing valid original head".to_string(),
-                                )
-                            },
-                        )?
-                    };
-                    let allow_rebase_original_override =
-                        !semantic_old_valid || rebase_is_control_mode(cmd);
-                    if allow_rebase_original_override {
+                    let mut mapping_old_head = strict_rebase_original_head_from_command(
+                        cmd, old_head,
+                    )
+                    .ok_or_else(|| {
+                        GitAiError::Generic(
+                            "rebase complete missing valid original head".to_string(),
+                        )
+                    })?;
+                    if !semantic_old_valid || rebase_is_control_mode(cmd) {
                         if let Some(worktree) = cmd.worktree.as_ref()
                             && let Some(pending_head) =
                                 self.pending_rebase_original_head_for_worktree(worktree)?
@@ -3264,20 +3413,23 @@ impl ActorDaemonCoordinator {
                     }
                     let repository = repository_for_rewrite_context(cmd, "rebase_complete")?;
                     let onto_head = rebase_onto_spec_from_command(cmd);
-                    let (original_commits, new_commits) = strict_rebase_mappings_from_repository(
-                        &repository,
-                        &mapping_old_head,
-                        new_head,
-                        onto_head.as_deref(),
-                        "rebase_complete",
-                    )?;
-                    out.push(RewriteLogEvent::rebase_complete(RebaseCompleteEvent::new(
-                        mapping_old_head,
-                        new_head.clone(),
-                        *interactive,
-                        original_commits,
-                        new_commits,
-                    )));
+                    if let Some((original_commits, new_commits)) =
+                        maybe_rebase_mappings_from_repository(
+                            &repository,
+                            &mapping_old_head,
+                            new_head,
+                            onto_head.as_deref(),
+                            "rebase_complete",
+                        )?
+                    {
+                        out.push(RewriteLogEvent::rebase_complete(RebaseCompleteEvent::new(
+                            mapping_old_head,
+                            new_head.clone(),
+                            *interactive,
+                            original_commits,
+                            new_commits,
+                        )));
+                    }
                     if let Some(worktree) = cmd.worktree.as_ref() {
                         self.clear_pending_rebase_original_head_for_worktree(worktree)?;
                     }
@@ -3433,17 +3585,14 @@ impl ActorDaemonCoordinator {
                             ));
                         }
                         let semantic_old_valid = is_valid_oid(&old_head) && !is_zero_oid(&old_head);
-                        let mut mapping_old_head = if semantic_old_valid {
-                            old_head.clone()
-                        } else {
-                            strict_rebase_original_head_from_command(cmd, &old_head).ok_or_else(
-                                || {
-                                    GitAiError::Generic(
-                                        "pull --rebase missing valid original head".to_string(),
-                                    )
-                                },
-                            )?
-                        };
+                        let mut mapping_old_head = strict_rebase_original_head_from_command(
+                            cmd, &old_head,
+                        )
+                        .ok_or_else(|| {
+                            GitAiError::Generic(
+                                "pull --rebase missing valid original head".to_string(),
+                            )
+                        })?;
                         if !semantic_old_valid {
                             if let Some(worktree) = cmd.worktree.as_ref()
                                 && let Some(pending_head) =
@@ -3464,21 +3613,23 @@ impl ActorDaemonCoordinator {
                         }
                         let repository =
                             repository_for_rewrite_context(cmd, "pull_rebase_complete")?;
-                        let (original_commits, new_commits) =
-                            strict_rebase_mappings_from_repository(
+                        if let Some((original_commits, new_commits)) =
+                            maybe_rebase_mappings_from_repository(
                                 &repository,
                                 &mapping_old_head,
                                 &new_head,
                                 None,
                                 "pull_rebase_complete",
-                            )?;
-                        out.push(RewriteLogEvent::rebase_complete(RebaseCompleteEvent::new(
-                            mapping_old_head,
-                            new_head,
-                            false,
-                            original_commits,
-                            new_commits,
-                        )));
+                            )?
+                        {
+                            out.push(RewriteLogEvent::rebase_complete(RebaseCompleteEvent::new(
+                                mapping_old_head,
+                                new_head,
+                                false,
+                                original_commits,
+                                new_commits,
+                            )));
+                        }
                         if let Some(worktree) = cmd.worktree.as_ref() {
                             self.clear_pending_rebase_original_head_for_worktree(worktree)?;
                         }
@@ -3999,71 +4150,6 @@ impl ActorDaemonCoordinator {
         ))
     }
 
-    async fn wait_for_family_idle(
-        &self,
-        repo_working_dir: String,
-        timeout_ms: Option<u64>,
-    ) -> Result<ControlResponse, GitAiError> {
-        let timeout_polls = timeout_ms.unwrap_or(8_000) / 10;
-        let mut polls_remaining = timeout_polls.max(1);
-        let mut stable_idle_polls = 0_u8;
-
-        loop {
-            let status = self.status_for_family(repo_working_dir.clone()).await?;
-            let latest_seq = status.latest_seq;
-
-            if latest_seq > 0 {
-                let barrier = self
-                    .wait_through_seq(repo_working_dir.clone(), latest_seq)
-                    .await?;
-                if !barrier.ok {
-                    return Ok(barrier);
-                }
-            }
-
-            let settled = self.status_for_family(repo_working_dir.clone()).await?;
-            let settled_latest = settled.latest_seq;
-            let settled_backlog = settled.backlog;
-            let settled_pending_roots = settled.pending_roots as u64;
-            let settled_effect_queue_depth = settled.effect_queue_depth;
-
-            if settled_backlog == 0
-                && settled_pending_roots == 0
-                && settled_effect_queue_depth == 0
-                && settled_latest == latest_seq
-            {
-                stable_idle_polls = stable_idle_polls.saturating_add(1);
-                if stable_idle_polls >= 2 {
-                    return Ok(ControlResponse::ok(
-                        Some(settled_latest),
-                        Some(settled_latest),
-                        Some(json!({
-                            "latest_seq": settled_latest,
-                            "backlog": settled_backlog,
-                            "pending_roots": settled_pending_roots,
-                            "effect_queue_depth": settled_effect_queue_depth,
-                        })),
-                    ));
-                }
-            } else {
-                stable_idle_polls = 0;
-            }
-
-            if polls_remaining == 0 {
-                return Err(GitAiError::Generic(format!(
-                    "family {} did not settle (latest seq={}, backlog={}, pending_roots={}, effect_queue_depth={})",
-                    repo_working_dir,
-                    settled_latest,
-                    settled_backlog,
-                    settled_pending_roots,
-                    settled_effect_queue_depth
-                )));
-            }
-            polls_remaining -= 1;
-            sleep(Duration::from_millis(10)).await;
-        }
-    }
-
     async fn handle_control_request(&self, request: ControlRequest) -> ControlResponse {
         let result = match request {
             ControlRequest::TraceIngest { payload, wait } => {
@@ -4097,13 +4183,6 @@ impl ActorDaemonCoordinator {
                 repo_working_dir,
                 seq,
             } => self.wait_through_seq(repo_working_dir, seq).await,
-            ControlRequest::WaitFamilyIdle {
-                repo_working_dir,
-                timeout_ms,
-            } => {
-                self.wait_for_family_idle(repo_working_dir, timeout_ms)
-                    .await
-            }
             ControlRequest::Shutdown => Ok(ControlResponse::ok(None, None, None)),
         };
 

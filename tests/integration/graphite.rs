@@ -58,10 +58,11 @@
 /// - `gt rename` - Rename branch
 /// - `gt track` / `gt untrack` - Metadata tracking
 use crate::repos::test_file::ExpectedLineExt;
-use crate::repos::test_repo::{TestRepo, get_binary_path};
+use crate::repos::test_repo::{TestRepo, get_binary_path, real_git_executable};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::OnceLock;
+use uuid::Uuid;
 
 const DETERMINISTIC_GIT_NAME: &str = "Graphite Test";
 const DETERMINISTIC_GIT_EMAIL: &str = "graphite-test@example.com";
@@ -117,47 +118,71 @@ macro_rules! require_gt {
     }};
 }
 
-/// Create a wrapper directory containing a `git` symlink (or copy on Windows)
-/// that points to the git-ai binary. This is created once and shared across
-/// all tests. When prepended to PATH, any child process (including `gt`) that
-/// calls `git` will actually invoke `git-ai`, which handles attribution
-/// tracking transparently — including during rebase operations that create
-/// new commit SHAs.
-static WRAPPER_DIR: OnceLock<PathBuf> = OnceLock::new();
+/// Create a shim directory containing a `git` symlink (or copy on Windows)
+/// that points to the test-only git shim binary. The shim logs tracked git
+/// invocations for external tools like Graphite, then delegates to either the
+/// real git binary or the git-ai wrapper depending on the test mode.
+static GT_GIT_SHIM_DIR: OnceLock<PathBuf> = OnceLock::new();
 
-fn get_wrapper_dir() -> &'static PathBuf {
-    WRAPPER_DIR.get_or_init(|| {
-        let binary_path = get_binary_path();
-        let wrapper_dir =
-            std::env::temp_dir().join(format!("git-ai-gt-wrapper-{}", std::process::id()));
-        std::fs::create_dir_all(&wrapper_dir).expect("create wrapper dir");
+fn gt_git_shim_dir() -> &'static PathBuf {
+    GT_GIT_SHIM_DIR.get_or_init(|| {
+        let shim_binary = PathBuf::from(env!("CARGO_BIN_EXE_git-ai-test-git-shim"));
+        let shim_dir =
+            std::env::temp_dir().join(format!("git-ai-gt-git-shim-{}", std::process::id()));
+        std::fs::create_dir_all(&shim_dir).expect("create shim dir");
 
         #[cfg(unix)]
         {
-            let link_path = wrapper_dir.join("git");
+            let link_path = shim_dir.join("git");
             // Remove stale symlink if it exists
             let _ = std::fs::remove_file(&link_path);
-            std::os::unix::fs::symlink(binary_path, &link_path).expect("create git symlink");
+            std::os::unix::fs::symlink(shim_binary, &link_path).expect("create git symlink");
         }
 
         #[cfg(windows)]
         {
-            let link_path = wrapper_dir.join("git.exe");
+            let link_path = shim_dir.join("git.exe");
             let _ = std::fs::remove_file(&link_path);
-            std::fs::copy(binary_path, &link_path).expect("copy git-ai as git.exe");
+            std::fs::copy(shim_binary, &link_path).expect("copy shim as git.exe");
         }
 
-        wrapper_dir
+        shim_dir
     })
 }
 
-/// Build a PATH string that has the git-ai wrapper directory first,
+/// Build a PATH string that has the shim directory first,
 /// followed by the original system PATH.
-fn wrapper_path() -> String {
-    let wrapper_dir = get_wrapper_dir();
+fn gt_git_path() -> String {
+    let shim_dir = gt_git_shim_dir();
     let original_path = std::env::var("PATH").unwrap_or_default();
     let sep = if cfg!(windows) { ";" } else { ":" };
-    format!("{}{}{}", wrapper_dir.display(), sep, original_path)
+    format!("{}{}{}", shim_dir.display(), sep, original_path)
+}
+
+fn gt_git_target(repo: &TestRepo) -> String {
+    if repo.mode().uses_wrapper() {
+        get_binary_path().to_string_lossy().to_string()
+    } else {
+        real_git_executable().to_string()
+    }
+}
+
+fn new_gt_started_log_path() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "git-ai-gt-started-{}-{}.jsonl",
+        std::process::id(),
+        Uuid::new_v4()
+    ))
+}
+
+fn count_gt_started_commands(log_path: &PathBuf) -> u64 {
+    let Ok(content) = std::fs::read_to_string(log_path) else {
+        return 0;
+    };
+    content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count() as u64
 }
 
 fn apply_deterministic_git_env(command: &mut Command, repo: &TestRepo) {
@@ -178,13 +203,6 @@ fn apply_deterministic_git_env(command: &mut Command, repo: &TestRepo) {
     command.env("LANG", "C");
     command.env("GIT_CONFIG_NOSYSTEM", "1");
     command.env("GIT_TERMINAL_PROMPT", "0");
-}
-
-fn gt_command_affects_daemon(args: &[&str]) -> bool {
-    !matches!(
-        args.first().copied(),
-        Some("bottom" | "checkout" | "down" | "init" | "top" | "up")
-    )
 }
 
 fn assert_head_branch(repo: &TestRepo, expected_branch: &str) {
@@ -238,22 +256,41 @@ fn gt(repo: &TestRepo, args: &[&str]) -> Result<String, String> {
         .args(args)
         .arg("--no-interactive");
 
-    // Put git-ai wrapper first in PATH so `gt` calls git-ai instead of raw git.
-    // This is essential for attribution tracking during gt operations.
-    command.env("PATH", wrapper_path());
+    let daemon_completion_baseline = repo
+        .mode()
+        .uses_daemon()
+        .then(|| repo.daemon_completion_count());
+    let started_log_path = repo.mode().uses_daemon().then(new_gt_started_log_path);
 
-    // Note: the git-ai wrapper finds the real git binary via resolve_git_path()
-    // in src/config.rs, which probes well-known system paths (/usr/bin/git, etc.).
-    // No explicit env var is needed for delegation.
+    // Put the test shim first in PATH so `gt` calls it instead of raw git. The
+    // shim logs tracked git invocations and then delegates to the mode-appropriate
+    // target binary.
+    command.env("PATH", gt_git_path());
+    command.env("GIT_AI_TEST_GIT_SHIM_TARGET", gt_git_target(repo));
+    if let Some(started_log_path) = started_log_path.as_ref() {
+        command.env("GIT_AI_TEST_SYNC_START_LOG", started_log_path);
+    }
 
     // Set deterministic git metadata + isolated config/locale across all gt invocations.
     apply_deterministic_git_env(&mut command, repo);
+
+    if repo.mode().uses_daemon() {
+        let trace_socket = repo.daemon_trace_socket_path();
+        let nesting =
+            std::env::var("GIT_AI_TEST_TRACE2_NESTING").unwrap_or_else(|_| "10".to_string());
+        command.env(
+            "GIT_TRACE2_EVENT",
+            git_ai::daemon::DaemonConfig::trace2_event_target_for_path(&trace_socket),
+        );
+        command.env("GIT_TRACE2_EVENT_NESTING", nesting);
+    }
 
     // Only set hook-mode env in hook-based test modes.
     if repo.mode().uses_hooks() {
         command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
     }
     command.env("GIT_AI_TEST_DB_PATH", repo.test_db_path().to_str().unwrap());
+    command.env("GITAI_TEST_DB_PATH", repo.test_db_path().to_str().unwrap());
 
     // Isolate Graphite's config and data directories per test to prevent
     // parallel test corruption of config files and the nuxes SQLite database
@@ -279,6 +316,15 @@ fn gt(repo: &TestRepo, args: &[&str]) -> Result<String, String> {
         .output()
         .unwrap_or_else(|e| panic!("Failed to execute gt {:?}: {}", args, e));
 
+    if let Some(baseline_count) = daemon_completion_baseline {
+        let started_count = count_gt_started_commands(
+            started_log_path
+                .as_ref()
+                .expect("daemon mode should always create a started log path"),
+        );
+        repo.sync_daemon_external_completion_delta(baseline_count, started_count);
+    }
+
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
@@ -290,15 +336,9 @@ fn gt(repo: &TestRepo, args: &[&str]) -> Result<String, String> {
         } else {
             format!("{}{}", stdout, stderr)
         };
-        if repo.mode().uses_daemon() && gt_command_affects_daemon(args) {
-            repo.mark_daemon_family_dirty();
-        }
         Ok(combined)
     } else {
         let combined_err = format!("{}{}", stderr, stdout);
-        if repo.mode().uses_daemon() && gt_command_affects_daemon(args) {
-            repo.mark_daemon_family_dirty();
-        }
         Err(combined_err)
     }
 }

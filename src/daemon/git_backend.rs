@@ -2,6 +2,7 @@ use crate::daemon::domain::{FamilyKey, RefChange, RepoContext};
 use crate::error::GitAiError;
 use crate::git::cli_parser::parse_git_cli_args;
 use crate::git::find_repository_in_path;
+use crate::git::repository::discover_repository_in_path_no_git_exec;
 use crate::git::repository::exec_git_allow_nonzero;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -161,8 +162,7 @@ impl GitBackend for SystemGitBackend {
         worktree: &Path,
         argv: &[String],
     ) -> Result<Option<String>, GitAiError> {
-        let worktree_str = worktree.to_string_lossy().to_string();
-        let repository = find_repository_in_path(&worktree_str)?;
+        let repository = discover_repository_in_path_no_git_exec(worktree)?;
         let mut current = parse_git_cli_args(git_invocation_tokens(argv));
         let mut seen = HashSet::new();
         loop {

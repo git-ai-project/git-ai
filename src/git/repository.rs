@@ -3,6 +3,9 @@ use crate::authorship::rebase_authorship::rewrite_authorship_if_needed;
 use crate::config;
 use crate::error::GitAiError;
 use crate::git::refs::get_authorship;
+use crate::git::repo_state::{
+    common_dir_for_git_dir, git_dir_for_worktree, worktree_root_for_path,
+};
 use crate::git::repo_storage::RepoStorage;
 use crate::git::rewrite_log::RewriteLogEvent;
 use crate::git::status::MAX_PATHSPEC_ARGS;
@@ -2659,6 +2662,149 @@ pub fn from_bare_repository(git_dir: &Path) -> Result<Repository, GitAiError> {
     })
 }
 
+fn repository_from_discovered_paths(
+    command_root: &Path,
+    workdir: &Path,
+    git_dir: &Path,
+    git_common_dir: &Path,
+) -> Result<Repository, GitAiError> {
+    if !git_dir.is_dir() {
+        return Err(GitAiError::Generic(format!(
+            "Git directory does not exist: {}",
+            git_dir.display()
+        )));
+    }
+    if !git_common_dir.is_dir() {
+        return Err(GitAiError::Generic(format!(
+            "Git common directory does not exist: {}",
+            git_common_dir.display()
+        )));
+    }
+    if !workdir.is_dir() {
+        return Err(GitAiError::Generic(format!(
+            "Work directory does not exist: {}",
+            workdir.display()
+        )));
+    }
+
+    let canonical_workdir = workdir.canonicalize().map_err(|e| {
+        GitAiError::Generic(format!(
+            "Failed to canonicalize working directory {}: {}",
+            workdir.display(),
+            e
+        ))
+    })?;
+
+    let worktree_ai_dir = worktree_storage_ai_dir(git_dir, git_common_dir);
+    let storage = if worktree_ai_dir == git_dir.join("ai") {
+        RepoStorage::for_repo_path(git_dir, workdir)
+    } else {
+        RepoStorage::for_isolated_worktree_storage(&worktree_ai_dir, workdir)
+    };
+
+    Ok(Repository {
+        global_args: vec!["-C".to_string(), command_root.to_string_lossy().to_string()],
+        storage,
+        git_dir: git_dir.to_path_buf(),
+        git_common_dir: git_common_dir.to_path_buf(),
+        pre_command_base_commit: None,
+        pre_command_refname: None,
+        pre_reset_target_commit: None,
+        pre_update_ref_refname: None,
+        pre_update_ref_old_target: None,
+        pre_update_ref_affects_checked_out_branch: None,
+        workdir: workdir.to_path_buf(),
+        canonical_workdir,
+        cached_author_identity: std::sync::OnceLock::new(),
+    })
+}
+
+pub fn discover_repository_in_path_no_git_exec(path: &Path) -> Result<Repository, GitAiError> {
+    let start = if path.file_name().and_then(|name| name.to_str()) == Some(".git") {
+        path.to_path_buf()
+    } else if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| path.to_path_buf())
+    };
+
+    if start.file_name().and_then(|name| name.to_str()) == Some(".git") {
+        if start.is_dir() {
+            let workdir = start.parent().ok_or_else(|| {
+                GitAiError::Generic(format!(
+                    "Git directory has no parent workdir: {}",
+                    start.display()
+                ))
+            })?;
+            let git_common_dir = common_dir_for_git_dir(&start).ok_or_else(|| {
+                GitAiError::Generic(format!(
+                    "Unable to resolve common dir for git dir: {}",
+                    start.display()
+                ))
+            })?;
+            return repository_from_discovered_paths(workdir, workdir, &start, &git_common_dir);
+        }
+
+        if start.is_file() {
+            let workdir = start.parent().ok_or_else(|| {
+                GitAiError::Generic(format!(
+                    ".git file has no parent workdir: {}",
+                    start.display()
+                ))
+            })?;
+            let git_dir = git_dir_for_worktree(workdir).ok_or_else(|| {
+                GitAiError::Generic(format!(
+                    "Unable to resolve git dir for worktree: {}",
+                    workdir.display()
+                ))
+            })?;
+            let git_common_dir = common_dir_for_git_dir(&git_dir).ok_or_else(|| {
+                GitAiError::Generic(format!(
+                    "Unable to resolve common dir for git dir: {}",
+                    git_dir.display()
+                ))
+            })?;
+            return repository_from_discovered_paths(workdir, workdir, &git_dir, &git_common_dir);
+        }
+    }
+
+    if let Some(worktree_root) = worktree_root_for_path(&start) {
+        let git_dir = git_dir_for_worktree(&worktree_root).ok_or_else(|| {
+            GitAiError::Generic(format!(
+                "Unable to resolve git dir for worktree: {}",
+                worktree_root.display()
+            ))
+        })?;
+        let git_common_dir = common_dir_for_git_dir(&git_dir).ok_or_else(|| {
+            GitAiError::Generic(format!(
+                "Unable to resolve common dir for git dir: {}",
+                git_dir.display()
+            ))
+        })?;
+        return repository_from_discovered_paths(
+            &worktree_root,
+            &worktree_root,
+            &git_dir,
+            &git_common_dir,
+        );
+    }
+
+    let mut current = Some(start.as_path());
+    while let Some(dir) = current {
+        if dir.join("HEAD").is_file() && dir.join("objects").is_dir() {
+            return from_bare_repository(dir);
+        }
+        current = dir.parent();
+    }
+
+    Err(GitAiError::Generic(format!(
+        "No git repository found for path without exec: {}",
+        path.display()
+    )))
+}
+
 pub fn find_repository_in_path(path: &str) -> Result<Repository, GitAiError> {
     let global_args = vec!["-C".to_string(), path.to_string()];
     find_repository(&global_args)
@@ -3621,6 +3767,13 @@ index 0000000..abc1234 100644
             repo.path().canonicalize().expect("canonical bare"),
             bare.canonicalize().expect("canonical path")
         );
+
+        let discovered =
+            discover_repository_in_path_no_git_exec(&bare).expect("discover bare repo");
+        assert_eq!(
+            discovered.path().canonicalize().expect("canonical bare"),
+            bare.canonicalize().expect("canonical path")
+        );
     }
 
     #[test]
@@ -3691,6 +3844,26 @@ index 0000000..abc1234 100644
                 .starts_with(common_dir.join("ai").join("worktrees")),
             "worktree storage should be isolated under common-dir/ai/worktrees: {}",
             repo.storage.working_logs.display()
+        );
+
+        let discovered =
+            discover_repository_in_path_no_git_exec(&worktree).expect("discover worktree repo");
+        assert_eq!(
+            discovered
+                .common_dir()
+                .canonicalize()
+                .expect("canonical discovered common dir"),
+            common_dir
+                .canonicalize()
+                .expect("canonical expected common dir")
+        );
+        assert!(
+            discovered
+                .storage
+                .working_logs
+                .starts_with(common_dir.join("ai").join("worktrees")),
+            "discovered worktree storage should be isolated under common-dir/ai/worktrees: {}",
+            discovered.storage.working_logs.display()
         );
     }
 }

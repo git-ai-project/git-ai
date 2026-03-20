@@ -505,16 +505,13 @@ impl<B: GitBackend> TraceNormalizer<B> {
         root_sid: &str,
     ) -> Result<Option<NormalizedCommand>, GitAiError> {
         let payload_pre_repo = payload_repo_context(payload, "git_ai_pre_repo");
-        let payload_worktree = payload
-            .get("worktree")
-            .or_else(|| payload.get("repo_working_dir"))
-            .and_then(Value::as_str)
-            .map(PathBuf::from);
+        let payload_worktree = payload_worktree(payload);
         let payload_repo = payload
             .get("repo")
             .and_then(Value::as_str)
             .map(PathBuf::from)
-            .map(|repo| worktree_from_def_repo_repo(&repo).unwrap_or(repo));
+            .map(|repo| worktree_from_def_repo_repo(&repo).unwrap_or(repo))
+            .map(|repo| worktree_root_for_path(&repo).unwrap_or(repo));
 
         let pending_worktree = self
             .state
@@ -542,6 +539,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
                 .or(payload_repo)
                 .ok_or_else(|| GitAiError::Generic("def_repo missing repo path".to_string()))?
         };
+        let repo = worktree_root_for_path(&repo).unwrap_or(repo);
 
         self.state
             .sid_to_worktree

@@ -4,7 +4,8 @@ use crate::daemon::domain::{
 };
 use crate::error::GitAiError;
 use crate::git::cli_parser::{explicit_rebase_branch_arg, parse_git_cli_args};
-use crate::git::repo_state::is_valid_git_oid;
+use crate::git::repo_state::{git_dir_for_worktree, is_valid_git_oid};
+use std::fs;
 use std::path::Path;
 
 #[derive(Default)]
@@ -48,14 +49,7 @@ impl CommandAnalyzer for HistoryAnalyzer {
                     && let Some(new_head) = post_head
                 {
                     if amend {
-                        let old_head = old_head_from_branch_ref_changes(cmd)
-                            .or_else(|| {
-                                non_empty_opt(
-                                    cmd.pre_repo.as_ref().and_then(|repo| repo.head.clone()),
-                                )
-                            })
-                            .or_else(|| old_head_from_refs(cmd, state.refs))
-                            .filter(|old| old != &new_head);
+                        let old_head = commit_base_hint(cmd, state.refs, &new_head);
                         if let Some(old_head) = old_head {
                             events.push(SemanticEvent::CommitAmended { old_head, new_head });
                         } else {
@@ -65,7 +59,7 @@ impl CommandAnalyzer for HistoryAnalyzer {
                             });
                         }
                     } else {
-                        let base = sanitize_base(old_head_from_refs(cmd, state.refs), &new_head);
+                        let base = commit_base_hint(cmd, state.refs, &new_head);
                         events.push(SemanticEvent::CommitCreated { base, new_head });
                     }
                 }
@@ -270,6 +264,10 @@ fn head_change(
         return Some((orig_head, new_head));
     }
 
+    if let Some(old_head) = old_head_from_worktree_head_reflog(cmd, &new_head) {
+        return Some((old_head, new_head));
+    }
+
     let old_head = non_empty_opt(
         cmd.pre_repo
             .as_ref()
@@ -342,6 +340,50 @@ fn old_head_from_refs(
                     .and_then(|branch| refs.get(&format!("refs/heads/{}", branch)).cloned())
             }),
     )
+}
+
+fn commit_base_hint(
+    cmd: &NormalizedCommand,
+    refs: &std::collections::HashMap<String, String>,
+    new_head: &str,
+) -> Option<String> {
+    sanitize_base(
+        old_head_from_branch_ref_changes(cmd)
+            .or_else(|| non_empty_opt(cmd.pre_repo.as_ref().and_then(|repo| repo.head.clone())))
+            .or_else(|| old_head_from_worktree_head_reflog(cmd, new_head))
+            .or_else(|| old_head_from_refs(cmd, refs)),
+        new_head,
+    )
+}
+
+fn old_head_from_worktree_head_reflog(cmd: &NormalizedCommand, new_head: &str) -> Option<String> {
+    if !is_valid_git_oid(new_head) || is_zero_oid(new_head) {
+        return None;
+    }
+
+    let worktree = cmd.worktree.as_deref()?;
+    let git_dir = git_dir_for_worktree(worktree)?;
+    let path = git_dir.join("logs").join("HEAD");
+    let contents = fs::read_to_string(path).ok()?;
+
+    for line in contents.lines().rev() {
+        let head = line.split('\t').next().unwrap_or_default();
+        let mut parts = head.split_whitespace();
+        let Some(old) = parts.next().map(str::trim) else {
+            continue;
+        };
+        let Some(new) = parts.next().map(str::trim) else {
+            continue;
+        };
+        if !is_valid_git_oid(old) || !is_valid_git_oid(new) || old == new {
+            continue;
+        }
+        if new == new_head {
+            return Some(old.to_string());
+        }
+    }
+
+    None
 }
 
 fn rebase_change(
@@ -458,6 +500,7 @@ fn infer_reset_kind(args: &[String]) -> ResetKind {
 mod tests {
     use super::*;
     use crate::daemon::domain::{CommandScope, RefChange};
+    use tempfile::tempdir;
 
     fn command(primary: &str, argv: &[&str]) -> NormalizedCommand {
         NormalizedCommand {
@@ -606,11 +649,48 @@ mod tests {
             result.events.iter().any(|event| matches!(
                 event,
                 SemanticEvent::CommitCreated {
+                    base,
                     new_head,
-                    ..
-                } if new_head == "new-head"
+                } if base.as_deref() == Some("old-head") && new_head == "new-head"
             )),
             "expected commit-created event from pre/post head fallback, got {:?}",
+            result.events
+        );
+    }
+
+    #[test]
+    fn commit_fallback_prefers_pre_head_over_family_refs() {
+        let analyzer = HistoryAnalyzer;
+        let mut cmd = command("commit", &["git", "commit", "-m", "x"]);
+        cmd.ref_changes.clear();
+        cmd.pre_repo = Some(crate::daemon::domain::RepoContext {
+            head: Some("old-head".to_string()),
+            branch: Some("main".to_string()),
+            detached: false,
+        });
+        cmd.post_repo = Some(crate::daemon::domain::RepoContext {
+            head: Some("new-head".to_string()),
+            branch: Some("main".to_string()),
+            detached: false,
+        });
+        let refs = std::collections::HashMap::from([(
+            "refs/heads/main".to_string(),
+            "wrong-family-head".to_string(),
+        )]);
+
+        let result = analyzer
+            .analyze(&cmd, AnalysisView { refs: &refs })
+            .unwrap();
+
+        assert!(
+            result.events.iter().any(|event| matches!(
+                event,
+                SemanticEvent::CommitCreated {
+                    base,
+                    new_head
+                } if base.as_deref() == Some("old-head") && new_head == "new-head"
+            )),
+            "expected commit-created event to prefer pre-head over family refs, got {:?}",
             result.events
         );
     }
@@ -643,6 +723,61 @@ mod tests {
                 } if base.as_deref() == Some("old-head") && new_head == "new-head"
             )),
             "expected commit-created event from post-head fallback, got {:?}",
+            result.events
+        );
+    }
+
+    #[test]
+    fn commit_falls_back_to_head_reflog_when_pre_and_post_are_contaminated() {
+        let analyzer = HistoryAnalyzer;
+        let dir = tempdir().expect("tempdir");
+        let worktree = dir.path();
+        let git_dir = worktree.join(".git");
+        fs::create_dir_all(git_dir.join("logs")).expect("create logs");
+        fs::write(
+            git_dir.join("logs").join("HEAD"),
+            concat!(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ",
+                "Test User <test@example.com> 0 +0000\tcommit: first\n",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ",
+                "cccccccccccccccccccccccccccccccccccccccc ",
+                "Test User <test@example.com> 0 +0000\tcommit: squash\n"
+            ),
+        )
+        .expect("write HEAD reflog");
+
+        let mut cmd = command("commit", &["git", "commit", "-m", "x"]);
+        cmd.ref_changes.clear();
+        cmd.worktree = Some(worktree.to_path_buf());
+        cmd.pre_repo = Some(crate::daemon::domain::RepoContext {
+            head: Some("cccccccccccccccccccccccccccccccccccccccc".to_string()),
+            branch: Some("main".to_string()),
+            detached: false,
+        });
+        cmd.post_repo = Some(crate::daemon::domain::RepoContext {
+            head: Some("cccccccccccccccccccccccccccccccccccccccc".to_string()),
+            branch: Some("main".to_string()),
+            detached: false,
+        });
+
+        let result = analyzer
+            .analyze(
+                &cmd,
+                AnalysisView {
+                    refs: &Default::default(),
+                },
+            )
+            .unwrap();
+
+        assert!(
+            result.events.iter().any(|event| matches!(
+                event,
+                SemanticEvent::CommitCreated { base, new_head }
+                    if base.as_deref() == Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                        && new_head == "cccccccccccccccccccccccccccccccccccccccc"
+            )),
+            "expected commit-created event from HEAD reflog fallback, got {:?}",
             result.events
         );
     }
