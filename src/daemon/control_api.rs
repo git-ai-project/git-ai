@@ -25,6 +25,8 @@ pub enum ControlRequest {
     SnapshotFamily { repo_working_dir: String },
     #[serde(rename = "barrier.applied_through_seq")]
     BarrierAppliedThroughSeq { repo_working_dir: String, seq: u64 },
+    #[serde(rename = "barrier.settled_family")]
+    BarrierSettledFamily { repo_working_dir: String },
     #[serde(rename = "shutdown")]
     Shutdown,
 }

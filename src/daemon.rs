@@ -41,7 +41,7 @@ use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
 use tokio::time::{Duration, sleep};
 
@@ -1965,6 +1965,66 @@ impl ActorDaemonCoordinator {
             debug_log(&format!(
                 "daemon trace connection close fallback finalized sid={}",
                 root_sid
+            ));
+            self.enqueue_trace_payload(payload)?;
+        }
+        Ok(())
+    }
+
+    fn enqueue_connection_closed_trace_root_fallbacks_for_family(
+        &self,
+        family: &str,
+    ) -> Result<(), GitAiError> {
+        let stale_roots = {
+            let mut ingress = self.trace_ingress_state.lock().map_err(|_| {
+                GitAiError::Generic("trace ingress state lock poisoned".to_string())
+            })?;
+            let mut stale = Vec::new();
+            for (root_sid, tracked_family) in ingress.root_families.clone() {
+                if tracked_family != family {
+                    continue;
+                }
+                if ingress.root_close_fallback_enqueued.contains(&root_sid) {
+                    continue;
+                }
+                if !Self::trace_root_is_tracked(&ingress, &root_sid) {
+                    continue;
+                }
+                if ingress
+                    .root_open_connections
+                    .get(&root_sid)
+                    .copied()
+                    .unwrap_or(0)
+                    > 0
+                {
+                    continue;
+                }
+                ingress
+                    .root_close_fallback_enqueued
+                    .insert(root_sid.clone());
+                stale.push(root_sid);
+            }
+            stale
+        };
+
+        for root_sid in stale_roots {
+            let mut payload = json!({
+                "event": "atexit",
+                "sid": root_sid,
+                "code": 0,
+                "time_ns": now_unix_nanos() as u64,
+                "git_ai_connection_close_fallback": true,
+            });
+            self.augment_trace_payload_with_reflog_metadata(&mut payload);
+            if let Some(object) = payload.as_object_mut() {
+                object.insert(
+                    TRACE_INGEST_SEQ_FIELD.to_string(),
+                    json!(self.next_trace_ingest_seq()),
+                );
+            }
+            debug_log(&format!(
+                "daemon settled-family fallback finalized sid={}",
+                payload.get("sid").and_then(Value::as_str).unwrap_or("")
             ));
             self.enqueue_trace_payload(payload)?;
         }
@@ -4119,6 +4179,61 @@ impl ActorDaemonCoordinator {
         ))
     }
 
+    async fn wait_until_family_settled(
+        &self,
+        repo_working_dir: String,
+    ) -> Result<ControlResponse, GitAiError> {
+        let repo_path = Path::new(&repo_working_dir);
+        let family = self.backend.resolve_family(repo_path)?;
+        let start = Instant::now();
+        let timeout = Duration::from_secs(10);
+
+        loop {
+            self.enqueue_connection_closed_trace_root_fallbacks_for_family(&family.0)?;
+
+            let status = self.status_for_family(repo_working_dir.clone()).await?;
+            if let Some(error) = status.last_error.clone() {
+                return Err(GitAiError::Generic(format!(
+                    "family {} reported side-effect error while waiting to settle: {}",
+                    family.0, error
+                )));
+            }
+
+            if status.pending_roots == 0 && status.effect_queue_depth == 0 {
+                self.coordinator
+                    .barrier_family(repo_path, status.latest_seq)
+                    .await?;
+                let confirm = self.status_for_family(repo_working_dir.clone()).await?;
+                if confirm.last_error.is_some() {
+                    return Err(GitAiError::Generic(format!(
+                        "family {} reported side-effect error while confirming settled state: {}",
+                        family.0,
+                        confirm.last_error.unwrap_or_default()
+                    )));
+                }
+                if confirm.pending_roots == 0 && confirm.effect_queue_depth == 0 {
+                    return Ok(ControlResponse::ok(
+                        Some(confirm.latest_seq),
+                        Some(confirm.latest_seq),
+                        Some(json!({
+                            "latest_seq": confirm.latest_seq,
+                            "family_key": family.0,
+                        })),
+                    ));
+                }
+            }
+
+            if start.elapsed() >= timeout {
+                return Err(GitAiError::Generic(format!(
+                    "timed out waiting for family {} to settle",
+                    family.0
+                )));
+            }
+
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     async fn handle_control_request(&self, request: ControlRequest) -> ControlResponse {
         let result = match request {
             ControlRequest::TraceIngest { payload, wait } => {
@@ -4152,6 +4267,9 @@ impl ActorDaemonCoordinator {
                 repo_working_dir,
                 seq,
             } => self.wait_through_seq(repo_working_dir, seq).await,
+            ControlRequest::BarrierSettledFamily { repo_working_dir } => {
+                self.wait_until_family_settled(repo_working_dir).await
+            }
             ControlRequest::Shutdown => Ok(ControlResponse::ok(None, None, None)),
         };
 

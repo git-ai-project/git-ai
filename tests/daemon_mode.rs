@@ -150,22 +150,17 @@ impl DaemonGuard {
     }
 
     fn latest_seq_and_wait_idle(&self) -> u64 {
-        let status = self.request(ControlRequest::StatusFamily {
+        let settled = self.request(ControlRequest::BarrierSettledFamily {
             repo_working_dir: self.repo_working_dir.clone(),
         });
-        assert!(status.ok, "status request should succeed");
-        let latest_seq = status
+        assert!(settled.ok, "barrier.settled_family should succeed");
+        settled
             .data
             .as_ref()
             .and_then(|v| v.get("latest_seq"))
             .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let settled = self.request(ControlRequest::BarrierAppliedThroughSeq {
-            repo_working_dir: self.repo_working_dir.clone(),
-            seq: latest_seq,
-        });
-        assert!(settled.ok, "barrier.applied_through_seq should succeed");
-        latest_seq
+            .or(settled.applied_seq)
+            .unwrap_or(0)
     }
 
     fn family_state_snapshot(&self) -> Value {
