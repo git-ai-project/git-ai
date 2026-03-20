@@ -180,6 +180,13 @@ fn apply_deterministic_git_env(command: &mut Command, repo: &TestRepo) {
     command.env("GIT_TERMINAL_PROMPT", "0");
 }
 
+fn gt_command_affects_daemon(args: &[&str]) -> bool {
+    !matches!(
+        args.first().copied(),
+        Some("bottom" | "checkout" | "down" | "init" | "top" | "up")
+    )
+}
+
 fn assert_head_branch(repo: &TestRepo, expected_branch: &str) {
     let current = repo.current_branch();
     assert_eq!(
@@ -283,13 +290,13 @@ fn gt(repo: &TestRepo, args: &[&str]) -> Result<String, String> {
         } else {
             format!("{}{}", stdout, stderr)
         };
-        if repo.mode().uses_daemon() {
+        if repo.mode().uses_daemon() && gt_command_affects_daemon(args) {
             repo.mark_daemon_family_dirty();
         }
         Ok(combined)
     } else {
         let combined_err = format!("{}{}", stderr, stdout);
-        if repo.mode().uses_daemon() {
+        if repo.mode().uses_daemon() && gt_command_affects_daemon(args) {
             repo.mark_daemon_family_dirty();
         }
         Err(combined_err)

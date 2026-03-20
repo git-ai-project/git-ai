@@ -3,7 +3,7 @@
 use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 use git_ai::authorship::stats::CommitStats;
 use git_ai::config::ConfigPatch;
-use git_ai::daemon::{ControlRequest, DaemonConfig, send_control_request};
+use git_ai::daemon::{ControlRequest, DaemonConfig, FamilyStatus, send_control_request};
 use git_ai::feature_flags::FeatureFlags;
 use git_ai::git::cli_parser::extract_clone_target_directory;
 use git_ai::git::repo_storage::PersistedWorkingLog;
@@ -385,6 +385,7 @@ fn resolve_test_db_path(
 struct DaemonSyncRegistry {
     dirty_generation: HashMap<String, u64>,
     synced_generation: HashMap<String, u64>,
+    latest_seq: HashMap<String, u64>,
 }
 
 impl DaemonSyncRegistry {
@@ -407,12 +408,21 @@ impl DaemonSyncRegistry {
         *self.dirty_generation.get(family_key).unwrap_or(&0)
     }
 
-    fn mark_synced_through(&mut self, family_key: &str, generation: u64) {
+    fn synced_generation(&self, family_key: &str) -> u64 {
+        *self.synced_generation.get(family_key).unwrap_or(&0)
+    }
+
+    fn latest_seq(&self, family_key: &str) -> u64 {
+        *self.latest_seq.get(family_key).unwrap_or(&0)
+    }
+
+    fn mark_synced_through(&mut self, family_key: &str, generation: u64, latest_seq: u64) {
         let synced = self
             .synced_generation
             .entry(family_key.to_string())
             .or_insert(0);
         *synced = (*synced).max(generation);
+        self.latest_seq.insert(family_key.to_string(), latest_seq);
     }
 }
 
@@ -1194,6 +1204,73 @@ impl TestRepo {
         }
     }
 
+    fn daemon_family_status_for_path(&self, repo_path: &Path) -> FamilyStatus {
+        let response = send_control_request(
+            &self.daemon_control_socket_path(),
+            &ControlRequest::StatusFamily {
+                repo_working_dir: repo_path.to_string_lossy().to_string(),
+            },
+        )
+        .unwrap_or_else(|e| {
+            panic!(
+                "failed to query daemon family status for {}: {}",
+                repo_path.display(),
+                e
+            )
+        });
+
+        if !response.ok {
+            panic!(
+                "daemon family status failed for {}: {}",
+                repo_path.display(),
+                response
+                    .error
+                    .unwrap_or_else(|| "unknown status.family error".to_string())
+            );
+        }
+
+        let data = response.data.unwrap_or_else(|| {
+            panic!(
+                "daemon family status for {} missing response payload",
+                repo_path.display()
+            )
+        });
+
+        serde_json::from_value::<FamilyStatus>(data).unwrap_or_else(|e| {
+            panic!(
+                "failed to parse daemon family status for {}: {}",
+                repo_path.display(),
+                e
+            )
+        })
+    }
+
+    fn wait_for_daemon_family_observed(
+        &self,
+        repo_path: &Path,
+        expected_latest_seq: u64,
+    ) -> FamilyStatus {
+        if !self.git_mode.uses_daemon() {
+            return FamilyStatus::default();
+        }
+
+        for _ in 0..800 {
+            let status = self.daemon_family_status_for_path(repo_path);
+            let observed_seq = status.latest_seq.saturating_add(status.backlog);
+            let observed = observed_seq >= expected_latest_seq;
+            if observed {
+                return status;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        panic!(
+            "daemon did not observe family {} through latest_seq {} within timeout",
+            repo_path.display(),
+            expected_latest_seq
+        );
+    }
+
     fn daemon_family_key(&self) -> String {
         self.daemon_family_key
             .get_or_init(|| {
@@ -1235,15 +1312,24 @@ impl TestRepo {
             let registry = daemon_sync_registry()
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            registry.dirty_target(&family_key)
+            registry.dirty_target(&family_key).map(|generation| {
+                let synced_generation = registry.synced_generation(&family_key);
+                let unsynced_generations = generation.saturating_sub(synced_generation);
+                let expected_latest_seq = registry
+                    .latest_seq(&family_key)
+                    .saturating_add(unsynced_generations);
+                (generation, expected_latest_seq)
+            })
         };
 
-        if let Some(target) = target {
+        if let Some((target_generation, expected_latest_seq)) = target {
+            self.wait_for_daemon_family_observed(&self.path, expected_latest_seq);
             self.wait_for_daemon_idle();
+            let settled_latest_seq = self.daemon_family_status_for_path(&self.path).latest_seq;
             let mut registry = daemon_sync_registry()
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            registry.mark_synced_through(&family_key, target);
+            registry.mark_synced_through(&family_key, target_generation, settled_latest_seq);
         }
     }
 
@@ -1253,19 +1339,30 @@ impl TestRepo {
         }
 
         let family_key = self.daemon_family_key();
-        let target = {
+        let (target_generation, expected_latest_seq, needs_observation) = {
             let registry = daemon_sync_registry()
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            registry.current_generation(&family_key)
+            let target_generation = registry.current_generation(&family_key);
+            let synced_generation = registry.synced_generation(&family_key);
+            let unsynced_generations = target_generation.saturating_sub(synced_generation);
+            let expected_latest_seq = registry
+                .latest_seq(&family_key)
+                .saturating_add(unsynced_generations);
+            let needs_observation = unsynced_generations > 0;
+            (target_generation, expected_latest_seq, needs_observation)
         };
 
+        if needs_observation {
+            self.wait_for_daemon_family_observed(&self.path, expected_latest_seq);
+        }
         self.wait_for_daemon_idle();
+        let settled_latest_seq = self.daemon_family_status_for_path(&self.path).latest_seq;
 
         let mut registry = daemon_sync_registry()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        registry.mark_synced_through(&family_key, target);
+        registry.mark_synced_through(&family_key, target_generation, settled_latest_seq);
     }
 
     fn sync_daemon_clone_target(&self, target_repo_path: &Path) {
@@ -1277,58 +1374,18 @@ impl TestRepo {
             return;
         };
 
+        self.wait_for_daemon_family_observed(target_repo_path, 1);
+
         let repo_working_dir = target_repo_path.to_string_lossy().to_string();
-        for _ in 0..800 {
-            let status = send_control_request(
-                &self.daemon_control_socket_path(),
-                &ControlRequest::StatusFamily {
-                    repo_working_dir: repo_working_dir.clone(),
-                },
-            )
+        daemon
+            .wait_for_repo_idle(&repo_working_dir)
             .unwrap_or_else(|e| {
                 panic!(
-                    "failed to query daemon clone status for {}: {}",
+                    "daemon clone sync failed for {}: {}",
                     target_repo_path.display(),
                     e
                 )
             });
-
-            let observed = status.ok
-                && status.data.as_ref().is_some_and(|data| {
-                    data.get("latest_seq").and_then(|v| v.as_u64()).unwrap_or(0) > 0
-                        || data.get("backlog").and_then(|v| v.as_u64()).unwrap_or(0) > 0
-                        || data
-                            .get("pending_roots")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0)
-                            > 0
-                        || data
-                            .get("effect_queue_depth")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0)
-                            > 0
-                });
-
-            if observed {
-                daemon
-                    .wait_for_repo_idle(&repo_working_dir)
-                    .unwrap_or_else(|e| {
-                        panic!(
-                            "daemon clone sync failed for {}: {}",
-                            target_repo_path.display(),
-                            e
-                        )
-                    });
-                return;
-            }
-
-            thread::sleep(Duration::from_millis(10));
-        }
-
-        panic!(
-            "daemon did not observe cloned repository {} within timeout",
-            target_repo_path.display()
-        );
     }
 
     fn setup_git_hooks_mode(&self) {
