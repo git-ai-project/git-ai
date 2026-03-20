@@ -2,8 +2,7 @@
 #[path = "integration/repos/mod.rs"]
 mod repos;
 
-use git_ai::daemon::{ControlRequest, send_control_request};
-use repos::test_repo::{GitTestMode, TestRepo, real_git_executable};
+use repos::test_repo::{GitTestMode, real_git_executable};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -34,85 +33,13 @@ fn run_git(args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-fn daemon_control_socket_path(repo: &TestRepo) -> PathBuf {
-    repo.daemon_control_socket_path()
-}
-
-fn sync_daemon_repo_if_needed(mode: GitTestMode, repo: &TestRepo, repo_working_dir: &Path) {
-    if !mode.uses_daemon() {
-        return;
-    }
-
-    let socket_path = daemon_control_socket_path(repo);
-    let repo_working_dir = repo_working_dir.to_string_lossy().to_string();
-    let settled = send_control_request(
-        &socket_path,
-        &ControlRequest::WaitFamilyIdle {
-            repo_working_dir: repo_working_dir.clone(),
-            timeout_ms: Some(8_000),
-        },
-    )
-    .unwrap_or_else(|err| {
-        panic!(
-            "daemon wait.family_idle failed for {} via {}: {}",
-            repo_working_dir,
-            socket_path.display(),
-            err
-        )
-    });
-    assert!(
-        settled.ok,
-        "daemon wait.family_idle failed for {}: {}",
-        repo_working_dir,
-        settled
-            .error
-            .clone()
-            .unwrap_or_else(|| "unknown daemon wait.family_idle error".to_string())
-    );
-}
-
-fn read_note_from_worktree(repo_path: &Path, commit_sha: &str) -> Option<String> {
-    let repo_path_str = repo_path.to_string_lossy().to_string();
-    let output = Command::new(real_git_executable())
-        .args([
-            "-C",
-            repo_path_str.as_str(),
-            "notes",
-            "--ref=ai",
-            "show",
-            commit_sha,
-        ])
-        .output()
-        .expect("git notes show should execute");
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let note = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if note.is_empty() { None } else { Some(note) }
-}
-
-fn read_note_from_bare_repo(git_dir: &Path, commit_sha: &str) -> Option<String> {
-    let git_dir_str = git_dir.to_string_lossy().to_string();
-    let output = Command::new(real_git_executable())
-        .args([
-            "--git-dir",
-            git_dir_str.as_str(),
-            "notes",
-            "--ref=ai",
-            "show",
-            commit_sha,
-        ])
-        .output()
-        .expect("git notes show on bare repo should execute");
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let note = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if note.is_empty() { None } else { Some(note) }
+fn read_note_from_worktree(
+    repo_path: &Path,
+    commit_sha: &str,
+    mode: GitTestMode,
+) -> Option<String> {
+    repos::test_repo::TestRepo::new_at_path_with_mode(repo_path, mode)
+        .read_authorship_note(commit_sha)
 }
 
 worktree_test_wrappers! {
@@ -164,9 +91,7 @@ worktree_test_wrappers! {
             .git(&["clone", upstream_str.as_str(), clone_dir_str.as_str()])
             .expect("clone should succeed");
 
-        sync_daemon_repo_if_needed(TestRepo::git_mode(), &local, &clone_dir);
-
-        let cloned_note = read_note_from_worktree(&clone_dir, &seed_sha);
+        let cloned_note = read_note_from_worktree(&clone_dir, &seed_sha, TestRepo::git_mode());
         assert!(
             cloned_note.is_some(),
             "cloned repository should have fetched authorship notes for commit {}",
@@ -233,9 +158,7 @@ worktree_test_wrappers! {
             clone_dir.display()
         );
 
-        sync_daemon_repo_if_needed(TestRepo::git_mode(), &local, &clone_dir);
-
-        let cloned_note = read_note_from_worktree(&clone_dir, &seed_sha);
+        let cloned_note = read_note_from_worktree(&clone_dir, &seed_sha, TestRepo::git_mode());
         assert!(
             cloned_note.is_some(),
             "cloned repository should have fetched authorship notes for commit {}",
@@ -287,7 +210,7 @@ worktree_test_wrappers! {
 
         let _ = local.git_og(&["update-ref", "-d", "refs/notes/ai"]);
         assert!(
-            read_note_from_worktree(local.path(), &seed_sha).is_none(),
+            local.read_authorship_note(&seed_sha).is_none(),
             "local note should be absent before fetch"
         );
 
@@ -295,9 +218,7 @@ worktree_test_wrappers! {
             .git(&["fetch", "origin"])
             .expect("fetch should succeed");
 
-        sync_daemon_repo_if_needed(mode, &local, local.path());
-
-        let fetched_note = read_note_from_worktree(local.path(), &seed_sha);
+        let fetched_note = local.read_authorship_note(&seed_sha);
         match mode {
             GitTestMode::Daemon | GitTestMode::Wrapper | GitTestMode::Both => assert!(
                 fetched_note.is_none(),
@@ -387,7 +308,7 @@ worktree_test_wrappers! {
         ]);
 
         assert!(
-            read_note_from_worktree(local.path(), &remote_sha).is_none(),
+            local.read_authorship_note(&remote_sha).is_none(),
             "local note should be absent before pull"
         );
 
@@ -395,9 +316,7 @@ worktree_test_wrappers! {
             .git(&["pull", "--ff-only", "origin", default_branch.as_str()])
             .expect("pull --ff-only should succeed");
 
-        sync_daemon_repo_if_needed(TestRepo::git_mode(), &local, local.path());
-
-        let pulled_note = read_note_from_worktree(local.path(), &remote_sha);
+        let pulled_note = local.read_authorship_note(&remote_sha);
         assert!(
             pulled_note.is_some(),
             "pull should import authorship note for remote commit {}",
@@ -536,11 +455,11 @@ worktree_test_wrappers! {
         ]);
 
         assert!(
-            read_note_from_worktree(local.path(), &base_sha).is_none(),
+            local.read_authorship_note(&base_sha).is_none(),
             "backup remote note should be absent before pull"
         );
         assert!(
-            read_note_from_worktree(local.path(), &remote_sha).is_none(),
+            local.read_authorship_note(&remote_sha).is_none(),
             "origin remote note should be absent before pull"
         );
 
@@ -548,16 +467,14 @@ worktree_test_wrappers! {
             .git(&["pull", "--ff-only", "origin", default_branch.as_str()])
             .expect("pull --ff-only should succeed");
 
-        sync_daemon_repo_if_needed(TestRepo::git_mode(), &local, local.path());
-
-        let pulled_origin_note = read_note_from_worktree(local.path(), &remote_sha);
+        let pulled_origin_note = local.read_authorship_note(&remote_sha);
         assert!(
             pulled_origin_note.is_some(),
             "pull should import authorship note for selected remote commit {}",
             remote_sha
         );
 
-        let leaked_backup_note = read_note_from_worktree(local.path(), &base_sha);
+        let leaked_backup_note = local.read_authorship_note(&base_sha);
         assert!(
             leaked_backup_note.is_none(),
             "pull from origin should not import backup remote note for commit {}",
@@ -652,7 +569,7 @@ worktree_test_wrappers! {
         ]);
 
         assert!(
-            read_note_from_worktree(local.path(), &remote_sha).is_none(),
+            local.read_authorship_note(&remote_sha).is_none(),
             "local note should be absent before pull --rebase"
         );
 
@@ -660,9 +577,7 @@ worktree_test_wrappers! {
             .git(&["pull", "--rebase", "origin", default_branch.as_str()])
             .expect("pull --rebase should succeed");
 
-        sync_daemon_repo_if_needed(TestRepo::git_mode(), &local, local.path());
-
-        let pulled_note = read_note_from_worktree(local.path(), &remote_sha);
+        let pulled_note = local.read_authorship_note(&remote_sha);
         assert!(
             pulled_note.is_some(),
             "pull --rebase should import authorship note for remote commit {}",
@@ -705,9 +620,7 @@ worktree_test_wrappers! {
             .git(&["push", "-u", "origin", "HEAD"])
             .expect("push should succeed");
 
-        sync_daemon_repo_if_needed(TestRepo::git_mode(), &local, local.path());
-
-        let remote_note = read_note_from_bare_repo(upstream.path(), &seed_sha);
+        let remote_note = local.read_authorship_note_in_git_dir(upstream.path(), &seed_sha);
         assert!(
             remote_note.is_some(),
             "push should propagate authorship note for commit {} to upstream",
