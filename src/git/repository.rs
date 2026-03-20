@@ -2131,6 +2131,44 @@ impl Repository {
         Ok(staged_files)
     }
 
+    /// Get blob OIDs for all stage-0 entries currently present in the index.
+    pub fn get_all_staged_file_blob_oids(&self) -> Result<HashMap<String, String>, GitAiError> {
+        let mut args = self.global_args_for_exec();
+        args.push("ls-files".to_string());
+        args.push("-z".to_string());
+        args.push("--stage".to_string());
+
+        let output = exec_git(&args)?;
+        let mut staged_blobs = HashMap::new();
+
+        for record in output.stdout.split(|byte| *byte == 0u8) {
+            if record.is_empty() {
+                continue;
+            }
+
+            let Some(tab_idx) = record.iter().position(|byte| *byte == b'\t') else {
+                continue;
+            };
+            let metadata = String::from_utf8_lossy(&record[..tab_idx]);
+            let file_path = String::from_utf8_lossy(&record[tab_idx + 1..]).to_string();
+
+            let mut parts = metadata.split_whitespace();
+            let _mode = parts.next();
+            let Some(blob_oid) = parts.next() else {
+                continue;
+            };
+            let Some(stage) = parts.next() else {
+                continue;
+            };
+
+            if stage == "0" && !blob_oid.trim().is_empty() {
+                staged_blobs.insert(file_path, blob_oid.to_string());
+            }
+        }
+
+        Ok(staged_blobs)
+    }
+
     /// List all files changed in a commit
     /// Returns a HashSet of file paths relative to the repository root
     pub fn list_commit_files(

@@ -227,6 +227,7 @@ fn test_merge_squash_event_creation() {
         "abc123".to_string(),
         "main".to_string(),
         "def456".to_string(),
+        std::collections::HashMap::new(),
     );
 
     assert_eq!(event.source_branch, "feature");
@@ -244,6 +245,7 @@ fn test_merge_squash_event_variant() {
         "abc123".to_string(),
         "main".to_string(),
         "def456".to_string(),
+        std::collections::HashMap::new(),
     ));
 
     match event {

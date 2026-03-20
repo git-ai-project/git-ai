@@ -66,6 +66,19 @@ pub fn rewrite_authorship_if_needed(
             ));
         }
         RewriteLogEvent::MergeSquash { merge_squash } => {
+            let current_head = repo
+                .head()
+                .ok()
+                .and_then(|head| head.target().ok())
+                .map(|oid| oid.to_string());
+            if current_head.as_deref() != Some(merge_squash.base_head.as_str()) {
+                debug_log(&format!(
+                    "Skipping merge --squash pre-commit prep because repo head already advanced past {}",
+                    merge_squash.base_head
+                ));
+                return Ok(());
+            }
+
             // --squash always fails if repo is not clean
             // this clears old working logs in the event you reset, make manual changes, reset, try again
             repo.storage
@@ -76,6 +89,7 @@ pub fn rewrite_authorship_if_needed(
                 repo,
                 &merge_squash.source_head,
                 &merge_squash.base_head,
+                &merge_squash.staged_file_blobs,
                 &commit_author,
             )?;
 
@@ -155,7 +169,7 @@ fn migrate_working_log_after_rebase(
         let initial = old_wl.read_initial_attributions();
         if !initial.files.is_empty() {
             let new_wl = repo.storage.working_log_for_base_commit(new_head);
-            new_wl.write_initial_attributions(initial.files, initial.prompts)?;
+            new_wl.write_initial(initial)?;
             debug_log(&format!(
                 "Migrated INITIAL attributions from {} to {}",
                 original_head, new_head
@@ -188,6 +202,7 @@ pub fn prepare_working_log_after_squash(
     repo: &Repository,
     source_head_sha: &str,
     target_branch_head_sha: &str,
+    staged_file_blobs: &HashMap<String, String>,
     _human_author: &str,
 ) -> Result<(), GitAiError> {
     use crate::authorship::virtual_attribution::{
@@ -236,8 +251,24 @@ pub fn prepare_working_log_after_squash(
         .await
     })?;
 
-    // Step 3: Read staged files content (final state after squash)
-    let staged_files = repo.get_all_staged_files_content(&changed_files)?;
+    // Step 3: Materialize the staged snapshot captured with the squash event.
+    let mut blob_oids: Vec<String> = changed_files
+        .iter()
+        .filter_map(|file_path| staged_file_blobs.get(file_path).cloned())
+        .collect();
+    blob_oids.sort();
+    blob_oids.dedup();
+    let blob_contents = batch_read_blob_contents(repo, &blob_oids)?;
+
+    let mut staged_files = HashMap::new();
+    for file_path in &changed_files {
+        let Some(blob_oid) = staged_file_blobs.get(file_path) else {
+            continue;
+        };
+        if let Some(content) = blob_contents.get(blob_oid) {
+            staged_files.insert(file_path.clone(), content.clone());
+        }
+    }
 
     // Step 4: Merge VirtualAttributions, favoring target branch (HEAD)
     let merged_va = merge_attributions_favoring_first(target_va, source_va, staged_files)?;
@@ -257,8 +288,13 @@ pub fn prepare_working_log_after_squash(
         let working_log = repo
             .storage
             .working_log_for_base_commit(target_branch_head_sha);
-        working_log
-            .write_initial_attributions(initial_attributions.files, initial_attributions.prompts)?;
+        let initial_file_contents =
+            merged_va.snapshot_contents_for_files(initial_attributions.files.keys());
+        working_log.write_initial_attributions_with_contents(
+            initial_attributions.files,
+            initial_attributions.prompts,
+            initial_file_contents,
+        )?;
     }
 
     Ok(())

@@ -954,6 +954,7 @@ fn get_checkpoint_entry_for_file(
     head_commit_sha: Arc<Option<String>>,
     head_tree_id: Arc<Option<String>>,
     initial_attributions: Arc<HashMap<String, Vec<LineAttribution>>>,
+    initial_snapshot_contents: Arc<HashMap<String, String>>,
     ts: u128,
 ) -> Result<Option<(WorkingLogEntry, FileLineStats)>, GitAiError> {
     let feature_flag_inter_commit_move = Config::get().get_feature_flags().inter_commit_move;
@@ -963,6 +964,7 @@ fn get_checkpoint_entry_for_file(
         .get(&file_path)
         .cloned()
         .unwrap_or_default();
+    let initial_snapshot_content = initial_snapshot_contents.get(&file_path).cloned();
 
     let previous_state = previous_file_state_by_file.get(&file_path).cloned();
     let has_prior_ai_edits = ai_touched_files.contains(&file_path);
@@ -1107,10 +1109,13 @@ fn get_checkpoint_entry_for_file(
             }
         }
 
-        // For INITIAL attributions, we need to use current_content (not previous_content)
-        // because INITIAL line numbers refer to the current state of the file
+        // INITIAL line numbers refer to the file state at the moment INITIAL was written.
+        // Snapshot-aware INITIAL storage preserves that exact content; older INITIAL files
+        // fall back to the legacy "current content" behavior.
         let content_for_line_conversion = if !initial_attrs_for_file.is_empty() {
-            &current_content
+            initial_snapshot_content
+                .as_deref()
+                .unwrap_or(&current_content)
         } else {
             &previous_content
         };
@@ -1123,11 +1128,11 @@ fn get_checkpoint_entry_for_file(
                 INITIAL_ATTRIBUTION_TS,
             );
 
-        // When we have INITIAL attributions, they describe the current state of the file.
-        // We need to pass current_content as previous_content so the attributions are preserved.
-        // The tracker will see no changes and preserve the INITIAL attributions.
+        // When INITIAL has a persisted snapshot, use that as the previous content so later
+        // edits after a restore/squash are tracked correctly. Older INITIAL files fall back
+        // to the legacy current-content behavior.
         let adjusted_previous = if !initial_attrs_for_file.is_empty() {
-            current_content.clone()
+            initial_snapshot_content.unwrap_or_else(|| current_content.clone())
         } else {
             previous_content
         };
@@ -1177,6 +1182,15 @@ async fn get_checkpoint_entries(
     // Read INITIAL attributions from working log (empty if file doesn't exist)
     let initial_read_start = Instant::now();
     let initial_data = working_log.read_initial_attributions();
+    let initial_snapshot_contents: HashMap<String, String> = initial_data
+        .files
+        .keys()
+        .filter_map(|file_path| {
+            working_log
+                .initial_file_content_from(&initial_data, file_path)
+                .map(|content| (file_path.clone(), content))
+        })
+        .collect();
     let initial_attributions = initial_data.files;
     debug_log(&format!(
         "[BENCHMARK] Reading initial attributions took {:?}",
@@ -1236,6 +1250,7 @@ async fn get_checkpoint_entries(
     let head_commit_sha = Arc::new(head_commit_sha);
     let head_tree_id = Arc::new(head_tree_id);
     let initial_attributions = Arc::new(initial_attributions);
+    let initial_snapshot_contents = Arc::new(initial_snapshot_contents);
 
     // Spawn tasks for each file
     let spawn_start = Instant::now();
@@ -1255,6 +1270,7 @@ async fn get_checkpoint_entries(
             .cloned()
             .unwrap_or_default();
         let initial_attributions = Arc::clone(&initial_attributions);
+        let initial_snapshot_contents = Arc::clone(&initial_snapshot_contents);
         let semaphore = Arc::clone(&semaphore);
 
         let task = smol::spawn(async move {
@@ -1276,6 +1292,7 @@ async fn get_checkpoint_entries(
                     head_commit_sha.clone(),
                     head_tree_id.clone(),
                     initial_attributions.clone(),
+                    initial_snapshot_contents.clone(),
                     ts,
                 )
             })

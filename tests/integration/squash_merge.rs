@@ -2,7 +2,13 @@ use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 use std::collections::HashMap;
-use std::time::Duration;
+
+fn deterministic_commit_env(timestamp: &'static str) -> [(&'static str, &'static str); 2] {
+    [
+        ("GIT_AUTHOR_DATE", timestamp),
+        ("GIT_COMMITTER_DATE", timestamp),
+    ]
+}
 
 /// Test merge --squash with a simple feature branch containing AI and human edits
 #[test]
@@ -22,13 +28,19 @@ fn test_prepare_working_log_simple_squash() {
 
     // Add AI changes on feature branch
     file.insert_at(3, crate::lines!["// AI added feature".ai()]);
-    repo.stage_all_and_commit("Add AI feature").unwrap();
-
-    std::thread::sleep(Duration::from_secs(1));
+    repo.stage_all_and_commit_with_env(
+        "Add AI feature",
+        &deterministic_commit_env("2030-01-01T00:00:00Z"),
+    )
+    .unwrap();
 
     // Add human changes on feature branch
     file.insert_at(4, crate::lines!["// Human refinement"]);
-    repo.stage_all_and_commit("Human refinement").unwrap();
+    repo.stage_all_and_commit_with_env(
+        "Human refinement",
+        &deterministic_commit_env("2030-01-01T00:00:01Z"),
+    )
+    .unwrap();
 
     // Go back to master and squash merge
     repo.git(&["checkout", &default_branch]).unwrap();
@@ -321,13 +333,19 @@ fn test_squash_merge_preserves_custom_attributes_from_config() {
     // Create feature branch with AI commit
     repo.git(&["checkout", "-b", "feature"]).unwrap();
     file.insert_at(3, crate::lines!["// AI feature line".ai()]);
-    repo.stage_all_and_commit("Add AI feature").unwrap();
-
-    std::thread::sleep(Duration::from_secs(1));
+    repo.stage_all_and_commit_with_env(
+        "Add AI feature",
+        &deterministic_commit_env("2030-01-02T00:00:00Z"),
+    )
+    .unwrap();
 
     // Add another AI commit on the feature branch
     file.insert_at(4, crate::lines!["// AI feature line 2".ai()]);
-    repo.stage_all_and_commit("Add AI feature 2").unwrap();
+    repo.stage_all_and_commit_with_env(
+        "Add AI feature 2",
+        &deterministic_commit_env("2030-01-02T00:00:01Z"),
+    )
+    .unwrap();
 
     // Verify custom attributes were set on the feature commits
     let feature_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();

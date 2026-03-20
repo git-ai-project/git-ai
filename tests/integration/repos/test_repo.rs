@@ -1904,6 +1904,15 @@ impl TestRepo {
         self.commit(message)
     }
 
+    pub fn stage_all_and_commit_with_env(
+        &self,
+        message: &str,
+        envs: &[(&str, &str)],
+    ) -> Result<NewCommit, String> {
+        self.git(&["add", "-A"]).expect("add --all should succeed");
+        self.commit_with_env(message, envs, None)
+    }
+
     pub fn commit_with_env(
         &self,
         message: &str,

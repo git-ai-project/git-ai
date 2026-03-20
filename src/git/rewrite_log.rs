@@ -1,5 +1,6 @@
 use crate::error::GitAiError;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Simple case classes for rewrite events
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -183,6 +184,8 @@ pub struct MergeSquashEvent {
     pub source_head: String,
     pub base_branch: String,
     pub base_head: String,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub staged_file_blobs: HashMap<String, String>,
 }
 
 impl MergeSquashEvent {
@@ -191,12 +194,14 @@ impl MergeSquashEvent {
         source_head: String,
         base_branch: String,
         base_head: String,
+        staged_file_blobs: HashMap<String, String>,
     ) -> Self {
         Self {
             source_branch,
             source_head,
             base_branch,
             base_head,
+            staged_file_blobs,
         }
     }
 }
@@ -412,6 +417,10 @@ pub struct StashEvent {
     pub stash_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stash_sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pathspecs: Vec<String>,
     pub success: bool,
     pub affected_files: Vec<String>,
 }
@@ -422,6 +431,8 @@ impl StashEvent {
         operation: StashOperation,
         stash_ref: Option<String>,
         stash_sha: Option<String>,
+        head_sha: Option<String>,
+        pathspecs: Vec<String>,
         success: bool,
         affected_files: Vec<String>,
     ) -> Self {
@@ -429,6 +440,8 @@ impl StashEvent {
             operation,
             stash_ref,
             stash_sha,
+            head_sha,
+            pathspecs,
             success,
             affected_files,
         }

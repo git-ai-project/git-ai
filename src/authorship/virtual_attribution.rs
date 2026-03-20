@@ -278,6 +278,20 @@ impl VirtualAttributions {
         self.file_contents.get(file_path)
     }
 
+    pub fn snapshot_contents_for_files<'a, I>(&self, file_paths: I) -> HashMap<String, String>
+    where
+        I: IntoIterator<Item = &'a String>,
+    {
+        file_paths
+            .into_iter()
+            .filter_map(|file_path| {
+                self.get_file_content(file_path)
+                    .cloned()
+                    .map(|content| (file_path.clone(), content))
+            })
+            .collect()
+    }
+
     /// Get a reference to the repository
     pub fn repo(&self) -> &Repository {
         &self.repo
@@ -1003,6 +1017,7 @@ impl VirtualAttributions {
         let initial_attributions = InitialAttributions {
             files: initial_files,
             prompts: initial_prompts,
+            file_blobs: HashMap::new(),
         };
 
         Ok((authorship_log, initial_attributions))

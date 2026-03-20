@@ -9,7 +9,7 @@ use crate::git::cli_parser::{
 };
 use crate::git::repo_state::{
     common_dir_for_repo_path, common_dir_for_worktree, git_dir_for_worktree,
-    read_ref_oid_for_common_dir, resolve_squash_source_head_for_worktree, worktree_root_for_path,
+    read_ref_oid_for_common_dir, worktree_root_for_path,
 };
 use crate::observability;
 use serde_json::Value;
@@ -32,11 +32,13 @@ pub struct PendingTraceCommand {
     pub finished_at_ns: Option<u128>,
     pub pre_repo: Option<RepoContext>,
     pub post_repo: Option<RepoContext>,
+    pub merge_squash_source_head: Option<String>,
     pub reflog_start_cut: Option<ReflogCut>,
     pub reflog_end_cut: Option<ReflogCut>,
     pub captured_ref_changes: Vec<RefChange>,
     pub stash_target_oid: Option<String>,
     pub stash_target_error: Option<String>,
+    pub merge_squash_staged_file_blobs: Option<HashMap<String, String>>,
     pub worktree_head_start_offset: Option<u64>,
     pub worktree_head_end_offset: Option<u64>,
     pub wrapper_mirror: bool,
@@ -60,11 +62,13 @@ pub struct DeferredRootExit {
     pub finished_at_ns: u128,
     pub pre_repo: Option<RepoContext>,
     pub post_repo: Option<RepoContext>,
+    pub merge_squash_source_head: Option<String>,
     pub worktree_head_start_offset: Option<u64>,
     pub worktree_head_end_offset: Option<u64>,
     pub reflog_start_cut: Option<ReflogCut>,
     pub reflog_end_cut: Option<ReflogCut>,
     pub captured_ref_changes: Vec<RefChange>,
+    pub merge_squash_staged_file_blobs: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -262,6 +266,30 @@ impl<B: GitBackend> TraceNormalizer<B> {
         }
     }
 
+    fn merge_pending_merge_squash_staged_file_blobs(
+        &mut self,
+        root_sid: &str,
+        staged_file_blobs: Option<HashMap<String, String>>,
+    ) {
+        if let Some(pending) = self.state.pending.get_mut(root_sid)
+            && let Some(staged_file_blobs) = staged_file_blobs
+        {
+            pending.merge_squash_staged_file_blobs = Some(staged_file_blobs);
+        }
+    }
+
+    fn merge_pending_merge_squash_source_head(
+        &mut self,
+        root_sid: &str,
+        source_head: Option<String>,
+    ) {
+        if let Some(pending) = self.state.pending.get_mut(root_sid)
+            && let Some(source_head) = source_head
+        {
+            pending.merge_squash_source_head = Some(source_head);
+        }
+    }
+
     pub fn ingest_payload(
         &mut self,
         payload: &Value,
@@ -288,6 +316,14 @@ impl<B: GitBackend> TraceNormalizer<B> {
             &root_sid,
             payload_string_field(payload, "git_ai_stash_target_oid"),
             payload_string_field(payload, "git_ai_stash_target_oid_error"),
+        );
+        self.merge_pending_merge_squash_staged_file_blobs(
+            &root_sid,
+            payload_string_map_field(payload, "git_ai_merge_squash_staged_file_blobs"),
+        );
+        self.merge_pending_merge_squash_source_head(
+            &root_sid,
+            payload_string_field(payload, "git_ai_merge_squash_source_head"),
         );
 
         match event {
@@ -383,6 +419,10 @@ impl<B: GitBackend> TraceNormalizer<B> {
             .unwrap_or(false);
         let stash_target_oid = payload_string_field(payload, "git_ai_stash_target_oid");
         let stash_target_error = payload_string_field(payload, "git_ai_stash_target_oid_error");
+        let merge_squash_source_head =
+            payload_string_field(payload, "git_ai_merge_squash_source_head");
+        let merge_squash_staged_file_blobs =
+            payload_string_map_field(payload, "git_ai_merge_squash_staged_file_blobs");
 
         let pending = PendingTraceCommand {
             root_sid: root_sid.to_string(),
@@ -397,11 +437,13 @@ impl<B: GitBackend> TraceNormalizer<B> {
             finished_at_ns: None,
             pre_repo,
             post_repo: None,
+            merge_squash_source_head,
             reflog_start_cut,
             reflog_end_cut: None,
             captured_ref_changes: Vec::new(),
             stash_target_oid,
             stash_target_error,
+            merge_squash_staged_file_blobs,
             worktree_head_start_offset,
             worktree_head_end_offset: None,
             wrapper_mirror,
@@ -442,6 +484,14 @@ impl<B: GitBackend> TraceNormalizer<B> {
                 deferred.reflog_end_cut,
             );
             self.merge_pending_ref_changes(root_sid, deferred.captured_ref_changes);
+            self.merge_pending_merge_squash_source_head(
+                root_sid,
+                deferred.merge_squash_source_head,
+            );
+            self.merge_pending_merge_squash_staged_file_blobs(
+                root_sid,
+                deferred.merge_squash_staged_file_blobs,
+            );
             return self.finalize_root_exit(root_sid, deferred.exit_code, deferred.finished_at_ns);
         }
 
@@ -588,6 +638,10 @@ impl<B: GitBackend> TraceNormalizer<B> {
         let payload_post_repo = payload_repo_context(payload, "git_ai_post_repo");
         let (payload_head_start, payload_head_end) = payload_worktree_head_offsets(payload);
         let payload_ref_changes = payload_reflog_changes(payload);
+        let payload_merge_squash_source_head =
+            payload_string_field(payload, "git_ai_merge_squash_source_head");
+        let payload_merge_squash_staged_file_blobs =
+            payload_string_map_field(payload, "git_ai_merge_squash_staged_file_blobs");
 
         if !self.state.pending.contains_key(root_sid) {
             let (payload_reflog_start, payload_reflog_end) = payload_family_reflog_cuts(payload);
@@ -600,11 +654,13 @@ impl<B: GitBackend> TraceNormalizer<B> {
                     finished_at_ns,
                     pre_repo: payload_pre_repo.clone(),
                     post_repo: payload_post_repo.clone(),
+                    merge_squash_source_head: payload_merge_squash_source_head.clone(),
                     worktree_head_start_offset: payload_head_start,
                     worktree_head_end_offset: payload_head_end,
                     reflog_start_cut: payload_reflog_start.clone(),
                     reflog_end_cut: payload_reflog_end.clone(),
                     captured_ref_changes: payload_ref_changes.clone(),
+                    merge_squash_staged_file_blobs: payload_merge_squash_staged_file_blobs.clone(),
                 });
             deferred.exit_code = exit_code;
             if deferred.pre_repo.is_none() {
@@ -612,6 +668,9 @@ impl<B: GitBackend> TraceNormalizer<B> {
             }
             if payload_post_repo.is_some() {
                 deferred.post_repo = payload_post_repo;
+            }
+            if let Some(source_head) = payload_merge_squash_source_head {
+                deferred.merge_squash_source_head = Some(source_head);
             }
             if finished_at_ns > deferred.finished_at_ns {
                 deferred.finished_at_ns = finished_at_ns;
@@ -638,6 +697,9 @@ impl<B: GitBackend> TraceNormalizer<B> {
                 payload_reflog_end,
                 MergeCutMode::Max,
             );
+            if let Some(staged_file_blobs) = payload_merge_squash_staged_file_blobs {
+                deferred.merge_squash_staged_file_blobs = Some(staged_file_blobs);
+            }
             for change in payload_ref_changes {
                 let duplicate = deferred.captured_ref_changes.iter().any(|existing| {
                     existing.reference == change.reference
@@ -875,26 +937,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
             .as_deref()
             .and_then(|worktree| pending_rebase_original_head_from_inflight(&self.state, worktree))
             .or(pending.rebase_original_head_hint.clone());
-        let merge_squash_source_head = if exit_code == 0
-            && primary_command.as_deref() == Some("merge")
-            && invoked_args.iter().any(|arg| arg == "--squash")
-        {
-            let worktree = pending.worktree.as_deref().ok_or_else(|| {
-                GitAiError::Generic(format!(
-                    "merge --squash missing worktree sid={}",
-                    pending.root_sid
-                ))
-            })?;
-            Some(resolve_squash_source_head_for_worktree(worktree).ok_or_else(|| {
-                GitAiError::Generic(format!(
-                    "merge --squash missing source head from MERGE_HEAD/SQUASH_MSG sid={} worktree={}",
-                    pending.root_sid,
-                    worktree.display()
-                ))
-            })?)
-        } else {
-            None
-        };
+        let merge_squash_source_head = pending.merge_squash_source_head;
 
         let normalized = NormalizedCommand {
             scope,
@@ -913,6 +956,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
             post_repo: pending.post_repo,
             inflight_rebase_original_head,
             merge_squash_source_head,
+            merge_squash_staged_file_blobs: pending.merge_squash_staged_file_blobs,
             stash_target_oid: pending.stash_target_oid,
             ref_changes,
             confidence,
@@ -1064,6 +1108,19 @@ fn payload_string_field(payload: &Value, key: &str) -> Option<String> {
         .get(key)
         .and_then(Value::as_str)
         .map(ToString::to_string)
+}
+
+fn payload_string_map_field(payload: &Value, key: &str) -> Option<HashMap<String, String>> {
+    payload.get(key).and_then(Value::as_object).map(|object| {
+        object
+            .iter()
+            .filter_map(|(map_key, value)| {
+                value
+                    .as_str()
+                    .map(|value| (map_key.clone(), value.to_string()))
+            })
+            .collect::<HashMap<_, _>>()
+    })
 }
 
 #[derive(Clone, Copy)]

@@ -117,11 +117,6 @@ impl CommandAnalyzer for HistoryAnalyzer {
                     let source_ref = merge_source_ref(&args).ok_or_else(|| {
                         GitAiError::Generic("merge --squash missing source ref".to_string())
                     })?;
-                    let source_head = cmd.merge_squash_source_head.clone().ok_or_else(|| {
-                        GitAiError::Generic(
-                            "merge --squash missing resolved source head".to_string(),
-                        )
-                    })?;
                     events.push(SemanticEvent::MergeSquash {
                         base_branch: cmd.pre_repo.as_ref().and_then(|repo| repo.branch.clone()),
                         base_head: cmd
@@ -130,7 +125,7 @@ impl CommandAnalyzer for HistoryAnalyzer {
                             .and_then(|repo| repo.head.clone())
                             .unwrap_or_default(),
                         source_ref,
-                        source_head,
+                        source_head: cmd.merge_squash_source_head.clone().unwrap_or_default(),
                     });
                 } else if let Some((old_head, new_head)) = head_change(cmd, state.refs) {
                     events.push(SemanticEvent::RefUpdated {
@@ -482,6 +477,7 @@ mod tests {
             post_repo: None,
             inflight_rebase_original_head: None,
             merge_squash_source_head: None,
+            merge_squash_staged_file_blobs: None,
             stash_target_oid: None,
             ref_changes: vec![RefChange {
                 reference: "HEAD".to_string(),

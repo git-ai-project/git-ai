@@ -9,7 +9,8 @@ use crate::git::cli_parser::{
 use crate::git::find_repository_in_path;
 use crate::git::repo_state::{
     HeadState, common_dir_for_worktree, git_dir_for_worktree, read_head_state_for_worktree,
-    read_ref_oid_for_worktree, resolve_stash_target_oid_for_worktree, worktree_root_for_path,
+    read_ref_oid_for_worktree, resolve_squash_source_head_for_worktree,
+    resolve_stash_target_oid_for_worktree, worktree_root_for_path,
 };
 use crate::git::repository::{Repository, exec_git};
 use crate::git::rewrite_log::{
@@ -20,7 +21,9 @@ use crate::git::sync_authorship::{fetch_authorship_notes, fetch_remote_from_args
 use crate::observability;
 use crate::utils::debug_log;
 use crate::{
-    authorship::rebase_authorship::reconstruct_working_log_after_reset,
+    authorship::rebase_authorship::{
+        prepare_working_log_after_squash, reconstruct_working_log_after_reset,
+    },
     authorship::working_log::CheckpointKind,
     commands::checkpoint_agent::agent_presets::AgentRunResult,
     commands::hooks::{push_hooks, stash_hooks},
@@ -496,6 +499,75 @@ fn resolve_stash_target_oid_for_command(
     Ok(Some(resolved))
 }
 
+fn capture_merge_squash_staged_file_blobs_for_command(
+    worktree: &Path,
+    primary_command: Option<&str>,
+    argv: &[String],
+    exit_code: i32,
+) -> Result<Option<HashMap<String, String>>, GitAiError> {
+    if exit_code != 0 || primary_command != Some("merge") {
+        return Ok(None);
+    }
+
+    let parsed = parse_git_cli_args(trace_invocation_args(argv));
+    if parsed.command.as_deref() != Some("merge")
+        || !parsed.command_args.iter().any(|arg| arg == "--squash")
+    {
+        return Ok(None);
+    }
+
+    let repo = find_repository_in_path(&worktree.to_string_lossy())?;
+    Ok(Some(repo.get_all_staged_file_blob_oids()?))
+}
+
+fn capture_merge_squash_source_head_for_command(
+    worktree: &Path,
+    primary_command: Option<&str>,
+    argv: &[String],
+    exit_code: i32,
+) -> Result<Option<String>, GitAiError> {
+    if exit_code != 0 || primary_command != Some("merge") {
+        return Ok(None);
+    }
+
+    let parsed = parse_git_cli_args(trace_invocation_args(argv));
+    if parsed.command.as_deref() != Some("merge")
+        || !parsed.command_args.iter().any(|arg| arg == "--squash")
+    {
+        return Ok(None);
+    }
+
+    let source_head = resolve_squash_source_head_for_worktree(worktree).ok_or_else(|| {
+        GitAiError::Generic(format!(
+            "merge --squash missing source head from MERGE_HEAD/SQUASH_MSG worktree={}",
+            worktree.display()
+        ))
+    })?;
+    Ok(Some(source_head))
+}
+
+fn capture_inflight_merge_squash_context_for_commit(
+    worktree: &Path,
+    primary_command: Option<&str>,
+    argv: &[String],
+) -> Result<Option<(String, HashMap<String, String>)>, GitAiError> {
+    if primary_command != Some("commit") {
+        return Ok(None);
+    }
+
+    let parsed = parse_git_cli_args(trace_invocation_args(argv));
+    if parsed.command.as_deref() != Some("commit") && primary_command != Some("commit") {
+        return Ok(None);
+    }
+
+    let Some(source_head) = resolve_squash_source_head_for_worktree(worktree) else {
+        return Ok(None);
+    };
+    let repo = find_repository_in_path(&worktree.to_string_lossy())?;
+    let staged_file_blobs = repo.get_all_staged_file_blob_oids()?;
+    Ok(Some((source_head, staged_file_blobs)))
+}
+
 fn tracked_reflog_refs_for_command(
     command: Option<&str>,
     repo: Option<&RepoContext>,
@@ -676,6 +748,18 @@ fn parsed_invocation_for_side_effect(
     }
 }
 
+fn parsed_invocation_for_normalized_command(
+    cmd: &crate::daemon::domain::NormalizedCommand,
+) -> ParsedGitInvocation {
+    if cmd.primary_command.is_some() || !cmd.invoked_args.is_empty() {
+        return parsed_invocation_for_side_effect(
+            cmd.primary_command.as_deref(),
+            &cmd.invoked_args,
+        );
+    }
+    parse_git_cli_args(trace_invocation_args(&cmd.raw_argv))
+}
+
 fn apply_push_side_effect(
     worktree: &str,
     command: Option<&str>,
@@ -799,20 +883,6 @@ fn build_commit_replay_file_snapshot(
     Ok((files, dirty_files))
 }
 
-fn latest_checkpoint_file_content(
-    working_log: &crate::git::repo_storage::PersistedWorkingLog,
-    file_path: &str,
-) -> Option<String> {
-    let checkpoints = working_log.read_all_checkpoints().ok()?;
-    let entry = checkpoints.iter().rev().find_map(|checkpoint| {
-        checkpoint
-            .entries
-            .iter()
-            .find(|entry| entry.file == file_path)
-    })?;
-    working_log.get_file_version(&entry.blob_sha).ok()
-}
-
 fn filter_commit_replay_files(
     working_log: &crate::git::repo_storage::PersistedWorkingLog,
     files: Vec<String>,
@@ -820,16 +890,18 @@ fn filter_commit_replay_files(
 ) -> (Vec<String>, HashMap<String, String>) {
     let mut selected_files = Vec::new();
     let mut selected_dirty_files = HashMap::new();
+    let initial_attributions = working_log.read_initial_attributions();
 
     for file_path in files {
         let Some(target_content) = dirty_files.get(&file_path).cloned() else {
             continue;
         };
 
-        let should_replay = match latest_checkpoint_file_content(working_log, &file_path) {
-            None => true,
-            Some(tracked_content) => tracked_content != target_content,
-        };
+        let should_replay =
+            match working_log.effective_tracked_file_content(&initial_attributions, &file_path) {
+                None => true,
+                Some(tracked_content) => tracked_content != target_content,
+            };
 
         if should_replay {
             selected_dirty_files.insert(file_path.clone(), target_content);
@@ -865,6 +937,68 @@ fn build_human_replay_agent_result(
     }
 }
 
+fn working_log_has_tracked_state_for_base(repo: &Repository, base_commit: &str) -> bool {
+    if !repo.storage.has_working_log(base_commit) {
+        return false;
+    }
+
+    let working_log = repo.storage.working_log_for_base_commit(base_commit);
+    let initial = working_log.read_initial_attributions();
+    if !initial.files.is_empty() {
+        return true;
+    }
+
+    working_log
+        .read_all_checkpoints()
+        .map(|checkpoints| !checkpoints.is_empty())
+        .unwrap_or(false)
+}
+
+fn preceding_merge_squash_for_pending_commit(
+    repo: &Repository,
+    base_commit: &str,
+) -> Result<Option<MergeSquashEvent>, GitAiError> {
+    let events = repo.storage.read_rewrite_events()?;
+    for event in events {
+        match event {
+            RewriteLogEvent::AuthorshipLogsSynced { .. } => continue,
+            RewriteLogEvent::MergeSquash { merge_squash }
+                if merge_squash.base_head == base_commit =>
+            {
+                return Ok(Some(merge_squash));
+            }
+            _ => return Ok(None),
+        }
+    }
+    Ok(None)
+}
+
+fn seed_merge_squash_working_log_for_commit_replay(
+    repo: &Repository,
+    base_commit: &str,
+    author: &str,
+) -> Result<(), GitAiError> {
+    if working_log_has_tracked_state_for_base(repo, base_commit) {
+        return Ok(());
+    }
+
+    let Some(merge_squash) = preceding_merge_squash_for_pending_commit(repo, base_commit)? else {
+        return Ok(());
+    };
+
+    debug_log(&format!(
+        "Seeding merge --squash working log before daemon commit replay for base {}",
+        base_commit
+    ));
+    prepare_working_log_after_squash(
+        repo,
+        &merge_squash.source_head,
+        base_commit,
+        &merge_squash.staged_file_blobs,
+        author,
+    )
+}
+
 fn sync_pre_commit_checkpoint_for_daemon_commit(
     repo: &Repository,
     rewrite_event: &RewriteLogEvent,
@@ -878,6 +1012,7 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
     if base_commit.trim().is_empty() || target_commit.trim().is_empty() || repo.workdir().is_err() {
         return Ok(());
     }
+    seed_merge_squash_working_log_for_commit_replay(repo, &base_commit, author)?;
     let (changed_files, dirty_files) =
         build_commit_replay_file_snapshot(repo, &base_commit, &target_commit)?;
     let working_log = repo.storage.working_log_for_base_commit(&base_commit);
@@ -957,48 +1092,40 @@ fn apply_stash_rewrite_side_effect(
     repo: &mut Repository,
     stash_event: &StashEvent,
 ) -> Result<(), GitAiError> {
-    use crate::commands::git_handlers::CommandHooksContext;
-
-    let mut args = vec!["stash".to_string()];
     match stash_event.operation {
-        StashOperation::Create => args.push("push".to_string()),
-        StashOperation::Apply => args.push("apply".to_string()),
-        StashOperation::Pop => args.push("pop".to_string()),
-        StashOperation::Drop => args.push("drop".to_string()),
-        StashOperation::List => args.push("list".to_string()),
+        StashOperation::Create => {
+            let Some(head_sha) = stash_event.head_sha.as_deref() else {
+                return Err(GitAiError::Generic(
+                    "stash create missing destination head".to_string(),
+                ));
+            };
+            let Some(stash_sha) = stash_event.stash_sha.as_deref() else {
+                debug_log("Skipping stash create replay without created stash oid");
+                return Ok(());
+            };
+            stash_hooks::save_stash_authorship_log(
+                repo,
+                head_sha,
+                stash_sha,
+                &stash_event.pathspecs,
+            )?;
+        }
+        StashOperation::Apply | StashOperation::Pop => {
+            let Some(head_sha) = stash_event.head_sha.as_deref() else {
+                return Err(GitAiError::Generic(
+                    "stash apply/pop missing destination head".to_string(),
+                ));
+            };
+            let Some(stash_sha) = stash_event.stash_sha.as_deref() else {
+                return Err(GitAiError::Generic(
+                    "stash apply/pop missing stash oid".to_string(),
+                ));
+            };
+            stash_hooks::restore_stash_attributions(repo, head_sha, stash_sha)?;
+        }
+        StashOperation::Drop | StashOperation::List => {}
     }
-    if matches!(
-        stash_event.operation,
-        StashOperation::Apply | StashOperation::Pop
-    ) && let Some(stash_ref) = stash_event.stash_ref.as_ref()
-    {
-        args.push(stash_ref.clone());
-    }
-
-    let parsed = parse_git_cli_args(&args);
-    let context = CommandHooksContext {
-        pre_commit_hook_result: None,
-        rebase_original_head: None,
-        rebase_onto: None,
-        fetch_authorship_handle: None,
-        stash_sha: stash_event.stash_sha.clone(),
-        push_authorship_handle: None,
-        stashed_va: None,
-    };
-    stash_hooks::post_stash_hook(&context, &parsed, repo, success_exit_status());
     Ok(())
-}
-
-#[cfg(unix)]
-fn success_exit_status() -> std::process::ExitStatus {
-    use std::os::unix::process::ExitStatusExt;
-    std::process::ExitStatus::from_raw(0)
-}
-
-#[cfg(windows)]
-fn success_exit_status() -> std::process::ExitStatus {
-    use std::os::windows::process::ExitStatusExt;
-    std::process::ExitStatus::from_raw(0)
 }
 
 fn apply_env_overrides_to_working_log(
@@ -1912,11 +2039,48 @@ impl ActorDaemonCoordinator {
             refs.sort();
             refs.dedup();
         }
-        if !is_terminal_root_trace_event(&event, &sid, &root)
-            && let Some(object) = payload.as_object_mut()
-        {
+        if let Some(object) = payload.as_object_mut() {
             if let Some(repo) = pre_repo.as_ref() {
                 object.insert("git_ai_pre_repo".to_string(), json!(repo));
+            }
+            if object.get("git_ai_merge_squash_source_head").is_none()
+                && object
+                    .get("git_ai_merge_squash_staged_file_blobs")
+                    .is_none()
+            {
+                match capture_inflight_merge_squash_context_for_commit(
+                    &worktree,
+                    effective_primary.as_deref(),
+                    &effective_argv,
+                ) {
+                    Ok(Some((source_head, staged_file_blobs))) => {
+                        object.insert(
+                            "git_ai_merge_squash_source_head".to_string(),
+                            json!(source_head),
+                        );
+                        object.insert(
+                            "git_ai_merge_squash_staged_file_blobs".to_string(),
+                            json!(staged_file_blobs),
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        debug_log(&format!(
+                            "daemon commit squash context capture failed sid={}: {}",
+                            sid, error
+                        ));
+                        observability::log_error(
+                            &error,
+                            Some(json!({
+                                "component": "daemon",
+                                "phase": "augment_trace_payload_with_reflog_metadata",
+                                "root_sid": root,
+                                "sid": sid,
+                                "argv": effective_argv,
+                            })),
+                        );
+                    }
+                }
             }
             if object.get("git_ai_stash_target_oid").is_none()
                 && object.get("git_ai_stash_target_oid_error").is_none()
@@ -1971,6 +2135,18 @@ impl ActorDaemonCoordinator {
             }
         }
 
+        let terminal_exit_code = if is_terminal_root_trace_event(&event, &sid, &root) {
+            Some(
+                payload
+                    .get("code")
+                    .or_else(|| payload.get("exit_code"))
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0) as i32,
+            )
+        } else {
+            None
+        };
+
         if is_terminal_root_trace_event(&event, &sid, &root)
             && let Some(object) = payload.as_object_mut()
         {
@@ -1979,6 +2155,67 @@ impl ActorDaemonCoordinator {
                     "git_ai_post_repo".to_string(),
                     json!(repo_context_from_head_state(state)),
                 );
+            }
+
+            match capture_merge_squash_source_head_for_command(
+                &worktree,
+                effective_primary.as_deref(),
+                &effective_argv,
+                terminal_exit_code.unwrap_or(0),
+            ) {
+                Ok(Some(source_head)) => {
+                    object.insert(
+                        "git_ai_merge_squash_source_head".to_string(),
+                        json!(source_head),
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    debug_log(&format!(
+                        "daemon merge --squash source head capture failed sid={}: {}",
+                        sid, error
+                    ));
+                    observability::log_error(
+                        &error,
+                        Some(json!({
+                            "component": "daemon",
+                            "phase": "augment_trace_payload_with_reflog_metadata",
+                            "root_sid": root,
+                            "sid": sid,
+                            "argv": effective_argv,
+                        })),
+                    );
+                }
+            }
+            match capture_merge_squash_staged_file_blobs_for_command(
+                &worktree,
+                effective_primary.as_deref(),
+                &effective_argv,
+                terminal_exit_code.unwrap_or(0),
+            ) {
+                Ok(Some(staged_file_blobs)) => {
+                    object.insert(
+                        "git_ai_merge_squash_staged_file_blobs".to_string(),
+                        json!(staged_file_blobs),
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    debug_log(&format!(
+                        "daemon merge --squash staged blob capture failed sid={}: {}",
+                        sid, error
+                    ));
+                    observability::log_error(
+                        &error,
+                        Some(json!({
+                            "component": "daemon",
+                            "phase": "augment_trace_payload_with_reflog_metadata",
+                            "root_sid": root,
+                            "sid": sid,
+                            "argv": effective_argv,
+                        })),
+                    );
+                }
             }
 
             if should_capture_mutation && !target_repo_only {
@@ -2530,13 +2767,148 @@ impl ActorDaemonCoordinator {
         cmd: &crate::daemon::domain::NormalizedCommand,
         operation: &StashOperation,
     ) -> Option<String> {
-        if matches!(
-            operation,
-            StashOperation::Apply | StashOperation::Pop | StashOperation::Drop
-        ) {
-            return cmd.stash_target_oid.clone();
+        match operation {
+            StashOperation::Create => cmd
+                .ref_changes
+                .iter()
+                .rfind(|change| change.reference == "refs/stash")
+                .map(|change| change.new.trim().to_string())
+                .filter(|oid| !oid.is_empty() && !is_zero_oid(oid)),
+            StashOperation::Apply | StashOperation::Pop | StashOperation::Drop => {
+                cmd.stash_target_oid.clone()
+            }
+            StashOperation::List => None,
         }
+    }
+
+    fn resolve_stash_head_for_event(
+        cmd: &crate::daemon::domain::NormalizedCommand,
+    ) -> Option<String> {
+        cmd.post_repo
+            .as_ref()
+            .and_then(|repo| repo.head.clone())
+            .or_else(|| cmd.pre_repo.as_ref().and_then(|repo| repo.head.clone()))
+    }
+
+    fn stash_pathspecs_from_command(cmd: &crate::daemon::domain::NormalizedCommand) -> Vec<String> {
+        let parsed = parsed_invocation_for_normalized_command(cmd);
+        if parsed.command.as_deref() != Some("stash") {
+            return Vec::new();
+        }
+        stash_hooks::extract_stash_pathspecs(&parsed)
+    }
+
+    fn merge_squash_source_ref_from_command(
+        cmd: &crate::daemon::domain::NormalizedCommand,
+    ) -> Option<String> {
+        let parsed = parsed_invocation_for_normalized_command(cmd);
+        if parsed.command.as_deref() == Some("merge")
+            && parsed.command_args.iter().any(|arg| arg == "--squash")
+        {
+            return parsed.pos_command(0);
+        }
+
+        let raw = parse_git_cli_args(trace_invocation_args(&cmd.raw_argv));
+        if raw.command.as_deref() == Some("merge")
+            && raw.command_args.iter().any(|arg| arg == "--squash")
+        {
+            return raw.pos_command(0);
+        }
+
         None
+    }
+
+    fn resolve_merge_squash_source_head_for_event(
+        cmd: &crate::daemon::domain::NormalizedCommand,
+        source_ref: &str,
+        source_head: &str,
+    ) -> Result<String, GitAiError> {
+        if !source_head.is_empty() {
+            return Ok(source_head.to_string());
+        }
+
+        let worktree = cmd.worktree.as_ref().ok_or_else(|| {
+            GitAiError::Generic(format!(
+                "merge squash missing worktree for source resolution sid={}",
+                cmd.root_sid
+            ))
+        })?;
+        let repo = find_repository_in_path(worktree.to_string_lossy().as_ref())?;
+        repo.revparse_single(source_ref)
+            .and_then(|obj| obj.peel_to_commit())
+            .map(|commit| commit.id())
+    }
+
+    fn synthesize_merge_squash_event_from_command(
+        cmd: &crate::daemon::domain::NormalizedCommand,
+    ) -> Result<Option<MergeSquashEvent>, GitAiError> {
+        if cmd.exit_code != 0 {
+            return Ok(None);
+        }
+
+        let parsed = parsed_invocation_for_normalized_command(cmd);
+        let raw = parse_git_cli_args(trace_invocation_args(&cmd.raw_argv));
+        let looks_like_squash = (parsed.command.as_deref() == Some("merge")
+            && parsed.command_args.iter().any(|arg| arg == "--squash"))
+            || (raw.command.as_deref() == Some("merge")
+                && raw.command_args.iter().any(|arg| arg == "--squash"))
+            || cmd
+                .merge_squash_source_head
+                .as_ref()
+                .is_some_and(|value| !value.trim().is_empty())
+            || cmd.merge_squash_staged_file_blobs.is_some();
+        if !looks_like_squash {
+            return Ok(None);
+        }
+
+        let base_head = cmd
+            .pre_repo
+            .as_ref()
+            .and_then(|repo| repo.head.clone())
+            .or_else(|| cmd.post_repo.as_ref().and_then(|repo| repo.head.clone()))
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                GitAiError::Generic(format!(
+                    "merge squash fallback missing base head sid={}",
+                    cmd.root_sid
+                ))
+            })?;
+        let base_branch = cmd
+            .pre_repo
+            .as_ref()
+            .and_then(|repo| repo.branch.clone())
+            .or_else(|| cmd.post_repo.as_ref().and_then(|repo| repo.branch.clone()))
+            .unwrap_or_else(|| "HEAD".to_string());
+        let source_ref = Self::merge_squash_source_ref_from_command(cmd);
+        let resolved_source_head = if let Some(source_head) = cmd
+            .merge_squash_source_head
+            .as_ref()
+            .filter(|value| is_valid_oid(value) && !is_zero_oid(value))
+        {
+            source_head.clone()
+        } else {
+            let source_ref = source_ref.as_deref().ok_or_else(|| {
+                GitAiError::Generic(format!(
+                    "merge squash fallback missing source ref and head sid={}",
+                    cmd.root_sid
+                ))
+            })?;
+            Self::resolve_merge_squash_source_head_for_event(cmd, source_ref, "")?
+        };
+        let staged_file_blobs = cmd.merge_squash_staged_file_blobs.clone().ok_or_else(|| {
+            GitAiError::Generic(format!(
+                "merge squash fallback missing staged blob snapshot sid={}",
+                cmd.root_sid
+            ))
+        })?;
+
+        Ok(Some(MergeSquashEvent::new(
+            source_ref.unwrap_or_else(|| resolved_source_head.clone()),
+            resolved_source_head,
+            base_branch,
+            base_head,
+            staged_file_blobs,
+        )))
     }
 
     fn rewrite_events_from_semantic_events(
@@ -2545,6 +2917,16 @@ impl ActorDaemonCoordinator {
         events: &[crate::daemon::domain::SemanticEvent],
     ) -> Result<Vec<RewriteLogEvent>, GitAiError> {
         let mut out = Vec::new();
+        let mut implicit_merge_squash = if events.iter().any(|event| {
+            matches!(
+                event,
+                crate::daemon::domain::SemanticEvent::MergeSquash { .. }
+            )
+        }) {
+            None
+        } else {
+            Self::synthesize_merge_squash_event_from_command(cmd)?
+        };
         for event in events {
             match event {
                 crate::daemon::domain::SemanticEvent::CommitCreated { base, new_head } => {
@@ -2552,6 +2934,9 @@ impl ActorDaemonCoordinator {
                         return Err(GitAiError::Generic(
                             "commit created event missing new head".to_string(),
                         ));
+                    }
+                    if let Some(merge_squash) = implicit_merge_squash.take() {
+                        out.push(RewriteLogEvent::merge_squash(merge_squash));
                     }
                     out.push(RewriteLogEvent::commit(base.clone(), new_head.clone()));
                 }
@@ -2725,21 +3110,34 @@ impl ActorDaemonCoordinator {
                     source_ref,
                     source_head,
                 } => {
-                    if base_head.is_empty() || source_ref.is_empty() || source_head.is_empty() {
+                    if base_head.is_empty() || source_ref.is_empty() {
                         return Err(GitAiError::Generic(
                             "merge squash event missing base or source".to_string(),
                         ));
                     }
-                    if !is_valid_oid(source_head) || is_zero_oid(source_head) {
+                    let resolved_source_head = Self::resolve_merge_squash_source_head_for_event(
+                        cmd,
+                        source_ref,
+                        source_head,
+                    )?;
+                    if !is_valid_oid(&resolved_source_head) || is_zero_oid(&resolved_source_head) {
                         return Err(GitAiError::Generic(
                             "merge squash source is not a concrete commit id".to_string(),
                         ));
                     }
+                    let staged_file_blobs =
+                        cmd.merge_squash_staged_file_blobs.clone().ok_or_else(|| {
+                            GitAiError::Generic(format!(
+                                "merge squash missing staged blob snapshot sid={}",
+                                cmd.root_sid
+                            ))
+                        })?;
                     out.push(RewriteLogEvent::merge_squash(MergeSquashEvent::new(
                         source_ref.clone(),
-                        source_head.clone(),
+                        resolved_source_head,
                         base_branch.clone().unwrap_or_else(|| "HEAD".to_string()),
                         base_head.clone(),
+                        staged_file_blobs,
                     )));
                 }
                 crate::daemon::domain::SemanticEvent::StashOperation { kind, stash_ref } => {
@@ -2751,6 +3149,12 @@ impl ActorDaemonCoordinator {
                         _ => StashOperation::Create,
                     };
                     let stash_sha = Self::resolve_stash_sha_for_event(cmd, &operation);
+                    let head_sha = Self::resolve_stash_head_for_event(cmd);
+                    let pathspecs = if matches!(operation, StashOperation::Create) {
+                        Self::stash_pathspecs_from_command(cmd)
+                    } else {
+                        Vec::new()
+                    };
                     if matches!(
                         operation,
                         StashOperation::Apply | StashOperation::Pop | StashOperation::Drop
@@ -2761,10 +3165,22 @@ impl ActorDaemonCoordinator {
                             operation, cmd.root_sid
                         )));
                     }
+                    if matches!(
+                        operation,
+                        StashOperation::Create | StashOperation::Apply | StashOperation::Pop
+                    ) && head_sha.is_none()
+                    {
+                        return Err(GitAiError::Generic(format!(
+                            "stash {:?} missing command head sid={}",
+                            operation, cmd.root_sid
+                        )));
+                    }
                     out.push(RewriteLogEvent::stash(StashEvent::new(
                         operation,
                         stash_ref.clone(),
                         stash_sha,
+                        head_sha,
+                        pathspecs,
                         true,
                         Vec::new(),
                     )));
@@ -2836,6 +3252,11 @@ impl ActorDaemonCoordinator {
                 _ => {}
             }
         }
+
+        if let Some(merge_squash) = implicit_merge_squash {
+            out.push(RewriteLogEvent::merge_squash(merge_squash));
+        }
+
         Ok(out)
     }
 

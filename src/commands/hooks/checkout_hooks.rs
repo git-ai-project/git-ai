@@ -161,7 +161,13 @@ fn remove_attributions_for_pathspecs(repository: &Repository, head: &str, pathsp
             .into_iter()
             .filter(|(file, _)| !matches_any_pathspec(file, pathspecs))
             .collect();
-        let _ = working_log.write_initial_attributions(filtered_files, initial.prompts);
+        let mut filtered_blobs = initial.file_blobs;
+        filtered_blobs.retain(|file, _| !matches_any_pathspec(file, pathspecs));
+        let _ = working_log.write_initial(crate::git::repo_storage::InitialAttributions {
+            files: filtered_files,
+            prompts: initial.prompts,
+            file_blobs: filtered_blobs,
+        });
     }
 
     // Filter checkpoints
