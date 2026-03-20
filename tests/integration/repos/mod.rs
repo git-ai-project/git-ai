@@ -55,7 +55,7 @@ macro_rules! subdir_test_variants {
                         let mode = GitTestMode::from_env();
 
                         if mode.uses_daemon() && git_command_requires_daemon_sync(args) {
-                            self.inner.sync_daemon_if_dirty();
+                            self.inner.sync_daemon_force();
                         }
 
                         let mut command = if mode.uses_wrapper() {
@@ -145,7 +145,7 @@ macro_rules! subdir_test_variants {
                             let mode = GitTestMode::from_env();
 
                             if mode.uses_daemon() && git_command_requires_daemon_sync(args) {
-                                self.inner.sync_daemon_if_dirty();
+                                self.inner.sync_daemon_force();
                             }
 
                             let mut command = if mode.uses_wrapper() {

@@ -1547,7 +1547,7 @@ impl TestRepo {
         self.sync_daemon_env_overrides(envs);
 
         if git_command_requires_daemon_sync(args) {
-            self.sync_daemon_if_dirty();
+            self.sync_daemon_force();
         }
 
         let canonical_working_dir = if let Some(working_dir_path) = working_dir {
@@ -1640,7 +1640,7 @@ impl TestRepo {
         args: &[&str],
     ) -> Result<String, String> {
         if git_ai_command_requires_daemon_sync(args) {
-            self.sync_daemon_if_dirty();
+            self.sync_daemon_force();
         }
 
         let binary_path = get_binary_path();
@@ -1695,7 +1695,7 @@ impl TestRepo {
 
     pub fn git_ai_with_env(&self, args: &[&str], envs: &[(&str, &str)]) -> Result<String, String> {
         if git_ai_command_requires_daemon_sync(args) {
-            self.sync_daemon_if_dirty();
+            self.sync_daemon_force();
         }
 
         let binary_path = get_binary_path();
@@ -1754,7 +1754,7 @@ impl TestRepo {
         use std::process::Stdio;
 
         if git_ai_command_requires_daemon_sync(args) {
-            self.sync_daemon_if_dirty();
+            self.sync_daemon_force();
         }
 
         let binary_path = get_binary_path();
@@ -1827,7 +1827,7 @@ impl TestRepo {
     }
 
     pub fn current_working_logs(&self) -> PersistedWorkingLog {
-        self.sync_daemon_if_dirty();
+        self.sync_daemon_force();
 
         let repo = GitAiRepository::find_repository_in_path(self.path.to_str().unwrap())
             .expect("Failed to find repository");
@@ -1854,7 +1854,7 @@ impl TestRepo {
         git_dir: &Path,
         commit_sha: &str,
     ) -> Option<String> {
-        self.sync_daemon_if_dirty();
+        self.sync_daemon_force();
 
         let mut command = Command::new(real_git_executable());
         configure_test_home_env(&mut command, &self.test_home);
