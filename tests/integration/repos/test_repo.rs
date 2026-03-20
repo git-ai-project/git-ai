@@ -490,7 +490,10 @@ fn git_ai_command_affects_daemon(args: &[&str]) -> bool {
 }
 
 fn clone_target_path(args: &[&str], cwd: &Path) -> Option<PathBuf> {
-    let argv = args.iter().map(|arg| (*arg).to_string()).collect::<Vec<_>>();
+    let argv = args
+        .iter()
+        .map(|arg| (*arg).to_string())
+        .collect::<Vec<_>>();
     let clone_index = argv.iter().position(|arg| arg == "clone")?;
     let target = extract_clone_target_directory(&argv[clone_index + 1..])?;
     let target_path = PathBuf::from(target);
@@ -1294,7 +1297,11 @@ impl TestRepo {
                 && status.data.as_ref().is_some_and(|data| {
                     data.get("latest_seq").and_then(|v| v.as_u64()).unwrap_or(0) > 0
                         || data.get("backlog").and_then(|v| v.as_u64()).unwrap_or(0) > 0
-                        || data.get("pending_roots").and_then(|v| v.as_u64()).unwrap_or(0) > 0
+                        || data
+                            .get("pending_roots")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0)
+                            > 0
                         || data
                             .get("effect_queue_depth")
                             .and_then(|v| v.as_u64())
