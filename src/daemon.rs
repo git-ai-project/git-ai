@@ -2730,15 +2730,14 @@ impl ActorDaemonCoordinator {
                     }
                 }
             }
-            if object.get("git_ai_stash_target_oid").is_none()
-                && object.get("git_ai_stash_target_oid_error").is_none()
-            {
+            if object.get("git_ai_stash_target_oid").is_none() {
                 match resolve_stash_target_oid_for_terminal_payload(
                     &worktree,
                     &effective_argv,
                     terminal_ref_changes.as_deref().unwrap_or(&[]),
                 ) {
                     Ok(Some(stash_target_oid)) => {
+                        object.remove("git_ai_stash_target_oid_error");
                         object.insert(
                             "git_ai_stash_target_oid".to_string(),
                             json!(stash_target_oid),
