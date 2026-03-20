@@ -93,7 +93,7 @@ impl DaemonConfig {
 
         #[cfg(unix)]
         {
-            let too_long = |path: &Path| path.to_string_lossy().as_bytes().len() >= 100;
+            let too_long = |path: &Path| path.to_string_lossy().len() >= 100;
             if too_long(&trace_socket_path) || too_long(&control_socket_path) {
                 let mut hasher = Sha256::new();
                 hasher.update(internal_dir.to_string_lossy().as_bytes());
@@ -1818,12 +1818,13 @@ impl ActorDaemonCoordinator {
 
         let should_capture_mutation = *ingress.root_mutating.get(&root).unwrap_or(&false);
         let target_repo_only = *ingress.root_target_repo_only.get(&root).unwrap_or(&false);
-        if !target_repo_only && !ingress.root_pre_repo.contains_key(&root) {
-            if let Some(state) = read_head_state_for_worktree(&worktree) {
-                ingress
-                    .root_pre_repo
-                    .insert(root.clone(), repo_context_from_head_state(state));
-            }
+        if !target_repo_only
+            && !ingress.root_pre_repo.contains_key(&root)
+            && let Some(state) = read_head_state_for_worktree(&worktree)
+        {
+            ingress
+                .root_pre_repo
+                .insert(root.clone(), repo_context_from_head_state(state));
         }
         let pre_repo = ingress.root_pre_repo.get(&root).cloned();
         if should_capture_mutation && !target_repo_only {
@@ -1858,10 +1859,7 @@ impl ActorDaemonCoordinator {
             && let Some(object) = payload.as_object_mut()
         {
             if let Some(repo) = pre_repo.as_ref() {
-                object.insert(
-                    "git_ai_pre_repo".to_string(),
-                    json!(repo),
-                );
+                object.insert("git_ai_pre_repo".to_string(), json!(repo));
             }
             if object.get("git_ai_stash_target_oid").is_none()
                 && object.get("git_ai_stash_target_oid_error").is_none()
@@ -3390,7 +3388,10 @@ impl ActorDaemonCoordinator {
             ControlRequest::WaitFamilyIdle {
                 repo_working_dir,
                 timeout_ms,
-            } => self.wait_for_family_idle(repo_working_dir, timeout_ms).await,
+            } => {
+                self.wait_for_family_idle(repo_working_dir, timeout_ms)
+                    .await
+            }
             ControlRequest::Shutdown => {
                 self.request_shutdown();
                 Ok(ControlResponse::ok(None, None, None))

@@ -367,10 +367,10 @@ fn rebase_change(
         .map(|(_, new_head)| new_head.clone())
         .or_else(|| non_empty_opt(cmd.post_repo.as_ref().and_then(|repo| repo.head.clone())))?;
 
-    if let Some((old_head, new_head_from_changes)) = from_changes {
-        if old_head != new_head_from_changes {
-            return Some((old_head, new_head_from_changes));
-        }
+    if let Some((old_head, new_head_from_changes)) = from_changes
+        && old_head != new_head_from_changes
+    {
+        return Some((old_head, new_head_from_changes));
     }
 
     non_empty_opt(cmd.pre_repo.as_ref().and_then(|repo| repo.head.clone()))
@@ -394,13 +394,12 @@ fn inferred_rebase_branch_change(cmd: &NormalizedCommand) -> Option<(String, Str
     }
 
     let post_head = non_empty_opt(cmd.post_repo.as_ref().and_then(|repo| repo.head.clone()));
-    if let Some(post_head) = post_head {
-        if let Some(change) = candidates
+    if let Some(post_head) = post_head
+        && let Some(change) = candidates
             .iter()
             .find(|change| change.new.trim() == post_head)
-        {
-            return Some((change.old.trim().to_string(), change.new.trim().to_string()));
-        }
+    {
+        return Some((change.old.trim().to_string(), change.new.trim().to_string()));
     }
 
     if candidates.len() == 1 {
