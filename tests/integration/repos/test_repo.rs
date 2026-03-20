@@ -17,7 +17,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -75,7 +75,6 @@ struct DaemonProcess {
     control_socket_path: PathBuf,
     trace_socket_path: PathBuf,
     stderr_log_path: PathBuf,
-    idle_wait_lock: Arc<Mutex<()>>,
 }
 
 impl DaemonProcess {
@@ -136,7 +135,6 @@ impl DaemonProcess {
             control_socket_path,
             trace_socket_path,
             stderr_log_path,
-            idle_wait_lock: Arc::new(Mutex::new(())),
         };
         if let Err(error) = daemon.wait_until_ready(repo_path, &mut child) {
             let _ = child.kill();
@@ -232,10 +230,6 @@ impl DaemonProcess {
     }
 
     fn wait_for_repo_idle(&self, repo_working_dir: &str) -> Result<(), String> {
-        let _guard = self
-            .idle_wait_lock
-            .lock()
-            .map_err(|_| "idle wait lock poisoned".to_string())?;
         let settled = send_control_request(
             &self.control_socket_path,
             &ControlRequest::WaitFamilyIdle {
