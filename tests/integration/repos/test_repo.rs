@@ -1699,10 +1699,10 @@ impl Drop for TestRepo {
             let _ = remove_dir_all_with_retry(&self.path, 80, Duration::from_millis(50));
             let _ = remove_dir_all_with_retry(base_path, 80, Duration::from_millis(50));
 
-            if let Some(base_db_path) = &self._base_test_db_path {
-                if remove_test_db {
-                    let _ = remove_dir_all_with_retry(base_db_path, 40, Duration::from_millis(25));
-                }
+            if let Some(base_db_path) = &self._base_test_db_path
+                && remove_test_db
+            {
+                let _ = remove_dir_all_with_retry(base_db_path, 40, Duration::from_millis(25));
             }
 
             if remove_test_db {

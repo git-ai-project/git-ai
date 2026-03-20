@@ -9,8 +9,7 @@ use crate::git::cli_parser::{
 };
 use crate::git::repo_state::{
     common_dir_for_repo_path, common_dir_for_worktree, git_dir_for_worktree,
-    read_ref_oid_for_common_dir, resolve_squash_source_head_for_worktree,
-    worktree_root_for_path,
+    read_ref_oid_for_common_dir, resolve_squash_source_head_for_worktree, worktree_root_for_path,
 };
 use crate::observability;
 use serde_json::Value;
@@ -518,7 +517,9 @@ impl<B: GitBackend> TraceNormalizer<B> {
             if let Some(family) = family.as_ref() {
                 pending.family_key = Some(family.clone());
             }
-            if pending.pre_repo.is_none() && let Some(pre_repo) = payload_pre_repo {
+            if pending.pre_repo.is_none()
+                && let Some(pre_repo) = payload_pre_repo
+            {
                 pending.pre_repo = Some(pre_repo);
             }
         }
@@ -2295,7 +2296,9 @@ mod tests {
             Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         );
         assert_eq!(
-            cmd.pre_repo.as_ref().and_then(|repo| repo.branch.as_deref()),
+            cmd.pre_repo
+                .as_ref()
+                .and_then(|repo| repo.branch.as_deref()),
             Some("main")
         );
     }
