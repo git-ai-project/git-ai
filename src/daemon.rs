@@ -642,7 +642,7 @@ fn apply_push_side_effect(
     Ok(())
 }
 
-fn apply_fetch_notes_sync_side_effect(
+fn apply_pull_notes_sync_side_effect(
     worktree: &str,
     command: Option<&str>,
     args: &[String],
@@ -654,7 +654,7 @@ fn apply_fetch_notes_sync_side_effect(
         Err(error) => {
             debug_log(&format!(
                 "daemon notes sync: failed to determine remote for {}: {}",
-                parsed.command.as_deref().unwrap_or("fetch/pull"),
+                parsed.command.as_deref().unwrap_or("pull"),
                 error
             ));
             return Ok(());
@@ -2934,9 +2934,8 @@ impl ActorDaemonCoordinator {
                     crate::daemon::domain::SemanticEvent::CloneCompleted { .. } => {
                         let _ = apply_clone_notes_sync_side_effect(&worktree);
                     }
-                    crate::daemon::domain::SemanticEvent::FetchCompleted { .. }
-                    | crate::daemon::domain::SemanticEvent::PullCompleted { .. } => {
-                        let _ = apply_fetch_notes_sync_side_effect(
+                    crate::daemon::domain::SemanticEvent::PullCompleted { .. } => {
+                        let _ = apply_pull_notes_sync_side_effect(
                             &worktree,
                             cmd.invoked_command.as_deref(),
                             &cmd.invoked_args,

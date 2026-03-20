@@ -245,7 +245,7 @@ worktree_test_wrappers! {
 }
 
 worktree_test_wrappers! {
-    fn notes_sync_fetch_behavior_matches_mode() {
+    fn notes_sync_fetch_does_not_import_authorship_notes() {
         let mode = TestRepo::git_mode();
         if mode == GitTestMode::Hooks {
             return;
@@ -299,12 +299,7 @@ worktree_test_wrappers! {
 
         let fetched_note = read_note_from_worktree(local.path(), &seed_sha);
         match mode {
-            GitTestMode::Daemon => assert!(
-                fetched_note.is_some(),
-                "daemon fetch should import authorship note for commit {}",
-                seed_sha
-            ),
-            GitTestMode::Wrapper | GitTestMode::Both => assert!(
+            GitTestMode::Daemon | GitTestMode::Wrapper | GitTestMode::Both => assert!(
                 fetched_note.is_none(),
                 "plain git fetch should not import authorship note for commit {} in {:?} mode",
                 seed_sha,
