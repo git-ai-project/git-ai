@@ -13,7 +13,7 @@ use crate::git::repo_state::{
     resolve_linear_head_commit_chain_for_worktree, resolve_squash_source_head_for_worktree,
     resolve_stash_target_oid_for_worktree, worktree_root_for_path,
 };
-use crate::git::repository::{Repository, exec_git};
+use crate::git::repository::{Repository, discover_repository_in_path_no_git_exec, exec_git};
 use crate::git::rewrite_log::{
     CherryPickAbortEvent, CherryPickCompleteEvent, MergeSquashEvent, RebaseAbortEvent,
     RebaseCompleteEvent, ResetEvent, ResetKind, RewriteLogEvent, StashEvent, StashOperation,
@@ -529,6 +529,46 @@ fn stash_target_spec_is_top_of_stack(target_spec: Option<&str>) -> bool {
         target_spec.unwrap_or("stash@{0}"),
         "stash@{0}" | "refs/stash" | "stash"
     )
+}
+
+fn inferred_top_stash_sha_from_rewrite_history(
+    worktree: &Path,
+) -> Result<Option<String>, GitAiError> {
+    let repo = discover_repository_in_path_no_git_exec(worktree)?;
+    let events = repo.storage.read_rewrite_events()?;
+    let mut stack: Vec<String> = Vec::new();
+    for event in events {
+        let RewriteLogEvent::Stash { stash } = event else {
+            continue;
+        };
+        if !stash.success {
+            continue;
+        }
+        match stash.operation {
+            StashOperation::Create => {
+                if let Some(stash_sha) = stash
+                    .stash_sha
+                    .filter(|stash_sha| !stash_sha.is_empty() && !is_zero_oid(stash_sha))
+                {
+                    stack.push(stash_sha);
+                }
+            }
+            StashOperation::Pop | StashOperation::Drop => {
+                if let Some(stash_sha) = stash.stash_sha
+                    && let Some(position) =
+                        stack.iter().rposition(|existing| existing == &stash_sha)
+                {
+                    stack.remove(position);
+                    continue;
+                }
+                if stash_target_spec_is_top_of_stack(stash.stash_ref.as_deref()) {
+                    let _ = stack.pop();
+                }
+            }
+            StashOperation::Apply | StashOperation::List => {}
+        }
+    }
+    Ok(stack.last().cloned())
 }
 
 fn resolve_stash_target_oid_for_terminal_payload(
@@ -3362,8 +3402,9 @@ impl ActorDaemonCoordinator {
     fn resolve_stash_sha_for_event(
         cmd: &crate::daemon::domain::NormalizedCommand,
         operation: &StashOperation,
-    ) -> Option<String> {
-        match operation {
+        stash_ref: Option<&str>,
+    ) -> Result<Option<String>, GitAiError> {
+        let resolved = match operation {
             StashOperation::Create => cmd
                 .ref_changes
                 .iter()
@@ -3381,7 +3422,17 @@ impl ActorDaemonCoordinator {
                 })
             }
             StashOperation::List => None,
+        };
+        if resolved.is_some() || !matches!(operation, StashOperation::Pop | StashOperation::Drop) {
+            return Ok(resolved);
         }
+        if !stash_target_spec_is_top_of_stack(stash_ref) {
+            return Ok(None);
+        }
+        let Some(worktree) = cmd.worktree.as_deref() else {
+            return Ok(None);
+        };
+        inferred_top_stash_sha_from_rewrite_history(worktree)
     }
 
     fn resolve_stash_head_for_event(
@@ -3754,7 +3805,8 @@ impl ActorDaemonCoordinator {
                         crate::daemon::domain::StashOpKind::List => StashOperation::List,
                         _ => StashOperation::Create,
                     };
-                    let stash_sha = Self::resolve_stash_sha_for_event(cmd, &operation);
+                    let stash_sha =
+                        Self::resolve_stash_sha_for_event(cmd, &operation, stash_ref.as_deref())?;
                     let head_sha = Self::resolve_stash_head_for_event(cmd);
                     let pathspecs = if matches!(operation, StashOperation::Create) {
                         Self::stash_pathspecs_from_command(cmd)
