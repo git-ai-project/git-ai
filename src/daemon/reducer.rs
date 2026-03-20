@@ -17,7 +17,7 @@ pub fn reduce_family_command(
     // Analyze against pre-command state so history/ref analyzers can infer old->new correctly.
     let analysis = analyzers.analyze(&cmd, AnalysisView { refs: &state.refs })?;
     apply_ref_changes(state, &cmd);
-    apply_post_repo_refs(state, &cmd);
+    apply_post_repo_refs(state, &cmd, &analysis);
     apply_worktree_state(state, &cmd);
 
     state.applied_seq = state.applied_seq.saturating_add(1);
@@ -81,7 +81,14 @@ fn apply_ref_changes(state: &mut FamilyState, cmd: &NormalizedCommand) {
     }
 }
 
-fn apply_post_repo_refs(state: &mut FamilyState, cmd: &NormalizedCommand) {
+fn apply_post_repo_refs(
+    state: &mut FamilyState,
+    cmd: &NormalizedCommand,
+    analysis: &AnalysisResult,
+) {
+    if !should_apply_post_repo_refs(cmd, analysis) {
+        return;
+    }
     let Some(post_repo) = cmd.post_repo.as_ref() else {
         return;
     };
@@ -103,6 +110,39 @@ fn apply_post_repo_refs(state: &mut FamilyState, cmd: &NormalizedCommand) {
     {
         state.refs.insert(format!("refs/heads/{}", branch), head);
     }
+}
+
+fn should_apply_post_repo_refs(cmd: &NormalizedCommand, analysis: &AnalysisResult) -> bool {
+    if cmd.post_repo.is_none() {
+        return false;
+    }
+
+    if cmd
+        .ref_changes
+        .iter()
+        .any(|change| change.reference == "HEAD" || change.reference.starts_with("refs/heads/"))
+    {
+        return false;
+    }
+
+    analysis.events.iter().any(|event| {
+        matches!(
+            event,
+            crate::daemon::domain::SemanticEvent::CommitCreated { .. }
+                | crate::daemon::domain::SemanticEvent::CommitAmended { .. }
+                | crate::daemon::domain::SemanticEvent::Reset { .. }
+                | crate::daemon::domain::SemanticEvent::RebaseComplete { .. }
+                | crate::daemon::domain::SemanticEvent::RebaseAbort { .. }
+                | crate::daemon::domain::SemanticEvent::CherryPickComplete { .. }
+                | crate::daemon::domain::SemanticEvent::CherryPickAbort { .. }
+                | crate::daemon::domain::SemanticEvent::PullCompleted { .. }
+                | crate::daemon::domain::SemanticEvent::RefUpdated { .. }
+                | crate::daemon::domain::SemanticEvent::BranchCreated { .. }
+                | crate::daemon::domain::SemanticEvent::BranchDeleted { .. }
+                | crate::daemon::domain::SemanticEvent::BranchRenamed { .. }
+                | crate::daemon::domain::SemanticEvent::SymbolicRefUpdated { .. }
+        )
+    })
 }
 
 fn apply_worktree_state(state: &mut FamilyState, cmd: &NormalizedCommand) {
@@ -204,11 +244,14 @@ mod tests {
     }
 
     #[test]
-    fn reducer_tracks_head_from_post_repo_snapshot() {
+    fn reducer_tracks_head_from_post_repo_snapshot_for_head_moving_commands() {
         let mut state = family_state();
         let registry = AnalyzerRegistry::new();
         let mut cmd = normalized();
         cmd.ref_changes.clear();
+        cmd.raw_argv = vec!["git".to_string(), "commit".to_string()];
+        cmd.primary_command = Some("commit".to_string());
+        cmd.invoked_command = Some("commit".to_string());
         cmd.post_repo = Some(crate::daemon::domain::RepoContext {
             head: Some("def".to_string()),
             branch: Some("main".to_string()),
@@ -220,6 +263,33 @@ mod tests {
         assert_eq!(
             state.refs.get("refs/heads/main").map(String::as_str),
             Some("def")
+        );
+    }
+
+    #[test]
+    fn reducer_ignores_post_repo_snapshot_for_stash_commands() {
+        let mut state = family_state();
+        state
+            .refs
+            .insert("refs/heads/main".to_string(), "abc".to_string());
+        let registry = AnalyzerRegistry::new();
+        let mut cmd = normalized();
+        cmd.ref_changes.clear();
+        cmd.raw_argv = vec!["git".to_string(), "stash".to_string(), "push".to_string()];
+        cmd.primary_command = Some("stash".to_string());
+        cmd.invoked_command = Some("stash".to_string());
+        cmd.invoked_args = vec!["push".to_string()];
+        cmd.post_repo = Some(crate::daemon::domain::RepoContext {
+            head: Some("def".to_string()),
+            branch: Some("main".to_string()),
+            detached: false,
+        });
+
+        let (_applied, _analysis) = reduce_family_command(&mut state, cmd, &registry).unwrap();
+
+        assert_eq!(
+            state.refs.get("refs/heads/main").map(String::as_str),
+            Some("abc")
         );
     }
 

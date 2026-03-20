@@ -186,6 +186,7 @@ pub enum SemanticEvent {
     StashOperation {
         kind: StashOpKind,
         stash_ref: Option<String>,
+        head: Option<String>,
     },
     FetchCompleted {
         remote: Option<String>,

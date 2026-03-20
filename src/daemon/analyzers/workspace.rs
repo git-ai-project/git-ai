@@ -13,7 +13,7 @@ impl CommandAnalyzer for WorkspaceAnalyzer {
     fn analyze(
         &self,
         cmd: &NormalizedCommand,
-        _state: AnalysisView<'_>,
+        state: AnalysisView<'_>,
     ) -> Result<AnalysisResult, GitAiError> {
         let name = cmd.primary_command.as_deref().unwrap_or_default();
         let args = command_args(cmd);
@@ -25,6 +25,7 @@ impl CommandAnalyzer for WorkspaceAnalyzer {
                 events.push(SemanticEvent::StashOperation {
                     kind: infer_stash_kind(&stash_args),
                     stash_ref: stash_target_spec(&stash_args).map(ToString::to_string),
+                    head: current_head_for_workspace_command(cmd, state.refs),
                 });
             }
             "checkout" => {
@@ -120,6 +121,35 @@ fn is_path_checkout(args: &[String]) -> bool {
             .any(|arg| arg.starts_with("--pathspec") || arg == "--ours" || arg == "--theirs")
 }
 
+fn current_head_for_workspace_command(
+    cmd: &NormalizedCommand,
+    refs: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    current_branch_ref(cmd)
+        .and_then(|reference| refs.get(&reference).cloned())
+        .or_else(|| refs.get("HEAD").cloned())
+        .or_else(|| cmd.pre_repo.as_ref().and_then(|repo| repo.head.clone()))
+        .or_else(|| cmd.post_repo.as_ref().and_then(|repo| repo.head.clone()))
+        .filter(|head| !head.trim().is_empty())
+}
+
+fn current_branch_ref(cmd: &NormalizedCommand) -> Option<String> {
+    let branch = cmd
+        .pre_repo
+        .as_ref()
+        .and_then(|repo| repo.branch.clone())
+        .or_else(|| cmd.post_repo.as_ref().and_then(|repo| repo.branch.clone()))?;
+    let branch = branch.trim();
+    if branch.is_empty() {
+        return None;
+    }
+    if branch.starts_with("refs/") {
+        Some(branch.to_string())
+    } else {
+        Some(format!("refs/heads/{}", branch))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,20 +184,24 @@ mod tests {
     #[test]
     fn stash_apply_maps_to_stash_operation() {
         let analyzer = WorkspaceAnalyzer;
+        let mut refs = std::collections::HashMap::new();
+        refs.insert("refs/heads/main".to_string(), "abc123".to_string());
+        let mut cmd = command("stash", &["git", "stash", "apply", "stash@{0}"]);
+        cmd.pre_repo = Some(crate::daemon::domain::RepoContext {
+            head: Some("abc123".to_string()),
+            branch: Some("main".to_string()),
+            detached: false,
+        });
         let result = analyzer
-            .analyze(
-                &command("stash", &["git", "stash", "apply", "stash@{0}"]),
-                AnalysisView {
-                    refs: &Default::default(),
-                },
-            )
+            .analyze(&cmd, AnalysisView { refs: &refs })
             .unwrap();
         assert!(result.events.iter().any(|event| matches!(
             event,
             SemanticEvent::StashOperation {
                 kind: StashOpKind::Apply,
+                head: Some(head),
                 ..
-            }
+            } if head == "abc123"
         )));
     }
 }

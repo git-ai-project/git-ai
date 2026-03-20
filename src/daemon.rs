@@ -3436,12 +3436,41 @@ impl ActorDaemonCoordinator {
     }
 
     fn resolve_stash_head_for_event(
+        semantic_head: Option<&String>,
         cmd: &crate::daemon::domain::NormalizedCommand,
     ) -> Option<String> {
-        cmd.post_repo
-            .as_ref()
-            .and_then(|repo| repo.head.clone())
+        semantic_head
+            .cloned()
             .or_else(|| cmd.pre_repo.as_ref().and_then(|repo| repo.head.clone()))
+            .or_else(|| cmd.post_repo.as_ref().and_then(|repo| repo.head.clone()))
+    }
+
+    fn resolve_stash_create_head_for_event(
+        cmd: &crate::daemon::domain::NormalizedCommand,
+        stash_sha: Option<&str>,
+        semantic_head: Option<&String>,
+    ) -> Result<Option<String>, GitAiError> {
+        if let Some(stash_sha) = stash_sha
+            && let Some(worktree) = cmd.worktree.as_ref()
+        {
+            let repo = find_repository_in_path(worktree.to_string_lossy().as_ref())?;
+            let stash_commit = repo.find_commit(stash_sha.to_string())?;
+            if let Ok(parent) = stash_commit.parent(0) {
+                return Ok(Some(parent.id().to_string()));
+            }
+        }
+
+        Ok(Self::resolve_stash_head_for_event(semantic_head, cmd))
+    }
+
+    fn resolve_stash_restore_head_for_event(
+        semantic_head: Option<&String>,
+        cmd: &crate::daemon::domain::NormalizedCommand,
+    ) -> Option<String> {
+        semantic_head
+            .cloned()
+            .or_else(|| cmd.pre_repo.as_ref().and_then(|repo| repo.head.clone()))
+            .or_else(|| cmd.post_repo.as_ref().and_then(|repo| repo.head.clone()))
     }
 
     fn stash_pathspecs_from_command(cmd: &crate::daemon::domain::NormalizedCommand) -> Vec<String> {
@@ -3797,7 +3826,11 @@ impl ActorDaemonCoordinator {
                         staged_file_blobs,
                     )));
                 }
-                crate::daemon::domain::SemanticEvent::StashOperation { kind, stash_ref } => {
+                crate::daemon::domain::SemanticEvent::StashOperation {
+                    kind,
+                    stash_ref,
+                    head,
+                } => {
                     let operation = match kind {
                         crate::daemon::domain::StashOpKind::Apply => StashOperation::Apply,
                         crate::daemon::domain::StashOpKind::Pop => StashOperation::Pop,
@@ -3807,7 +3840,17 @@ impl ActorDaemonCoordinator {
                     };
                     let stash_sha =
                         Self::resolve_stash_sha_for_event(cmd, &operation, stash_ref.as_deref())?;
-                    let head_sha = Self::resolve_stash_head_for_event(cmd);
+                    let head_sha = match operation {
+                        StashOperation::Create => Self::resolve_stash_create_head_for_event(
+                            cmd,
+                            stash_sha.as_deref(),
+                            head.as_ref(),
+                        )?,
+                        StashOperation::Apply | StashOperation::Pop => {
+                            Self::resolve_stash_restore_head_for_event(head.as_ref(), cmd)
+                        }
+                        StashOperation::Drop | StashOperation::List => None,
+                    };
                     let pathspecs = if matches!(operation, StashOperation::Create) {
                         Self::stash_pathspecs_from_command(cmd)
                     } else {
