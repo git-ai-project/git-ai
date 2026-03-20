@@ -6,7 +6,6 @@ use crate::{
     error::GitAiError,
 };
 use serde::Deserialize;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct ZedPreset;
 
@@ -14,6 +13,8 @@ pub struct ZedPreset;
 #[derive(Debug, Deserialize)]
 struct ZedHookInput {
     hook_event_name: String,
+    #[serde(default)]
+    session_id: Option<String>,
     #[serde(default)]
     cwd: Option<String>,
     #[serde(default)]
@@ -45,14 +46,10 @@ impl AgentCheckpointPreset for ZedPreset {
             .or_else(|| hook_input.tool_input.and_then(|ti| ti.file_paths))
             .filter(|paths| !paths.is_empty());
 
-        // Generate a session ID based on time (Zed doesn't provide session IDs via MCP)
-        let session_id = format!(
-            "zed-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0)
-        );
+        // Use session_id from MCP server (stable per server instance) or generate fallback
+        let session_id = hook_input
+            .session_id
+            .unwrap_or_else(|| "zed-unknown".to_string());
 
         let agent_id = AgentId {
             tool: "zed".to_string(),

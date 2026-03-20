@@ -1,15 +1,24 @@
 use crate::error::GitAiError;
 use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerParams};
-use crate::mdm::utils::{home_dir, write_atomic};
+use crate::mdm::utils::{binary_exists, home_dir, write_atomic};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 pub struct ZedInstaller;
 
 impl ZedInstaller {
+    /// Path to Zed's config directory, respecting XDG_CONFIG_HOME
+    fn config_dir() -> PathBuf {
+        if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+            PathBuf::from(xdg).join("zed")
+        } else {
+            home_dir().join(".config").join("zed")
+        }
+    }
+
     /// Path to Zed's global settings
     fn settings_path() -> PathBuf {
-        home_dir().join(".config").join("zed").join("settings.json")
+        Self::config_dir().join("settings.json")
     }
 
     /// Generate the context_servers JSON snippet for Zed settings
@@ -43,10 +52,11 @@ impl HookInstaller for ZedInstaller {
 
     fn check_hooks(&self, params: &HookInstallerParams) -> Result<HookCheckResult, GitAiError> {
         let settings_path = Self::settings_path();
-        let zed_config_dir = home_dir().join(".config").join("zed");
+        let has_binary = binary_exists("zed");
+        let has_config_dir = Self::config_dir().exists();
 
-        // Check if Zed is installed (has config directory)
-        if !zed_config_dir.exists() {
+        // Check if Zed is installed (binary or config directory)
+        if !has_binary && !has_config_dir {
             return Ok(HookCheckResult {
                 tool_installed: false,
                 hooks_installed: false,
