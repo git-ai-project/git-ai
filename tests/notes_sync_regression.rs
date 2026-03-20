@@ -245,8 +245,9 @@ worktree_test_wrappers! {
 }
 
 worktree_test_wrappers! {
-    fn notes_sync_fetch_imports_authorship_notes_from_remote() {
-        if TestRepo::git_mode() == GitTestMode::Hooks {
+    fn notes_sync_fetch_behavior_matches_mode() {
+        let mode = TestRepo::git_mode();
+        if mode == GitTestMode::Hooks {
             return;
         }
 
@@ -294,14 +295,23 @@ worktree_test_wrappers! {
             .git(&["fetch", "origin"])
             .expect("fetch should succeed");
 
-        sync_daemon_repo_if_needed(TestRepo::git_mode(), &local, local.path());
+        sync_daemon_repo_if_needed(mode, &local, local.path());
 
         let fetched_note = read_note_from_worktree(local.path(), &seed_sha);
-        assert!(
-            fetched_note.is_some(),
-            "fetch should import authorship note for commit {}",
-            seed_sha
-        );
+        match mode {
+            GitTestMode::Daemon => assert!(
+                fetched_note.is_some(),
+                "daemon fetch should import authorship note for commit {}",
+                seed_sha
+            ),
+            GitTestMode::Wrapper | GitTestMode::Both => assert!(
+                fetched_note.is_none(),
+                "plain git fetch should not import authorship note for commit {} in {:?} mode",
+                seed_sha,
+                mode
+            ),
+            GitTestMode::Hooks => unreachable!("hooks mode returned above"),
+        }
     }
 }
 
