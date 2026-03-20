@@ -62,6 +62,7 @@ pub struct NormalizedCommand {
     pub post_repo: Option<RepoContext>,
     pub inflight_rebase_original_head: Option<String>,
     pub merge_squash_source_head: Option<String>,
+    pub stash_target_oid: Option<String>,
     pub ref_changes: Vec<RefChange>,
     pub confidence: Confidence,
     pub wrapper_mirror: bool,

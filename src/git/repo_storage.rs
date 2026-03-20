@@ -536,6 +536,17 @@ impl PersistedWorkingLog {
         self.write_all_checkpoints_unlocked(checkpoints)
     }
 
+    pub fn mutate_all_checkpoints<F>(&self, mutator: F) -> Result<Vec<Checkpoint>, GitAiError>
+    where
+        F: FnOnce(&mut Vec<Checkpoint>) -> Result<(), GitAiError>,
+    {
+        let _lock = self.acquire_checkpoints_lock()?;
+        let mut checkpoints = self.read_all_checkpoints_unlocked()?;
+        mutator(&mut checkpoints)?;
+        self.write_all_checkpoints_unlocked(&checkpoints)?;
+        Ok(checkpoints)
+    }
+
     fn write_all_checkpoints_unlocked(&self, checkpoints: &[Checkpoint]) -> Result<(), GitAiError> {
         let checkpoints_file = self.checkpoints_file_path();
 

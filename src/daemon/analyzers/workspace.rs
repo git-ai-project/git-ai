@@ -3,6 +3,7 @@ use crate::daemon::domain::{
     AnalysisResult, CommandClass, Confidence, NormalizedCommand, SemanticEvent, StashOpKind,
 };
 use crate::error::GitAiError;
+use crate::git::cli_parser::stash_target_spec;
 use std::path::Path;
 
 #[derive(Default)]
@@ -19,10 +20,13 @@ impl CommandAnalyzer for WorkspaceAnalyzer {
 
         let mut events = Vec::new();
         match name {
-            "stash" => events.push(SemanticEvent::StashOperation {
-                kind: infer_stash_kind(&args),
-                stash_ref: args.iter().find(|arg| arg.starts_with("stash@{")).cloned(),
-            }),
+            "stash" => {
+                let stash_args = stash_command_args(cmd);
+                events.push(SemanticEvent::StashOperation {
+                    kind: infer_stash_kind(&stash_args),
+                    stash_ref: stash_target_spec(&stash_args).map(ToString::to_string),
+                });
+            }
             "checkout" => {
                 if is_path_checkout(&args) {
                     events.push(SemanticEvent::CheckoutPaths);
@@ -86,6 +90,16 @@ fn normalized_args(argv: &[String]) -> Vec<String> {
     }
 }
 
+fn stash_command_args(cmd: &NormalizedCommand) -> Vec<String> {
+    let args = normalized_args(&cmd.raw_argv);
+    if let Some(index) = args.iter().position(|arg| arg == "stash")
+        && let Some(stash_args) = args.get(index + 1..)
+    {
+        return stash_args.to_vec();
+    }
+    command_args(cmd)
+}
+
 fn infer_stash_kind(args: &[String]) -> StashOpKind {
     match args.first().map(String::as_str).unwrap_or("push") {
         "push" | "save" => StashOpKind::Push,
@@ -129,6 +143,7 @@ mod tests {
             post_repo: None,
             inflight_rebase_original_head: None,
             merge_squash_source_head: None,
+            stash_target_oid: None,
             ref_changes: Vec::new(),
             confidence: Confidence::Low,
             wrapper_mirror: false,

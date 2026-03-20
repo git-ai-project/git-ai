@@ -232,6 +232,7 @@ mod tests {
             post_repo: None,
             inflight_rebase_original_head: None,
             merge_squash_source_head: None,
+            stash_target_oid: None,
             ref_changes: Vec::new(),
             confidence: Confidence::Low,
             wrapper_mirror: false,

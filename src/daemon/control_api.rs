@@ -25,6 +25,11 @@ pub enum ControlRequest {
     SnapshotFamily { repo_working_dir: String },
     #[serde(rename = "barrier.applied_through_seq")]
     BarrierAppliedThroughSeq { repo_working_dir: String, seq: u64 },
+    #[serde(rename = "wait.family_idle")]
+    WaitFamilyIdle {
+        repo_working_dir: String,
+        timeout_ms: Option<u64>,
+    },
     #[serde(rename = "shutdown")]
     Shutdown,
 }

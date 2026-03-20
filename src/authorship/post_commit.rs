@@ -68,18 +68,12 @@ pub fn post_commit(
     let repo_storage = &repo.storage;
     let working_log = repo_storage.working_log_for_base_commit(&parent_sha);
 
-    // Pull all working log entries from the parent commit
-
-    let mut parent_working_log = working_log.read_all_checkpoints()?;
-
-    // debug_log(&format!(
-    //     "edited files: {:?}",
-    //     parent_working_log.edited_files
-    // ));
-
-    // Update prompts/transcripts to their latest versions and persist to disk
-    // Do this BEFORE filtering so that all checkpoints (including untracked files) are updated
-    update_prompts_to_latest(&mut parent_working_log)?;
+    // Refresh prompts/transcripts under the same checkpoints lock used by append_checkpoint so
+    // concurrent checkpoint appends cannot be lost between a read and rewrite of the JSONL file.
+    let parent_working_log = working_log.mutate_all_checkpoints(|checkpoints| {
+        update_prompts_to_latest(checkpoints)?;
+        Ok(())
+    })?;
 
     // Batch upsert all prompts to database after refreshing (non-fatal if it fails)
     if let Err(e) = batch_upsert_prompts_to_db(&parent_working_log, &working_log, &commit_sha) {
@@ -95,8 +89,6 @@ pub fn post_commit(
             })),
         );
     }
-
-    working_log.write_all_checkpoints(&parent_working_log)?;
 
     // Create VirtualAttributions from working log (fast path - no blame)
     // We don't need to run blame because we only care about the working log data

@@ -3,8 +3,15 @@ use crate::daemon::domain::{
 };
 use crate::daemon::git_backend::{GitBackend, ReflogCut};
 use crate::error::GitAiError;
-use crate::git::cli_parser::parse_git_cli_args;
-use crate::git::repo_state::{git_dir_for_worktree, resolve_squash_source_head_for_worktree};
+use crate::git::cli_parser::{
+    explicit_rebase_branch_arg, parse_git_cli_args, rebase_has_control_mode,
+    stash_requires_target_resolution,
+};
+use crate::git::repo_state::{
+    common_dir_for_repo_path, common_dir_for_worktree, git_dir_for_worktree,
+    read_ref_oid_for_common_dir, resolve_squash_source_head_for_worktree,
+    worktree_root_for_path,
+};
 use crate::observability;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -18,6 +25,7 @@ pub struct PendingTraceCommand {
     pub raw_argv: Vec<String>,
     pub root_cmd_name: Option<String>,
     pub observed_child_commands: Vec<String>,
+    pub invocation_worktree: Option<PathBuf>,
     pub worktree: Option<PathBuf>,
     pub family_key: Option<FamilyKey>,
     pub started_at_ns: u128,
@@ -28,6 +36,8 @@ pub struct PendingTraceCommand {
     pub reflog_start_cut: Option<ReflogCut>,
     pub reflog_end_cut: Option<ReflogCut>,
     pub captured_ref_changes: Vec<RefChange>,
+    pub stash_target_oid: Option<String>,
+    pub stash_target_error: Option<String>,
     pub worktree_head_start_offset: Option<u64>,
     pub worktree_head_end_offset: Option<u64>,
     pub wrapper_mirror: bool,
@@ -49,11 +59,20 @@ pub struct TraceNormalizerState {
 pub struct DeferredRootExit {
     pub exit_code: i32,
     pub finished_at_ns: u128,
+    pub pre_repo: Option<RepoContext>,
+    pub post_repo: Option<RepoContext>,
     pub worktree_head_start_offset: Option<u64>,
     pub worktree_head_end_offset: Option<u64>,
     pub reflog_start_cut: Option<ReflogCut>,
     pub reflog_end_cut: Option<ReflogCut>,
     pub captured_ref_changes: Vec<RefChange>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OrphanTraceRoot {
+    pub root_sid: String,
+    pub raw_argv: Vec<String>,
+    pub deferred_exit_only: bool,
 }
 
 pub struct TraceNormalizer<B: GitBackend> {
@@ -80,6 +99,41 @@ impl<B: GitBackend> TraceNormalizer<B> {
             let _ = self.state.sid_to_family.remove(root_sid);
             let _ = self.state.prestart_root_cmd_names.remove(root_sid);
         }
+        removed
+    }
+
+    pub fn sweep_orphans(&mut self) -> Vec<OrphanTraceRoot> {
+        let mut removed = Vec::new();
+
+        let pending_roots = self.state.pending.keys().cloned().collect::<Vec<_>>();
+        for root_sid in pending_roots {
+            if let Some(pending) = self.remove_pending_root(&root_sid) {
+                removed.push(OrphanTraceRoot {
+                    root_sid,
+                    raw_argv: pending.raw_argv,
+                    deferred_exit_only: false,
+                });
+            }
+        }
+
+        let deferred_roots = self
+            .state
+            .deferred_exits
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for root_sid in deferred_roots {
+            self.state.deferred_exits.remove(&root_sid);
+            let _ = self.state.sid_to_worktree.remove(&root_sid);
+            let _ = self.state.sid_to_family.remove(&root_sid);
+            let _ = self.state.prestart_root_cmd_names.remove(&root_sid);
+            removed.push(OrphanTraceRoot {
+                root_sid,
+                raw_argv: Vec::new(),
+                deferred_exit_only: true,
+            });
+        }
+
         removed
     }
 
@@ -117,7 +171,9 @@ impl<B: GitBackend> TraceNormalizer<B> {
                 None => return Ok(()),
             };
 
-            let (Some(worktree), Some(family)) = (pending.worktree.as_deref(), pending.family_key.as_ref()) else {
+            let (Some(worktree), Some(family)) =
+                (pending.worktree.as_deref(), pending.family_key.as_ref())
+            else {
                 return Ok(());
             };
 
@@ -189,6 +245,24 @@ impl<B: GitBackend> TraceNormalizer<B> {
         }
     }
 
+    fn merge_pending_stash_metadata(
+        &mut self,
+        root_sid: &str,
+        stash_target_oid: Option<String>,
+        stash_target_error: Option<String>,
+    ) {
+        if let Some(pending) = self.state.pending.get_mut(root_sid) {
+            if let Some(stash_target_oid) = stash_target_oid {
+                pending.stash_target_oid = Some(stash_target_oid);
+                pending.stash_target_error = None;
+            } else if pending.stash_target_oid.is_none()
+                && let Some(stash_target_error) = stash_target_error
+            {
+                pending.stash_target_error = Some(stash_target_error);
+            }
+        }
+    }
+
     pub fn ingest_payload(
         &mut self,
         payload: &Value,
@@ -211,6 +285,11 @@ impl<B: GitBackend> TraceNormalizer<B> {
         let (payload_reflog_start, payload_reflog_end) = payload_family_reflog_cuts(payload);
         self.merge_pending_family_reflog_cuts(&root_sid, payload_reflog_start, payload_reflog_end);
         self.merge_pending_ref_changes(&root_sid, payload_reflog_changes(payload));
+        self.merge_pending_stash_metadata(
+            &root_sid,
+            payload_string_field(payload, "git_ai_stash_target_oid"),
+            payload_string_field(payload, "git_ai_stash_target_oid_error"),
+        );
 
         match event {
             "start" => self.handle_start(payload, sid, &root_sid, ts),
@@ -238,25 +317,26 @@ impl<B: GitBackend> TraceNormalizer<B> {
         }
 
         let raw_argv = payload_argv(payload);
-        let mut worktree = payload_worktree(payload)
+        let worktree = payload_worktree(payload)
             .or_else(|| worktree_from_argv(&raw_argv))
+            .or_else(|| payload_cwd(payload))
             .or_else(|| self.state.sid_to_worktree.get(root_sid).cloned());
 
-        if worktree.is_none()
-            && let Some(cwd) = payload.get("cwd").and_then(Value::as_str)
-        {
-            worktree = Some(PathBuf::from(cwd));
-        }
-
         let family_key = if let Some(worktree) = worktree.as_deref() {
-            match self.backend.resolve_family(worktree) {
-                Ok(family) => {
-                    self.state
-                        .sid_to_family
-                        .insert(root_sid.to_string(), family.clone());
-                    Some(family)
-                }
-                Err(_) => self.state.sid_to_family.get(root_sid).cloned(),
+            if let Some(common_dir) = common_dir_for_worktree(worktree) {
+                let family = FamilyKey::new(
+                    common_dir
+                        .canonicalize()
+                        .unwrap_or(common_dir)
+                        .to_string_lossy()
+                        .to_string(),
+                );
+                self.state
+                    .sid_to_family
+                    .insert(root_sid.to_string(), family.clone());
+                Some(family)
+            } else {
+                self.state.sid_to_family.get(root_sid).cloned()
             }
         } else {
             self.state.sid_to_family.get(root_sid).cloned()
@@ -274,14 +354,13 @@ impl<B: GitBackend> TraceNormalizer<B> {
         let (_invoked_command, invoked_args) =
             canonical_invocation(&raw_argv, primary_hint.as_deref());
         let rebase_original_head_hint = if primary_hint.as_deref() == Some("rebase")
-            && !args_have_rebase_control_mode(&invoked_args)
+            && !rebase_has_control_mode(&invoked_args)
         {
-            family_key
-                .as_ref()
-                .and_then(|family| {
-                    explicit_rebase_branch_arg(&invoked_args)
-                        .and_then(|branch| resolve_rebase_branch_head_hint(family, branch))
-                })
+            family_key.as_ref().and_then(|family| {
+                explicit_rebase_branch_arg(&invoked_args)
+                    .as_ref()
+                    .and_then(|branch| resolve_rebase_branch_head_hint(family, branch))
+            })
         } else {
             None
         };
@@ -297,24 +376,21 @@ impl<B: GitBackend> TraceNormalizer<B> {
         } else {
             None
         };
-        let pre_repo = if family_key.is_some()
-            && let Some(worktree) = worktree.as_deref()
-        {
-            Some(self.backend.repo_context(worktree)?)
-        } else {
-            None
-        };
+        let pre_repo = payload_repo_context(payload, "git_ai_pre_repo");
 
         let wrapper_mirror = payload
             .get("wrapper_mirror")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let stash_target_oid = payload_string_field(payload, "git_ai_stash_target_oid");
+        let stash_target_error = payload_string_field(payload, "git_ai_stash_target_oid_error");
 
         let pending = PendingTraceCommand {
             root_sid: root_sid.to_string(),
             raw_argv,
             root_cmd_name: None,
             observed_child_commands: Vec::new(),
+            invocation_worktree: worktree.clone(),
             worktree,
             family_key,
             started_at_ns,
@@ -325,6 +401,8 @@ impl<B: GitBackend> TraceNormalizer<B> {
             reflog_start_cut,
             reflog_end_cut: None,
             captured_ref_changes: Vec::new(),
+            stash_target_oid,
+            stash_target_error,
             worktree_head_start_offset,
             worktree_head_end_offset: None,
             wrapper_mirror,
@@ -343,6 +421,17 @@ impl<B: GitBackend> TraceNormalizer<B> {
             pending.root_cmd_name = Some(prestart_cmd_name);
         }
         if let Some(deferred) = self.state.deferred_exits.remove(root_sid) {
+            if let Some(pre_repo) = deferred.pre_repo
+                && let Some(pending) = self.state.pending.get_mut(root_sid)
+                && pending.pre_repo.is_none()
+            {
+                pending.pre_repo = Some(pre_repo);
+            }
+            if let Some(post_repo) = deferred.post_repo
+                && let Some(pending) = self.state.pending.get_mut(root_sid)
+            {
+                pending.post_repo = Some(post_repo);
+            }
             self.merge_pending_worktree_head_offsets(
                 root_sid,
                 deferred.worktree_head_start_offset,
@@ -366,6 +455,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
         _sid: &str,
         root_sid: &str,
     ) -> Result<Option<NormalizedCommand>, GitAiError> {
+        let payload_pre_repo = payload_repo_context(payload, "git_ai_pre_repo");
         let payload_worktree = payload
             .get("worktree")
             .or_else(|| payload.get("repo_working_dir"))
@@ -382,20 +472,41 @@ impl<B: GitBackend> TraceNormalizer<B> {
             .pending
             .get(root_sid)
             .and_then(|pending| pending.worktree.clone());
+        let prefer_def_repo_target = self
+            .state
+            .pending
+            .get(root_sid)
+            .and_then(|pending| argv_primary_command(&pending.raw_argv))
+            .is_some_and(|command| matches!(command.as_str(), "clone" | "init"));
 
         // Trace2 `def_repo.repo` may point at a common-dir `.git` path for worktrees.
-        // Keep the start/cwd-derived worktree when available and only fall back to `repo`
-        // when we have no better working-directory signal.
-        let repo = payload_worktree
-            .or(pending_worktree)
-            .or(payload_repo)
-            .ok_or_else(|| GitAiError::Generic("def_repo missing repo path".to_string()))?;
+        // For normal in-repo commands we keep the start/cwd-derived worktree when available.
+        // For clone/init the `def_repo` target is the repo we actually created and must win.
+        let repo = if prefer_def_repo_target {
+            payload_worktree
+                .or(payload_repo)
+                .or(pending_worktree)
+                .ok_or_else(|| GitAiError::Generic("def_repo missing repo path".to_string()))?
+        } else {
+            payload_worktree
+                .or(pending_worktree)
+                .or(payload_repo)
+                .ok_or_else(|| GitAiError::Generic("def_repo missing repo path".to_string()))?
+        };
 
         self.state
             .sid_to_worktree
             .insert(root_sid.to_string(), repo.clone());
 
-        let family = self.backend.resolve_family(&repo).ok();
+        let family = common_dir_for_repo_path(&repo).map(|common_dir| {
+            FamilyKey::new(
+                common_dir
+                    .canonicalize()
+                    .unwrap_or(common_dir)
+                    .to_string_lossy()
+                    .to_string(),
+            )
+        });
         if let Some(family) = family.as_ref() {
             self.state
                 .sid_to_family
@@ -404,24 +515,10 @@ impl<B: GitBackend> TraceNormalizer<B> {
         if let Some(pending) = self.state.pending.get_mut(root_sid) {
             pending.saw_def_repo = true;
             pending.worktree = Some(repo);
-            if let Some(family) = family.as_ref()
-                && pending.family_key.is_none()
-            {
+            if let Some(family) = family.as_ref() {
                 pending.family_key = Some(family.clone());
             }
-        }
-        let pre_repo_capture_worktree = self.state.pending.get(root_sid).and_then(|pending| {
-            if pending.pre_repo.is_none() && pending.family_key.is_some() {
-                pending.worktree.clone()
-            } else {
-                None
-            }
-        });
-        if let Some(worktree) = pre_repo_capture_worktree.as_deref() {
-            let pre_repo = self.backend.repo_context(worktree)?;
-            if let Some(pending) = self.state.pending.get_mut(root_sid)
-                && pending.pre_repo.is_none()
-            {
+            if pending.pre_repo.is_none() && let Some(pre_repo) = payload_pre_repo {
                 pending.pre_repo = Some(pre_repo);
             }
         }
@@ -486,6 +583,8 @@ impl<B: GitBackend> TraceNormalizer<B> {
             .or_else(|| payload.get("exit_code"))
             .and_then(Value::as_i64)
             .unwrap_or(0) as i32;
+        let payload_pre_repo = payload_repo_context(payload, "git_ai_pre_repo");
+        let payload_post_repo = payload_repo_context(payload, "git_ai_post_repo");
         let (payload_head_start, payload_head_end) = payload_worktree_head_offsets(payload);
         let payload_ref_changes = payload_reflog_changes(payload);
 
@@ -498,6 +597,8 @@ impl<B: GitBackend> TraceNormalizer<B> {
                 .or_insert(DeferredRootExit {
                     exit_code,
                     finished_at_ns,
+                    pre_repo: payload_pre_repo.clone(),
+                    post_repo: payload_post_repo.clone(),
                     worktree_head_start_offset: payload_head_start,
                     worktree_head_end_offset: payload_head_end,
                     reflog_start_cut: payload_reflog_start.clone(),
@@ -505,6 +606,12 @@ impl<B: GitBackend> TraceNormalizer<B> {
                     captured_ref_changes: payload_ref_changes.clone(),
                 });
             deferred.exit_code = exit_code;
+            if deferred.pre_repo.is_none() {
+                deferred.pre_repo = payload_pre_repo;
+            }
+            if payload_post_repo.is_some() {
+                deferred.post_repo = payload_post_repo;
+            }
             if finished_at_ns > deferred.finished_at_ns {
                 deferred.finished_at_ns = finished_at_ns;
             }
@@ -547,6 +654,17 @@ impl<B: GitBackend> TraceNormalizer<B> {
             return Ok(None);
         }
 
+        if let Some(pre_repo) = payload_pre_repo
+            && let Some(pending) = self.state.pending.get_mut(root_sid)
+            && pending.pre_repo.is_none()
+        {
+            pending.pre_repo = Some(pre_repo);
+        }
+        if let Some(post_repo) = payload_post_repo
+            && let Some(pending) = self.state.pending.get_mut(root_sid)
+        {
+            pending.post_repo = Some(post_repo);
+        }
         self.merge_pending_worktree_head_offsets(root_sid, payload_head_start, payload_head_end);
         self.merge_pending_ref_changes(root_sid, payload_ref_changes);
         trace_debug_lifecycle(&format!(
@@ -585,19 +703,15 @@ impl<B: GitBackend> TraceNormalizer<B> {
         if pending.family_key.is_none()
             && let Some(worktree) = pending.worktree.as_deref()
         {
-            pending.family_key = self.backend.resolve_family(worktree).ok();
-        }
-        if pending.pre_repo.is_none()
-            && pending.family_key.is_some()
-            && let Some(worktree) = pending.worktree.as_deref()
-        {
-            pending.pre_repo = Some(self.backend.repo_context(worktree)?);
-        }
-        if pending.post_repo.is_none()
-            && pending.family_key.is_some()
-            && let Some(worktree) = pending.worktree.as_deref()
-        {
-            pending.post_repo = Some(self.backend.repo_context(worktree)?);
+            pending.family_key = common_dir_for_worktree(worktree).map(|common_dir| {
+                FamilyKey::new(
+                    common_dir
+                        .canonicalize()
+                        .unwrap_or(common_dir)
+                        .to_string_lossy()
+                        .to_string(),
+                )
+            });
         }
 
         let mut primary_command = self.resolve_primary_hint(
@@ -611,6 +725,19 @@ impl<B: GitBackend> TraceNormalizer<B> {
             canonical_invocation(&pending.raw_argv, primary_command.as_deref());
         if primary_command.is_none() {
             primary_command = invoked_command.clone();
+        }
+        if primary_command.as_deref() == Some("stash")
+            && stash_requires_target_resolution(&invoked_args)
+            && pending.stash_target_oid.is_none()
+        {
+            return Err(GitAiError::Generic(
+                pending.stash_target_error.unwrap_or_else(|| {
+                    format!(
+                        "stash command missing pre-command stash target oid sid={} argv={:?}",
+                        pending.root_sid, pending.raw_argv
+                    )
+                }),
+            ));
         }
 
         let may_mutate_refs = command_may_mutate_refs(primary_command.as_deref());
@@ -674,7 +801,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
         };
 
         if exit_code == 0 && matches!(primary_command.as_deref(), Some("clone" | "init")) {
-            let cwd_hint = pending.worktree.as_deref();
+            let cwd_hint = pending.invocation_worktree.as_deref();
             let target_from_def_repo = pending
                 .saw_def_repo
                 .then(|| pending.worktree.clone())
@@ -686,10 +813,10 @@ impl<B: GitBackend> TraceNormalizer<B> {
             };
 
             let mut candidates = Vec::new();
-            if let Some(target) = target_from_def_repo.as_ref() {
+            if let Some(target) = target_from_argv.as_ref() {
                 candidates.push(target.clone());
             }
-            if let Some(target) = target_from_argv.as_ref() {
+            if let Some(target) = target_from_def_repo.as_ref() {
                 let duplicate = candidates.iter().any(|existing| existing == target);
                 if !duplicate {
                     candidates.push(target.clone());
@@ -699,17 +826,27 @@ impl<B: GitBackend> TraceNormalizer<B> {
             let mut resolved = false;
             let mut last_error: Option<(PathBuf, GitAiError)> = None;
             for candidate in candidates {
-                match self.backend.resolve_family(&candidate) {
-                    Ok(resolved_family) => {
-                        pending.worktree = Some(candidate);
-                        family_key = Some(resolved_family.clone());
-                        scope = CommandScope::Family(resolved_family);
-                        resolved = true;
-                        break;
-                    }
-                    Err(error) => {
-                        last_error = Some((candidate, error));
-                    }
+                if let Some(common_dir) = common_dir_for_repo_path(&candidate) {
+                    let resolved_family = FamilyKey::new(
+                        common_dir
+                            .canonicalize()
+                            .unwrap_or(common_dir)
+                            .to_string_lossy()
+                            .to_string(),
+                    );
+                    pending.worktree = Some(candidate);
+                    family_key = Some(resolved_family.clone());
+                    scope = CommandScope::Family(resolved_family);
+                    resolved = true;
+                    break;
+                } else {
+                    last_error = Some((
+                        candidate.clone(),
+                        GitAiError::Generic(format!(
+                            "failed to resolve clone/init target family from filesystem: {}",
+                            candidate.display()
+                        )),
+                    ));
                 }
             }
 
@@ -732,9 +869,10 @@ impl<B: GitBackend> TraceNormalizer<B> {
             }
         }
 
-        let inflight_rebase_original_head = family_key
-            .as_ref()
-            .and_then(|family| pending_rebase_original_head_from_inflight(&self.state, family))
+        let inflight_rebase_original_head = pending
+            .worktree
+            .as_deref()
+            .and_then(|worktree| pending_rebase_original_head_from_inflight(&self.state, worktree))
             .or(pending.rebase_original_head_hint.clone());
         let merge_squash_source_head = if exit_code == 0
             && primary_command.as_deref() == Some("merge")
@@ -774,6 +912,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
             post_repo: pending.post_repo,
             inflight_rebase_original_head,
             merge_squash_source_head,
+            stash_target_oid: pending.stash_target_oid,
             ref_changes,
             confidence,
             wrapper_mirror: pending.wrapper_mirror,
@@ -915,13 +1054,28 @@ fn payload_reflog_changes(payload: &Value) -> Vec<RefChange> {
         .unwrap_or_default()
 }
 
+fn payload_repo_context(payload: &Value, key: &str) -> Option<RepoContext> {
+    serde_json::from_value(payload.get(key)?.clone()).ok()
+}
+
+fn payload_string_field(payload: &Value, key: &str) -> Option<String> {
+    payload
+        .get(key)
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+}
+
 #[derive(Clone, Copy)]
 enum MergeCutMode {
     Min,
     Max,
 }
 
-fn merge_reflog_cut(target: &mut Option<ReflogCut>, incoming: Option<ReflogCut>, mode: MergeCutMode) {
+fn merge_reflog_cut(
+    target: &mut Option<ReflogCut>,
+    incoming: Option<ReflogCut>,
+    mode: MergeCutMode,
+) {
     let Some(incoming) = incoming else {
         return;
     };
@@ -984,6 +1138,15 @@ fn payload_worktree(payload: &Value) -> Option<PathBuf> {
         .or_else(|| payload.get("repo_working_dir"))
         .and_then(Value::as_str)
         .map(PathBuf::from)
+        .map(|path| worktree_root_for_path(&path).unwrap_or(path))
+}
+
+fn payload_cwd(payload: &Value) -> Option<PathBuf> {
+    payload
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .map(|path| worktree_root_for_path(&path).unwrap_or(path))
 }
 
 fn worktree_from_def_repo_repo(repo: &Path) -> Option<PathBuf> {
@@ -1060,7 +1223,8 @@ fn worktree_from_argv(argv: &[String]) -> Option<PathBuf> {
     let mut idx = 0;
     while idx < argv.len() {
         if argv[idx] == "-C" && idx + 1 < argv.len() {
-            return Some(PathBuf::from(argv[idx + 1].clone()));
+            let path = PathBuf::from(argv[idx + 1].clone());
+            return Some(worktree_root_for_path(&path).unwrap_or(path));
         }
         idx += 1;
     }
@@ -1141,11 +1305,6 @@ fn command_may_mutate_refs(primary_command: Option<&str>) -> bool {
     )
 }
 
-fn args_have_rebase_control_mode(args: &[String]) -> bool {
-    args.iter()
-        .any(|arg| matches!(arg.as_str(), "--continue" | "--abort" | "--skip" | "--quit"))
-}
-
 fn pending_is_non_control_rebase(pending: &PendingTraceCommand) -> bool {
     let primary = select_primary_command(
         pending.root_cmd_name.as_deref(),
@@ -1155,20 +1314,31 @@ fn pending_is_non_control_rebase(pending: &PendingTraceCommand) -> bool {
     if primary.as_deref() != Some("rebase") {
         return false;
     }
-    let (_invoked_command, invoked_args) = canonical_invocation(&pending.raw_argv, primary.as_deref());
-    !args_have_rebase_control_mode(&invoked_args)
+    let (_invoked_command, invoked_args) =
+        canonical_invocation(&pending.raw_argv, primary.as_deref());
+    !rebase_has_control_mode(&invoked_args)
 }
 
 fn pending_rebase_original_head_from_inflight(
     state: &TraceNormalizerState,
-    family: &FamilyKey,
+    worktree: &Path,
 ) -> Option<String> {
+    let target = worktree
+        .canonicalize()
+        .unwrap_or_else(|_| worktree.to_path_buf());
     state
         .pending
         .values()
-        .filter(|pending| pending.family_key.as_ref() == Some(family))
-        .filter(|pending| pending_is_non_control_rebase(pending))
         .filter_map(|pending| {
+            let pending_worktree = pending
+                .worktree
+                .as_deref()
+                .map(|path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf()));
+            Some((pending, pending_worktree?))
+        })
+        .filter(|(_, pending_worktree)| *pending_worktree == target)
+        .filter(|(pending, _)| pending_is_non_control_rebase(pending))
+        .filter_map(|(pending, _)| {
             pending
                 .pre_repo
                 .as_ref()
@@ -1180,46 +1350,6 @@ fn pending_rebase_original_head_from_inflight(
         .map(|(_, head)| head)
 }
 
-fn explicit_rebase_branch_arg(args: &[String]) -> Option<&str> {
-    let mut positionals = Vec::new();
-    let mut has_root = false;
-    let mut skip_next = false;
-    for arg in args {
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-        match arg.as_str() {
-            "--root" => {
-                has_root = true;
-                continue;
-            }
-            "--onto" | "-s" | "--strategy" | "-X" | "--strategy-option" | "-m" | "--mainline"
-            | "-S" | "--gpg-sign" => {
-                skip_next = true;
-                continue;
-            }
-            _ => {}
-        }
-        if arg.starts_with("--onto=")
-            || arg.starts_with("--strategy=")
-            || arg.starts_with("--strategy-option=")
-            || arg.starts_with("--gpg-sign=")
-        {
-            continue;
-        }
-        if arg.starts_with('-') {
-            continue;
-        }
-        positionals.push(arg.as_str());
-    }
-    if has_root {
-        positionals.first().copied()
-    } else {
-        positionals.get(1).copied()
-    }
-}
-
 fn resolve_rebase_branch_head_hint(family: &FamilyKey, branch_spec: &str) -> Option<String> {
     if is_valid_oid(branch_spec) && !is_zero_oid(branch_spec) {
         return Some(branch_spec.to_string());
@@ -1229,33 +1359,8 @@ fn resolve_rebase_branch_head_hint(family: &FamilyKey, branch_spec: &str) -> Opt
     } else {
         format!("refs/heads/{}", branch_spec)
     };
-    let common_dir = PathBuf::from(&family.0);
-    let loose_ref = common_dir.join(&ref_name);
-    if let Ok(contents) = fs::read_to_string(&loose_ref) {
-        let oid = contents.trim();
-        if is_valid_oid(oid) && !is_zero_oid(oid) {
-            return Some(oid.to_string());
-        }
-    }
-    let packed_refs = common_dir.join("packed-refs");
-    read_packed_ref_oid(&packed_refs, &ref_name)
-}
-
-fn read_packed_ref_oid(path: &Path, ref_name: &str) -> Option<String> {
-    let contents = fs::read_to_string(path).ok()?;
-    for line in contents.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with('^') {
-            continue;
-        }
-        let mut parts = line.split_whitespace();
-        let oid = parts.next()?;
-        let name = parts.next()?;
-        if name == ref_name && is_valid_oid(oid) && !is_zero_oid(oid) {
-            return Some(oid.to_string());
-        }
-    }
-    None
+    read_ref_oid_for_common_dir(&PathBuf::from(&family.0), &ref_name)
+        .filter(|oid| is_valid_oid(oid) && !is_zero_oid(oid))
 }
 
 fn select_primary_command(
@@ -1566,9 +1671,10 @@ mod tests {
     #[test]
     fn alias_commit_captures_mutation_state_at_start() {
         let backend = Arc::new(MockBackend::default());
-        backend.set_family("/repo", "/repo/.git");
-        backend.set_context("/repo", "head-a");
-        backend.set_alias("/repo", "ci", "commit");
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let worktree = temp.path().join("repo");
+        fs::create_dir_all(worktree.join(".git")).expect("create git dir");
+        backend.set_alias(worktree.to_str().expect("utf8 worktree"), "ci", "commit");
         let mut normalizer = TraceNormalizer::new(backend);
 
         let start = serde_json::json!({
@@ -1576,7 +1682,7 @@ mod tests {
             "sid":"alias-commit",
             "ts":1,
             "argv":["git","ci","-m","msg"],
-            "worktree":"/repo",
+            "worktree":worktree,
             "git_ai_family_reflog_start": {"HEAD": 10}
         });
         let exit = serde_json::json!({
@@ -1768,24 +1874,24 @@ mod tests {
     #[test]
     fn clone_relative_target_falls_back_to_argv_target_when_def_repo_candidate_fails() {
         let backend = Arc::new(MockBackend::default());
-        backend.set_family(
-            "/outer/nested/relative-clone",
-            "/outer/nested/relative-clone/.git",
-        );
         let mut normalizer = TraceNormalizer::new(backend);
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let outer = temp.path().join("outer");
+        let clone_dir = outer.join("nested").join("relative-clone");
+        fs::create_dir_all(clone_dir.join(".git")).expect("create clone git dir");
 
         let start = serde_json::json!({
             "event":"start",
             "sid":"clone-rel",
             "ts":1,
             "argv":["git","clone","ssh://example/repo.git","nested/relative-clone"],
-            "worktree":"/outer"
+            "worktree":outer
         });
         let def_repo = serde_json::json!({
             "event":"def_repo",
             "sid":"clone-rel",
             "ts":2,
-            "repo":"/outer/nested/relative-clone/.git"
+            "repo":clone_dir.join(".git")
         });
         let exit = serde_json::json!({
             "event":"exit",
@@ -1799,30 +1905,31 @@ mod tests {
         let cmd = normalizer.ingest_payload(&exit).unwrap().unwrap();
 
         assert_eq!(cmd.primary_command.as_deref(), Some("clone"));
-        assert_eq!(
-            cmd.worktree.as_ref(),
-            Some(&PathBuf::from("/outer/nested/relative-clone"))
-        );
+        assert_eq!(cmd.worktree.as_ref(), Some(&clone_dir));
         assert!(matches!(cmd.scope, CommandScope::Family(_)));
     }
 
     #[test]
     fn clone_with_late_family_resolution_does_not_error_without_reflog_start_cut() {
         let backend = Arc::new(MockBackend::default());
-        let mut normalizer = TraceNormalizer::new(backend.clone());
+        let mut normalizer = TraceNormalizer::new(backend);
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let outer = temp.path().join("outer");
+        let clone_dir = outer.join("nested").join("relative-clone");
+        fs::create_dir_all(clone_dir.parent().expect("clone parent")).expect("create clone parent");
 
         let start = serde_json::json!({
             "event":"start",
             "sid":"clone-late-family",
             "ts":1,
             "argv":["git","clone","ssh://example/repo.git","nested/relative-clone"],
-            "worktree":"/outer"
+            "worktree":outer
         });
         let def_repo = serde_json::json!({
             "event":"def_repo",
             "sid":"clone-late-family",
             "ts":2,
-            "worktree":"/outer/nested/relative-clone"
+            "worktree":clone_dir
         });
         let cmd_name = serde_json::json!({
             "event":"cmd_name",
@@ -1842,11 +1949,7 @@ mod tests {
         assert!(normalizer.ingest_payload(&cmd_name).unwrap().is_none());
 
         // Simulate repo discoverability only once clone is about to exit.
-        backend.set_family(
-            "/outer/nested/relative-clone",
-            "/outer/nested/relative-clone/.git",
-        );
-        backend.set_context("/outer/nested/relative-clone", "head-after-clone");
+        fs::create_dir_all(clone_dir.join(".git")).expect("create clone git dir");
 
         let cmd = normalizer
             .ingest_payload(&exit)
@@ -1855,6 +1958,52 @@ mod tests {
 
         assert_eq!(cmd.primary_command.as_deref(), Some("clone"));
         assert!(matches!(cmd.scope, CommandScope::Family(_)));
+    }
+
+    #[test]
+    fn clone_prefers_target_family_over_source_cwd_family() {
+        let backend = Arc::new(MockBackend::default());
+        let mut normalizer = TraceNormalizer::new(backend);
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let source_repo = temp.path().join("source-repo");
+        let cloned_repo = temp.path().join("cloned-repo");
+        fs::create_dir_all(source_repo.join(".git")).expect("create source git dir");
+        fs::create_dir_all(cloned_repo.join(".git")).expect("create cloned git dir");
+
+        let start = serde_json::json!({
+            "event":"start",
+            "sid":"clone-source-cwd",
+            "ts":1,
+            "argv":["git","clone","ssh://example/repo.git",cloned_repo],
+            "worktree":source_repo
+        });
+        let def_repo = serde_json::json!({
+            "event":"def_repo",
+            "sid":"clone-source-cwd",
+            "ts":2,
+            "repo":cloned_repo.join(".git")
+        });
+        let exit = serde_json::json!({
+            "event":"exit",
+            "sid":"clone-source-cwd",
+            "ts":3,
+            "code":0
+        });
+
+        assert!(normalizer.ingest_payload(&start).unwrap().is_none());
+        assert!(normalizer.ingest_payload(&def_repo).unwrap().is_none());
+        let cmd = normalizer.ingest_payload(&exit).unwrap().unwrap();
+
+        assert_eq!(cmd.primary_command.as_deref(), Some("clone"));
+        assert_eq!(cmd.worktree.as_ref(), Some(&cloned_repo));
+        let expected_family = cloned_repo
+            .join(".git")
+            .canonicalize()
+            .unwrap_or_else(|_| cloned_repo.join(".git"));
+        assert_eq!(
+            cmd.family_key.as_ref().map(|family| family.0.as_str()),
+            Some(expected_family.to_string_lossy().as_ref())
+        );
     }
 
     #[test]
@@ -1891,18 +2040,19 @@ mod tests {
     #[test]
     fn interleaved_roots_with_out_of_order_exits_finalize_independently() {
         let backend = Arc::new(MockBackend::default());
-        backend.set_family("/repo-a", "/repo-a/.git");
-        backend.set_context("/repo-a", "head-a");
-        backend.set_family("/repo-b", "/repo-b/.git");
-        backend.set_context("/repo-b", "head-b");
         let mut normalizer = TraceNormalizer::new(backend);
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let repo_a = temp.path().join("repo-a");
+        let repo_b = temp.path().join("repo-b");
+        fs::create_dir_all(repo_a.join(".git")).expect("create repo-a git dir");
+        fs::create_dir_all(repo_b.join(".git")).expect("create repo-b git dir");
 
         let start_a = serde_json::json!({
             "event":"start",
             "sid":"s-a",
             "ts":1,
             "argv":["git","commit","-m","a"],
-            "worktree":"/repo-a",
+            "worktree":repo_a,
             "git_ai_family_reflog_start": {"HEAD": 100}
         });
         let start_b = serde_json::json!({
@@ -1910,7 +2060,7 @@ mod tests {
             "sid":"s-b",
             "ts":2,
             "argv":["git","push","origin","main"],
-            "worktree":"/repo-b",
+            "worktree":repo_b,
             "git_ai_family_reflog_start": {"HEAD": 200}
         });
         let exit_b = serde_json::json!({
@@ -1934,13 +2084,13 @@ mod tests {
         let cmd_b = normalizer.ingest_payload(&exit_b).unwrap().unwrap();
         assert_eq!(cmd_b.root_sid, "s-b");
         assert_eq!(cmd_b.primary_command.as_deref(), Some("push"));
-        assert_eq!(cmd_b.worktree.as_deref(), Some(Path::new("/repo-b")));
+        assert_eq!(cmd_b.worktree.as_deref(), Some(repo_b.as_path()));
         assert!(matches!(cmd_b.scope, CommandScope::Family(_)));
 
         let cmd_a = normalizer.ingest_payload(&exit_a).unwrap().unwrap();
         assert_eq!(cmd_a.root_sid, "s-a");
         assert_eq!(cmd_a.primary_command.as_deref(), Some("commit"));
-        assert_eq!(cmd_a.worktree.as_deref(), Some(Path::new("/repo-a")));
+        assert_eq!(cmd_a.worktree.as_deref(), Some(repo_a.as_path()));
         assert!(matches!(cmd_a.scope, CommandScope::Family(_)));
 
         assert!(normalizer.state().pending.is_empty());
@@ -1949,24 +2099,49 @@ mod tests {
     #[test]
     fn start_ignores_repo_gitdir_hint_and_uses_cwd_for_worktree_resolution() {
         let backend = Arc::new(MockBackend::default());
-        backend.set_family("/repo-worker-b", "/family/.git");
-        backend.set_context("/repo-worker-b", "worker-head");
         let mut normalizer = TraceNormalizer::new(backend.clone());
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let repo_base = temp.path().join("repo-base");
+        let common_git_dir = repo_base.join(".git");
+        let worker_git_dir = common_git_dir.join("worktrees").join("worker-b");
+        let worker_worktree = temp.path().join("repo-worker-b");
+        let worker_head = "1111111111111111111111111111111111111111";
+        fs::create_dir_all(common_git_dir.join("refs").join("heads"))
+            .expect("create common refs/heads");
+        fs::create_dir_all(&worker_git_dir).expect("create linked worktree git dir");
+        fs::create_dir_all(&worker_worktree).expect("create worker worktree");
+        fs::write(
+            worker_worktree.join(".git"),
+            format!("gitdir: {}\n", worker_git_dir.display()),
+        )
+        .expect("write linked worktree .git pointer");
+        fs::write(worker_git_dir.join("HEAD"), "ref: refs/heads/worker-b\n")
+            .expect("write worker HEAD");
+        fs::write(
+            common_git_dir.join("refs").join("heads").join("worker-b"),
+            format!("{worker_head}\n"),
+        )
+        .expect("write worker branch ref");
 
         let start = serde_json::json!({
             "event":"start",
             "sid":"s-repo-field",
             "ts":1,
             "argv":["git","commit","-m","msg"],
-            "repo":"/repo-base/.git",
-            "cwd":"/repo-worker-b",
+            "repo":common_git_dir,
+            "cwd":worker_worktree,
+            "git_ai_pre_repo": {
+                "head": worker_head,
+                "branch": "worker-b",
+                "detached": false
+            },
             "git_ai_family_reflog_start": {"HEAD": 300}
         });
         let def_repo = serde_json::json!({
             "event":"def_repo",
             "sid":"s-repo-field",
             "ts":2,
-            "repo":"/repo-base/.git/worktrees/worker-b"
+            "repo":worker_git_dir
         });
         let cmd_name = serde_json::json!({
             "event":"cmd_name",
@@ -1989,13 +2164,139 @@ mod tests {
         let cmd = normalizer.ingest_payload(&exit).unwrap().unwrap();
         assert_eq!(
             cmd.pre_repo.as_ref().and_then(|repo| repo.head.as_deref()),
-            Some("worker-head")
+            Some(worker_head)
         );
-        assert_eq!(
-            cmd.post_repo.as_ref().and_then(|repo| repo.head.as_deref()),
-            Some("worker-head")
-        );
-        assert_eq!(cmd.worktree.as_deref(), Some(Path::new("/repo-worker-b")));
+        assert!(cmd.post_repo.is_none());
+        assert_eq!(cmd.worktree.as_deref(), Some(worker_worktree.as_path()));
     }
 
+    #[test]
+    fn stash_target_oid_can_arrive_after_start_on_def_repo() {
+        let backend = Arc::new(MockBackend::default());
+        let mut normalizer = TraceNormalizer::new(backend);
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(repo.join(".git")).expect("create git dir");
+
+        let start = serde_json::json!({
+            "event":"start",
+            "sid":"stash-late-meta",
+            "ts":1,
+            "argv":["git","stash","pop"],
+            "git_ai_family_reflog_start": {"refs/stash": 9}
+        });
+        let def_repo = serde_json::json!({
+            "event":"def_repo",
+            "sid":"stash-late-meta",
+            "ts":2,
+            "worktree":repo,
+            "git_ai_stash_target_oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        });
+        let exit = serde_json::json!({
+            "event":"exit",
+            "sid":"stash-late-meta",
+            "ts":3,
+            "code":0,
+            "git_ai_family_reflog_start": {"refs/stash": 9},
+            "git_ai_family_reflog_end": {"refs/stash": 9}
+        });
+
+        assert!(normalizer.ingest_payload(&start).unwrap().is_none());
+        assert!(normalizer.ingest_payload(&def_repo).unwrap().is_none());
+        let cmd = normalizer.ingest_payload(&exit).unwrap().unwrap();
+
+        assert_eq!(
+            cmd.stash_target_oid.as_deref(),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+    }
+
+    #[test]
+    fn destructive_stash_requires_pre_command_target_oid() {
+        let backend = Arc::new(MockBackend::default());
+        let mut normalizer = TraceNormalizer::new(backend);
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(repo.join(".git")).expect("create git dir");
+
+        let start = serde_json::json!({
+            "event":"start",
+            "sid":"stash-missing-meta",
+            "ts":1,
+            "argv":["git","stash","pop"],
+            "worktree":repo,
+            "git_ai_family_reflog_start": {"refs/stash": 11}
+        });
+        let exit = serde_json::json!({
+            "event":"exit",
+            "sid":"stash-missing-meta",
+            "ts":2,
+            "code":0,
+            "git_ai_family_reflog_end": {"refs/stash": 11}
+        });
+
+        assert!(normalizer.ingest_payload(&start).unwrap().is_none());
+        let error = normalizer
+            .ingest_payload(&exit)
+            .expect_err("missing stash metadata should error");
+        assert!(
+            error
+                .to_string()
+                .contains("missing pre-command stash target oid"),
+            "unexpected error: {}",
+            error
+        );
+    }
+
+    #[test]
+    fn pre_repo_can_arrive_after_start_on_def_repo() {
+        let backend = Arc::new(MockBackend::default());
+        let mut normalizer = TraceNormalizer::new(backend);
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(repo.join(".git/refs/heads")).expect("create git refs");
+        fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").expect("write HEAD");
+        fs::write(
+            repo.join(".git/refs/heads/main"),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+        )
+        .expect("write main ref");
+
+        let start = serde_json::json!({
+            "event":"start",
+            "sid":"pre-repo-def-repo",
+            "ts":1,
+            "argv":["git","status"]
+        });
+        let def_repo = serde_json::json!({
+            "event":"def_repo",
+            "sid":"pre-repo-def-repo",
+            "ts":2,
+            "worktree":repo,
+            "git_ai_pre_repo": {
+                "head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "branch":"main",
+                "detached":false
+            }
+        });
+        let exit = serde_json::json!({
+            "event":"exit",
+            "sid":"pre-repo-def-repo",
+            "ts":3,
+            "code":0
+        });
+
+        assert!(normalizer.ingest_payload(&start).unwrap().is_none());
+        assert!(normalizer.ingest_payload(&def_repo).unwrap().is_none());
+        let cmd = normalizer.ingest_payload(&exit).unwrap().unwrap();
+
+        assert_eq!(
+            cmd.pre_repo.as_ref().and_then(|repo| repo.head.as_deref()),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+        assert_eq!(
+            cmd.pre_repo.as_ref().and_then(|repo| repo.branch.as_deref()),
+            Some("main")
+        );
+    }
 }

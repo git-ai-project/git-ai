@@ -9,6 +9,7 @@ use git_ai::git::repo_storage::PersistedWorkingLog;
 use git_ai::git::repository as GitAiRepository;
 use git_ai::observability::wrapper_performance_targets::BenchmarkResult;
 use insta::{Settings, assert_debug_snapshot};
+use interprocess::local_socket::LocalSocketStream;
 use rand::Rng;
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -16,7 +17,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -74,6 +75,7 @@ struct DaemonProcess {
     control_socket_path: PathBuf,
     trace_socket_path: PathBuf,
     stderr_log_path: PathBuf,
+    idle_wait_lock: Arc<Mutex<()>>,
 }
 
 impl DaemonProcess {
@@ -134,6 +136,7 @@ impl DaemonProcess {
             control_socket_path,
             trace_socket_path,
             stderr_log_path,
+            idle_wait_lock: Arc::new(Mutex::new(())),
         };
         if let Err(error) = daemon.wait_until_ready(repo_path, &mut child) {
             let _ = child.kill();
@@ -190,7 +193,15 @@ impl DaemonProcess {
                     },
                 );
                 match status {
-                    Ok(_) => return Ok(()),
+                    Ok(_) => {
+                        if LocalSocketStream::connect(
+                            self.trace_socket_path.to_string_lossy().as_ref(),
+                        )
+                        .is_ok()
+                        {
+                            return Ok(());
+                        }
+                    }
                     Err(error) => {
                         last_status_error = Some(error.to_string());
                     }
@@ -206,9 +217,7 @@ impl DaemonProcess {
             self.trace_socket_path.display(),
             saw_control_socket,
             saw_trace_socket,
-            last_status_error
-                .as_deref()
-                .unwrap_or("none")
+            last_status_error.as_deref().unwrap_or("none")
         ) + &stderr_tail)
     }
 
@@ -236,113 +245,24 @@ impl DaemonProcess {
     }
 
     fn wait_for_repo_idle(&self, repo_working_dir: &str) -> Result<(), String> {
-        let mut last_latest_seq = 0_u64;
-        let mut last_backlog = 0_u64;
-        let mut last_pending_roots = 0_u64;
-        let mut last_effect_queue_depth = 0_u64;
-        let mut stable_idle_polls = 0_u8;
-
-        for _ in 0..800 {
-            let status = send_control_request(
-                &self.control_socket_path,
-                &ControlRequest::StatusFamily {
-                    repo_working_dir: repo_working_dir.to_string(),
-                },
-            )
-            .map_err(|e| format!("status request failed: {}", e))?;
-            if !status.ok {
-                return Err(status
-                    .error
-                    .unwrap_or_else(|| "status request returned not ok".to_string()));
-            }
-            let latest_seq = status
-                .data
-                .as_ref()
-                .and_then(|v| v.get("latest_seq"))
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-
-            if latest_seq > 0 {
-                let barrier = send_control_request(
-                    &self.control_socket_path,
-                    &ControlRequest::BarrierAppliedThroughSeq {
-                        repo_working_dir: repo_working_dir.to_string(),
-                        seq: latest_seq,
-                    },
-                )
-                .map_err(|e| format!("barrier request failed: {}", e))?;
-                if !barrier.ok {
-                    return Err(barrier
-                        .error
-                        .unwrap_or_else(|| "barrier request returned not ok".to_string()));
-                }
-            }
-
-            let settled = send_control_request(
-                &self.control_socket_path,
-                &ControlRequest::StatusFamily {
-                    repo_working_dir: repo_working_dir.to_string(),
-                },
-            )
-            .map_err(|e| format!("settled status request failed: {}", e))?;
-            if !settled.ok {
-                return Err(settled
-                    .error
-                    .unwrap_or_else(|| "settled status request returned not ok".to_string()));
-            }
-            let settled_latest = settled
-                .data
-                .as_ref()
-                .and_then(|v| v.get("latest_seq"))
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            let settled_backlog = settled
-                .data
-                .as_ref()
-                .and_then(|v| v.get("backlog"))
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            let settled_pending_roots = settled
-                .data
-                .as_ref()
-                .and_then(|v| v.get("pending_roots"))
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            let settled_effect_queue_depth = settled
-                .data
-                .as_ref()
-                .and_then(|v| v.get("effect_queue_depth"))
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            last_backlog = settled_backlog;
-            last_pending_roots = settled_pending_roots;
-            last_effect_queue_depth = settled_effect_queue_depth;
-
-            if settled_backlog == 0
-                && settled_pending_roots == 0
-                && settled_effect_queue_depth == 0
-                && settled_latest == last_latest_seq
-            {
-                stable_idle_polls = stable_idle_polls.saturating_add(1);
-                if stable_idle_polls >= 2 {
-                    return Ok(());
-                }
-            } else {
-                stable_idle_polls = 0;
-            }
-
-            last_latest_seq = settled_latest;
-            thread::sleep(Duration::from_millis(10));
+        let _guard = self
+            .idle_wait_lock
+            .lock()
+            .map_err(|_| "idle wait lock poisoned".to_string())?;
+        let settled = send_control_request(
+            &self.control_socket_path,
+            &ControlRequest::WaitFamilyIdle {
+                repo_working_dir: repo_working_dir.to_string(),
+                timeout_ms: Some(8_000),
+            },
+        )
+        .map_err(|e| format!("wait.family_idle request failed: {}", e))?;
+        if settled.ok {
+            return Ok(());
         }
-
-        Err(format!(
-            "daemon did not settle for repo {} (latest seq={}, backlog={}, pending_roots={}, effect_queue_depth={})",
-            repo_working_dir,
-            last_latest_seq,
-            last_backlog,
-            last_pending_roots,
-            last_effect_queue_depth
-        ))
+        Err(settled
+            .error
+            .unwrap_or_else(|| "wait.family_idle returned not ok".to_string()))
     }
 
     fn shutdown(&self) {
@@ -1020,12 +940,12 @@ impl TestRepo {
         Self::new_at_path_with_mode(path, GitTestMode::from_env())
     }
 
-    pub fn new_at_path_with_mode(path: &PathBuf, git_mode: GitTestMode) -> Self {
+    pub fn new_at_path_with_mode(path: &Path, git_mode: GitTestMode) -> Self {
         Self::new_at_path_with_mode_and_daemon_scope(path, git_mode, DaemonTestScope::Shared)
     }
 
     pub fn new_at_path_with_mode_and_daemon_scope(
-        path: &PathBuf,
+        path: &Path,
         git_mode: GitTestMode,
         daemon_scope: DaemonTestScope,
     ) -> Self {
@@ -1761,7 +1681,8 @@ impl Drop for TestRepo {
             daemon.shutdown();
         }
 
-        let remove_test_db = !(self.git_mode.uses_daemon() && self.daemon_scope == DaemonTestScope::Shared);
+        let remove_test_db =
+            !(self.git_mode.uses_daemon() && self.daemon_scope == DaemonTestScope::Shared);
 
         if let Some(base_path) = &self._base_repo_path {
             let _ = Command::new(real_git_executable())
@@ -1785,7 +1706,8 @@ impl Drop for TestRepo {
             }
 
             if remove_test_db {
-                let _ = remove_dir_all_with_retry(&self.test_db_path, 40, Duration::from_millis(25));
+                let _ =
+                    remove_dir_all_with_retry(&self.test_db_path, 40, Duration::from_millis(25));
             }
             let _ = remove_dir_all_with_retry(&self.test_home, 40, Duration::from_millis(25));
             return;
@@ -1892,6 +1814,7 @@ impl NewCommit {
 static DEFAULT_BRANCH_NAME: OnceLock<String> = OnceLock::new();
 static TEMPLATE_REPO: OnceLock<PathBuf> = OnceLock::new();
 static TEMPLATE_BARE_REPO: OnceLock<PathBuf> = OnceLock::new();
+static COMPILED_BINARY: OnceLock<PathBuf> = OnceLock::new();
 
 pub(crate) fn real_git_executable() -> &'static str {
     git_ai::config::Config::get().git_cmd()

@@ -59,8 +59,13 @@ fn handle_run(args: &[String]) -> Result<(), String> {
     }
     let config = DaemonConfig::from_default_paths().map_err(|e| e.to_string())?;
     let runtime_dir = daemon_runtime_dir(&config)?;
-    std::env::set_current_dir(&runtime_dir)
-        .map_err(|e| format!("failed to set daemon runtime cwd to {}: {}", runtime_dir.display(), e))?;
+    std::env::set_current_dir(&runtime_dir).map_err(|e| {
+        format!(
+            "failed to set daemon runtime cwd to {}: {}",
+            runtime_dir.display(),
+            e
+        )
+    })?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

@@ -3,7 +3,8 @@ use crate::daemon::domain::{
     AnalysisResult, CommandClass, Confidence, NormalizedCommand, ResetKind, SemanticEvent,
 };
 use crate::error::GitAiError;
-use crate::git::cli_parser::parse_git_cli_args;
+use crate::git::cli_parser::{explicit_rebase_branch_arg, parse_git_cli_args};
+use crate::git::repo_state::is_valid_git_oid;
 use std::path::Path;
 
 #[derive(Default)]
@@ -22,8 +23,19 @@ impl CommandAnalyzer for HistoryAnalyzer {
         match name {
             "commit" => {
                 let amend = args.iter().any(|arg| arg == "--amend");
-                let post_head = non_empty_opt(cmd.post_repo.as_ref().and_then(|repo| repo.head.clone()));
-                if let Some((old_head, new_head)) = head_change(cmd, state.refs) {
+                let post_head =
+                    non_empty_opt(cmd.post_repo.as_ref().and_then(|repo| repo.head.clone()));
+                if let Some((mut old_head, new_head)) = head_change(cmd, state.refs) {
+                    if amend
+                        && (!is_valid_git_oid(&old_head) || is_zero_oid(&old_head))
+                        && let Some(pre_head) =
+                            non_empty_opt(cmd.pre_repo.as_ref().and_then(|repo| repo.head.clone()))
+                        && is_valid_git_oid(&pre_head)
+                        && !is_zero_oid(&pre_head)
+                        && pre_head != new_head
+                    {
+                        old_head = pre_head;
+                    }
                     if amend {
                         events.push(SemanticEvent::CommitAmended { old_head, new_head });
                     } else {
@@ -36,15 +48,14 @@ impl CommandAnalyzer for HistoryAnalyzer {
                     && let Some(new_head) = post_head
                 {
                     if amend {
-                        let old_head =
-                            old_head_from_branch_ref_changes(cmd)
-                                .or_else(|| {
-                                    non_empty_opt(
-                                        cmd.pre_repo.as_ref().and_then(|repo| repo.head.clone()),
-                                    )
-                                })
-                                .or_else(|| old_head_from_refs(cmd, state.refs))
-                                .filter(|old| old != &new_head);
+                        let old_head = old_head_from_branch_ref_changes(cmd)
+                            .or_else(|| {
+                                non_empty_opt(
+                                    cmd.pre_repo.as_ref().and_then(|repo| repo.head.clone()),
+                                )
+                            })
+                            .or_else(|| old_head_from_refs(cmd, state.refs))
+                            .filter(|old| old != &new_head);
                         if let Some(old_head) = old_head {
                             events.push(SemanticEvent::CommitAmended { old_head, new_head });
                         } else {
@@ -419,47 +430,6 @@ fn explicit_rebase_branch_change(cmd: &NormalizedCommand) -> Option<(String, Str
         .map(|change| (change.old.trim().to_string(), change.new.trim().to_string()))
 }
 
-fn explicit_rebase_branch_arg(args: &[String]) -> Option<&str> {
-    let mut positionals = Vec::new();
-    let mut has_root = false;
-    let mut skip_next = false;
-    for arg in args {
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-        match arg.as_str() {
-            "--continue" | "--abort" | "--skip" | "--quit" => return None,
-            "--root" => {
-                has_root = true;
-                continue;
-            }
-            "--onto" | "-s" | "--strategy" | "-X" | "--strategy-option" | "-m" | "--mainline"
-            | "-S" | "--gpg-sign" => {
-                skip_next = true;
-                continue;
-            }
-            _ => {}
-        }
-        if arg.starts_with("--onto=")
-            || arg.starts_with("--strategy=")
-            || arg.starts_with("--strategy-option=")
-            || arg.starts_with("--gpg-sign=")
-        {
-            continue;
-        }
-        if arg.starts_with('-') {
-            continue;
-        }
-        positionals.push(arg.as_str());
-    }
-    if has_root {
-        positionals.first().copied()
-    } else {
-        positionals.get(1).copied()
-    }
-}
-
 fn change_span(changes: &[&crate::daemon::domain::RefChange]) -> Option<(String, String)> {
     let first = changes.first()?;
     let last = changes.last()?;
@@ -513,6 +483,7 @@ mod tests {
             post_repo: None,
             inflight_rebase_original_head: None,
             merge_squash_source_head: None,
+            stash_target_oid: None,
             ref_changes: vec![RefChange {
                 reference: "HEAD".to_string(),
                 old: "a".to_string(),
@@ -540,6 +511,55 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, SemanticEvent::CommitCreated { .. }))
         );
+    }
+
+    #[test]
+    fn amend_prefers_pre_head_over_zero_old_reflog_change() {
+        let analyzer = HistoryAnalyzer;
+        let mut cmd = command("commit", &["git", "commit", "--amend", "-m", "x"]);
+        cmd.pre_repo = Some(crate::daemon::domain::RepoContext {
+            head: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
+            branch: Some("main".to_string()),
+            detached: false,
+        });
+        cmd.post_repo = Some(crate::daemon::domain::RepoContext {
+            head: Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string()),
+            branch: Some("main".to_string()),
+            detached: false,
+        });
+        cmd.ref_changes = vec![
+            RefChange {
+                reference: "refs/heads/main".to_string(),
+                old: "0000000000000000000000000000000000000000".to_string(),
+                new: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            },
+            RefChange {
+                reference: "refs/heads/main".to_string(),
+                old: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                new: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+            },
+            RefChange {
+                reference: "HEAD".to_string(),
+                old: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                new: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+            },
+        ];
+
+        let result = analyzer
+            .analyze(
+                &cmd,
+                AnalysisView {
+                    refs: &Default::default(),
+                },
+            )
+            .unwrap();
+
+        assert!(result.events.iter().any(|event| matches!(
+            event,
+            SemanticEvent::CommitAmended { old_head, new_head }
+                if old_head == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    && new_head == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        )));
     }
 
     #[test]
@@ -856,9 +876,7 @@ mod tests {
             branch: Some("main".to_string()),
             detached: false,
         });
-        cmd.merge_squash_source_head = Some(
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
-        );
+        cmd.merge_squash_source_head = Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string());
 
         let result = analyzer
             .analyze(

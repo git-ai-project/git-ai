@@ -1,3 +1,4 @@
+#[path = "integration/repos/mod.rs"]
 mod repos;
 
 use git_ai::daemon::{ControlRequest, DaemonConfig, send_control_request};

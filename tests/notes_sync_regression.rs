@@ -1,4 +1,5 @@
 #[macro_use]
+#[path = "integration/repos/mod.rs"]
 mod repos;
 
 use git_ai::daemon::{ControlRequest, send_control_request};
@@ -6,8 +7,7 @@ use repos::test_repo::{GitTestMode, TestRepo, real_git_executable};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn unique_temp_path(prefix: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -45,113 +45,29 @@ fn sync_daemon_repo_if_needed(mode: GitTestMode, repo: &TestRepo, repo_working_d
 
     let socket_path = daemon_control_socket_path(repo);
     let repo_working_dir = repo_working_dir.to_string_lossy().to_string();
-    let mut last_latest_seq = 0_u64;
-    let mut stable_idle_polls = 0_u8;
-    let mut saw_activity = false;
-
-    for _ in 0..800 {
-        let status = send_control_request(
-            &socket_path,
-            &ControlRequest::StatusFamily {
-                repo_working_dir: repo_working_dir.clone(),
-            },
-        )
-        .unwrap_or_else(|err| {
-            panic!(
-                "daemon status request failed for {} via {}: {}",
-                repo_working_dir,
-                socket_path.display(),
-                err
-            )
-        });
-        assert!(
-            status.ok,
-            "daemon status failed for {}: {}",
+    let settled = send_control_request(
+        &socket_path,
+        &ControlRequest::WaitFamilyIdle {
+            repo_working_dir: repo_working_dir.clone(),
+            timeout_ms: Some(8_000),
+        },
+    )
+    .unwrap_or_else(|err| {
+        panic!(
+            "daemon wait.family_idle failed for {} via {}: {}",
             repo_working_dir,
-            status
-                .error
-                .clone()
-                .unwrap_or_else(|| "unknown daemon status error".to_string())
-        );
-
-        let latest_seq = status
-            .data
-            .as_ref()
-            .and_then(|v| v.get("latest_seq"))
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        if latest_seq > 0 {
-            saw_activity = true;
-        }
-        let backlog = status
-            .data
-            .as_ref()
-            .and_then(|v| v.get("backlog"))
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        let pending_roots = status
-            .data
-            .as_ref()
-            .and_then(|v| v.get("pending_roots"))
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-
-        if latest_seq > 0 {
-            let barrier = send_control_request(
-                &socket_path,
-                &ControlRequest::BarrierAppliedThroughSeq {
-                    repo_working_dir: repo_working_dir.clone(),
-                    seq: latest_seq,
-                },
-            )
-            .unwrap_or_else(|err| {
-                panic!(
-                    "daemon barrier request failed for {} via {}: {}",
-                    repo_working_dir,
-                    socket_path.display(),
-                    err
-                )
-            });
-            assert!(
-                barrier.ok,
-                "daemon barrier failed for {}: {}",
-                repo_working_dir,
-                barrier
-                    .error
-                    .clone()
-                    .unwrap_or_else(|| "unknown daemon barrier error".to_string())
-            );
-
-            let applied_seq = barrier.applied_seq.unwrap_or(0);
-            if applied_seq < latest_seq {
-                stable_idle_polls = 0;
-                thread::sleep(Duration::from_millis(10));
-                continue;
-            }
-        }
-
-        if saw_activity
-            && backlog == 0
-            && pending_roots == 0
-            && latest_seq == last_latest_seq
-        {
-            stable_idle_polls = stable_idle_polls.saturating_add(1);
-            if stable_idle_polls >= 2 {
-                return;
-            }
-        } else {
-            stable_idle_polls = 0;
-        }
-
-        last_latest_seq = latest_seq;
-        thread::sleep(Duration::from_millis(10));
-    }
-
-    panic!(
-        "daemon did not settle for repo {} via {} (saw_activity={})",
+            socket_path.display(),
+            err
+        )
+    });
+    assert!(
+        settled.ok,
+        "daemon wait.family_idle failed for {}: {}",
         repo_working_dir,
-        socket_path.display(),
-        saw_activity
+        settled
+            .error
+            .clone()
+            .unwrap_or_else(|| "unknown daemon wait.family_idle error".to_string())
     );
 }
 

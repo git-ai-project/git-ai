@@ -1,8 +1,11 @@
 #[macro_use]
+#[path = "integration/repos/mod.rs"]
 mod repos;
 
 use git_ai::authorship::working_log::CheckpointKind;
-use git_ai::daemon::{ControlRequest, ControlResponse, DaemonConfig, DaemonLock, send_control_request};
+use git_ai::daemon::{
+    ControlRequest, ControlResponse, DaemonConfig, DaemonLock, send_control_request,
+};
 use interprocess::local_socket::LocalSocketStream;
 use repos::test_file::ExpectedLineExt;
 use repos::test_repo::{GitTestMode, TestRepo, get_binary_path, real_git_executable};
@@ -43,6 +46,24 @@ fn daemon_lock_path(repo: &TestRepo) -> PathBuf {
 fn send_trace_frames(trace_socket_path: &Path, payloads: &[Value]) {
     let mut stream = LocalSocketStream::connect(trace_socket_path.to_string_lossy().as_ref())
         .expect("failed to connect to trace socket");
+    for payload in payloads {
+        let raw = serde_json::to_string(payload).expect("failed to serialize trace payload");
+        stream
+            .write_all(raw.as_bytes())
+            .expect("failed to write trace payload");
+        stream
+            .write_all(b"\n")
+            .expect("failed to write trace newline");
+    }
+    stream.flush().expect("failed to flush trace payloads");
+}
+
+fn open_trace_stream(trace_socket_path: &Path) -> LocalSocketStream {
+    LocalSocketStream::connect(trace_socket_path.to_string_lossy().as_ref())
+        .expect("failed to connect to trace socket")
+}
+
+fn write_trace_frames(stream: &mut LocalSocketStream, payloads: &[Value]) {
     for payload in payloads {
         let raw = serde_json::to_string(payload).expect("failed to serialize trace payload");
         stream
@@ -102,68 +123,21 @@ impl DaemonGuard {
     }
 
     fn latest_seq_and_wait_idle(&self) -> u64 {
-        let mut last_latest_seq = 0_u64;
-        let mut stable_idle_polls = 0_u8;
-
-        for _ in 0..200 {
-            let status = self.request(ControlRequest::StatusFamily {
-                repo_working_dir: self.repo_working_dir.clone(),
-            });
-            assert!(status.ok, "status request should succeed");
-            let latest_seq = status
-                .data
-                .as_ref()
-                .and_then(|v| v.get("latest_seq"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-
-            if latest_seq > 0 {
-                let barrier = self.request(ControlRequest::BarrierAppliedThroughSeq {
-                    repo_working_dir: self.repo_working_dir.clone(),
-                    seq: latest_seq,
-                });
-                assert!(barrier.ok, "barrier request should succeed");
-            }
-
-            let settled = self.request(ControlRequest::StatusFamily {
-                repo_working_dir: self.repo_working_dir.clone(),
-            });
-            assert!(settled.ok, "settled status request should succeed");
-            let settled_latest = settled
-                .data
-                .as_ref()
-                .and_then(|v| v.get("latest_seq"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let settled_backlog = settled
-                .data
-                .as_ref()
-                .and_then(|v| v.get("backlog"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let settled_effect_queue = settled
-                .data
-                .as_ref()
-                .and_then(|v| v.get("effect_queue_depth"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-
-            if settled_backlog == 0
-                && settled_effect_queue == 0
-                && settled_latest == last_latest_seq
-            {
-                stable_idle_polls = stable_idle_polls.saturating_add(1);
-                if stable_idle_polls >= 2 {
-                    return settled_latest;
-                }
-            } else {
-                stable_idle_polls = 0;
-            }
-            last_latest_seq = settled_latest;
-            thread::sleep(Duration::from_millis(25));
-        }
-
-        last_latest_seq
+        let settled = self.request(ControlRequest::WaitFamilyIdle {
+            repo_working_dir: self.repo_working_dir.clone(),
+            timeout_ms: Some(8_000),
+        });
+        assert!(settled.ok, "wait.family_idle should succeed");
+        let status = self.request(ControlRequest::StatusFamily {
+            repo_working_dir: self.repo_working_dir.clone(),
+        });
+        assert!(status.ok, "status request should succeed");
+        status
+            .data
+            .as_ref()
+            .and_then(|v| v.get("latest_seq"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
     }
 
     fn family_state_snapshot(&self) -> Value {
@@ -399,7 +373,7 @@ fn assert_blame_lines_for_workdir(
         });
     let actual: Vec<(String, String)> = blame_output
         .lines()
-        .filter(|line| !line.trim().is_empty())
+        .filter(|line: &&str| !line.trim().is_empty())
         .map(parse_blame_line)
         .collect();
     assert_eq!(
@@ -752,6 +726,102 @@ fn daemon_trace_ingest_treats_atexit_as_terminal_for_reflog_capture() {
                 && command.get("exit_code").and_then(Value::as_i64) == Some(1)
         }),
         "atexit terminal frames should still produce a tracked commit command"
+    );
+}
+
+#[test]
+#[serial]
+fn daemon_status_family_ignores_open_roots_from_other_families() {
+    let repo_a = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let repo_b = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let daemon = DaemonGuard::start(&repo_a);
+    let mut trace_stream = open_trace_stream(&daemon.trace_socket_path);
+
+    write_trace_frames(
+        &mut trace_stream,
+        &[serde_json::json!({
+            "event":"start",
+            "sid":"family-b-open-root",
+            "ts":1,
+            "argv":["git","status"],
+            "cwd":repo_b.path().to_string_lossy().to_string(),
+        })],
+    );
+
+    let status_a = daemon.request(ControlRequest::StatusFamily {
+        repo_working_dir: repo_workdir_string(&repo_a),
+    });
+    assert!(status_a.ok, "family A status should succeed");
+    let status_a_data = status_a
+        .data
+        .as_ref()
+        .expect("family A status should include data");
+    assert_eq!(
+        status_a_data.get("backlog").and_then(Value::as_u64),
+        Some(0),
+        "family A backlog should ignore family B roots: {}",
+        status_a_data
+    );
+    assert_eq!(
+        status_a_data.get("pending_roots").and_then(Value::as_u64),
+        Some(0),
+        "family A pending_roots should ignore family B roots: {}",
+        status_a_data
+    );
+
+    let status_b = daemon.request(ControlRequest::StatusFamily {
+        repo_working_dir: repo_workdir_string(&repo_b),
+    });
+    assert!(status_b.ok, "family B status should succeed");
+    let status_b_data = status_b
+        .data
+        .as_ref()
+        .expect("family B status should include data");
+    assert_eq!(
+        status_b_data.get("pending_roots").and_then(Value::as_u64),
+        Some(1),
+        "family B should report its own open root: {}",
+        status_b_data
+    );
+}
+
+#[test]
+#[serial]
+fn daemon_checkpoint_wait_is_not_blocked_by_other_family_open_root() {
+    let repo_a = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let repo_b = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let daemon = DaemonGuard::start(&repo_a);
+    let mut trace_stream = open_trace_stream(&daemon.trace_socket_path);
+
+    write_trace_frames(
+        &mut trace_stream,
+        &[serde_json::json!({
+            "event":"start",
+            "sid":"family-b-open-root-for-checkpoint",
+            "ts":1,
+            "argv":["git","status"],
+            "cwd":repo_b.path().to_string_lossy().to_string(),
+        })],
+    );
+
+    let response = daemon.request(ControlRequest::CheckpointRun {
+        request: Box::new(git_ai::daemon::CheckpointRunRequest {
+            repo_working_dir: repo_workdir_string(&repo_a),
+            author: Some("mock_ai".to_string()),
+            quiet: Some(true),
+            ..Default::default()
+        }),
+        wait: Some(true),
+    });
+    assert!(
+        response.ok,
+        "family A checkpoint should not wait on family B open root: {:?}",
+        response
+    );
+    assert!(
+        response.applied_seq.is_some(),
+        "checkpoint wait should return an applied sequence: {:?}",
+        response
     );
 }
 
@@ -2160,6 +2230,33 @@ fn daemon_pure_trace_socket_parallel_worktree_streams_preserve_exact_line_attrib
         .expect("parallel worker-b thread should not panic");
 
     daemon.latest_seq_and_wait_idle();
+
+    let family_state = daemon.family_state_snapshot();
+    let commit_events = family_state
+        .get("rewrite_events")
+        .and_then(Value::as_array)
+        .expect("family state should contain rewrite events")
+        .iter()
+        .filter_map(|event| {
+            event
+                .get("commit")
+                .and_then(Value::as_object)
+                .and_then(|commit| commit.get("commit_sha"))
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        commit_events.len(),
+        2,
+        "parallel worktree commits should emit two commit rewrite events: {:?}",
+        commit_events
+    );
+    assert_ne!(
+        commit_events[0], commit_events[1],
+        "parallel worktree commits should preserve distinct commit SHAs: {:?}",
+        commit_events
+    );
 
     for idx in 0..file_count {
         let file_a = format!("daemon-race-parallel-a-{idx}.txt");

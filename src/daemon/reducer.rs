@@ -174,6 +174,7 @@ mod tests {
             post_repo: None,
             inflight_rebase_original_head: None,
             merge_squash_source_head: None,
+            stash_target_oid: None,
             ref_changes: vec![RefChange {
                 reference: "refs/heads/main".to_string(),
                 old: "".to_string(),
@@ -223,9 +224,7 @@ mod tests {
 
     #[test]
     fn global_reducer_never_drops_commands() {
-        let mut state = GlobalState {
-            applied_seq: 0,
-        };
+        let mut state = GlobalState { applied_seq: 0 };
         let registry = AnalyzerRegistry::new();
         let (applied, _analysis) =
             reduce_global_command(&mut state, normalized(), &registry).unwrap();

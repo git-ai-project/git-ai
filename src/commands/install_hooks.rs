@@ -208,7 +208,6 @@ fn maybe_configure_async_mode_daemon_trace2(dry_run: bool) -> Result<(), GitAiEr
         TRACE2_EVENT_NESTING_VALUE,
         dry_run,
     )?;
-
     Ok(())
 }
 

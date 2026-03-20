@@ -1,14 +1,23 @@
 use crate::config;
+use crate::daemon::domain::RepoContext;
 use crate::daemon::git_backend::GitBackend;
 use crate::error::GitAiError;
-use crate::git::cli_parser::{ParsedGitInvocation, parse_git_cli_args};
+use crate::git::cli_parser::{
+    ParsedGitInvocation, explicit_rebase_branch_arg, parse_git_cli_args,
+    stash_requires_target_resolution, stash_target_spec, summarize_rebase_args,
+};
 use crate::git::find_repository_in_path;
+use crate::git::repo_state::{
+    HeadState, common_dir_for_worktree, git_dir_for_worktree, read_head_state_for_worktree,
+    read_ref_oid_for_worktree, resolve_stash_target_oid_for_worktree, worktree_root_for_path,
+};
 use crate::git::repository::{Repository, exec_git};
 use crate::git::rewrite_log::{
     CherryPickAbortEvent, CherryPickCompleteEvent, MergeSquashEvent, RebaseAbortEvent,
     RebaseCompleteEvent, ResetEvent, ResetKind, RewriteLogEvent, StashEvent, StashOperation,
 };
 use crate::git::sync_authorship::{fetch_authorship_notes, fetch_remote_from_args};
+use crate::observability;
 use crate::utils::debug_log;
 use crate::{
     authorship::rebase_authorship::reconstruct_working_log_after_reset,
@@ -16,7 +25,6 @@ use crate::{
     commands::checkpoint_agent::agent_presets::AgentRunResult,
     commands::hooks::{push_hooks, stash_hooks},
 };
-use crate::observability;
 use interprocess::local_socket::{LocalSocketListener, LocalSocketStream};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -31,6 +39,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
+use tokio::time::{Duration, sleep};
 
 pub mod analyzers;
 pub mod control_api;
@@ -204,6 +213,7 @@ fn daemon_worktree_from_repo_path(repo_path: &Path) -> Option<PathBuf> {
 }
 
 fn trace_payload_worktree_hint(payload: &Value) -> Option<PathBuf> {
+    let normalize = |path: PathBuf| worktree_root_for_path(&path).unwrap_or(path);
     let event = payload
         .get("event")
         .and_then(Value::as_str)
@@ -214,17 +224,20 @@ fn trace_payload_worktree_hint(payload: &Value) -> Option<PathBuf> {
             .or_else(|| payload.get("repo_working_dir"))
             .and_then(Value::as_str)
         {
-            return Some(PathBuf::from(path));
+            return Some(normalize(PathBuf::from(path)));
         }
         if let Some(repo_path) = payload.get("repo").and_then(Value::as_str) {
             let candidate = PathBuf::from(repo_path);
             if let Some(worktree) = daemon_worktree_from_repo_path(&candidate) {
-                return Some(worktree);
+                return Some(normalize(worktree));
             }
         }
     }
     if let Some(path) = payload.get("worktree").and_then(Value::as_str) {
-        return Some(PathBuf::from(path));
+        return Some(normalize(PathBuf::from(path)));
+    }
+    if let Some(cwd) = payload.get("cwd").and_then(Value::as_str) {
+        return Some(normalize(PathBuf::from(cwd)));
     }
     let argv = payload
         .get("argv")
@@ -242,31 +255,15 @@ fn trace_payload_worktree_hint(payload: &Value) -> Option<PathBuf> {
     let mut i = 0;
     while i + 1 < argv.len() {
         if argv[i] == "-C" {
-            return Some(PathBuf::from(&argv[i + 1]));
+            return Some(normalize(PathBuf::from(&argv[i + 1])));
         }
         i += 1;
-    }
-    if let Some(cwd) = payload.get("cwd").and_then(Value::as_str) {
-        return Some(PathBuf::from(cwd));
     }
     None
 }
 
 fn daemon_git_dir_for_worktree(worktree: &Path) -> Option<PathBuf> {
-    let dot_git = worktree.join(".git");
-    if dot_git.is_dir() {
-        return Some(dot_git);
-    }
-    if !dot_git.is_file() {
-        return None;
-    }
-    let content = fs::read_to_string(&dot_git).ok()?;
-    let pointer = content.strip_prefix("gitdir:")?.trim();
-    let candidate = PathBuf::from(pointer);
-    if candidate.is_absolute() {
-        return Some(candidate);
-    }
-    Some(worktree.join(candidate))
+    git_dir_for_worktree(worktree)
 }
 
 fn daemon_worktree_head_reflog_offset(worktree: &Path) -> Option<u64> {
@@ -275,41 +272,223 @@ fn daemon_worktree_head_reflog_offset(worktree: &Path) -> Option<u64> {
     fs::metadata(path).ok().map(|metadata| metadata.len())
 }
 
-fn daemon_common_dir_for_worktree(worktree: &Path) -> Option<PathBuf> {
-    let git_dir = daemon_git_dir_for_worktree(worktree)?;
-    let parent = git_dir.parent()?;
-    if parent.file_name().and_then(|name| name.to_str()) == Some("worktrees") {
-        return parent.parent().map(PathBuf::from);
+fn repo_context_from_head_state(state: HeadState) -> RepoContext {
+    RepoContext {
+        head: state.head,
+        branch: state.branch,
+        detached: state.detached,
     }
-    Some(git_dir)
 }
 
-fn daemon_reflog_offsets_for_worktree(worktree: &Path) -> Option<HashMap<String, u64>> {
-    let common_dir = daemon_common_dir_for_worktree(worktree)?;
-    let logs_dir = common_dir.join("logs");
-    if !logs_dir.exists() {
-        return Some(HashMap::new());
+fn trace_payload_cmd_name(payload: &Value) -> Option<String> {
+    payload
+        .get("name")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+}
+
+fn trace_payload_argv(payload: &Value) -> Vec<String> {
+    payload
+        .get("argv")
+        .and_then(Value::as_array)
+        .map(|argv| {
+            argv.iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn trace_payload_primary_command(payload: &Value) -> Option<String> {
+    trace_payload_cmd_name(payload).or_else(|| {
+        let argv = trace_payload_argv(payload);
+        trace_argv_primary_command(&argv)
+    })
+}
+
+fn trace_argv_primary_command(argv: &[String]) -> Option<String> {
+    let mut idx = 0;
+    if argv
+        .first()
+        .map(|token| {
+            let file_name = Path::new(token)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(token);
+            file_name == "git" || file_name == "git.exe"
+        })
+        .unwrap_or(false)
+    {
+        idx = 1;
+    }
+    while idx < argv.len() {
+        let token = argv[idx].as_str();
+        if token == "-C" {
+            idx += 2;
+            continue;
+        }
+        if matches!(
+            token,
+            "-c" | "--config-env"
+                | "--git-dir"
+                | "--work-tree"
+                | "--namespace"
+                | "--super-prefix"
+                | "--exec-path"
+                | "--worktree-attributes"
+                | "--attr-source"
+        ) {
+            idx += 2;
+            continue;
+        }
+        if token.starts_with("--") && token.contains('=') {
+            idx += 1;
+            continue;
+        }
+        if token.starts_with('-') {
+            idx += 1;
+            continue;
+        }
+        return Some(token.to_string());
+    }
+    None
+}
+
+fn trace_command_may_mutate_refs(primary_command: Option<&str>) -> bool {
+    matches!(
+        primary_command,
+        Some(
+            "cherry-pick"
+                | "checkout"
+                | "clone"
+                | "commit"
+                | "fetch"
+                | "init"
+                | "merge"
+                | "pull"
+                | "push"
+                | "rebase"
+                | "reset"
+                | "stash"
+                | "switch"
+        )
+    )
+}
+
+fn trace_command_uses_target_repo_context_only(primary_command: Option<&str>) -> bool {
+    matches!(primary_command, Some("clone" | "init"))
+}
+
+fn trace_invocation_args(argv: &[String]) -> &[String] {
+    if argv
+        .first()
+        .map(|token| {
+            Path::new(token)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == "git" || name == "git.exe")
+        })
+        .unwrap_or(false)
+    {
+        &argv[1..]
+    } else {
+        argv
+    }
+}
+
+fn resolve_explicit_rebase_branch_ref(worktree: &Path, argv: &[String]) -> Option<String> {
+    let parsed = parse_git_cli_args(trace_invocation_args(argv));
+    if parsed.command.as_deref() != Some("rebase") {
+        return None;
     }
 
+    let branch_spec = explicit_rebase_branch_arg(&parsed.command_args)?;
+    let branch_ref = explicit_rebase_branch_ref_name(&branch_spec)?;
+    read_ref_oid_for_worktree(worktree, &branch_ref).map(|_| branch_ref)
+}
+
+fn explicit_rebase_branch_ref_name(branch_spec: &str) -> Option<String> {
+    if branch_spec.starts_with("refs/") {
+        return Some(branch_spec.to_string());
+    }
+    if is_valid_oid(branch_spec) || branch_spec == "HEAD" || branch_spec.starts_with("@{") {
+        return None;
+    }
+    Some(format!("refs/heads/{}", branch_spec))
+}
+
+fn resolve_stash_target_oid_for_command(
+    worktree: &Path,
+    argv: &[String],
+) -> Result<Option<String>, GitAiError> {
+    let parsed = parse_git_cli_args(trace_invocation_args(argv));
+    if parsed.command.as_deref() != Some("stash") {
+        return Ok(None);
+    }
+    if !stash_requires_target_resolution(&parsed.command_args) {
+        return Ok(None);
+    }
+
+    let target_spec = stash_target_spec(&parsed.command_args);
+    let resolved =
+        resolve_stash_target_oid_for_worktree(worktree, target_spec).ok_or_else(|| {
+            GitAiError::Generic(format!(
+                "failed to resolve stash target oid from repo state (spec={:?}, worktree={})",
+                target_spec,
+                worktree.display()
+            ))
+        })?;
+    Ok(Some(resolved))
+}
+
+fn tracked_reflog_refs_for_command(
+    command: Option<&str>,
+    repo: Option<&RepoContext>,
+    worktree: &Path,
+    argv: &[String],
+) -> Vec<String> {
+    let mut refs = Vec::new();
+    if let Some(branch) = repo.and_then(|repo| repo.branch.as_deref()) {
+        refs.push(format!("refs/heads/{}", branch));
+    }
+    if command == Some("rebase")
+        && let Some(branch_ref) = resolve_explicit_rebase_branch_ref(worktree, argv)
+    {
+        refs.push(branch_ref);
+    }
+    if matches!(
+        command,
+        Some("reset" | "merge" | "pull" | "rebase" | "cherry-pick" | "checkout" | "switch")
+    ) {
+        refs.push("ORIG_HEAD".to_string());
+    }
+    if command == Some("stash")
+        && !stash_requires_target_resolution(
+            &parse_git_cli_args(trace_invocation_args(argv)).command_args,
+        )
+    {
+        refs.push("refs/stash".to_string());
+    }
+    refs.sort();
+    refs.dedup();
+    refs
+}
+
+fn daemon_reflog_offsets_for_refs(
+    worktree: &Path,
+    refs: &[String],
+) -> Option<HashMap<String, u64>> {
+    let common_dir = common_dir_for_worktree(worktree)?;
+    let logs_dir = common_dir.join("logs");
     let mut offsets = HashMap::new();
-    let mut stack = vec![logs_dir.clone()];
-    while let Some(dir) = stack.pop() {
-        let entries = fs::read_dir(&dir).ok()?;
-        for entry in entries {
-            let entry = entry.ok()?;
-            let path = entry.path();
-            let metadata = entry.metadata().ok()?;
-            if metadata.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            if !metadata.is_file() {
-                continue;
-            }
-            let rel = path.strip_prefix(&logs_dir).ok()?;
-            let rel_key = rel.to_string_lossy().replace('\\', "/");
-            offsets.insert(rel_key, metadata.len());
-        }
+    for reference in refs {
+        let path = logs_dir.join(reference);
+        let len = fs::metadata(&path)
+            .ok()
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        offsets.insert(reference.clone(), len);
     }
     Some(offsets)
 }
@@ -337,7 +516,7 @@ fn daemon_reflog_delta_from_offsets(
     start_offsets: &HashMap<String, u64>,
     end_offsets: &HashMap<String, u64>,
 ) -> Result<Vec<crate::daemon::domain::RefChange>, GitAiError> {
-    let common_dir = daemon_common_dir_for_worktree(worktree).ok_or_else(|| {
+    let common_dir = common_dir_for_worktree(worktree).ok_or_else(|| {
         GitAiError::Generic(format!(
             "failed to resolve common dir for worktree {}",
             worktree.display()
@@ -920,12 +1099,10 @@ fn strict_rebase_mappings_from_repository(
     onto_head: Option<&str>,
     context: &str,
 ) -> Result<(Vec<String>, Vec<String>), GitAiError> {
-    let (original_commits, new_commits) = crate::commands::hooks::rebase_hooks::build_rebase_commit_mappings(
-        repository,
-        old_head,
-        new_head,
-        onto_head,
-    )?;
+    let (original_commits, new_commits) =
+        crate::commands::hooks::rebase_hooks::build_rebase_commit_mappings(
+            repository, old_head, new_head, onto_head,
+        )?;
     if original_commits.is_empty() {
         return Err(GitAiError::Generic(format!(
             "{} missing rebase source commits",
@@ -969,10 +1146,7 @@ fn strict_cherry_pick_mappings_from_command(
 }
 
 fn append_unique_oid(target: &mut Vec<String>, value: &str) {
-    if is_valid_oid(value)
-        && !is_zero_oid(value)
-        && !target.iter().any(|seen| seen == value)
-    {
+    if is_valid_oid(value) && !is_zero_oid(value) && !target.iter().any(|seen| seen == value) {
         target.push(value.to_string());
     }
 }
@@ -990,8 +1164,10 @@ fn cherry_pick_source_commits_from_command(
         if arg == "--abort" || arg == "--continue" || arg == "--quit" || arg == "--skip" {
             return Vec::new();
         }
-        if matches!(arg.as_str(), "-m" | "--mainline" | "-X" | "--strategy-option" | "--strategy")
-            || arg == "--gpg-sign"
+        if matches!(
+            arg.as_str(),
+            "-m" | "--mainline" | "-X" | "--strategy-option" | "--strategy"
+        ) || arg == "--gpg-sign"
         {
             skip_next = true;
             continue;
@@ -1005,73 +1181,21 @@ fn cherry_pick_source_commits_from_command(
 }
 
 fn rebase_is_control_mode(cmd: &crate::daemon::domain::NormalizedCommand) -> bool {
-    cmd.invoked_args
-        .iter()
-        .any(|arg| matches!(arg.as_str(), "--continue" | "--abort" | "--skip" | "--quit"))
+    summarize_rebase_args(&cmd.invoked_args).is_control_mode
 }
 
-fn rebase_onto_spec_from_command(
-    cmd: &crate::daemon::domain::NormalizedCommand,
-) -> Option<String> {
-    let args = &cmd.invoked_args;
-    if args
-        .iter()
-        .any(|arg| matches!(arg.as_str(), "--continue" | "--abort" | "--skip" | "--quit"))
-    {
+fn rebase_onto_spec_from_command(cmd: &crate::daemon::domain::NormalizedCommand) -> Option<String> {
+    let summary = summarize_rebase_args(&cmd.invoked_args);
+    if summary.is_control_mode {
         return None;
     }
-
-    let mut positionals: Vec<String> = Vec::new();
-    let mut has_root = false;
-    let mut i = 0usize;
-    while i < args.len() {
-        let arg = args[i].as_str();
-        match arg {
-            "--root" => {
-                has_root = true;
-                i += 1;
-                continue;
-            }
-            "--onto" => {
-                if i + 1 < args.len() && !args[i + 1].starts_with('-') {
-                    return Some(args[i + 1].clone());
-                }
-                i += 2;
-                continue;
-            }
-            "-s" | "--strategy" | "-X" | "--strategy-option" | "-m" | "--mainline" | "-S"
-            | "--gpg-sign" => {
-                i += 2;
-                continue;
-            }
-            _ => {}
-        }
-        if let Some(spec) = arg.strip_prefix("--onto=") {
-            if !spec.is_empty() {
-                return Some(spec.to_string());
-            }
-            i += 1;
-            continue;
-        }
-        if arg.starts_with("--strategy=")
-            || arg.starts_with("--strategy-option=")
-            || arg.starts_with("--gpg-sign=")
-        {
-            i += 1;
-            continue;
-        }
-        if arg.starts_with('-') {
-            i += 1;
-            continue;
-        }
-        positionals.push(arg.to_string());
-        i += 1;
+    if let Some(onto_spec) = summary.onto_spec {
+        return Some(onto_spec);
     }
-
-    if has_root {
+    if summary.has_root {
         return None;
     }
-    positionals.first().cloned()
+    summary.positionals.first().cloned()
 }
 
 fn strict_rebase_original_head_from_command(
@@ -1080,6 +1204,21 @@ fn strict_rebase_original_head_from_command(
 ) -> Option<String> {
     if is_valid_oid(semantic_old_head) && !is_zero_oid(semantic_old_head) {
         return Some(semantic_old_head.to_string());
+    }
+
+    if let Some(branch_spec) = explicit_rebase_branch_arg(&cmd.invoked_args)
+        && let Some(branch_ref) = explicit_rebase_branch_ref_name(&branch_spec)
+        && let Some(old_head) = cmd
+            .ref_changes
+            .iter()
+            .find(|change| {
+                change.reference == branch_ref
+                    && is_valid_oid(&change.old)
+                    && !is_zero_oid(&change.old)
+            })
+            .map(|change| change.old.clone())
+    {
+        return Some(old_head);
     }
 
     if let Some(old_head) = cmd
@@ -1099,9 +1238,7 @@ fn strict_rebase_original_head_from_command(
         .ref_changes
         .iter()
         .find(|change| {
-            change.reference == "HEAD"
-                && is_valid_oid(&change.old)
-                && !is_zero_oid(&change.old)
+            change.reference == "HEAD" && is_valid_oid(&change.old) && !is_zero_oid(&change.old)
         })
         .map(|change| change.old.clone())
     {
@@ -1119,7 +1256,6 @@ fn strict_rebase_original_head_from_command(
 }
 
 fn repository_for_rewrite_context(
-    family: Option<&str>,
     cmd: &crate::daemon::domain::NormalizedCommand,
     context: &str,
 ) -> Result<Repository, GitAiError> {
@@ -1128,14 +1264,9 @@ fn repository_for_rewrite_context(
     {
         return Ok(repository);
     }
-    if let Some(family) = family
-        && let Ok(repository) = find_repository_in_path(family)
-    {
-        return Ok(repository);
-    }
     Err(GitAiError::Generic(format!(
-        "{} requires repository context (missing worktree/family lookup)",
-        context
+        "{} requires repository context from command worktree",
+        context,
     )))
 }
 
@@ -1274,6 +1405,12 @@ struct FamilySideEffectState {
 #[derive(Debug, Default, Clone)]
 struct TraceIngressState {
     root_worktrees: HashMap<String, PathBuf>,
+    root_families: HashMap<String, String>,
+    root_argv: HashMap<String, Vec<String>>,
+    root_pre_repo: HashMap<String, RepoContext>,
+    root_mutating: HashMap<String, bool>,
+    root_target_repo_only: HashMap<String, bool>,
+    root_reflog_refs: HashMap<String, Vec<String>>,
     root_head_reflog_start_offsets: HashMap<String, u64>,
     root_family_reflog_start_offsets: HashMap<String, HashMap<String, u64>>,
 }
@@ -1288,8 +1425,8 @@ struct ActorDaemonCoordinator {
         >,
     >,
     rewrite_events_by_family: Mutex<HashMap<String, Vec<Value>>>,
-    pending_rebase_original_head_by_family: Mutex<HashMap<String, String>>,
-    pending_cherry_pick_sources_by_family: Mutex<HashMap<String, Vec<String>>>,
+    pending_rebase_original_head_by_worktree: Mutex<HashMap<String, String>>,
+    pending_cherry_pick_sources_by_worktree: Mutex<HashMap<String, Vec<String>>>,
     inflight_effects_by_family: Mutex<HashMap<String, usize>>,
     ordered_side_effects_by_family: Mutex<HashMap<String, FamilySideEffectState>>,
     side_effect_errors_by_family: Mutex<HashMap<String, BTreeMap<u64, String>>>,
@@ -1316,8 +1453,8 @@ impl ActorDaemonCoordinator {
             )),
             backend,
             rewrite_events_by_family: Mutex::new(HashMap::new()),
-            pending_rebase_original_head_by_family: Mutex::new(HashMap::new()),
-            pending_cherry_pick_sources_by_family: Mutex::new(HashMap::new()),
+            pending_rebase_original_head_by_worktree: Mutex::new(HashMap::new()),
+            pending_cherry_pick_sources_by_worktree: Mutex::new(HashMap::new()),
             inflight_effects_by_family: Mutex::new(HashMap::new()),
             ordered_side_effects_by_family: Mutex::new(HashMap::new()),
             side_effect_errors_by_family: Mutex::new(HashMap::new()),
@@ -1417,6 +1554,16 @@ impl ActorDaemonCoordinator {
         Ok(())
     }
 
+    fn latest_side_effect_error(&self, family: &str) -> Result<Option<String>, GitAiError> {
+        let map = self
+            .side_effect_errors_by_family
+            .lock()
+            .map_err(|_| GitAiError::Generic("side effect errors map lock poisoned".to_string()))?;
+        Ok(map
+            .get(family)
+            .and_then(|errors| errors.iter().next_back().map(|(_, error)| error.clone())))
+    }
+
     fn trace_connection_opened(&self) {
         self.active_trace_connections.fetch_add(1, Ordering::SeqCst);
     }
@@ -1431,6 +1578,23 @@ impl ActorDaemonCoordinator {
 
     fn active_trace_connection_count(&self) -> u64 {
         self.active_trace_connections.load(Ordering::SeqCst) as u64
+    }
+
+    fn clear_trace_root_tracking(&self, root_sid: &str) -> Result<(), GitAiError> {
+        let mut ingress = self
+            .trace_ingress_state
+            .lock()
+            .map_err(|_| GitAiError::Generic("trace ingress state lock poisoned".to_string()))?;
+        ingress.root_worktrees.remove(root_sid);
+        ingress.root_families.remove(root_sid);
+        ingress.root_argv.remove(root_sid);
+        ingress.root_pre_repo.remove(root_sid);
+        ingress.root_mutating.remove(root_sid);
+        ingress.root_target_repo_only.remove(root_sid);
+        ingress.root_reflog_refs.remove(root_sid);
+        ingress.root_head_reflog_start_offsets.remove(root_sid);
+        ingress.root_family_reflog_start_offsets.remove(root_sid);
+        Ok(())
     }
 
     fn next_trace_ingest_seq(&self) -> u64 {
@@ -1457,10 +1621,7 @@ impl ActorDaemonCoordinator {
             let mut pending_by_seq: BTreeMap<u64, Value> = BTreeMap::new();
 
             while let Some(payload) = rx.recv().await {
-                let Some(seq) = payload
-                    .get(TRACE_INGEST_SEQ_FIELD)
-                    .and_then(Value::as_u64)
-                else {
+                let Some(seq) = payload.get(TRACE_INGEST_SEQ_FIELD).and_then(Value::as_u64) else {
                     let error = GitAiError::Generic(
                         "trace ingest payload missing ingress sequence".to_string(),
                     );
@@ -1554,7 +1715,9 @@ impl ActorDaemonCoordinator {
                 Ordering::SeqCst,
                 |current| Some(current.saturating_sub(1)),
             );
-            return Err(GitAiError::Generic("trace ingest queue send failed".to_string()));
+            return Err(GitAiError::Generic(
+                "trace ingest queue send failed".to_string(),
+            ));
         }
         Ok(())
     }
@@ -1592,70 +1755,237 @@ impl ActorDaemonCoordinator {
         };
 
         if let Some(worktree) = trace_payload_worktree_hint(payload) {
+            if let Some(common_dir) = common_dir_for_worktree(&worktree) {
+                let family = common_dir.canonicalize().unwrap_or(common_dir);
+                ingress
+                    .root_families
+                    .insert(root.clone(), family.to_string_lossy().to_string());
+            }
             ingress.root_worktrees.insert(root.clone(), worktree);
         }
+        let payload_argv = trace_payload_argv(payload);
+        if event == "start" && !payload_argv.is_empty() {
+            ingress.root_argv.insert(root.clone(), payload_argv.clone());
+        }
+        let effective_argv = if payload_argv.is_empty() {
+            ingress.root_argv.get(&root).cloned().unwrap_or_default()
+        } else {
+            payload_argv
+        };
+        let effective_primary = trace_payload_primary_command(payload)
+            .or_else(|| trace_argv_primary_command(&effective_argv));
+        if let Some(primary) = effective_primary.clone() {
+            let should_capture = trace_command_may_mutate_refs(Some(primary.as_str()));
+            match ingress.root_mutating.get(&root).copied() {
+                Some(false) if should_capture => {
+                    ingress.root_mutating.insert(root.clone(), true);
+                }
+                None => {
+                    ingress.root_mutating.insert(root.clone(), should_capture);
+                }
+                _ => {}
+            }
+            let target_repo_only =
+                trace_command_uses_target_repo_context_only(Some(primary.as_str()));
+            match ingress.root_target_repo_only.get(&root).copied() {
+                Some(false) if target_repo_only => {
+                    ingress.root_target_repo_only.insert(root.clone(), true);
+                    ingress.root_reflog_refs.remove(&root);
+                    ingress.root_head_reflog_start_offsets.remove(&root);
+                    ingress.root_family_reflog_start_offsets.remove(&root);
+                }
+                None => {
+                    ingress
+                        .root_target_repo_only
+                        .insert(root.clone(), target_repo_only);
+                }
+                _ => {}
+            }
+        }
+
         let Some(worktree) = ingress.root_worktrees.get(&root).cloned() else {
             if is_terminal_root_trace_event(&event, &sid, &root) {
+                ingress.root_mutating.remove(&root);
+                ingress.root_target_repo_only.remove(&root);
+                ingress.root_argv.remove(&root);
+                ingress.root_pre_repo.remove(&root);
+                ingress.root_reflog_refs.remove(&root);
                 ingress.root_head_reflog_start_offsets.remove(&root);
                 ingress.root_family_reflog_start_offsets.remove(&root);
             }
             return;
         };
 
-        if !ingress.root_head_reflog_start_offsets.contains_key(&root)
-            && let Some(offset) = daemon_worktree_head_reflog_offset(&worktree)
-        {
-            ingress
-                .root_head_reflog_start_offsets
-                .insert(root.clone(), offset);
+        let should_capture_mutation = *ingress.root_mutating.get(&root).unwrap_or(&false);
+        let target_repo_only = *ingress.root_target_repo_only.get(&root).unwrap_or(&false);
+        if !target_repo_only && !ingress.root_pre_repo.contains_key(&root) {
+            if let Some(state) = read_head_state_for_worktree(&worktree) {
+                ingress
+                    .root_pre_repo
+                    .insert(root.clone(), repo_context_from_head_state(state));
+            }
         }
-        if !ingress.root_family_reflog_start_offsets.contains_key(&root)
-            && let Some(offsets) = daemon_reflog_offsets_for_worktree(&worktree)
+        let pre_repo = ingress.root_pre_repo.get(&root).cloned();
+        if should_capture_mutation && !target_repo_only {
+            let contextual_refs = if let Some(repo) = pre_repo.as_ref() {
+                tracked_reflog_refs_for_command(
+                    effective_primary.as_deref(),
+                    Some(repo),
+                    &worktree,
+                    &effective_argv,
+                )
+            } else {
+                tracked_reflog_refs_for_command(
+                    effective_primary.as_deref(),
+                    None,
+                    &worktree,
+                    &effective_argv,
+                )
+            };
+            let refs = ingress
+                .root_reflog_refs
+                .entry(root.clone())
+                .or_insert_with(Vec::new);
+            for reference in contextual_refs {
+                if !refs.iter().any(|existing| existing == &reference) {
+                    refs.push(reference);
+                }
+            }
+            refs.sort();
+            refs.dedup();
+        }
+        if !is_terminal_root_trace_event(&event, &sid, &root)
+            && let Some(object) = payload.as_object_mut()
         {
-            ingress
-                .root_family_reflog_start_offsets
-                .insert(root.clone(), offsets);
+            if let Some(repo) = pre_repo.as_ref() {
+                object.insert(
+                    "git_ai_pre_repo".to_string(),
+                    json!(repo),
+                );
+            }
+            if object.get("git_ai_stash_target_oid").is_none()
+                && object.get("git_ai_stash_target_oid_error").is_none()
+            {
+                match resolve_stash_target_oid_for_command(&worktree, &effective_argv) {
+                    Ok(Some(stash_target_oid)) => {
+                        object.insert(
+                            "git_ai_stash_target_oid".to_string(),
+                            json!(stash_target_oid),
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        debug_log(&format!(
+                            "daemon stash target resolution failed sid={}: {}",
+                            sid, error
+                        ));
+                        observability::log_error(
+                            &error,
+                            Some(json!({
+                                "component": "daemon",
+                                "phase": "augment_trace_payload_with_reflog_metadata",
+                                "root_sid": root,
+                                "sid": sid,
+                                "argv": effective_argv,
+                            })),
+                        );
+                        object.insert(
+                            "git_ai_stash_target_oid_error".to_string(),
+                            json!(error.to_string()),
+                        );
+                    }
+                }
+            }
+        }
+
+        if should_capture_mutation && !target_repo_only {
+            if !ingress.root_head_reflog_start_offsets.contains_key(&root)
+                && let Some(offset) = daemon_worktree_head_reflog_offset(&worktree)
+            {
+                ingress
+                    .root_head_reflog_start_offsets
+                    .insert(root.clone(), offset);
+            }
+            if !ingress.root_family_reflog_start_offsets.contains_key(&root)
+                && let Some(refs) = ingress.root_reflog_refs.get(&root)
+                && let Some(offsets) = daemon_reflog_offsets_for_refs(&worktree, refs)
+            {
+                ingress
+                    .root_family_reflog_start_offsets
+                    .insert(root.clone(), offsets);
+            }
         }
 
         if is_terminal_root_trace_event(&event, &sid, &root)
             && let Some(object) = payload.as_object_mut()
         {
-            if let Some(start_offset) = ingress.root_head_reflog_start_offsets.get(&root).copied() {
+            if let Some(state) = read_head_state_for_worktree(&worktree) {
                 object.insert(
-                    "git_ai_worktree_head_reflog_start".to_string(),
-                    json!(start_offset),
+                    "git_ai_post_repo".to_string(),
+                    json!(repo_context_from_head_state(state)),
                 );
             }
-            if let Some(end_offset) = daemon_worktree_head_reflog_offset(&worktree) {
-                object.insert(
-                    "git_ai_worktree_head_reflog_end".to_string(),
-                    json!(end_offset),
-                );
-            }
-            if let Some(start_offsets) = ingress.root_family_reflog_start_offsets.get(&root) {
-                object.insert(
-                    "git_ai_family_reflog_start".to_string(),
-                    json!(start_offsets),
-                );
-                if let Some(end_offsets) = daemon_reflog_offsets_for_worktree(&worktree) {
-                    match daemon_reflog_delta_from_offsets(&worktree, start_offsets, &end_offsets) {
-                        Ok(ref_changes) => {
-                            object.insert(
-                                "git_ai_family_reflog_changes".to_string(),
-                                json!(ref_changes),
-                            );
+
+            if should_capture_mutation && !target_repo_only {
+                if let Some(start_offset) =
+                    ingress.root_head_reflog_start_offsets.get(&root).copied()
+                {
+                    object.insert(
+                        "git_ai_worktree_head_reflog_start".to_string(),
+                        json!(start_offset),
+                    );
+                }
+                if let Some(end_offset) = daemon_worktree_head_reflog_offset(&worktree) {
+                    object.insert(
+                        "git_ai_worktree_head_reflog_end".to_string(),
+                        json!(end_offset),
+                    );
+                }
+                if let Some(start_offsets) = ingress.root_family_reflog_start_offsets.get(&root) {
+                    object.insert(
+                        "git_ai_family_reflog_start".to_string(),
+                        json!(start_offsets),
+                    );
+                    if let Some(refs) = ingress.root_reflog_refs.get(&root)
+                        && let Some(mut end_offsets) =
+                            daemon_reflog_offsets_for_refs(&worktree, refs)
+                    {
+                        for (reference, start_offset) in start_offsets {
+                            let end_offset = end_offsets
+                                .entry(reference.clone())
+                                .or_insert(*start_offset);
+                            if *end_offset < *start_offset {
+                                *end_offset = *start_offset;
+                            }
                         }
-                        Err(error) => {
-                            debug_log(&format!(
-                                "daemon trace reflog delta capture error sid={}: {}",
-                                sid, error
-                            ));
+                        match daemon_reflog_delta_from_offsets(
+                            &worktree,
+                            start_offsets,
+                            &end_offsets,
+                        ) {
+                            Ok(ref_changes) => {
+                                object.insert(
+                                    "git_ai_family_reflog_changes".to_string(),
+                                    json!(ref_changes),
+                                );
+                            }
+                            Err(error) => {
+                                debug_log(&format!(
+                                    "daemon trace reflog delta capture error sid={}: {}",
+                                    sid, error
+                                ));
+                            }
                         }
+                        object.insert("git_ai_family_reflog_end".to_string(), json!(end_offsets));
                     }
-                    object.insert("git_ai_family_reflog_end".to_string(), json!(end_offsets));
                 }
             }
             ingress.root_worktrees.remove(&root);
+            ingress.root_argv.remove(&root);
+            ingress.root_pre_repo.remove(&root);
+            ingress.root_mutating.remove(&root);
+            ingress.root_target_repo_only.remove(&root);
+            ingress.root_reflog_refs.remove(&root);
             ingress.root_head_reflog_start_offsets.remove(&root);
             ingress.root_family_reflog_start_offsets.remove(&root);
         }
@@ -1784,8 +2114,16 @@ impl ActorDaemonCoordinator {
             match ready_entry {
                 OrderedSideEffectEntry::Command(applied) => {
                     let _ = self.begin_family_effect(family);
-                    self.maybe_apply_side_effects_for_applied_command(Some(family), &applied)
-                        .await;
+                    if let Err(error) = self
+                        .maybe_apply_side_effects_for_applied_command(Some(family), &applied)
+                        .await
+                    {
+                        let _ = self.record_side_effect_error(family, seq, &error);
+                        debug_log(&format!(
+                            "daemon command side effect failed for family {} seq {}: {}",
+                            family, seq, error
+                        ));
+                    }
                     let _ = self.end_family_effect(family);
                 }
                 OrderedSideEffectEntry::Checkpoint(request) => {
@@ -1898,43 +2236,64 @@ impl ActorDaemonCoordinator {
         }
     }
 
-    async fn pending_counts(&self) -> Result<u64, GitAiError> {
+    async fn sweep_orphan_trace_roots(&self) -> Result<(), GitAiError> {
         let active_connections = self.active_trace_connection_count();
         let queued_payloads = self.queued_trace_payloads.load(Ordering::SeqCst) as u64;
-        let mut normalizer = self.normalizer.lock().await;
-        if active_connections == 0
-            && queued_payloads == 0
-            && !normalizer.state().pending.is_empty()
-        {
-            let orphan_roots = normalizer
-                .state()
-                .pending
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>();
-            for root_sid in orphan_roots {
-                if let Some(pending) = normalizer.remove_pending_root(&root_sid) {
-                    let error = GitAiError::Generic(format!(
-                        "orphan trace root removed without active connections sid={} argv={:?}",
-                        root_sid, pending.raw_argv
-                    ));
-                    observability::log_error(
-                        &error,
-                        Some(serde_json::json!({
-                            "component": "trace_normalizer",
-                            "phase": "orphan_pending_root_sweep",
-                            "root_sid": root_sid,
-                            "argv": pending.raw_argv,
-                        })),
-                    );
-                }
-            }
+        if active_connections != 0 || queued_payloads != 0 {
+            return Ok(());
         }
-        Ok(
-            normalizer.state().pending.len() as u64
-                + normalizer.state().deferred_exits.len() as u64
-                + queued_payloads,
-        )
+
+        let removed_roots = {
+            let mut normalizer = self.normalizer.lock().await;
+            normalizer.sweep_orphans()
+        };
+
+        for removed in removed_roots {
+            let crate::daemon::trace_normalizer::OrphanTraceRoot {
+                root_sid,
+                raw_argv,
+                deferred_exit_only,
+            } = removed;
+            self.clear_trace_root_tracking(&root_sid)?;
+            let error = if deferred_exit_only {
+                GitAiError::Generic(format!(
+                    "orphan deferred trace exit removed without active connections sid={}",
+                    root_sid,
+                ))
+            } else {
+                GitAiError::Generic(format!(
+                    "orphan trace root removed without active connections sid={} argv={:?}",
+                    root_sid, raw_argv
+                ))
+            };
+            observability::log_error(
+                &error,
+                Some(serde_json::json!({
+                    "component": "trace_normalizer",
+                    "phase": if deferred_exit_only {
+                        "orphan_deferred_exit_sweep"
+                    } else {
+                        "orphan_pending_root_sweep"
+                    },
+                    "root_sid": root_sid,
+                    "argv": raw_argv,
+                })),
+            );
+        }
+        Ok(())
+    }
+
+    async fn family_pending_trace_root_count(&self, family: &str) -> Result<u64, GitAiError> {
+        self.sweep_orphan_trace_roots().await?;
+        let ingress = self
+            .trace_ingress_state
+            .lock()
+            .map_err(|_| GitAiError::Generic("trace ingress state lock poisoned".to_string()))?;
+        Ok(ingress
+            .root_families
+            .values()
+            .filter(|tracked_family| tracked_family.as_str() == family)
+            .count() as u64)
     }
 
     fn append_rewrite_event_for_family(
@@ -1963,85 +2322,102 @@ impl ActorDaemonCoordinator {
         Ok(map.get(family).cloned().unwrap_or_default())
     }
 
-    fn set_pending_rebase_original_head_for_family(
+    fn rewrite_worktree_key(worktree: &Path) -> String {
+        worktree
+            .canonicalize()
+            .unwrap_or_else(|_| worktree.to_path_buf())
+            .to_string_lossy()
+            .to_string()
+    }
+
+    fn set_pending_rebase_original_head_for_worktree(
         &self,
-        family: &str,
+        worktree: &Path,
         original_head: String,
     ) -> Result<(), GitAiError> {
         let mut map = self
-            .pending_rebase_original_head_by_family
+            .pending_rebase_original_head_by_worktree
             .lock()
             .map_err(|_| {
                 GitAiError::Generic("pending rebase original-head map lock poisoned".to_string())
             })?;
-        map.insert(family.to_string(), original_head);
+        map.insert(Self::rewrite_worktree_key(worktree), original_head);
         Ok(())
     }
 
-    fn pending_rebase_original_head_for_family(
+    fn pending_rebase_original_head_for_worktree(
         &self,
-        family: &str,
+        worktree: &Path,
     ) -> Result<Option<String>, GitAiError> {
         let map = self
-            .pending_rebase_original_head_by_family
+            .pending_rebase_original_head_by_worktree
             .lock()
             .map_err(|_| {
                 GitAiError::Generic("pending rebase original-head map lock poisoned".to_string())
             })?;
-        Ok(map.get(family).cloned())
+        Ok(map.get(&Self::rewrite_worktree_key(worktree)).cloned())
     }
 
-    fn clear_pending_rebase_original_head_for_family(&self, family: &str) -> Result<(), GitAiError> {
+    fn clear_pending_rebase_original_head_for_worktree(
+        &self,
+        worktree: &Path,
+    ) -> Result<(), GitAiError> {
         let mut map = self
-            .pending_rebase_original_head_by_family
+            .pending_rebase_original_head_by_worktree
             .lock()
             .map_err(|_| {
                 GitAiError::Generic("pending rebase original-head map lock poisoned".to_string())
             })?;
-        map.remove(family);
+        map.remove(&Self::rewrite_worktree_key(worktree));
         Ok(())
     }
 
-    fn set_pending_cherry_pick_sources_for_family(
+    fn set_pending_cherry_pick_sources_for_worktree(
         &self,
-        family: &str,
+        worktree: &Path,
         sources: Vec<String>,
     ) -> Result<(), GitAiError> {
         let mut map = self
-            .pending_cherry_pick_sources_by_family
+            .pending_cherry_pick_sources_by_worktree
             .lock()
             .map_err(|_| {
                 GitAiError::Generic("pending cherry-pick sources map lock poisoned".to_string())
             })?;
+        let key = Self::rewrite_worktree_key(worktree);
         if sources.is_empty() {
-            map.remove(family);
+            map.remove(&key);
         } else {
-            map.insert(family.to_string(), sources);
+            map.insert(key, sources);
         }
         Ok(())
     }
 
-    fn take_pending_cherry_pick_sources_for_family(
+    fn take_pending_cherry_pick_sources_for_worktree(
         &self,
-        family: &str,
+        worktree: &Path,
     ) -> Result<Vec<String>, GitAiError> {
         let mut map = self
-            .pending_cherry_pick_sources_by_family
+            .pending_cherry_pick_sources_by_worktree
             .lock()
             .map_err(|_| {
                 GitAiError::Generic("pending cherry-pick sources map lock poisoned".to_string())
             })?;
-        Ok(map.remove(family).unwrap_or_default())
+        Ok(map
+            .remove(&Self::rewrite_worktree_key(worktree))
+            .unwrap_or_default())
     }
 
-    fn clear_pending_cherry_pick_sources_for_family(&self, family: &str) -> Result<(), GitAiError> {
+    fn clear_pending_cherry_pick_sources_for_worktree(
+        &self,
+        worktree: &Path,
+    ) -> Result<(), GitAiError> {
         let mut map = self
-            .pending_cherry_pick_sources_by_family
+            .pending_cherry_pick_sources_by_worktree
             .lock()
             .map_err(|_| {
                 GitAiError::Generic("pending cherry-pick sources map lock poisoned".to_string())
             })?;
-        map.remove(family);
+        map.remove(&Self::rewrite_worktree_key(worktree));
         Ok(())
     }
 
@@ -2095,53 +2471,21 @@ impl ActorDaemonCoordinator {
         (old, new)
     }
 
-    fn stash_sha_from_ref_changes(
-        cmd: &crate::daemon::domain::NormalizedCommand,
-    ) -> Option<String> {
-        cmd.ref_changes
-            .iter()
-            .find(|change| {
-                change.reference == "refs/stash"
-                    && is_valid_oid(&change.old)
-                    && !is_zero_oid(&change.old)
-            })
-            .map(|change| change.old.clone())
-            .or_else(|| {
-                cmd.ref_changes
-                    .iter()
-                    .find(|change| {
-                        change.reference.contains("stash")
-                            && is_valid_oid(&change.old)
-                            && !is_zero_oid(&change.old)
-                    })
-                    .map(|change| change.old.clone())
-            })
-    }
-
     fn resolve_stash_sha_for_event(
         cmd: &crate::daemon::domain::NormalizedCommand,
         operation: &StashOperation,
-        stash_ref: Option<&str>,
     ) -> Option<String> {
-        if matches!(operation, StashOperation::Pop)
-            && let Some(old_stash_sha) = Self::stash_sha_from_ref_changes(cmd)
-        {
-            return Some(old_stash_sha);
-        }
-
-        if matches!(operation, StashOperation::Apply | StashOperation::Drop)
-            && let Some(stash_ref) = stash_ref
-            && is_valid_oid(stash_ref)
-            && !is_zero_oid(stash_ref)
-        {
-            return Some(stash_ref.to_string());
+        if matches!(
+            operation,
+            StashOperation::Apply | StashOperation::Pop | StashOperation::Drop
+        ) {
+            return cmd.stash_target_oid.clone();
         }
         None
     }
 
     fn rewrite_events_from_semantic_events(
         &self,
-        family: Option<&str>,
         cmd: &crate::daemon::domain::NormalizedCommand,
         events: &[crate::daemon::domain::SemanticEvent],
     ) -> Result<Vec<RewriteLogEvent>, GitAiError> {
@@ -2157,7 +2501,14 @@ impl ActorDaemonCoordinator {
                     out.push(RewriteLogEvent::commit(base.clone(), new_head.clone()));
                 }
                 crate::daemon::domain::SemanticEvent::CommitAmended { old_head, new_head } => {
-                    if old_head.is_empty() || new_head.is_empty() || old_head == new_head {
+                    if old_head.is_empty()
+                        || new_head.is_empty()
+                        || old_head == new_head
+                        || !is_valid_oid(old_head)
+                        || is_zero_oid(old_head)
+                        || !is_valid_oid(new_head)
+                        || is_zero_oid(new_head)
+                    {
                         return Err(GitAiError::Generic(
                             "commit amend event missing valid heads".to_string(),
                         ));
@@ -2208,17 +2559,20 @@ impl ActorDaemonCoordinator {
                     let mut mapping_old_head = if semantic_old_valid {
                         old_head.clone()
                     } else {
-                        strict_rebase_original_head_from_command(cmd, old_head).ok_or_else(|| {
-                            GitAiError::Generic(
-                                "rebase complete missing valid original head".to_string(),
-                            )
-                        })?
+                        strict_rebase_original_head_from_command(cmd, old_head).ok_or_else(
+                            || {
+                                GitAiError::Generic(
+                                    "rebase complete missing valid original head".to_string(),
+                                )
+                            },
+                        )?
                     };
-                    let allow_rebase_original_override = !semantic_old_valid || rebase_is_control_mode(cmd);
+                    let allow_rebase_original_override =
+                        !semantic_old_valid || rebase_is_control_mode(cmd);
                     if allow_rebase_original_override {
-                        if let Some(family) = family
+                        if let Some(worktree) = cmd.worktree.as_ref()
                             && let Some(pending_head) =
-                                self.pending_rebase_original_head_for_family(family)?
+                                self.pending_rebase_original_head_for_worktree(worktree)?
                             && pending_head != *old_head
                             && pending_head != *new_head
                         {
@@ -2233,8 +2587,7 @@ impl ActorDaemonCoordinator {
                             mapping_old_head = inflight_head.clone();
                         }
                     }
-                    let repository =
-                        repository_for_rewrite_context(family, cmd, "rebase_complete")?;
+                    let repository = repository_for_rewrite_context(cmd, "rebase_complete")?;
                     let onto_head = rebase_onto_spec_from_command(cmd);
                     let (original_commits, new_commits) = strict_rebase_mappings_from_repository(
                         &repository,
@@ -2250,8 +2603,8 @@ impl ActorDaemonCoordinator {
                         original_commits,
                         new_commits,
                     )));
-                    if let Some(family) = family {
-                        let _ = self.clear_pending_rebase_original_head_for_family(family);
+                    if let Some(worktree) = cmd.worktree.as_ref() {
+                        self.clear_pending_rebase_original_head_for_worktree(worktree)?;
                     }
                 }
                 crate::daemon::domain::SemanticEvent::RebaseAbort { head } => {
@@ -2260,8 +2613,8 @@ impl ActorDaemonCoordinator {
                             head.clone(),
                         )));
                     }
-                    if let Some(family) = family {
-                        let _ = self.clear_pending_rebase_original_head_for_family(family);
+                    if let Some(worktree) = cmd.worktree.as_ref() {
+                        self.clear_pending_rebase_original_head_for_worktree(worktree)?;
                     }
                 }
                 crate::daemon::domain::SemanticEvent::CherryPickComplete {
@@ -2274,8 +2627,13 @@ impl ActorDaemonCoordinator {
                             "cherry-pick complete event missing valid heads".to_string(),
                         ));
                     }
-                    let pending_sources = family
-                        .and_then(|key| self.take_pending_cherry_pick_sources_for_family(key).ok())
+                    let pending_sources = cmd
+                        .worktree
+                        .as_ref()
+                        .and_then(|worktree| {
+                            self.take_pending_cherry_pick_sources_for_worktree(worktree)
+                                .ok()
+                        })
                         .unwrap_or_default();
                     let (source_commits, new_commits) = strict_cherry_pick_mappings_from_command(
                         cmd,
@@ -2292,8 +2650,8 @@ impl ActorDaemonCoordinator {
                             new_commits,
                         ),
                     ));
-                    if let Some(family) = family {
-                        let _ = self.clear_pending_cherry_pick_sources_for_family(family);
+                    if let Some(worktree) = cmd.worktree.as_ref() {
+                        self.clear_pending_cherry_pick_sources_for_worktree(worktree)?;
                     }
                 }
                 crate::daemon::domain::SemanticEvent::CherryPickAbort { head } => {
@@ -2302,8 +2660,8 @@ impl ActorDaemonCoordinator {
                             CherryPickAbortEvent::new(head.clone()),
                         ));
                     }
-                    if let Some(family) = family {
-                        let _ = self.clear_pending_cherry_pick_sources_for_family(family);
+                    if let Some(worktree) = cmd.worktree.as_ref() {
+                        self.clear_pending_cherry_pick_sources_for_worktree(worktree)?;
                     }
                 }
                 crate::daemon::domain::SemanticEvent::MergeSquash {
@@ -2337,8 +2695,17 @@ impl ActorDaemonCoordinator {
                         crate::daemon::domain::StashOpKind::List => StashOperation::List,
                         _ => StashOperation::Create,
                     };
-                    let stash_sha =
-                        Self::resolve_stash_sha_for_event(cmd, &operation, stash_ref.as_deref());
+                    let stash_sha = Self::resolve_stash_sha_for_event(cmd, &operation);
+                    if matches!(
+                        operation,
+                        StashOperation::Apply | StashOperation::Pop | StashOperation::Drop
+                    ) && stash_sha.is_none()
+                    {
+                        return Err(GitAiError::Generic(format!(
+                            "stash {:?} missing pre-command stash target oid sid={}",
+                            operation, cmd.root_sid
+                        )));
+                    }
                     out.push(RewriteLogEvent::stash(StashEvent::new(
                         operation,
                         stash_ref.clone(),
@@ -2372,9 +2739,9 @@ impl ActorDaemonCoordinator {
                             )?
                         };
                         if !semantic_old_valid {
-                            if let Some(family) = family
+                            if let Some(worktree) = cmd.worktree.as_ref()
                                 && let Some(pending_head) =
-                                    self.pending_rebase_original_head_for_family(family)?
+                                    self.pending_rebase_original_head_for_worktree(worktree)?
                                 && pending_head != old_head
                                 && pending_head != new_head
                             {
@@ -2389,11 +2756,8 @@ impl ActorDaemonCoordinator {
                                 mapping_old_head = inflight_head.clone();
                             }
                         }
-                        let repository = repository_for_rewrite_context(
-                            family,
-                            cmd,
-                            "pull_rebase_complete",
-                        )?;
+                        let repository =
+                            repository_for_rewrite_context(cmd, "pull_rebase_complete")?;
                         let (original_commits, new_commits) =
                             strict_rebase_mappings_from_repository(
                                 &repository,
@@ -2409,8 +2773,8 @@ impl ActorDaemonCoordinator {
                             original_commits,
                             new_commits,
                         )));
-                        if let Some(family) = family {
-                            let _ = self.clear_pending_rebase_original_head_for_family(family);
+                        if let Some(worktree) = cmd.worktree.as_ref() {
+                            self.clear_pending_rebase_original_head_for_worktree(worktree)?;
                         }
                     }
                 }
@@ -2454,7 +2818,7 @@ impl ActorDaemonCoordinator {
         &self,
         family: Option<&str>,
         applied: &crate::daemon::domain::AppliedCommand,
-    ) {
+    ) -> Result<(), GitAiError> {
         let cmd = &applied.command;
         let events = &applied.analysis.events;
         let saw_pull_event = events.iter().any(|event| {
@@ -2499,11 +2863,15 @@ impl ActorDaemonCoordinator {
             ));
         }
         if cmd.wrapper_mirror || cmd.exit_code != 0 {
-            if let Some(family) = family
-                && cmd.primary_command.as_deref() == Some("rebase")
-            {
+            if cmd.primary_command.as_deref() == Some("rebase") {
+                let worktree = cmd.worktree.as_ref().ok_or_else(|| {
+                    GitAiError::Generic(format!(
+                        "rebase side-effect state requires worktree sid={}",
+                        cmd.root_sid
+                    ))
+                })?;
                 if cmd.invoked_args.iter().any(|arg| arg == "--abort") {
-                    let _ = self.clear_pending_rebase_original_head_for_family(family);
+                    self.clear_pending_rebase_original_head_for_worktree(worktree)?;
                 } else if cmd.exit_code != 0 && !rebase_is_control_mode(cmd) {
                     let pending_old_head = strict_rebase_original_head_from_command(cmd, "");
                     if let Some(old_head) = pending_old_head {
@@ -2513,30 +2881,33 @@ impl ActorDaemonCoordinator {
                             .is_some_and(|v| v == "1")
                         {
                             debug_log(&format!(
-                                "daemon pending rebase original head set family={} head={}",
+                                "daemon pending rebase original head set family={:?} head={}",
                                 family, old_head
                             ));
                         }
-                        let _ =
-                            self.set_pending_rebase_original_head_for_family(family, old_head);
+                        self.set_pending_rebase_original_head_for_worktree(worktree, old_head)?;
                     }
                 }
             }
-            if let Some(family) = family
-                && cmd.primary_command.as_deref() == Some("cherry-pick")
-            {
+            if cmd.primary_command.as_deref() == Some("cherry-pick") {
+                let worktree = cmd.worktree.as_ref().ok_or_else(|| {
+                    GitAiError::Generic(format!(
+                        "cherry-pick side-effect state requires worktree sid={}",
+                        cmd.root_sid
+                    ))
+                })?;
                 if cmd.invoked_args.iter().any(|arg| arg == "--abort") {
-                    let _ = self.clear_pending_cherry_pick_sources_for_family(family);
+                    self.clear_pending_cherry_pick_sources_for_worktree(worktree)?;
                 } else if cmd.exit_code != 0 {
                     let source_commits = cherry_pick_source_commits_from_command(cmd);
-                    let _ = self.set_pending_cherry_pick_sources_for_family(family, source_commits);
+                    self.set_pending_cherry_pick_sources_for_worktree(worktree, source_commits)?;
                 }
             }
             if let Some(family) = family
                 && saw_pull_event
                 && !cmd.ref_changes.is_empty()
             {
-                let _ = self.append_rewrite_event_for_family(
+                self.append_rewrite_event_for_family(
                     family,
                     json!({
                         "ref_reconcile": {
@@ -2544,9 +2915,9 @@ impl ActorDaemonCoordinator {
                             "ref_changes": cmd.ref_changes,
                         }
                     }),
-                );
+                )?;
             }
-            return;
+            return Ok(());
         }
 
         if let Some(worktree) = cmd.worktree.as_ref() {
@@ -2576,7 +2947,7 @@ impl ActorDaemonCoordinator {
             }
         }
 
-        let rewrite_events = match self.rewrite_events_from_semantic_events(family, cmd, events) {
+        let rewrite_events = match self.rewrite_events_from_semantic_events(cmd, events) {
             Ok(rewrite_events) => rewrite_events,
             Err(error) => {
                 debug_log(&format!(
@@ -2594,19 +2965,7 @@ impl ActorDaemonCoordinator {
                         "family": family,
                     })),
                 );
-                if let Some(family) = family {
-                    let _ = self.append_rewrite_event_for_family(
-                        family,
-                        json!({
-                            "rewrite_error": {
-                                "command": cmd.primary_command,
-                                "invoked_command": cmd.invoked_command,
-                                "reason": error.to_string(),
-                            }
-                        }),
-                    );
-                }
-                return;
+                return Err(error);
             }
         };
 
@@ -2616,18 +2975,17 @@ impl ActorDaemonCoordinator {
             if let Some(worktree) = cmd.worktree.as_ref() {
                 let worktree = worktree.to_string_lossy().to_string();
                 let env_overrides = self.env_overrides_for_worktree(worktree.as_ref()).await;
-                let _ = apply_rewrite_side_effect(
+                apply_rewrite_side_effect(
                     &worktree,
                     rewrite_event.clone(),
                     env_overrides.as_ref(),
-                );
+                )?;
             }
             if let Some(family) = family {
-                let _ = self.append_rewrite_event_for_family(
+                self.append_rewrite_event_for_family(
                     family,
-                    serde_json::to_value(rewrite_event)
-                        .unwrap_or_else(|_| json!({"rewrite_error": true})),
-                );
+                    serde_json::to_value(rewrite_event).map_err(GitAiError::from)?,
+                )?;
             }
         }
 
@@ -2639,7 +2997,7 @@ impl ActorDaemonCoordinator {
             let has_head_delta =
                 !old_head.is_empty() && !new_head.is_empty() && old_head != new_head;
             if !cmd.ref_changes.is_empty() || has_head_delta {
-                let _ = self.append_rewrite_event_for_family(
+                self.append_rewrite_event_for_family(
                     family,
                     json!({
                         "ref_reconcile": {
@@ -2649,7 +3007,7 @@ impl ActorDaemonCoordinator {
                             "new_head": new_head,
                         }
                     }),
-                );
+                )?;
             }
         }
 
@@ -2664,13 +3022,14 @@ impl ActorDaemonCoordinator {
                 && let Ok(repo) = find_repository_in_path(&worktree.to_string_lossy())
                 && repo_is_ancestor(&repo, &old_head, &new_head)
             {
-                let _ = apply_pull_fast_forward_working_log_side_effect(
+                apply_pull_fast_forward_working_log_side_effect(
                     &worktree.to_string_lossy(),
                     &old_head,
                     &new_head,
-                );
+                )?;
             }
         }
+        Ok(())
     }
 
     async fn apply_trace_payload_to_state(
@@ -2684,8 +3043,14 @@ impl ActorDaemonCoordinator {
         let Some(command) = emitted else {
             return Ok(None);
         };
-        let applied = self.coordinator.route_command(command).await?;
-        Ok(Some(applied))
+        let root_sid = command.root_sid.clone();
+        match self.coordinator.route_command(command).await {
+            Ok(applied) => Ok(Some(applied)),
+            Err(error) => {
+                let _ = self.clear_trace_root_tracking(&root_sid);
+                Err(error)
+            }
+        }
     }
 
     async fn ingest_trace_payload(
@@ -2718,6 +3083,7 @@ impl ActorDaemonCoordinator {
             self.enqueue_ordered_family_side_effect_command(family, applied.clone())
                 .await?;
         }
+        self.clear_trace_root_tracking(&applied.command.root_sid)?;
 
         if wait && let Some(worktree) = applied.command.worktree.as_ref() {
             let _ = self.coordinator.barrier_family(worktree, applied.seq).await;
@@ -2730,10 +3096,7 @@ impl ActorDaemonCoordinator {
         ))
     }
 
-    async fn ingest_trace_payload_fast(
-        self: Arc<Self>,
-        payload: Value,
-    ) -> Result<(), GitAiError> {
+    async fn ingest_trace_payload_fast(self: Arc<Self>, payload: Value) -> Result<(), GitAiError> {
         if !is_trace_payload(&payload) {
             return Ok(());
         }
@@ -2741,6 +3104,7 @@ impl ActorDaemonCoordinator {
         let Some(applied) = self.apply_trace_payload_to_state(payload).await? else {
             return Ok(());
         };
+        let root_sid = applied.command.root_sid.clone();
         if let Some(family) = applied.command.family_key.as_ref().map(|key| key.0.clone()) {
             self.enqueue_ordered_family_side_effect_entry_no_drain(
                 &family,
@@ -2761,6 +3125,7 @@ impl ActorDaemonCoordinator {
                 }
             });
         }
+        self.clear_trace_root_tracking(&root_sid)?;
 
         Ok(())
     }
@@ -2841,22 +3206,23 @@ impl ActorDaemonCoordinator {
             .status_family(Path::new(&repo_working_dir))
             .await?;
         let latest_seq = status.applied_seq;
-        let pending_roots = self.pending_counts().await?;
-        let active_connections = self.active_trace_connection_count();
-        let pending_total = pending_roots.saturating_add(active_connections);
-        let cursor = latest_seq.saturating_sub(pending_total);
-        let backlog = pending_total;
+        let pending_roots = self.family_pending_trace_root_count(&family.0).await?;
+        let cursor = latest_seq.saturating_sub(pending_roots);
+        let backlog = pending_roots;
         let inflight_effects = self.inflight_effect_depth(&family.0)?;
         let pending_ordered_effects = self.pending_ordered_effect_depth(&family.0)?;
+        let family_key = family.0;
         Ok(FamilyStatus {
-            family_key: family.0,
+            family_key: family_key.clone(),
             latest_seq,
             cursor,
             backlog,
             effect_queue_depth: inflight_effects.saturating_add(pending_ordered_effects),
-            active_trace_connections: active_connections as usize,
+            active_trace_connections: 0,
             pending_roots: pending_roots as usize,
-            last_error: status.last_error,
+            last_error: status
+                .last_error
+                .or_else(|| self.latest_side_effect_error(&family_key).ok().flatten()),
         })
     }
 
@@ -2900,7 +3266,9 @@ impl ActorDaemonCoordinator {
                     "commands": commands,
                     "checkpoints": snapshot.checkpoints,
                     "rewrite_events": rewrite_events,
-                    "last_error": snapshot.last_error,
+                    "last_error": snapshot
+                        .last_error
+                        .or_else(|| self.latest_side_effect_error(&family.0).ok().flatten()),
                 }
             })),
         ))
@@ -2919,6 +3287,71 @@ impl ActorDaemonCoordinator {
             Some(status.applied_seq),
             None,
         ))
+    }
+
+    async fn wait_for_family_idle(
+        &self,
+        repo_working_dir: String,
+        timeout_ms: Option<u64>,
+    ) -> Result<ControlResponse, GitAiError> {
+        let timeout_polls = timeout_ms.unwrap_or(8_000) / 10;
+        let mut polls_remaining = timeout_polls.max(1);
+        let mut stable_idle_polls = 0_u8;
+
+        loop {
+            let status = self.status_for_family(repo_working_dir.clone()).await?;
+            let latest_seq = status.latest_seq;
+
+            if latest_seq > 0 {
+                let barrier = self
+                    .wait_through_seq(repo_working_dir.clone(), latest_seq)
+                    .await?;
+                if !barrier.ok {
+                    return Ok(barrier);
+                }
+            }
+
+            let settled = self.status_for_family(repo_working_dir.clone()).await?;
+            let settled_latest = settled.latest_seq;
+            let settled_backlog = settled.backlog;
+            let settled_pending_roots = settled.pending_roots as u64;
+            let settled_effect_queue_depth = settled.effect_queue_depth;
+
+            if settled_backlog == 0
+                && settled_pending_roots == 0
+                && settled_effect_queue_depth == 0
+                && settled_latest == latest_seq
+            {
+                stable_idle_polls = stable_idle_polls.saturating_add(1);
+                if stable_idle_polls >= 2 {
+                    return Ok(ControlResponse::ok(
+                        Some(settled_latest),
+                        Some(settled_latest),
+                        Some(json!({
+                            "latest_seq": settled_latest,
+                            "backlog": settled_backlog,
+                            "pending_roots": settled_pending_roots,
+                            "effect_queue_depth": settled_effect_queue_depth,
+                        })),
+                    ));
+                }
+            } else {
+                stable_idle_polls = 0;
+            }
+
+            if polls_remaining == 0 {
+                return Err(GitAiError::Generic(format!(
+                    "family {} did not settle (latest seq={}, backlog={}, pending_roots={}, effect_queue_depth={})",
+                    repo_working_dir,
+                    settled_latest,
+                    settled_backlog,
+                    settled_pending_roots,
+                    settled_effect_queue_depth
+                )));
+            }
+            polls_remaining -= 1;
+            sleep(Duration::from_millis(10)).await;
+        }
     }
 
     async fn handle_control_request(&self, request: ControlRequest) -> ControlResponse {
@@ -2954,6 +3387,10 @@ impl ActorDaemonCoordinator {
                 repo_working_dir,
                 seq,
             } => self.wait_through_seq(repo_working_dir, seq).await,
+            ControlRequest::WaitFamilyIdle {
+                repo_working_dir,
+                timeout_ms,
+            } => self.wait_for_family_idle(repo_working_dir, timeout_ms).await,
             ControlRequest::Shutdown => {
                 self.request_shutdown();
                 Ok(ControlResponse::ok(None, None, None))

@@ -1,8 +1,7 @@
 use crate::authorship::rebase_authorship::walk_commits_to_base;
 use crate::commands::git_handlers::CommandHooksContext;
 use crate::commands::hooks::commit_hooks::get_commit_default_author;
-use crate::git::cli_parser::ParsedGitInvocation;
-use crate::git::cli_parser::is_dry_run;
+use crate::git::cli_parser::{ParsedGitInvocation, RebaseArgsSummary, is_dry_run};
 use crate::git::repository::Repository;
 use crate::git::rewrite_log::RewriteLogEvent;
 use crate::utils::debug_log;
@@ -424,97 +423,8 @@ fn is_ancestor(repository: &Repository, ancestor: &str, descendant: &str) -> boo
     crate::git::repository::exec_git(&args).is_ok()
 }
 
-struct RebaseArgsSummary {
-    is_control_mode: bool,
-    has_root: bool,
-    onto_spec: Option<String>,
-    positionals: Vec<String>,
-}
-
 fn summarize_rebase_args(parsed_args: &ParsedGitInvocation) -> RebaseArgsSummary {
-    // Modes that do not start a new rebase sequence.
-    for mode in [
-        "--continue",
-        "--abort",
-        "--skip",
-        "--quit",
-        "--show-current-patch",
-    ] {
-        if parsed_args.has_command_flag(mode) {
-            return RebaseArgsSummary {
-                is_control_mode: true,
-                has_root: false,
-                onto_spec: None,
-                positionals: Vec::new(),
-            };
-        }
-    }
-
-    let mut has_root = false;
-    let mut onto_spec: Option<String> = None;
-    let mut positionals: Vec<String> = Vec::new();
-    let args = &parsed_args.command_args;
-    let mut i = 0usize;
-
-    while i < args.len() {
-        let arg = args[i].as_str();
-
-        if arg == "--" {
-            break;
-        }
-
-        if arg == "--onto" {
-            if let Some(next) = args.get(i + 1) {
-                onto_spec = Some(next.clone());
-                i += 2;
-                continue;
-            }
-            break;
-        }
-        if let Some(spec) = arg.strip_prefix("--onto=") {
-            onto_spec = Some(spec.to_string());
-            i += 1;
-            continue;
-        }
-
-        if arg == "--root" {
-            has_root = true;
-            i += 1;
-            continue;
-        }
-
-        if arg.starts_with('-') {
-            // Subset of rebase flags that consume a separate value token.
-            let takes_value = matches!(
-                arg,
-                "-s" | "--strategy"
-                    | "-X"
-                    | "--strategy-option"
-                    | "-x"
-                    | "--exec"
-                    | "--empty"
-                    | "-C"
-                    | "-S"
-                    | "--gpg-sign"
-            );
-            if takes_value && !arg.contains('=') {
-                i += 2;
-                continue;
-            }
-            i += 1;
-            continue;
-        }
-
-        positionals.push(arg.to_string());
-        i += 1;
-    }
-
-    RebaseArgsSummary {
-        is_control_mode: false,
-        has_root,
-        onto_spec,
-        positionals,
-    }
+    crate::git::cli_parser::summarize_rebase_args(&parsed_args.command_args)
 }
 
 #[cfg(test)]
