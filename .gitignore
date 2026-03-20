@@ -31,4 +31,8 @@ node_modules/
 
 # Task files
 tasks.json
-tasks/ 
+tasks/
+
+# Fuzz testing
+fuzz/artifacts/
+fuzz/corpus/

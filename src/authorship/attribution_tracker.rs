@@ -529,6 +529,25 @@ impl AttributionTracker {
         current_author: &str,
         ts: u128,
     ) -> Result<Vec<Attribution>, GitAiError> {
+        self.update_attributions_for_checkpoint(
+            old_content,
+            new_content,
+            old_attributions,
+            current_author,
+            ts,
+            false,
+        )
+    }
+
+    pub fn update_attributions_for_checkpoint(
+        &self,
+        old_content: &str,
+        new_content: &str,
+        old_attributions: &[Attribution],
+        current_author: &str,
+        ts: u128,
+        is_ai_checkpoint: bool,
+    ) -> Result<Vec<Attribution>, GitAiError> {
         // Cursor-based scans in transform_attributions assume sorted ranges.
         // Normalize once at the boundary so callers can pass ranges in any order.
         let sorted_old_storage = (!is_attribution_list_sorted(old_attributions))
@@ -542,12 +561,16 @@ impl AttributionTracker {
         let (deletions, insertions) = self.build_diff_catalog(&diff_result.diffs);
 
         // Phase 3: Detect move operations
-        let move_mappings =
-            if self.should_skip_move_detection(old_content, new_content, &deletions, &insertions) {
-                Vec::new()
-            } else {
-                self.detect_moves(old_content, new_content, &deletions, &insertions)
-            };
+        let move_mappings = if is_ai_checkpoint {
+            // AI formatting/refactor checkpoints should attribute rewritten regions to AI
+            // instead of preserving original ownership through move detection.
+            Vec::new()
+        } else if self.should_skip_move_detection(old_content, new_content, &deletions, &insertions)
+        {
+            Vec::new()
+        } else {
+            self.detect_moves(old_content, new_content, &deletions, &insertions)
+        };
 
         // Phase 4: Transform attributions through the diff
         let new_attributions = self.transform_attributions(
@@ -558,6 +581,7 @@ impl AttributionTracker {
             &move_mappings,
             ts,
             &diff_result.substantive_new_ranges,
+            is_ai_checkpoint,
         );
 
         // Phase 5: Merge and clean up
@@ -816,6 +840,7 @@ impl AttributionTracker {
         move_mappings: &[MoveMapping],
         ts: u128,
         substantive_new_ranges: &[(usize, usize)],
+        is_ai_checkpoint: bool,
     ) -> Vec<Attribution> {
         let mut new_attributions = Vec::new();
 
@@ -935,10 +960,11 @@ impl AttributionTracker {
                                 }
                             }
                         }
-                    } else if !data_is_whitespace(diff.data()) {
+                    } else if is_ai_checkpoint || !data_is_whitespace(diff.data()) {
                         // For non-move deletions of substantive content, create a zero-length
-                        // marker attribution at the deletion point. This ensures lines with
-                        // deletions get attributed to the deleting author.
+                        // marker attribution at the deletion point. For AI checkpoints, apply
+                        // this to whitespace deletions as well so formatting-only rewrites are
+                        // attributed to AI.
                         new_attributions.push(Attribution::new(
                             new_pos,
                             new_pos, // Zero-length marker
@@ -1007,6 +1033,20 @@ impl AttributionTracker {
                     }
 
                     // Add attribution for this insertion
+                    if is_ai_checkpoint {
+                        new_attributions.push(Attribution::new(
+                            new_pos,
+                            new_pos + len,
+                            current_author.to_string(),
+                            ts,
+                        ));
+
+                        new_pos += len;
+                        insertion_idx += 1;
+                        prev_whitespace_delete = false;
+                        continue;
+                    }
+
                     let insertion_range = (new_pos, new_pos + len);
                     let is_substantive_insert =
                         ranges_intersect(substantive_new_ranges, insertion_range);
@@ -1938,6 +1978,14 @@ pub fn attributions_to_line_attributions(
     attributions: &[Attribution],
     content: &str,
 ) -> Vec<LineAttribution> {
+    attributions_to_line_attributions_for_checkpoint(attributions, content, false)
+}
+
+pub fn attributions_to_line_attributions_for_checkpoint(
+    attributions: &[Attribution],
+    content: &str,
+    is_ai_checkpoint: bool,
+) -> Vec<LineAttribution> {
     if content.is_empty() || attributions.is_empty() {
         return Vec::new();
     }
@@ -1987,6 +2035,7 @@ pub fn attributions_to_line_attributions(
             &active_indices,
             attributions,
             content,
+            is_ai_checkpoint,
         );
         line_authors.push(Some((author, overrode)));
     }
@@ -2009,6 +2058,7 @@ fn find_dominant_author_for_line_candidates(
     candidate_indices: &[usize],
     attributions: &[Attribution],
     full_content: &str,
+    is_ai_checkpoint: bool,
 ) -> (String, Option<String>) {
     let mut candidate_attrs: Vec<&Attribution> = Vec::new();
     for &attr_idx in candidate_indices {
@@ -2041,7 +2091,9 @@ fn find_dominant_author_for_line_candidates(
         // Zero-length attributions are deletion markers - they indicate the author
         // deleted content at this position, so they should influence line attribution
         let is_deletion_marker = attribution.start == attribution.end;
-        if has_non_whitespace || is_line_empty || is_deletion_marker {
+        let is_ai_author = attribution.author_id != CheckpointKind::Human.to_str();
+        let include_ai_whitespace = is_ai_checkpoint && is_ai_author;
+        if has_non_whitespace || is_line_empty || is_deletion_marker || include_ai_whitespace {
             candidate_attrs.push(attribution);
         } else {
             // If the attribution is only whitespace, discard it

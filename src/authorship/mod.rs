@@ -3,6 +3,7 @@ pub mod attribution_tracker;
 pub mod authorship_log;
 pub mod authorship_log_serialization;
 pub mod diff_ai_accepted;
+pub mod git_ai_hooks;
 pub mod ignore;
 pub mod imara_diff_utils;
 pub mod internal_db;

@@ -83,47 +83,8 @@ pub fn fetch_authorship_notes(
         remote_name, tracking_ref
     ));
 
-    // First, check if the remote has refs/notes/ai using ls-remote
-    // This is important for bare repos where the refmap might not be configured
-    let mut ls_remote_args = repository.global_args_for_exec();
-    ls_remote_args.push("ls-remote".to_string());
-    ls_remote_args.push(remote_name.to_string());
-    ls_remote_args.push("refs/notes/ai".to_string());
-
-    debug_log(&format!("ls-remote command: {:?}", ls_remote_args));
-
-    match exec_git(&ls_remote_args) {
-        Ok(output) => {
-            let result = String::from_utf8_lossy(&output.stdout).to_string();
-            debug_log(&format!("ls-remote stdout: '{}'", result));
-            debug_log(&format!(
-                "ls-remote stderr: '{}'",
-                String::from_utf8_lossy(&output.stderr)
-            ));
-
-            if result.trim().is_empty() {
-                debug_log(&format!(
-                    "no authorship notes found on remote '{}', nothing to sync",
-                    remote_name
-                ));
-                return Ok(NotesExistence::NotFound);
-            }
-            debug_log(&format!(
-                "found authorship notes on remote '{}'",
-                remote_name
-            ));
-        }
-        Err(e) => {
-            debug_log(&format!(
-                "failed to check for authorship notes on remote '{}': {}",
-                remote_name, e
-            ));
-            // Return error instead of assuming no notes - we don't know the state
-            return Err(e);
-        }
-    }
-
-    // Now fetch the notes to the tracking ref with explicit refspec
+    // Fetch notes to tracking ref with explicit refspec.
+    // If the remote does not have refs/notes/ai yet, treat that as NotFound.
     let fetch_refspec = format!("+refs/notes/ai:{}", tracking_ref);
 
     // Build the internal authorship fetch with explicit flags and disabled hooks.
@@ -148,6 +109,13 @@ pub fn fetch_authorship_notes(
             ));
         }
         Err(e) => {
+            if is_missing_remote_notes_ref_error(&e) {
+                debug_log(&format!(
+                    "no authorship notes found on remote '{}', nothing to sync",
+                    remote_name
+                ));
+                return Ok(NotesExistence::NotFound);
+            }
             debug_log(&format!("authorship fetch failed: {}", e));
             return Err(e);
         }
@@ -186,6 +154,19 @@ pub fn fetch_authorship_notes(
     }
 
     Ok(NotesExistence::Found)
+}
+
+fn is_missing_remote_notes_ref_error(error: &GitAiError) -> bool {
+    let GitAiError::GitCliError { stderr, .. } = error else {
+        return false;
+    };
+
+    let stderr_lower = stderr.to_ascii_lowercase();
+    stderr_lower.contains("refs/notes/ai")
+        && (stderr_lower.contains("couldn't find remote ref")
+            || stderr_lower.contains("could not find remote ref")
+            || stderr_lower.contains("remote ref does not exist")
+            || stderr_lower.contains("not our ref"))
 }
 // for use with post-push hook
 pub fn push_authorship_notes(repository: &Repository, remote_name: &str) -> Result<(), GitAiError> {
@@ -367,5 +348,26 @@ mod tests {
                 .any(|pair| pair[0] == "-c" && pair[1] == disabled_hooks)
         );
         assert!(args.contains(&"push".to_string()));
+    }
+
+    #[test]
+    fn missing_remote_notes_ref_error_is_detected() {
+        let err = GitAiError::GitCliError {
+            code: Some(128),
+            stderr: "fatal: couldn't find remote ref refs/notes/ai".to_string(),
+            args: vec!["fetch".to_string(), "origin".to_string()],
+        };
+        assert!(is_missing_remote_notes_ref_error(&err));
+    }
+
+    #[test]
+    fn missing_remote_notes_ref_error_ignores_unrelated_git_errors() {
+        let err = GitAiError::GitCliError {
+            code: Some(128),
+            stderr: "fatal: Authentication failed for 'https://github.com/org/repo.git/'"
+                .to_string(),
+            args: vec!["fetch".to_string(), "origin".to_string()],
+        };
+        assert!(!is_missing_remote_notes_ref_error(&err));
     }
 }

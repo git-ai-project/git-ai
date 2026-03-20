@@ -1,16 +1,19 @@
 name: E2E Tests
 
 on:
+  schedule:
+    - cron: '0 2 * * *'  # 2 AM UTC nightly
   pull_request:
-    branches: [main]
-  push:
-    branches: [main]
-  merge_group:
-    branches: [main]
+    types: [labeled]
+  workflow_dispatch:
 
 jobs:
   e2e-tests:
     runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && github.event.label.name == 'integration')
 
     steps:
       - name: Checkout repository

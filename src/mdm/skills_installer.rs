@@ -421,7 +421,7 @@ mod tests {
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
         remove_skill_link(&link).unwrap();
-        assert!(!link.symlink_metadata().is_ok());
+        assert!(link.symlink_metadata().is_err());
         assert!(target.exists(), "original target should not be removed");
     }
 

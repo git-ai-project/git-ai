@@ -1545,12 +1545,19 @@ fn load_pull_hook_state(repo: &Repository) -> Option<PullHookState> {
     serde_json::from_slice(&data).ok()
 }
 
-fn fetch_notes_from_all_remotes(repo: &Repository) {
-    if let Ok(remotes) = repo.remotes() {
-        for remote in remotes {
-            let _ = fetch_authorship_notes(repo, &remote);
-        }
-    }
+fn fetch_notes_from_pull_remote(repo: &Repository) {
+    let remote = repo
+        .upstream_remote()
+        .ok()
+        .flatten()
+        .or_else(|| repo.get_default_remote().ok().flatten());
+
+    let Some(remote) = remote else {
+        debug_log("pull hooks: could not resolve remote for authorship fetch; skipping");
+        return;
+    };
+
+    let _ = fetch_authorship_notes(repo, &remote);
 }
 
 fn was_fast_forward_pull(repository: &Repository, expected_new_head: &str) -> bool {
@@ -1836,7 +1843,7 @@ fn maybe_handle_pull_post_merge(repo: &mut Repository) {
         return;
     }
 
-    fetch_notes_from_all_remotes(repo);
+    fetch_notes_from_pull_remote(repo);
 
     let Ok(new_head) = repo.head().and_then(|head| head.target()) else {
         return;
@@ -1862,7 +1869,7 @@ fn maybe_handle_pull_post_rewrite(repo: &mut Repository) {
         return;
     }
 
-    fetch_notes_from_all_remotes(repo);
+    fetch_notes_from_pull_remote(repo);
 
     let Ok(new_head) = repo.head().and_then(|head| head.target()) else {
         clear_pull_hook_state(repo);

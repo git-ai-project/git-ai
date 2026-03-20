@@ -1,0 +1,12 @@
+pre-commit:
+  parallel: true
+  commands:
+    format-check:
+      glob: "**/*.{rs,toml}"
+      run: task format:check
+    lint:
+      glob: "**/*.{rs,toml}"
+      run: task lint
+    doc-check:
+      glob: "**/*.{rs,toml}"
+      run: task doc

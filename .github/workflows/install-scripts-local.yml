@@ -1,17 +1,26 @@
 name: End-to-End Tests
 
 on:
+  schedule:
+    - cron: '0 3 * * *'  # 3 AM UTC nightly
   pull_request:
-    branches: [main]
+    types: [labeled]
   push:
     branches: [main]
   merge_group:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   install-local-unix:
     name: E2E ${{ matrix.agent.name }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
+      github.event_name == 'merge_group' ||
+      (github.event_name == 'pull_request' && github.event.label.name == 'integration')
     strategy:
       fail-fast: false
       matrix:
@@ -141,6 +150,12 @@ jobs:
   install-local-windows:
     name: E2E ${{ matrix.agent.name }} on windows-latest
     runs-on: windows-latest
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
+      github.event_name == 'merge_group' ||
+      (github.event_name == 'pull_request' && github.event.label.name == 'integration')
     strategy:
       fail-fast: false
       matrix:

@@ -2718,10 +2718,10 @@ pluralize@^8.0.0:
   resolved "https://registry.yarnpkg.com/pluralize/-/pluralize-8.0.0.tgz#1a6fa16a38d12a1901e0320fa017051c539ce3b1"
   integrity sha512-Nc3IT5yHzflTfbjgqWcCPpo7DaKy4FnpB0l/zCAW0Tc7jxAiuqSxHasntB3D7887LSrA93kDJ9IXovxJYxyLCA==
 
-posthog-node@^5.28.2:
-  version "5.28.2"
-  resolved "https://registry.yarnpkg.com/posthog-node/-/posthog-node-5.28.2.tgz#e743a40093dc2dfef8a68b3aef94403f15ad4891"
-  integrity sha512-a+unFAKU8Vtez1DAEgCXB/KOZbroQZE+GvnSr9B35u3uMUxtyPO5ulgLJo8AUcZ4prhv6ia8R1Xjr4BrxPfdsA==
+posthog-node@^5.28.3:
+  version "5.28.3"
+  resolved "https://registry.yarnpkg.com/posthog-node/-/posthog-node-5.28.3.tgz#9deed338d42056962e72c9ebe518b3042ccdf2da"
+  integrity sha512-kcnEgBW4o3oSqr+oHy54+w0o5Ww91bp6I3iEe7jvr6Nd7mAyWLbAMIILnSbDJpn2129WXhMCCbVP//VlfBtCNA==
   dependencies:
     "@posthog/core" "1.23.4"
 

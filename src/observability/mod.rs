@@ -6,8 +6,9 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-#[allow(unused_imports)]
-use crate::metrics::{METRICS_API_VERSION, MetricEvent};
+#[cfg(not(any(test, feature = "test-support")))]
+use crate::metrics::METRICS_API_VERSION;
+use crate::metrics::MetricEvent;
 
 pub mod flush;
 pub mod wrapper_performance_targets;

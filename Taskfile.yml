@@ -56,10 +56,9 @@ tasks:
       - cargo test
 
   lint:
-    desc: Run cargo check and clippy
+    desc: Run cargo check and clippy with warnings as errors
     cmds:
-      - cargo check
-      - cargo clippy
+      - cargo clippy --all-targets -- -D warnings
 
   bench:
     desc: Run benchmarks
@@ -67,9 +66,11 @@ tasks:
       - cargo bench
 
   doc:
-    desc: Build documentation
+    desc: Build documentation with warnings as errors
     cmds:
-      - cargo doc --workspace --no-deps
+      - cargo doc --no-deps
+    env:
+      RUSTDOCFLAGS: "-D warnings"
 
   format:
     desc: Format code with rustfmt
@@ -116,3 +117,12 @@ tasks:
     desc: Install dependencies using Cargo
     cmds:
       - cargo install --path .
+  fuzz:
+    desc: Run fuzz testing (requires nightly)
+    cmds:
+      - cargo +nightly fuzz run fuzz_checkpoint -- -max_total_time=60
+
+  miri:
+    desc: Run miri for undefined behavior detection (requires nightly)
+    cmds:
+      - cargo +nightly miri test --lib

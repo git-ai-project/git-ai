@@ -402,7 +402,7 @@ mod tests {
     #[test]
     fn test_get_rebased_commits_linear_history() {
         let test_repo = TmpRepo::new().unwrap();
-        let repo = test_repo.gitai_repo();
+        let _repo = test_repo.gitai_repo();
 
         // Create a linear commit history
         let file_path = test_repo.path().join("test.txt");
@@ -469,7 +469,7 @@ mod tests {
     #[test]
     fn test_get_rebased_commits_more_than_available() {
         let test_repo = TmpRepo::new().unwrap();
-        let repo = test_repo.gitai_repo();
+        let _repo = test_repo.gitai_repo();
 
         // Create single commit
         let file_path = test_repo.path().join("test.txt");

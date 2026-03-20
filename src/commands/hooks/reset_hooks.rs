@@ -1,6 +1,7 @@
 use crate::{
     authorship::working_log::CheckpointKind,
     commands::hooks::commit_hooks,
+    commands::hooks::plumbing_rewrite_hooks::apply_wrapper_plumbing_rewrite_if_possible,
     git::{cli_parser::ParsedGitInvocation, repository::Repository, rewrite_log::ResetKind},
     utils::debug_log,
 };
@@ -175,7 +176,7 @@ fn handle_reset_hard(repository: &Repository, old_head_sha: &str, _target_commit
 
 /// Handle --soft, --mixed, --merge: preserve working directory and reconstruct working log
 fn handle_reset_preserve_working_dir(
-    repository: &Repository,
+    repository: &mut Repository,
     old_head_sha: &str,
     target_commit_sha: &str,
     new_head_sha: &str,
@@ -199,9 +200,21 @@ fn handle_reset_preserve_working_dir(
     let is_backward = is_ancestor(repository, target_commit_sha, old_head_sha);
 
     if !is_backward {
-        // Non-ancestor reset (e.g. branch restacked to a rebased version of the same commit).
-        // The working directory is preserved (--keep/--mixed/--soft), so the checkpoint data
-        // is still valid — just re-key it under the new HEAD.
+        // Non-ancestor reset (e.g. Graphite restacking the currently checked-out branch).
+        // Try to treat this as a rewrite first so authorship notes follow the rewritten commits.
+        if apply_wrapper_plumbing_rewrite_if_possible(
+            repository,
+            old_head_sha,
+            target_commit_sha,
+            human_author,
+            true,
+        ) {
+            debug_log("Reset to non-ancestor commit, handled as wrapper plumbing rewrite");
+            return;
+        }
+
+        // Fall back to re-keying the working log so uncommitted state is preserved even when
+        // we cannot derive a safe commit mapping.
         debug_log("Reset to non-ancestor commit, migrating working log");
         let _ = repository
             .storage

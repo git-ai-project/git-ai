@@ -180,6 +180,8 @@
             cargo-watch     # Auto-rebuild on file changes
             cargo-expand    # Show macro expansions
             cargo-llvm-cov  # Code coverage via LLVM instrumentation
+            lefthook        # Git hooks manager
+            go-task         # Task runner (Taskfile.yml)
           ] ++ lib.optionals stdenv.hostPlatform.isDarwin [
             libiconv
             apple-sdk_15
@@ -237,6 +239,10 @@ GITOGEOF
               "$GITWRAP_DIR/git-ai" install-hooks 2>/dev/null || true
             fi
 
+            # Install lefthook git hooks (use real git, not the git-ai wrapper,
+            # since the dev binary may not be built yet)
+            PATH="${pkgs.git}/bin:$PATH" lefthook install 2>/dev/null || true
+
             # Set up environment for development
             export RUST_BACKTRACE=1
             export RUST_LOG=debug
@@ -281,6 +287,58 @@ GITOGEOF
           drv = git-ai-package;
           exePath = "/bin/git-ai";
         };
+
+        # Nix flake checks: run with `nix flake check`
+        # Tests are not included here -- they require network access, Node.js,
+        # and the Graphite CLI, which are not available in the Nix sandbox.
+        # Tests run in CI via the existing test.yml workflow instead.
+        checks =
+          let
+            commonNativeBuildInputs = with pkgs; [ pkg-config ]
+              ++ [ rustPlatform.bindgenHook ];
+            commonBuildInputs = with pkgs; [ sqlite ]
+              ++ lib.optionals stdenv.hostPlatform.isDarwin [
+                libiconv apple-sdk_15
+              ];
+            mkCheck = attrs: rustPlatform.buildRustPackage ({
+              version = git-ai-unwrapped.version;
+              src = ./.;
+              cargoLock.lockFile = ./Cargo.lock;
+              nativeBuildInputs = commonNativeBuildInputs;
+              buildInputs = commonBuildInputs;
+              installPhase = "mkdir -p $out";
+              doCheck = false;
+            } // attrs);
+          in
+          {
+            # Build check - ensures the package builds
+            build = git-ai-unwrapped;
+
+            # Clippy lint check with warnings as errors
+            clippy = mkCheck {
+              pname = "git-ai-clippy";
+              buildPhase = ''
+                cargo clippy --all-targets -- -D warnings
+              '';
+            };
+
+            # Format check
+            fmt = mkCheck {
+              pname = "git-ai-fmt";
+              buildPhase = ''
+                cargo fmt -- --check
+              '';
+            };
+
+            # Doc check with warnings as errors
+            doc = mkCheck {
+              pname = "git-ai-doc";
+              RUSTDOCFLAGS = "-D warnings";
+              buildPhase = ''
+                cargo doc --no-deps
+              '';
+            };
+          };
 
         # Formatter for `nix fmt`
         formatter = pkgs.nixpkgs-fmt;
