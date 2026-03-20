@@ -5,7 +5,6 @@ use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 use git_ai::authorship::working_log::AgentId;
 use git_ai::git::refs::notes_add;
 use std::collections::HashMap;
-use std::process::Command;
 
 fn test_mode_uses_daemon() -> bool {
     matches!(
@@ -16,28 +15,6 @@ fn test_mode_uses_daemon() -> bool {
             .as_deref(),
         Some("daemon") | Some("trace-daemon") | Some("pure-daemon")
     )
-}
-
-fn read_authorship_note(repo: &TestRepo, commit_sha: &str) -> Option<String> {
-    let output = Command::new("git")
-        .args([
-            "-C",
-            repo.path().to_str().expect("valid repo path"),
-            "--no-pager",
-            "notes",
-            "--ref=ai",
-            "show",
-            commit_sha,
-        ])
-        .output()
-        .expect("failed to run git notes show");
-
-    if output.status.success() {
-        let note = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if note.is_empty() { None } else { Some(note) }
-    } else {
-        None
-    }
 }
 
 /// Test simple rebase with no conflicts where trees are identical - multiple commits
@@ -326,7 +303,8 @@ fn test_rebase_preserves_human_only_commit_note_metadata() {
     let prod_commit = repo.stage_all_and_commit("Prod human commit").unwrap();
 
     // Sanity check: original commit has a note and it's metadata-only.
-    let old_note = read_authorship_note(&repo, &prod_commit.commit_sha)
+    let old_note = repo
+        .read_authorship_note(&prod_commit.commit_sha)
         .expect("original commit should have an authorship note");
     let old_log =
         AuthorshipLog::deserialize_from_string(&old_note).expect("parse original authorship note");
@@ -344,7 +322,8 @@ fn test_rebase_preserves_human_only_commit_note_metadata() {
     let rebased_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
     // Regression check: rebased commit should still carry the metadata-only note.
-    let rebased_note = read_authorship_note(&repo, &rebased_sha)
+    let rebased_note = repo
+        .read_authorship_note(&rebased_sha)
         .expect("rebased commit should preserve metadata-only authorship note");
     let rebased_log = AuthorshipLog::deserialize_from_string(&rebased_note)
         .expect("parse rebased authorship note");
@@ -381,7 +360,8 @@ fn test_rebase_preserves_prompt_only_commit_note_metadata() {
         .stage_all_and_commit("Prod human commit")
         .expect("create prod commit");
 
-    let original_note = read_authorship_note(&repo, &prod_commit.commit_sha)
+    let original_note = repo
+        .read_authorship_note(&prod_commit.commit_sha)
         .expect("source commit should have authorship note");
     let mut original_log =
         AuthorshipLog::deserialize_from_string(&original_note).expect("parse source note");
@@ -428,7 +408,8 @@ fn test_rebase_preserves_prompt_only_commit_note_metadata() {
     repo.git(&["rebase", "dev"]).unwrap();
     let rebased_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
-    let rebased_note = read_authorship_note(&repo, &rebased_sha)
+    let rebased_note = repo
+        .read_authorship_note(&rebased_sha)
         .expect("rebased commit should preserve prompt-only note");
     let rebased_log =
         AuthorshipLog::deserialize_from_string(&rebased_note).expect("parse rebased note");
@@ -1503,7 +1484,8 @@ fn test_rebase_preserves_custom_attributes_from_config() {
 
     // Verify custom attributes were set on the original commit
     let original_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
-    let original_note = read_authorship_note(&repo, &original_sha)
+    let original_note = repo
+        .read_authorship_note(&original_sha)
         .expect("original commit should have authorship note");
     let original_log =
         AuthorshipLog::deserialize_from_string(&original_note).expect("parse original note");
@@ -1527,7 +1509,8 @@ fn test_rebase_preserves_custom_attributes_from_config() {
 
     // Verify custom attributes survived the rebase
     let rebased_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
-    let rebased_note = read_authorship_note(&repo, &rebased_sha)
+    let rebased_note = repo
+        .read_authorship_note(&rebased_sha)
         .expect("rebased commit should have authorship note");
     let rebased_log =
         AuthorshipLog::deserialize_from_string(&rebased_note).expect("parse rebased note");

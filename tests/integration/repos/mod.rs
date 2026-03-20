@@ -46,10 +46,17 @@ macro_rules! subdir_test_variants {
                         full_args.extend(args);
 
                         use std::process::Command;
-                        use $crate::repos::test_repo::{get_binary_path, GitTestMode};
+                        use $crate::repos::test_repo::{
+                            get_binary_path, git_command_affects_daemon,
+                            git_command_requires_daemon_sync, GitTestMode,
+                        };
 
                         let binary_path = get_binary_path();
                         let mode = GitTestMode::from_env();
+
+                        if mode.uses_daemon() && git_command_requires_daemon_sync(args) {
+                            self.inner.sync_daemon_if_dirty();
+                        }
 
                         let mut command = if mode.uses_wrapper() {
                             Command::new(binary_path)
@@ -102,10 +109,15 @@ macro_rules! subdir_test_variants {
 
                         if output.status.success() {
                             if mode.uses_daemon() {
-                                self.inner.sync_daemon();
+                                if git_command_affects_daemon(args) {
+                                    self.inner.mark_daemon_family_dirty();
+                                }
                             }
                             Ok(if stdout.is_empty() { stderr } else { stdout })
                         } else {
+                            if mode.uses_daemon() && git_command_affects_daemon(args) {
+                                self.inner.mark_daemon_family_dirty();
+                            }
                             Err(stderr)
                         }
                     }
@@ -124,10 +136,17 @@ macro_rules! subdir_test_variants {
                             full_args.extend(args);
 
                             use std::process::Command;
-                            use $crate::repos::test_repo::{get_binary_path, GitTestMode};
+                            use $crate::repos::test_repo::{
+                                get_binary_path, git_command_affects_daemon,
+                                git_command_requires_daemon_sync, GitTestMode,
+                            };
 
                             let binary_path = get_binary_path();
                             let mode = GitTestMode::from_env();
+
+                            if mode.uses_daemon() && git_command_requires_daemon_sync(args) {
+                                self.inner.sync_daemon_if_dirty();
+                            }
 
                             let mut command = if mode.uses_wrapper() {
                                 Command::new(binary_path)
@@ -184,10 +203,15 @@ macro_rules! subdir_test_variants {
 
                             if output.status.success() {
                                 if mode.uses_daemon() {
-                                    self.inner.sync_daemon();
+                                    if git_command_affects_daemon(args) {
+                                        self.inner.mark_daemon_family_dirty();
+                                    }
                                 }
                                 Ok(if stdout.is_empty() { stderr } else { stdout })
                             } else {
+                                if mode.uses_daemon() && git_command_affects_daemon(args) {
+                                    self.inner.mark_daemon_family_dirty();
+                                }
                                 Err(stderr)
                             }
                         } else {

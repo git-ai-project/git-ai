@@ -17,7 +17,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -293,6 +293,7 @@ fn configure_test_home_env(command: &mut Command, test_home: &Path) {
 
 static SHARED_DAEMON_PROCESS: OnceLock<Arc<DaemonProcess>> = OnceLock::new();
 static SHARED_DAEMON_EXIT_HOOK: OnceLock<()> = OnceLock::new();
+static DAEMON_SYNC_REGISTRY: OnceLock<Mutex<DaemonSyncRegistry>> = OnceLock::new();
 
 extern "C" fn shutdown_shared_daemon_at_process_exit() {
     if let Some(daemon) = SHARED_DAEMON_PROCESS.get() {
@@ -379,6 +380,121 @@ fn resolve_test_db_path(
     }
 }
 
+#[derive(Debug, Default)]
+struct DaemonSyncRegistry {
+    dirty_generation: HashMap<String, u64>,
+    synced_generation: HashMap<String, u64>,
+}
+
+impl DaemonSyncRegistry {
+    fn mark_dirty(&mut self, family_key: &str) -> u64 {
+        let generation = self
+            .dirty_generation
+            .entry(family_key.to_string())
+            .or_insert(0);
+        *generation += 1;
+        *generation
+    }
+
+    fn dirty_target(&self, family_key: &str) -> Option<u64> {
+        let dirty = *self.dirty_generation.get(family_key).unwrap_or(&0);
+        let synced = *self.synced_generation.get(family_key).unwrap_or(&0);
+        (dirty > synced).then_some(dirty)
+    }
+
+    fn current_generation(&self, family_key: &str) -> u64 {
+        *self.dirty_generation.get(family_key).unwrap_or(&0)
+    }
+
+    fn mark_synced_through(&mut self, family_key: &str, generation: u64) {
+        let synced = self
+            .synced_generation
+            .entry(family_key.to_string())
+            .or_insert(0);
+        *synced = (*synced).max(generation);
+    }
+}
+
+fn daemon_sync_registry() -> &'static Mutex<DaemonSyncRegistry> {
+    DAEMON_SYNC_REGISTRY.get_or_init(|| Mutex::new(DaemonSyncRegistry::default()))
+}
+
+fn git_primary_command<'a>(args: &'a [&'a str]) -> Option<(&'a str, Option<&'a str>)> {
+    let mut iter = args.iter().copied();
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            break;
+        }
+        match arg {
+            "-c" | "-C" | "--config-env" | "--exec-path" | "--git-dir" | "--namespace"
+            | "--super-prefix" | "--work-tree" => {
+                iter.next();
+            }
+            _ if arg.starts_with("-c")
+                || arg.starts_with("-C")
+                || arg.starts_with("--config-env=")
+                || arg.starts_with("--exec-path=")
+                || arg.starts_with("--git-dir=")
+                || arg.starts_with("--namespace=")
+                || arg.starts_with("--super-prefix=")
+                || arg.starts_with("--work-tree=") => {}
+            _ if arg.starts_with('-') => {}
+            _ => return Some((arg, iter.next().filter(|next| !next.starts_with('-')))),
+        }
+    }
+    None
+}
+
+pub(crate) fn git_command_affects_daemon(args: &[&str]) -> bool {
+    let Some((command, subcommand)) = git_primary_command(args) else {
+        return false;
+    };
+
+    match command {
+        "branch" => !args.contains(&"--show-current"),
+        "checkout" | "cherry-pick" | "clone" | "commit" | "fetch" | "init" | "merge" | "pull"
+        | "push" | "rebase" | "reset" | "revert" | "switch" | "tag" | "update-ref" | "worktree" => {
+            true
+        }
+        "remote" => matches!(
+            subcommand,
+            Some("add" | "remove" | "rm" | "rename" | "set-head" | "set-branches" | "set-url")
+        ),
+        "stash" => !matches!(subcommand, Some("list" | "show")),
+        _ => false,
+    }
+}
+
+pub(crate) fn git_command_requires_daemon_sync(args: &[&str]) -> bool {
+    let Some((command, _subcommand)) = git_primary_command(args) else {
+        return false;
+    };
+
+    matches!(command, "notes")
+}
+
+fn git_ai_primary_command<'a>(args: &'a [&'a str]) -> Option<&'a str> {
+    args.iter().copied().find(|arg| !arg.starts_with('-'))
+}
+
+fn git_ai_command_requires_daemon_sync(args: &[&str]) -> bool {
+    matches!(
+        git_ai_primary_command(args),
+        Some("blame" | "diff" | "prompts" | "stats")
+    )
+}
+
+fn git_ai_command_affects_daemon(args: &[&str]) -> bool {
+    matches!(git_ai_primary_command(args), Some("checkpoint"))
+}
+
+fn env_explicitly_enables_trace2(envs: &[(&str, &str)]) -> bool {
+    envs.iter().any(|(key, value)| {
+        matches!(*key, "GIT_TRACE2" | "GIT_TRACE2_EVENT" | "GIT_TRACE2_PERF")
+            && !matches!(*value, "" | "0")
+    })
+}
+
 #[derive(Debug)]
 pub struct TestRepo {
     path: PathBuf,
@@ -394,6 +510,7 @@ pub struct TestRepo {
     _base_repo_path: Option<PathBuf>,
     /// Base repo's test DB path for cleanup.
     _base_test_db_path: Option<PathBuf>,
+    daemon_family_key: OnceLock<String>,
 }
 
 #[allow(dead_code)]
@@ -671,6 +788,7 @@ impl TestRepo {
             daemon_process,
             _base_repo_path: Some(base_path),
             _base_test_db_path: Some(base_test_db_path),
+            daemon_family_key: OnceLock::new(),
         };
 
         repo.apply_default_config_patch();
@@ -707,6 +825,7 @@ impl TestRepo {
             daemon_process: None,
             _base_repo_path: None,
             _base_test_db_path: None,
+            daemon_family_key: OnceLock::new(),
         };
 
         repo.apply_default_config_patch();
@@ -788,6 +907,7 @@ impl TestRepo {
             daemon_process: None,
             _base_repo_path: Some(main_path),
             _base_test_db_path: None,
+            daemon_family_key: OnceLock::new(),
         };
 
         repo.apply_default_config_patch();
@@ -831,6 +951,7 @@ impl TestRepo {
             daemon_process: None,
             _base_repo_path: None,
             _base_test_db_path: None,
+            daemon_family_key: OnceLock::new(),
         };
 
         let mut repo = repo;
@@ -888,6 +1009,7 @@ impl TestRepo {
             daemon_process: None,
             _base_repo_path: None,
             _base_test_db_path: None,
+            daemon_family_key: OnceLock::new(),
         };
 
         // Ensure the upstream default branch is named "main" for consistency across Git versions
@@ -930,6 +1052,7 @@ impl TestRepo {
             daemon_process: None,
             _base_repo_path: None,
             _base_test_db_path: None,
+            daemon_family_key: OnceLock::new(),
         };
 
         // Ensure the default branch is named "main" for consistency across Git versions
@@ -983,6 +1106,7 @@ impl TestRepo {
             daemon_process: None,
             _base_repo_path: None,
             _base_test_db_path: None,
+            daemon_family_key: OnceLock::new(),
         };
 
         repo.apply_default_config_patch();
@@ -1051,6 +1175,80 @@ impl TestRepo {
                     panic!("daemon sync failed for {}: {}", self.path.display(), e)
                 });
         }
+    }
+
+    fn daemon_family_key(&self) -> String {
+        self.daemon_family_key
+            .get_or_init(|| {
+                let repo = GitAiRepository::find_repository_in_path(self.path.to_str().unwrap())
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "failed to resolve daemon family key for {}: {}",
+                            self.path.display(),
+                            e
+                        )
+                    });
+                let common_dir = repo
+                    .common_dir()
+                    .canonicalize()
+                    .unwrap_or_else(|_| repo.common_dir().to_path_buf());
+                common_dir.to_string_lossy().to_string()
+            })
+            .clone()
+    }
+
+    pub(crate) fn mark_daemon_family_dirty(&self) {
+        if !self.git_mode.uses_daemon() {
+            return;
+        }
+        let family_key = self.daemon_family_key();
+        let mut registry = daemon_sync_registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        registry.mark_dirty(&family_key);
+    }
+
+    pub(crate) fn sync_daemon_if_dirty(&self) {
+        if !self.git_mode.uses_daemon() {
+            return;
+        }
+
+        let family_key = self.daemon_family_key();
+        let target = {
+            let registry = daemon_sync_registry()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            registry.dirty_target(&family_key)
+        };
+
+        if let Some(target) = target {
+            self.wait_for_daemon_idle();
+            let mut registry = daemon_sync_registry()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            registry.mark_synced_through(&family_key, target);
+        }
+    }
+
+    pub(crate) fn sync_daemon_force(&self) {
+        if !self.git_mode.uses_daemon() {
+            return;
+        }
+
+        let family_key = self.daemon_family_key();
+        let target = {
+            let registry = daemon_sync_registry()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            registry.current_generation(&family_key)
+        };
+
+        self.wait_for_daemon_idle();
+
+        let mut registry = daemon_sync_registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        registry.mark_synced_through(&family_key, target);
     }
 
     fn setup_git_hooks_mode(&self) {
@@ -1169,7 +1367,7 @@ impl TestRepo {
     }
 
     pub fn sync_daemon(&self) {
-        self.wait_for_daemon_idle();
+        self.sync_daemon_force();
     }
 
     pub fn stats(&self) -> Result<CommitStats, String> {
@@ -1275,6 +1473,9 @@ impl TestRepo {
                 } else {
                     format!("{}{}", stdout, stderr)
                 };
+                if env_explicitly_enables_trace2(envs) && git_command_affects_daemon(args) {
+                    self.mark_daemon_family_dirty();
+                }
                 return Ok(combined);
             }
 
@@ -1283,6 +1484,9 @@ impl TestRepo {
                 continue;
             }
 
+            if env_explicitly_enables_trace2(envs) && git_command_affects_daemon(args) {
+                self.mark_daemon_family_dirty();
+            }
             return Err(format!("{}{}", stdout, stderr));
         }
 
@@ -1341,6 +1545,10 @@ impl TestRepo {
         working_dir: Option<&std::path::Path>,
     ) -> Result<String, String> {
         self.sync_daemon_env_overrides(envs);
+
+        if git_command_requires_daemon_sync(args) {
+            self.sync_daemon_if_dirty();
+        }
 
         let canonical_working_dir = if let Some(working_dir_path) = working_dir {
             Some(working_dir_path.canonicalize().map_err(|e| {
@@ -1406,7 +1614,9 @@ impl TestRepo {
                 } else {
                     format!("{}{}", stdout, stderr)
                 };
-                self.wait_for_daemon_idle();
+                if git_command_affects_daemon(args) {
+                    self.mark_daemon_family_dirty();
+                }
                 return Ok(combined);
             }
 
@@ -1415,6 +1625,9 @@ impl TestRepo {
                 continue;
             }
 
+            if git_command_affects_daemon(args) {
+                self.mark_daemon_family_dirty();
+            }
             return Err(stderr);
         }
 
@@ -1426,6 +1639,10 @@ impl TestRepo {
         working_dir: &std::path::Path,
         args: &[&str],
     ) -> Result<String, String> {
+        if git_ai_command_requires_daemon_sync(args) {
+            self.sync_daemon_if_dirty();
+        }
+
         let binary_path = get_binary_path();
 
         let mut command = Command::new(binary_path);
@@ -1464,14 +1681,23 @@ impl TestRepo {
             } else {
                 format!("{}{}", stdout, stderr)
             };
-            self.wait_for_daemon_idle();
+            if git_ai_command_affects_daemon(args) {
+                self.mark_daemon_family_dirty();
+            }
             Ok(combined)
         } else {
+            if git_ai_command_affects_daemon(args) {
+                self.mark_daemon_family_dirty();
+            }
             Err(stderr)
         }
     }
 
     pub fn git_ai_with_env(&self, args: &[&str], envs: &[(&str, &str)]) -> Result<String, String> {
+        if git_ai_command_requires_daemon_sync(args) {
+            self.sync_daemon_if_dirty();
+        }
+
         let binary_path = get_binary_path();
 
         let mut command = Command::new(binary_path);
@@ -1510,9 +1736,14 @@ impl TestRepo {
             } else {
                 format!("{}{}", stdout, stderr)
             };
-            self.wait_for_daemon_idle();
+            if git_ai_command_affects_daemon(args) {
+                self.mark_daemon_family_dirty();
+            }
             Ok(combined)
         } else {
+            if git_ai_command_affects_daemon(args) {
+                self.mark_daemon_family_dirty();
+            }
             Err(stderr)
         }
     }
@@ -1521,6 +1752,10 @@ impl TestRepo {
     pub fn git_ai_with_stdin(&self, args: &[&str], stdin_data: &[u8]) -> Result<String, String> {
         use std::io::Write;
         use std::process::Stdio;
+
+        if git_ai_command_requires_daemon_sync(args) {
+            self.sync_daemon_if_dirty();
+        }
 
         let binary_path = get_binary_path();
 
@@ -1567,9 +1802,14 @@ impl TestRepo {
             } else {
                 format!("{}{}", stdout, stderr)
             };
-            self.wait_for_daemon_idle();
+            if git_ai_command_affects_daemon(args) {
+                self.mark_daemon_family_dirty();
+            }
             Ok(combined)
         } else {
+            if git_ai_command_affects_daemon(args) {
+                self.mark_daemon_family_dirty();
+            }
             Err(stderr)
         }
     }
@@ -1587,6 +1827,8 @@ impl TestRepo {
     }
 
     pub fn current_working_logs(&self) -> PersistedWorkingLog {
+        self.sync_daemon_if_dirty();
+
         let repo = GitAiRepository::find_repository_in_path(self.path.to_str().unwrap())
             .expect("Failed to find repository");
 
@@ -1599,6 +1841,47 @@ impl TestRepo {
 
         // Get the working log for the current HEAD commit
         repo.storage.working_log_for_base_commit(&commit_sha)
+    }
+
+    pub fn read_authorship_note(&self, commit_sha: &str) -> Option<String> {
+        self.git(&["notes", "--ref=ai", "show", commit_sha])
+            .ok()
+            .filter(|note| !note.trim().is_empty())
+    }
+
+    pub fn read_authorship_note_in_git_dir(
+        &self,
+        git_dir: &Path,
+        commit_sha: &str,
+    ) -> Option<String> {
+        self.sync_daemon_if_dirty();
+
+        let mut command = Command::new(real_git_executable());
+        configure_test_home_env(&mut command, &self.test_home);
+        command.args([
+            "--git-dir",
+            git_dir.to_str().expect("valid git dir"),
+            "--no-pager",
+            "notes",
+            "--ref=ai",
+            "show",
+            commit_sha,
+        ]);
+
+        let output = command
+            .output()
+            .expect("failed to run git notes show in git dir");
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let note = String::from_utf8_lossy(&output.stdout).to_string();
+        if note.trim().is_empty() {
+            None
+        } else {
+            Some(note)
+        }
     }
 
     pub fn commit(&self, message: &str) -> Result<NewCommit, String> {
@@ -1642,29 +1925,17 @@ impl TestRepo {
                     .target()
                     .map_err(|e| format!("Failed to get HEAD target: {}", e))?;
 
-                // In daemon mode, notes are applied asynchronously after command state settles.
-                // Poll briefly to avoid flaking on note-read races right after `git commit`.
-                let mut authorship_log = None;
-                let max_attempts = if self.git_mode.uses_daemon() { 200 } else { 1 };
-                for attempt in 0..max_attempts {
-                    if let Some(content) =
-                        git_ai::git::refs::show_authorship_note(&repo, &head_commit)
-                    {
-                        authorship_log = Some(
-                            AuthorshipLog::deserialize_from_string(&content)
-                                .map_err(|e| format!("Failed to parse authorship log: {}", e))?,
-                        );
-                        break;
-                    }
-                    if attempt + 1 < max_attempts {
-                        self.wait_for_daemon_idle();
-                        thread::sleep(Duration::from_millis(20));
-                    }
-                }
-                let authorship_log = match authorship_log {
-                    Some(log) => log,
-                    None => return Err("No authorship log found for the new commit".to_string()),
-                };
+                self.sync_daemon_force();
+
+                let content = git_ai::git::refs::show_authorship_note(&repo, &head_commit)
+                    .ok_or_else(|| {
+                        format!(
+                            "No authorship log found for new commit {} after daemon sync",
+                            head_commit
+                        )
+                    })?;
+                let authorship_log = AuthorshipLog::deserialize_from_string(&content)
+                    .map_err(|e| format!("Failed to parse authorship log: {}", e))?;
 
                 Ok(NewCommit {
                     commit_sha: head_commit,

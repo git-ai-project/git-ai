@@ -5,29 +5,6 @@ use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 use git_ai::authorship::working_log::AgentId;
 use git_ai::git::refs::notes_add;
 use std::collections::HashMap;
-use std::process::Command;
-
-fn read_authorship_note(repo: &TestRepo, commit_sha: &str) -> Option<String> {
-    let output = Command::new("git")
-        .args([
-            "-C",
-            repo.path().to_str().expect("valid repo path"),
-            "--no-pager",
-            "notes",
-            "--ref=ai",
-            "show",
-            commit_sha,
-        ])
-        .output()
-        .expect("failed to run git notes show");
-
-    if output.status.success() {
-        let note = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if note.is_empty() { None } else { Some(note) }
-    } else {
-        None
-    }
-}
 
 /// Test cherry-picking a single AI-authored commit
 #[test]
@@ -118,7 +95,8 @@ fn test_cherry_pick_preserves_human_only_commit_note_metadata() {
         .stage_all_and_commit("human-only commit")
         .expect("create source commit");
 
-    let source_note = read_authorship_note(&repo, &source_commit.commit_sha)
+    let source_note = repo
+        .read_authorship_note(&source_commit.commit_sha)
         .expect("source commit should have a metadata-only note");
     let source_log =
         AuthorshipLog::deserialize_from_string(&source_note).expect("parse source note");
@@ -130,7 +108,8 @@ fn test_cherry_pick_preserves_human_only_commit_note_metadata() {
         .unwrap();
     let new_commit = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
-    let new_note = read_authorship_note(&repo, &new_commit)
+    let new_note = repo
+        .read_authorship_note(&new_commit)
         .expect("cherry-picked commit should preserve metadata-only note");
     let new_log = AuthorshipLog::deserialize_from_string(&new_note).expect("parse new note");
     assert!(new_log.attestations.is_empty());
@@ -154,7 +133,8 @@ fn test_cherry_pick_preserves_prompt_only_commit_note_metadata() {
         .stage_all_and_commit("human-only commit")
         .expect("create source commit");
 
-    let source_note = read_authorship_note(&repo, &source_commit.commit_sha)
+    let source_note = repo
+        .read_authorship_note(&source_commit.commit_sha)
         .expect("source commit should have authorship note");
     let mut source_log =
         AuthorshipLog::deserialize_from_string(&source_note).expect("parse source note");
@@ -208,7 +188,8 @@ fn test_cherry_pick_preserves_prompt_only_commit_note_metadata() {
         .unwrap();
     let new_commit = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
-    let new_note = read_authorship_note(&repo, &new_commit)
+    let new_note = repo
+        .read_authorship_note(&new_commit)
         .expect("cherry-picked commit should preserve prompt-only note");
     let new_log = AuthorshipLog::deserialize_from_string(&new_note).expect("parse new note");
     assert!(new_log.attestations.is_empty());
@@ -616,7 +597,8 @@ fn test_cherry_pick_preserves_custom_attributes_from_config() {
     let feature_commit = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
     // Verify custom attributes were set on the original commit
-    let original_note = read_authorship_note(&repo, &feature_commit)
+    let original_note = repo
+        .read_authorship_note(&feature_commit)
         .expect("original commit should have authorship note");
     let original_log =
         AuthorshipLog::deserialize_from_string(&original_note).expect("parse original note");
@@ -634,7 +616,8 @@ fn test_cherry_pick_preserves_custom_attributes_from_config() {
 
     // Verify custom attributes survived the cherry-pick
     let new_commit = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
-    let new_note = read_authorship_note(&repo, &new_commit)
+    let new_note = repo
+        .read_authorship_note(&new_commit)
         .expect("cherry-picked commit should have authorship note");
     let new_log = AuthorshipLog::deserialize_from_string(&new_note).expect("parse new note");
     assert!(

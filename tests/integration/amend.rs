@@ -2,27 +2,6 @@ use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 use std::collections::HashMap;
-use std::process::Command;
-
-fn read_authorship_note(repo: &TestRepo, commit_sha: &str) -> Option<String> {
-    let output = Command::new("git")
-        .args([
-            "-C",
-            repo.path().to_str().unwrap(),
-            "notes",
-            "--ref",
-            "ai",
-            "show",
-            commit_sha,
-        ])
-        .output()
-        .expect("failed to run git notes show");
-    if output.status.success() {
-        Some(String::from_utf8_lossy(&output.stdout).to_string())
-    } else {
-        None
-    }
-}
 
 /// Test amending a commit by adding AI-authored lines at the top of the file.
 #[test]
@@ -547,7 +526,8 @@ fn test_amend_preserves_custom_attributes_from_config() {
 
     // Verify custom attributes were set on the original commit
     let original_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
-    let original_note = read_authorship_note(&repo, &original_sha)
+    let original_note = repo
+        .read_authorship_note(&original_sha)
         .expect("original commit should have authorship note");
     let original_log =
         AuthorshipLog::deserialize_from_string(&original_note).expect("parse original note");
@@ -567,7 +547,8 @@ fn test_amend_preserves_custom_attributes_from_config() {
 
     // Verify custom attributes survived the amend
     let amended_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
-    let amended_note = read_authorship_note(&repo, &amended_sha)
+    let amended_note = repo
+        .read_authorship_note(&amended_sha)
         .expect("amended commit should have authorship note");
     let amended_log =
         AuthorshipLog::deserialize_from_string(&amended_note).expect("parse amended note");

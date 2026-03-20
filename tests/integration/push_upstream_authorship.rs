@@ -1,29 +1,5 @@
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
-use std::process::Command;
-
-fn read_remote_authorship_note(repo: &TestRepo, commit_sha: &str) -> Option<String> {
-    let git_dir = repo.path().to_str().expect("valid repo path");
-    let output = Command::new("git")
-        .args([
-            "--git-dir",
-            git_dir,
-            "--no-pager",
-            "notes",
-            "--ref=ai",
-            "show",
-            commit_sha,
-        ])
-        .output()
-        .expect("failed to run git notes show on remote");
-
-    if output.status.success() {
-        let note = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if note.is_empty() { None } else { Some(note) }
-    } else {
-        None
-    }
-}
 
 #[test]
 fn push_with_set_upstream_flag_pushes_authorship_notes() {
@@ -39,7 +15,7 @@ fn push_with_set_upstream_flag_pushes_authorship_notes() {
         .git(&["push", "-u", "origin", "HEAD"])
         .expect("push with -u should succeed");
 
-    let note = read_remote_authorship_note(&upstream, &commit.commit_sha);
+    let note = local.read_authorship_note_in_git_dir(upstream.path(), &commit.commit_sha);
     assert!(
         note.is_some(),
         "expected authorship notes to be pushed to the remote when using -u"
@@ -74,7 +50,7 @@ fn push_after_branch_set_upstream_pushes_authorship_notes() {
         .git(&["push"])
         .expect("push with configured upstream should succeed");
 
-    let note = read_remote_authorship_note(&upstream, &follow_up.commit_sha);
+    let note = local.read_authorship_note_in_git_dir(upstream.path(), &follow_up.commit_sha);
     assert!(
         note.is_some(),
         "expected authorship notes to be pushed after setting upstream with git branch -u"

@@ -283,13 +283,15 @@ fn gt(repo: &TestRepo, args: &[&str]) -> Result<String, String> {
         } else {
             format!("{}{}", stdout, stderr)
         };
-        // Ensure daemon-mode processing is fully settled before assertions execute.
-        repo.sync_daemon();
+        if repo.mode().uses_daemon() {
+            repo.mark_daemon_family_dirty();
+        }
         Ok(combined)
     } else {
         let combined_err = format!("{}{}", stderr, stdout);
-        // Even on failures, wait for daemon processing to settle before returning.
-        repo.sync_daemon();
+        if repo.mode().uses_daemon() {
+            repo.mark_daemon_family_dirty();
+        }
         Err(combined_err)
     }
 }

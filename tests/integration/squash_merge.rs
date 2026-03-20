@@ -2,28 +2,7 @@ use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 use std::collections::HashMap;
-use std::process::Command;
 use std::time::Duration;
-
-fn read_authorship_note(repo: &TestRepo, commit_sha: &str) -> Option<String> {
-    let output = Command::new("git")
-        .args([
-            "-C",
-            repo.path().to_str().unwrap(),
-            "notes",
-            "--ref",
-            "ai",
-            "show",
-            commit_sha,
-        ])
-        .output()
-        .expect("failed to run git notes show");
-    if output.status.success() {
-        Some(String::from_utf8_lossy(&output.stdout).to_string())
-    } else {
-        None
-    }
-}
 
 /// Test merge --squash with a simple feature branch containing AI and human edits
 #[test]
@@ -352,7 +331,8 @@ fn test_squash_merge_preserves_custom_attributes_from_config() {
 
     // Verify custom attributes were set on the feature commits
     let feature_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
-    let feature_note = read_authorship_note(&repo, &feature_sha)
+    let feature_note = repo
+        .read_authorship_note(&feature_sha)
         .expect("feature commit should have authorship note");
     let feature_log =
         AuthorshipLog::deserialize_from_string(&feature_note).expect("parse feature note");
@@ -371,7 +351,8 @@ fn test_squash_merge_preserves_custom_attributes_from_config() {
 
     // Verify custom attributes survived the squash merge
     let squash_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
-    let squash_note = read_authorship_note(&repo, &squash_sha)
+    let squash_note = repo
+        .read_authorship_note(&squash_sha)
         .expect("squash commit should have authorship note");
     let squash_log =
         AuthorshipLog::deserialize_from_string(&squash_note).expect("parse squash note");
