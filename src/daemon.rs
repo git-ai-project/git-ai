@@ -1974,33 +1974,6 @@ impl ActorDaemonCoordinator {
         self.active_trace_connections.load(Ordering::SeqCst) as u64
     }
 
-    fn trace_ingress_globally_idle(&self) -> Result<bool, GitAiError> {
-        if self.active_trace_connection_count() != 0 {
-            return Ok(false);
-        }
-        if self.queued_trace_payloads.load(Ordering::SeqCst) != 0 {
-            return Ok(false);
-        }
-
-        let ingress = self
-            .trace_ingress_state
-            .lock()
-            .map_err(|_| GitAiError::Generic("trace ingress state lock poisoned".to_string()))?;
-        Ok(ingress.root_worktrees.is_empty()
-            && ingress.root_families.is_empty()
-            && ingress.root_argv.is_empty()
-            && ingress.root_pre_repo.is_empty()
-            && ingress.root_mutating.is_empty()
-            && ingress.root_target_repo_only.is_empty()
-            && ingress.root_reflog_refs.is_empty()
-            && ingress.root_head_reflog_start_offsets.is_empty()
-            && ingress.root_family_reflog_start_offsets.is_empty()
-            && ingress.root_activity_seq.is_empty()
-            && ingress.root_last_activity_ns.is_empty()
-            && ingress.root_open_connections.is_empty()
-            && ingress.root_close_fallback_enqueued.is_empty())
-    }
-
     fn clear_trace_root_tracking(&self, root_sid: &str) -> Result<(), GitAiError> {
         let mut ingress = self
             .trace_ingress_state
@@ -4053,17 +4026,11 @@ impl ActorDaemonCoordinator {
             let settled_backlog = settled.backlog;
             let settled_pending_roots = settled.pending_roots as u64;
             let settled_effect_queue_depth = settled.effect_queue_depth;
-            let family_observed = settled_latest > 0
-                || settled_backlog > 0
-                || settled_pending_roots > 0
-                || settled_effect_queue_depth > 0;
-            let ingress_idle = self.trace_ingress_globally_idle()?;
 
             if settled_backlog == 0
                 && settled_pending_roots == 0
                 && settled_effect_queue_depth == 0
                 && settled_latest == latest_seq
-                && (family_observed || ingress_idle)
             {
                 stable_idle_polls = stable_idle_polls.saturating_add(1);
                 if stable_idle_polls >= 2 {

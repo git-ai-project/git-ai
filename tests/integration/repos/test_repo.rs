@@ -5,6 +5,7 @@ use git_ai::authorship::stats::CommitStats;
 use git_ai::config::ConfigPatch;
 use git_ai::daemon::{ControlRequest, DaemonConfig, send_control_request};
 use git_ai::feature_flags::FeatureFlags;
+use git_ai::git::cli_parser::extract_clone_target_directory;
 use git_ai::git::repo_storage::PersistedWorkingLog;
 use git_ai::git::repository as GitAiRepository;
 use git_ai::observability::wrapper_performance_targets::BenchmarkResult;
@@ -486,6 +487,19 @@ fn git_ai_command_requires_daemon_sync(args: &[&str]) -> bool {
 
 fn git_ai_command_affects_daemon(args: &[&str]) -> bool {
     matches!(git_ai_primary_command(args), Some("checkpoint"))
+}
+
+fn clone_target_path(args: &[&str], cwd: &Path) -> Option<PathBuf> {
+    let argv = args.iter().map(|arg| (*arg).to_string()).collect::<Vec<_>>();
+    let clone_index = argv.iter().position(|arg| arg == "clone")?;
+    let target = extract_clone_target_directory(&argv[clone_index + 1..])?;
+    let target_path = PathBuf::from(target);
+    let resolved = if target_path.is_absolute() {
+        target_path
+    } else {
+        cwd.join(target_path)
+    };
+    Some(resolved.canonicalize().unwrap_or(resolved))
 }
 
 fn env_explicitly_enables_trace2(envs: &[(&str, &str)]) -> bool {
@@ -1251,6 +1265,65 @@ impl TestRepo {
         registry.mark_synced_through(&family_key, target);
     }
 
+    fn sync_daemon_clone_target(&self, target_repo_path: &Path) {
+        if !self.git_mode.uses_daemon() {
+            return;
+        }
+
+        let Some(daemon) = &self.daemon_process else {
+            return;
+        };
+
+        let repo_working_dir = target_repo_path.to_string_lossy().to_string();
+        for _ in 0..800 {
+            let status = send_control_request(
+                &self.daemon_control_socket_path(),
+                &ControlRequest::StatusFamily {
+                    repo_working_dir: repo_working_dir.clone(),
+                },
+            )
+            .unwrap_or_else(|e| {
+                panic!(
+                    "failed to query daemon clone status for {}: {}",
+                    target_repo_path.display(),
+                    e
+                )
+            });
+
+            let observed = status.ok
+                && status.data.as_ref().is_some_and(|data| {
+                    data.get("latest_seq").and_then(|v| v.as_u64()).unwrap_or(0) > 0
+                        || data.get("backlog").and_then(|v| v.as_u64()).unwrap_or(0) > 0
+                        || data.get("pending_roots").and_then(|v| v.as_u64()).unwrap_or(0) > 0
+                        || data
+                            .get("effect_queue_depth")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0)
+                            > 0
+                });
+
+            if observed {
+                daemon
+                    .wait_for_repo_idle(&repo_working_dir)
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "daemon clone sync failed for {}: {}",
+                            target_repo_path.display(),
+                            e
+                        )
+                    });
+                return;
+            }
+
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        panic!(
+            "daemon did not observe cloned repository {} within timeout",
+            target_repo_path.display()
+        );
+    }
+
     fn setup_git_hooks_mode(&self) {
         if !self.git_mode.uses_hooks() {
             return;
@@ -1615,7 +1688,20 @@ impl TestRepo {
                     format!("{}{}", stdout, stderr)
                 };
                 if git_command_affects_daemon(args) {
-                    self.mark_daemon_family_dirty();
+                    if self.git_mode.uses_daemon()
+                        && git_primary_command(args).map(|(cmd, _)| cmd) == Some("clone")
+                    {
+                        let clone_cwd = canonical_working_dir
+                            .as_deref()
+                            .unwrap_or(self.path.as_path());
+                        if let Some(target_repo_path) = clone_target_path(args, clone_cwd) {
+                            self.sync_daemon_clone_target(&target_repo_path);
+                        } else {
+                            self.mark_daemon_family_dirty();
+                        }
+                    } else {
+                        self.mark_daemon_family_dirty();
+                    }
                 }
                 return Ok(combined);
             }
