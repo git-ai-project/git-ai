@@ -1,6 +1,5 @@
 use crate::daemon::domain::{
-    AppliedCommand, ApplyAck, CheckpointObserved, CommandScope, FamilyKey, FamilySnapshot,
-    FamilyStatus, NormalizedCommand,
+    AppliedCommand, ApplyAck, CommandScope, FamilyKey, FamilyStatus, NormalizedCommand,
 };
 use crate::daemon::family_actor::{FamilyActorHandle, spawn_family_actor};
 use crate::daemon::git_backend::GitBackend;
@@ -39,38 +38,16 @@ impl<B: GitBackend> Coordinator<B> {
         }
     }
 
-    pub async fn apply_checkpoint(
-        &self,
-        checkpoint: CheckpointObserved,
-    ) -> Result<ApplyAck, GitAiError> {
-        let family = self.backend.resolve_family(&checkpoint.repo_working_dir)?;
+    pub async fn apply_checkpoint(&self, repo_working_dir: &Path) -> Result<ApplyAck, GitAiError> {
+        let family = self.backend.resolve_family(repo_working_dir)?;
         let actor = self.get_or_create_family_actor(family).await;
-        actor.apply_checkpoint(checkpoint).await
+        actor.apply_checkpoint().await
     }
 
     pub async fn status_family(&self, repo_working_dir: &Path) -> Result<FamilyStatus, GitAiError> {
         let family = self.backend.resolve_family(repo_working_dir)?;
         let actor = self.get_or_create_family_actor(family).await;
         actor.status().await
-    }
-
-    pub async fn snapshot_family(
-        &self,
-        repo_working_dir: &Path,
-    ) -> Result<FamilySnapshot, GitAiError> {
-        let family = self.backend.resolve_family(repo_working_dir)?;
-        let actor = self.get_or_create_family_actor(family).await;
-        actor.snapshot().await
-    }
-
-    pub async fn barrier_family(
-        &self,
-        repo_working_dir: &Path,
-        seq: u64,
-    ) -> Result<(), GitAiError> {
-        let family = self.backend.resolve_family(repo_working_dir)?;
-        let actor = self.get_or_create_family_actor(family).await;
-        actor.barrier(seq).await
     }
 
     pub async fn shutdown(&self) -> Result<(), GitAiError> {
@@ -196,7 +173,6 @@ mod tests {
             stash_target_oid: None,
             ref_changes: Vec::new(),
             confidence: Confidence::Low,
-            wrapper_mirror: false,
         }
     }
 
@@ -223,7 +199,6 @@ mod tests {
             stash_target_oid: None,
             ref_changes: Vec::new(),
             confidence: Confidence::Low,
-            wrapper_mirror: false,
         }
     }
 
@@ -241,21 +216,6 @@ mod tests {
             .unwrap();
         assert_eq!(f.seq, 1);
 
-        coordinator.shutdown().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn barrier_waits_on_family_applied_seq() {
-        let backend = Arc::new(MockBackend::default().with_family("/repo", "family:/repo"));
-        let coordinator = Coordinator::new(backend);
-        let _ = coordinator
-            .route_command(family_cmd("family:/repo", "/repo"))
-            .await
-            .unwrap();
-        coordinator
-            .barrier_family(Path::new("/repo"), 1)
-            .await
-            .unwrap();
         coordinator.shutdown().await.unwrap();
     }
 }

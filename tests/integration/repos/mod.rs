@@ -45,7 +45,6 @@ macro_rules! subdir_test_variants {
                         use std::process::Command;
                         use $crate::repos::test_repo::{
                             get_binary_path,
-                            git_command_requires_daemon_completion_barrier,
                             git_command_requires_daemon_sync, git_command_routes_to_clone_target,
                             new_daemon_test_sync_session_id, GitTestMode,
                         };
@@ -135,9 +134,6 @@ macro_rules! subdir_test_variants {
                                             .as_deref()
                                             .expect("daemon test sync session should exist"),
                                     );
-                                if git_command_requires_daemon_completion_barrier(args, true) {
-                                    self.inner.sync_daemon_force();
-                                }
                             }
                             Ok(if stdout.is_empty() { stderr } else { stdout })
                         } else {
@@ -148,9 +144,6 @@ macro_rules! subdir_test_variants {
                                             .as_deref()
                                             .expect("daemon test sync session should exist"),
                                     );
-                                if git_command_requires_daemon_completion_barrier(args, false) {
-                                    self.inner.sync_daemon_force();
-                                }
                             }
                             Err(stderr)
                         }
@@ -169,7 +162,6 @@ macro_rules! subdir_test_variants {
                             use std::process::Command;
                             use $crate::repos::test_repo::{
                                 get_binary_path,
-                                git_command_requires_daemon_completion_barrier,
                                 git_command_requires_daemon_sync,
                                 git_command_routes_to_clone_target,
                                 new_daemon_test_sync_session_id, GitTestMode,
@@ -263,9 +255,6 @@ macro_rules! subdir_test_variants {
                                             .as_deref()
                                             .expect("daemon test sync session should exist"),
                                     );
-                                    if git_command_requires_daemon_completion_barrier(args, true) {
-                                        self.inner.sync_daemon_force();
-                                    }
                                 }
                                 Ok(if stdout.is_empty() { stderr } else { stdout })
                             } else {
@@ -275,9 +264,6 @@ macro_rules! subdir_test_variants {
                                             .as_deref()
                                             .expect("daemon test sync session should exist"),
                                     );
-                                    if git_command_requires_daemon_completion_barrier(args, false) {
-                                        self.inner.sync_daemon_force();
-                                    }
                                 }
                                 Err(stderr)
                             }

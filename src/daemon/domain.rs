@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -67,7 +67,6 @@ pub struct NormalizedCommand {
     pub stash_target_oid: Option<String>,
     pub ref_changes: Vec<RefChange>,
     pub confidence: Confidence,
-    pub wrapper_mirror: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -245,20 +244,10 @@ pub struct WorktreeState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CheckpointSummary {
-    pub id: String,
-    pub author: String,
-    pub timestamp_ns: u128,
-    pub file_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FamilyState {
     pub family_key: FamilyKey,
     pub refs: HashMap<String, String>,
     pub worktrees: HashMap<PathBuf, WorktreeState>,
-    pub recent_commands: VecDeque<AppliedCommand>,
-    pub checkpoints: HashMap<String, CheckpointSummary>,
     pub last_error: Option<String>,
     pub applied_seq: u64,
 }
@@ -278,26 +267,5 @@ pub struct ApplyAck {
 pub struct FamilyStatus {
     pub family_key: FamilyKey,
     pub applied_seq: u64,
-    pub recent_command_count: usize,
     pub last_error: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FamilySnapshot {
-    pub family_key: FamilyKey,
-    pub refs: HashMap<String, String>,
-    pub worktrees: HashMap<PathBuf, WorktreeState>,
-    pub recent_commands: Vec<AppliedCommand>,
-    pub checkpoints: HashMap<String, CheckpointSummary>,
-    pub last_error: Option<String>,
-    pub applied_seq: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CheckpointObserved {
-    pub repo_working_dir: PathBuf,
-    pub id: String,
-    pub author: String,
-    pub timestamp_ns: u128,
-    pub file_count: usize,
 }

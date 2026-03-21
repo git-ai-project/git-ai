@@ -5,8 +5,6 @@ use serde_json::Value;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params")]
 pub enum ControlRequest {
-    #[serde(rename = "trace.ingest")]
-    TraceIngest { payload: Value, wait: Option<bool> },
     #[serde(rename = "checkpoint.run")]
     CheckpointRun {
         request: Box<CheckpointRunRequest>,
@@ -14,10 +12,6 @@ pub enum ControlRequest {
     },
     #[serde(rename = "status.family")]
     StatusFamily { repo_working_dir: String },
-    #[serde(rename = "snapshot.family")]
-    SnapshotFamily { repo_working_dir: String },
-    #[serde(rename = "barrier.settled_family")]
-    BarrierSettledFamily { repo_working_dir: String },
     #[serde(rename = "shutdown")]
     Shutdown,
 }
@@ -48,19 +42,16 @@ pub struct ControlResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seq: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub applied_seq: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
 impl ControlResponse {
-    pub fn ok(seq: Option<u64>, applied_seq: Option<u64>, data: Option<Value>) -> Self {
+    pub fn ok(seq: Option<u64>, data: Option<Value>) -> Self {
         Self {
             ok: true,
             seq,
-            applied_seq,
             data,
             error: None,
         }
@@ -70,7 +61,6 @@ impl ControlResponse {
         Self {
             ok: false,
             seq: None,
-            applied_seq: None,
             data: None,
             error: Some(msg.into()),
         }
@@ -81,14 +71,5 @@ impl ControlResponse {
 pub struct FamilyStatus {
     pub family_key: String,
     pub latest_seq: u64,
-    pub cursor: u64,
-    pub backlog: u64,
-    pub effect_queue_depth: usize,
-    pub active_trace_connections: usize,
-    pub pending_roots: usize,
-    #[serde(default)]
-    pub pending_root_activity_seq: u64,
-    #[serde(default)]
-    pub pending_root_summaries: Vec<String>,
     pub last_error: Option<String>,
 }

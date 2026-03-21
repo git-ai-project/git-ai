@@ -507,7 +507,6 @@ mod tests {
                 new: "b".to_string(),
             }],
             confidence: Confidence::Low,
-            wrapper_mirror: false,
         }
     }
 

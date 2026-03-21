@@ -41,7 +41,6 @@ pub struct PendingTraceCommand {
     pub carryover_snapshot_id: Option<String>,
     pub worktree_head_start_offset: Option<u64>,
     pub worktree_head_end_offset: Option<u64>,
-    pub wrapper_mirror: bool,
     pub saw_def_repo: bool,
     pub rebase_original_head_hint: Option<String>,
 }
@@ -483,10 +482,6 @@ impl<B: GitBackend> TraceNormalizer<B> {
         };
         let pre_repo = payload_repo_context(payload, "git_ai_pre_repo");
 
-        let wrapper_mirror = payload
-            .get("wrapper_mirror")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
         let stash_target_oid = payload_string_field(payload, "git_ai_stash_target_oid");
         let stash_target_error = payload_string_field(payload, "git_ai_stash_target_oid_error");
         let merge_squash_source_head =
@@ -518,7 +513,6 @@ impl<B: GitBackend> TraceNormalizer<B> {
             carryover_snapshot_id,
             worktree_head_start_offset,
             worktree_head_end_offset: None,
-            wrapper_mirror,
             saw_def_repo: false,
             rebase_original_head_hint,
         };
@@ -1025,7 +1019,6 @@ impl<B: GitBackend> TraceNormalizer<B> {
             stash_target_oid: pending.stash_target_oid,
             ref_changes,
             confidence,
-            wrapper_mirror: pending.wrapper_mirror,
         };
 
         trace_debug_lifecycle(&format!(

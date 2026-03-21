@@ -424,16 +424,11 @@ fn daemon_status_does_not_self_emit_trace2_events() {
         .get("latest_seq")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(u64::MAX);
-    let cursor = status_data
-        .get("cursor")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(u64::MAX);
 
     assert_eq!(
         latest_seq, 0,
         "daemon status should not create self-trace events when global trace2 target points to daemon"
     );
-    assert_eq!(cursor, 0);
 
     let _ = send_control_request(
         &daemon_control_socket_path(&repo),

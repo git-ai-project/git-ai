@@ -425,42 +425,15 @@ fn resolve_test_db_path(
 #[derive(Debug, Default)]
 struct DaemonSyncRegistry {
     last_synced_completion_count: HashMap<String, u64>,
-    pending_completion_delta: HashMap<String, u64>,
     pending_sessions: HashMap<String, Vec<String>>,
 }
 
 impl DaemonSyncRegistry {
-    fn pending_completion_delta(&self, family_key: &str) -> u64 {
-        self.pending_completion_delta
-            .get(family_key)
-            .copied()
-            .unwrap_or(0)
-    }
-
     fn pending_sessions(&self, family_key: &str) -> Vec<String> {
         self.pending_sessions
             .get(family_key)
             .cloned()
             .unwrap_or_default()
-    }
-
-    fn record_expected_completion_delta(
-        &mut self,
-        family_key: &str,
-        baseline_count: u64,
-        delta: u64,
-    ) {
-        if delta == 0 {
-            return;
-        }
-        if self.pending_completion_delta(family_key) == 0 {
-            self.last_synced_completion_count
-                .insert(family_key.to_string(), baseline_count);
-        }
-        *self
-            .pending_completion_delta
-            .entry(family_key.to_string())
-            .or_insert(0) += delta;
     }
 
     fn last_synced_completion_count(&self, family_key: &str) -> u64 {
@@ -491,26 +464,23 @@ impl DaemonSyncRegistry {
 
     fn mark_synced_through(&mut self, family_key: &str, completion_count: u64) {
         self.advance_last_synced_completion_count(family_key, completion_count);
-        self.pending_completion_delta.remove(family_key);
     }
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
-struct DaemonTestCompletionLogEntry {
+pub(crate) struct DaemonTestCompletionLogEntry {
     #[serde(default)]
-    seq: u64,
+    pub(crate) seq: u64,
     #[serde(default)]
-    sync_tracked: bool,
+    pub(crate) primary_command: Option<String>,
     #[serde(default)]
-    test_sync_session: Option<String>,
-    status: String,
-    error: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ObservedDaemonCompletion {
-    count: u64,
-    last_seq: u64,
+    pub(crate) exit_code: Option<i32>,
+    #[serde(default)]
+    pub(crate) sync_tracked: bool,
+    #[serde(default)]
+    pub(crate) test_sync_session: Option<String>,
+    pub(crate) status: String,
+    pub(crate) error: Option<String>,
 }
 
 fn daemon_sync_registry() -> &'static Mutex<DaemonSyncRegistry> {
@@ -555,19 +525,6 @@ pub(crate) fn git_command_requires_daemon_sync(args: &[&str]) -> bool {
     matches!(command, "notes")
 }
 
-pub(crate) fn git_command_requires_daemon_completion_barrier(args: &[&str], success: bool) -> bool {
-    let Some((command, _subcommand)) = git_primary_command(args) else {
-        return false;
-    };
-
-    match command {
-        "merge" => success && args.contains(&"--squash"),
-        "pull" | "reset" | "stash" => success,
-        "cherry-pick" | "rebase" => !success,
-        _ => false,
-    }
-}
-
 fn git_ai_primary_command<'a>(args: &'a [&'a str]) -> Option<&'a str> {
     args.iter().copied().find(|arg| !arg.starts_with('-'))
 }
@@ -581,18 +538,6 @@ fn git_ai_command_requires_daemon_sync(args: &[&str]) -> bool {
 
 fn git_invocation_requires_daemon_sync(invocation: &ParsedGitInvocation) -> bool {
     matches!(invocation.command.as_deref(), Some("notes"))
-}
-
-fn git_invocation_requires_daemon_completion_barrier(
-    invocation: &ParsedGitInvocation,
-    success: bool,
-) -> bool {
-    match invocation.command.as_deref() {
-        Some("merge") => success && invocation.command_args.iter().any(|arg| arg == "--squash"),
-        Some("pull" | "reset" | "stash") => success,
-        Some("cherry-pick" | "rebase") => !success,
-        _ => false,
-    }
 }
 
 fn git_invocation_routes_to_clone_target(invocation: &ParsedGitInvocation) -> bool {
@@ -1289,6 +1234,11 @@ impl TestRepo {
         self.daemon_completion_entries_for_family(&family_key).len() as u64
     }
 
+    pub(crate) fn daemon_completion_entries(&self) -> Vec<DaemonTestCompletionLogEntry> {
+        let family_key = self.daemon_family_key();
+        self.daemon_completion_entries_for_family(&family_key)
+    }
+
     fn daemon_completion_entries_for_family(
         &self,
         family_key: &str,
@@ -1320,7 +1270,7 @@ impl TestRepo {
         family_key: &str,
         baseline_count: u64,
         expected_count: u64,
-    ) -> ObservedDaemonCompletion {
+    ) -> u64 {
         for _ in 0..800 {
             let entries = self.daemon_completion_entries_for_family(family_key);
             let tracked_entries = entries
@@ -1343,14 +1293,7 @@ impl TestRepo {
             }
             let observed_count = tracked_entries.len() as u64;
             if observed_count >= expected_count {
-                let last_seq = tracked_entries
-                    .get(expected_count.saturating_sub(1) as usize)
-                    .map(|entry| entry.seq)
-                    .unwrap_or(0);
-                return ObservedDaemonCompletion {
-                    count: observed_count,
-                    last_seq,
-                };
+                return observed_count;
             }
             thread::sleep(Duration::from_millis(10));
         }
@@ -1361,11 +1304,7 @@ impl TestRepo {
         );
     }
 
-    fn wait_for_daemon_completion_sessions(
-        &self,
-        family_key: &str,
-        sessions: &[String],
-    ) -> ObservedDaemonCompletion {
+    fn wait_for_daemon_completion_sessions(&self, family_key: &str, sessions: &[String]) -> u64 {
         let expected: std::collections::HashSet<&str> =
             sessions.iter().map(|session| session.as_str()).collect();
         for _ in 0..800 {
@@ -1375,7 +1314,6 @@ impl TestRepo {
                 .filter(|entry| entry.sync_tracked)
                 .collect::<Vec<_>>();
             let mut completed = std::collections::HashSet::<&str>::new();
-            let mut last_seq = 0u64;
 
             for entry in &tracked_entries {
                 let Some(session) = entry.test_sync_session.as_deref() else {
@@ -1393,14 +1331,10 @@ impl TestRepo {
                     );
                 }
                 completed.insert(session);
-                last_seq = last_seq.max(entry.seq);
             }
 
             if completed.len() == expected.len() {
-                return ObservedDaemonCompletion {
-                    count: tracked_entries.len() as u64,
-                    last_seq,
-                };
+                return tracked_entries.len() as u64;
             }
 
             thread::sleep(Duration::from_millis(10));
@@ -1416,7 +1350,7 @@ impl TestRepo {
         &self,
         baseline_count: u64,
         expected_count: u64,
-    ) -> ObservedDaemonCompletion {
+    ) -> u64 {
         let family_key = self.daemon_family_key();
         for _ in 0..800 {
             let entries = self.daemon_completion_entries_for_family(&family_key);
@@ -1436,14 +1370,7 @@ impl TestRepo {
             }
             let observed_count = entries.len() as u64;
             if observed_count >= expected_count {
-                let last_seq = entries
-                    .get(expected_count.saturating_sub(1) as usize)
-                    .map(|entry| entry.seq)
-                    .unwrap_or(0);
-                return ObservedDaemonCompletion {
-                    count: observed_count,
-                    last_seq,
-                };
+                return observed_count;
             }
             thread::sleep(Duration::from_millis(10));
         }
@@ -1488,35 +1415,6 @@ impl TestRepo {
         self.daemon_family_key
             .get_or_init(|| self.daemon_family_key_for_repo_path(&self.path))
             .clone()
-    }
-
-    fn record_daemon_family_expected_completion_delta_for_family_key(
-        &self,
-        family_key: &str,
-        baseline_count: u64,
-        delta: u64,
-    ) {
-        if !self.git_mode.uses_daemon() {
-            return;
-        }
-
-        let mut registry = daemon_sync_registry()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        registry.record_expected_completion_delta(family_key, baseline_count, delta);
-    }
-
-    pub(crate) fn record_daemon_family_expected_completion_delta(
-        &self,
-        baseline_count: u64,
-        delta: u64,
-    ) {
-        let family_key = self.daemon_family_key();
-        self.record_daemon_family_expected_completion_delta_for_family_key(
-            &family_key,
-            baseline_count,
-            delta,
-        );
     }
 
     pub(crate) fn record_daemon_family_expected_completion_session(&self, session: &str) {
@@ -1606,125 +1504,13 @@ impl TestRepo {
         candidates
     }
 
-    pub(crate) fn sync_daemon_if_dirty(&self) {
-        if !self.git_mode.uses_daemon() {
-            return;
-        }
-
-        let family_key = self.daemon_family_key();
-        let pending_sessions = {
-            let registry = daemon_sync_registry()
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            registry.pending_sessions(&family_key)
-        };
-
-        if !pending_sessions.is_empty() {
-            let observed_completion =
-                self.wait_for_daemon_completion_sessions(&family_key, &pending_sessions);
-            let mut registry = daemon_sync_registry()
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            registry.clear_pending_sessions(&family_key);
-            registry.advance_last_synced_completion_count(&family_key, observed_completion.count);
-        }
-
-        let (baseline_count, pending_delta) = {
-            let registry = daemon_sync_registry()
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            (
-                registry.last_synced_completion_count(&family_key),
-                registry.pending_completion_delta(&family_key),
-            )
-        };
-
-        if pending_delta != 0 {
-            let observed_completion = self.wait_for_daemon_completion_count(
-                &family_key,
-                baseline_count,
-                baseline_count.saturating_add(pending_delta),
-            );
-            let mut registry = daemon_sync_registry()
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            registry.mark_synced_through(&family_key, observed_completion.count);
-        }
-    }
-
     pub(crate) fn sync_daemon_force(&self) {
         if !self.git_mode.uses_daemon() {
             return;
         }
 
         let family_key = self.daemon_family_key();
-        let pending_sessions = {
-            let registry = daemon_sync_registry()
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            registry.pending_sessions(&family_key)
-        };
-
-        if !pending_sessions.is_empty() {
-            let observed_completion =
-                self.wait_for_daemon_completion_sessions(&family_key, &pending_sessions);
-            let mut registry = daemon_sync_registry()
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            registry.clear_pending_sessions(&family_key);
-            registry.advance_last_synced_completion_count(&family_key, observed_completion.count);
-        }
-
-        let (baseline_count, pending_delta) = {
-            let registry = daemon_sync_registry()
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            (
-                registry.last_synced_completion_count(&family_key),
-                registry.pending_completion_delta(&family_key),
-            )
-        };
-
-        if pending_delta == 0 {
-            return;
-        }
-        let observed_completion = self.wait_for_daemon_completion_count(
-            &family_key,
-            baseline_count,
-            baseline_count.saturating_add(pending_delta),
-        );
-
-        let mut registry = daemon_sync_registry()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        registry.mark_synced_through(&family_key, observed_completion.count);
-    }
-
-    pub(crate) fn sync_daemon_external_completion_delta(
-        &self,
-        baseline_count: u64,
-        expected_delta: u64,
-    ) {
-        if !self.git_mode.uses_daemon() {
-            return;
-        }
-
-        let family_key = self.daemon_family_key();
-        if expected_delta != 0 {
-            let observed_completion = self.wait_for_daemon_total_completion_count(
-                baseline_count,
-                baseline_count.saturating_add(expected_delta),
-            );
-            let mut registry = daemon_sync_registry()
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            registry.mark_synced_through(&family_key, observed_completion.count);
-            return;
-        }
-        let mut registry = daemon_sync_registry()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        registry.mark_synced_through(&family_key, baseline_count);
+        self.sync_pending_daemon_sessions(&family_key);
     }
 
     pub(crate) fn sync_daemon_external_tracked_completion_delta(
@@ -1737,11 +1523,8 @@ impl TestRepo {
         }
 
         let family_key = self.daemon_family_key();
-        let observed_completion = if expected_delta == 0 {
-            ObservedDaemonCompletion {
-                count: baseline_count,
-                last_seq: 0,
-            }
+        let observed_count = if expected_delta == 0 {
+            baseline_count
         } else {
             self.wait_for_daemon_completion_count(
                 &family_key,
@@ -1753,7 +1536,7 @@ impl TestRepo {
         let mut registry = daemon_sync_registry()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        registry.mark_synced_through(&family_key, observed_completion.count);
+        registry.mark_synced_through(&family_key, observed_count);
     }
 
     fn sync_daemon_clone_target(&self, target_repo_path: &Path) {
@@ -1768,7 +1551,7 @@ impl TestRepo {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             registry.last_synced_completion_count(&family_key)
         };
-        let observed_completion = self.wait_for_daemon_completion_count(
+        let observed_count = self.wait_for_daemon_completion_count(
             &family_key,
             baseline_count,
             baseline_count.saturating_add(1),
@@ -1776,7 +1559,28 @@ impl TestRepo {
         let mut registry = daemon_sync_registry()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        registry.mark_synced_through(&family_key, observed_completion.count);
+        registry.mark_synced_through(&family_key, observed_count);
+    }
+
+    fn sync_pending_daemon_sessions(&self, family_key: &str) {
+        let pending_sessions = {
+            let registry = daemon_sync_registry()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            registry.pending_sessions(family_key)
+        };
+
+        if pending_sessions.is_empty() {
+            return;
+        }
+
+        let observed_count =
+            self.wait_for_daemon_completion_sessions(family_key, &pending_sessions);
+        let mut registry = daemon_sync_registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        registry.clear_pending_sessions(family_key);
+        registry.advance_last_synced_completion_count(family_key, observed_count);
     }
 
     fn setup_git_hooks_mode(&self) {
@@ -2025,10 +1829,6 @@ impl TestRepo {
                             .as_deref()
                             .expect("daemon test sync session should exist for tracked command"),
                     );
-                    if git_invocation_requires_daemon_completion_barrier(&tracked_invocation, true)
-                    {
-                        self.sync_daemon_force();
-                    }
                 }
                 return Ok(combined);
             }
@@ -2044,9 +1844,6 @@ impl TestRepo {
                         .as_deref()
                         .expect("daemon test sync session should exist for tracked command"),
                 );
-                if git_invocation_requires_daemon_completion_barrier(&tracked_invocation, false) {
-                    self.sync_daemon_force();
-                }
             }
             return Err(format!("{}{}", stdout, stderr));
         }
@@ -2212,12 +2009,6 @@ impl TestRepo {
                                 "daemon test sync session should exist for tracked command",
                             ),
                         );
-                        if git_invocation_requires_daemon_completion_barrier(
-                            &tracked_invocation,
-                            true,
-                        ) {
-                            self.sync_daemon_force();
-                        }
                     }
                 }
                 return Ok(combined);
@@ -2234,9 +2025,6 @@ impl TestRepo {
                         .as_deref()
                         .expect("daemon test sync session should exist for tracked command"),
                 );
-                if git_invocation_requires_daemon_completion_barrier(&tracked_invocation, false) {
-                    self.sync_daemon_force();
-                }
             }
             return Err(stderr);
         }

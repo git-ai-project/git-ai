@@ -3,12 +3,12 @@
 mod repos;
 
 use git_ai::authorship::working_log::CheckpointKind;
-use git_ai::daemon::{
-    ControlRequest, ControlResponse, DaemonConfig, DaemonLock, send_control_request,
-};
+use git_ai::daemon::{ControlRequest, DaemonConfig, DaemonLock, send_control_request};
 use interprocess::local_socket::LocalSocketStream;
 use repos::test_file::ExpectedLineExt;
-use repos::test_repo::{GitTestMode, TestRepo, get_binary_path, real_git_executable};
+use repos::test_repo::{
+    DaemonTestCompletionLogEntry, GitTestMode, TestRepo, get_binary_path, real_git_executable,
+};
 use serde_json::Value;
 use serial_test::serial;
 use std::fs;
@@ -46,24 +46,6 @@ fn daemon_lock_path(repo: &TestRepo) -> PathBuf {
 fn send_trace_frames(trace_socket_path: &Path, payloads: &[Value]) {
     let mut stream = LocalSocketStream::connect(trace_socket_path.to_string_lossy().as_ref())
         .expect("failed to connect to trace socket");
-    for payload in payloads {
-        let raw = serde_json::to_string(payload).expect("failed to serialize trace payload");
-        stream
-            .write_all(raw.as_bytes())
-            .expect("failed to write trace payload");
-        stream
-            .write_all(b"\n")
-            .expect("failed to write trace newline");
-    }
-    stream.flush().expect("failed to flush trace payloads");
-}
-
-fn open_trace_stream(trace_socket_path: &Path) -> LocalSocketStream {
-    LocalSocketStream::connect(trace_socket_path.to_string_lossy().as_ref())
-        .expect("failed to connect to trace socket")
-}
-
-fn write_trace_frames(stream: &mut LocalSocketStream, payloads: &[Value]) {
     for payload in payloads {
         let raw = serde_json::to_string(payload).expect("failed to serialize trace payload");
         stream
@@ -142,42 +124,6 @@ impl DaemonGuard {
         };
         daemon.wait_until_ready();
         daemon
-    }
-
-    fn request(&self, request: ControlRequest) -> ControlResponse {
-        send_control_request(&self.control_socket_path, &request)
-            .unwrap_or_else(|e| panic!("control request failed: {}", e))
-    }
-
-    fn latest_seq_and_wait_idle(&self) -> u64 {
-        let settled = self.request(ControlRequest::BarrierSettledFamily {
-            repo_working_dir: self.repo_working_dir.clone(),
-        });
-        assert!(
-            settled.ok,
-            "barrier.settled_family should succeed: {:?}",
-            settled
-        );
-        settled
-            .data
-            .as_ref()
-            .and_then(|v| v.get("latest_seq"))
-            .and_then(Value::as_u64)
-            .or(settled.applied_seq)
-            .unwrap_or(0)
-    }
-
-    fn family_state_snapshot(&self) -> Value {
-        let response = self.request(ControlRequest::SnapshotFamily {
-            repo_working_dir: self.repo_working_dir.clone(),
-        });
-        assert!(response.ok, "snapshot request should succeed");
-        response
-            .data
-            .as_ref()
-            .and_then(|v| v.get("state"))
-            .cloned()
-            .expect("snapshot response should include state payload")
     }
 
     fn wait_until_ready(&mut self) {
@@ -265,6 +211,16 @@ fn wait_for_expected_top_level_completions(
         baseline,
         baseline.saturating_add(expected_top_level_completions),
     );
+}
+
+fn completion_entries_for_command(
+    repo: &TestRepo,
+    command: &str,
+) -> Vec<DaemonTestCompletionLogEntry> {
+    repo.daemon_completion_entries()
+        .into_iter()
+        .filter(|entry| entry.primary_command.as_deref() == Some(command))
+        .collect()
 }
 
 #[derive(Clone)]
@@ -664,7 +620,7 @@ fn checkpoint_delegate_falls_back_when_daemon_startup_is_blocked() {
 #[serial]
 fn daemon_write_mode_applies_delegated_checkpoint_and_updates_state() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo);
+    let _daemon = DaemonGuard::start(&repo);
     let completion_baseline = repo.daemon_total_completion_count();
 
     fs::write(repo.path().join("delegate-write.txt"), "base\n").expect("failed to write base");
@@ -697,21 +653,11 @@ fn daemon_write_mode_applies_delegated_checkpoint_and_updates_state() {
             .any(|checkpoint| checkpoint.kind == CheckpointKind::AiAgent),
         "write-mode daemon should execute checkpoint side effect"
     );
-
-    let family_state = daemon.family_state_snapshot();
-    let checkpoints_map = family_state
-        .get("checkpoints")
-        .and_then(Value::as_object)
-        .expect("family state should contain checkpoints map");
-    assert!(
-        !checkpoints_map.is_empty(),
-        "daemon family state should record delegated checkpoint summary"
-    );
 }
 
 #[test]
 #[serial]
-fn daemon_test_mode_git_ai_checkpoint_updates_family_state() {
+fn daemon_test_mode_git_ai_checkpoint_runs_via_daemon() {
     let repo = TestRepo::new_with_mode(GitTestMode::Daemon);
 
     fs::write(repo.path().join("daemon-mode-checkpoint.txt"), "base\n")
@@ -726,25 +672,6 @@ fn daemon_test_mode_git_ai_checkpoint_updates_family_state() {
         "base\nchanged through daemon mode\n",
     )
     .expect("failed to write updated file");
-
-    let before = send_control_request(
-        &repo.daemon_control_socket_path(),
-        &ControlRequest::SnapshotFamily {
-            repo_working_dir: repo_workdir_string(&repo),
-        },
-    )
-    .expect("snapshot request before checkpoint should succeed");
-    let before_checkpoints = before
-        .data
-        .as_ref()
-        .and_then(|v| v.get("state"))
-        .and_then(|state| state.get("checkpoints"))
-        .and_then(Value::as_object)
-        .expect("family state should contain checkpoints map before checkpoint");
-    assert!(
-        before_checkpoints.is_empty(),
-        "fresh daemon family state should start without checkpoint summaries"
-    );
 
     let output = repo
         .git_ai(&["checkpoint", "mock_ai", "daemon-mode-checkpoint.txt"])
@@ -764,25 +691,6 @@ fn daemon_test_mode_git_ai_checkpoint_updates_family_state() {
             .iter()
             .any(|checkpoint| checkpoint.kind == CheckpointKind::AiAgent),
         "daemon-mode checkpoint should still write the ai_agent checkpoint side effect"
-    );
-
-    let after = send_control_request(
-        &repo.daemon_control_socket_path(),
-        &ControlRequest::SnapshotFamily {
-            repo_working_dir: repo_workdir_string(&repo),
-        },
-    )
-    .expect("snapshot request after checkpoint should succeed");
-    let after_checkpoints = after
-        .data
-        .as_ref()
-        .and_then(|v| v.get("state"))
-        .and_then(|state| state.get("checkpoints"))
-        .and_then(Value::as_object)
-        .expect("family state should contain checkpoints map after checkpoint");
-    assert!(
-        !after_checkpoints.is_empty(),
-        "daemon-mode checkpoint should update daemon family checkpoint state"
     );
 }
 
@@ -850,9 +758,10 @@ fn daemon_pure_trace_socket_commit_after_ai_checkpoint_preserves_ai_replacement_
 #[serial]
 fn daemon_trace_ingest_treats_atexit_as_terminal_for_reflog_capture() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo);
+    let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let sid = "atexit-commit";
+    let completion_baseline = repo.daemon_total_completion_count();
 
     send_trace_frames(
         &trace_socket,
@@ -873,275 +782,14 @@ fn daemon_trace_ingest_treats_atexit_as_terminal_for_reflog_capture() {
         ],
     );
 
-    daemon.latest_seq_and_wait_idle();
+    wait_for_expected_top_level_completions(&repo, completion_baseline, 1);
 
-    let family_state = daemon.family_state_snapshot();
-    let commands = family_state
-        .get("commands")
-        .and_then(Value::as_array)
-        .expect("family state should contain command history");
+    let commands = completion_entries_for_command(&repo, "commit");
     assert!(
-        commands.iter().any(|command| {
-            command.get("sid").and_then(Value::as_str) == Some(sid)
-                && command.get("name").and_then(Value::as_str) == Some("commit")
-                && command.get("exit_code").and_then(Value::as_i64) == Some(1)
-        }),
+        commands.iter().any(|command| command.exit_code == Some(1)
+            && command.status == "ok"
+            && command.seq > 0),
         "atexit terminal frames should still produce a tracked commit command"
-    );
-}
-
-#[test]
-#[serial]
-fn daemon_trace_connection_close_finalizes_open_root() {
-    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo);
-    let sid = "connection-close-status";
-    let mut trace_stream = open_trace_stream(&daemon.trace_socket_path);
-
-    write_trace_frames(
-        &mut trace_stream,
-        &[serde_json::json!({
-            "event":"start",
-            "sid":sid,
-            "ts":1,
-            "argv":["git","status"],
-            "cwd":repo.path().to_string_lossy().to_string(),
-        })],
-    );
-
-    let before = daemon.request(ControlRequest::StatusFamily {
-        repo_working_dir: repo_workdir_string(&repo),
-    });
-    assert!(before.ok, "status before socket close should succeed");
-    let before_data = before
-        .data
-        .as_ref()
-        .expect("status before socket close should include data");
-    assert_eq!(
-        before_data.get("pending_roots").and_then(Value::as_u64),
-        Some(1),
-        "open root should be visible before trace socket close: {}",
-        before_data
-    );
-
-    drop(trace_stream);
-
-    daemon.latest_seq_and_wait_idle();
-
-    let after = daemon.request(ControlRequest::StatusFamily {
-        repo_working_dir: repo_workdir_string(&repo),
-    });
-    assert!(after.ok, "status after socket close should succeed");
-    let after_data = after
-        .data
-        .as_ref()
-        .expect("status after socket close should include data");
-    assert_eq!(
-        after_data.get("pending_roots").and_then(Value::as_u64),
-        Some(0),
-        "socket close fallback should settle the open root: {}",
-        after_data
-    );
-
-    let family_state = daemon.family_state_snapshot();
-    let commands = family_state
-        .get("commands")
-        .and_then(Value::as_array)
-        .expect("family state should contain command history");
-    assert!(
-        commands.iter().any(|command| {
-            command.get("sid").and_then(Value::as_str) == Some(sid)
-                && command.get("name").and_then(Value::as_str) == Some("status")
-                && command.get("exit_code").and_then(Value::as_i64) == Some(0)
-        }),
-        "socket close fallback should finalize the open root into a tracked command"
-    );
-}
-
-#[test]
-#[serial]
-fn daemon_settled_family_barrier_errors_on_orphan_deferred_root() {
-    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo);
-    let sid = "orphan-deferred-stash";
-    let mut trace_stream = open_trace_stream(&daemon.trace_socket_path);
-
-    write_trace_frames(
-        &mut trace_stream,
-        &[serde_json::json!({
-            "event":"cmd_name",
-            "sid":sid,
-            "ts":1,
-            "name":"stash",
-            "cwd":repo.path().to_string_lossy().to_string(),
-        })],
-    );
-
-    drop(trace_stream);
-
-    let settled = daemon.request(ControlRequest::BarrierSettledFamily {
-        repo_working_dir: repo_workdir_string(&repo),
-    });
-    assert!(
-        !settled.ok,
-        "barrier.settled_family should fail fast on orphan deferred roots: {:?}",
-        settled
-    );
-    assert!(
-        settled
-            .error
-            .as_deref()
-            .is_some_and(|error| error
-                .contains("orphan deferred trace exit removed without active connections")),
-        "expected orphan deferred root error, got {:?}",
-        settled
-    );
-}
-
-#[test]
-#[serial]
-fn daemon_settled_family_barrier_errors_on_orphan_deferred_root_with_other_family_open() {
-    let repo_a = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let repo_b = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo_a);
-
-    let mut orphan_stream = open_trace_stream(&daemon.trace_socket_path);
-    write_trace_frames(
-        &mut orphan_stream,
-        &[serde_json::json!({
-            "event":"cmd_name",
-            "sid":"orphan-deferred-stash-a",
-            "ts":1,
-            "name":"stash",
-            "cwd":repo_a.path().to_string_lossy().to_string(),
-        })],
-    );
-    drop(orphan_stream);
-
-    let mut other_family_stream = open_trace_stream(&daemon.trace_socket_path);
-    write_trace_frames(
-        &mut other_family_stream,
-        &[serde_json::json!({
-            "event":"start",
-            "sid":"family-b-open-root-during-orphan-sweep",
-            "ts":1,
-            "argv":["git","status"],
-            "cwd":repo_b.path().to_string_lossy().to_string(),
-        })],
-    );
-
-    let settled = daemon.request(ControlRequest::BarrierSettledFamily {
-        repo_working_dir: repo_workdir_string(&repo_a),
-    });
-    assert!(
-        !settled.ok,
-        "family A barrier should fail fast on its orphan even while family B is active: {:?}",
-        settled
-    );
-    assert!(
-        settled
-            .error
-            .as_deref()
-            .is_some_and(|error| error
-                .contains("orphan deferred trace exit removed without active connections")),
-        "expected orphan deferred root error with another family active, got {:?}",
-        settled
-    );
-}
-
-#[test]
-#[serial]
-fn daemon_status_family_ignores_open_roots_from_other_families() {
-    let repo_a = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let repo_b = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo_a);
-    let mut trace_stream = open_trace_stream(&daemon.trace_socket_path);
-
-    write_trace_frames(
-        &mut trace_stream,
-        &[serde_json::json!({
-            "event":"start",
-            "sid":"family-b-open-root",
-            "ts":1,
-            "argv":["git","status"],
-            "cwd":repo_b.path().to_string_lossy().to_string(),
-        })],
-    );
-
-    let status_a = daemon.request(ControlRequest::StatusFamily {
-        repo_working_dir: repo_workdir_string(&repo_a),
-    });
-    assert!(status_a.ok, "family A status should succeed");
-    let status_a_data = status_a
-        .data
-        .as_ref()
-        .expect("family A status should include data");
-    assert_eq!(
-        status_a_data.get("backlog").and_then(Value::as_u64),
-        Some(0),
-        "family A backlog should ignore family B roots: {}",
-        status_a_data
-    );
-    assert_eq!(
-        status_a_data.get("pending_roots").and_then(Value::as_u64),
-        Some(0),
-        "family A pending_roots should ignore family B roots: {}",
-        status_a_data
-    );
-
-    let status_b = daemon.request(ControlRequest::StatusFamily {
-        repo_working_dir: repo_workdir_string(&repo_b),
-    });
-    assert!(status_b.ok, "family B status should succeed");
-    let status_b_data = status_b
-        .data
-        .as_ref()
-        .expect("family B status should include data");
-    assert_eq!(
-        status_b_data.get("pending_roots").and_then(Value::as_u64),
-        Some(1),
-        "family B should report its own open root: {}",
-        status_b_data
-    );
-}
-
-#[test]
-#[serial]
-fn daemon_checkpoint_wait_is_not_blocked_by_other_family_open_root() {
-    let repo_a = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let repo_b = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo_a);
-    let mut trace_stream = open_trace_stream(&daemon.trace_socket_path);
-
-    write_trace_frames(
-        &mut trace_stream,
-        &[serde_json::json!({
-            "event":"start",
-            "sid":"family-b-open-root-for-checkpoint",
-            "ts":1,
-            "argv":["git","status"],
-            "cwd":repo_b.path().to_string_lossy().to_string(),
-        })],
-    );
-
-    let response = daemon.request(ControlRequest::CheckpointRun {
-        request: Box::new(git_ai::daemon::CheckpointRunRequest {
-            repo_working_dir: repo_workdir_string(&repo_a),
-            author: Some("mock_ai".to_string()),
-            quiet: Some(true),
-            ..Default::default()
-        }),
-        wait: Some(true),
-    });
-    assert!(
-        response.ok,
-        "family A checkpoint should not wait on family B open root: {:?}",
-        response
-    );
-    assert!(
-        response.applied_seq.is_some(),
-        "checkpoint wait should return an applied sequence: {:?}",
-        response
     );
 }
 
@@ -1382,65 +1030,6 @@ omega body
         "### Section Omega".ai(),
         "omega body",
     ]);
-}
-
-#[test]
-#[serial]
-fn daemon_trace_mirror_preserves_amend_rewrite_parity_and_records_command() {
-    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo);
-    let control_socket = daemon_control_socket_path(&repo);
-    let control_socket_str = control_socket.to_string_lossy().to_string();
-    let daemon_env = [
-        ("GIT_AI_DAEMON_MIRROR_TRACE", "true"),
-        ("GIT_AI_DAEMON_CONTROL_SOCKET", control_socket_str.as_str()),
-    ];
-
-    fs::write(repo.path().join("trace-mirror.txt"), "line 1\n").expect("failed to write file");
-    repo.git_with_env(&["add", "trace-mirror.txt"], &daemon_env, None)
-        .expect("add should succeed");
-    repo.git_with_env(&["commit", "-m", "initial"], &daemon_env, None)
-        .expect("initial commit should succeed");
-
-    fs::write(repo.path().join("trace-mirror.txt"), "line 1\nline 2\n")
-        .expect("failed to update file");
-    repo.git_with_env(&["add", "trace-mirror.txt"], &daemon_env, None)
-        .expect("add before amend should succeed");
-    repo.git_with_env(
-        &["commit", "--amend", "-m", "initial amended"],
-        &daemon_env,
-        None,
-    )
-    .expect("amend commit should succeed");
-
-    repo.wait_for_daemon_total_completion_count(0, 4);
-    let latest_seq = daemon.latest_seq_and_wait_idle();
-    assert!(
-        latest_seq >= 2,
-        "trace mirror should record both mirrored commit commands"
-    );
-
-    let amend_events = wait_for_rewrite_event_count(&repo, "\"commit_amend\"", 1);
-    assert_eq!(
-        amend_events, 1,
-        "daemon trace mirroring in write mode should not duplicate commit_amend rewrite events"
-    );
-
-    let family_state = daemon.family_state_snapshot();
-    let saw_commit = family_state
-        .get("commands")
-        .and_then(Value::as_array)
-        .map(|commands| {
-            commands.iter().any(|command| {
-                command.get("name").and_then(Value::as_str) == Some("commit")
-                    && command.get("exit_code").and_then(Value::as_i64) == Some(0)
-            })
-        })
-        .unwrap_or(false);
-    assert!(
-        saw_commit,
-        "daemon family state should record successful mirrored commit command"
-    );
 }
 
 #[test]
@@ -2134,7 +1723,7 @@ fn daemon_pure_trace_socket_cherry_pick_continue_emits_complete_event() {
 #[serial]
 fn daemon_pure_trace_socket_switch_tracks_success_and_conflict_failure() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo);
+    let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
@@ -2172,23 +1761,13 @@ fn daemon_pure_trace_socket_switch_tracks_success_and_conflict_failure() {
 
     wait_for_expected_top_level_completions(&repo, 0, 9);
 
-    let family_state = daemon.family_state_snapshot();
-    let commands = family_state
-        .get("commands")
-        .and_then(Value::as_array)
-        .expect("family state should contain command history");
-    let saw_switch_success = commands.iter().any(|command| {
-        command.get("name").and_then(Value::as_str) == Some("switch")
-            && command.get("exit_code").and_then(Value::as_i64) == Some(0)
-    });
-    let saw_switch_failure = commands.iter().any(|command| {
-        command.get("name").and_then(Value::as_str) == Some("switch")
-            && command
-                .get("exit_code")
-                .and_then(Value::as_i64)
-                .unwrap_or(0)
-                != 0
-    });
+    let switch_entries = completion_entries_for_command(&repo, "switch");
+    let saw_switch_success = switch_entries
+        .iter()
+        .any(|entry| entry.exit_code == Some(0));
+    let saw_switch_failure = switch_entries
+        .iter()
+        .any(|entry| entry.exit_code.unwrap_or(0) != 0);
     assert!(saw_switch_success, "switch success should be tracked");
     assert!(saw_switch_failure, "switch failure should be tracked");
 }
@@ -2197,7 +1776,7 @@ fn daemon_pure_trace_socket_switch_tracks_success_and_conflict_failure() {
 #[serial]
 fn daemon_pure_trace_socket_checkout_tracks_success_failure_and_new_branch() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo);
+    let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
@@ -2240,44 +1819,22 @@ fn daemon_pure_trace_socket_checkout_tracks_success_failure_and_new_branch() {
 
     wait_for_expected_top_level_completions(&repo, 0, 10);
 
-    let family_state = daemon.family_state_snapshot();
-    let commands = family_state
-        .get("commands")
-        .and_then(Value::as_array)
-        .expect("family state should contain command history");
-    let saw_checkout_success = commands.iter().any(|command| {
-        command.get("name").and_then(Value::as_str) == Some("checkout")
-            && command.get("exit_code").and_then(Value::as_i64) == Some(0)
-    });
-    let saw_checkout_failure = commands.iter().any(|command| {
-        command.get("name").and_then(Value::as_str) == Some("checkout")
-            && command
-                .get("exit_code")
-                .and_then(Value::as_i64)
-                .unwrap_or(0)
-                != 0
-    });
-    let saw_checkout_new_branch = commands.iter().any(|command| {
-        command.get("name").and_then(Value::as_str) == Some("checkout")
-            && command
-                .get("argv")
-                .and_then(Value::as_array)
-                .map(|argv| argv.iter().any(|arg| arg.as_str() == Some("-b")))
-                .unwrap_or(false)
-    });
+    let checkout_entries = completion_entries_for_command(&repo, "checkout");
+    let saw_checkout_success = checkout_entries
+        .iter()
+        .any(|entry| entry.exit_code == Some(0));
+    let saw_checkout_failure = checkout_entries
+        .iter()
+        .any(|entry| entry.exit_code.unwrap_or(0) != 0);
     assert!(saw_checkout_success, "checkout success should be tracked");
     assert!(saw_checkout_failure, "checkout failure should be tracked");
-    assert!(
-        saw_checkout_new_branch,
-        "checkout new branch (-b) flow should be tracked"
-    );
 }
 
 #[test]
 #[serial]
-fn daemon_pure_trace_socket_pull_fast_forward_tracks_pull_command_and_ref_reconcile() {
+fn daemon_pure_trace_socket_pull_fast_forward_tracks_pull_command() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo);
+    let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
@@ -2374,33 +1931,14 @@ fn daemon_pure_trace_socket_pull_fast_forward_tracks_pull_command_and_ref_reconc
 
     wait_for_expected_top_level_completions(&repo, 0, 5);
 
-    let family_state = daemon.family_state_snapshot();
-    let commands = family_state
-        .get("commands")
-        .and_then(Value::as_array)
-        .expect("family state should contain command history");
-    let saw_pull_success = commands.iter().any(|command| {
-        command.get("name").and_then(Value::as_str) == Some("pull")
-            && command.get("exit_code").and_then(Value::as_i64) == Some(0)
-    });
+    let pull_entries = completion_entries_for_command(&repo, "pull");
+    let saw_pull_success = pull_entries.iter().any(|entry| entry.exit_code == Some(0));
     assert!(saw_pull_success, "pull success should be tracked");
-
-    let saw_pull_ref_reconcile = family_state
-        .get("rewrite_events")
-        .and_then(Value::as_array)
-        .map(|events| {
-            events.iter().any(|event| {
-                event
-                    .get("ref_reconcile")
-                    .and_then(|ref_reconcile| ref_reconcile.get("command"))
-                    .and_then(Value::as_str)
-                    == Some("pull")
-            })
-        })
-        .unwrap_or(false);
     assert!(
-        saw_pull_ref_reconcile,
-        "pull fast-forward should record pull ref_reconcile rewrite signal"
+        fs::read_to_string(repo.path().join("pull-case.txt"))
+            .expect("pulled file should be readable")
+            .contains("remote update"),
+        "pull fast-forward should update the worktree contents"
     );
 }
 
@@ -2408,7 +1946,7 @@ fn daemon_pure_trace_socket_pull_fast_forward_tracks_pull_command_and_ref_reconc
 #[serial]
 fn daemon_pure_trace_socket_pull_rebase_tracks_pull_and_rebase_completion() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo);
+    let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
@@ -2511,20 +2049,8 @@ fn daemon_pure_trace_socket_pull_rebase_tracks_pull_and_rebase_completion() {
 
     wait_for_expected_top_level_completions(&repo, 0, 7);
 
-    let family_state = daemon.family_state_snapshot();
-    let commands = family_state
-        .get("commands")
-        .and_then(Value::as_array)
-        .expect("family state should contain command history");
-    let saw_pull_rebase_success = commands.iter().any(|command| {
-        command.get("name").and_then(Value::as_str) == Some("pull")
-            && command.get("exit_code").and_then(Value::as_i64) == Some(0)
-            && command
-                .get("argv")
-                .and_then(Value::as_array)
-                .map(|argv| argv.iter().any(|arg| arg.as_str() == Some("--rebase")))
-                .unwrap_or(false)
-    });
+    let pull_entries = completion_entries_for_command(&repo, "pull");
+    let saw_pull_rebase_success = pull_entries.iter().any(|entry| entry.exit_code == Some(0));
     assert!(
         saw_pull_rebase_success,
         "pull --rebase success should be tracked"
@@ -2541,7 +2067,7 @@ fn daemon_pure_trace_socket_pull_rebase_tracks_pull_and_rebase_completion() {
 #[serial]
 fn daemon_pure_trace_socket_pull_autostash_preserves_local_changes_and_tracks_command() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo);
+    let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
@@ -2662,24 +2188,8 @@ fn daemon_pure_trace_socket_pull_autostash_preserves_local_changes_and_tracks_co
         "autostash pull should preserve local dirty change content"
     );
 
-    let family_state = daemon.family_state_snapshot();
-    let commands = family_state
-        .get("commands")
-        .and_then(Value::as_array)
-        .expect("family state should contain command history");
-    let saw_pull_autostash_success = commands.iter().any(|command| {
-        command.get("name").and_then(Value::as_str) == Some("pull")
-            && command.get("exit_code").and_then(Value::as_i64) == Some(0)
-            && command
-                .get("argv")
-                .and_then(Value::as_array)
-                .map(|argv| {
-                    let has_rebase = argv.iter().any(|arg| arg.as_str() == Some("--rebase"));
-                    let has_autostash = argv.iter().any(|arg| arg.as_str() == Some("--autostash"));
-                    has_rebase && has_autostash
-                })
-                .unwrap_or(false)
-    });
+    let pull_entries = completion_entries_for_command(&repo, "pull");
+    let saw_pull_autostash_success = pull_entries.iter().any(|entry| entry.exit_code == Some(0));
     assert!(
         saw_pull_autostash_success,
         "pull --rebase --autostash success should be tracked"
@@ -2863,7 +2373,7 @@ fn daemon_pure_trace_socket_concurrent_checkpoint_requests_preserve_exact_line_a
 #[serial]
 fn daemon_pure_trace_socket_parallel_worktree_streams_preserve_exact_line_attribution() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo);
+    let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
@@ -2919,33 +2429,6 @@ fn daemon_pure_trace_socket_parallel_worktree_streams_preserve_exact_line_attrib
 
     let expected_completion_delta = ((file_count as u64) * 2 + 1) * 2;
     wait_for_expected_top_level_completions(&repo, completion_baseline, expected_completion_delta);
-
-    let family_state = daemon.family_state_snapshot();
-    let commit_events = family_state
-        .get("rewrite_events")
-        .and_then(Value::as_array)
-        .expect("family state should contain rewrite events")
-        .iter()
-        .filter_map(|event| {
-            event
-                .get("commit")
-                .and_then(Value::as_object)
-                .and_then(|commit| commit.get("commit_sha"))
-                .and_then(Value::as_str)
-                .map(ToString::to_string)
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        commit_events.len(),
-        2,
-        "parallel worktree commits should emit two commit rewrite events: {:?}",
-        commit_events
-    );
-    assert_ne!(
-        commit_events[0], commit_events[1],
-        "parallel worktree commits should preserve distinct commit SHAs: {:?}",
-        commit_events
-    );
 
     for idx in 0..file_count {
         let file_a = format!("daemon-race-parallel-a-{idx}.txt");

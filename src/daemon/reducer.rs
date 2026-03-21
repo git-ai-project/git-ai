@@ -1,13 +1,9 @@
 use crate::daemon::analyzers::{AnalysisView, AnalyzerRegistry};
 use crate::daemon::domain::{
-    AnalysisResult, AppliedCommand, CheckpointObserved, CheckpointSummary, FamilyState,
-    GlobalState, NormalizedCommand, WorktreeState,
+    AnalysisResult, AppliedCommand, FamilyState, GlobalState, NormalizedCommand, WorktreeState,
 };
 use crate::error::GitAiError;
-use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-
-const RECENT_COMMAND_CAP: usize = 512;
 
 pub fn reduce_family_command(
     state: &mut FamilyState,
@@ -26,8 +22,6 @@ pub fn reduce_family_command(
         command: cmd,
         analysis: analysis.clone(),
     };
-    state.recent_commands.push_back(applied.clone());
-    cap_recent_commands(&mut state.recent_commands);
     Ok((applied, analysis))
 }
 
@@ -47,17 +41,8 @@ pub fn reduce_global_command(
     Ok((applied, analysis))
 }
 
-pub fn reduce_checkpoint(state: &mut FamilyState, checkpoint: CheckpointObserved) {
+pub fn reduce_checkpoint(state: &mut FamilyState) {
     state.applied_seq = state.applied_seq.saturating_add(1);
-    state.checkpoints.insert(
-        checkpoint.id.clone(),
-        CheckpointSummary {
-            id: checkpoint.id,
-            author: checkpoint.author,
-            timestamp_ns: checkpoint.timestamp_ns,
-            file_count: checkpoint.file_count,
-        },
-    );
 }
 
 fn apply_ref_changes(state: &mut FamilyState, cmd: &NormalizedCommand) {
@@ -155,12 +140,6 @@ fn apply_worktree_state(state: &mut FamilyState, cmd: &NormalizedCommand) {
     );
 }
 
-fn cap_recent_commands(commands: &mut VecDeque<AppliedCommand>) {
-    while commands.len() > RECENT_COMMAND_CAP {
-        let _ = commands.pop_front();
-    }
-}
-
 fn canonicalize_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
@@ -172,15 +151,13 @@ mod tests {
     use crate::daemon::domain::{
         CommandScope, Confidence, FamilyKey, FamilyState, GlobalState, RefChange,
     };
-    use std::collections::{HashMap, VecDeque};
+    use std::collections::HashMap;
 
     fn family_state() -> FamilyState {
         FamilyState {
             family_key: FamilyKey::new("family:/tmp/repo"),
             refs: HashMap::new(),
             worktrees: HashMap::new(),
-            recent_commands: VecDeque::new(),
-            checkpoints: HashMap::new(),
             last_error: None,
             applied_seq: 0,
         }
@@ -213,7 +190,6 @@ mod tests {
                 new: "abc".to_string(),
             }],
             confidence: Confidence::Low,
-            wrapper_mirror: false,
         }
     }
 

@@ -47,9 +47,9 @@ use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc, oneshot};
-use tokio::time::{Duration, sleep};
+use tokio::time::Duration;
 
 pub mod analyzers;
 pub mod control_api;
@@ -2043,13 +2043,6 @@ fn apply_reset_working_log_side_effect(
     Ok(())
 }
 
-fn short_hash_json(value: &Value) -> String {
-    let canonical = serde_json::to_vec(value).unwrap_or_default();
-    let mut hasher = Sha256::new();
-    hasher.update(canonical);
-    format!("{:x}", hasher.finalize())
-}
-
 fn now_unix_nanos() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2150,7 +2143,6 @@ struct TraceIngressState {
     root_reflog_refs: HashMap<String, Vec<String>>,
     root_head_reflog_start_offsets: HashMap<String, u64>,
     root_family_reflog_start_offsets: HashMap<String, HashMap<String, u64>>,
-    root_activity_seq: HashMap<String, u64>,
     root_last_activity_ns: HashMap<String, u64>,
     root_open_connections: HashMap<String, usize>,
     root_close_fallback_enqueued: HashSet<String>,
@@ -2184,8 +2176,6 @@ struct ActorDaemonCoordinator {
     family_sequencers_by_family: Mutex<HashMap<String, FamilySequencerState>>,
     pending_root_slots_by_root: Mutex<HashMap<String, PendingRootSlot>>,
     side_effect_errors_by_family: Mutex<HashMap<String, BTreeMap<u64, String>>>,
-    trace_root_errors_by_family: Mutex<HashMap<String, String>>,
-    side_effect_progress_notify_by_family: Mutex<HashMap<String, Arc<Notify>>>,
     side_effect_exec_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     carryover_snapshots_by_id: Mutex<HashMap<String, HashMap<String, String>>>,
     carryover_snapshot_ids_by_root: Mutex<HashMap<String, Vec<String>>>,
@@ -2193,7 +2183,6 @@ struct ActorDaemonCoordinator {
     trace_ingest_tx: Mutex<Option<mpsc::Sender<Value>>>,
     next_trace_ingest_seq: AtomicUsize,
     next_carryover_snapshot_id: AtomicUsize,
-    next_trace_root_activity_seq: AtomicUsize,
     queued_trace_payloads: AtomicUsize,
     queued_trace_payloads_by_root: Mutex<HashMap<String, usize>>,
     processed_trace_ingest_seq: AtomicUsize,
@@ -2206,7 +2195,7 @@ struct ActorDaemonCoordinator {
 enum TracePayloadApplyOutcome {
     None,
     Applied(Box<crate::daemon::domain::AppliedCommand>),
-    QueuedFamily(String),
+    QueuedFamily,
 }
 
 impl ActorDaemonCoordinator {
@@ -2227,8 +2216,6 @@ impl ActorDaemonCoordinator {
             family_sequencers_by_family: Mutex::new(HashMap::new()),
             pending_root_slots_by_root: Mutex::new(HashMap::new()),
             side_effect_errors_by_family: Mutex::new(HashMap::new()),
-            trace_root_errors_by_family: Mutex::new(HashMap::new()),
-            side_effect_progress_notify_by_family: Mutex::new(HashMap::new()),
             side_effect_exec_locks: Mutex::new(HashMap::new()),
             carryover_snapshots_by_id: Mutex::new(HashMap::new()),
             carryover_snapshot_ids_by_root: Mutex::new(HashMap::new()),
@@ -2245,7 +2232,6 @@ impl ActorDaemonCoordinator {
             trace_ingest_tx: Mutex::new(None),
             next_trace_ingest_seq: AtomicUsize::new(0),
             next_carryover_snapshot_id: AtomicUsize::new(0),
-            next_trace_root_activity_seq: AtomicUsize::new(0),
             queued_trace_payloads: AtomicUsize::new(0),
             queued_trace_payloads_by_root: Mutex::new(HashMap::new()),
             processed_trace_ingest_seq: AtomicUsize::new(0),
@@ -2300,25 +2286,6 @@ impl ActorDaemonCoordinator {
         Ok(())
     }
 
-    fn inflight_effect_depth(&self, family: &str) -> Result<usize, GitAiError> {
-        let map = self
-            .inflight_effects_by_family
-            .lock()
-            .map_err(|_| GitAiError::Generic("inflight effects map lock poisoned".to_string()))?;
-        Ok(*map.get(family).unwrap_or(&0))
-    }
-
-    fn pending_ordered_effect_depth(&self, family: &str) -> Result<usize, GitAiError> {
-        let map = self
-            .family_sequencers_by_family
-            .lock()
-            .map_err(|_| GitAiError::Generic("family sequencer map lock poisoned".to_string()))?;
-        Ok(map
-            .get(family)
-            .map(|state| state.entries.len())
-            .unwrap_or(0))
-    }
-
     fn trace_command_participates_in_family_sequencer(primary_command: Option<&str>) -> bool {
         matches!(
             primary_command,
@@ -2344,12 +2311,7 @@ impl ActorDaemonCoordinator {
         )
     }
 
-    fn append_pending_root_entry(
-        &self,
-        family: &str,
-        root_sid: &str,
-        primary_command: Option<String>,
-    ) -> Result<(), GitAiError> {
+    fn append_pending_root_entry(&self, family: &str, root_sid: &str) -> Result<(), GitAiError> {
         {
             let pending_slots = self.pending_root_slots_by_root.lock().map_err(|_| {
                 GitAiError::Generic("pending root slots map lock poisoned".to_string())
@@ -2373,7 +2335,6 @@ impl ActorDaemonCoordinator {
                     });
             let order = state.next_order;
             state.next_order = state.next_order.saturating_add(1);
-            let _ = primary_command;
             state
                 .entries
                 .insert(order, FamilySequencerEntry::PendingRoot);
@@ -2441,7 +2402,7 @@ impl ActorDaemonCoordinator {
             .unwrap_or(common_dir)
             .to_string_lossy()
             .to_string();
-        self.append_pending_root_entry(&family, root_sid, primary_command)
+        self.append_pending_root_entry(&family, root_sid)
     }
 
     async fn replace_pending_root_entry(
@@ -2521,23 +2482,6 @@ impl ActorDaemonCoordinator {
             .and_then(|errors| errors.iter().next_back().map(|(_, error)| error.clone())))
     }
 
-    fn record_trace_root_error(&self, family: &str, error: &GitAiError) -> Result<(), GitAiError> {
-        let mut map = self
-            .trace_root_errors_by_family
-            .lock()
-            .map_err(|_| GitAiError::Generic("trace root errors map lock poisoned".to_string()))?;
-        map.insert(family.to_string(), error.to_string());
-        Ok(())
-    }
-
-    fn latest_trace_root_error(&self, family: &str) -> Result<Option<String>, GitAiError> {
-        let map = self
-            .trace_root_errors_by_family
-            .lock()
-            .map_err(|_| GitAiError::Generic("trace root errors map lock poisoned".to_string()))?;
-        Ok(map.get(family).cloned())
-    }
-
     fn maybe_append_test_completion_log(
         &self,
         family: &str,
@@ -2596,13 +2540,6 @@ impl ActorDaemonCoordinator {
         Ok(())
     }
 
-    fn next_trace_root_activity_seq(&self) -> u64 {
-        (self
-            .next_trace_root_activity_seq
-            .fetch_add(1, Ordering::SeqCst) as u64)
-            + 1
-    }
-
     fn trace_root_is_tracked(ingress: &TraceIngressState, root: &str) -> bool {
         ingress.root_worktrees.contains_key(root)
             || ingress.root_families.contains_key(root)
@@ -2615,66 +2552,16 @@ impl ActorDaemonCoordinator {
             || ingress.root_family_reflog_start_offsets.contains_key(root)
     }
 
-    fn trace_root_blocks_family_progress(ingress: &TraceIngressState, root: &str) -> bool {
-        if !Self::trace_root_is_tracked(ingress, root) {
-            return false;
-        }
-
-        let primary = ingress
-            .root_argv
-            .get(root)
-            .map(|argv| parse_git_cli_args(trace_invocation_args(argv)))
-            .and_then(|parsed| parsed.command);
-
-        if matches!(primary.as_deref(), Some("status")) {
-            return true;
-        }
-
-        Self::trace_command_participates_in_family_sequencer(primary.as_deref())
-            || ingress.root_mutating.get(root).copied().unwrap_or(false)
-    }
-
-    fn trace_root_summary(ingress: &TraceIngressState, root: &str, now_ns: u64) -> String {
-        let primary = ingress
-            .root_argv
-            .get(root)
-            .and_then(|argv| trace_argv_primary_command(argv))
-            .unwrap_or_else(|| "unknown".to_string());
-        let open = ingress
-            .root_open_connections
-            .get(root)
-            .copied()
-            .unwrap_or(0);
-        let idle_ms = ingress
-            .root_last_activity_ns
-            .get(root)
-            .copied()
-            .map(|last| now_ns.saturating_sub(last) / 1_000_000)
-            .unwrap_or(0);
-        format!(
-            "sid={} cmd={} open_connections={} idle_ms={} fallback_enqueued={}",
-            root,
-            primary,
-            open,
-            idle_ms,
-            ingress.root_close_fallback_enqueued.contains(root)
-        )
-    }
-
-    fn mark_trace_root_activity(&self, root_sid: &str) -> Result<u64, GitAiError> {
-        let activity_seq = self.next_trace_root_activity_seq();
+    fn mark_trace_root_activity(&self, root_sid: &str) -> Result<(), GitAiError> {
         let mut ingress = self
             .trace_ingress_state
             .lock()
             .map_err(|_| GitAiError::Generic("trace ingress state lock poisoned".to_string()))?;
         ingress
-            .root_activity_seq
-            .insert(root_sid.to_string(), activity_seq);
-        ingress
             .root_last_activity_ns
             .insert(root_sid.to_string(), now_unix_nanos() as u64);
         ingress.root_close_fallback_enqueued.remove(root_sid);
-        Ok(activity_seq)
+        Ok(())
     }
 
     fn trace_root_connection_opened(&self, root_sid: &str) -> Result<(), GitAiError> {
@@ -2750,13 +2637,6 @@ impl ActorDaemonCoordinator {
         Ok(())
     }
 
-    fn queued_trace_payload_count_for_root(&self, root_sid: &str) -> Result<usize, GitAiError> {
-        let queued = self.queued_trace_payloads_by_root.lock().map_err(|_| {
-            GitAiError::Generic("queued trace payloads by root lock poisoned".to_string())
-        })?;
-        Ok(queued.get(root_sid).copied().unwrap_or(0))
-    }
-
     fn enqueue_stale_connection_close_fallbacks(&self, roots: &[String]) -> Result<(), GitAiError> {
         let stale_roots = {
             let mut ingress = self.trace_ingress_state.lock().map_err(|_| {
@@ -2810,126 +2690,6 @@ impl ActorDaemonCoordinator {
         Ok(())
     }
 
-    fn enqueue_connection_closed_trace_root_fallbacks_for_family(
-        &self,
-        family: &str,
-    ) -> Result<(), GitAiError> {
-        let stale_roots = {
-            let mut ingress = self.trace_ingress_state.lock().map_err(|_| {
-                GitAiError::Generic("trace ingress state lock poisoned".to_string())
-            })?;
-            let mut stale = Vec::new();
-            for (root_sid, tracked_family) in ingress.root_families.clone() {
-                if tracked_family != family {
-                    continue;
-                }
-                if ingress.root_close_fallback_enqueued.contains(&root_sid) {
-                    continue;
-                }
-                if !Self::trace_root_is_tracked(&ingress, &root_sid) {
-                    continue;
-                }
-                if ingress
-                    .root_open_connections
-                    .get(&root_sid)
-                    .copied()
-                    .unwrap_or(0)
-                    > 0
-                {
-                    continue;
-                }
-                ingress
-                    .root_close_fallback_enqueued
-                    .insert(root_sid.clone());
-                stale.push(root_sid);
-            }
-            stale
-        };
-
-        for root_sid in stale_roots {
-            let mut payload = json!({
-                "event": "atexit",
-                "sid": root_sid,
-                "code": 0,
-                "time_ns": now_unix_nanos() as u64,
-                "git_ai_connection_close_fallback": true,
-            });
-            if let Some(object) = payload.as_object_mut() {
-                object.insert(
-                    TRACE_INGEST_SEQ_FIELD.to_string(),
-                    json!(self.next_trace_ingest_seq()),
-                );
-            }
-            debug_log(&format!(
-                "daemon settled-family fallback finalized sid={}",
-                payload.get("sid").and_then(Value::as_str).unwrap_or("")
-            ));
-            self.enqueue_trace_payload(payload)?;
-        }
-        Ok(())
-    }
-
-    fn enqueue_idle_trace_root_fallbacks_for_family(
-        &self,
-        family: &str,
-        min_idle_ms: u64,
-    ) -> Result<(), GitAiError> {
-        let min_idle_ns = min_idle_ms.saturating_mul(1_000_000);
-        let now_ns = now_unix_nanos() as u64;
-        let stale_roots = {
-            let mut ingress = self.trace_ingress_state.lock().map_err(|_| {
-                GitAiError::Generic("trace ingress state lock poisoned".to_string())
-            })?;
-            let mut stale = Vec::new();
-            for (root_sid, tracked_family) in ingress.root_families.clone() {
-                if tracked_family != family {
-                    continue;
-                }
-                if ingress.root_close_fallback_enqueued.contains(&root_sid) {
-                    continue;
-                }
-                if !Self::trace_root_is_tracked(&ingress, &root_sid) {
-                    continue;
-                }
-                let last_activity_ns = ingress.root_last_activity_ns.get(&root_sid).copied();
-                let idle_for_ns = match last_activity_ns {
-                    Some(last) => now_ns.saturating_sub(last),
-                    None => continue,
-                };
-                if idle_for_ns < min_idle_ns {
-                    continue;
-                }
-                ingress
-                    .root_close_fallback_enqueued
-                    .insert(root_sid.clone());
-                stale.push(root_sid);
-            }
-            stale
-        };
-
-        for root_sid in stale_roots {
-            let mut payload = json!({
-                "event": "atexit",
-                "sid": root_sid,
-                "code": 0,
-                "time_ns": now_unix_nanos() as u64,
-                "git_ai_connection_close_fallback": true,
-            });
-            if let Some(object) = payload.as_object_mut() {
-                object.insert(
-                    TRACE_INGEST_SEQ_FIELD.to_string(),
-                    json!(self.next_trace_ingest_seq()),
-                );
-            }
-            debug_log(&format!(
-                "daemon stale trace root fallback finalized sid={}",
-                root_sid
-            ));
-            self.enqueue_trace_payload(payload)?;
-        }
-        Ok(())
-    }
-
     fn clear_trace_root_tracking(&self, root_sid: &str) -> Result<(), GitAiError> {
         let mut ingress = self
             .trace_ingress_state
@@ -2944,7 +2704,6 @@ impl ActorDaemonCoordinator {
         ingress.root_reflog_refs.remove(root_sid);
         ingress.root_head_reflog_start_offsets.remove(root_sid);
         ingress.root_family_reflog_start_offsets.remove(root_sid);
-        ingress.root_activity_seq.remove(root_sid);
         ingress.root_last_activity_ns.remove(root_sid);
         ingress.root_open_connections.remove(root_sid);
         ingress.root_close_fallback_enqueued.remove(root_sid);
@@ -3794,19 +3553,6 @@ impl ActorDaemonCoordinator {
             .clone())
     }
 
-    fn side_effect_progress_notify(&self, family: &str) -> Result<Arc<Notify>, GitAiError> {
-        let mut map = self
-            .side_effect_progress_notify_by_family
-            .lock()
-            .map_err(|_| {
-                GitAiError::Generic("side effect progress notify map lock poisoned".to_string())
-            })?;
-        Ok(map
-            .entry(family.to_string())
-            .or_insert_with(|| Arc::new(Notify::new()))
-            .clone())
-    }
-
     async fn append_checkpoint_to_family_sequencer(
         &self,
         family: &str,
@@ -3923,22 +3669,10 @@ impl ActorDaemonCoordinator {
                     request,
                     respond_to,
                 } => {
-                    let id = format!(
-                        "cp-{}",
-                        short_hash_json(&serde_json::to_value(&request).map_err(GitAiError::from)?)
-                    );
-                    let author = request
-                        .author
-                        .clone()
-                        .unwrap_or_else(|| "unknown".to_string());
-                    let observed = crate::daemon::domain::CheckpointObserved {
-                        repo_working_dir: PathBuf::from(&request.repo_working_dir),
-                        id,
-                        author,
-                        timestamp_ns: now_unix_nanos(),
-                        file_count: 0,
-                    };
-                    let ack = self.coordinator.apply_checkpoint(observed).await;
+                    let ack = self
+                        .coordinator
+                        .apply_checkpoint(Path::new(&request.repo_working_dir))
+                        .await;
                     let should_log_completion =
                         crate::daemon::test_sync::tracks_checkpoint_request_for_test_sync(&request);
                     let result = match ack {
@@ -3988,152 +3722,8 @@ impl ActorDaemonCoordinator {
         }
         let _ = self.end_family_effect(family);
 
-        if progressed {
-            self.side_effect_progress_notify(family)?.notify_waiters();
-        }
+        let _ = progressed;
         Ok(())
-    }
-
-    async fn sweep_orphan_trace_roots_for_family(&self, family: &str) -> Result<(), GitAiError> {
-        let orphan_candidates = {
-            let ingress = self.trace_ingress_state.lock().map_err(|_| {
-                GitAiError::Generic("trace ingress state lock poisoned".to_string())
-            })?;
-            ingress
-                .root_families
-                .iter()
-                .filter_map(|(root_sid, tracked_family)| {
-                    if tracked_family != family
-                        || !Self::trace_root_blocks_family_progress(&ingress, root_sid)
-                    {
-                        return None;
-                    }
-                    ingress
-                        .root_open_connections
-                        .get(root_sid)
-                        .copied()
-                        .unwrap_or(0)
-                        .eq(&0)
-                        .then_some(root_sid.clone())
-                })
-                .collect::<Vec<_>>()
-        };
-
-        let mut removable_roots = Vec::new();
-        for root_sid in orphan_candidates {
-            if self.queued_trace_payload_count_for_root(&root_sid)? == 0 {
-                removable_roots.push(root_sid);
-            }
-        }
-
-        if removable_roots.is_empty() {
-            return Ok(());
-        }
-
-        let removed_roots = {
-            let mut normalizer = self.normalizer.lock().await;
-            normalizer.sweep_orphans_for_roots(&removable_roots)
-        };
-
-        for removed in removed_roots {
-            let crate::daemon::trace_normalizer::OrphanTraceRoot {
-                root_sid,
-                raw_argv,
-                deferred_exit_only,
-            } = removed;
-            let family = {
-                let ingress = self.trace_ingress_state.lock().map_err(|_| {
-                    GitAiError::Generic("trace ingress state lock poisoned".to_string())
-                })?;
-                ingress.root_families.get(&root_sid).cloned()
-            };
-            self.clear_trace_root_tracking(&root_sid)?;
-            self.discard_carryover_snapshots_for_root(&root_sid)?;
-            let error = if deferred_exit_only {
-                GitAiError::Generic(format!(
-                    "orphan deferred trace exit removed without active connections sid={}",
-                    root_sid,
-                ))
-            } else {
-                GitAiError::Generic(format!(
-                    "orphan trace root removed without active connections sid={} argv={:?}",
-                    root_sid, raw_argv
-                ))
-            };
-            observability::log_error(
-                &error,
-                Some(serde_json::json!({
-                    "component": "trace_normalizer",
-                    "phase": if deferred_exit_only {
-                        "orphan_deferred_exit_sweep"
-                    } else {
-                        "orphan_pending_root_sweep"
-                    },
-                    "root_sid": root_sid,
-                    "argv": raw_argv,
-                })),
-            );
-            let _ = self
-                .replace_pending_root_entry(&root_sid, FamilySequencerEntry::Canceled)
-                .await;
-            if let Some(family) = family.as_deref() {
-                let _ = self.record_trace_root_error(family, &error);
-            }
-        }
-        Ok(())
-    }
-
-    async fn family_pending_trace_root_count(&self, family: &str) -> Result<u64, GitAiError> {
-        let _ = self.enqueue_connection_closed_trace_root_fallbacks_for_family(family);
-        let _ = self.enqueue_idle_trace_root_fallbacks_for_family(family, 1_500);
-        self.sweep_orphan_trace_roots_for_family(family).await?;
-        let ingress = self
-            .trace_ingress_state
-            .lock()
-            .map_err(|_| GitAiError::Generic("trace ingress state lock poisoned".to_string()))?;
-        Ok(ingress
-            .root_families
-            .iter()
-            .filter(|(root_sid, tracked_family)| {
-                tracked_family.as_str() == family
-                    && Self::trace_root_blocks_family_progress(&ingress, root_sid)
-            })
-            .count() as u64)
-    }
-
-    async fn pending_trace_root_status_for_family(
-        &self,
-        family: &str,
-    ) -> Result<(usize, u64, Vec<String>), GitAiError> {
-        let pending_roots = self.family_pending_trace_root_count(family).await?;
-        let now_ns = now_unix_nanos() as u64;
-        let ingress = self
-            .trace_ingress_state
-            .lock()
-            .map_err(|_| GitAiError::Generic("trace ingress state lock poisoned".to_string()))?;
-
-        let mut max_activity_seq = 0u64;
-        let mut summaries = Vec::new();
-
-        for (root_sid, tracked_family) in &ingress.root_families {
-            if tracked_family != family
-                || !Self::trace_root_blocks_family_progress(&ingress, root_sid)
-            {
-                continue;
-            }
-            max_activity_seq = max_activity_seq.max(
-                ingress
-                    .root_activity_seq
-                    .get(root_sid)
-                    .copied()
-                    .unwrap_or(0),
-            );
-            if summaries.len() < 4 {
-                summaries.push(Self::trace_root_summary(&ingress, root_sid, now_ns));
-            }
-        }
-
-        Ok((pending_roots as usize, max_activity_seq, summaries))
     }
 
     fn append_rewrite_event_for_family(
@@ -4152,14 +3742,6 @@ impl ActorDaemonCoordinator {
             entries.drain(0..extra);
         }
         Ok(())
-    }
-
-    fn rewrite_events_for_family(&self, family: &str) -> Result<Vec<Value>, GitAiError> {
-        let map = self
-            .rewrite_events_by_family
-            .lock()
-            .map_err(|_| GitAiError::Generic("rewrite events map lock poisoned".to_string()))?;
-        Ok(map.get(family).cloned().unwrap_or_default())
     }
 
     fn rewrite_worktree_key(worktree: &Path) -> String {
@@ -4921,7 +4503,7 @@ impl ActorDaemonCoordinator {
             .is_some_and(|v| v == "1")
         {
             debug_log(&format!(
-                "daemon side-effect command={} primary={} seq={} argv={:?} invoked_args={:?} ref_changes_len={} ref_changes={:?} events={:?} pre_head={:?} post_head={:?} exit_code={} wrapper_mirror={}",
+                "daemon side-effect command={} primary={} seq={} argv={:?} invoked_args={:?} ref_changes_len={} ref_changes={:?} events={:?} pre_head={:?} post_head={:?} exit_code={}",
                 cmd.invoked_command.clone().unwrap_or_default(),
                 cmd.primary_command.clone().unwrap_or_default(),
                 applied.seq,
@@ -4933,7 +4515,6 @@ impl ActorDaemonCoordinator {
                 cmd.pre_repo.as_ref().and_then(|repo| repo.head.clone()),
                 cmd.post_repo.as_ref().and_then(|repo| repo.head.clone()),
                 cmd.exit_code,
-                cmd.wrapper_mirror,
             ));
             debug_log(&format!(
                 "daemon side-effect inflight_rebase_original_head={:?}",
@@ -5002,7 +4583,7 @@ impl ActorDaemonCoordinator {
                 }
             }
         }
-        if cmd.wrapper_mirror || cmd.exit_code != 0 {
+        if cmd.exit_code != 0 {
             if cmd.primary_command.as_deref() == Some("rebase") {
                 let worktree = cmd.worktree.as_ref().ok_or_else(|| {
                     GitAiError::Generic(format!(
@@ -5211,7 +4792,8 @@ impl ActorDaemonCoordinator {
                     .await?
             {
                 self.clear_trace_root_tracking(root_sid)?;
-                return Ok(TracePayloadApplyOutcome::QueuedFamily(family));
+                let _ = family;
+                return Ok(TracePayloadApplyOutcome::QueuedFamily);
             }
             return Ok(TracePayloadApplyOutcome::None);
         };
@@ -5224,7 +4806,8 @@ impl ActorDaemonCoordinator {
             )
             .await?
         {
-            TracePayloadApplyOutcome::QueuedFamily(family)
+            let _ = family;
+            TracePayloadApplyOutcome::QueuedFamily
         } else {
             match self.coordinator.route_command(command).await {
                 Ok(applied) => TracePayloadApplyOutcome::Applied(Box::new(applied)),
@@ -5239,73 +4822,12 @@ impl ActorDaemonCoordinator {
         Ok(outcome)
     }
 
-    async fn ingest_trace_payload(
-        &self,
-        payload: Value,
-        wait: bool,
-    ) -> Result<ControlResponse, GitAiError> {
-        if !is_trace_payload(&payload) {
-            return Ok(ControlResponse::ok(
-                None,
-                None,
-                Some(json!({ "ignored": true })),
-            ));
-        }
-
-        match self.apply_trace_payload_to_state(payload).await? {
-            TracePayloadApplyOutcome::None => Ok(ControlResponse::ok(
-                None,
-                None,
-                Some(json!({ "buffered": true })),
-            )),
-            TracePayloadApplyOutcome::Applied(applied) => {
-                if let Some(family) = applied
-                    .command
-                    .family_key
-                    .as_ref()
-                    .map(|key| key.0.as_str())
-                {
-                    self.begin_family_effect(family)?;
-                    let result = self
-                        .maybe_apply_side_effects_for_applied_command(Some(family), &applied)
-                        .await;
-                    let _ = self.end_family_effect(family);
-                    if let Err(error) = result {
-                        let _ = self.record_side_effect_error(family, applied.seq, &error);
-                        return Err(error);
-                    }
-                    if let Err(error) =
-                        self.append_command_completion_log(family, &applied, &Ok(()), applied.seq)
-                    {
-                        let _ = self.record_side_effect_error(family, applied.seq, &error);
-                        return Err(error);
-                    }
-                }
-
-                if wait && let Some(worktree) = applied.command.worktree.as_ref() {
-                    let _ = self.coordinator.barrier_family(worktree, applied.seq).await;
-                }
-
-                Ok(ControlResponse::ok(
-                    Some(applied.seq),
-                    if wait { Some(applied.seq) } else { None },
-                    None,
-                ))
-            }
-            TracePayloadApplyOutcome::QueuedFamily(family) => Ok(ControlResponse::ok(
-                None,
-                None,
-                Some(json!({ "queued": true, "family_key": family })),
-            )),
-        }
-    }
-
     async fn ingest_trace_payload_fast(self: Arc<Self>, payload: Value) -> Result<(), GitAiError> {
         if !is_trace_payload(&payload) {
             return Ok(());
         }
         match self.apply_trace_payload_to_state(payload).await? {
-            TracePayloadApplyOutcome::None | TracePayloadApplyOutcome::QueuedFamily(_) => {}
+            TracePayloadApplyOutcome::None | TracePayloadApplyOutcome::QueuedFamily => {}
             TracePayloadApplyOutcome::Applied(applied) => {
                 if let Some(family) = applied.command.family_key.as_ref().map(|key| key.0.clone()) {
                     self.begin_family_effect(&family)?;
@@ -5360,12 +4882,12 @@ impl ActorDaemonCoordinator {
             let seq = rx.await.map_err(|_| {
                 GitAiError::Generic("checkpoint sequencer completion receive failed".to_string())
             })??;
-            return Ok(ControlResponse::ok(Some(seq), Some(seq), None));
+            return Ok(ControlResponse::ok(Some(seq), None));
         }
 
         self.append_checkpoint_to_family_sequencer(&family.0, request, None)
             .await?;
-        Ok(ControlResponse::ok(None, None, None))
+        Ok(ControlResponse::ok(None, None))
     }
 
     async fn status_for_family(
@@ -5378,146 +4900,18 @@ impl ActorDaemonCoordinator {
             .status_family(Path::new(&repo_working_dir))
             .await?;
         let latest_seq = status.applied_seq;
-        let (pending_roots, pending_root_activity_seq, pending_root_summaries) =
-            self.pending_trace_root_status_for_family(&family.0).await?;
-        let pending_roots = pending_roots as u64;
-        let cursor = latest_seq.saturating_sub(pending_roots);
-        let backlog = pending_roots;
-        let inflight_effects = self.inflight_effect_depth(&family.0)?;
-        let pending_ordered_effects = self.pending_ordered_effect_depth(&family.0)?;
         let family_key = family.0;
         Ok(FamilyStatus {
             family_key: family_key.clone(),
             latest_seq,
-            cursor,
-            backlog,
-            effect_queue_depth: inflight_effects.saturating_add(pending_ordered_effects),
-            active_trace_connections: 0,
-            pending_roots: pending_roots as usize,
-            pending_root_activity_seq,
-            pending_root_summaries,
             last_error: status
                 .last_error
-                .or_else(|| self.latest_trace_root_error(&family_key).ok().flatten())
                 .or_else(|| self.latest_side_effect_error(&family_key).ok().flatten()),
         })
     }
 
-    async fn snapshot_for_family(
-        &self,
-        repo_working_dir: String,
-    ) -> Result<ControlResponse, GitAiError> {
-        let family = self.backend.resolve_family(Path::new(&repo_working_dir))?;
-        let snapshot = self
-            .coordinator
-            .snapshot_family(Path::new(&repo_working_dir))
-            .await?;
-        let latest_seq = snapshot.applied_seq;
-        let rewrite_events = self.rewrite_events_for_family(&family.0)?;
-        let commands = snapshot
-            .recent_commands
-            .iter()
-            .map(|command| {
-                json!({
-                    "seq": command.seq,
-                    "sid": command.command.root_sid,
-                    "name": command.command.primary_command.clone().unwrap_or_default(),
-                    "argv": command.command.raw_argv,
-                    "exit_code": command.command.exit_code,
-                    "worktree": command.command.worktree.as_ref().map(|p| p.to_string_lossy().to_string()),
-                    "pre_head": command.command.pre_repo.as_ref().and_then(|r| r.head.clone()),
-                    "post_head": command.command.post_repo.as_ref().and_then(|r| r.head.clone()),
-                    "ref_changes": command.command.ref_changes,
-                })
-            })
-            .collect::<Vec<_>>();
-
-        Ok(ControlResponse::ok(
-            None,
-            None,
-            Some(json!({
-            "family_key": family.0,
-            "latest_seq": latest_seq,
-            "cursor": snapshot.applied_seq,
-                "state": {
-                    "commands": commands,
-                    "checkpoints": snapshot.checkpoints,
-                    "rewrite_events": rewrite_events,
-                    "last_error": snapshot
-                        .last_error
-                        .or_else(|| self.latest_side_effect_error(&family.0).ok().flatten()),
-                }
-            })),
-        ))
-    }
-
-    async fn wait_until_family_settled(
-        &self,
-        repo_working_dir: String,
-    ) -> Result<ControlResponse, GitAiError> {
-        let repo_path = Path::new(&repo_working_dir);
-        let family = self.backend.resolve_family(repo_path)?;
-        let start = Instant::now();
-        let total_timeout = Duration::from_secs(60);
-        let last_status = loop {
-            let status = self.status_for_family(repo_working_dir.clone()).await?;
-            if let Some(error) = status.last_error.clone() {
-                return Err(GitAiError::Generic(format!(
-                    "family {} reported side-effect error while waiting to settle: {}",
-                    family.0, error
-                )));
-            }
-
-            if status.pending_roots == 0 && status.effect_queue_depth == 0 {
-                self.coordinator
-                    .barrier_family(repo_path, status.latest_seq)
-                    .await?;
-                let confirm = self.status_for_family(repo_working_dir.clone()).await?;
-                if confirm.last_error.is_some() {
-                    return Err(GitAiError::Generic(format!(
-                        "family {} reported side-effect error while confirming settled state: {}",
-                        family.0,
-                        confirm.last_error.unwrap_or_default()
-                    )));
-                }
-                if confirm.pending_roots == 0 && confirm.effect_queue_depth == 0 {
-                    return Ok(ControlResponse::ok(
-                        Some(confirm.latest_seq),
-                        Some(confirm.latest_seq),
-                        Some(json!({
-                            "latest_seq": confirm.latest_seq,
-                            "family_key": family.0,
-                        })),
-                    ));
-                }
-            }
-
-            if start.elapsed() >= total_timeout {
-                break status;
-            }
-
-            sleep(Duration::from_millis(10)).await;
-        };
-
-        Err(GitAiError::Generic(format!(
-            "timed out waiting for family {} to settle after {:?}; last metrics were latest_seq={}, pending_roots={}, effect_queue_depth={}, pending_root_activity_seq={}, pending_root_summaries={:?}",
-            family.0,
-            total_timeout,
-            last_status.latest_seq,
-            last_status.pending_roots,
-            last_status.effect_queue_depth,
-            last_status.pending_root_activity_seq,
-            last_status.pending_root_summaries
-        )))
-    }
-
     async fn handle_control_request(&self, request: ControlRequest) -> ControlResponse {
         let result = match request {
-            ControlRequest::TraceIngest { mut payload, wait } => {
-                self.prepare_trace_payload_for_ingest(&mut payload);
-                self.ingest_trace_payload(payload, wait.unwrap_or(false))
-                    .await
-            }
             ControlRequest::CheckpointRun { request, wait } => {
                 self.ingest_checkpoint_payload(*request, wait.unwrap_or(false))
                     .await
@@ -5527,16 +4921,10 @@ impl ActorDaemonCoordinator {
                 .await
                 .and_then(|status| {
                     serde_json::to_value(status)
-                        .map(|v| ControlResponse::ok(None, None, Some(v)))
+                        .map(|v| ControlResponse::ok(None, Some(v)))
                         .map_err(GitAiError::from)
                 }),
-            ControlRequest::SnapshotFamily { repo_working_dir } => {
-                self.snapshot_for_family(repo_working_dir).await
-            }
-            ControlRequest::BarrierSettledFamily { repo_working_dir } => {
-                self.wait_until_family_settled(repo_working_dir).await
-            }
-            ControlRequest::Shutdown => Ok(ControlResponse::ok(None, None, None)),
+            ControlRequest::Shutdown => Ok(ControlResponse::ok(None, None)),
         };
 
         match result {
