@@ -19,84 +19,30 @@ const HOOK_EVENTS: &[&str] = &[
 pub struct WindsurfInstaller;
 
 impl WindsurfInstaller {
-    fn hooks_path() -> PathBuf {
-        home_dir()
-            .join(".codeium")
-            .join("windsurf")
-            .join("hooks.json")
-    }
-}
-
-impl HookInstaller for WindsurfInstaller {
-    fn name(&self) -> &str {
-        "Windsurf"
-    }
-
-    fn id(&self) -> &str {
-        "windsurf"
+    /// Both locations where Windsurf looks for hooks.
+    fn hooks_paths() -> [PathBuf; 2] {
+        // https://docs.windsurf.com/windsurf/cascade/hooks#user-level
+        let codeium = home_dir().join(".codeium");
+        [
+            // for intellej
+            codeium.join("hooks.json"),
+            // for windsurf 
+            codeium.join("windsurf").join("hooks.json"),
+        ]
     }
 
-    fn check_hooks(&self, _params: &HookInstallerParams) -> Result<HookCheckResult, GitAiError> {
-        let has_binary = binary_exists("windsurf");
-        let has_dotfiles = home_dir().join(".codeium").join("windsurf").exists();
-
-        if !has_binary && !has_dotfiles {
-            return Ok(HookCheckResult {
-                tool_installed: false,
-                hooks_installed: false,
-                hooks_up_to_date: false,
-            });
-        }
-
-        let hooks_path = Self::hooks_path();
-        if !hooks_path.exists() {
-            return Ok(HookCheckResult {
-                tool_installed: true,
-                hooks_installed: false,
-                hooks_up_to_date: false,
-            });
-        }
-
-        let content = fs::read_to_string(&hooks_path)?;
-        let existing: Value = serde_json::from_str(&content).unwrap_or_else(|_| json!({}));
-
-        // Check if any of our hook events have a git-ai checkpoint command
-        let has_hooks = HOOK_EVENTS.iter().all(|event| {
-            existing
-                .get("hooks")
-                .and_then(|h| h.get(*event))
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter().any(|item| {
-                        item.get("command")
-                            .and_then(|c| c.as_str())
-                            .map(is_git_ai_checkpoint_command)
-                            .unwrap_or(false)
-                    })
-                })
-                .unwrap_or(false)
-        });
-
-        Ok(HookCheckResult {
-            tool_installed: true,
-            hooks_installed: has_hooks,
-            hooks_up_to_date: has_hooks,
-        })
-    }
-
-    fn install_hooks(
-        &self,
-        params: &HookInstallerParams,
+    /// Install hooks into a single hooks.json file, returning a diff if changes were made.
+    fn install_hooks_at(
+        hooks_path: &PathBuf,
+        desired_cmd: &str,
         dry_run: bool,
     ) -> Result<Option<String>, GitAiError> {
-        let hooks_path = Self::hooks_path();
-
         if let Some(dir) = hooks_path.parent() {
             fs::create_dir_all(dir)?;
         }
 
         let existing_content = if hooks_path.exists() {
-            fs::read_to_string(&hooks_path)?
+            fs::read_to_string(hooks_path)?
         } else {
             String::new()
         };
@@ -106,12 +52,6 @@ impl HookInstaller for WindsurfInstaller {
         } else {
             serde_json::from_str(&existing_content)?
         };
-
-        let desired_cmd = format!(
-            "{} {}",
-            params.binary_path.display(),
-            WINDSURF_CHECKPOINT_CMD
-        );
 
         let mut merged = existing.clone();
         let mut hooks_obj = merged.get("hooks").cloned().unwrap_or_else(|| json!({}));
@@ -186,27 +126,25 @@ impl HookInstaller for WindsurfInstaller {
         }
 
         let new_content = serde_json::to_string_pretty(&merged)?;
-        let diff_output = generate_diff(&hooks_path, &existing_content, &new_content);
+        let diff_output = generate_diff(hooks_path, &existing_content, &new_content);
 
         if !dry_run {
-            write_atomic(&hooks_path, new_content.as_bytes())?;
+            write_atomic(hooks_path, new_content.as_bytes())?;
         }
 
         Ok(Some(diff_output))
     }
 
-    fn uninstall_hooks(
-        &self,
-        _params: &HookInstallerParams,
+    /// Remove hooks from a single hooks.json file, returning a diff if changes were made.
+    fn uninstall_hooks_at(
+        hooks_path: &PathBuf,
         dry_run: bool,
     ) -> Result<Option<String>, GitAiError> {
-        let hooks_path = Self::hooks_path();
-
         if !hooks_path.exists() {
             return Ok(None);
         }
 
-        let existing_content = fs::read_to_string(&hooks_path)?;
+        let existing_content = fs::read_to_string(hooks_path)?;
         let existing: Value = serde_json::from_str(&existing_content)?;
 
         let mut merged = existing.clone();
@@ -242,12 +180,122 @@ impl HookInstaller for WindsurfInstaller {
         }
 
         let new_content = serde_json::to_string_pretty(&merged)?;
-        let diff_output = generate_diff(&hooks_path, &existing_content, &new_content);
+        let diff_output = generate_diff(hooks_path, &existing_content, &new_content);
 
         if !dry_run {
-            write_atomic(&hooks_path, new_content.as_bytes())?;
+            write_atomic(hooks_path, new_content.as_bytes())?;
         }
 
         Ok(Some(diff_output))
+    }
+}
+
+impl HookInstaller for WindsurfInstaller {
+    fn name(&self) -> &str {
+        "Windsurf"
+    }
+
+    fn id(&self) -> &str {
+        "windsurf"
+    }
+
+    fn check_hooks(&self, _params: &HookInstallerParams) -> Result<HookCheckResult, GitAiError> {
+        let has_binary = binary_exists("windsurf");
+        let has_dotfiles = home_dir().join(".codeium").join("windsurf").exists();
+
+        if !has_binary && !has_dotfiles {
+            return Ok(HookCheckResult {
+                tool_installed: false,
+                hooks_installed: false,
+                hooks_up_to_date: false,
+            });
+        }
+
+        // Check all hook locations — hooks are installed only if present in every location
+        let mut all_installed = true;
+        for hooks_path in Self::hooks_paths() {
+            if !hooks_path.exists() {
+                all_installed = false;
+                continue;
+            }
+
+            let content = fs::read_to_string(&hooks_path)?;
+            let existing: Value =
+                serde_json::from_str(&content).unwrap_or_else(|_| json!({}));
+
+            let has_hooks = HOOK_EVENTS.iter().all(|event| {
+                existing
+                    .get("hooks")
+                    .and_then(|h| h.get(*event))
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter().any(|item| {
+                            item.get("command")
+                                .and_then(|c| c.as_str())
+                                .map(is_git_ai_checkpoint_command)
+                                .unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false)
+            });
+
+            if !has_hooks {
+                all_installed = false;
+            }
+        }
+
+        Ok(HookCheckResult {
+            tool_installed: true,
+            hooks_installed: all_installed,
+            hooks_up_to_date: all_installed,
+        })
+    }
+
+    fn install_hooks(
+        &self,
+        params: &HookInstallerParams,
+        dry_run: bool,
+    ) -> Result<Option<String>, GitAiError> {
+        let desired_cmd = format!(
+            "{} {}",
+            params.binary_path.display(),
+            WINDSURF_CHECKPOINT_CMD
+        );
+
+        let mut all_diffs = Vec::new();
+
+        for hooks_path in Self::hooks_paths() {
+            if let Some(diff) =
+                Self::install_hooks_at(&hooks_path, &desired_cmd, dry_run)?
+            {
+                all_diffs.push(diff);
+            }
+        }
+
+        if all_diffs.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(all_diffs.join("\n")))
+        }
+    }
+
+    fn uninstall_hooks(
+        &self,
+        _params: &HookInstallerParams,
+        dry_run: bool,
+    ) -> Result<Option<String>, GitAiError> {
+        let mut all_diffs = Vec::new();
+
+        for hooks_path in Self::hooks_paths() {
+            if let Some(diff) = Self::uninstall_hooks_at(&hooks_path, dry_run)? {
+                all_diffs.push(diff);
+            }
+        }
+
+        if all_diffs.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(all_diffs.join("\n")))
+        }
     }
 }
