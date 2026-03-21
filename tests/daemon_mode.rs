@@ -960,6 +960,46 @@ fn daemon_trace_connection_close_finalizes_open_root() {
 
 #[test]
 #[serial]
+fn daemon_settled_family_barrier_errors_on_orphan_deferred_root() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let daemon = DaemonGuard::start(&repo);
+    let sid = "orphan-deferred-stash";
+    let mut trace_stream = open_trace_stream(&daemon.trace_socket_path);
+
+    write_trace_frames(
+        &mut trace_stream,
+        &[serde_json::json!({
+            "event":"cmd_name",
+            "sid":sid,
+            "ts":1,
+            "name":"stash",
+            "cwd":repo.path().to_string_lossy().to_string(),
+        })],
+    );
+
+    drop(trace_stream);
+
+    let settled = daemon.request(ControlRequest::BarrierSettledFamily {
+        repo_working_dir: repo_workdir_string(&repo),
+    });
+    assert!(
+        !settled.ok,
+        "barrier.settled_family should fail fast on orphan deferred roots: {:?}",
+        settled
+    );
+    assert!(
+        settled
+            .error
+            .as_deref()
+            .is_some_and(|error| error
+                .contains("orphan deferred trace exit removed without active connections")),
+        "expected orphan deferred root error, got {:?}",
+        settled
+    );
+}
+
+#[test]
+#[serial]
 fn daemon_status_family_ignores_open_roots_from_other_families() {
     let repo_a = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let repo_b = TestRepo::new_with_mode(GitTestMode::Wrapper);

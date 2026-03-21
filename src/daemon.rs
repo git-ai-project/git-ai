@@ -2200,6 +2200,7 @@ struct ActorDaemonCoordinator {
     inflight_effects_by_family: Mutex<HashMap<String, usize>>,
     ordered_side_effects_by_family: Mutex<HashMap<String, FamilySideEffectState>>,
     side_effect_errors_by_family: Mutex<HashMap<String, BTreeMap<u64, String>>>,
+    trace_root_errors_by_family: Mutex<HashMap<String, String>>,
     side_effect_progress_notify_by_family: Mutex<HashMap<String, Arc<Notify>>>,
     side_effect_exec_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     carryover_snapshots_by_id: Mutex<HashMap<String, HashMap<String, String>>>,
@@ -2233,6 +2234,7 @@ impl ActorDaemonCoordinator {
             inflight_effects_by_family: Mutex::new(HashMap::new()),
             ordered_side_effects_by_family: Mutex::new(HashMap::new()),
             side_effect_errors_by_family: Mutex::new(HashMap::new()),
+            trace_root_errors_by_family: Mutex::new(HashMap::new()),
             side_effect_progress_notify_by_family: Mutex::new(HashMap::new()),
             side_effect_exec_locks: Mutex::new(HashMap::new()),
             carryover_snapshots_by_id: Mutex::new(HashMap::new()),
@@ -2351,6 +2353,23 @@ impl ActorDaemonCoordinator {
         Ok(map
             .get(family)
             .and_then(|errors| errors.iter().next_back().map(|(_, error)| error.clone())))
+    }
+
+    fn record_trace_root_error(&self, family: &str, error: &GitAiError) -> Result<(), GitAiError> {
+        let mut map = self
+            .trace_root_errors_by_family
+            .lock()
+            .map_err(|_| GitAiError::Generic("trace root errors map lock poisoned".to_string()))?;
+        map.insert(family.to_string(), error.to_string());
+        Ok(())
+    }
+
+    fn latest_trace_root_error(&self, family: &str) -> Result<Option<String>, GitAiError> {
+        let map = self
+            .trace_root_errors_by_family
+            .lock()
+            .map_err(|_| GitAiError::Generic("trace root errors map lock poisoned".to_string()))?;
+        Ok(map.get(family).cloned())
     }
 
     fn maybe_append_test_completion_log(
@@ -3778,6 +3797,12 @@ impl ActorDaemonCoordinator {
                 raw_argv,
                 deferred_exit_only,
             } = removed;
+            let family = {
+                let ingress = self.trace_ingress_state.lock().map_err(|_| {
+                    GitAiError::Generic("trace ingress state lock poisoned".to_string())
+                })?;
+                ingress.root_families.get(&root_sid).cloned()
+            };
             self.clear_trace_root_tracking(&root_sid)?;
             self.discard_carryover_snapshots_for_root(&root_sid)?;
             let error = if deferred_exit_only {
@@ -3804,21 +3829,16 @@ impl ActorDaemonCoordinator {
                     "argv": raw_argv,
                 })),
             );
+            if let Some(family) = family.as_deref() {
+                let _ = self.record_trace_root_error(family, &error);
+            }
         }
         Ok(())
     }
 
     async fn family_pending_trace_root_count(&self, family: &str) -> Result<u64, GitAiError> {
         let _ = self.enqueue_idle_trace_root_fallbacks_for_family(family, 1_500);
-        let has_tracked_roots = {
-            let ingress = self.trace_ingress_state.lock().map_err(|_| {
-                GitAiError::Generic("trace ingress state lock poisoned".to_string())
-            })?;
-            !ingress.root_families.is_empty()
-        };
-        if !has_tracked_roots {
-            self.sweep_orphan_trace_roots().await?;
-        }
+        self.sweep_orphan_trace_roots().await?;
         let ingress = self
             .trace_ingress_state
             .lock()
@@ -5139,6 +5159,7 @@ impl ActorDaemonCoordinator {
             pending_root_summaries,
             last_error: status
                 .last_error
+                .or_else(|| self.latest_trace_root_error(&family_key).ok().flatten())
                 .or_else(|| self.latest_side_effect_error(&family_key).ok().flatten()),
         })
     }
