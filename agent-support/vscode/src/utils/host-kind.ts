@@ -1,4 +1,6 @@
 import * as vscode from "vscode";
+import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 
 export type IDEHostConfiguration = {
@@ -19,6 +21,22 @@ export type IDEHostKind =
   | typeof IDEHostKindVSCode
   | typeof IDEHostKindUnknown;
 
+/**
+ * Loads the list of IDE names that should be treated as VSCode by checking the configuration file.
+ */
+function loadVscodeIdeNames(): string[] {
+  try {
+    const filePath = path.join(os.homedir(), ".git-ai", "VSCODE_IDE_NAMES");
+    const content = fs.readFileSync(filePath, "utf-8");
+    return content
+      .split("\n")
+      .map((line: string) => line.trim().toLowerCase())
+      .filter((line: string) => line.length > 0);
+  } catch {
+    return [];
+  }
+}
+
 export function detectIDEHost(): IDEHostConfiguration {
   const appName = (vscode.env.appName ?? "").toLowerCase();
   const uriScheme = (vscode.env.uriScheme ?? "").toLowerCase();
@@ -26,11 +44,19 @@ export function detectIDEHost(): IDEHostConfiguration {
 
   const has = (s: string) => appName.includes(s) || uriScheme === s || execPath.includes(`${path.sep}${s}`);
 
-  const kind: IDEHostKind =
+  let kind: IDEHostKind =
     has("cursor") ? "cursor" :
     has("windsurf") ? "windsurf" :
     has("vscodium") || uriScheme === "vscode-insiders" || uriScheme === "vscode" || appName.includes("visual studio code") ? "vscode" :
     "unknown";
+
+  // If we don't recognize the IDE, check if it's a custom VSCode-like IDE that should be treated as VSCode by checking the configuration file.
+  if (kind === "unknown") {
+    const vscodeIdeNames = loadVscodeIdeNames();
+    if (vscodeIdeNames.some(has)) {
+      kind = "vscode";
+    }
+  }
 
   return { kind, appName: vscode.env.appName, uriScheme: vscode.env.uriScheme, execPath: process.execPath };
 }
