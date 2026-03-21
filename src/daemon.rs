@@ -512,13 +512,35 @@ fn tracked_working_log_files(
     Ok(files)
 }
 
-fn read_worktree_snapshot_for_files(
+fn system_time_to_unix_nanos(time: SystemTime) -> Option<u128> {
+    time.duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_nanos())
+}
+
+fn rfc3339_to_unix_nanos(value: &str) -> Option<u128> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .and_then(|timestamp| u128::try_from(timestamp.timestamp_nanos_opt()?).ok())
+}
+
+fn read_worktree_snapshot_for_files_at_or_before(
     worktree: &Path,
     file_paths: &HashSet<String>,
+    max_modified_ns: u128,
 ) -> HashMap<String, String> {
     let mut snapshot = HashMap::new();
     for file_path in file_paths {
         let absolute = worktree.join(file_path);
+        let modified_after_cutoff = fs::metadata(&absolute)
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(system_time_to_unix_nanos)
+            .is_some_and(|modified_ns| modified_ns > max_modified_ns);
+        if modified_after_cutoff {
+            continue;
+        }
+
         let content = match fs::read(&absolute) {
             Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
             Err(_) => String::new(),
@@ -532,6 +554,31 @@ fn commit_replay_files_from_snapshot(snapshot: &HashMap<String, String>) -> Vec<
     let mut files = snapshot.keys().cloned().collect::<Vec<_>>();
     files.sort();
     files
+}
+
+fn stable_final_state_for_commit_rewrite(
+    repo: &Repository,
+    rewrite_event: &RewriteLogEvent,
+) -> Result<Option<HashMap<String, String>>, GitAiError> {
+    let Some((base_commit, target_commit)) =
+        commit_replay_context_from_rewrite_event(rewrite_event)
+    else {
+        return Ok(None);
+    };
+    if base_commit.trim().is_empty() || target_commit.trim().is_empty() {
+        return Ok(None);
+    }
+
+    committed_file_snapshot_between_commits(
+        repo,
+        if base_commit == "initial" {
+            None
+        } else {
+            Some(base_commit.as_str())
+        },
+        &target_commit,
+    )
+    .map(Some)
 }
 
 fn ref_change_span(
@@ -1459,15 +1506,10 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
         return Ok(());
     }
     seed_merge_squash_working_log_for_commit_replay(repo, &base_commit, author)?;
-    let (changed_files, dirty_files) = if let Some(snapshot) = carryover_snapshot {
-        let changed_files = commit_replay_files_from_snapshot(snapshot);
-        if changed_files.is_empty() {
-            return Ok(());
-        }
-        let working_log = repo.storage.working_log_for_base_commit(&base_commit);
-        filter_commit_replay_files(&working_log, changed_files, snapshot.clone())
+    let dirty_files = if let Some(snapshot) = carryover_snapshot {
+        snapshot.clone()
     } else {
-        let dirty_files = committed_file_snapshot_between_commits(
+        committed_file_snapshot_between_commits(
             repo,
             if base_commit == "initial" {
                 None
@@ -1475,14 +1517,15 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
                 Some(base_commit.as_str())
             },
             &target_commit,
-        )?;
-        let changed_files = commit_replay_files_from_snapshot(&dirty_files);
-        if changed_files.is_empty() {
-            return Ok(());
-        }
-        let working_log = repo.storage.working_log_for_base_commit(&base_commit);
-        filter_commit_replay_files(&working_log, changed_files, dirty_files)
+        )?
     };
+    let changed_files = commit_replay_files_from_snapshot(&dirty_files);
+    if changed_files.is_empty() {
+        return Ok(());
+    }
+    let working_log = repo.storage.working_log_for_base_commit(&base_commit);
+    let (changed_files, dirty_files) =
+        filter_commit_replay_files(&working_log, changed_files, dirty_files);
     if changed_files.is_empty() {
         return Ok(());
     }
@@ -1537,24 +1580,27 @@ fn apply_rewrite_side_effect(
     )?;
     apply_env_overrides_to_working_log(&repo, &rewrite_event, env_overrides)?;
     let log = repo.storage.append_rewrite_event(rewrite_event.clone())?;
+    let committed_final_state = stable_final_state_for_commit_rewrite(&repo, &rewrite_event)?;
     match &rewrite_event {
         RewriteLogEvent::Commit { commit } => {
+            let final_state_override = carryover_snapshot.or(committed_final_state.as_ref());
             post_commit_with_final_state(
                 &repo,
                 commit.base_commit.clone(),
                 commit.commit_sha.clone(),
                 author.clone(),
                 true,
-                carryover_snapshot,
+                final_state_override,
             )?;
         }
         RewriteLogEvent::CommitAmend { commit_amend } => {
+            let final_state_override = carryover_snapshot.or(committed_final_state.as_ref());
             rewrite_authorship_after_commit_amend_with_snapshot(
                 &repo,
                 &commit_amend.original_commit,
                 &commit_amend.amended_commit_sha,
                 author.clone(),
-                carryover_snapshot,
+                final_state_override,
             )?;
         }
         _ => {
@@ -2180,6 +2226,7 @@ struct CarryoverCaptureInput<'a> {
     primary_command: Option<&'a str>,
     argv: &'a [String],
     exit_code: i32,
+    finished_at_ns: u128,
     post_repo: Option<&'a RepoContext>,
     ref_changes: &'a [crate::daemon::domain::RefChange],
     merge_squash_staged_file_blobs: Option<&'a HashMap<String, String>>,
@@ -2897,7 +2944,11 @@ impl ActorDaemonCoordinator {
             return Ok(None);
         }
 
-        let snapshot = read_worktree_snapshot_for_files(input.worktree, &file_paths);
+        let snapshot = read_worktree_snapshot_for_files_at_or_before(
+            input.worktree,
+            &file_paths,
+            input.finished_at_ns,
+        );
         self.store_carryover_snapshot(input.root_sid, snapshot)
     }
 
@@ -3470,6 +3521,30 @@ impl ActorDaemonCoordinator {
                 }
             }
             if object.get("git_ai_carryover_snapshot_id").is_none() {
+                let terminal_time_ns = object
+                    .get("time")
+                    .and_then(Value::as_str)
+                    .and_then(rfc3339_to_unix_nanos)
+                    .or_else(|| {
+                        object
+                            .get("time_ns")
+                            .and_then(Value::as_u64)
+                            .map(u128::from)
+                    })
+                    .or_else(|| object.get("ts").and_then(Value::as_u64).map(u128::from))
+                    .or_else(|| {
+                        object
+                            .get("t_abs")
+                            .and_then(Value::as_f64)
+                            .and_then(|seconds| {
+                                if seconds.is_sign_negative() {
+                                    None
+                                } else {
+                                    Some((seconds * 1_000_000_000_f64) as u128)
+                                }
+                            })
+                    })
+                    .unwrap_or_else(now_unix_nanos);
                 let merge_squash_staged_file_blobs = object
                     .get("git_ai_merge_squash_staged_file_blobs")
                     .and_then(Value::as_object)
@@ -3486,6 +3561,7 @@ impl ActorDaemonCoordinator {
                     primary_command: effective_primary.as_deref(),
                     argv: &effective_argv,
                     exit_code: terminal_exit_code.unwrap_or(0),
+                    finished_at_ns: terminal_time_ns,
                     post_repo: post_repo.as_ref(),
                     ref_changes: terminal_ref_changes.as_deref().unwrap_or(&[]),
                     merge_squash_staged_file_blobs: merge_squash_staged_file_blobs.as_ref(),
@@ -5162,6 +5238,12 @@ impl ActorDaemonCoordinator {
             ));
         }
         let family = self.backend.resolve_family(Path::new(&repo_working_dir))?;
+        let pending_trace_roots = self.family_pending_trace_root_count(&family.0).await?;
+        if pending_trace_roots > 0 || self.pending_ordered_effect_depth(&family.0)? > 0 {
+            let _ = self
+                .wait_until_family_settled(repo_working_dir.clone())
+                .await?;
+        }
         let id = format!(
             "cp-{}",
             short_hash_json(&serde_json::to_value(&request).map_err(GitAiError::from)?)
@@ -5299,21 +5381,6 @@ impl ActorDaemonCoordinator {
         ))
     }
 
-    async fn wait_through_seq(
-        &self,
-        repo_working_dir: String,
-        seq: u64,
-    ) -> Result<ControlResponse, GitAiError> {
-        let repo_path = Path::new(&repo_working_dir);
-        self.coordinator.barrier_family(repo_path, seq).await?;
-        let status = self.coordinator.status_family(repo_path).await?;
-        Ok(ControlResponse::ok(
-            Some(seq),
-            Some(status.applied_seq),
-            None,
-        ))
-    }
-
     async fn wait_until_family_settled(
         &self,
         repo_working_dir: String,
@@ -5404,10 +5471,6 @@ impl ActorDaemonCoordinator {
             ControlRequest::SnapshotFamily { repo_working_dir } => {
                 self.snapshot_for_family(repo_working_dir).await
             }
-            ControlRequest::BarrierAppliedThroughSeq {
-                repo_working_dir,
-                seq,
-            } => self.wait_through_seq(repo_working_dir, seq).await,
             ControlRequest::BarrierSettledFamily { repo_working_dir } => {
                 self.wait_until_family_settled(repo_working_dir).await
             }

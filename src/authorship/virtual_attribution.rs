@@ -1056,7 +1056,7 @@ fn collect_unstaged_hunks_from_snapshot(
         let final_content = final_state_snapshot
             .get(&file_path)
             .cloned()
-            .unwrap_or_default();
+            .unwrap_or_else(|| committed_content.clone());
 
         if committed_content == final_content {
             continue;
