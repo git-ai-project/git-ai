@@ -4,6 +4,8 @@ use crate::git::repository::config_get_str_for_path_no_git_exec;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+pub const TEST_SYNC_SESSION_CONFIG_KEY: &str = "git-ai.testSyncSession";
+
 pub fn tracks_primary_command_for_test_sync(
     primary_command: Option<&str>,
     invoked_args: &[String],
@@ -50,6 +52,39 @@ pub fn tracked_parsed_git_invocation_for_test_sync(
 
 pub fn tracks_checkpoint_request_for_test_sync(request: &CheckpointRunRequest) -> bool {
     !request.is_pre_commit.unwrap_or(false)
+}
+
+pub fn test_sync_session_from_invocation(invocation: &ParsedGitInvocation) -> Option<String> {
+    let mut idx = 0usize;
+    while idx < invocation.global_args.len() {
+        let token = &invocation.global_args[idx];
+
+        if token == "-c" {
+            let Some(config_arg) = invocation.global_args.get(idx + 1) else {
+                break;
+            };
+            if let Some(value) = test_sync_session_from_config_arg(config_arg) {
+                return Some(value);
+            }
+            idx += 2;
+            continue;
+        }
+
+        if let Some(config_arg) = token.strip_prefix("-c")
+            && let Some(value) = test_sync_session_from_config_arg(config_arg)
+        {
+            return Some(value);
+        }
+
+        idx += 1;
+    }
+
+    None
+}
+
+fn test_sync_session_from_config_arg(config_arg: &str) -> Option<String> {
+    let (key, value) = config_arg.split_once('=')?;
+    (key == TEST_SYNC_SESSION_CONFIG_KEY).then(|| value.to_string())
 }
 
 fn resolve_repo_lookup_for_git_invocation(parsed: &ParsedGitInvocation, cwd: &Path) -> PathBuf {

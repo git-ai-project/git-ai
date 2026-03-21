@@ -48,8 +48,8 @@ macro_rules! subdir_test_variants {
                         use std::process::Command;
                         use $crate::repos::test_repo::{
                             get_binary_path, git_command_requires_daemon_completion_barrier,
-                            git_command_routes_to_clone_target, git_command_requires_daemon_sync,
-                            GitTestMode,
+                            git_command_requires_daemon_sync, git_command_routes_to_clone_target,
+                            new_test_sync_session_id, GitTestMode,
                         };
 
                         let binary_path = get_binary_path();
@@ -68,6 +68,8 @@ macro_rules! subdir_test_variants {
                         let daemon_command_pending = mode.uses_daemon()
                             && command_affects_daemon
                             && !git_command_routes_to_clone_target(args);
+                        let daemon_sync_session =
+                            daemon_command_pending.then(new_test_sync_session_id);
 
                         let mut command = if mode.uses_wrapper() {
                             Command::new(binary_path)
@@ -75,6 +77,13 @@ macro_rules! subdir_test_variants {
                             Command::new($crate::repos::test_repo::real_git_executable())
                         };
                         command.current_dir(&arbitrary_dir);
+                        if let Some(session_id) = daemon_sync_session.as_deref() {
+                            command.arg("-c").arg(format!(
+                                "{}={}",
+                                git_ai::daemon::test_sync::TEST_SYNC_SESSION_CONFIG_KEY,
+                                session_id
+                            ));
+                        }
                         command.args(&full_args);
                         command.env("HOME", self.inner.test_home_path());
                         command.env(
@@ -120,7 +129,11 @@ macro_rules! subdir_test_variants {
 
                         if output.status.success() {
                             if daemon_command_pending {
-                                self.inner.record_daemon_family_expected_completion();
+                                self.inner.record_daemon_family_expected_completion(
+                                    daemon_sync_session
+                                        .as_deref()
+                                        .expect("daemon sync session"),
+                                );
                                 if git_command_requires_daemon_completion_barrier(args, true) {
                                     self.inner.sync_daemon_force();
                                 }
@@ -128,7 +141,11 @@ macro_rules! subdir_test_variants {
                             Ok(if stdout.is_empty() { stderr } else { stdout })
                         } else {
                             if daemon_command_pending {
-                                self.inner.record_daemon_family_expected_completion();
+                                self.inner.record_daemon_family_expected_completion(
+                                    daemon_sync_session
+                                        .as_deref()
+                                        .expect("daemon sync session"),
+                                );
                                 if git_command_requires_daemon_completion_barrier(args, false) {
                                     self.inner.sync_daemon_force();
                                 }
@@ -153,8 +170,9 @@ macro_rules! subdir_test_variants {
                             use std::process::Command;
                             use $crate::repos::test_repo::{
                                 get_binary_path, git_command_requires_daemon_completion_barrier,
+                                git_command_requires_daemon_sync,
                                 git_command_routes_to_clone_target,
-                                git_command_requires_daemon_sync, GitTestMode,
+                                new_test_sync_session_id, GitTestMode,
                             };
 
                         let binary_path = get_binary_path();
@@ -173,6 +191,8 @@ macro_rules! subdir_test_variants {
                         let daemon_command_pending = mode.uses_daemon()
                             && command_affects_daemon
                             && !git_command_routes_to_clone_target(args);
+                        let daemon_sync_session =
+                            daemon_command_pending.then(new_test_sync_session_id);
 
                             let mut command = if mode.uses_wrapper() {
                                 Command::new(binary_path)
@@ -180,6 +200,13 @@ macro_rules! subdir_test_variants {
                                 Command::new($crate::repos::test_repo::real_git_executable())
                             };
                             command.current_dir(&arbitrary_dir);
+                            if let Some(session_id) = daemon_sync_session.as_deref() {
+                                command.arg("-c").arg(format!(
+                                    "{}={}",
+                                    git_ai::daemon::test_sync::TEST_SYNC_SESSION_CONFIG_KEY,
+                                    session_id
+                                ));
+                            }
                             command.args(&full_args);
                             command.env("HOME", self.inner.test_home_path());
                             command.env(
@@ -229,7 +256,11 @@ macro_rules! subdir_test_variants {
 
                             if output.status.success() {
                                 if daemon_command_pending {
-                                    self.inner.record_daemon_family_expected_completion();
+                                    self.inner.record_daemon_family_expected_completion(
+                                        daemon_sync_session
+                                            .as_deref()
+                                            .expect("daemon sync session"),
+                                    );
                                     if git_command_requires_daemon_completion_barrier(args, true) {
                                         self.inner.sync_daemon_force();
                                     }
@@ -237,7 +268,11 @@ macro_rules! subdir_test_variants {
                                 Ok(if stdout.is_empty() { stderr } else { stdout })
                             } else {
                                 if daemon_command_pending {
-                                    self.inner.record_daemon_family_expected_completion();
+                                    self.inner.record_daemon_family_expected_completion(
+                                        daemon_sync_session
+                                            .as_deref()
+                                            .expect("daemon sync session"),
+                                    );
                                     if git_command_requires_daemon_completion_barrier(args, false) {
                                         self.inner.sync_daemon_force();
                                     }

@@ -1,4 +1,5 @@
 use crate::daemon::{ControlRequest, DaemonConfig, send_control_request};
+use crate::utils::LockFile;
 use interprocess::local_socket::LocalSocketStream;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -85,6 +86,13 @@ pub(crate) fn ensure_daemon_running(timeout: Duration) -> Result<DaemonConfig, S
         return Ok(config);
     }
 
+    if daemon_startup_is_blocked(&config) {
+        return Err(format!(
+            "daemon startup blocked: lock held at {}",
+            config.lock_path.display()
+        ));
+    }
+
     spawn_daemon_run_detached(&config)?;
     if wait_for_daemon_up(&config, timeout) {
         return Ok(config);
@@ -95,6 +103,22 @@ pub(crate) fn ensure_daemon_running(timeout: Duration) -> Result<DaemonConfig, S
         timeout,
         config.control_socket_path.display()
     ))
+}
+
+fn daemon_startup_is_blocked(config: &DaemonConfig) -> bool {
+    if let Some(parent) = config.lock_path.parent()
+        && std::fs::create_dir_all(parent).is_err()
+    {
+        return false;
+    }
+
+    match LockFile::try_acquire(&config.lock_path) {
+        Some(lock) => {
+            drop(lock);
+            false
+        }
+        None => true,
+    }
 }
 
 fn daemon_is_up(config: &DaemonConfig) -> bool {

@@ -998,7 +998,7 @@ fn run_checkpoint_via_daemon_or_local(
     if daemon_checkpoint_delegate_enabled() {
         let repo_working_dir = repo.workdir().map(|p| p.to_string_lossy().to_string()).ok();
         if let Some(repo_working_dir) = repo_working_dir {
-            match crate::commands::daemon::ensure_daemon_running(Duration::from_secs(2)) {
+            match crate::commands::daemon::ensure_daemon_running(Duration::from_secs(10)) {
                 Ok(config) => {
                     let request = ControlRequest::CheckpointRun {
                         request: Box::new(crate::daemon::CheckpointRunRequest {
@@ -1052,6 +1052,8 @@ fn run_checkpoint_via_daemon_or_local(
         }
     }
 
+    settle_repo_family_via_daemon_if_available(repo);
+
     commands::checkpoint::run(
         repo,
         author,
@@ -1062,6 +1064,17 @@ fn run_checkpoint_via_daemon_or_local(
         agent_run_result,
         is_pre_commit,
     )
+}
+
+fn settle_repo_family_via_daemon_if_available(repo: &Repository) {
+    let Ok(repo_working_dir) = repo.workdir().map(|p| p.to_string_lossy().to_string()) else {
+        return;
+    };
+    let Ok(config) = crate::daemon::DaemonConfig::from_env_or_default_paths() else {
+        return;
+    };
+    let request = ControlRequest::BarrierSettledFamily { repo_working_dir };
+    let _ = send_control_request(&config.control_socket_path, &request);
 }
 
 fn log_daemon_checkpoint_delegate_failure(

@@ -225,6 +225,8 @@ struct TestCompletionLogEntry {
     family_key: String,
     kind: String,
     primary_command: Option<String>,
+    #[serde(default)]
+    test_sync_session: Option<String>,
     exit_code: Option<i32>,
     #[serde(default)]
     sync_tracked: bool,
@@ -958,13 +960,24 @@ fn parsed_invocation_for_side_effect(
 fn parsed_invocation_for_normalized_command(
     cmd: &crate::daemon::domain::NormalizedCommand,
 ) -> ParsedGitInvocation {
+    if !cmd.raw_argv.is_empty() {
+        return parse_git_cli_args(trace_invocation_args(&cmd.raw_argv));
+    }
+
     if cmd.primary_command.is_some() || !cmd.invoked_args.is_empty() {
         return parsed_invocation_for_side_effect(
             cmd.primary_command.as_deref(),
             &cmd.invoked_args,
         );
     }
-    parse_git_cli_args(trace_invocation_args(&cmd.raw_argv))
+
+    ParsedGitInvocation {
+        global_args: Vec::new(),
+        command: None,
+        command_args: Vec::new(),
+        saw_end_of_opts: false,
+        is_help: false,
+    }
 }
 
 fn apply_push_side_effect(
@@ -1298,7 +1311,11 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
     seed_merge_squash_working_log_for_commit_replay(repo, &base_commit, author)?;
     let (changed_files, dirty_files) = if let Some(snapshot) = carryover_snapshot {
         let changed_files = commit_replay_files_from_snapshot(snapshot);
-        (changed_files, snapshot.clone())
+        if changed_files.is_empty() {
+            return Ok(());
+        }
+        let working_log = repo.storage.working_log_for_base_commit(&base_commit);
+        filter_commit_replay_files(&working_log, changed_files, snapshot.clone())
     } else {
         let dirty_files = committed_file_snapshot_between_commits(
             repo,
@@ -3432,11 +3449,16 @@ impl ActorDaemonCoordinator {
                             applied.command.primary_command.as_deref(),
                             &applied.command.invoked_args,
                         );
+                    let test_sync_session =
+                        crate::daemon::test_sync::test_sync_session_from_invocation(
+                            &parsed_invocation_for_normalized_command(&applied.command),
+                        );
                     let log_entry = TestCompletionLogEntry {
                         seq,
                         family_key: family.to_string(),
                         kind: "command".to_string(),
                         primary_command: applied.command.primary_command.clone(),
+                        test_sync_session,
                         exit_code: Some(applied.command.exit_code),
                         sync_tracked,
                         status: if result.is_ok() {
@@ -3471,6 +3493,7 @@ impl ActorDaemonCoordinator {
                             family_key: family.to_string(),
                             kind: "checkpoint".to_string(),
                             primary_command: Some("checkpoint".to_string()),
+                            test_sync_session: None,
                             exit_code: None,
                             sync_tracked: true,
                             status: if result.is_ok() {

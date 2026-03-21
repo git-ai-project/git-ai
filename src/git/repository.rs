@@ -14,6 +14,7 @@ use crate::utils::debug_log;
 #[cfg(windows)]
 use crate::utils::is_interactive_terminal;
 
+use gix_index::entry::Stage;
 use regex::Regex;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -2081,15 +2082,16 @@ impl Repository {
     /// Get blob OIDs for all stage-0 entries currently present in the index.
     pub fn get_all_staged_file_blob_oids(&self) -> Result<HashMap<String, String>, GitAiError> {
         let mut staged_blobs = HashMap::new();
-        let repo = git2::Repository::open(self.path())?;
-        let index = repo.index()?;
+        let object_hash = repository_object_hash_kind_for_path_no_git_exec(self.path())?;
+        let index_path = self.path().join("index");
+        let index = gix_index::File::at(index_path, object_hash, true, Default::default())
+            .map_err(|err| GitAiError::GixError(err.to_string()))?;
 
-        for entry in index.iter() {
-            let stage = (entry.flags & 0x3000) >> 12;
-            if stage != 0 {
+        for entry in index.entries() {
+            if entry.stage() != Stage::Unconflicted {
                 continue;
             }
-            let file_path = String::from_utf8_lossy(&entry.path).to_string();
+            let file_path = entry.path(&index).to_string();
             if !file_path.trim().is_empty() {
                 staged_blobs.insert(file_path, entry.id.to_string());
             }
@@ -2736,6 +2738,24 @@ pub fn config_get_str_for_path_no_git_exec(
     let paths = discover_repository_paths_no_git_exec(path)?;
     git_config_file_for_repo_paths(&paths.git_dir, &paths.git_common_dir)
         .map(|cfg| cfg.string(key).map(|cow| cow.to_string()))
+}
+
+fn repository_object_hash_kind_for_path_no_git_exec(
+    path: &Path,
+) -> Result<gix_index::hash::Kind, GitAiError> {
+    match config_get_str_for_path_no_git_exec(path, "extensions.objectformat")?
+        .as_deref()
+        .map(str::trim)
+    {
+        None | Some("") | Some("sha1") => Ok(gix_index::hash::Kind::Sha1),
+        Some("sha256") => Err(GitAiError::Generic(
+            "SHA-256 repositories are not supported while reading the git index".to_string(),
+        )),
+        Some(other) => Err(GitAiError::Generic(format!(
+            "Unsupported git object format '{}' while reading index",
+            other
+        ))),
+    }
 }
 
 #[allow(dead_code)]
@@ -3898,6 +3918,37 @@ index 0000000..abc1234 100644
                 .starts_with(common_dir.join("ai").join("worktrees")),
             "discovered worktree storage should be isolated under common-dir/ai/worktrees: {}",
             discovered.storage.working_logs.display()
+        );
+    }
+
+    #[test]
+    fn get_all_staged_file_blob_oids_reads_stage_zero_entries_without_git2() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo_dir = temp.path().join("repo");
+        fs::create_dir_all(&repo_dir).expect("create repo dir");
+
+        run_git(&repo_dir, &["init"]);
+        run_git(&repo_dir, &["config", "user.name", "Test User"]);
+        run_git(&repo_dir, &["config", "user.email", "test@example.com"]);
+
+        fs::write(repo_dir.join("a.txt"), "alpha\n").expect("write a.txt");
+        fs::create_dir_all(repo_dir.join("dir")).expect("create dir");
+        fs::write(repo_dir.join("dir").join("b.txt"), "beta\n").expect("write b.txt");
+
+        run_git(&repo_dir, &["add", "."]);
+
+        let repo = find_repository_in_path(repo_dir.to_str().expect("repo path")).expect("repo");
+        let staged = repo
+            .get_all_staged_file_blob_oids()
+            .expect("read staged blobs");
+
+        assert_eq!(
+            staged.get("a.txt"),
+            Some(&run_git_stdout(&repo_dir, &["rev-parse", ":0:a.txt"]))
+        );
+        assert_eq!(
+            staged.get("dir/b.txt"),
+            Some(&run_git_stdout(&repo_dir, &["rev-parse", ":0:dir/b.txt"]))
         );
     }
 }
