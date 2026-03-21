@@ -184,6 +184,23 @@ pub fn latest_reflog_old_oid_for_worktree(worktree: &Path, refname: &str) -> Opt
         .find(|oid| is_valid_git_oid(oid) && !oid.chars().all(|c| c == '0'))
 }
 
+pub fn resolve_reflog_old_oid_for_ref_new_oid_in_worktree(
+    worktree: &Path,
+    refname: &str,
+    new_oid: &str,
+) -> Option<String> {
+    if !is_valid_git_oid(new_oid) {
+        return None;
+    }
+
+    let common_dir = common_dir_for_worktree(worktree)?;
+    read_reflog_entries(&common_dir, refname)?
+        .into_iter()
+        .rev()
+        .find(|entry| entry.new == new_oid && is_valid_git_oid(&entry.old))
+        .map(|entry| entry.old)
+}
+
 pub fn read_head_state_for_worktree(worktree: &Path) -> Option<HeadState> {
     let git_dir = git_dir_for_worktree(worktree)?;
     let common_dir = common_dir_for_git_dir(&git_dir)?;
@@ -251,8 +268,19 @@ struct HeadReflogTransition {
     message: String,
 }
 
-fn read_head_reflog_transitions_for_worktree(
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebaseReflogSegment {
+    pub original_head: String,
+    pub onto_head: String,
+    pub new_head: String,
+    pub action_prefix: String,
+    pub start_target: String,
+    pub finish_target: Option<String>,
+}
+
+fn read_head_reflog_transitions_for_worktree_internal(
     worktree: &Path,
+    include_noop: bool,
 ) -> Result<Vec<HeadReflogTransition>, GitAiError> {
     let git_dir = git_dir_for_worktree(worktree).ok_or_else(|| {
         GitAiError::Generic(format!(
@@ -283,7 +311,7 @@ fn read_head_reflog_transitions_for_worktree(
         let Some(new) = parts.next().map(str::trim) else {
             continue;
         };
-        if !is_valid_git_oid(old) || !is_valid_git_oid(new) || old == new {
+        if !is_valid_git_oid(old) || !is_valid_git_oid(new) || (!include_noop && old == new) {
             continue;
         }
         out.push(HeadReflogTransition {
@@ -294,6 +322,12 @@ fn read_head_reflog_transitions_for_worktree(
     }
 
     Ok(out)
+}
+
+fn read_head_reflog_transitions_for_worktree(
+    worktree: &Path,
+) -> Result<Vec<HeadReflogTransition>, GitAiError> {
+    read_head_reflog_transitions_for_worktree_internal(worktree, false)
 }
 
 fn try_resolve_linear_head_chain(
@@ -323,6 +357,120 @@ fn try_resolve_linear_head_chain(
             .rev()
             .find(|idx| transitions[*idx].new == target)?;
     }
+}
+
+fn rebase_like_start(message: &str) -> Option<(String, String)> {
+    let (prefix, target) = message.split_once(" (start): checkout ")?;
+    let prefix = prefix.trim();
+    if prefix != "rebase" && !prefix.starts_with("pull") {
+        return None;
+    }
+    let target = target.trim();
+    if target.is_empty() {
+        return None;
+    }
+    Some((prefix.to_string(), target.to_string()))
+}
+
+fn rebase_like_finish_target(message: &str, action_prefix: &str) -> Option<String> {
+    let prefix = format!("{} (finish): returning to ", action_prefix);
+    message
+        .strip_prefix(&prefix)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn rebase_start_targets_match(segment_target: &str, hint: &str) -> bool {
+    segment_target == hint
+        || segment_target
+            .strip_prefix("refs/heads/")
+            .is_some_and(|target| target == hint)
+        || hint
+            .strip_prefix("refs/heads/")
+            .is_some_and(|target| target == segment_target)
+}
+
+fn read_complete_rebase_segments_for_worktree(
+    worktree: &Path,
+) -> Result<Vec<RebaseReflogSegment>, GitAiError> {
+    let transitions = read_head_reflog_transitions_for_worktree_internal(worktree, true)?;
+    let mut segments = Vec::new();
+    let mut index = 0usize;
+
+    while index < transitions.len() {
+        let Some((action_prefix, start_target)) = rebase_like_start(&transitions[index].message)
+        else {
+            index += 1;
+            continue;
+        };
+
+        let original_head = transitions[index].old.clone();
+        let onto_head = transitions[index].new.clone();
+        let mut new_head = onto_head.clone();
+        let mut finish_target = None;
+        let mut cursor = index + 1;
+        let mut completed = false;
+
+        while cursor < transitions.len() {
+            let transition = &transitions[cursor];
+            if rebase_like_start(&transition.message).is_some() {
+                break;
+            }
+            if let Some(target) = rebase_like_finish_target(&transition.message, &action_prefix) {
+                finish_target = Some(target);
+                if transition.old != transition.new {
+                    new_head = transition.new.clone();
+                }
+                completed = true;
+                cursor += 1;
+                break;
+            }
+            if transition.old != transition.new
+                && transition
+                    .message
+                    .starts_with(&format!("{} (", action_prefix))
+            {
+                new_head = transition.new.clone();
+            }
+            cursor += 1;
+        }
+
+        if completed {
+            segments.push(RebaseReflogSegment {
+                original_head,
+                onto_head,
+                new_head,
+                action_prefix,
+                start_target,
+                finish_target,
+            });
+        }
+
+        index = cursor.max(index + 1);
+    }
+
+    Ok(segments)
+}
+
+pub fn resolve_rebase_segment_for_worktree(
+    worktree: &Path,
+    start_target_hint: Option<&str>,
+    already_processed_new_heads: &std::collections::HashSet<String>,
+) -> Result<Option<RebaseReflogSegment>, GitAiError> {
+    let candidates = read_complete_rebase_segments_for_worktree(worktree)?
+        .into_iter()
+        .filter(|segment| !already_processed_new_heads.contains(&segment.new_head))
+        .collect::<Vec<_>>();
+
+    if let Some(start_target_hint) = start_target_hint
+        && let Some(segment) = candidates
+            .iter()
+            .find(|segment| rebase_start_targets_match(&segment.start_target, start_target_hint))
+    {
+        return Ok(Some(segment.clone()));
+    }
+
+    Ok(candidates.into_iter().next())
 }
 
 pub fn resolve_linear_head_commit_chain_for_worktree(
@@ -479,6 +627,32 @@ mod tests {
 
         let resolved = latest_reflog_old_oid_for_worktree(worktree, "refs/stash").unwrap();
         assert_eq!(resolved, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    }
+
+    #[test]
+    fn resolve_reflog_old_oid_for_ref_new_oid_reads_matching_branch_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path();
+        let git_dir = worktree.join(".git");
+        let old = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let new = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        write_file(&git_dir.join("HEAD"), "ref: refs/heads/main\n");
+        write_file(
+            &git_dir.join("logs/refs/heads/feature"),
+            &format!(
+                concat!(
+                    "0000000000000000000000000000000000000000 {old} Test <t@example.com> 0 -0000\tbranch: Created from main\n",
+                    "{old} {new} Test <t@example.com> 0 -0000\trebase (finish): refs/heads/feature onto main\n",
+                ),
+                old = old,
+                new = new
+            ),
+        );
+
+        let resolved =
+            resolve_reflog_old_oid_for_ref_new_oid_in_worktree(worktree, "refs/heads/feature", new)
+                .unwrap();
+        assert_eq!(resolved, old);
     }
 
     #[test]

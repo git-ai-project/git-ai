@@ -233,6 +233,7 @@ mod tests {
             inflight_rebase_original_head: None,
             merge_squash_source_head: None,
             merge_squash_staged_file_blobs: None,
+            carryover_snapshot_id: None,
             stash_target_oid: None,
             ref_changes: Vec::new(),
             confidence: Confidence::Low,

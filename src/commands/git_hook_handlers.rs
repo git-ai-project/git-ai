@@ -1670,6 +1670,7 @@ fn maybe_handle_reset_reference_transaction(
             &old_head,
             &human_author,
             None,
+            None,
         );
     } else {
         let _ = repo.storage.delete_working_log_for_base_commit(&old_head);

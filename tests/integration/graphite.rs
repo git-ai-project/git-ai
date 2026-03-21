@@ -329,7 +329,7 @@ fn gt(repo: &TestRepo, args: &[&str]) -> Result<String, String> {
                 .as_ref()
                 .expect("daemon mode should always create a started log path"),
         );
-        repo.sync_daemon_external_completion_delta(baseline_count, started_count);
+        repo.sync_daemon_external_tracked_completion_delta(baseline_count, started_count);
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();

@@ -311,12 +311,59 @@ fn process_completed_rebase(
     debug_log("✓ Rebase authorship rewrite complete");
 }
 
+fn original_equivalent_for_rewritten_commit(
+    repository: &Repository,
+    rewritten_commit: &str,
+) -> Option<String> {
+    let events = repository.storage.read_rewrite_events().ok()?;
+    for event in events {
+        match event {
+            RewriteLogEvent::RebaseComplete { rebase_complete } => {
+                if let Some(index) = rebase_complete
+                    .new_commits
+                    .iter()
+                    .position(|commit| commit == rewritten_commit)
+                {
+                    return rebase_complete.original_commits.get(index).cloned();
+                }
+            }
+            RewriteLogEvent::CherryPickComplete {
+                cherry_pick_complete,
+            } => {
+                if let Some(index) = cherry_pick_complete
+                    .new_commits
+                    .iter()
+                    .position(|commit| commit == rewritten_commit)
+                {
+                    return cherry_pick_complete.source_commits.get(index).cloned();
+                }
+            }
+            RewriteLogEvent::CommitAmend { commit_amend }
+                if commit_amend.amended_commit_sha == rewritten_commit =>
+            {
+                return Some(commit_amend.original_commit);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 pub(crate) fn build_rebase_commit_mappings(
     repository: &Repository,
     original_head: &str,
     new_head: &str,
     onto_head: Option<&str>,
 ) -> Result<(Vec<String>, Vec<String>), crate::error::GitAiError> {
+    if let Some(onto_head) = onto_head
+        && !crate::git::repo_state::is_valid_git_oid(onto_head)
+    {
+        return Err(crate::error::GitAiError::Generic(format!(
+            "rebase mapping expected resolved onto oid, got '{}'",
+            onto_head
+        )));
+    }
+
     // Get commits from new_head and original_head
     let new_head_commit = repository.find_commit(new_head.to_string())?;
     let original_head_commit = repository.find_commit(original_head.to_string())?;
@@ -324,16 +371,21 @@ pub(crate) fn build_rebase_commit_mappings(
     // Find merge base between original and new
     let merge_base = repository.merge_base(original_head_commit.id(), new_head_commit.id())?;
 
-    // Walk from original_head to merge_base to get the commits that were rebased
-    let mut original_commits = walk_commits_to_base(repository, original_head, &merge_base)?;
+    let original_base = onto_head
+        .and_then(|onto| original_equivalent_for_rewritten_commit(repository, onto))
+        .filter(|mapped| mapped != original_head && is_ancestor(repository, mapped, original_head))
+        .unwrap_or_else(|| merge_base.clone());
+
+    // Walk from original_head to the original-side lower bound to get the commits that were rebased.
+    let mut original_commits = walk_commits_to_base(repository, original_head, &original_base)?;
     original_commits.reverse();
 
     // If there were no original commits, there is nothing to rewrite.
     // Avoid walking potentially large parts of new history.
     if original_commits.is_empty() {
         debug_log(&format!(
-            "Commit mapping: 0 original -> 0 new (merge_base: {})",
-            merge_base
+            "Commit mapping: 0 original -> 0 new (merge_base: {}, original_base: {})",
+            merge_base, original_base
         ));
         return Ok((original_commits, Vec::new()));
     }
@@ -351,10 +403,11 @@ pub(crate) fn build_rebase_commit_mappings(
     new_commits.reverse();
 
     debug_log(&format!(
-        "Commit mapping: {} original -> {} new (merge_base: {}, new_base: {})",
+        "Commit mapping: {} original -> {} new (merge_base: {}, original_base: {}, new_base: {})",
         original_commits.len(),
         new_commits.len(),
         merge_base,
+        original_base,
         new_commits_base
     ));
 
@@ -380,7 +433,7 @@ fn resolve_rebase_original_head(
     resolve_commitish(repository, branch_spec)
 }
 
-fn resolve_rebase_onto_head(
+pub(crate) fn resolve_rebase_onto_head(
     parsed_args: &ParsedGitInvocation,
     repository: &Repository,
 ) -> Option<String> {

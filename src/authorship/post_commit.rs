@@ -60,6 +60,24 @@ pub fn post_commit(
     human_author: String,
     supress_output: bool,
 ) -> Result<(String, AuthorshipLog), GitAiError> {
+    post_commit_with_final_state(
+        repo,
+        base_commit,
+        commit_sha,
+        human_author,
+        supress_output,
+        None,
+    )
+}
+
+pub fn post_commit_with_final_state(
+    repo: &Repository,
+    base_commit: Option<String>,
+    commit_sha: String,
+    human_author: String,
+    supress_output: bool,
+    final_state_override: Option<&HashMap<String, String>>,
+) -> Result<(String, AuthorshipLog), GitAiError> {
     // Use base_commit parameter if provided, otherwise use "initial" for empty repos
     // This matches the convention in checkpoint.rs
     let parent_sha = base_commit.unwrap_or_else(|| "initial".to_string());
@@ -93,11 +111,20 @@ pub fn post_commit(
     // Create VirtualAttributions from working log (fast path - no blame)
     // We don't need to run blame because we only care about the working log data
     // that was accumulated since the parent commit
-    let working_va = VirtualAttributions::from_just_working_log(
-        repo.clone(),
-        parent_sha.clone(),
-        Some(human_author.clone()),
-    )?;
+    let working_va = if let Some(snapshot) = final_state_override {
+        VirtualAttributions::from_working_log_snapshot(
+            repo.clone(),
+            parent_sha.clone(),
+            Some(human_author.clone()),
+            snapshot,
+        )?
+    } else {
+        VirtualAttributions::from_just_working_log(
+            repo.clone(),
+            parent_sha.clone(),
+            Some(human_author.clone()),
+        )?
+    };
 
     // Build pathspecs from AI-relevant checkpoint entries only.
     // Human-only entries with no AI attribution do not affect authorship output and should not
@@ -119,13 +146,13 @@ pub fn post_commit(
         pathspecs.insert(file_path.clone());
     }
 
-    // Split VirtualAttributions into committed (authorship log) and uncommitted (INITIAL)
     let (mut authorship_log, initial_attributions) = working_va
         .to_authorship_log_and_initial_working_log(
             repo,
             &parent_sha,
             &commit_sha,
             Some(&pathspecs),
+            final_state_override,
         )?;
 
     authorship_log.metadata.base_commit_sha = commit_sha.clone();

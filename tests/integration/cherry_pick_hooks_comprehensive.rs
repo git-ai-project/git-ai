@@ -1,4 +1,4 @@
-use crate::repos::test_repo::TestRepo;
+use crate::repos::test_repo::{GitTestMode, TestRepo};
 use git_ai::git::rewrite_log::RewriteLogEvent;
 use std::path::PathBuf;
 
@@ -15,13 +15,17 @@ fn resolve_git_dir(repo: &TestRepo) -> PathBuf {
     }
 }
 
+fn direct_test_repo() -> TestRepo {
+    TestRepo::new_with_mode(GitTestMode::Wrapper)
+}
+
 // ==============================================================================
 // Cherry-Pick Hook State Detection Tests
 // ==============================================================================
 
 #[test]
 fn test_cherry_pick_head_file_detection() {
-    let repo = TestRepo::new();
+    let repo = direct_test_repo();
 
     // Initially CHERRY_PICK_HEAD should not exist
     let cherry_pick_head = resolve_git_dir(&repo).join("CHERRY_PICK_HEAD");
@@ -30,7 +34,7 @@ fn test_cherry_pick_head_file_detection() {
 
 #[test]
 fn test_cherry_pick_sequencer_detection() {
-    let repo = TestRepo::new();
+    let repo = direct_test_repo();
 
     // Initially sequencer directory should not exist
     let sequencer_dir = resolve_git_dir(&repo).join("sequencer");
@@ -39,7 +43,7 @@ fn test_cherry_pick_sequencer_detection() {
 
 #[test]
 fn test_cherry_pick_not_in_progress() {
-    let repo = TestRepo::new();
+    let repo = direct_test_repo();
 
     let git_dir = resolve_git_dir(&repo);
     let cherry_pick_head = git_dir.join("CHERRY_PICK_HEAD");
@@ -393,7 +397,7 @@ fn test_no_cherry_pick_events() {
 
 #[test]
 fn test_pre_hook_new_cherry_pick() {
-    let repo = TestRepo::new();
+    let repo = direct_test_repo();
 
     // Create a commit
     repo.filename("test.txt")
@@ -411,7 +415,7 @@ fn test_pre_hook_new_cherry_pick() {
 
 #[test]
 fn test_pre_hook_continuing_cherry_pick() {
-    let repo = TestRepo::new();
+    let repo = direct_test_repo();
 
     // Create a commit
     repo.filename("test.txt")
@@ -433,7 +437,7 @@ fn test_pre_hook_continuing_cherry_pick() {
 
 #[test]
 fn test_post_hook_still_in_progress() {
-    let repo = TestRepo::new();
+    let repo = direct_test_repo();
 
     // Create CHERRY_PICK_HEAD to simulate in-progress state
     let cherry_pick_head = resolve_git_dir(&repo).join("CHERRY_PICK_HEAD");
@@ -448,7 +452,7 @@ fn test_post_hook_still_in_progress() {
 
 #[test]
 fn test_post_hook_conflict_state() {
-    let repo = TestRepo::new();
+    let repo = direct_test_repo();
 
     // Create both CHERRY_PICK_HEAD and sequencer to simulate conflict
     let git_dir = resolve_git_dir(&repo);
@@ -465,7 +469,7 @@ fn test_post_hook_conflict_state() {
 
 #[test]
 fn test_post_hook_completed() {
-    let repo = TestRepo::new();
+    let repo = direct_test_repo();
 
     // Neither CHERRY_PICK_HEAD nor sequencer exist
     let git_dir = resolve_git_dir(&repo);
@@ -496,7 +500,7 @@ fn test_post_hook_with_failure_status() {
 
 #[test]
 fn test_build_commit_mappings() {
-    let repo = TestRepo::new();
+    let repo = direct_test_repo();
 
     // Create first commit
     repo.filename("file1.txt")
@@ -684,7 +688,7 @@ fn test_head_changed_detection() {
 
 #[test]
 fn test_cherry_pick_complete_flow() {
-    let repo = TestRepo::new();
+    let repo = direct_test_repo();
 
     // Create initial commit
     repo.filename("base.txt").set_contents(vec!["base"]).stage();
@@ -713,7 +717,7 @@ fn test_cherry_pick_complete_flow() {
 
 #[test]
 fn test_cherry_pick_abort_flow() {
-    let repo = TestRepo::new();
+    let repo = direct_test_repo();
 
     // Create initial commit
     repo.filename("base.txt").set_contents(vec!["base"]).stage();

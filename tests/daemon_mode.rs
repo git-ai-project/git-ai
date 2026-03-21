@@ -256,6 +256,17 @@ fn traced_git_with_env(
     repo.git_og_with_env(args, envs)
 }
 
+fn wait_for_expected_top_level_completions(
+    repo: &TestRepo,
+    baseline: u64,
+    expected_top_level_completions: u64,
+) {
+    repo.wait_for_daemon_total_completion_count(
+        baseline,
+        baseline.saturating_add(expected_top_level_completions),
+    );
+}
+
 #[derive(Clone)]
 struct WorkdirRaceHarness {
     test_home: PathBuf,
@@ -654,6 +665,7 @@ fn checkpoint_delegate_falls_back_when_daemon_startup_is_blocked() {
 fn daemon_write_mode_applies_delegated_checkpoint_and_updates_state() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let daemon = DaemonGuard::start(&repo);
+    let completion_baseline = repo.daemon_total_completion_count();
 
     fs::write(repo.path().join("delegate-write.txt"), "base\n").expect("failed to write base");
     repo.git(&["add", "delegate-write.txt"])
@@ -673,7 +685,7 @@ fn daemon_write_mode_applies_delegated_checkpoint_and_updates_state() {
     )
     .expect("delegated checkpoint should succeed");
 
-    daemon.latest_seq_and_wait_idle();
+    wait_for_expected_top_level_completions(&repo, completion_baseline, 1);
 
     let checkpoints = repo
         .current_working_logs()
@@ -778,30 +790,57 @@ fn daemon_test_mode_git_ai_checkpoint_updates_family_state() {
 #[serial]
 fn daemon_pure_trace_socket_commit_after_ai_checkpoint_preserves_ai_replacement_attribution() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo);
+    let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
     let file_path = repo.path().join("daemon-ai-replace.txt");
+    let completion_baseline = repo.daemon_total_completion_count();
+    let mut expected_top_level_completions = 0u64;
 
     fs::write(&file_path, "old line\n").expect("failed to write base contents");
-    repo.git_og_with_env(&["add", "daemon-ai-replace.txt"], &env_refs)
-        .expect("base add should succeed");
-    repo.git_og_with_env(&["commit", "-m", "base"], &env_refs)
-        .expect("base commit should succeed");
+    traced_git_with_env(
+        &repo,
+        &["add", "daemon-ai-replace.txt"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("base add should succeed");
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "base"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("base commit should succeed");
 
     fs::write(&file_path, "new line from ai\n").expect("failed to write ai contents");
+    expected_top_level_completions += 1;
     repo.git_ai_with_env(
         &["checkpoint", "mock_ai", "daemon-ai-replace.txt"],
         &[("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true")],
     )
     .expect("ai checkpoint should succeed");
-    repo.git_og_with_env(&["add", "daemon-ai-replace.txt"], &env_refs)
-        .expect("add should succeed");
-    repo.git_og_with_env(&["commit", "-m", "commit ai replacement"], &env_refs)
-        .expect("commit should succeed");
+    traced_git_with_env(
+        &repo,
+        &["add", "daemon-ai-replace.txt"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("add should succeed");
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "commit ai replacement"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("commit should succeed");
 
-    daemon.latest_seq_and_wait_idle();
+    wait_for_expected_top_level_completions(
+        &repo,
+        completion_baseline,
+        expected_top_level_completions,
+    );
 
     let mut file = repo.filename("daemon-ai-replace.txt");
     file.assert_lines_and_blame(lines!["new line from ai".ai()]);
@@ -1019,18 +1058,30 @@ fn daemon_checkpoint_wait_is_not_blocked_by_other_family_open_root() {
 #[serial]
 fn daemon_pure_trace_socket_checkpoint_stage_checkpoint_two_commits_preserve_ai_lines() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo);
+    let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
     let file_rel = "daemon-two-ai-lines.txt";
     let file_path = repo.path().join(file_rel);
+    let completion_baseline = repo.daemon_total_completion_count();
+    let mut expected_top_level_completions = 0u64;
 
     fs::write(&file_path, "base\n").expect("failed to seed base file");
-    repo.git_og_with_env(&["add", file_rel], &env_refs)
-        .expect("base add should succeed");
-    repo.git_og_with_env(&["commit", "-m", "base"], &env_refs)
-        .expect("base commit should succeed");
+    traced_git_with_env(
+        &repo,
+        &["add", file_rel],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("base add should succeed");
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "base"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("base commit should succeed");
 
     {
         let mut f = fs::OpenOptions::new()
@@ -1039,14 +1090,20 @@ fn daemon_pure_trace_socket_checkpoint_stage_checkpoint_two_commits_preserve_ai_
             .expect("failed to open file for first append");
         writeln!(f, "test").expect("failed to append first ai line");
     }
+    expected_top_level_completions += 1;
     repo.git_ai_with_env(
         &["checkpoint", "mock_ai", file_rel],
         &[("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true")],
     )
     .expect("first delegated ai checkpoint should succeed");
 
-    repo.git_og_with_env(&["add", "."], &env_refs)
-        .expect("staging first ai line should succeed");
+    traced_git_with_env(
+        &repo,
+        &["add", "."],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("staging first ai line should succeed");
 
     {
         let mut f = fs::OpenOptions::new()
@@ -1055,21 +1112,45 @@ fn daemon_pure_trace_socket_checkpoint_stage_checkpoint_two_commits_preserve_ai_
             .expect("failed to open file for second append");
         writeln!(f, "test1").expect("failed to append second ai line");
     }
+    expected_top_level_completions += 1;
     repo.git_ai_with_env(
         &["checkpoint", "mock_ai", file_rel],
         &[("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true")],
     )
     .expect("second delegated ai checkpoint should succeed");
 
-    repo.git_og_with_env(&["commit", "-m", "first ai line"], &env_refs)
-        .expect("first commit should succeed");
-    daemon.latest_seq_and_wait_idle();
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "first ai line"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("first commit should succeed");
+    wait_for_expected_top_level_completions(
+        &repo,
+        completion_baseline,
+        expected_top_level_completions,
+    );
 
-    repo.git_og_with_env(&["add", "."], &env_refs)
-        .expect("staging second ai line should succeed");
-    repo.git_og_with_env(&["commit", "-m", "second ai line"], &env_refs)
-        .expect("second commit should succeed");
-    daemon.latest_seq_and_wait_idle();
+    traced_git_with_env(
+        &repo,
+        &["add", "."],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("staging second ai line should succeed");
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "second ai line"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("second commit should succeed");
+    wait_for_expected_top_level_completions(
+        &repo,
+        completion_baseline,
+        expected_top_level_completions,
+    );
 
     let mut file = repo.filename(file_rel);
     file.assert_lines_and_blame(lines!["base", "test".ai(), "test1".ai()]);
@@ -1079,12 +1160,14 @@ fn daemon_pure_trace_socket_checkpoint_stage_checkpoint_two_commits_preserve_ai_
 #[serial]
 fn daemon_pure_trace_socket_checkpoint_stage_checkpoint_non_adjacent_hunks_survive_split_commits() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo);
+    let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
     let file_rel = "daemon-non-adjacent.md";
     let file_path = repo.path().join(file_rel);
+    let completion_baseline = repo.daemon_total_completion_count();
+    let mut expected_top_level_completions = 0u64;
 
     let initial = "\
 Top line
@@ -1099,10 +1182,20 @@ middle line 2
 omega body
 ";
     fs::write(&file_path, initial).expect("failed to write initial content");
-    repo.git_og_with_env(&["add", file_rel], &env_refs)
-        .expect("base add should succeed");
-    repo.git_og_with_env(&["commit", "-m", "base"], &env_refs)
-        .expect("base commit should succeed");
+    traced_git_with_env(
+        &repo,
+        &["add", file_rel],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("base add should succeed");
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "base"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("base commit should succeed");
 
     let first_ai_hunk = "\
 Top line
@@ -1117,14 +1210,20 @@ middle line 2
 omega body
 ";
     fs::write(&file_path, first_ai_hunk).expect("failed to write first hunk content");
+    expected_top_level_completions += 1;
     repo.git_ai_with_env(
         &["checkpoint", "mock_ai", file_rel],
         &[("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true")],
     )
     .expect("first delegated checkpoint should succeed");
 
-    repo.git_og_with_env(&["add", "."], &env_refs)
-        .expect("staging first hunk should succeed");
+    traced_git_with_env(
+        &repo,
+        &["add", "."],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("staging first hunk should succeed");
 
     let both_hunks = "\
 Top line
@@ -1139,21 +1238,45 @@ middle line 2
 omega body
 ";
     fs::write(&file_path, both_hunks).expect("failed to write both hunks content");
+    expected_top_level_completions += 1;
     repo.git_ai_with_env(
         &["checkpoint", "mock_ai", file_rel],
         &[("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true")],
     )
     .expect("second delegated checkpoint should succeed");
 
-    repo.git_og_with_env(&["commit", "-m", "commit first staged hunk"], &env_refs)
-        .expect("first split commit should succeed");
-    daemon.latest_seq_and_wait_idle();
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "commit first staged hunk"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("first split commit should succeed");
+    wait_for_expected_top_level_completions(
+        &repo,
+        completion_baseline,
+        expected_top_level_completions,
+    );
 
-    repo.git_og_with_env(&["add", "."], &env_refs)
-        .expect("staging remaining hunk should succeed");
-    repo.git_og_with_env(&["commit", "-m", "commit second hunk"], &env_refs)
-        .expect("second split commit should succeed");
-    daemon.latest_seq_and_wait_idle();
+    traced_git_with_env(
+        &repo,
+        &["add", "."],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("staging remaining hunk should succeed");
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "commit second hunk"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("second split commit should succeed");
+    wait_for_expected_top_level_completions(
+        &repo,
+        completion_baseline,
+        expected_top_level_completions,
+    );
 
     let mut file = repo.filename(file_rel);
     file.assert_lines_and_blame(lines![
@@ -1199,10 +1322,11 @@ fn daemon_trace_mirror_preserves_amend_rewrite_parity_and_records_command() {
     )
     .expect("amend commit should succeed");
 
+    repo.wait_for_daemon_total_completion_count(0, 4);
     let latest_seq = daemon.latest_seq_and_wait_idle();
     assert!(
-        latest_seq >= 3,
-        "trace mirror should append start/cmd_name/exit events"
+        latest_seq >= 2,
+        "trace mirror should record both mirrored commit commands"
     );
 
     let amend_events = wait_for_rewrite_event_count(&repo, "\"commit_amend\"", 1);
@@ -1232,25 +1356,51 @@ fn daemon_trace_mirror_preserves_amend_rewrite_parity_and_records_command() {
 #[serial]
 fn daemon_pure_trace_socket_write_mode_applies_amend_rewrite() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo);
+    let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
+    let completion_baseline = repo.daemon_total_completion_count();
+    let mut expected_top_level_completions = 0u64;
 
     fs::write(repo.path().join("pure-trace.txt"), "line 1\n").expect("failed to write file");
-    repo.git_og_with_env(&["add", "pure-trace.txt"], &env_refs)
-        .expect("add should succeed");
-    repo.git_og_with_env(&["commit", "-m", "initial"], &env_refs)
-        .expect("commit should succeed");
+    traced_git_with_env(
+        &repo,
+        &["add", "pure-trace.txt"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("add should succeed");
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "initial"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("commit should succeed");
 
     fs::write(repo.path().join("pure-trace.txt"), "line 1\nline 2\n")
         .expect("failed to update file");
-    repo.git_og_with_env(&["add", "pure-trace.txt"], &env_refs)
-        .expect("add before amend should succeed");
-    repo.git_og_with_env(&["commit", "--amend", "-m", "initial amended"], &env_refs)
-        .expect("amend should succeed");
+    traced_git_with_env(
+        &repo,
+        &["add", "pure-trace.txt"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("add before amend should succeed");
+    traced_git_with_env(
+        &repo,
+        &["commit", "--amend", "-m", "initial amended"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("amend should succeed");
 
-    daemon.latest_seq_and_wait_idle();
+    wait_for_expected_top_level_completions(
+        &repo,
+        completion_baseline,
+        expected_top_level_completions,
+    );
 
     let amend_events = wait_for_rewrite_event_count(&repo, "\"commit_amend\"", 1);
     assert_eq!(
@@ -1263,48 +1413,113 @@ fn daemon_pure_trace_socket_write_mode_applies_amend_rewrite() {
 #[serial]
 fn daemon_pure_trace_socket_rebase_abort_emits_abort_event() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo);
+    let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
     let default_branch = repo.current_branch();
+    let completion_baseline = repo.daemon_total_completion_count();
+    let mut expected_top_level_completions = 0u64;
 
     fs::write(repo.path().join("rebase-conflict.txt"), "base\n").expect("failed to write base");
-    repo.git_og_with_env(&["add", "rebase-conflict.txt"], &env_refs)
-        .expect("add should succeed");
-    repo.git_og_with_env(&["commit", "-m", "base"], &env_refs)
-        .expect("base commit should succeed");
+    traced_git_with_env(
+        &repo,
+        &["add", "rebase-conflict.txt"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("add should succeed");
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "base"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("base commit should succeed");
 
-    repo.git_og_with_env(&["checkout", "-b", "feature"], &env_refs)
-        .expect("feature branch checkout should succeed");
+    traced_git_with_env(
+        &repo,
+        &["checkout", "-b", "feature"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("feature branch checkout should succeed");
     fs::write(repo.path().join("rebase-conflict.txt"), "feature\n")
         .expect("failed to write feature branch change");
-    repo.git_og_with_env(&["add", "rebase-conflict.txt"], &env_refs)
-        .expect("feature add should succeed");
-    repo.git_og_with_env(&["commit", "-m", "feature change"], &env_refs)
-        .expect("feature commit should succeed");
+    traced_git_with_env(
+        &repo,
+        &["add", "rebase-conflict.txt"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("feature add should succeed");
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "feature change"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("feature commit should succeed");
 
-    repo.git_og_with_env(&["checkout", default_branch.as_str()], &env_refs)
-        .expect("checkout default branch should succeed");
+    traced_git_with_env(
+        &repo,
+        &["checkout", default_branch.as_str()],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("checkout default branch should succeed");
     fs::write(repo.path().join("rebase-conflict.txt"), "main\n")
         .expect("failed to write default branch change");
-    repo.git_og_with_env(&["add", "rebase-conflict.txt"], &env_refs)
-        .expect("default branch add should succeed");
-    repo.git_og_with_env(&["commit", "-m", "main change"], &env_refs)
-        .expect("default branch commit should succeed");
+    traced_git_with_env(
+        &repo,
+        &["add", "rebase-conflict.txt"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("default branch add should succeed");
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "main change"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("default branch commit should succeed");
 
-    repo.git_og_with_env(&["checkout", "feature"], &env_refs)
-        .expect("checkout feature should succeed");
-    let rebase_conflict = repo.git_og_with_env(&["rebase", default_branch.as_str()], &env_refs);
+    traced_git_with_env(
+        &repo,
+        &["checkout", "feature"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("checkout feature should succeed");
+    let rebase_conflict = traced_git_with_env(
+        &repo,
+        &["rebase", default_branch.as_str()],
+        &env_refs,
+        &mut expected_top_level_completions,
+    );
     assert!(
         rebase_conflict.is_err(),
         "rebase should conflict for abort flow coverage"
     );
-    daemon.latest_seq_and_wait_idle();
-    repo.git_og_with_env(&["rebase", "--abort"], &env_refs)
-        .expect("rebase abort should succeed");
+    wait_for_expected_top_level_completions(
+        &repo,
+        completion_baseline,
+        expected_top_level_completions,
+    );
+    traced_git_with_env(
+        &repo,
+        &["rebase", "--abort"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("rebase abort should succeed");
 
-    daemon.latest_seq_and_wait_idle();
+    wait_for_expected_top_level_completions(
+        &repo,
+        completion_baseline,
+        expected_top_level_completions,
+    );
 
     let rewrite_log_path = git_common_dir(&repo).join("ai").join("rewrite_log");
     let rewrite_log =
@@ -1321,52 +1536,111 @@ fn daemon_pure_trace_socket_rebase_abort_emits_abort_event() {
 #[serial]
 fn daemon_pure_trace_socket_cherry_pick_abort_emits_abort_event() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo);
+    let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
     let default_branch = repo.current_branch();
+    let completion_baseline = repo.daemon_total_completion_count();
+    let mut expected_top_level_completions = 0u64;
 
     fs::write(repo.path().join("cherry-conflict.txt"), "base\n").expect("failed to write base");
-    repo.git_og_with_env(&["add", "cherry-conflict.txt"], &env_refs)
-        .expect("add should succeed");
-    repo.git_og_with_env(&["commit", "-m", "base"], &env_refs)
-        .expect("base commit should succeed");
+    traced_git_with_env(
+        &repo,
+        &["add", "cherry-conflict.txt"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("add should succeed");
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "base"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("base commit should succeed");
 
-    repo.git_og_with_env(&["checkout", "-b", "topic"], &env_refs)
-        .expect("topic branch checkout should succeed");
+    traced_git_with_env(
+        &repo,
+        &["checkout", "-b", "topic"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("topic branch checkout should succeed");
     fs::write(repo.path().join("cherry-conflict.txt"), "topic\n")
         .expect("failed to write topic branch change");
-    repo.git_og_with_env(&["add", "cherry-conflict.txt"], &env_refs)
-        .expect("topic add should succeed");
-    repo.git_og_with_env(&["commit", "-m", "topic change"], &env_refs)
-        .expect("topic commit should succeed");
+    traced_git_with_env(
+        &repo,
+        &["add", "cherry-conflict.txt"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("topic add should succeed");
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "topic change"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("topic commit should succeed");
     let topic_sha = repo
         .git(&["rev-parse", "topic"])
         .expect("topic rev-parse should succeed")
         .trim()
         .to_string();
 
-    repo.git_og_with_env(&["checkout", default_branch.as_str()], &env_refs)
-        .expect("checkout default branch should succeed");
+    traced_git_with_env(
+        &repo,
+        &["checkout", default_branch.as_str()],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("checkout default branch should succeed");
     fs::write(repo.path().join("cherry-conflict.txt"), "main\n")
         .expect("failed to write default branch conflicting change");
-    repo.git_og_with_env(&["add", "cherry-conflict.txt"], &env_refs)
-        .expect("default branch add should succeed");
-    repo.git_og_with_env(&["commit", "-m", "main change"], &env_refs)
-        .expect("default branch commit should succeed");
+    traced_git_with_env(
+        &repo,
+        &["add", "cherry-conflict.txt"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("default branch add should succeed");
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "main change"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("default branch commit should succeed");
 
-    let cherry_pick_conflict =
-        repo.git_og_with_env(&["cherry-pick", topic_sha.as_str()], &env_refs);
+    let cherry_pick_conflict = traced_git_with_env(
+        &repo,
+        &["cherry-pick", topic_sha.as_str()],
+        &env_refs,
+        &mut expected_top_level_completions,
+    );
     assert!(
         cherry_pick_conflict.is_err(),
         "cherry-pick should conflict for abort flow coverage"
     );
-    daemon.latest_seq_and_wait_idle();
-    repo.git_og_with_env(&["cherry-pick", "--abort"], &env_refs)
-        .expect("cherry-pick abort should succeed");
+    wait_for_expected_top_level_completions(
+        &repo,
+        completion_baseline,
+        expected_top_level_completions,
+    );
+    traced_git_with_env(
+        &repo,
+        &["cherry-pick", "--abort"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("cherry-pick abort should succeed");
 
-    daemon.latest_seq_and_wait_idle();
+    wait_for_expected_top_level_completions(
+        &repo,
+        completion_baseline,
+        expected_top_level_completions,
+    );
 
     let rewrite_log_path = git_common_dir(&repo).join("ai").join("rewrite_log");
     let rewrite_log = fs::read_to_string(&rewrite_log_path)
@@ -1383,7 +1657,7 @@ fn daemon_pure_trace_socket_cherry_pick_abort_emits_abort_event() {
 #[serial]
 fn daemon_pure_trace_socket_stash_main_ops_emit_stash_events() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo);
+    let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
@@ -1477,11 +1751,11 @@ fn daemon_pure_trace_socket_stash_main_ops_emit_stash_events() {
     )
     .expect("stash drop should succeed");
 
-    repo.wait_for_daemon_total_completion_count(
+    wait_for_expected_top_level_completions(
+        &repo,
         completion_baseline,
-        completion_baseline + expected_top_level_completions,
+        expected_top_level_completions,
     );
-    daemon.latest_seq_and_wait_idle();
 
     let rewrite_log_path = git_common_dir(&repo).join("ai").join("rewrite_log");
     let rewrite_log =
@@ -1505,52 +1779,113 @@ fn daemon_pure_trace_socket_stash_main_ops_emit_stash_events() {
 #[serial]
 fn daemon_pure_trace_socket_reset_modes_emit_reset_kinds() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo);
+    let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
+    let completion_baseline = repo.daemon_total_completion_count();
+    let mut expected_top_level_completions = 0u64;
 
     fs::write(repo.path().join("reset-case.txt"), "line 1\n").expect("failed to write file");
-    repo.git_og_with_env(&["add", "reset-case.txt"], &env_refs)
-        .expect("add should succeed");
-    repo.git_og_with_env(&["commit", "-m", "c1"], &env_refs)
-        .expect("c1 should succeed");
+    traced_git_with_env(
+        &repo,
+        &["add", "reset-case.txt"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("add should succeed");
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "c1"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("c1 should succeed");
 
     fs::write(repo.path().join("reset-case.txt"), "line 1\nline 2\n")
         .expect("failed to write c2 content");
-    repo.git_og_with_env(&["add", "reset-case.txt"], &env_refs)
-        .expect("add c2 should succeed");
-    repo.git_og_with_env(&["commit", "-m", "c2"], &env_refs)
-        .expect("c2 should succeed");
+    traced_git_with_env(
+        &repo,
+        &["add", "reset-case.txt"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("add c2 should succeed");
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "c2"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("c2 should succeed");
 
     fs::write(
         repo.path().join("reset-case.txt"),
         "line 1\nline 2\nline 3\n",
     )
     .expect("failed to write c3 content");
-    repo.git_og_with_env(&["add", "reset-case.txt"], &env_refs)
-        .expect("add c3 should succeed");
-    repo.git_og_with_env(&["commit", "-m", "c3"], &env_refs)
-        .expect("c3 should succeed");
+    traced_git_with_env(
+        &repo,
+        &["add", "reset-case.txt"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("add c3 should succeed");
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "c3"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("c3 should succeed");
 
     fs::write(
         repo.path().join("reset-case.txt"),
         "line 1\nline 2\nline 3\nline 4\n",
     )
     .expect("failed to write c4 content");
-    repo.git_og_with_env(&["add", "reset-case.txt"], &env_refs)
-        .expect("add c4 should succeed");
-    repo.git_og_with_env(&["commit", "-m", "c4"], &env_refs)
-        .expect("c4 should succeed");
+    traced_git_with_env(
+        &repo,
+        &["add", "reset-case.txt"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("add c4 should succeed");
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "c4"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("c4 should succeed");
 
-    repo.git_og_with_env(&["reset", "--soft", "HEAD~1"], &env_refs)
-        .expect("soft reset should succeed");
-    repo.git_og_with_env(&["reset", "--mixed", "HEAD~1"], &env_refs)
-        .expect("mixed reset should succeed");
-    repo.git_og_with_env(&["reset", "--hard", "HEAD~1"], &env_refs)
-        .expect("hard reset should succeed");
+    traced_git_with_env(
+        &repo,
+        &["reset", "--soft", "HEAD~1"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("soft reset should succeed");
+    traced_git_with_env(
+        &repo,
+        &["reset", "--mixed", "HEAD~1"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("mixed reset should succeed");
+    traced_git_with_env(
+        &repo,
+        &["reset", "--hard", "HEAD~1"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("hard reset should succeed");
 
-    daemon.latest_seq_and_wait_idle();
+    wait_for_expected_top_level_completions(
+        &repo,
+        completion_baseline,
+        expected_top_level_completions,
+    );
     let rewrite_log_path = git_common_dir(&repo).join("ai").join("rewrite_log");
     let rewrite_log =
         fs::read_to_string(&rewrite_log_path).expect("rewrite log should exist after reset modes");
@@ -1571,7 +1906,7 @@ fn daemon_pure_trace_socket_reset_modes_emit_reset_kinds() {
 #[serial]
 fn daemon_pure_trace_socket_rebase_continue_emits_complete_event() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo);
+    let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = vec![
@@ -1612,7 +1947,7 @@ fn daemon_pure_trace_socket_rebase_continue_emits_complete_event() {
         rebase_conflict.is_err(),
         "rebase should conflict before continue"
     );
-    daemon.latest_seq_and_wait_idle();
+    wait_for_expected_top_level_completions(&repo, 0, 10);
 
     fs::write(repo.path().join("rebase-continue.txt"), "resolved\n")
         .expect("failed to write resolved content");
@@ -1621,7 +1956,7 @@ fn daemon_pure_trace_socket_rebase_continue_emits_complete_event() {
     repo.git_og_with_env(&["rebase", "--continue"], &env_refs)
         .expect("rebase continue should succeed");
 
-    daemon.latest_seq_and_wait_idle();
+    wait_for_expected_top_level_completions(&repo, 0, 12);
 
     let rewrite_log_path = git_common_dir(&repo).join("ai").join("rewrite_log");
     let rewrite_log = fs::read_to_string(&rewrite_log_path)
@@ -1638,7 +1973,7 @@ fn daemon_pure_trace_socket_rebase_continue_emits_complete_event() {
 #[serial]
 fn daemon_pure_trace_socket_cherry_pick_continue_emits_complete_event() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo);
+    let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = vec![
@@ -1682,7 +2017,7 @@ fn daemon_pure_trace_socket_cherry_pick_continue_emits_complete_event() {
         cherry_conflict.is_err(),
         "cherry-pick should conflict before continue"
     );
-    daemon.latest_seq_and_wait_idle();
+    wait_for_expected_top_level_completions(&repo, 0, 9);
 
     fs::write(repo.path().join("cherry-continue.txt"), "resolved\n")
         .expect("failed to write resolved cherry content");
@@ -1691,7 +2026,7 @@ fn daemon_pure_trace_socket_cherry_pick_continue_emits_complete_event() {
     repo.git_og_with_env(&["cherry-pick", "--continue"], &env_refs)
         .expect("cherry-pick continue should succeed");
 
-    daemon.latest_seq_and_wait_idle();
+    wait_for_expected_top_level_completions(&repo, 0, 11);
 
     let rewrite_log_path = git_common_dir(&repo).join("ai").join("rewrite_log");
     let rewrite_log = fs::read_to_string(&rewrite_log_path)
@@ -1744,7 +2079,7 @@ fn daemon_pure_trace_socket_switch_tracks_success_and_conflict_failure() {
         "switch should fail when local changes would be overwritten"
     );
 
-    daemon.latest_seq_and_wait_idle();
+    wait_for_expected_top_level_completions(&repo, 0, 9);
 
     let family_state = daemon.family_state_snapshot();
     let commands = family_state
@@ -1812,7 +2147,7 @@ fn daemon_pure_trace_socket_checkout_tracks_success_failure_and_new_branch() {
         "checkout should fail when local changes would be overwritten"
     );
 
-    daemon.latest_seq_and_wait_idle();
+    wait_for_expected_top_level_completions(&repo, 0, 10);
 
     let family_state = daemon.family_state_snapshot();
     let commands = family_state
@@ -1946,7 +2281,7 @@ fn daemon_pure_trace_socket_pull_fast_forward_tracks_pull_command_and_ref_reconc
     )
     .expect("fast-forward pull should succeed");
 
-    daemon.latest_seq_and_wait_idle();
+    wait_for_expected_top_level_completions(&repo, 0, 5);
 
     let family_state = daemon.family_state_snapshot();
     let commands = family_state
@@ -2083,7 +2418,7 @@ fn daemon_pure_trace_socket_pull_rebase_tracks_pull_and_rebase_completion() {
     )
     .expect("pull --rebase should succeed");
 
-    daemon.latest_seq_and_wait_idle();
+    wait_for_expected_top_level_completions(&repo, 0, 7);
 
     let family_state = daemon.family_state_snapshot();
     let commands = family_state
@@ -2227,7 +2562,7 @@ fn daemon_pure_trace_socket_pull_autostash_preserves_local_changes_and_tracks_co
     )
     .expect("pull --rebase --autostash should succeed");
 
-    daemon.latest_seq_and_wait_idle();
+    wait_for_expected_top_level_completions(&repo, 0, 5);
 
     let local_contents = fs::read_to_string(repo.path().join("autostash-local.txt"))
         .expect("local file should remain readable");
@@ -2264,7 +2599,7 @@ fn daemon_pure_trace_socket_pull_autostash_preserves_local_changes_and_tracks_co
 #[serial]
 fn daemon_pure_trace_socket_high_throughput_ai_commit_burst_preserves_exact_blame() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo);
+    let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
@@ -2289,7 +2624,7 @@ fn daemon_pure_trace_socket_high_throughput_ai_commit_burst_preserves_exact_blam
     repo.git_og_with_env(&["commit", "-m", "ai burst commit"], &env_refs)
         .expect("ai burst commit should succeed");
 
-    daemon.latest_seq_and_wait_idle();
+    wait_for_expected_top_level_completions(&repo, 0, (file_count as u64 * 2) + 1);
     let commit_events = wait_for_rewrite_event_count(&repo, "\"commit_sha\"", 1);
     assert_eq!(
         commit_events, 1,
@@ -2306,7 +2641,7 @@ fn daemon_pure_trace_socket_high_throughput_ai_commit_burst_preserves_exact_blam
 #[serial]
 fn daemon_pure_trace_socket_concurrent_worktree_burst_preserves_exact_line_attribution() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo);
+    let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
@@ -2329,8 +2664,10 @@ fn daemon_pure_trace_socket_concurrent_worktree_burst_preserves_exact_line_attri
         &env_refs,
     )
     .expect("worktree add worker-b should succeed");
+    wait_for_expected_top_level_completions(&repo, 0, 2);
 
     let file_count = 10usize;
+    let completion_baseline = repo.daemon_total_completion_count();
     for idx in 0..file_count {
         let file_a = format!("daemon-race-a-{idx}.txt");
         harness.write_ai_line_checkpoint_and_add(
@@ -2350,7 +2687,8 @@ fn daemon_pure_trace_socket_concurrent_worktree_burst_preserves_exact_line_attri
     harness.run_traced_git(&worker_a_dir, &["commit", "-m", "worker-a burst commit"]);
     harness.run_traced_git(&worker_b_dir, &["commit", "-m", "worker-b burst commit"]);
 
-    daemon.latest_seq_and_wait_idle();
+    let expected_completion_delta = (file_count as u64 * 4) + 2;
+    wait_for_expected_top_level_completions(&repo, completion_baseline, expected_completion_delta);
 
     for idx in 0..file_count {
         let file_a = format!("daemon-race-a-{idx}.txt");
@@ -2379,7 +2717,7 @@ fn daemon_pure_trace_socket_concurrent_worktree_burst_preserves_exact_line_attri
 #[serial]
 fn daemon_pure_trace_socket_concurrent_checkpoint_requests_preserve_exact_line_attribution() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon = DaemonGuard::start(&repo);
+    let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
     let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
@@ -2388,6 +2726,7 @@ fn daemon_pure_trace_socket_concurrent_checkpoint_requests_preserve_exact_line_a
     let workdir = repo.path().to_path_buf();
 
     let file_count = 12usize;
+    let completion_baseline = repo.daemon_total_completion_count();
     let mut expected = Vec::new();
     for idx in 0..file_count {
         let file_rel = format!("daemon-race-concurrent-checkpoint-{idx}.txt");
@@ -2420,7 +2759,8 @@ fn daemon_pure_trace_socket_concurrent_checkpoint_requests_preserve_exact_line_a
     )
     .expect("commit for concurrent checkpoint files should succeed");
 
-    daemon.latest_seq_and_wait_idle();
+    let expected_completion_delta = file_count as u64 + 2;
+    wait_for_expected_top_level_completions(&repo, completion_baseline, expected_completion_delta);
 
     for (file_rel, line) in expected {
         let mut file = repo.filename(file_rel.as_str());
@@ -2458,8 +2798,10 @@ fn daemon_pure_trace_socket_parallel_worktree_streams_preserve_exact_line_attrib
         &env_refs,
     )
     .expect("worktree add parallel worker-b should succeed");
+    wait_for_expected_top_level_completions(&repo, 0, 2);
 
     let file_count = 8usize;
+    let completion_baseline = repo.daemon_total_completion_count();
 
     let worker_a = harness.spawn_worktree_ai_stream(
         worker_a_dir.clone(),
@@ -2484,7 +2826,8 @@ fn daemon_pure_trace_socket_parallel_worktree_streams_preserve_exact_line_attrib
         .join()
         .expect("parallel worker-b thread should not panic");
 
-    daemon.latest_seq_and_wait_idle();
+    let expected_completion_delta = ((file_count as u64) * 2 + 1) * 2;
+    wait_for_expected_top_level_completions(&repo, completion_baseline, expected_completion_delta);
 
     let family_state = daemon.family_state_snapshot();
     let commit_events = family_state

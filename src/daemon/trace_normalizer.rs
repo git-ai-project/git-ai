@@ -12,7 +12,7 @@ use crate::git::repo_state::{
 };
 use crate::observability;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -38,6 +38,7 @@ pub struct PendingTraceCommand {
     pub stash_target_oid: Option<String>,
     pub stash_target_error: Option<String>,
     pub merge_squash_staged_file_blobs: Option<HashMap<String, String>>,
+    pub carryover_snapshot_id: Option<String>,
     pub worktree_head_start_offset: Option<u64>,
     pub worktree_head_end_offset: Option<u64>,
     pub wrapper_mirror: bool,
@@ -49,7 +50,8 @@ pub struct PendingTraceCommand {
 pub struct TraceNormalizerState {
     pub pending: HashMap<String, PendingTraceCommand>,
     pub deferred_exits: HashMap<String, DeferredRootExit>,
-    pub completed_roots: std::collections::HashSet<String>,
+    pub completed_roots: HashSet<String>,
+    pub completed_root_order: VecDeque<String>,
     pub sid_to_worktree: HashMap<String, PathBuf>,
     pub sid_to_family: HashMap<String, FamilyKey>,
     pub prestart_root_cmd_names: HashMap<String, String>,
@@ -68,6 +70,7 @@ pub struct DeferredRootExit {
     pub reflog_end_cut: Option<ReflogCut>,
     pub captured_ref_changes: Vec<RefChange>,
     pub merge_squash_staged_file_blobs: Option<HashMap<String, String>>,
+    pub carryover_snapshot_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -82,6 +85,8 @@ pub struct TraceNormalizer<B: GitBackend> {
     state: TraceNormalizerState,
 }
 
+const COMPLETED_ROOT_RETENTION_LIMIT: usize = 65_536;
+
 impl<B: GitBackend> TraceNormalizer<B> {
     pub fn new(backend: Arc<B>) -> Self {
         Self {
@@ -92,6 +97,28 @@ impl<B: GitBackend> TraceNormalizer<B> {
 
     pub fn state(&self) -> &TraceNormalizerState {
         &self.state
+    }
+
+    fn is_completed_root(&self, root_sid: &str) -> bool {
+        self.state.completed_roots.contains(root_sid)
+    }
+
+    fn mark_completed_root_with_limit(&mut self, root_sid: &str, limit: usize) {
+        if self.state.completed_roots.insert(root_sid.to_string()) {
+            self.state
+                .completed_root_order
+                .push_back(root_sid.to_string());
+        }
+        while self.state.completed_roots.len() > limit {
+            let Some(oldest) = self.state.completed_root_order.pop_front() else {
+                break;
+            };
+            self.state.completed_roots.remove(&oldest);
+        }
+    }
+
+    fn mark_completed_root(&mut self, root_sid: &str) {
+        self.mark_completed_root_with_limit(root_sid, COMPLETED_ROOT_RETENTION_LIMIT);
     }
 
     pub fn remove_pending_root(&mut self, root_sid: &str) -> Option<PendingTraceCommand> {
@@ -277,6 +304,18 @@ impl<B: GitBackend> TraceNormalizer<B> {
         }
     }
 
+    fn merge_pending_carryover_snapshot_id(
+        &mut self,
+        root_sid: &str,
+        carryover_snapshot_id: Option<String>,
+    ) {
+        if let Some(pending) = self.state.pending.get_mut(root_sid)
+            && let Some(carryover_snapshot_id) = carryover_snapshot_id
+        {
+            pending.carryover_snapshot_id = Some(carryover_snapshot_id);
+        }
+    }
+
     fn merge_pending_merge_squash_source_head(
         &mut self,
         root_sid: &str,
@@ -302,7 +341,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
             .and_then(Value::as_str)
             .ok_or_else(|| GitAiError::Generic("trace payload missing sid".to_string()))?;
         let root_sid = root_sid(sid).to_string();
-        if self.state.completed_roots.contains(&root_sid) {
+        if self.is_completed_root(&root_sid) {
             return Ok(None);
         }
         let ts = payload_timestamp_ns(payload)?;
@@ -323,6 +362,10 @@ impl<B: GitBackend> TraceNormalizer<B> {
         self.merge_pending_merge_squash_source_head(
             &root_sid,
             payload_string_field(payload, "git_ai_merge_squash_source_head"),
+        );
+        self.merge_pending_carryover_snapshot_id(
+            &root_sid,
+            payload_string_field(payload, "git_ai_carryover_snapshot_id"),
         );
 
         match event {
@@ -346,7 +389,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
         if sid != root_sid {
             return Ok(None);
         }
-        if self.state.completed_roots.contains(root_sid) {
+        if self.is_completed_root(root_sid) {
             return Ok(None);
         }
 
@@ -422,6 +465,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
             payload_string_field(payload, "git_ai_merge_squash_source_head");
         let merge_squash_staged_file_blobs =
             payload_string_map_field(payload, "git_ai_merge_squash_staged_file_blobs");
+        let carryover_snapshot_id = payload_string_field(payload, "git_ai_carryover_snapshot_id");
 
         let pending = PendingTraceCommand {
             root_sid: root_sid.to_string(),
@@ -443,6 +487,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
             stash_target_oid,
             stash_target_error,
             merge_squash_staged_file_blobs,
+            carryover_snapshot_id,
             worktree_head_start_offset,
             worktree_head_end_offset: None,
             wrapper_mirror,
@@ -491,6 +536,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
                 root_sid,
                 deferred.merge_squash_staged_file_blobs,
             );
+            self.merge_pending_carryover_snapshot_id(root_sid, deferred.carryover_snapshot_id);
             return self.finalize_root_exit(root_sid, deferred.exit_code, deferred.finished_at_ns);
         }
 
@@ -622,7 +668,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
             let _ = finished_at_ns;
             return Ok(None);
         }
-        if self.state.completed_roots.contains(root_sid) {
+        if self.is_completed_root(root_sid) {
             return Ok(None);
         }
 
@@ -639,6 +685,8 @@ impl<B: GitBackend> TraceNormalizer<B> {
             payload_string_field(payload, "git_ai_merge_squash_source_head");
         let payload_merge_squash_staged_file_blobs =
             payload_string_map_field(payload, "git_ai_merge_squash_staged_file_blobs");
+        let payload_carryover_snapshot_id =
+            payload_string_field(payload, "git_ai_carryover_snapshot_id");
 
         if !self.state.pending.contains_key(root_sid) {
             let (payload_reflog_start, payload_reflog_end) = payload_family_reflog_cuts(payload);
@@ -658,6 +706,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
                     reflog_end_cut: payload_reflog_end.clone(),
                     captured_ref_changes: payload_ref_changes.clone(),
                     merge_squash_staged_file_blobs: payload_merge_squash_staged_file_blobs.clone(),
+                    carryover_snapshot_id: payload_carryover_snapshot_id.clone(),
                 });
             deferred.exit_code = exit_code;
             if deferred.pre_repo.is_none() {
@@ -697,6 +746,9 @@ impl<B: GitBackend> TraceNormalizer<B> {
             if let Some(staged_file_blobs) = payload_merge_squash_staged_file_blobs {
                 deferred.merge_squash_staged_file_blobs = Some(staged_file_blobs);
             }
+            if payload_carryover_snapshot_id.is_some() {
+                deferred.carryover_snapshot_id = payload_carryover_snapshot_id;
+            }
             for change in payload_ref_changes {
                 let duplicate = deferred.captured_ref_changes.iter().any(|existing| {
                     existing.reference == change.reference
@@ -727,6 +779,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
         }
         self.merge_pending_worktree_head_offsets(root_sid, payload_head_start, payload_head_end);
         self.merge_pending_ref_changes(root_sid, payload_ref_changes);
+        self.merge_pending_carryover_snapshot_id(root_sid, payload_carryover_snapshot_id);
         trace_debug_lifecycle(&format!(
             "trace normalizer exit sid={} code={} pending_before_finalize={}",
             root_sid,
@@ -940,22 +993,20 @@ impl<B: GitBackend> TraceNormalizer<B> {
             inflight_rebase_original_head,
             merge_squash_source_head,
             merge_squash_staged_file_blobs: pending.merge_squash_staged_file_blobs,
+            carryover_snapshot_id: pending.carryover_snapshot_id,
             stash_target_oid: pending.stash_target_oid,
             ref_changes,
             confidence,
             wrapper_mirror: pending.wrapper_mirror,
         };
 
-        if self.state.completed_roots.len() > 8_192 {
-            self.state.completed_roots.clear();
-        }
         trace_debug_lifecycle(&format!(
             "trace normalizer finalized sid={} primary={:?} pending_after_finalize={}",
             root_sid,
             normalized.primary_command,
             self.state.pending.len()
         ));
-        self.state.completed_roots.insert(root_sid.to_string());
+        self.mark_completed_root(root_sid);
         let _ = self.state.sid_to_worktree.remove(root_sid);
         let _ = self.state.sid_to_family.remove(root_sid);
         let _ = self.state.prestart_root_cmd_names.remove(root_sid);
@@ -1707,6 +1758,35 @@ mod tests {
         assert_eq!(cmd.root_sid, "s1-atexit");
         assert_eq!(cmd.primary_command.as_deref(), Some("status"));
         assert_eq!(cmd.exit_code, 0);
+    }
+
+    #[test]
+    fn completed_root_retention_does_not_clear_all_recent_roots() {
+        let backend = Arc::new(MockBackend::default());
+        let mut normalizer = TraceNormalizer::new(backend);
+
+        normalizer.mark_completed_root_with_limit("root-a", 3);
+        normalizer.mark_completed_root_with_limit("root-b", 3);
+        normalizer.mark_completed_root_with_limit("root-c", 3);
+
+        let late_payload = serde_json::json!({
+            "event":"atexit",
+            "sid":"root-a",
+            "ts":10,
+            "code":0
+        });
+        assert!(
+            normalizer.ingest_payload(&late_payload).unwrap().is_none(),
+            "late payloads for recently completed roots should stay ignored"
+        );
+
+        normalizer.mark_completed_root_with_limit("root-d", 3);
+        assert_eq!(normalizer.state.completed_roots.len(), 3);
+        assert!(normalizer.state.completed_roots.contains("root-b"));
+        assert!(normalizer.state.completed_roots.contains("root-c"));
+        assert!(normalizer.state.completed_roots.contains("root-d"));
+        assert!(!normalizer.state.completed_roots.contains("root-a"));
+        assert_eq!(normalizer.state.completed_root_order.len(), 3);
     }
 
     #[test]

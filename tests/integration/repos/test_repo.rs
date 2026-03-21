@@ -467,9 +467,17 @@ impl DaemonSyncRegistry {
 #[derive(Debug, Clone, serde::Deserialize)]
 struct DaemonTestCompletionLogEntry {
     #[serde(default)]
+    seq: u64,
+    #[serde(default)]
     sync_tracked: bool,
     status: String,
     error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ObservedDaemonCompletion {
+    count: u64,
+    last_seq: u64,
 }
 
 fn daemon_sync_registry() -> &'static Mutex<DaemonSyncRegistry> {
@@ -534,7 +542,7 @@ fn git_ai_primary_command<'a>(args: &'a [&'a str]) -> Option<&'a str> {
 fn git_ai_command_requires_daemon_sync(args: &[&str]) -> bool {
     matches!(
         git_ai_primary_command(args),
-        Some("blame" | "diff" | "prompts" | "stats")
+        Some("blame" | "continue" | "diff" | "prompts" | "search" | "stats")
     )
 }
 
@@ -1262,9 +1270,6 @@ impl TestRepo {
     }
 
     pub(crate) fn daemon_completion_count(&self) -> u64 {
-        if !self.git_mode.uses_daemon() {
-            return 0;
-        }
         let family_key = self.daemon_family_key();
         self.daemon_completion_entries_for_family(&family_key)
             .into_iter()
@@ -1273,9 +1278,6 @@ impl TestRepo {
     }
 
     pub(crate) fn daemon_total_completion_count(&self) -> u64 {
-        if !self.git_mode.uses_daemon() {
-            return 0;
-        }
         let family_key = self.daemon_family_key();
         self.daemon_completion_entries_for_family(&family_key).len() as u64
     }
@@ -1311,7 +1313,7 @@ impl TestRepo {
         family_key: &str,
         baseline_count: u64,
         expected_count: u64,
-    ) -> u64 {
+    ) -> ObservedDaemonCompletion {
         for _ in 0..800 {
             let entries = self.daemon_completion_entries_for_family(family_key);
             let tracked_entries = entries
@@ -1334,7 +1336,14 @@ impl TestRepo {
             }
             let observed_count = tracked_entries.len() as u64;
             if observed_count >= expected_count {
-                return observed_count;
+                let last_seq = tracked_entries
+                    .get(expected_count.saturating_sub(1) as usize)
+                    .map(|entry| entry.seq)
+                    .unwrap_or(0);
+                return ObservedDaemonCompletion {
+                    count: observed_count,
+                    last_seq,
+                };
             }
             thread::sleep(Duration::from_millis(10));
         }
@@ -1345,11 +1354,66 @@ impl TestRepo {
         );
     }
 
+    fn wait_for_daemon_family_settled(&self, repo_path: &Path) {
+        if !self.git_mode.uses_daemon() {
+            return;
+        }
+
+        let repo_working_dir = repo_path
+            .canonicalize()
+            .unwrap_or_else(|_| repo_path.to_path_buf())
+            .to_string_lossy()
+            .to_string();
+        let response = send_control_request(
+            &self.daemon_control_socket_path(),
+            &ControlRequest::BarrierSettledFamily { repo_working_dir },
+        )
+        .unwrap_or_else(|error| panic!("failed waiting for daemon family to settle: {}", error));
+
+        if !response.ok {
+            panic!(
+                "daemon settled-family barrier failed: {}",
+                response
+                    .error
+                    .unwrap_or_else(|| "unknown daemon error".to_string())
+            );
+        }
+    }
+
+    fn wait_for_daemon_applied_through_seq(&self, repo_path: &Path, seq: u64) {
+        if !self.git_mode.uses_daemon() || seq == 0 {
+            return;
+        }
+
+        let repo_working_dir = repo_path
+            .canonicalize()
+            .unwrap_or_else(|_| repo_path.to_path_buf())
+            .to_string_lossy()
+            .to_string();
+        let response = send_control_request(
+            &self.daemon_control_socket_path(),
+            &ControlRequest::BarrierAppliedThroughSeq {
+                repo_working_dir,
+                seq,
+            },
+        )
+        .unwrap_or_else(|error| panic!("failed waiting for daemon seq barrier: {}", error));
+
+        if !response.ok {
+            panic!(
+                "daemon applied-through-seq barrier failed: {}",
+                response
+                    .error
+                    .unwrap_or_else(|| "unknown daemon error".to_string())
+            );
+        }
+    }
+
     pub(crate) fn wait_for_daemon_total_completion_count(
         &self,
         baseline_count: u64,
         expected_count: u64,
-    ) -> u64 {
+    ) -> ObservedDaemonCompletion {
         let family_key = self.daemon_family_key();
         for _ in 0..800 {
             let entries = self.daemon_completion_entries_for_family(&family_key);
@@ -1369,7 +1433,14 @@ impl TestRepo {
             }
             let observed_count = entries.len() as u64;
             if observed_count >= expected_count {
-                return observed_count;
+                let last_seq = entries
+                    .get(expected_count.saturating_sub(1) as usize)
+                    .map(|entry| entry.seq)
+                    .unwrap_or(0);
+                return ObservedDaemonCompletion {
+                    count: observed_count,
+                    last_seq,
+                };
             }
             thread::sleep(Duration::from_millis(10));
         }
@@ -1535,15 +1606,17 @@ impl TestRepo {
         };
 
         if let Some(expected_completion_count) = expected_completion_count {
-            let observed_completion_count = self.wait_for_daemon_completion_count(
+            let observed_completion = self.wait_for_daemon_completion_count(
                 &family_key,
                 baseline_count,
                 expected_completion_count,
             );
+            self.wait_for_daemon_applied_through_seq(&self.path, observed_completion.last_seq);
+            self.wait_for_daemon_family_settled(&self.path);
             let mut registry = daemon_sync_registry()
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            registry.mark_synced_through(&family_key, observed_completion_count);
+            registry.mark_synced_through(&family_key, observed_completion.count);
         }
     }
 
@@ -1567,16 +1640,18 @@ impl TestRepo {
             return;
         };
 
-        let observed_completion_count = self.wait_for_daemon_completion_count(
+        let observed_completion = self.wait_for_daemon_completion_count(
             &family_key,
             baseline_count,
             expected_completion_count,
         );
+        self.wait_for_daemon_applied_through_seq(&self.path, observed_completion.last_seq);
+        self.wait_for_daemon_family_settled(&self.path);
 
         let mut registry = daemon_sync_registry()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        registry.mark_synced_through(&family_key, observed_completion_count);
+        registry.mark_synced_through(&family_key, observed_completion.count);
     }
 
     pub(crate) fn sync_daemon_external_completion_delta(
@@ -1589,8 +1664,37 @@ impl TestRepo {
         }
 
         let family_key = self.daemon_family_key();
-        let observed_completion_count = if expected_delta == 0 {
-            baseline_count
+        if expected_delta != 0 {
+            let observed_completion = self.wait_for_daemon_total_completion_count(
+                baseline_count,
+                baseline_count.saturating_add(expected_delta),
+            );
+            self.wait_for_daemon_applied_through_seq(&self.path, observed_completion.last_seq);
+        }
+        self.wait_for_daemon_family_settled(&self.path);
+        let observed_tracked_completion_count = self.daemon_completion_count();
+
+        let mut registry = daemon_sync_registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        registry.mark_synced_through(&family_key, observed_tracked_completion_count);
+    }
+
+    pub(crate) fn sync_daemon_external_tracked_completion_delta(
+        &self,
+        baseline_count: u64,
+        expected_delta: u64,
+    ) {
+        if !self.git_mode.uses_daemon() {
+            return;
+        }
+
+        let family_key = self.daemon_family_key();
+        let observed_completion = if expected_delta == 0 {
+            ObservedDaemonCompletion {
+                count: baseline_count,
+                last_seq: 0,
+            }
         } else {
             self.wait_for_daemon_completion_count(
                 &family_key,
@@ -1598,11 +1702,13 @@ impl TestRepo {
                 baseline_count.saturating_add(expected_delta),
             )
         };
+        self.wait_for_daemon_applied_through_seq(&self.path, observed_completion.last_seq);
+        self.wait_for_daemon_family_settled(&self.path);
 
         let mut registry = daemon_sync_registry()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        registry.mark_synced_through(&family_key, observed_completion_count);
+        registry.mark_synced_through(&family_key, observed_completion.count);
     }
 
     fn sync_daemon_clone_target(&self, target_repo_path: &Path) {
@@ -1617,15 +1723,17 @@ impl TestRepo {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             registry.last_synced_completion_count(&family_key)
         };
-        let observed_completion_count = self.wait_for_daemon_completion_count(
+        let observed_completion = self.wait_for_daemon_completion_count(
             &family_key,
             baseline_count,
             baseline_count.saturating_add(1),
         );
+        self.wait_for_daemon_applied_through_seq(target_repo_path, observed_completion.last_seq);
+        self.wait_for_daemon_family_settled(target_repo_path);
         let mut registry = daemon_sync_registry()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        registry.mark_synced_through(&family_key, observed_completion_count);
+        registry.mark_synced_through(&family_key, observed_completion.count);
     }
 
     fn setup_git_hooks_mode(&self) {

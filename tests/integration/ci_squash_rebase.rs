@@ -1,12 +1,16 @@
 use crate::repos::test_file::ExpectedLineExt;
-use crate::repos::test_repo::TestRepo;
+use crate::repos::test_repo::{GitTestMode, TestRepo};
 use git_ai::git::refs::get_reference_as_authorship_log_v3;
 use git_ai::git::repository as GitAiRepository;
+
+fn direct_test_repo() -> TestRepo {
+    TestRepo::new_with_mode(GitTestMode::Wrapper)
+}
 
 /// Test basic squash merge via CI - AI code from feature branch squashed into main
 #[test]
 fn test_ci_squash_merge_basic() {
-    let repo = TestRepo::new();
+    let repo = direct_test_repo();
     let mut file = repo.filename("feature.js");
 
     // Create initial commit on main (rename default branch to main)
@@ -75,7 +79,7 @@ fn test_ci_squash_merge_basic() {
 /// Test squash merge with multiple files containing AI code
 #[test]
 fn test_ci_squash_merge_multiple_files() {
-    let repo = TestRepo::new();
+    let repo = direct_test_repo();
 
     // Create initial commit on main with two files
     let mut file1 = repo.filename("file1.js");
@@ -155,7 +159,7 @@ fn test_ci_squash_merge_multiple_files() {
 /// Test squash merge with mixed AI and human content
 #[test]
 fn test_ci_squash_merge_mixed_content() {
-    let repo = TestRepo::new();
+    let repo = direct_test_repo();
     let mut file = repo.filename("mixed.js");
 
     // Create initial commit
@@ -233,7 +237,7 @@ fn test_ci_squash_merge_mixed_content() {
 /// Test squash merge where source commits have notes but no AI attestations.
 #[test]
 fn test_ci_squash_merge_empty_notes_preserved() {
-    let repo = TestRepo::new();
+    let repo = direct_test_repo();
     let mut file = repo.filename("feature.txt");
 
     file.set_contents(crate::lines!["base"]);
@@ -276,7 +280,7 @@ fn test_ci_squash_merge_empty_notes_preserved() {
 /// Test squash merge where source commits have no notes at all.
 #[test]
 fn test_ci_squash_merge_no_notes_no_authorship_created() {
-    let repo = TestRepo::new();
+    let repo = direct_test_repo();
 
     repo.git_og(&["config", "user.name", "Test User"]).unwrap();
     repo.git_og(&["config", "user.email", "test@example.com"])
@@ -332,7 +336,7 @@ fn test_ci_squash_merge_no_notes_no_authorship_created() {
 /// Test squash merge where conflict resolution adds content
 #[test]
 fn test_ci_squash_merge_with_manual_changes() {
-    let repo = TestRepo::new();
+    let repo = direct_test_repo();
     let mut file = repo.filename("config.js");
 
     // Create initial commit
@@ -404,7 +408,7 @@ fn test_ci_squash_merge_with_manual_changes() {
 /// Test rebase-like merge (multiple commits squashed) with AI content
 #[test]
 fn test_ci_rebase_merge_multiple_commits() {
-    let repo = TestRepo::new();
+    let repo = direct_test_repo();
     let mut file = repo.filename("app.js");
 
     // Create initial commit

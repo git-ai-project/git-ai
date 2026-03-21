@@ -2080,36 +2080,18 @@ impl Repository {
 
     /// Get blob OIDs for all stage-0 entries currently present in the index.
     pub fn get_all_staged_file_blob_oids(&self) -> Result<HashMap<String, String>, GitAiError> {
-        let mut args = self.global_args_for_exec();
-        args.push("ls-files".to_string());
-        args.push("-z".to_string());
-        args.push("--stage".to_string());
-
-        let output = exec_git(&args)?;
         let mut staged_blobs = HashMap::new();
+        let repo = git2::Repository::open(self.path())?;
+        let index = repo.index()?;
 
-        for record in output.stdout.split(|byte| *byte == 0u8) {
-            if record.is_empty() {
+        for entry in index.iter() {
+            let stage = (entry.flags & 0x3000) >> 12;
+            if stage != 0 {
                 continue;
             }
-
-            let Some(tab_idx) = record.iter().position(|byte| *byte == b'\t') else {
-                continue;
-            };
-            let metadata = String::from_utf8_lossy(&record[..tab_idx]);
-            let file_path = String::from_utf8_lossy(&record[tab_idx + 1..]).to_string();
-
-            let mut parts = metadata.split_whitespace();
-            let _mode = parts.next();
-            let Some(blob_oid) = parts.next() else {
-                continue;
-            };
-            let Some(stage) = parts.next() else {
-                continue;
-            };
-
-            if stage == "0" && !blob_oid.trim().is_empty() {
-                staged_blobs.insert(file_path, blob_oid.to_string());
+            let file_path = String::from_utf8_lossy(&entry.path).to_string();
+            if !file_path.trim().is_empty() {
+                staged_blobs.insert(file_path, entry.id.to_string());
             }
         }
 

@@ -136,6 +136,7 @@ fn run_status(json: bool) -> Result<(), GitAiError> {
         &head_sha,
         &head_sha,
         Some(&pathspecs),
+        None,
     )?;
 
     // Get actual git diff stats between HEAD and working directory (like post_commit does)

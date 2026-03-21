@@ -63,6 +63,7 @@ pub struct NormalizedCommand {
     pub inflight_rebase_original_head: Option<String>,
     pub merge_squash_source_head: Option<String>,
     pub merge_squash_staged_file_blobs: Option<HashMap<String, String>>,
+    pub carryover_snapshot_id: Option<String>,
     pub stash_target_oid: Option<String>,
     pub ref_changes: Vec<RefChange>,
     pub confidence: Confidence,

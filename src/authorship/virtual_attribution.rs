@@ -451,6 +451,266 @@ impl VirtualAttributions {
         })
     }
 
+    /// Create VirtualAttributions from working-log state using an exact captured snapshot
+    /// instead of the live worktree.
+    pub fn from_working_log_snapshot(
+        repo: Repository,
+        base_commit: String,
+        human_author: Option<String>,
+        final_state_snapshot: &HashMap<String, String>,
+    ) -> Result<Self, GitAiError> {
+        let working_log = repo.storage.working_log_for_base_commit(&base_commit);
+        let initial_attributions = working_log.read_initial_attributions();
+        let checkpoints = working_log.read_all_checkpoints().unwrap_or_default();
+
+        let mut attributions: HashMap<String, (Vec<Attribution>, Vec<LineAttribution>)> =
+            HashMap::new();
+        let mut prompts = BTreeMap::new();
+        let mut file_contents: HashMap<String, String> = HashMap::new();
+
+        let mut session_additions: HashMap<String, u32> = HashMap::new();
+        let mut session_deletions: HashMap<String, u32> = HashMap::new();
+
+        for (prompt_id, prompt_record) in &initial_attributions.prompts {
+            prompts
+                .entry(prompt_id.clone())
+                .or_insert_with(BTreeMap::new)
+                .insert(String::new(), prompt_record.clone());
+        }
+
+        for (file_path, line_attrs) in &initial_attributions.files {
+            let file_content = final_state_snapshot
+                .get(file_path)
+                .cloned()
+                .or_else(|| {
+                    working_log.stored_initial_file_content_from(&initial_attributions, file_path)
+                })
+                .unwrap_or_default();
+            file_contents.insert(file_path.clone(), file_content.clone());
+
+            let char_attrs = line_attributions_to_attributions(line_attrs, &file_content, 0);
+            attributions.insert(file_path.clone(), (char_attrs, line_attrs.clone()));
+        }
+
+        for checkpoint in &checkpoints {
+            if let Some(agent_id) = &checkpoint.agent_id {
+                let author_id =
+                    crate::authorship::authorship_log_serialization::generate_short_hash(
+                        &agent_id.id,
+                        &agent_id.tool,
+                    );
+                let prompt_record = crate::authorship::authorship_log::PromptRecord {
+                    agent_id: agent_id.clone(),
+                    human_author: human_author.clone(),
+                    messages: checkpoint
+                        .transcript
+                        .as_ref()
+                        .map(|t| t.messages().to_vec())
+                        .unwrap_or_default(),
+                    total_additions: 0,
+                    total_deletions: 0,
+                    accepted_lines: 0,
+                    overriden_lines: 0,
+                    messages_url: None,
+                    custom_attributes: None,
+                };
+
+                prompts
+                    .entry(author_id.clone())
+                    .or_insert_with(BTreeMap::new)
+                    .insert(String::new(), prompt_record);
+
+                *session_additions.entry(author_id.clone()).or_insert(0) +=
+                    checkpoint.line_stats.additions;
+                *session_deletions.entry(author_id.clone()).or_insert(0) +=
+                    checkpoint.line_stats.deletions;
+            }
+
+            for entry in &checkpoint.entries {
+                if entry.line_attributions.is_empty() && entry.attributions.is_empty() {
+                    continue;
+                }
+
+                let file_content = final_state_snapshot
+                    .get(&entry.file)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        working_log
+                            .get_file_version(&entry.blob_sha)
+                            .unwrap_or_default()
+                    });
+                file_contents.insert(entry.file.clone(), file_content.clone());
+
+                let line_attrs = if entry.line_attributions.is_empty() {
+                    crate::authorship::attribution_tracker::attributions_to_line_attributions(
+                        &entry.attributions,
+                        &file_content,
+                    )
+                } else {
+                    entry.line_attributions.clone()
+                };
+
+                if line_attrs.is_empty() {
+                    continue;
+                }
+
+                let char_attrs = line_attributions_to_attributions(&line_attrs, &file_content, 0);
+                attributions.insert(entry.file.clone(), (char_attrs, line_attrs));
+            }
+        }
+
+        Self::calculate_and_update_prompt_metrics(
+            &mut prompts,
+            &attributions,
+            &session_additions,
+            &session_deletions,
+        );
+
+        Ok(VirtualAttributions {
+            repo,
+            base_commit,
+            attributions,
+            file_contents,
+            prompts,
+            ts: 0,
+            blame_start_commit: None,
+        })
+    }
+
+    /// Create VirtualAttributions from only the persisted working-log state.
+    ///
+    /// Unlike `from_just_working_log`, this never reads the live worktree. It is intended for
+    /// daemon-side async reconstruction where the command's final state has already been captured.
+    pub fn from_persisted_working_log(
+        repo: Repository,
+        base_commit: String,
+        human_author: Option<String>,
+    ) -> Result<Self, GitAiError> {
+        let working_log = repo.storage.working_log_for_base_commit(&base_commit);
+        let initial_attributions = working_log.read_initial_attributions();
+        let checkpoints = working_log.read_all_checkpoints().unwrap_or_default();
+
+        let mut attributions: HashMap<String, (Vec<Attribution>, Vec<LineAttribution>)> =
+            HashMap::new();
+        let mut prompts = BTreeMap::new();
+        let mut file_contents: HashMap<String, String> = HashMap::new();
+
+        let mut session_additions: HashMap<String, u32> = HashMap::new();
+        let mut session_deletions: HashMap<String, u32> = HashMap::new();
+
+        for (prompt_id, prompt_record) in &initial_attributions.prompts {
+            prompts
+                .entry(prompt_id.clone())
+                .or_insert_with(BTreeMap::new)
+                .insert(String::new(), prompt_record.clone());
+        }
+
+        for (file_path, line_attrs) in &initial_attributions.files {
+            let file_content = working_log
+                .stored_initial_file_content_from(&initial_attributions, file_path)
+                .ok_or_else(|| {
+                    GitAiError::Generic(format!(
+                        "INITIAL missing persisted file snapshot for {}",
+                        file_path
+                    ))
+                })?;
+            file_contents.insert(file_path.clone(), file_content.clone());
+            let char_attrs = line_attributions_to_attributions(line_attrs, &file_content, 0);
+            attributions.insert(file_path.clone(), (char_attrs, line_attrs.clone()));
+        }
+
+        for checkpoint in &checkpoints {
+            if let Some(agent_id) = &checkpoint.agent_id {
+                let author_id =
+                    crate::authorship::authorship_log_serialization::generate_short_hash(
+                        &agent_id.id,
+                        &agent_id.tool,
+                    );
+                let prompt_record = crate::authorship::authorship_log::PromptRecord {
+                    agent_id: agent_id.clone(),
+                    human_author: human_author.clone(),
+                    messages: checkpoint
+                        .transcript
+                        .as_ref()
+                        .map(|t| t.messages().to_vec())
+                        .unwrap_or_default(),
+                    total_additions: 0,
+                    total_deletions: 0,
+                    accepted_lines: 0,
+                    overriden_lines: 0,
+                    messages_url: None,
+                    custom_attributes: None,
+                };
+
+                prompts
+                    .entry(author_id.clone())
+                    .or_insert_with(BTreeMap::new)
+                    .insert(String::new(), prompt_record);
+
+                *session_additions.entry(author_id.clone()).or_insert(0) +=
+                    checkpoint.line_stats.additions;
+                *session_deletions.entry(author_id.clone()).or_insert(0) +=
+                    checkpoint.line_stats.deletions;
+            }
+
+            for entry in &checkpoint.entries {
+                if entry.line_attributions.is_empty() && entry.attributions.is_empty() {
+                    continue;
+                }
+
+                let file_content = working_log.get_file_version(&entry.blob_sha)?;
+                file_contents.insert(entry.file.clone(), file_content.clone());
+
+                let (char_attrs, line_attrs) = if !entry.attributions.is_empty() {
+                    let char_attrs = if checkpoint.kind == CheckpointKind::Human {
+                        entry.attributions.clone()
+                    } else {
+                        entry
+                            .attributions
+                            .iter()
+                            .filter(|attr| attr.author_id != CheckpointKind::Human.to_str())
+                            .cloned()
+                            .collect()
+                    };
+                    let line_attrs =
+                        crate::authorship::attribution_tracker::attributions_to_line_attributions(
+                            &char_attrs,
+                            &file_content,
+                        );
+                    (char_attrs, line_attrs)
+                } else {
+                    let line_attrs = entry.line_attributions.clone();
+                    let char_attrs =
+                        line_attributions_to_attributions(&line_attrs, &file_content, 0);
+                    (char_attrs, line_attrs)
+                };
+
+                if line_attrs.is_empty() {
+                    continue;
+                }
+
+                attributions.insert(entry.file.clone(), (char_attrs, line_attrs));
+            }
+        }
+
+        Self::calculate_and_update_prompt_metrics(
+            &mut prompts,
+            &attributions,
+            &session_additions,
+            &session_deletions,
+        );
+
+        Ok(VirtualAttributions {
+            repo,
+            base_commit,
+            attributions,
+            file_contents,
+            prompts,
+            ts: 0,
+            blame_start_commit: None,
+        })
+    }
+
     /// Create VirtualAttributions from working log checkpoints for a specific base commit
     ///
     /// This function:
@@ -496,6 +756,46 @@ impl VirtualAttributions {
         let merged_va = merge_attributions_favoring_first(checkpoint_va, blame_va, final_state)?;
 
         Ok(merged_va)
+    }
+
+    /// Snapshot-backed daemon variant of `from_working_log_for_commit`.
+    ///
+    /// This uses an exact captured post-command snapshot instead of the live worktree so async
+    /// replay stays correct even if the user keeps editing after the git command exits.
+    pub async fn from_working_log_for_commit_snapshot(
+        repo: Repository,
+        base_commit: String,
+        pathspecs: &[String],
+        human_author: Option<String>,
+        blame_start_commit: Option<String>,
+        final_state_snapshot: &HashMap<String, String>,
+    ) -> Result<Self, GitAiError> {
+        let blame_va = Self::new_for_base_commit(
+            repo.clone(),
+            base_commit.clone(),
+            pathspecs,
+            blame_start_commit,
+        )
+        .await?;
+
+        let checkpoint_va = Self::from_working_log_snapshot(
+            repo.clone(),
+            base_commit.clone(),
+            human_author,
+            final_state_snapshot,
+        )?;
+
+        if checkpoint_va.attributions.is_empty() {
+            return Ok(blame_va);
+        }
+
+        let mut final_state = checkpoint_va.file_contents.clone();
+        for (file, content) in &blame_va.file_contents {
+            final_state
+                .entry(file.clone())
+                .or_insert_with(|| content.clone());
+        }
+        merge_attributions_favoring_first(checkpoint_va, blame_va, final_state)
     }
 
     /// Create VirtualAttributions from raw components (used for transformations)
@@ -730,6 +1030,107 @@ fn collect_unstaged_hunks(
     Ok((unstaged_hunks, pure_insertion_hunks))
 }
 
+#[allow(clippy::type_complexity)]
+fn collect_unstaged_hunks_from_snapshot(
+    repo: &Repository,
+    commit_sha: &str,
+    pathspecs: Option<&HashSet<String>>,
+    final_state_snapshot: &HashMap<String, String>,
+) -> Result<
+    (
+        HashMap<String, Vec<LineRange>>,
+        HashMap<String, Vec<LineRange>>,
+    ),
+    GitAiError,
+> {
+    let mut unstaged_hunks: HashMap<String, Vec<LineRange>> = HashMap::new();
+    let mut pure_insertion_hunks: HashMap<String, Vec<LineRange>> = HashMap::new();
+
+    let file_paths: HashSet<String> = match pathspecs {
+        Some(paths) => paths.iter().cloned().collect(),
+        None => final_state_snapshot.keys().cloned().collect(),
+    };
+
+    for file_path in file_paths {
+        let committed_content = get_file_content_at_commit(repo, commit_sha, &file_path)?;
+        let final_content = final_state_snapshot
+            .get(&file_path)
+            .cloned()
+            .unwrap_or_default();
+
+        if committed_content == final_content {
+            continue;
+        }
+
+        let committed_lines = split_lines_preserving_terminators(&committed_content);
+        let final_lines = split_lines_preserving_terminators(&final_content);
+        let diff_ops = crate::authorship::imara_diff_utils::capture_diff_slices(
+            &committed_lines,
+            &final_lines,
+        );
+
+        let mut all_added_lines = Vec::new();
+        let mut pure_insertion_lines = Vec::new();
+
+        for op in diff_ops {
+            match op {
+                crate::authorship::imara_diff_utils::DiffOp::Insert {
+                    new_index, new_len, ..
+                } => {
+                    let start = new_index as u32 + 1;
+                    let end = start + new_len as u32;
+                    for line in start..end {
+                        all_added_lines.push(line);
+                        pure_insertion_lines.push(line);
+                    }
+                }
+                crate::authorship::imara_diff_utils::DiffOp::Replace {
+                    new_index, new_len, ..
+                } => {
+                    let start = new_index as u32 + 1;
+                    let end = start + new_len as u32;
+                    for line in start..end {
+                        all_added_lines.push(line);
+                    }
+                }
+                crate::authorship::imara_diff_utils::DiffOp::Equal { .. }
+                | crate::authorship::imara_diff_utils::DiffOp::Delete { .. } => {}
+            }
+        }
+
+        if !all_added_lines.is_empty() {
+            unstaged_hunks.insert(
+                file_path.clone(),
+                LineRange::compress_lines(&all_added_lines),
+            );
+        }
+        if !pure_insertion_lines.is_empty() {
+            pure_insertion_hunks
+                .insert(file_path, LineRange::compress_lines(&pure_insertion_lines));
+        }
+    }
+
+    Ok((unstaged_hunks, pure_insertion_hunks))
+}
+
+fn split_lines_preserving_terminators(s: &str) -> Vec<&str> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+
+    for (idx, ch) in s.char_indices() {
+        if ch == '\n' {
+            lines.push(&s[start..idx + 1]);
+            start = idx + 1;
+        }
+    }
+
+    if start < s.len() {
+        lines.push(&s[start..]);
+    }
+
+    lines
+}
+
 impl VirtualAttributions {
     /// Split VirtualAttributions into committed and uncommitted buckets
     ///
@@ -742,6 +1143,7 @@ impl VirtualAttributions {
         parent_sha: &str,
         commit_sha: &str,
         pathspecs: Option<&HashSet<String>>,
+        final_state_snapshot: Option<&HashMap<String, String>>,
     ) -> Result<
         (
             crate::authorship::authorship_log_serialization::AuthorshipLog,
@@ -774,7 +1176,11 @@ impl VirtualAttributions {
         // Get committed hunks (in commit coordinates) and unstaged hunks (in working directory coordinates)
         let committed_hunks = collect_committed_hunks(repo, parent_sha, commit_sha, pathspecs)?;
         let (mut unstaged_hunks, pure_insertion_hunks) =
-            collect_unstaged_hunks(repo, commit_sha, pathspecs)?;
+            if let Some(snapshot) = final_state_snapshot {
+                collect_unstaged_hunks_from_snapshot(repo, commit_sha, pathspecs, snapshot)?
+            } else {
+                collect_unstaged_hunks(repo, commit_sha, pathspecs)?
+            };
 
         // IMPORTANT: If a line appears in both committed_hunks and unstaged_hunks, it means:
         // - The line was committed in this commit (in commit coordinates)
@@ -1161,6 +1567,42 @@ impl VirtualAttributions {
         Ok(authorship_log)
     }
 
+    /// Convert all current AI attributions into INITIAL without consulting the live worktree.
+    pub fn to_initial_working_log_only(&self) -> crate::git::repo_storage::InitialAttributions {
+        let mut initial_files: HashMap<String, Vec<LineAttribution>> = HashMap::new();
+        let mut referenced_prompts = HashSet::new();
+
+        for (file_path, (_, line_attrs)) in &self.attributions {
+            let filtered: Vec<LineAttribution> = line_attrs
+                .iter()
+                .filter(|attr| attr.author_id != CheckpointKind::Human.to_str())
+                .cloned()
+                .collect();
+            if filtered.is_empty() {
+                continue;
+            }
+            for attr in &filtered {
+                referenced_prompts.insert(attr.author_id.clone());
+            }
+            initial_files.insert(file_path.clone(), filtered);
+        }
+
+        let mut initial_prompts = HashMap::new();
+        for prompt_id in referenced_prompts {
+            if let Some(commits) = self.prompts.get(&prompt_id)
+                && let Some(prompt) = commits.values().next()
+            {
+                initial_prompts.insert(prompt_id, prompt.clone());
+            }
+        }
+
+        crate::git::repo_storage::InitialAttributions {
+            files: initial_files,
+            prompts: initial_prompts,
+            file_blobs: HashMap::new(),
+        }
+    }
+
     /// Merge prompts from multiple sources, picking the newest PromptRecord for each prompt_id.
     /// When a prompt_id appears multiple times, accumulate totals across all records (except overridden lines).
     ///
@@ -1530,7 +1972,7 @@ pub fn restore_stashed_va(
     // Since these are uncommitted changes, we use the same SHA for parent and commit
     // to get all attributions into the INITIAL file (not the authorship log)
     let (_authorship_log, initial_attributions) = match merged_va
-        .to_authorship_log_and_initial_working_log(repository, new_head, new_head, None)
+        .to_authorship_log_and_initial_working_log(repository, new_head, new_head, None, None)
     {
         Ok(result) => result,
         Err(e) => {

@@ -680,11 +680,22 @@ impl PersistedWorkingLog {
         initial: &InitialAttributions,
         file_path: &str,
     ) -> Option<String> {
-        if let Some(blob_sha) = initial.file_blobs.get(file_path) {
-            return self.get_file_version(blob_sha).ok();
+        if let Some(content) = self.stored_initial_file_content_from(initial, file_path) {
+            return Some(content);
         }
         if initial.files.contains_key(file_path) {
             return self.read_current_file_content(file_path).ok();
+        }
+        None
+    }
+
+    pub fn stored_initial_file_content_from(
+        &self,
+        initial: &InitialAttributions,
+        file_path: &str,
+    ) -> Option<String> {
+        if let Some(blob_sha) = initial.file_blobs.get(file_path) {
+            return self.get_file_version(blob_sha).ok();
         }
         None
     }
