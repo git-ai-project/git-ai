@@ -306,6 +306,7 @@ fn daemon_worktree_from_repo_path(repo_path: &Path) -> Option<PathBuf> {
 
 fn trace_payload_worktree_hint(payload: &Value) -> Option<PathBuf> {
     let normalize = |path: PathBuf| worktree_root_for_path(&path).unwrap_or(path);
+    let argv = trace_payload_argv(payload);
     let event = payload
         .get("event")
         .and_then(Value::as_str)
@@ -328,30 +329,95 @@ fn trace_payload_worktree_hint(payload: &Value) -> Option<PathBuf> {
     if let Some(path) = payload.get("worktree").and_then(Value::as_str) {
         return Some(normalize(PathBuf::from(path)));
     }
-    if let Some(cwd) = payload.get("cwd").and_then(Value::as_str) {
-        return Some(normalize(PathBuf::from(cwd)));
+    if let Some(cwd) = payload.get("cwd").and_then(Value::as_str)
+        && let Some(base_dir) = trace_payload_command_base_dir(payload, &argv, Path::new(cwd))
+    {
+        return Some(normalize(base_dir));
     }
-    let argv = payload
-        .get("argv")
-        .and_then(Value::as_array)
-        .map(|argv| {
-            argv.iter()
-                .filter_map(Value::as_str)
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let mut idx = 0usize;
+    while idx < argv.len() {
+        if argv[idx] == "-C" {
+            let path_arg = argv.get(idx + 1)?;
+            return Some(normalize(PathBuf::from(path_arg)));
+        }
+        if let Some(path_arg) = argv[idx].strip_prefix("-C")
+            && !path_arg.is_empty()
+        {
+            return Some(normalize(PathBuf::from(path_arg)));
+        }
+        idx += 1;
+    }
     if argv.is_empty() {
         return None;
     }
-    let mut i = 0;
-    while i + 1 < argv.len() {
-        if argv[i] == "-C" {
-            return Some(normalize(PathBuf::from(&argv[i + 1])));
-        }
-        i += 1;
-    }
     None
+}
+
+fn trace_payload_command_base_dir(
+    _payload: &Value,
+    argv: &[String],
+    cwd: &Path,
+) -> Option<PathBuf> {
+    let parsed = parse_git_cli_args(trace_invocation_args(argv));
+    let mut base = cwd.to_path_buf();
+    let mut idx = 0usize;
+
+    while idx < parsed.global_args.len() {
+        let token = &parsed.global_args[idx];
+
+        if token == "-C" {
+            let path_arg = parsed.global_args.get(idx + 1)?;
+            let next_base = PathBuf::from(path_arg);
+            base = if next_base.is_absolute() {
+                next_base
+            } else {
+                base.join(next_base)
+            };
+            idx += 2;
+            continue;
+        }
+
+        if let Some(path_arg) = token.strip_prefix("-C") {
+            let next_base = PathBuf::from(path_arg);
+            base = if next_base.is_absolute() {
+                next_base
+            } else {
+                base.join(next_base)
+            };
+            idx += 1;
+            continue;
+        }
+
+        idx += 1;
+    }
+
+    Some(base)
+}
+
+fn trace_payload_time_ns(payload: &Value) -> Option<u128> {
+    payload
+        .get("time")
+        .and_then(Value::as_str)
+        .and_then(rfc3339_to_unix_nanos)
+        .or_else(|| {
+            payload
+                .get("time_ns")
+                .and_then(Value::as_u64)
+                .map(u128::from)
+        })
+        .or_else(|| payload.get("ts").and_then(Value::as_u64).map(u128::from))
+        .or_else(|| {
+            payload
+                .get("t_abs")
+                .and_then(Value::as_f64)
+                .and_then(|seconds| {
+                    if seconds.is_sign_negative() {
+                        None
+                    } else {
+                        Some((seconds * 1_000_000_000_f64) as u128)
+                    }
+                })
+        })
 }
 
 fn daemon_git_dir_for_worktree(worktree: &Path) -> Option<PathBuf> {
@@ -2027,14 +2093,14 @@ fn apply_reset_working_log_side_effect(
                 reset.old_head_sha, reset.new_head_sha
             )));
         }
-        let _ = reconstruct_working_log_after_reset(
+        reconstruct_working_log_after_reset(
             repository,
             &reset.new_head_sha,
             &reset.old_head_sha,
             human_author,
             pathspecs,
             carryover_snapshot.cloned(),
-        );
+        )?;
     } else {
         let _ = repository
             .storage
@@ -2119,17 +2185,22 @@ enum FamilySequencerEntry {
     Canceled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct FamilySequencerOrder {
+    started_at_ns: u128,
+    ordinal: u64,
+}
+
 #[derive(Debug, Default)]
 struct FamilySequencerState {
-    next_order: u64,
-    front_order: u64,
-    entries: BTreeMap<u64, FamilySequencerEntry>,
+    next_ordinal: u64,
+    entries: BTreeMap<FamilySequencerOrder, FamilySequencerEntry>,
 }
 
 #[derive(Debug, Clone)]
 struct PendingRootSlot {
     family: String,
-    order: u64,
+    order: FamilySequencerOrder,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -2311,7 +2382,12 @@ impl ActorDaemonCoordinator {
         )
     }
 
-    fn append_pending_root_entry(&self, family: &str, root_sid: &str) -> Result<(), GitAiError> {
+    fn append_pending_root_entry(
+        &self,
+        family: &str,
+        root_sid: &str,
+        started_at_ns: u128,
+    ) -> Result<(), GitAiError> {
         {
             let pending_slots = self.pending_root_slots_by_root.lock().map_err(|_| {
                 GitAiError::Generic("pending root slots map lock poisoned".to_string())
@@ -2329,12 +2405,14 @@ impl ActorDaemonCoordinator {
                 sequencers
                     .entry(family.to_string())
                     .or_insert_with(|| FamilySequencerState {
-                        next_order: 1,
-                        front_order: 1,
+                        next_ordinal: 1,
                         entries: BTreeMap::new(),
                     });
-            let order = state.next_order;
-            state.next_order = state.next_order.saturating_add(1);
+            let order = FamilySequencerOrder {
+                started_at_ns,
+                ordinal: state.next_ordinal,
+            };
+            state.next_ordinal = state.next_ordinal.saturating_add(1);
             state
                 .entries
                 .insert(order, FamilySequencerEntry::PendingRoot);
@@ -2397,12 +2475,13 @@ impl ActorDaemonCoordinator {
         let Some(common_dir) = common_dir_for_worktree(&worktree) else {
             return Ok(());
         };
+        let started_at_ns = trace_payload_time_ns(payload).unwrap_or_else(now_unix_nanos);
         let family = common_dir
             .canonicalize()
             .unwrap_or(common_dir)
             .to_string_lossy()
             .to_string();
-        self.append_pending_root_entry(&family, root_sid)
+        self.append_pending_root_entry(&family, root_sid, started_at_ns)
     }
 
     async fn replace_pending_root_entry(
@@ -2423,13 +2502,12 @@ impl ActorDaemonCoordinator {
             let state = sequencers
                 .entry(family.clone())
                 .or_insert_with(|| FamilySequencerState {
-                    next_order: 1,
-                    front_order: 1,
+                    next_ordinal: 1,
                     entries: BTreeMap::new(),
                 });
             let Some(entry) = state.entries.get_mut(&slot.order) else {
                 return Err(GitAiError::Generic(format!(
-                    "missing pending root sequencer entry for sid={} family={} order={}",
+                    "missing pending root sequencer entry for sid={} family={} order={:?}",
                     root_sid, family, slot.order
                 )));
             };
@@ -2439,7 +2517,7 @@ impl ActorDaemonCoordinator {
                 }
                 _ => {
                     return Err(GitAiError::Generic(format!(
-                        "sequencer entry for sid={} family={} order={} was not pending",
+                        "sequencer entry for sid={} family={} order={:?} was not pending",
                         root_sid, family, slot.order
                     )));
                 }
@@ -3571,12 +3649,14 @@ impl ActorDaemonCoordinator {
                 sequencers
                     .entry(family.to_string())
                     .or_insert_with(|| FamilySequencerState {
-                        next_order: 1,
-                        front_order: 1,
+                        next_ordinal: 1,
                         entries: BTreeMap::new(),
                     });
-            let order = state.next_order;
-            state.next_order = state.next_order.saturating_add(1);
+            let order = FamilySequencerOrder {
+                started_at_ns: now_unix_nanos(),
+                ordinal: state.next_ordinal,
+            };
+            state.next_ordinal = state.next_ordinal.saturating_add(1);
             state.entries.insert(
                 order,
                 FamilySequencerEntry::Checkpoint {
@@ -3603,23 +3683,23 @@ impl ActorDaemonCoordinator {
             let state = map
                 .entry(family.to_string())
                 .or_insert_with(|| FamilySequencerState {
-                    next_order: 1,
-                    front_order: 1,
+                    next_ordinal: 1,
                     entries: BTreeMap::new(),
                 });
             loop {
-                let Some(entry) = state.entries.remove(&state.front_order) else {
+                let Some(first_entry) = state.entries.first_entry() else {
                     break;
                 };
+                if matches!(first_entry.get(), FamilySequencerEntry::PendingRoot) {
+                    break;
+                }
+                let (order, entry) = first_entry.remove_entry();
                 match entry {
                     FamilySequencerEntry::PendingRoot => {
-                        state.entries.insert(state.front_order, entry);
-                        break;
+                        unreachable!("pending root should not be removed from sequencer front");
                     }
                     other => {
-                        let order = state.front_order;
-                        state.front_order = state.front_order.saturating_add(1);
-                        ready.push((order, other));
+                        ready.push((order.ordinal, other));
                         progressed = true;
                     }
                 }
