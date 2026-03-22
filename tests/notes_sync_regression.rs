@@ -328,7 +328,7 @@ worktree_test_wrappers! {
 worktree_test_wrappers! {
     fn notes_sync_pull_fast_forward_syncs_only_selected_remote() {
         let (local, upstream) = TestRepo::new_with_remote();
-        let backup = repos::test_repo::TestRepo::new_bare_with_mode(GitTestMode::from_env());
+        let backup = repos::test_repo::TestRepo::new_bare_with_mode(TestRepo::git_mode());
         let default_branch = local.current_branch();
 
         fs::write(local.path().join("pull-base.txt"), "base\n")

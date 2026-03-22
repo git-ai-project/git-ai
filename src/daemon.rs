@@ -2221,7 +2221,6 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
     if base_commit.trim().is_empty() || target_commit.trim().is_empty() {
         return Ok(());
     }
-    seed_merge_squash_working_log_for_commit_replay(repo, &base_commit, author)?;
     let dirty_files = if let Some(snapshot) = carryover_snapshot {
         snapshot.clone()
     } else {
@@ -2238,32 +2237,6 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
     let changed_files = commit_replay_files_from_snapshot(&dirty_files);
     if changed_files.is_empty() {
         return Ok(());
-    }
-    if !working_log_has_tracked_state_for_base(repo, &base_commit)
-        && let Ok(worktree) = repo.workdir()
-    {
-        let _ = recover_reset_working_log_for_commit_replay(
-            repo,
-            &worktree,
-            &base_commit,
-            author,
-            Some(&dirty_files),
-            None,
-        )?;
-    }
-    if !working_log_has_tracked_state_for_base(repo, &base_commit) {
-        if preceding_merge_squash_for_pending_commit(repo, &base_commit)?.is_some() {
-            return Err(GitAiError::Generic(format!(
-                "commit replay missing merge --squash prerequisite working log for base {}",
-                base_commit
-            )));
-        }
-        if latest_reset_for_base_commit(repo, &base_commit)?.is_some() {
-            return Err(GitAiError::Generic(format!(
-                "commit replay missing reset prerequisite working log for base {}",
-                base_commit
-            )));
-        }
     }
     let working_log = repo.storage.working_log_for_base_commit(&base_commit);
     let (changed_files, dirty_files) =

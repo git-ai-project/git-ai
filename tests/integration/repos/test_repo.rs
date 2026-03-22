@@ -251,7 +251,7 @@ impl DaemonProcess {
             .arg(repo_path)
             .arg("-c")
             .arg(format!("core.hooksPath={}", null_hooks))
-            .args(["status", "--short"])
+            .args(["notes", "--ref=ai", "list"])
             .env(
                 "GIT_TRACE2_EVENT",
                 DaemonConfig::trace2_event_target_for_path(&self.trace_socket_path),
@@ -260,11 +260,14 @@ impl DaemonProcess {
         configure_test_home_env(&mut command, &self.daemon_home);
 
         let output = command.output().map_err(|error| {
-            format!("failed to run daemon readiness probe git status: {}", error)
+            format!(
+                "failed to run daemon readiness probe git notes list: {}",
+                error
+            )
         })?;
         if !output.status.success() {
             return Err(format!(
-                "daemon readiness probe git status failed:\nstdout: {}\nstderr: {}",
+                "daemon readiness probe git notes list failed:\nstdout: {}\nstderr: {}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             ));
@@ -1200,8 +1203,10 @@ impl TestRepo {
 
         upstream.apply_default_config_patch();
         mirror.apply_default_config_patch();
-        upstream.setup_daemon_mode();
         mirror.setup_daemon_mode();
+        // The upstream side of new_with_remote() is a bare remote fixture. It is not the repo
+        // under test for daemon mode, and bootstrapping the shared daemon against a bare repo
+        // breaks the readiness handshake for this test process.
         upstream.setup_git_hooks_mode();
         mirror.setup_git_hooks_mode();
 
