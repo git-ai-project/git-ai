@@ -15,8 +15,31 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        test_mode: [wrapper, daemon]
+        include:
+          - os: ubuntu-latest
+            test_mode: wrapper
+            test_threads: 4
+            daemon_pool: 4
+          - os: ubuntu-latest
+            test_mode: daemon
+            test_threads: 4
+            daemon_pool: 4
+          - os: windows-latest
+            test_mode: wrapper
+            test_threads: 4
+            daemon_pool: 4
+          - os: windows-latest
+            test_mode: daemon
+            test_threads: 4
+            daemon_pool: 4
+          - os: macos-latest
+            test_mode: wrapper
+            test_threads: 2
+            daemon_pool: 2
+          - os: macos-latest
+            test_mode: daemon
+            test_threads: 2
+            daemon_pool: 2
 
     steps:
       - name: Checkout code
@@ -55,10 +78,11 @@ jobs:
         run: sudo apt-get install -y mold
 
       - name: Run tests
-        run: cargo test -- --test-threads=8
+        run: cargo test -- --test-threads=${{ matrix.test_threads }}
         env:
           CARGO_INCREMENTAL: 0
           GIT_AI_TEST_GIT_MODE: ${{ matrix.test_mode }}
+          GIT_AI_TEST_SHARED_DAEMON_POOL_SIZE: ${{ matrix.daemon_pool }}
           RUSTFLAGS: ${{ runner.os == 'Linux' && '-C link-arg=-fuse-ld=mold' || '' }}
 
   test-ignored:
