@@ -207,6 +207,8 @@ pub fn is_in_background_agent() -> bool {
             // Cloud agent environment (CLOUD_AGENT_* prefix)
             || std::env::vars().any(|(k, _)| k.starts_with("CLOUD_AGENT_"))
             || std::path::Path::new("/opt/.devin").is_dir()
+            // Explicit opt-in for cloud/background agent environments
+            || std::env::var("GIT_AI_CLOUD_AGENT").map(|v| v == "1").unwrap_or(false)
     })
 }
 
