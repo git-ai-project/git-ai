@@ -175,12 +175,12 @@ mod tests {
     fn test_match_email_copilot() {
         assert_eq!(
             match_email_to_agent("198982749+Copilot@users.noreply.github.com"),
-            Some("github-copilot")
+            Some("github-copilot-agent")
         );
         // Different numeric prefix should still match
         assert_eq!(
             match_email_to_agent("999999+Copilot@users.noreply.github.com"),
-            Some("github-copilot")
+            Some("github-copilot-agent")
         );
     }
 
