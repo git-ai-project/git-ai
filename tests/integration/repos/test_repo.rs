@@ -1239,20 +1239,33 @@ impl TestRepo {
         let Ok(content) = fs::read_to_string(&path) else {
             return Vec::new();
         };
-
-        content
+        let ends_with_newline = content.ends_with('\n');
+        let lines: Vec<&str> = content
             .lines()
             .filter(|line| !line.trim().is_empty())
+            .collect();
+        let total_lines = lines.len();
+
+        lines
+            .into_iter()
             .enumerate()
-            .map(|(idx, line)| {
-                serde_json::from_str::<DaemonTestCompletionLogEntry>(line).unwrap_or_else(|e| {
-                    panic!(
-                        "failed to parse daemon completion log entry {} in {}: {}",
-                        idx + 1,
-                        path.display(),
-                        e
-                    )
-                })
+            .filter_map(|(idx, line)| {
+                match serde_json::from_str::<DaemonTestCompletionLogEntry>(line) {
+                    Ok(entry) => Some(entry),
+                    Err(error)
+                        if idx + 1 == total_lines && !ends_with_newline && error.is_eof() =>
+                    {
+                        None
+                    }
+                    Err(error) => {
+                        panic!(
+                            "failed to parse daemon completion log entry {} in {}: {}",
+                            idx + 1,
+                            path.display(),
+                            error
+                        )
+                    }
+                }
             })
             .collect()
     }
