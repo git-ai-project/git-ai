@@ -10,7 +10,7 @@ use chrono::{TimeZone, Utc};
 use dirs;
 use glob::glob;
 use rusqlite::{Connection, OpenFlags};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
 use std::path::{Component, Path, PathBuf};
@@ -19,7 +19,7 @@ pub struct AgentCheckpointFlags {
     pub hook_input: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentRunResult {
     pub agent_id: AgentId,
     pub agent_metadata: Option<HashMap<String, String>>,

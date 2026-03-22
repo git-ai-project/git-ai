@@ -229,6 +229,7 @@ fn handle_reset_preserve_working_dir(
         old_head_sha,
         human_author,
         None, // No user-specified pathspecs for regular resets
+        None,
     ) {
         Ok(_) => {
             debug_log(&format!(
@@ -306,6 +307,7 @@ fn handle_reset_pathspec_preserve_working_dir(
         old_head_sha,
         human_author,
         Some(pathspecs), // Pass pathspecs to limit reconstruction
+        None,
     ) {
         Ok(_) => {
             debug_log(&format!(

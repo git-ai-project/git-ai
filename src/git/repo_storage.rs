@@ -4,12 +4,13 @@ use crate::authorship::authorship_log_serialization::generate_short_hash;
 use crate::authorship::working_log::{CHECKPOINT_API_VERSION, Checkpoint, CheckpointKind};
 use crate::error::GitAiError;
 use crate::git::rewrite_log::{RewriteLogEvent, append_event_to_file};
-use crate::utils::{debug_log, normalize_to_posix};
+use crate::utils::{LockFile, debug_log, normalize_to_posix};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 /// Initial attributions data structure stored in the INITIAL file
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -18,6 +19,9 @@ pub struct InitialAttributions {
     pub files: HashMap<String, Vec<LineAttribution>>,
     /// Map of author_id (hash) to PromptRecord for prompt tracking
     pub prompts: HashMap<String, PromptRecord>,
+    /// Optional blob snapshot of the file content represented by INITIAL.
+    #[serde(default)]
+    pub file_blobs: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -221,6 +225,35 @@ impl PersistedWorkingLog {
         Ok(())
     }
 
+    fn checkpoint_lock_path(&self) -> PathBuf {
+        self.dir.join("checkpoints.lock")
+    }
+
+    fn checkpoints_file_path(&self) -> PathBuf {
+        self.dir.join("checkpoints.jsonl")
+    }
+
+    fn acquire_checkpoints_lock(&self) -> Result<LockFile, GitAiError> {
+        let lock_path = self.checkpoint_lock_path();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(lock) = LockFile::try_acquire(&lock_path) {
+                return Ok(lock);
+            }
+            if Instant::now() >= deadline {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    format!(
+                        "timed out acquiring checkpoint lock at {}",
+                        lock_path.display()
+                    ),
+                )
+                .into());
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
     /* blob storage */
     pub fn get_file_version(&self, sha: &str) -> Result<String, GitAiError> {
         let blob_path = self.dir.join("blobs").join(sha);
@@ -326,8 +359,10 @@ impl PersistedWorkingLog {
 
     /* append checkpoint */
     pub fn append_checkpoint(&self, checkpoint: &Checkpoint) -> Result<(), GitAiError> {
+        let _lock = self.acquire_checkpoints_lock()?;
+
         // Read existing checkpoints
-        let mut checkpoints = self.read_all_checkpoints().unwrap_or_default();
+        let mut checkpoints = self.read_all_checkpoints_unlocked().unwrap_or_default();
 
         // Create a copy, potentially without transcript to reduce storage size.
         // Transcripts are refetched in update_prompts_to_latest() before post-commit
@@ -382,11 +417,16 @@ impl PersistedWorkingLog {
         self.prune_old_char_attributions(&mut checkpoints);
 
         // Write all checkpoints back
-        self.write_all_checkpoints(&checkpoints)
+        self.write_all_checkpoints_unlocked(&checkpoints)
     }
 
     pub fn read_all_checkpoints(&self) -> Result<Vec<Checkpoint>, GitAiError> {
-        let checkpoints_file = self.dir.join("checkpoints.jsonl");
+        let _lock = self.acquire_checkpoints_lock()?;
+        self.read_all_checkpoints_unlocked()
+    }
+
+    fn read_all_checkpoints_unlocked(&self) -> Result<Vec<Checkpoint>, GitAiError> {
+        let checkpoints_file = self.checkpoints_file_path();
 
         if !checkpoints_file.exists() {
             return Ok(Vec::new());
@@ -495,7 +535,23 @@ impl PersistedWorkingLog {
     /// by post-commit after transcripts have been refetched and need to be preserved
     /// for from_just_working_log() to read them.
     pub fn write_all_checkpoints(&self, checkpoints: &[Checkpoint]) -> Result<(), GitAiError> {
-        let checkpoints_file = self.dir.join("checkpoints.jsonl");
+        let _lock = self.acquire_checkpoints_lock()?;
+        self.write_all_checkpoints_unlocked(checkpoints)
+    }
+
+    pub fn mutate_all_checkpoints<F>(&self, mutator: F) -> Result<Vec<Checkpoint>, GitAiError>
+    where
+        F: FnOnce(&mut Vec<Checkpoint>) -> Result<(), GitAiError>,
+    {
+        let _lock = self.acquire_checkpoints_lock()?;
+        let mut checkpoints = self.read_all_checkpoints_unlocked()?;
+        mutator(&mut checkpoints)?;
+        self.write_all_checkpoints_unlocked(&checkpoints)?;
+        Ok(checkpoints)
+    }
+
+    fn write_all_checkpoints_unlocked(&self, checkpoints: &[Checkpoint]) -> Result<(), GitAiError> {
+        let checkpoints_file = self.checkpoints_file_path();
 
         // Serialize all checkpoints to JSONL
         let mut lines = Vec::new();
@@ -556,26 +612,112 @@ impl PersistedWorkingLog {
         attributions: HashMap<String, Vec<LineAttribution>>,
         prompts: HashMap<String, PromptRecord>,
     ) -> Result<(), GitAiError> {
-        // Filter out empty attributions
+        self.write_initial(InitialAttributions {
+            files: attributions,
+            prompts,
+            file_blobs: HashMap::new(),
+        })
+    }
+
+    /// Persist INITIAL attributions plus exact file snapshots for the target working log.
+    pub fn write_initial_attributions_with_contents(
+        &self,
+        attributions: HashMap<String, Vec<LineAttribution>>,
+        prompts: HashMap<String, PromptRecord>,
+        file_contents: HashMap<String, String>,
+    ) -> Result<(), GitAiError> {
         let filtered: HashMap<String, Vec<LineAttribution>> = attributions
             .into_iter()
             .filter(|(_, attrs)| !attrs.is_empty())
             .collect();
+        let mut file_blobs = HashMap::new();
+        for file_path in filtered.keys() {
+            if let Some(content) = file_contents.get(file_path) {
+                let blob_sha = self.persist_file_version(content)?;
+                file_blobs.insert(file_path.clone(), blob_sha);
+            }
+        }
 
-        if filtered.is_empty() {
-            // Don't create an INITIAL file if there are no attributions
+        self.write_initial(InitialAttributions {
+            files: filtered,
+            prompts,
+            file_blobs,
+        })
+    }
+
+    /// Write a fully-formed INITIAL state, preserving any persisted blob references.
+    pub fn write_initial(&self, initial: InitialAttributions) -> Result<(), GitAiError> {
+        let filtered_files: HashMap<String, Vec<LineAttribution>> = initial
+            .files
+            .into_iter()
+            .filter(|(_, attrs)| !attrs.is_empty())
+            .collect();
+
+        if filtered_files.is_empty() {
+            if self.initial_file.exists() {
+                fs::remove_file(&self.initial_file)?;
+            }
             return Ok(());
         }
 
+        let mut file_blobs = initial.file_blobs;
+        file_blobs.retain(|file_path, _| filtered_files.contains_key(file_path));
+
         let initial_data = InitialAttributions {
-            files: filtered,
-            prompts,
+            files: filtered_files,
+            prompts: initial.prompts,
+            file_blobs,
         };
 
         let json = serde_json::to_string_pretty(&initial_data)?;
         fs::write(&self.initial_file, json)?;
 
         Ok(())
+    }
+
+    pub fn initial_file_content_from(
+        &self,
+        initial: &InitialAttributions,
+        file_path: &str,
+    ) -> Option<String> {
+        if let Some(content) = self.stored_initial_file_content_from(initial, file_path) {
+            return Some(content);
+        }
+        if initial.files.contains_key(file_path) {
+            return self.read_current_file_content(file_path).ok();
+        }
+        None
+    }
+
+    pub fn stored_initial_file_content_from(
+        &self,
+        initial: &InitialAttributions,
+        file_path: &str,
+    ) -> Option<String> {
+        if let Some(blob_sha) = initial.file_blobs.get(file_path) {
+            return self.get_file_version(blob_sha).ok();
+        }
+        None
+    }
+
+    pub fn latest_checkpoint_file_content(&self, file_path: &str) -> Option<String> {
+        let checkpoints = self.read_all_checkpoints().ok()?;
+        let entry = checkpoints.iter().rev().find_map(|checkpoint| {
+            checkpoint
+                .entries
+                .iter()
+                .find(|entry| entry.file == file_path)
+        })?;
+        self.get_file_version(&entry.blob_sha).ok()
+    }
+
+    pub fn effective_tracked_file_content(
+        &self,
+        initial: &InitialAttributions,
+        file_path: &str,
+    ) -> Option<String> {
+        self.latest_checkpoint_file_content(file_path)
+            .or_else(|| self.initial_file_content_from(initial, file_path))
     }
 
     /// Read initial attributions from the INITIAL file.
@@ -940,6 +1082,72 @@ mod tests {
         assert_eq!(
             working_log.dir, expected_path,
             "Working log directory should be in correct location"
+        );
+    }
+
+    #[test]
+    fn test_write_initial_with_contents_persists_snapshot_blob() {
+        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
+        let repo_storage =
+            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap());
+        let working_log = repo_storage.working_log_for_base_commit("test-commit-sha");
+
+        let mut attributions = HashMap::new();
+        attributions.insert(
+            "src/test.rs".to_string(),
+            vec![LineAttribution {
+                start_line: 1,
+                end_line: 1,
+                author_id: "ai-1".to_string(),
+                overrode: None,
+            }],
+        );
+        let mut contents = HashMap::new();
+        contents.insert("src/test.rs".to_string(), "fn main() {}\n".to_string());
+
+        working_log
+            .write_initial_attributions_with_contents(attributions, HashMap::new(), contents)
+            .expect("write INITIAL with contents");
+
+        let initial = working_log.read_initial_attributions();
+        let blob_sha = initial
+            .file_blobs
+            .get("src/test.rs")
+            .expect("snapshot blob should exist");
+        let persisted = working_log
+            .get_file_version(blob_sha)
+            .expect("read snapshot blob");
+        assert_eq!(persisted, "fn main() {}\n");
+    }
+
+    #[test]
+    fn test_write_initial_empty_removes_existing_file() {
+        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
+        let repo_storage =
+            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap());
+        let working_log = repo_storage.working_log_for_base_commit("test-commit-sha");
+
+        let mut attributions = HashMap::new();
+        attributions.insert(
+            "src/test.rs".to_string(),
+            vec![LineAttribution {
+                start_line: 1,
+                end_line: 1,
+                author_id: "ai-1".to_string(),
+                overrode: None,
+            }],
+        );
+        working_log
+            .write_initial_attributions(attributions, HashMap::new())
+            .expect("write INITIAL");
+        assert!(working_log.initial_file.exists(), "INITIAL should exist");
+
+        working_log
+            .write_initial(InitialAttributions::default())
+            .expect("clear INITIAL");
+        assert!(
+            !working_log.initial_file.exists(),
+            "INITIAL should be removed when empty"
         );
     }
 }

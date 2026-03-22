@@ -66,6 +66,19 @@ pub fn rewrite_authorship_if_needed(
             ));
         }
         RewriteLogEvent::MergeSquash { merge_squash } => {
+            let current_head = repo
+                .head()
+                .ok()
+                .and_then(|head| head.target().ok())
+                .map(|oid| oid.to_string());
+            if current_head.as_deref() != Some(merge_squash.base_head.as_str()) {
+                debug_log(&format!(
+                    "Skipping merge --squash pre-commit prep because repo head already advanced past {}",
+                    merge_squash.base_head
+                ));
+                return Ok(());
+            }
+
             // --squash always fails if repo is not clean
             // this clears old working logs in the event you reset, make manual changes, reset, try again
             repo.storage
@@ -76,6 +89,7 @@ pub fn rewrite_authorship_if_needed(
                 repo,
                 &merge_squash.source_head,
                 &merge_squash.base_head,
+                &merge_squash.staged_file_blobs,
                 &commit_author,
             )?;
 
@@ -155,7 +169,7 @@ fn migrate_working_log_after_rebase(
         let initial = old_wl.read_initial_attributions();
         if !initial.files.is_empty() {
             let new_wl = repo.storage.working_log_for_base_commit(new_head);
-            new_wl.write_initial_attributions(initial.files, initial.prompts)?;
+            new_wl.write_initial(initial)?;
             debug_log(&format!(
                 "Migrated INITIAL attributions from {} to {}",
                 original_head, new_head
@@ -188,6 +202,7 @@ pub fn prepare_working_log_after_squash(
     repo: &Repository,
     source_head_sha: &str,
     target_branch_head_sha: &str,
+    staged_file_blobs: &HashMap<String, String>,
     _human_author: &str,
 ) -> Result<(), GitAiError> {
     use crate::authorship::virtual_attribution::{
@@ -236,31 +251,116 @@ pub fn prepare_working_log_after_squash(
         .await
     })?;
 
-    // Step 3: Read staged files content (final state after squash)
-    let staged_files = repo.get_all_staged_files_content(&changed_files)?;
+    // Step 3: Materialize the staged snapshot captured with the squash event.
+    let mut blob_oids: Vec<String> = changed_files
+        .iter()
+        .filter_map(|file_path| staged_file_blobs.get(file_path).cloned())
+        .collect();
+    blob_oids.sort();
+    blob_oids.dedup();
+    let blob_contents = batch_read_blob_contents(repo, &blob_oids)?;
+
+    let mut staged_files = HashMap::new();
+    for file_path in &changed_files {
+        let Some(blob_oid) = staged_file_blobs.get(file_path) else {
+            continue;
+        };
+        if let Some(content) = blob_contents.get(blob_oid) {
+            staged_files.insert(file_path.clone(), content.clone());
+        }
+    }
 
     // Step 4: Merge VirtualAttributions, favoring target branch (HEAD)
     let merged_va = merge_attributions_favoring_first(target_va, source_va, staged_files)?;
 
-    // Step 5: Convert to INITIAL (everything is uncommitted in a squash)
-    // Pass same SHA for parent and commit to get empty diff (no committed hunks)
-    let (_authorship_log, initial_attributions) = merged_va
-        .to_authorship_log_and_initial_working_log(
-            repo,
-            target_branch_head_sha,
-            target_branch_head_sha,
-            None,
-        )?;
+    // Step 5: Convert to INITIAL (everything is uncommitted in a squash).
+    // This must stay independent of the live worktree because daemon replay may lag behind
+    // later user edits.
+    let initial_attributions = merged_va.to_initial_working_log_only();
 
     // Step 6: Write INITIAL file
     if !initial_attributions.files.is_empty() {
         let working_log = repo
             .storage
             .working_log_for_base_commit(target_branch_head_sha);
-        working_log
-            .write_initial_attributions(initial_attributions.files, initial_attributions.prompts)?;
+        let initial_file_contents =
+            merged_va.snapshot_contents_for_files(initial_attributions.files.keys());
+        working_log.write_initial_attributions_with_contents(
+            initial_attributions.files,
+            initial_attributions.prompts,
+            initial_file_contents,
+        )?;
     }
 
+    Ok(())
+}
+
+/// Restore carried-over uncommitted authorship after an async head/base transition.
+///
+/// This uses only persisted working-log state from `old_head`, persisted state already present on
+/// `new_head`, and the exact final file contents captured at command exit.
+pub fn restore_working_log_carryover(
+    repo: &Repository,
+    old_head: &str,
+    new_head: &str,
+    final_state: HashMap<String, String>,
+    human_author: Option<String>,
+) -> Result<(), GitAiError> {
+    if old_head.is_empty() || new_head.is_empty() || final_state.is_empty() {
+        return Ok(());
+    }
+
+    let old_va =
+        crate::authorship::virtual_attribution::VirtualAttributions::from_persisted_working_log(
+            repo.clone(),
+            old_head.to_string(),
+            human_author,
+        )?;
+    restore_virtual_attribution_carryover(repo, new_head, old_va, final_state)
+}
+
+pub fn restore_virtual_attribution_carryover(
+    repo: &Repository,
+    new_head: &str,
+    carried_va: crate::authorship::virtual_attribution::VirtualAttributions,
+    final_state: HashMap<String, String>,
+) -> Result<(), GitAiError> {
+    if new_head.is_empty() || final_state.is_empty() || carried_va.attributions.is_empty() {
+        return Ok(());
+    }
+
+    let new_va =
+        crate::authorship::virtual_attribution::VirtualAttributions::from_persisted_working_log(
+            repo.clone(),
+            new_head.to_string(),
+            None,
+        )
+        .unwrap_or_else(|_| {
+            crate::authorship::virtual_attribution::VirtualAttributions::new(
+                repo.clone(),
+                new_head.to_string(),
+                HashMap::new(),
+                HashMap::new(),
+                0,
+            )
+        });
+
+    let merged_va = crate::authorship::virtual_attribution::merge_attributions_favoring_first(
+        carried_va,
+        new_va,
+        final_state.clone(),
+    )?;
+    let initial_attributions = merged_va.to_initial_working_log_only();
+    if initial_attributions.files.is_empty() && initial_attributions.prompts.is_empty() {
+        return Ok(());
+    }
+
+    let working_log = repo.storage.working_log_for_base_commit(new_head);
+    working_log.write_initial_attributions_with_contents(
+        initial_attributions.files,
+        initial_attributions.prompts,
+        final_state,
+    )?;
     Ok(())
 }
 
@@ -446,10 +546,12 @@ pub fn rewrite_authorship_after_rebase_v2(
     // Filter out commits that already have authorship logs (these are commits from the target branch).
     // Only process newly created rebased commits.
     let commits_with_logs = commits_with_authorship_notes(repo, new_commits)?;
+    let force_process_existing_notes = original_commits.len() > new_commits.len();
     let commits_to_process: Vec<String> = new_commits
         .iter()
         .filter(|commit| {
-            let has_log = commits_with_logs.contains(commit.as_str());
+            let has_log =
+                !force_process_existing_notes && commits_with_logs.contains(commit.as_str());
             if has_log {
                 debug_log(&format!(
                     "Skipping commit {} (already has authorship log)",
@@ -771,15 +873,24 @@ pub fn rewrite_authorship_after_cherry_pick(
     new_commits: &[String],
     _human_author: &str,
 ) -> Result<(), GitAiError> {
-    // Handle edge case: no commits to process
     if new_commits.is_empty() {
-        debug_log("Cherry-pick resulted in no new commits");
-        return Ok(());
+        return Err(GitAiError::Generic(
+            "cherry-pick rewrite missing new commits".to_string(),
+        ));
     }
 
     if source_commits.is_empty() {
-        debug_log("Warning: Cherry-pick with no source commits");
-        return Ok(());
+        return Err(GitAiError::Generic(
+            "cherry-pick rewrite missing source commits".to_string(),
+        ));
+    }
+
+    if source_commits.len() != new_commits.len() {
+        return Err(GitAiError::Generic(format!(
+            "cherry-pick rewrite commit count mismatch source_commits={} new_commits={}",
+            source_commits.len(),
+            new_commits.len()
+        )));
     }
 
     debug_log(&format!(
@@ -1052,6 +1163,52 @@ fn collect_changed_file_contents_from_diff(
     }
 
     Ok((changed_files, file_contents))
+}
+
+pub(crate) fn committed_file_snapshot_between_commits(
+    repo: &Repository,
+    from_commit: Option<&str>,
+    to_commit: &str,
+) -> Result<HashMap<String, String>, GitAiError> {
+    let to_commit = repo.find_commit(to_commit.to_string())?;
+    let to_tree = to_commit.tree()?;
+    if matches!(from_commit, None | Some("initial")) {
+        let mut args = repo.global_args_for_exec();
+        args.push("ls-tree".to_string());
+        args.push("-r".to_string());
+        args.push("-z".to_string());
+        args.push("--name-only".to_string());
+        args.push(to_tree.id());
+
+        let output = exec_git(&args)?;
+        let tracked_paths = output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|bytes| !bytes.is_empty())
+            .filter_map(|bytes| String::from_utf8(bytes.to_vec()).ok())
+            .collect::<Vec<_>>();
+        return get_committed_files_content(repo, &to_commit.id(), &tracked_paths);
+    }
+
+    let from_tree = repo.find_commit(from_commit.unwrap().to_string())?.tree()?;
+    let diff = repo.diff_tree_to_tree(Some(&from_tree), Some(&to_tree), None, None)?;
+    let tracked_paths = diff
+        .deltas()
+        .filter_map(|delta| delta.new_file().path().or(delta.old_file().path()))
+        .map(|path| path.to_string_lossy().to_string())
+        .collect::<HashSet<_>>();
+
+    if tracked_paths.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let tracked_lookup = tracked_paths
+        .iter()
+        .map(|path| path.as_str())
+        .collect::<HashSet<_>>();
+    let (_changed_files, contents) =
+        collect_changed_file_contents_from_diff(repo, &diff, &tracked_lookup)?;
+    Ok(contents)
 }
 
 fn batch_read_blob_contents(
@@ -1442,6 +1599,22 @@ pub fn rewrite_authorship_after_commit_amend(
     amended_commit: &str,
     _human_author: String,
 ) -> Result<AuthorshipLog, GitAiError> {
+    rewrite_authorship_after_commit_amend_with_snapshot(
+        repo,
+        original_commit,
+        amended_commit,
+        _human_author,
+        None,
+    )
+}
+
+pub fn rewrite_authorship_after_commit_amend_with_snapshot(
+    repo: &Repository,
+    original_commit: &str,
+    amended_commit: &str,
+    human_author: String,
+    final_state_override: Option<&HashMap<String, String>>,
+) -> Result<AuthorshipLog, GitAiError> {
     use crate::authorship::virtual_attribution::VirtualAttributions;
 
     // Get the files that changed between original and amended commit
@@ -1464,20 +1637,38 @@ pub fn rewrite_authorship_after_commit_amend(
     // Phase 1: Load all attributions (committed + uncommitted)
     let repo_clone = repo.clone();
     let pathspecs_vec: Vec<String> = pathspecs.iter().cloned().collect();
-    let working_va = smol::block_on(async {
-        VirtualAttributions::from_working_log_for_commit(
-            repo_clone,
-            original_commit.to_string(),
-            &pathspecs_vec,
-            if has_existing_prompts {
-                None
-            } else {
-                Some(_human_author.clone())
-            },
-            None,
-        )
-        .await
-    })?;
+    let working_va = if let Some(snapshot) = final_state_override {
+        smol::block_on(async {
+            VirtualAttributions::from_working_log_for_commit_snapshot(
+                repo_clone,
+                original_commit.to_string(),
+                &pathspecs_vec,
+                if has_existing_prompts {
+                    None
+                } else {
+                    Some(human_author.clone())
+                },
+                None,
+                snapshot,
+            )
+            .await
+        })?
+    } else {
+        smol::block_on(async {
+            VirtualAttributions::from_working_log_for_commit(
+                repo_clone,
+                original_commit.to_string(),
+                &pathspecs_vec,
+                if has_existing_prompts {
+                    None
+                } else {
+                    Some(human_author.clone())
+                },
+                None,
+            )
+            .await
+        })?
+    };
 
     // Phase 2: Get parent of amended commit for diff calculation
     let amended_commit_obj = repo.find_commit(amended_commit.to_string())?;
@@ -1487,23 +1678,27 @@ pub fn rewrite_authorship_after_commit_amend(
         "initial".to_string()
     };
 
-    // pathspecs is already a HashSet
     let pathspecs_set = pathspecs;
 
-    // Phase 3: Split into committed (authorship log) vs uncommitted (INITIAL)
     let (mut authorship_log, initial_attributions) = working_va
         .to_authorship_log_and_initial_working_log(
             repo,
             &parent_sha,
             amended_commit,
             Some(&pathspecs_set),
+            final_state_override,
         )?;
 
     // Update base commit SHA
     authorship_log.metadata.base_commit_sha = amended_commit.to_string();
 
-    // Inject custom attributes into all PromptRecords (same as post_commit)
-    let custom_attrs = crate::config::Config::get().custom_attributes();
+    // Inject custom attributes into all PromptRecords (same behavior as post_commit).
+    // In daemon mode we need a fresh config snapshot because the daemon is long-lived.
+    let custom_attrs = if crate::daemon::daemon_process_active() {
+        crate::config::Config::fresh().custom_attributes().clone()
+    } else {
+        crate::config::Config::get().custom_attributes().clone()
+    };
     if !custom_attrs.is_empty() {
         for pr in authorship_log.metadata.prompts.values_mut() {
             pr.custom_attributes = Some(custom_attrs.clone());
@@ -1519,8 +1714,13 @@ pub fn rewrite_authorship_after_commit_amend(
     // Save INITIAL file for uncommitted attributions
     if !initial_attributions.files.is_empty() {
         let new_working_log = repo.storage.working_log_for_base_commit(amended_commit);
-        new_working_log
-            .write_initial_attributions(initial_attributions.files, initial_attributions.prompts)?;
+        let initial_file_contents =
+            working_va.snapshot_contents_for_files(initial_attributions.files.keys());
+        new_working_log.write_initial_attributions_with_contents(
+            initial_attributions.files,
+            initial_attributions.prompts,
+            initial_file_contents,
+        )?;
     }
 
     // Clean up old working log
@@ -1600,6 +1800,7 @@ pub fn reconstruct_working_log_after_reset(
     old_head_sha: &str,      // Where HEAD was BEFORE reset
     _human_author: &str,
     user_pathspecs: Option<&[String]>, // Optional user-specified pathspecs for partial reset
+    final_state_override: Option<HashMap<String, String>>,
 ) -> Result<(), GitAiError> {
     debug_log(&format!(
         "Reconstructing working log after reset from {} to {}",
@@ -1650,22 +1851,60 @@ pub fn reconstruct_working_log_after_reset(
         pathspecs.len()
     ));
 
-    // Step 2: Build VirtualAttributions from old_head with working log applied
-    // from_working_log_for_commit now runs blame (gets ALL prompts) AND applies working log
+    // Step 2: Build final state from the captured command-exit snapshot when available.
+    let has_captured_snapshot = final_state_override.is_some();
+    let final_state = if let Some(final_state_override) = final_state_override {
+        final_state_override
+    } else {
+        let mut final_state: HashMap<String, String> = HashMap::new();
+        let workdir = repo.workdir()?;
+        for file_path in &pathspecs {
+            let abs_path = workdir.join(file_path);
+            let content = if abs_path.exists() {
+                std::fs::read_to_string(&abs_path).unwrap_or_default()
+            } else {
+                String::new()
+            };
+            final_state.insert(file_path.clone(), content);
+        }
+        debug_log(&format!(
+            "Read {} files from working directory",
+            final_state.len()
+        ));
+        final_state
+    };
+
+    // Step 3: Build VirtualAttributions from old_head with working log applied.
+    // When we have a captured snapshot, use it instead of the live worktree so line
+    // coordinates stay stable under async replay.
     let repo_clone = repo.clone();
     let old_head_clone = old_head_sha.to_string();
     let pathspecs_clone = pathspecs.clone();
 
-    let old_head_va = smol::block_on(async {
-        crate::authorship::virtual_attribution::VirtualAttributions::from_working_log_for_commit(
-            repo_clone,
-            old_head_clone,
-            &pathspecs_clone,
-            None, // Don't need human_author for this step
-            Some(target_commit_sha.to_string()),
-        )
-        .await
-    })?;
+    let old_head_va = if has_captured_snapshot {
+        smol::block_on(async {
+            crate::authorship::virtual_attribution::VirtualAttributions::from_working_log_for_commit_snapshot(
+                repo_clone,
+                old_head_clone,
+                &pathspecs_clone,
+                None,
+                Some(target_commit_sha.to_string()),
+                &final_state,
+            )
+            .await
+        })?
+    } else {
+        smol::block_on(async {
+            crate::authorship::virtual_attribution::VirtualAttributions::from_working_log_for_commit(
+                repo_clone,
+                old_head_clone,
+                &pathspecs_clone,
+                None,
+                Some(target_commit_sha.to_string()),
+            )
+            .await
+        })?
+    };
 
     debug_log(&format!(
         "Built old_head VA with {} files, {} prompts",
@@ -1673,7 +1912,7 @@ pub fn reconstruct_working_log_after_reset(
         old_head_va.prompts().len()
     ));
 
-    // Step 3: Build VirtualAttributions from target_commit
+    // Step 4: Build VirtualAttributions from target_commit
     let repo_clone = repo.clone();
     let target_clone = target_commit_sha.to_string();
     let pathspecs_clone = pathspecs.clone();
@@ -1694,26 +1933,6 @@ pub fn reconstruct_working_log_after_reset(
         target_va.prompts().len()
     ));
 
-    // Step 4: Build final state from working directory
-    use std::collections::HashMap;
-    let mut final_state: HashMap<String, String> = HashMap::new();
-
-    let workdir = repo.workdir()?;
-    for file_path in &pathspecs {
-        let abs_path = workdir.join(file_path);
-        let content = if abs_path.exists() {
-            std::fs::read_to_string(&abs_path).unwrap_or_default()
-        } else {
-            String::new()
-        };
-        final_state.insert(file_path.clone(), content);
-    }
-
-    debug_log(&format!(
-        "Read {} files from working directory",
-        final_state.len()
-    ));
-
     // Step 5: Merge VAs favoring old_head to preserve uncommitted AI changes
     // old_head (with working log) wins overlaps, target fills gaps
     let merged_va = crate::authorship::virtual_attribution::merge_attributions_favoring_first(
@@ -1727,23 +1946,14 @@ pub fn reconstruct_working_log_after_reset(
         merged_va.files().len()
     ));
 
-    // Step 6: Convert to INITIAL (everything is uncommitted after reset)
-    // Pass same SHA for parent and commit to get empty diff (no committed hunks)
-    // IMPORTANT: Pass pathspecs to limit diff to only changed files (major performance optimization)
-    let pathspecs_set: std::collections::HashSet<String> = pathspecs.iter().cloned().collect();
-    let (authorship_log, initial_attributions) = merged_va
-        .to_authorship_log_and_initial_working_log(
-            repo,
-            target_commit_sha,
-            target_commit_sha,
-            Some(&pathspecs_set),
-        )?;
+    // Step 6: Convert to INITIAL (everything is uncommitted after reset) without consulting the
+    // live worktree again.
+    let initial_attributions = merged_va.to_initial_working_log_only();
 
     debug_log(&format!(
-        "Generated INITIAL attributions for {} files, {} attestations, {} prompts",
+        "Generated INITIAL attributions for {} files, {} prompts",
         initial_attributions.files.len(),
-        authorship_log.attestations.len(),
-        authorship_log.metadata.prompts.len()
+        initial_attributions.prompts.len()
     ));
 
     // Step 7: Write INITIAL file
@@ -1751,8 +1961,11 @@ pub fn reconstruct_working_log_after_reset(
     new_working_log.reset_working_log()?;
 
     if !initial_attributions.files.is_empty() {
-        new_working_log
-            .write_initial_attributions(initial_attributions.files, initial_attributions.prompts)?;
+        new_working_log.write_initial_attributions_with_contents(
+            initial_attributions.files,
+            initial_attributions.prompts,
+            final_state,
+        )?;
     }
 
     // Delete old working log
@@ -2913,8 +3126,9 @@ fn transform_attributions_to_final_state(
 mod tests {
     use super::{
         collect_changed_file_contents_from_diff, get_pathspecs_from_commits,
-        parse_cat_file_batch_output_with_oids, transform_attributions_to_final_state,
-        try_fast_path_rebase_note_remap, walk_commits_to_base,
+        parse_cat_file_batch_output_with_oids, rewrite_authorship_after_cherry_pick,
+        transform_attributions_to_final_state, try_fast_path_rebase_note_remap,
+        walk_commits_to_base,
     };
     use crate::authorship::attribution_tracker::{Attribution, LineAttribution};
     use crate::authorship::authorship_log::{LineRange, PromptRecord};
@@ -3032,6 +3246,26 @@ mod tests {
             msg.contains("not an ancestor"),
             "unexpected error message: {}",
             msg
+        );
+    }
+
+    #[test]
+    fn rewrite_authorship_after_cherry_pick_errors_on_mismatched_commit_counts() {
+        let repo = TmpRepo::new().expect("tmp repo");
+        let err = rewrite_authorship_after_cherry_pick(
+            repo.gitai_repo(),
+            &["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()],
+            &[
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+                "cccccccccccccccccccccccccccccccccccccccc".to_string(),
+            ],
+            "human",
+        )
+        .expect_err("mismatched cherry-pick mapping should fail");
+
+        assert!(
+            err.to_string()
+                .contains("cherry-pick rewrite commit count mismatch")
         );
     }
 

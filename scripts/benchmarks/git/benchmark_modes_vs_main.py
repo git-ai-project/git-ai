@@ -7,6 +7,7 @@ Compares:
 2) current(wrapper)
 3) current(hooks)
 4) current(wrapper+hooks)
+5) current(daemon)
 
 The harness builds binaries for both branches, runs a scenario matrix that
 covers basic and complex Git operations, and emits:
@@ -30,7 +31,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 
 MANAGED_HOOK_NAMES = [
@@ -55,7 +56,7 @@ class Variant:
     key: str
     label: str
     binary: Path
-    mode: str  # wrapper | hooks | both
+    mode: str  # wrapper | hooks | both | daemon
 
 
 @dataclasses.dataclass(frozen=True)
@@ -235,7 +236,10 @@ class VariantRunner:
         self.run_root = run_root
         self.timeout_s = timeout_s
 
-        self.home_dir = run_root / "home"
+        tmp_root = Path("/tmp") if os.name != "nt" else Path(tempfile.gettempdir())
+        self.home_dir = Path(
+            tempfile.mkdtemp(prefix=f"gai-modes-{self.variant.key}-", dir=str(tmp_root))
+        )
         self.bin_dir = run_root / "bin"
         self.git_wrapper = self.bin_dir / ("git.exe" if os.name == "nt" else "git")
 
@@ -252,6 +256,168 @@ class VariantRunner:
         self.base_env["GIT_AI_DEBUG"] = "0"
         self.base_env["GIT_AI_DEBUG_PERFORMANCE"] = "0"
         self.base_env["PATH"] = f"{self.bin_dir}{os.pathsep}{self.base_env.get('PATH', '')}"
+
+        self.daemon_process: subprocess.Popen[str] | None = None
+        self.daemon_started = False
+        self.daemon_socket_dir = self.home_dir / ".git-ai" / "internal" / "daemon"
+        self.daemon_trace_socket = self.daemon_socket_dir / "trace2.sock"
+        self.daemon_control_socket = self.daemon_socket_dir / "control.sock"
+
+        if self.variant.mode == "daemon":
+            self.start_daemon()
+            self.base_env["GIT_TRACE2_EVENT"] = (
+                f"af_unix:stream:{self.daemon_trace_socket}"
+            )
+            self.base_env["GIT_TRACE2_EVENT_NESTING"] = os.environ.get(
+                "GIT_AI_TEST_TRACE2_NESTING",
+                "10",
+            )
+            self.base_env["GIT_AI_DAEMON_CHECKPOINT_DELEGATE"] = "true"
+            self.base_env["GIT_AI_DAEMON_CONTROL_SOCKET"] = str(
+                self.daemon_control_socket
+            )
+
+    def start_daemon(self) -> None:
+        self.daemon_socket_dir.mkdir(parents=True, exist_ok=True)
+        proc = subprocess.Popen(
+            [
+                str(self.variant.binary),
+                "daemon",
+                "run",
+            ],
+            cwd=str(self.run_root),
+            env=self.base_env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        self.daemon_process = proc
+
+        exit_code: int | None = None
+        for _ in range(300):
+            if self.daemon_control_socket.exists() and self.daemon_trace_socket.exists():
+                self.daemon_started = True
+                if proc.poll() is not None:
+                    self.daemon_process = None
+                return
+            if exit_code is None:
+                exit_code = proc.poll()
+            time.sleep(0.01)
+
+        raise BenchmarkError(
+            "Timed out waiting for daemon sockets "
+            f"(control={self.daemon_control_socket}, trace={self.daemon_trace_socket})"
+        )
+
+    def close(self) -> None:
+        if self.variant.mode == "daemon" and self.daemon_started:
+            try:
+                run_cmd(
+                    [str(self.variant.binary), "daemon", "shutdown"],
+                    cwd=self.run_root,
+                    env=self.base_env,
+                    timeout_s=20,
+                )
+            except Exception:
+                pass
+
+        if self.daemon_process is not None:
+            deadline = time.time() + 5.0
+            while time.time() < deadline:
+                if self.daemon_process.poll() is not None:
+                    break
+                time.sleep(0.05)
+
+            if self.daemon_process.poll() is None:
+                self.daemon_process.kill()
+                self.daemon_process.wait(timeout=5)
+            self.daemon_process = None
+
+        shutil.rmtree(self.home_dir, ignore_errors=True)
+
+    def daemon_request(self, args: list[str]) -> dict[str, Any]:
+        if self.variant.mode != "daemon":
+            raise BenchmarkError(
+                f"daemon_request called for non-daemon variant: {self.variant.key}"
+            )
+        proc = run_cmd(
+            [str(self.variant.binary), "daemon", *args],
+            cwd=self.run_root,
+            env=self.base_env,
+            timeout_s=30,
+        )
+        payload = (proc.stdout or "").strip()
+        if not payload:
+            raise BenchmarkError(
+                f"Daemon command returned empty payload: {' '.join(args)}"
+            )
+        try:
+            decoded = json.loads(payload)
+        except json.JSONDecodeError as err:
+            raise BenchmarkError(
+                f"Failed to decode daemon response for {' '.join(args)}: {err}\n{payload}"
+            ) from err
+        if not isinstance(decoded, dict):
+            raise BenchmarkError(
+                f"Unexpected daemon response shape for {' '.join(args)}: {decoded!r}"
+            )
+        return decoded
+
+    def wait_for_daemon_idle(self, repo_dir: Path) -> None:
+        if self.variant.mode != "daemon":
+            return
+
+        last_latest_seq = 0
+        stable_polls = 0
+        repo = str(repo_dir)
+        for _ in range(200):
+            status = self.daemon_request(["status", "--repo", repo])
+            if not bool(status.get("ok")):
+                raise BenchmarkError(
+                    f"Daemon status failed for {repo}: {status.get('error')}"
+                )
+            data = status.get("data")
+            if not isinstance(data, dict):
+                raise BenchmarkError(
+                    f"Daemon status response missing data for {repo}: {status!r}"
+                )
+            latest_seq = int(data.get("latest_seq") or 0)
+            if latest_seq > 0:
+                barrier = self.daemon_request(
+                    ["barrier", "--repo", repo, "--seq", str(latest_seq)]
+                )
+                if not bool(barrier.get("ok")):
+                    raise BenchmarkError(
+                        f"Daemon barrier failed for {repo}: {barrier.get('error')}"
+                    )
+
+            settled = self.daemon_request(["status", "--repo", repo])
+            if not bool(settled.get("ok")):
+                raise BenchmarkError(
+                    f"Daemon settled-status failed for {repo}: {settled.get('error')}"
+                )
+            settled_data = settled.get("data")
+            if not isinstance(settled_data, dict):
+                raise BenchmarkError(
+                    "Daemon settled-status response missing data "
+                    f"for {repo}: {settled!r}"
+                )
+            settled_latest = int(settled_data.get("latest_seq") or 0)
+            settled_backlog = int(settled_data.get("backlog") or 0)
+
+            if settled_backlog == 0 and settled_latest == last_latest_seq:
+                stable_polls += 1
+                if stable_polls >= 2:
+                    return
+            else:
+                stable_polls = 0
+
+            last_latest_seq = settled_latest
+            time.sleep(0.01)
+
+        raise BenchmarkError(
+            f"Daemon did not settle for repo {repo} (latest_seq={last_latest_seq})"
+        )
 
     def assert_repo_local_hooks(self, repo_dir: Path) -> None:
         expected_hooks_dir = (repo_dir / ".git" / "ai" / "hooks").resolve()
@@ -808,38 +974,49 @@ def render_report(
     lines.append("## Exact Timings (ms)")
     lines.append("")
     lines.append(
-        "| Scenario | main(wrapper) runs | current(wrapper) runs | current(hooks) runs | current(wrapper+hooks) runs |"
+        "| Scenario | main(wrapper) runs | current(wrapper) runs | current(hooks) runs | current(wrapper+hooks) runs | current(daemon) runs |"
     )
-    lines.append("|---|---:|---:|---:|---:|")
+    lines.append("|---|---:|---:|---:|---:|---:|")
     for scenario in scenarios:
         row = [scenario.key]
-        for key in ["main_wrapper", "current_wrapper", "current_hooks", "current_both"]:
+        for key in [
+            "main_wrapper",
+            "current_wrapper",
+            "current_hooks",
+            "current_both",
+            "current_daemon",
+        ]:
             runs = summary[scenario.key][key]["runs_ms"]  # type: ignore[index]
             row.append(", ".join(f"{float(v):.3f}" for v in runs))  # type: ignore[arg-type]
-        lines.append(f"| {row[0]} | {row[1]} | {row[2]} | {row[3]} | {row[4]} |")
+        lines.append(
+            f"| {row[0]} | {row[1]} | {row[2]} | {row[3]} | {row[4]} | {row[5]} |"
+        )
     lines.append("")
     lines.append("## Median Summary (ms) and Slowdown vs main(wrapper)")
     lines.append("")
     lines.append(
-        "| Scenario | main(wrapper) | current(wrapper) | current(hooks) | current(wrapper+hooks) | wrapper Δ% | hooks Δ% | both Δ% |"
+        "| Scenario | main(wrapper) | current(wrapper) | current(hooks) | current(wrapper+hooks) | current(daemon) | wrapper Δ% | hooks Δ% | both Δ% | daemon Δ% |"
     )
-    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for scenario in scenarios:
         data = summary[scenario.key]
         base = float(data["main_wrapper"]["median_ms"])  # type: ignore[index]
         cw = float(data["current_wrapper"]["median_ms"])  # type: ignore[index]
         ch = float(data["current_hooks"]["median_ms"])  # type: ignore[index]
         cb = float(data["current_both"]["median_ms"])  # type: ignore[index]
+        cd = float(data["current_daemon"]["median_ms"])  # type: ignore[index]
         s = slowdowns.get(scenario.key, {})
         lines.append(
-            f"| {scenario.key} | {base:.3f} | {cw:.3f} | {ch:.3f} | {cb:.3f} | "
-            f"{s.get('current_wrapper', 0.0):.3f}% | {s.get('current_hooks', 0.0):.3f}% | {s.get('current_both', 0.0):.3f}% |"
+            f"| {scenario.key} | {base:.3f} | {cw:.3f} | {ch:.3f} | {cb:.3f} | {cd:.3f} | "
+            f"{s.get('current_wrapper', 0.0):.3f}% | {s.get('current_hooks', 0.0):.3f}% | "
+            f"{s.get('current_both', 0.0):.3f}% | {s.get('current_daemon', 0.0):.3f}% |"
         )
 
     ratios: dict[str, list[float]] = {
         "current_wrapper": [],
         "current_hooks": [],
         "current_both": [],
+        "current_daemon": [],
     }
     for scenario in scenarios:
         data = summary[scenario.key]
@@ -913,7 +1090,7 @@ def write_raw_csv(path: Path, results: list[RunResult]) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Benchmark main(wrapper) against current wrapper/hooks/wrapper+hooks "
+            "Benchmark main(wrapper) against current wrapper/hooks/wrapper+hooks/daemon "
             "across basic and complex git workflows."
         )
     )
@@ -966,7 +1143,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--enforce-margin",
         action="store_true",
-        help="Exit non-zero when any current_hooks/current_both margin check fails.",
+        help="Exit non-zero when any current_hooks/current_both/current_daemon margin check fails.",
     )
     parser.add_argument(
         "--margin-baseline",
@@ -1030,6 +1207,7 @@ def main() -> int:
             Variant("current_wrapper", "current(wrapper)", current_bin, "wrapper"),
             Variant("current_hooks", "current(hooks)", current_bin, "hooks"),
             Variant("current_both", "current(wrapper+hooks)", current_bin, "both"),
+            Variant("current_daemon", "current(daemon)", current_bin, "daemon"),
         ]
 
         timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
@@ -1056,44 +1234,49 @@ def main() -> int:
                 scenario_variant_root.mkdir(parents=True, exist_ok=True)
 
                 runner = VariantRunner(variant, scenario_variant_root, real_git)
-                template_repo = scenario_variant_root / "repo-template"
-                print(f"[setup] scenario={scenario.key} variant={variant.key}")
-                scenario.setup(runner, template_repo)
+                try:
+                    template_repo = scenario_variant_root / "repo-template"
+                    print(f"[setup] scenario={scenario.key} variant={variant.key}")
+                    scenario.setup(runner, template_repo)
+                    runner.wait_for_daemon_idle(template_repo)
 
-                for run_index in range(1, iterations + 1):
-                    run_dir = runs_root / scenario.key / variant.key / f"run_{run_index:02d}"
-                    if run_dir.exists():
-                        shutil.rmtree(run_dir)
-                    run_repo = run_dir / "repo"
-                    run_repo.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copytree(
-                        template_repo,
-                        run_repo,
-                        ignore=ignore_transient_git_lockfiles,
-                    )
-                    if variant.mode in ("hooks", "both"):
-                        runner.run_git_ai(["git-hooks", "ensure"], cwd=run_repo)
-                        runner.assert_repo_local_hooks(run_repo)
-
-                    t0 = time.perf_counter()
-                    scenario.measure(runner, run_repo, run_index)
-                    duration_ms = (time.perf_counter() - t0) * 1000.0
-                    raw_results.append(
-                        RunResult(
-                            scenario=scenario.key,
-                            complexity=scenario.complexity,
-                            variant=variant.key,
-                            run_index=run_index,
-                            duration_ms=duration_ms,
+                    for run_index in range(1, iterations + 1):
+                        run_dir = runs_root / scenario.key / variant.key / f"run_{run_index:02d}"
+                        if run_dir.exists():
+                            shutil.rmtree(run_dir)
+                        run_repo = run_dir / "repo"
+                        run_repo.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copytree(
+                            template_repo,
+                            run_repo,
+                            ignore=ignore_transient_git_lockfiles,
                         )
-                    )
-                    print(
-                        f"[run] scenario={scenario.key} variant={variant.key} "
-                        f"run={run_index}/{iterations} duration_ms={duration_ms:.3f}"
-                    )
+                        if variant.mode in ("hooks", "both"):
+                            runner.run_git_ai(["git-hooks", "ensure"], cwd=run_repo)
+                            runner.assert_repo_local_hooks(run_repo)
 
-                    if not args.keep_artifacts and run_dir.exists():
-                        shutil.rmtree(run_dir)
+                        t0 = time.perf_counter()
+                        scenario.measure(runner, run_repo, run_index)
+                        duration_ms = (time.perf_counter() - t0) * 1000.0
+                        runner.wait_for_daemon_idle(run_repo)
+                        raw_results.append(
+                            RunResult(
+                                scenario=scenario.key,
+                                complexity=scenario.complexity,
+                                variant=variant.key,
+                                run_index=run_index,
+                                duration_ms=duration_ms,
+                            )
+                        )
+                        print(
+                            f"[run] scenario={scenario.key} variant={variant.key} "
+                            f"run={run_index}/{iterations} duration_ms={duration_ms:.3f}"
+                        )
+
+                        if not args.keep_artifacts and run_dir.exists():
+                            shutil.rmtree(run_dir)
+                finally:
+                    runner.close()
 
         summary = summarize_runs(raw_results)
         slowdowns = compute_slowdowns(summary, baseline_key="main_wrapper")
@@ -1101,7 +1284,7 @@ def main() -> int:
             summary,
             baseline_key=args.margin_baseline,
             margin_pct=args.margin_pct,
-            variants=["current_hooks", "current_both"],
+            variants=["current_hooks", "current_both", "current_daemon"],
         )
 
         metadata: dict[str, str | int | dict[str, str]] = {

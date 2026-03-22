@@ -43,7 +43,7 @@ use crate::authorship::working_log::AgentId;
 
 /// Emit at most one `agent_usage` metric per prompt every 2.5 minutes.
 /// This is half of the server-side bucketing window.
-#[cfg(not(any(test, feature = "test-support")))]
+#[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
 const AGENT_USAGE_MIN_INTERVAL_SECS: u64 = 150;
 
 /// Build EventAttributes with repo metadata.
@@ -126,17 +126,45 @@ pub fn run(
     agent_run_result: Option<AgentRunResult>,
     is_pre_commit: bool,
 ) -> Result<(usize, usize, usize), GitAiError> {
+    run_with_base_commit_override(
+        repo,
+        author,
+        kind,
+        show_working_log,
+        reset,
+        quiet,
+        agent_run_result,
+        is_pre_commit,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_with_base_commit_override(
+    repo: &Repository,
+    author: &str,
+    kind: CheckpointKind,
+    show_working_log: bool,
+    reset: bool,
+    quiet: bool,
+    agent_run_result: Option<AgentRunResult>,
+    is_pre_commit: bool,
+    base_commit_override: Option<&str>,
+) -> Result<(usize, usize, usize), GitAiError> {
     let checkpoint_start = Instant::now();
     debug_log("[BENCHMARK] Starting checkpoint run");
 
     // Robustly handle zero-commit repos
-    let base_commit = match repo.head() {
-        Ok(head) => match head.target() {
-            Ok(oid) => oid,
+    let base_commit = base_commit_override
+        .filter(|base| !base.trim().is_empty())
+        .map(|base| base.to_string())
+        .unwrap_or_else(|| match repo.head() {
+            Ok(head) => match head.target() {
+                Ok(oid) => oid,
+                Err(_) => "initial".to_string(),
+            },
             Err(_) => "initial".to_string(),
-        },
-        Err(_) => "initial".to_string(),
-    };
+        });
 
     // Cannot run checkpoint on bare repositories
     if repo.workdir().is_err() {
@@ -160,8 +188,9 @@ pub fn run(
         storage_start.elapsed()
     ));
 
-    // Early exit for human only
-    if is_pre_commit {
+    // Early exit for human-only pre-commit hooks.
+    // Synthetic replay flows provide an explicit base override and must always process.
+    if is_pre_commit && base_commit_override.is_none() {
         let has_no_ai_edits = working_log
             .all_ai_touched_files()
             .map(|files| files.is_empty())
@@ -273,6 +302,7 @@ pub fn run(
         &working_log,
         pathspec_filter,
         is_pre_commit,
+        is_pre_commit && pathspec_filter.is_some(),
         &ignore_matcher,
     )?;
     debug_log(&format!(
@@ -384,6 +414,7 @@ pub fn run(
         agent_run_result.as_ref(),
         ts,
         is_pre_commit,
+        base_commit_override,
     ))?;
     debug_log(&format!(
         "[BENCHMARK] get_checkpoint_entries generated {} entries, took {:?}",
@@ -610,9 +641,10 @@ fn get_all_tracked_files(
     working_log: &PersistedWorkingLog,
     edited_filepaths: Option<&Vec<String>>,
     is_pre_commit: bool,
+    preserve_explicit_pre_commit_paths: bool,
     ignore_matcher: &IgnoreMatcher,
 ) -> Result<Vec<String>, GitAiError> {
-    let mut files: HashSet<String> = edited_filepaths
+    let explicit_pre_commit_paths: HashSet<String> = edited_filepaths
         .map(|paths| {
             paths
                 .iter()
@@ -621,6 +653,7 @@ fn get_all_tracked_files(
                 .collect()
         })
         .unwrap_or_default();
+    let mut files = explicit_pre_commit_paths.clone();
 
     // Helper closure to check if a path is within the repository
     // This prevents crashes when files outside the repo were tracked (e.g., opened in IDE but not in repo)
@@ -735,6 +768,25 @@ fn get_all_tracked_files(
                 if is_text_file(working_log, &normalized_path) {
                     results_for_tracked_files.push(normalized_path);
                 }
+            }
+        }
+    }
+
+    if preserve_explicit_pre_commit_paths {
+        for normalized_path in explicit_pre_commit_paths {
+            if !is_path_in_repo(&normalized_path) {
+                continue;
+            }
+            if should_ignore_file_with_matcher(&normalized_path, ignore_matcher) {
+                continue;
+            }
+            if results_for_tracked_files.contains(&normalized_path) {
+                continue;
+            }
+            if is_text_file(working_log, &normalized_path)
+                || is_text_file_in_head(repo, &normalized_path)
+            {
+                results_for_tracked_files.push(normalized_path);
             }
         }
     }
@@ -902,6 +954,7 @@ fn get_checkpoint_entry_for_file(
     head_commit_sha: Arc<Option<String>>,
     head_tree_id: Arc<Option<String>>,
     initial_attributions: Arc<HashMap<String, Vec<LineAttribution>>>,
+    initial_snapshot_contents: Arc<HashMap<String, String>>,
     ts: u128,
 ) -> Result<Option<(WorkingLogEntry, FileLineStats)>, GitAiError> {
     let feature_flag_inter_commit_move = Config::get().get_feature_flags().inter_commit_move;
@@ -911,6 +964,7 @@ fn get_checkpoint_entry_for_file(
         .get(&file_path)
         .cloned()
         .unwrap_or_default();
+    let initial_snapshot_content = initial_snapshot_contents.get(&file_path).cloned();
 
     let previous_state = previous_file_state_by_file.get(&file_path).cloned();
     let has_prior_ai_edits = ai_touched_files.contains(&file_path);
@@ -1055,10 +1109,13 @@ fn get_checkpoint_entry_for_file(
             }
         }
 
-        // For INITIAL attributions, we need to use current_content (not previous_content)
-        // because INITIAL line numbers refer to the current state of the file
+        // INITIAL line numbers refer to the file state at the moment INITIAL was written.
+        // Snapshot-aware INITIAL storage preserves that exact content; older INITIAL files
+        // fall back to the legacy "current content" behavior.
         let content_for_line_conversion = if !initial_attrs_for_file.is_empty() {
-            &current_content
+            initial_snapshot_content
+                .as_deref()
+                .unwrap_or(&current_content)
         } else {
             &previous_content
         };
@@ -1071,11 +1128,11 @@ fn get_checkpoint_entry_for_file(
                 INITIAL_ATTRIBUTION_TS,
             );
 
-        // When we have INITIAL attributions, they describe the current state of the file.
-        // We need to pass current_content as previous_content so the attributions are preserved.
-        // The tracker will see no changes and preserve the INITIAL attributions.
+        // When INITIAL has a persisted snapshot, use that as the previous content so later
+        // edits after a restore/squash are tracked correctly. Older INITIAL files fall back
+        // to the legacy current-content behavior.
         let adjusted_previous = if !initial_attrs_for_file.is_empty() {
-            current_content.clone()
+            initial_snapshot_content.unwrap_or_else(|| current_content.clone())
         } else {
             previous_content
         };
@@ -1118,12 +1175,22 @@ async fn get_checkpoint_entries(
     agent_run_result: Option<&AgentRunResult>,
     ts: u128,
     is_pre_commit: bool,
+    head_commit_override: Option<&str>,
 ) -> Result<(Vec<WorkingLogEntry>, Vec<FileLineStats>), GitAiError> {
     let entries_fn_start = Instant::now();
 
     // Read INITIAL attributions from working log (empty if file doesn't exist)
     let initial_read_start = Instant::now();
     let initial_data = working_log.read_initial_attributions();
+    let initial_snapshot_contents: HashMap<String, String> = initial_data
+        .files
+        .keys()
+        .filter_map(|file_path| {
+            working_log
+                .initial_file_content_from(&initial_data, file_path)
+                .map(|content| (file_path.clone(), content))
+        })
+        .collect();
     let initial_attributions = initial_data.files;
     debug_log(&format!(
         "[BENCHMARK] Reading initial attributions took {:?}",
@@ -1155,11 +1222,16 @@ async fn get_checkpoint_entries(
     };
 
     // Get HEAD commit info for git operations
-    let head_commit = repo
-        .head()
-        .ok()
-        .and_then(|h| h.target().ok())
-        .and_then(|oid| repo.find_commit(oid).ok());
+    let head_commit = head_commit_override
+        .map(str::trim)
+        .filter(|sha| !sha.is_empty() && *sha != "initial")
+        .and_then(|sha| repo.find_commit(sha.to_string()).ok())
+        .or_else(|| {
+            repo.head()
+                .ok()
+                .and_then(|h| h.target().ok())
+                .and_then(|oid| repo.find_commit(oid).ok())
+        });
     let head_commit_sha = head_commit.as_ref().map(|c| c.id().to_string());
     let head_tree_id = head_commit
         .as_ref()
@@ -1178,6 +1250,7 @@ async fn get_checkpoint_entries(
     let head_commit_sha = Arc::new(head_commit_sha);
     let head_tree_id = Arc::new(head_tree_id);
     let initial_attributions = Arc::new(initial_attributions);
+    let initial_snapshot_contents = Arc::new(initial_snapshot_contents);
 
     // Spawn tasks for each file
     let spawn_start = Instant::now();
@@ -1197,6 +1270,7 @@ async fn get_checkpoint_entries(
             .cloned()
             .unwrap_or_default();
         let initial_attributions = Arc::clone(&initial_attributions);
+        let initial_snapshot_contents = Arc::clone(&initial_snapshot_contents);
         let semaphore = Arc::clone(&semaphore);
 
         let task = smol::spawn(async move {
@@ -1218,6 +1292,7 @@ async fn get_checkpoint_entries(
                     head_commit_sha.clone(),
                     head_tree_id.clone(),
                     initial_attributions.clone(),
+                    initial_snapshot_contents.clone(),
                     ts,
                 )
             })
@@ -1616,6 +1691,68 @@ mod tests {
         assert_eq!(
             entries_len, 1,
             "Should create an AI checkpoint entry for unstaged changes without pathspecs"
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_base_override_controls_head_context_for_entry_generation() {
+        use crate::authorship::transcript::AiTranscript;
+        use crate::authorship::working_log::AgentId;
+        use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
+        use std::collections::HashMap;
+        use std::fs;
+
+        let (tmp_repo, mut file, _) = TmpRepo::new_with_base_commit().unwrap();
+        let filename = file.filename().to_string();
+
+        file.update("line from commit A\n").unwrap();
+        tmp_repo.commit_with_message("commit A").unwrap();
+        let base_commit = tmp_repo.get_head_commit_sha().unwrap();
+
+        file.update("line from commit B\n").unwrap();
+        tmp_repo.commit_with_message("commit B").unwrap();
+
+        // Keep the worktree dirty so git status returns this file, but inject deterministic
+        // content from commit B via dirty_files.
+        fs::write(file.path(), "line from uncommitted edit\n").unwrap();
+
+        let mut dirty_files = HashMap::new();
+        dirty_files.insert(filename.clone(), "line from commit B\n".to_string());
+        let agent_run_result = AgentRunResult {
+            agent_id: AgentId {
+                tool: "mock_ai".to_string(),
+                id: "base-override-regression".to_string(),
+                model: "test".to_string(),
+            },
+            agent_metadata: None,
+            transcript: Some(AiTranscript { messages: vec![] }),
+            checkpoint_kind: CheckpointKind::AiAgent,
+            repo_working_dir: None,
+            edited_filepaths: Some(vec![filename]),
+            will_edit_filepaths: None,
+            dirty_files: Some(dirty_files),
+        };
+
+        let (entries_len, files_len, _) = run_with_base_commit_override(
+            tmp_repo.gitai_repo(),
+            "mock-ai",
+            CheckpointKind::AiAgent,
+            false,
+            false,
+            true,
+            Some(agent_run_result),
+            false,
+            Some(base_commit.as_str()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            files_len, 1,
+            "Expected one tracked file for the checkpoint run"
+        );
+        assert_eq!(
+            entries_len, 1,
+            "When base override points to commit A, current content from commit B must produce an entry"
         );
     }
 

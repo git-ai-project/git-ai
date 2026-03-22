@@ -8,6 +8,7 @@ use crate::commands::hooks::stash_hooks;
 use crate::config;
 use crate::error::GitAiError;
 use crate::git::cli_parser::ParsedGitInvocation;
+use crate::git::repo_state::resolve_squash_source_head_from_git_dir;
 use crate::git::repository::{Repository, disable_internal_git_hooks};
 use crate::git::sync_authorship::fetch_authorship_notes;
 use crate::utils::{debug_log, debug_performance_log_structured};
@@ -1427,6 +1428,7 @@ fn parse_hook_stdin(stdin: &[u8]) -> Vec<(String, String)> {
         .collect()
 }
 
+#[cfg(test)]
 fn is_valid_git_oid(value: &str) -> bool {
     (value.len() == 40 || value.len() == 64) && value.chars().all(|c| c.is_ascii_hexdigit())
 }
@@ -1440,33 +1442,7 @@ fn is_null_oid(value: &str) -> bool {
 }
 
 fn resolve_squash_source_head(repo: &Repository) -> Option<String> {
-    // Some Git versions keep MERGE_HEAD for --squash, others do not.
-    let merge_head_path = repo.path().join("MERGE_HEAD");
-    if let Ok(contents) = fs::read_to_string(merge_head_path)
-        && let Some(candidate) = contents
-            .lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-        && is_valid_git_oid(candidate)
-    {
-        return Some(candidate.to_string());
-    }
-
-    // SQUASH_MSG is created by `git merge --squash` and includes the squashed tip commit(s).
-    // We use the first commit entry, which corresponds to the source head.
-    let squash_msg_path = repo.path().join("SQUASH_MSG");
-    if let Ok(contents) = fs::read_to_string(squash_msg_path) {
-        for line in contents.lines() {
-            if let Some(rest) = line.trim_start().strip_prefix("commit ")
-                && let Some(candidate) = rest.split_whitespace().next()
-                && is_valid_git_oid(candidate)
-            {
-                return Some(candidate.to_string());
-            }
-        }
-    }
-
-    None
+    resolve_squash_source_head_from_git_dir(repo.path())
 }
 
 fn parsed_invocation(command: &str, command_args: Vec<String>) -> ParsedGitInvocation {
@@ -1693,6 +1669,7 @@ fn maybe_handle_reset_reference_transaction(
             &new_head,
             &old_head,
             &human_author,
+            None,
             None,
         );
     } else {
@@ -2679,6 +2656,7 @@ pub fn ensure_repo_level_hooks_for_checkpoint(repo: &Repository) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::feature_flags::FeatureFlags;
     use serial_test::serial;
 
     struct GlobalConfigOverrideGuard {
@@ -2695,6 +2673,21 @@ mod tests {
     impl Drop for GlobalConfigOverrideGuard {
         fn drop(&mut self) {
             let _ = set_test_global_git_config_override_path(self.old.clone());
+        }
+    }
+
+    struct TestFeatureFlagsGuard;
+
+    impl TestFeatureFlagsGuard {
+        fn defaults() -> Self {
+            crate::config::Config::set_test_feature_flags(FeatureFlags::default());
+            Self
+        }
+    }
+
+    impl Drop for TestFeatureFlagsGuard {
+        fn drop(&mut self) {
+            crate::config::Config::clear_test_feature_flags();
         }
     }
 
@@ -2805,7 +2798,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn ensure_repo_hooks_installed_uses_repo_local_forwarding() {
+        let _flags = TestFeatureFlagsGuard::defaults();
         let tmp = tempfile::tempdir().expect("failed to create tempdir");
         let repo = init_repo(&tmp.path().join("repo"));
         let user_hooks = tmp.path().join("repo-user-hooks");
@@ -2877,6 +2872,7 @@ mod tests {
     #[test]
     #[serial]
     fn ensure_repo_hooks_installed_uses_global_fallback_when_local_missing() {
+        let _flags = TestFeatureFlagsGuard::defaults();
         let tmp = tempfile::tempdir().expect("failed to create tempdir");
         let home = tmp.path().join("home");
         fs::create_dir_all(&home).expect("failed to create home dir");
@@ -2964,7 +2960,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn remove_repo_hooks_unsets_local_hooks_path_when_no_original_value() {
+        let _flags = TestFeatureFlagsGuard::defaults();
         let tmp = tempfile::tempdir().expect("failed to create tempdir");
         let repo = init_repo(&tmp.path().join("repo"));
         let local_config = repo_local_config_path(&repo);
@@ -3769,7 +3767,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn non_managed_hooks_provisioned_only_when_original_exists() {
+        let _flags = TestFeatureFlagsGuard::defaults();
         let tmp = tempfile::tempdir().expect("failed to create tempdir");
         let repo = init_repo(&tmp.path().join("repo"));
         let user_hooks = tmp.path().join("user-hooks");

@@ -52,7 +52,7 @@ case "$AGENT" in
     ;;
 
   opencode)
-    PLUGIN="$HOME/.config/opencode/plugin/git-ai.ts"
+    PLUGIN="$HOME/.config/opencode/plugins/git-ai.ts"
     [ -f "$PLUGIN" ] || fail "OpenCode plugin not found at $PLUGIN"
     pass "OpenCode git-ai plugin installed at $PLUGIN"
     ;;

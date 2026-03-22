@@ -823,13 +823,27 @@ fn test_blame_commit_range_with_oldest_date() {
     let mut file = repo.filename("test.txt");
 
     file.set_contents(crate::lines!["Old content"]);
-    repo.stage_all_and_commit("Old").unwrap();
-
-    std::thread::sleep(std::time::Duration::from_secs(1));
-    let now = chrono::Utc::now();
+    repo.stage_all_and_commit_with_env(
+        "Old",
+        &[
+            ("GIT_AUTHOR_DATE", "2030-01-03T00:00:00Z"),
+            ("GIT_COMMITTER_DATE", "2030-01-03T00:00:00Z"),
+        ],
+    )
+    .unwrap();
+    let now = chrono::DateTime::parse_from_rfc3339("2030-01-03T00:00:01Z")
+        .expect("valid RFC3339 cutoff date")
+        .with_timezone(&chrono::Utc);
 
     file.set_contents(crate::lines!["New content"]);
-    repo.stage_all_and_commit("New").unwrap();
+    repo.stage_all_and_commit_with_env(
+        "New",
+        &[
+            ("GIT_AUTHOR_DATE", "2030-01-03T00:00:02Z"),
+            ("GIT_COMMITTER_DATE", "2030-01-03T00:00:02Z"),
+        ],
+    )
+    .unwrap();
 
     let gitai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
         .expect("Failed to find repository");

@@ -141,6 +141,151 @@ pub fn is_flag_with_value(flag: &str) -> bool {
     )
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebaseArgsSummary {
+    pub is_control_mode: bool,
+    pub has_root: bool,
+    pub onto_spec: Option<String>,
+    pub positionals: Vec<String>,
+}
+
+pub fn summarize_rebase_args(command_args: &[String]) -> RebaseArgsSummary {
+    for mode in [
+        "--continue",
+        "--abort",
+        "--skip",
+        "--quit",
+        "--show-current-patch",
+    ] {
+        if command_args.iter().any(|arg| arg == mode) {
+            return RebaseArgsSummary {
+                is_control_mode: true,
+                has_root: false,
+                onto_spec: None,
+                positionals: Vec::new(),
+            };
+        }
+    }
+
+    let mut has_root = false;
+    let mut onto_spec: Option<String> = None;
+    let mut positionals: Vec<String> = Vec::new();
+    let mut i = 0usize;
+
+    while i < command_args.len() {
+        let arg = command_args[i].as_str();
+
+        if arg == "--" {
+            break;
+        }
+
+        if arg == "--onto" {
+            if let Some(next) = command_args.get(i + 1) {
+                onto_spec = Some(next.clone());
+                i += 2;
+                continue;
+            }
+            break;
+        }
+        if let Some(spec) = arg.strip_prefix("--onto=") {
+            onto_spec = Some(spec.to_string());
+            i += 1;
+            continue;
+        }
+
+        if arg == "--root" {
+            has_root = true;
+            i += 1;
+            continue;
+        }
+
+        if arg.starts_with('-') {
+            let takes_value = matches!(
+                arg,
+                "-s" | "--strategy"
+                    | "-X"
+                    | "--strategy-option"
+                    | "-x"
+                    | "--exec"
+                    | "--empty"
+                    | "-C"
+                    | "-S"
+                    | "--gpg-sign"
+            );
+            if takes_value && !arg.contains('=') {
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+
+        positionals.push(arg.to_string());
+        i += 1;
+    }
+
+    RebaseArgsSummary {
+        is_control_mode: false,
+        has_root,
+        onto_spec,
+        positionals,
+    }
+}
+
+pub fn rebase_has_control_mode(command_args: &[String]) -> bool {
+    summarize_rebase_args(command_args).is_control_mode
+}
+
+pub fn explicit_rebase_branch_arg(command_args: &[String]) -> Option<String> {
+    let summary = summarize_rebase_args(command_args);
+    if summary.is_control_mode {
+        return None;
+    }
+
+    if summary.has_root {
+        summary.positionals.first().cloned()
+    } else {
+        summary.positionals.get(1).cloned()
+    }
+}
+
+pub fn stash_subcommand(command_args: &[String]) -> Option<&str> {
+    match command_args.first().map(String::as_str) {
+        Some("push" | "save" | "apply" | "pop" | "drop" | "list" | "branch" | "show") => {
+            command_args.first().map(String::as_str)
+        }
+        _ => None,
+    }
+}
+
+pub fn stash_requires_target_resolution(command_args: &[String]) -> bool {
+    matches!(
+        stash_subcommand(command_args),
+        Some("apply" | "pop" | "drop")
+    )
+}
+
+pub fn stash_target_spec(command_args: &[String]) -> Option<&str> {
+    if !stash_requires_target_resolution(command_args) {
+        return None;
+    }
+
+    let remaining = command_args.get(1..)?;
+    let mut saw_separator = false;
+    for arg in remaining {
+        if arg == "--" {
+            saw_separator = true;
+            continue;
+        }
+        if !saw_separator && arg.starts_with('-') {
+            continue;
+        }
+        return Some(arg.as_str());
+    }
+
+    None
+}
+
 pub fn parse_git_cli_args(args: &[String]) -> ParsedGitInvocation {
     use Kind::*;
 
@@ -717,5 +862,79 @@ mod tests {
             extract_clone_target_directory(&args),
             Some("my-dir".to_string())
         );
+    }
+
+    #[test]
+    fn test_explicit_rebase_branch_arg_standard_mode() {
+        let args = vec![
+            "--rebase-merges".to_string(),
+            "main".to_string(),
+            "feature".to_string(),
+        ];
+        assert_eq!(
+            explicit_rebase_branch_arg(&args),
+            Some("feature".to_string())
+        );
+    }
+
+    #[test]
+    fn test_explicit_rebase_branch_arg_root_mode() {
+        let args = vec![
+            "--root".to_string(),
+            "--onto".to_string(),
+            "main".to_string(),
+            "feature".to_string(),
+        ];
+        assert_eq!(
+            explicit_rebase_branch_arg(&args),
+            Some("feature".to_string())
+        );
+    }
+
+    #[test]
+    fn test_explicit_rebase_branch_arg_control_mode_returns_none() {
+        let args = vec!["--continue".to_string()];
+        assert_eq!(explicit_rebase_branch_arg(&args), None);
+        assert!(rebase_has_control_mode(&args));
+    }
+
+    #[test]
+    fn test_rebase_summary_treats_show_current_patch_as_control_mode() {
+        let args = vec!["--show-current-patch".to_string()];
+        let summary = summarize_rebase_args(&args);
+        assert!(summary.is_control_mode);
+        assert!(summary.positionals.is_empty());
+    }
+
+    #[test]
+    fn test_explicit_rebase_branch_arg_skips_exec_and_empty_values() {
+        let args = vec![
+            "--exec".to_string(),
+            "printf hi".to_string(),
+            "--empty".to_string(),
+            "keep".to_string(),
+            "main".to_string(),
+            "feature".to_string(),
+        ];
+        assert_eq!(
+            explicit_rebase_branch_arg(&args),
+            Some("feature".to_string())
+        );
+    }
+
+    #[test]
+    fn test_rebase_summary_tracks_onto_with_c_path() {
+        let args = vec![
+            "-C".to_string(),
+            "1".to_string(),
+            "--onto".to_string(),
+            "new-base".to_string(),
+            "upstream".to_string(),
+            "feature".to_string(),
+        ];
+        let summary = summarize_rebase_args(&args);
+        assert!(!summary.is_control_mode);
+        assert_eq!(summary.onto_spec.as_deref(), Some("new-base"));
+        assert_eq!(summary.positionals, vec!["upstream", "feature"]);
     }
 }

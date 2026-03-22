@@ -30,6 +30,14 @@ cargo insta review                       # interactively review snapshot changes
 cargo insta accept                       # accept all pending snapshots
 ```
 
+When running a single test file, always use the following format:
+
+```bash
+cargo test --package git-ai --test <test_file_name> --  --nocapture 
+```
+
+Using the above format, cargo will skip building other test files, which GREATLY speeds up the test execution.
+
 **Dev environment**: Use `nix develop` to get the pinned Rust 1.93.0 toolchain and dev wrappers (`git`, `git-ai`, `git-og`). The shell hook creates wrapper scripts in `~/.git-ai-local-dev/gitwrap/bin/` that point to `target/debug/git-ai`. Use `git-og` to bypass git-ai and call real git.
 
 ## Architecture

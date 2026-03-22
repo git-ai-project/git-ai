@@ -451,15 +451,14 @@ fn test_cursor_e2e_with_resync() {
     use tempfile::TempDir;
 
     let repo = TestRepo::new();
-    let db_path = fixture_path("cursor_test.vscdb");
-    let db_path_str = db_path.to_string_lossy().to_string();
-
     // Create a temp directory for the modified database
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let temp_db_path = temp_dir.path().join("modified_cursor_test.vscdb");
 
     // Copy the fixture database to the temp location
+    let db_path = fixture_path("cursor_test.vscdb");
     fs::copy(&db_path, &temp_db_path).expect("Failed to copy database");
+    let temp_db_path_str = temp_db_path.to_string_lossy().to_string();
 
     // Modify one of the messages in the temp database
     {
@@ -535,22 +534,16 @@ fn test_cursor_e2e_with_resync() {
     let result = repo
         .git_ai_with_env(
             &["checkpoint", "cursor", "--hook-input", &hook_input],
-            &[("GIT_AI_CURSOR_GLOBAL_DB_PATH", &db_path_str)],
+            &[("GIT_AI_CURSOR_GLOBAL_DB_PATH", &temp_db_path_str)],
         )
         .unwrap();
 
     println!("Checkpoint output: {}", result);
 
-    // Now commit with the MODIFIED database - this tests the resync logic in post_commit
-    let temp_db_path_str = temp_db_path.to_string_lossy().to_string();
+    // Now commit after modifying the same database in-place - this tests the resync logic in
+    // post_commit without relying on an out-of-band daemon env override channel.
     repo.git(&["add", "-A"]).expect("add --all should succeed");
-    let commit = repo
-        .commit_with_env(
-            "Add cursor edits",
-            &[("GIT_AI_CURSOR_GLOBAL_DB_PATH", &temp_db_path_str)],
-            None,
-        )
-        .unwrap();
+    let commit = repo.commit("Add cursor edits").unwrap();
 
     // Verify attribution still works
     let mut file = repo.filename("src/main.rs");

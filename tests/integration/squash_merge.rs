@@ -2,27 +2,12 @@ use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 use std::collections::HashMap;
-use std::process::Command;
-use std::time::Duration;
 
-fn read_authorship_note(repo: &TestRepo, commit_sha: &str) -> Option<String> {
-    let output = Command::new("git")
-        .args([
-            "-C",
-            repo.path().to_str().unwrap(),
-            "notes",
-            "--ref",
-            "ai",
-            "show",
-            commit_sha,
-        ])
-        .output()
-        .expect("failed to run git notes show");
-    if output.status.success() {
-        Some(String::from_utf8_lossy(&output.stdout).to_string())
-    } else {
-        None
-    }
+fn deterministic_commit_env(timestamp: &'static str) -> [(&'static str, &'static str); 2] {
+    [
+        ("GIT_AUTHOR_DATE", timestamp),
+        ("GIT_COMMITTER_DATE", timestamp),
+    ]
 }
 
 /// Test merge --squash with a simple feature branch containing AI and human edits
@@ -43,13 +28,19 @@ fn test_prepare_working_log_simple_squash() {
 
     // Add AI changes on feature branch
     file.insert_at(3, crate::lines!["// AI added feature".ai()]);
-    repo.stage_all_and_commit("Add AI feature").unwrap();
-
-    std::thread::sleep(Duration::from_secs(1));
+    repo.stage_all_and_commit_with_env(
+        "Add AI feature",
+        &deterministic_commit_env("2030-01-01T00:00:00Z"),
+    )
+    .unwrap();
 
     // Add human changes on feature branch
     file.insert_at(4, crate::lines!["// Human refinement"]);
-    repo.stage_all_and_commit("Human refinement").unwrap();
+    repo.stage_all_and_commit_with_env(
+        "Human refinement",
+        &deterministic_commit_env("2030-01-01T00:00:01Z"),
+    )
+    .unwrap();
 
     // Go back to master and squash merge
     repo.git(&["checkout", &default_branch]).unwrap();
@@ -323,7 +314,7 @@ fn test_prepare_working_log_squash_with_mixed_additions() {
 /// when the real post-commit pipeline injects them.
 #[test]
 fn test_squash_merge_preserves_custom_attributes_from_config() {
-    let mut repo = TestRepo::new();
+    let mut repo = TestRepo::new_dedicated_daemon();
 
     // Configure custom attributes via config patch
     let mut attrs = HashMap::new();
@@ -342,17 +333,24 @@ fn test_squash_merge_preserves_custom_attributes_from_config() {
     // Create feature branch with AI commit
     repo.git(&["checkout", "-b", "feature"]).unwrap();
     file.insert_at(3, crate::lines!["// AI feature line".ai()]);
-    repo.stage_all_and_commit("Add AI feature").unwrap();
-
-    std::thread::sleep(Duration::from_secs(1));
+    repo.stage_all_and_commit_with_env(
+        "Add AI feature",
+        &deterministic_commit_env("2030-01-02T00:00:00Z"),
+    )
+    .unwrap();
 
     // Add another AI commit on the feature branch
     file.insert_at(4, crate::lines!["// AI feature line 2".ai()]);
-    repo.stage_all_and_commit("Add AI feature 2").unwrap();
+    repo.stage_all_and_commit_with_env(
+        "Add AI feature 2",
+        &deterministic_commit_env("2030-01-02T00:00:01Z"),
+    )
+    .unwrap();
 
     // Verify custom attributes were set on the feature commits
     let feature_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
-    let feature_note = read_authorship_note(&repo, &feature_sha)
+    let feature_note = repo
+        .read_authorship_note(&feature_sha)
         .expect("feature commit should have authorship note");
     let feature_log =
         AuthorshipLog::deserialize_from_string(&feature_note).expect("parse feature note");
@@ -371,7 +369,8 @@ fn test_squash_merge_preserves_custom_attributes_from_config() {
 
     // Verify custom attributes survived the squash merge
     let squash_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
-    let squash_note = read_authorship_note(&repo, &squash_sha)
+    let squash_note = repo
+        .read_authorship_note(&squash_sha)
         .expect("squash commit should have authorship note");
     let squash_log =
         AuthorshipLog::deserialize_from_string(&squash_note).expect("parse squash note");

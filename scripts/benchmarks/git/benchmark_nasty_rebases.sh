@@ -19,7 +19,7 @@ Options:
   --burst-every <n>            Every Nth feature commit rewrites all generated files (default: 25)
   --git-bin <path>             Git binary to use (default: wrapper next to git-ai, else PATH git)
   --git-ai-bin <path>          git-ai binary (default: PATH git-ai)
-  --hook-mode <mode>           wrapper | hooks | both (default: wrapper)
+  --hook-mode <mode>           wrapper | hooks | both | daemon (default: wrapper)
   --skip-clone                 Reuse existing clone in <work-root>/repo
   -h, --help                   Show help
 
@@ -83,8 +83,8 @@ if [[ -z "$WORK_ROOT" ]]; then
   WORK_ROOT="${TMPDIR:-/tmp}/git-ai-nasty-rebase-$(date +%Y%m%d-%H%M%S)"
 fi
 
-if [[ "$HOOK_MODE" != "wrapper" && "$HOOK_MODE" != "hooks" && "$HOOK_MODE" != "both" ]]; then
-  echo "error: --hook-mode must be one of wrapper|hooks|both" >&2
+if [[ "$HOOK_MODE" != "wrapper" && "$HOOK_MODE" != "hooks" && "$HOOK_MODE" != "both" && "$HOOK_MODE" != "daemon" ]]; then
+  echo "error: --hook-mode must be one of wrapper|hooks|both|daemon" >&2
   exit 1
 fi
 
@@ -94,6 +94,36 @@ SUMMARY_FILE="$WORK_ROOT/summary.txt"
 RESULTS_TSV="$WORK_ROOT/results.tsv"
 
 mkdir -p "$WORK_ROOT" "$LOG_DIR"
+
+DAEMON_STARTED=0
+cleanup() {
+  if [[ "$HOOK_MODE" == "daemon" && "$DAEMON_STARTED" -eq 1 ]]; then
+    (
+      cd "$REPO_DIR" 2>/dev/null || true
+      GIT_AI_DEBUG=0 GIT_AI_DEBUG_PERFORMANCE=0 "$GIT_AI_BIN" daemon shutdown >/dev/null 2>&1 || true
+    )
+  fi
+}
+trap cleanup EXIT
+
+if [[ "$HOOK_MODE" == "daemon" ]]; then
+  if [[ -z "${GIT_AI_DAEMON_CONTROL_SOCKET:-}" ]]; then
+    export GIT_AI_DAEMON_CONTROL_SOCKET="$HOME/.git-ai/internal/daemon/control.sock"
+  fi
+  if [[ -z "${GIT_TRACE2_EVENT:-}" ]]; then
+    export GIT_TRACE2_EVENT="af_unix:stream:$HOME/.git-ai/internal/daemon/trace2.sock"
+  fi
+  if [[ -z "${GIT_TRACE2_EVENT_NESTING:-}" ]]; then
+    export GIT_TRACE2_EVENT_NESTING="10"
+  fi
+  export GIT_AI_DAEMON_CHECKPOINT_DELEGATE="true"
+
+  if ! GIT_AI_DEBUG=0 GIT_AI_DEBUG_PERFORMANCE=0 "$GIT_AI_BIN" daemon start >/dev/null 2>&1; then
+    echo "error: failed to start git-ai daemon for benchmark mode" >&2
+    exit 1
+  fi
+  DAEMON_STARTED=1
+fi
 
 now_ns() {
   python3 - <<'PY'
@@ -144,10 +174,20 @@ PY
 }
 
 run_ai_checkpoint() {
-  (
-    cd "$REPO_DIR"
-    GIT_AI_DEBUG=0 GIT_AI_DEBUG_PERFORMANCE=0 "$GIT_AI_BIN" checkpoint mock_ai >/dev/null
-  )
+  if [[ "$HOOK_MODE" == "daemon" ]]; then
+    (
+      cd "$REPO_DIR"
+      GIT_AI_DEBUG=0 GIT_AI_DEBUG_PERFORMANCE=0 \
+      GIT_AI_DAEMON_CHECKPOINT_DELEGATE=true \
+      GIT_AI_DAEMON_CONTROL_SOCKET="$GIT_AI_DAEMON_CONTROL_SOCKET" \
+      "$GIT_AI_BIN" checkpoint mock_ai >/dev/null
+    )
+  else
+    (
+      cd "$REPO_DIR"
+      GIT_AI_DEBUG=0 GIT_AI_DEBUG_PERFORMANCE=0 "$GIT_AI_BIN" checkpoint mock_ai >/dev/null
+    )
+  fi
 }
 
 ensure_clean_rebase_state() {

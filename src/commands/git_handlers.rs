@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use crate::authorship::virtual_attribution::VirtualAttributions;
 use crate::commands::git_hook_handlers::{
     ENV_SKIP_MANAGED_HOOKS, has_repo_hook_state, resolve_previous_non_managed_hooks_path,
@@ -21,6 +19,7 @@ use crate::git::cli_parser::{ParsedGitInvocation, parse_git_cli_args};
 use crate::git::find_repository;
 use crate::git::repository::{Repository, disable_internal_git_hooks};
 use crate::observability;
+use std::collections::HashSet;
 
 use crate::observability::wrapper_performance_targets::log_performance_target_if_violated;
 #[cfg(windows)]
@@ -109,6 +108,12 @@ pub fn handle_git(args: &[String]) {
         let orig_args: Vec<String> = std::env::args().skip(1).collect();
         proxy_to_git(&orig_args, true, None);
         return;
+    }
+
+    // Async mode: wrapper should behave as a pure passthrough to git.
+    if config::Config::get().feature_flags().async_mode {
+        let exit_status = proxy_to_git(args, false, None);
+        exit_with_status(exit_status);
     }
 
     let mut parsed_args = parse_git_cli_args(args);

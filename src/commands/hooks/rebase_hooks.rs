@@ -1,8 +1,7 @@
 use crate::authorship::rebase_authorship::walk_commits_to_base;
 use crate::commands::git_handlers::CommandHooksContext;
 use crate::commands::hooks::commit_hooks::get_commit_default_author;
-use crate::git::cli_parser::ParsedGitInvocation;
-use crate::git::cli_parser::is_dry_run;
+use crate::git::cli_parser::{ParsedGitInvocation, RebaseArgsSummary, is_dry_run};
 use crate::git::repository::Repository;
 use crate::git::rewrite_log::RewriteLogEvent;
 use crate::utils::debug_log;
@@ -312,12 +311,59 @@ fn process_completed_rebase(
     debug_log("✓ Rebase authorship rewrite complete");
 }
 
+fn original_equivalent_for_rewritten_commit(
+    repository: &Repository,
+    rewritten_commit: &str,
+) -> Option<String> {
+    let events = repository.storage.read_rewrite_events().ok()?;
+    for event in events {
+        match event {
+            RewriteLogEvent::RebaseComplete { rebase_complete } => {
+                if let Some(index) = rebase_complete
+                    .new_commits
+                    .iter()
+                    .position(|commit| commit == rewritten_commit)
+                {
+                    return rebase_complete.original_commits.get(index).cloned();
+                }
+            }
+            RewriteLogEvent::CherryPickComplete {
+                cherry_pick_complete,
+            } => {
+                if let Some(index) = cherry_pick_complete
+                    .new_commits
+                    .iter()
+                    .position(|commit| commit == rewritten_commit)
+                {
+                    return cherry_pick_complete.source_commits.get(index).cloned();
+                }
+            }
+            RewriteLogEvent::CommitAmend { commit_amend }
+                if commit_amend.amended_commit_sha == rewritten_commit =>
+            {
+                return Some(commit_amend.original_commit);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 pub(crate) fn build_rebase_commit_mappings(
     repository: &Repository,
     original_head: &str,
     new_head: &str,
     onto_head: Option<&str>,
 ) -> Result<(Vec<String>, Vec<String>), crate::error::GitAiError> {
+    if let Some(onto_head) = onto_head
+        && !crate::git::repo_state::is_valid_git_oid(onto_head)
+    {
+        return Err(crate::error::GitAiError::Generic(format!(
+            "rebase mapping expected resolved onto oid, got '{}'",
+            onto_head
+        )));
+    }
+
     // Get commits from new_head and original_head
     let new_head_commit = repository.find_commit(new_head.to_string())?;
     let original_head_commit = repository.find_commit(original_head.to_string())?;
@@ -325,16 +371,21 @@ pub(crate) fn build_rebase_commit_mappings(
     // Find merge base between original and new
     let merge_base = repository.merge_base(original_head_commit.id(), new_head_commit.id())?;
 
-    // Walk from original_head to merge_base to get the commits that were rebased
-    let mut original_commits = walk_commits_to_base(repository, original_head, &merge_base)?;
+    let original_base = onto_head
+        .and_then(|onto| original_equivalent_for_rewritten_commit(repository, onto))
+        .filter(|mapped| mapped != original_head && is_ancestor(repository, mapped, original_head))
+        .unwrap_or_else(|| merge_base.clone());
+
+    // Walk from original_head to the original-side lower bound to get the commits that were rebased.
+    let mut original_commits = walk_commits_to_base(repository, original_head, &original_base)?;
     original_commits.reverse();
 
     // If there were no original commits, there is nothing to rewrite.
     // Avoid walking potentially large parts of new history.
     if original_commits.is_empty() {
         debug_log(&format!(
-            "Commit mapping: 0 original -> 0 new (merge_base: {})",
-            merge_base
+            "Commit mapping: 0 original -> 0 new (merge_base: {}, original_base: {})",
+            merge_base, original_base
         ));
         return Ok((original_commits, Vec::new()));
     }
@@ -352,10 +403,11 @@ pub(crate) fn build_rebase_commit_mappings(
     new_commits.reverse();
 
     debug_log(&format!(
-        "Commit mapping: {} original -> {} new (merge_base: {}, new_base: {})",
+        "Commit mapping: {} original -> {} new (merge_base: {}, original_base: {}, new_base: {})",
         original_commits.len(),
         new_commits.len(),
         merge_base,
+        original_base,
         new_commits_base
     ));
 
@@ -381,7 +433,7 @@ fn resolve_rebase_original_head(
     resolve_commitish(repository, branch_spec)
 }
 
-fn resolve_rebase_onto_head(
+pub(crate) fn resolve_rebase_onto_head(
     parsed_args: &ParsedGitInvocation,
     repository: &Repository,
 ) -> Option<String> {
@@ -424,97 +476,8 @@ fn is_ancestor(repository: &Repository, ancestor: &str, descendant: &str) -> boo
     crate::git::repository::exec_git(&args).is_ok()
 }
 
-struct RebaseArgsSummary {
-    is_control_mode: bool,
-    has_root: bool,
-    onto_spec: Option<String>,
-    positionals: Vec<String>,
-}
-
 fn summarize_rebase_args(parsed_args: &ParsedGitInvocation) -> RebaseArgsSummary {
-    // Modes that do not start a new rebase sequence.
-    for mode in [
-        "--continue",
-        "--abort",
-        "--skip",
-        "--quit",
-        "--show-current-patch",
-    ] {
-        if parsed_args.has_command_flag(mode) {
-            return RebaseArgsSummary {
-                is_control_mode: true,
-                has_root: false,
-                onto_spec: None,
-                positionals: Vec::new(),
-            };
-        }
-    }
-
-    let mut has_root = false;
-    let mut onto_spec: Option<String> = None;
-    let mut positionals: Vec<String> = Vec::new();
-    let args = &parsed_args.command_args;
-    let mut i = 0usize;
-
-    while i < args.len() {
-        let arg = args[i].as_str();
-
-        if arg == "--" {
-            break;
-        }
-
-        if arg == "--onto" {
-            if let Some(next) = args.get(i + 1) {
-                onto_spec = Some(next.clone());
-                i += 2;
-                continue;
-            }
-            break;
-        }
-        if let Some(spec) = arg.strip_prefix("--onto=") {
-            onto_spec = Some(spec.to_string());
-            i += 1;
-            continue;
-        }
-
-        if arg == "--root" {
-            has_root = true;
-            i += 1;
-            continue;
-        }
-
-        if arg.starts_with('-') {
-            // Subset of rebase flags that consume a separate value token.
-            let takes_value = matches!(
-                arg,
-                "-s" | "--strategy"
-                    | "-X"
-                    | "--strategy-option"
-                    | "-x"
-                    | "--exec"
-                    | "--empty"
-                    | "-C"
-                    | "-S"
-                    | "--gpg-sign"
-            );
-            if takes_value && !arg.contains('=') {
-                i += 2;
-                continue;
-            }
-            i += 1;
-            continue;
-        }
-
-        positionals.push(arg.to_string());
-        i += 1;
-    }
-
-    RebaseArgsSummary {
-        is_control_mode: false,
-        has_root,
-        onto_spec,
-        positionals,
-    }
+    crate::git::cli_parser::summarize_rebase_args(&parsed_args.command_args)
 }
 
 #[cfg(test)]

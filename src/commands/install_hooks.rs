@@ -1,4 +1,6 @@
 use crate::commands::flush_metrics_db::spawn_background_metrics_db_flush;
+use crate::config;
+use crate::daemon::DaemonConfig;
 use crate::error::GitAiError;
 use crate::mdm::agents::get_all_installers;
 use crate::mdm::git_client_installer::GitClientInstallerParams;
@@ -8,6 +10,13 @@ use crate::mdm::skills_installer;
 use crate::mdm::spinner::{Spinner, print_diff};
 use crate::mdm::utils::{get_current_binary_path, git_shim_path};
 use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+
+const TRACE2_EVENT_TARGET_KEY: &str = "trace2.eventTarget";
+const TRACE2_EVENT_NESTING_KEY: &str = "trace2.eventNesting";
+const TRACE2_EVENT_NESTING_VALUE: &str = "10";
 
 /// Installation status for a tool
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +116,98 @@ fn print_amp_plugins_note(installer_id: &str) {
     }
 }
 
+fn read_global_git_config_value(git_cmd: &str, key: &str) -> Result<Option<String>, GitAiError> {
+    let output = Command::new(git_cmd)
+        .args(["config", "--global", "--get", key])
+        .output()?;
+
+    if output.status.success() {
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if value.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(value))
+        }
+    } else if output.status.code() == Some(1) {
+        Ok(None)
+    } else {
+        Err(GitAiError::Generic(format!(
+            "failed to read global git config key '{}'",
+            key
+        )))
+    }
+}
+
+fn set_global_git_config_value(git_cmd: &str, key: &str, value: &str) -> Result<(), GitAiError> {
+    let status = Command::new(git_cmd)
+        .args(["config", "--global", key, value])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(GitAiError::Generic(format!(
+            "failed to set global git config key '{}'",
+            key
+        )))
+    }
+}
+
+fn ensure_global_git_config_value(
+    git_cmd: &str,
+    key: &str,
+    value: &str,
+    dry_run: bool,
+) -> Result<(), GitAiError> {
+    let current = read_global_git_config_value(git_cmd, key)?;
+    if current.as_deref() == Some(value) || dry_run {
+        return Ok(());
+    }
+    set_global_git_config_value(git_cmd, key, value)
+}
+
+fn ensure_global_git_config_dirs() -> Result<(), GitAiError> {
+    if let Ok(path) = std::env::var("GIT_CONFIG_GLOBAL") {
+        let config_path = PathBuf::from(path);
+        if let Some(parent) = config_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+
+    if let Ok(home) = std::env::var("HOME") {
+        fs::create_dir_all(home)?;
+    }
+
+    Ok(())
+}
+
+fn maybe_configure_async_mode_daemon_trace2(dry_run: bool) -> Result<(), GitAiError> {
+    let runtime_config = config::Config::fresh();
+    if !runtime_config.feature_flags().async_mode {
+        return Ok(());
+    }
+
+    ensure_global_git_config_dirs()?;
+
+    let daemon_config = DaemonConfig::from_env_or_default_paths()?;
+    let event_target = daemon_config.trace2_event_target();
+
+    ensure_global_git_config_value(
+        runtime_config.git_cmd(),
+        TRACE2_EVENT_TARGET_KEY,
+        &event_target,
+        dry_run,
+    )?;
+    ensure_global_git_config_value(
+        runtime_config.git_cmd(),
+        TRACE2_EVENT_NESTING_KEY,
+        TRACE2_EVENT_NESTING_VALUE,
+        dry_run,
+    )?;
+    Ok(())
+}
+
 /// Main entry point for install-hooks command
 pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
     // Parse flags
@@ -120,6 +221,9 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
             verbose = true;
         }
     }
+
+    // In async mode, daemon trace2 config must be in place before any install work starts.
+    maybe_configure_async_mode_daemon_trace2(dry_run)?;
 
     // Get absolute path to the current binary
     let binary_path = get_current_binary_path()?;

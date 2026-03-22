@@ -3,13 +3,18 @@ use crate::authorship::rebase_authorship::rewrite_authorship_if_needed;
 use crate::config;
 use crate::error::GitAiError;
 use crate::git::refs::get_authorship;
+use crate::git::repo_state::{
+    common_dir_for_git_dir, git_dir_for_worktree, worktree_root_for_path,
+};
 use crate::git::repo_storage::RepoStorage;
 use crate::git::rewrite_log::RewriteLogEvent;
 use crate::git::status::MAX_PATHSPEC_ARGS;
 use crate::git::sync_authorship::{fetch_authorship_notes, push_authorship_notes};
+use crate::utils::debug_log;
 #[cfg(windows)]
 use crate::utils::is_interactive_terminal;
 
+use gix_index::entry::Stage;
 use regex::Regex;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -1236,14 +1241,27 @@ impl Repository {
             .expect("Error writing .git/ai/rewrite_log");
 
         if apply_side_effects
-            && let Ok(_) = rewrite_authorship_if_needed(
+            && let Err(error) = rewrite_authorship_if_needed(
                 self,
                 &rewrite_log_event,
                 commit_author,
                 &log,
                 supress_output,
             )
-        {}
+        {
+            debug_log(&format!(
+                "rewrite_authorship_if_needed failed for {:?}: {}",
+                rewrite_log_event, error
+            ));
+            crate::observability::log_error(
+                &error,
+                Some(serde_json::json!({
+                    "component": "repository",
+                    "operation": "handle_rewrite_log_event",
+                    "rewrite_event": rewrite_log_event,
+                })),
+            );
+        }
     }
 
     // Internal util to get the git object type for a given OID
@@ -1392,63 +1410,7 @@ impl Repository {
     }
 
     fn get_git_config_file(&self) -> Result<gix_config::File<'static>, GitAiError> {
-        let mut config =
-            gix_config::File::from_globals().map_err(|e| GitAiError::GixError(e.to_string()))?;
-
-        let home = dirs::home_dir();
-        let options = gix_config::file::init::Options {
-            includes: gix_config::file::includes::Options::follow(
-                gix_config::path::interpolate::Context {
-                    home_dir: home.as_deref(),
-                    ..Default::default()
-                },
-                gix_config::file::includes::conditional::Context {
-                    git_dir: Some(self.path()),
-                    branch_name: None,
-                },
-            ),
-            ..Default::default()
-        };
-
-        config
-            .resolve_includes(options)
-            .map_err(|e| GitAiError::GixError(e.to_string()))?;
-
-        let local_config_path = self.common_dir().join("config");
-        let local_config =
-            Self::load_optional_config_file(&local_config_path, gix_config::Source::Local)?;
-        let worktree_config_enabled = local_config
-            .as_ref()
-            .and_then(|cfg| cfg.boolean("extensions.worktreeConfig"))
-            .and_then(Result::ok)
-            .unwrap_or(false);
-
-        if let Some(mut local_config) = local_config {
-            local_config
-                .resolve_includes(options)
-                .map_err(|e| GitAiError::GixError(e.to_string()))?;
-            config.append(local_config);
-        }
-
-        if worktree_config_enabled {
-            let worktree_config_path = self.path().join("config.worktree");
-            if let Some(mut worktree_config) = Self::load_optional_config_file(
-                &worktree_config_path,
-                gix_config::Source::Worktree,
-            )? {
-                worktree_config
-                    .resolve_includes(options)
-                    .map_err(|e| GitAiError::GixError(e.to_string()))?;
-                config.append(worktree_config);
-            }
-        }
-
-        config.append(
-            gix_config::File::from_environment_overrides()
-                .map_err(|e| GitAiError::GixError(e.to_string()))?,
-        );
-
-        Ok(config)
+        git_config_file_for_repo_paths(self.path(), self.common_dir())
     }
 
     /// Get config value for a given key as a String.
@@ -2117,6 +2079,27 @@ impl Repository {
         Ok(staged_files)
     }
 
+    /// Get blob OIDs for all stage-0 entries currently present in the index.
+    pub fn get_all_staged_file_blob_oids(&self) -> Result<HashMap<String, String>, GitAiError> {
+        let mut staged_blobs = HashMap::new();
+        let object_hash = repository_object_hash_kind_for_path_no_git_exec(self.path())?;
+        let index_path = self.path().join("index");
+        let index = gix_index::File::at(index_path, object_hash, true, Default::default())
+            .map_err(|err| GitAiError::GixError(err.to_string()))?;
+
+        for entry in index.entries() {
+            if entry.stage() != Stage::Unconflicted {
+                continue;
+            }
+            let file_path = entry.path(&index).to_string();
+            if !file_path.trim().is_empty() {
+                staged_blobs.insert(file_path, entry.id.to_string());
+            }
+        }
+
+        Ok(staged_blobs)
+    }
+
     /// List all files changed in a commit
     /// Returns a HashSet of file paths relative to the repository root
     pub fn list_commit_files(
@@ -2509,7 +2492,7 @@ pub fn find_repository(global_args: &[String]) -> Result<Repository, GitAiError>
 }
 
 fn resolve_command_base_dir(global_args: &[String]) -> Result<PathBuf, GitAiError> {
-    let mut base = std::env::current_dir().map_err(GitAiError::IoError)?;
+    let mut base: Option<PathBuf> = None;
     let mut idx = 0usize;
 
     while idx < global_args.len() {
@@ -2519,18 +2502,25 @@ fn resolve_command_base_dir(global_args: &[String]) -> Result<PathBuf, GitAiErro
             })?;
 
             let next_base = PathBuf::from(path_arg);
-            base = if next_base.is_absolute() {
+            base = Some(if next_base.is_absolute() {
                 next_base
             } else {
-                base.join(next_base)
-            };
+                let current = match &base {
+                    Some(existing) => existing.clone(),
+                    None => std::env::current_dir().map_err(GitAiError::IoError)?,
+                };
+                current.join(next_base)
+            });
             idx += 2;
             continue;
         }
         idx += 1;
     }
 
-    Ok(base)
+    match base {
+        Some(base) => Ok(base),
+        None => std::env::current_dir().map_err(GitAiError::IoError),
+    }
 }
 
 fn worktree_storage_ai_dir(git_dir: &Path, git_common_dir: &Path) -> PathBuf {
@@ -2566,6 +2556,208 @@ fn worktree_storage_ai_dir(git_dir: &Path, git_common_dir: &Path) -> PathBuf {
         .join(fallback_name)
 }
 
+struct DiscoveredRepositoryPaths {
+    command_root: PathBuf,
+    workdir: PathBuf,
+    git_dir: PathBuf,
+    git_common_dir: PathBuf,
+}
+
+fn discover_repository_paths_no_git_exec(
+    path: &Path,
+) -> Result<DiscoveredRepositoryPaths, GitAiError> {
+    let start = if path.file_name().and_then(|name| name.to_str()) == Some(".git") || path.is_dir()
+    {
+        path.to_path_buf()
+    } else {
+        path.parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| path.to_path_buf())
+    };
+
+    if start.file_name().and_then(|name| name.to_str()) == Some(".git") {
+        if start.is_dir() {
+            let workdir = start.parent().ok_or_else(|| {
+                GitAiError::Generic(format!(
+                    "Git directory has no parent workdir: {}",
+                    start.display()
+                ))
+            })?;
+            let git_common_dir = common_dir_for_git_dir(&start).ok_or_else(|| {
+                GitAiError::Generic(format!(
+                    "Unable to resolve common dir for git dir: {}",
+                    start.display()
+                ))
+            })?;
+            return Ok(DiscoveredRepositoryPaths {
+                command_root: workdir.to_path_buf(),
+                workdir: workdir.to_path_buf(),
+                git_dir: start,
+                git_common_dir,
+            });
+        }
+
+        if start.is_file() {
+            let workdir = start.parent().ok_or_else(|| {
+                GitAiError::Generic(format!(
+                    ".git file has no parent workdir: {}",
+                    start.display()
+                ))
+            })?;
+            let git_dir = git_dir_for_worktree(workdir).ok_or_else(|| {
+                GitAiError::Generic(format!(
+                    "Unable to resolve git dir for worktree: {}",
+                    workdir.display()
+                ))
+            })?;
+            let git_common_dir = common_dir_for_git_dir(&git_dir).ok_or_else(|| {
+                GitAiError::Generic(format!(
+                    "Unable to resolve common dir for git dir: {}",
+                    git_dir.display()
+                ))
+            })?;
+            return Ok(DiscoveredRepositoryPaths {
+                command_root: workdir.to_path_buf(),
+                workdir: workdir.to_path_buf(),
+                git_dir,
+                git_common_dir,
+            });
+        }
+    }
+
+    if let Some(worktree_root) = worktree_root_for_path(&start) {
+        let git_dir = git_dir_for_worktree(&worktree_root).ok_or_else(|| {
+            GitAiError::Generic(format!(
+                "Unable to resolve git dir for worktree: {}",
+                worktree_root.display()
+            ))
+        })?;
+        let git_common_dir = common_dir_for_git_dir(&git_dir).ok_or_else(|| {
+            GitAiError::Generic(format!(
+                "Unable to resolve common dir for git dir: {}",
+                git_dir.display()
+            ))
+        })?;
+        return Ok(DiscoveredRepositoryPaths {
+            command_root: worktree_root.clone(),
+            workdir: worktree_root,
+            git_dir,
+            git_common_dir,
+        });
+    }
+
+    let mut current = Some(start.as_path());
+    while let Some(dir) = current {
+        if dir.join("HEAD").is_file() && dir.join("objects").is_dir() {
+            let workdir = dir.parent().ok_or_else(|| {
+                GitAiError::Generic(format!("Git directory has no parent: {}", dir.display()))
+            })?;
+            return Ok(DiscoveredRepositoryPaths {
+                command_root: dir.to_path_buf(),
+                workdir: workdir.to_path_buf(),
+                git_dir: dir.to_path_buf(),
+                git_common_dir: dir.to_path_buf(),
+            });
+        }
+        current = dir.parent();
+    }
+
+    Err(GitAiError::Generic(format!(
+        "No git repository found for path without exec: {}",
+        path.display()
+    )))
+}
+
+fn git_config_file_for_repo_paths(
+    git_dir: &Path,
+    git_common_dir: &Path,
+) -> Result<gix_config::File<'static>, GitAiError> {
+    let mut config =
+        gix_config::File::from_globals().map_err(|e| GitAiError::GixError(e.to_string()))?;
+
+    let home = dirs::home_dir();
+    let options = gix_config::file::init::Options {
+        includes: gix_config::file::includes::Options::follow(
+            gix_config::path::interpolate::Context {
+                home_dir: home.as_deref(),
+                ..Default::default()
+            },
+            gix_config::file::includes::conditional::Context {
+                git_dir: Some(git_dir),
+                branch_name: None,
+            },
+        ),
+        ..Default::default()
+    };
+
+    config
+        .resolve_includes(options)
+        .map_err(|e| GitAiError::GixError(e.to_string()))?;
+
+    let local_config_path = git_common_dir.join("config");
+    let local_config =
+        Repository::load_optional_config_file(&local_config_path, gix_config::Source::Local)?;
+    let worktree_config_enabled = local_config
+        .as_ref()
+        .and_then(|cfg| cfg.boolean("extensions.worktreeConfig"))
+        .and_then(Result::ok)
+        .unwrap_or(false);
+
+    if let Some(mut local_config) = local_config {
+        local_config
+            .resolve_includes(options)
+            .map_err(|e| GitAiError::GixError(e.to_string()))?;
+        config.append(local_config);
+    }
+
+    if worktree_config_enabled {
+        let worktree_config_path = git_dir.join("config.worktree");
+        if let Some(mut worktree_config) = Repository::load_optional_config_file(
+            &worktree_config_path,
+            gix_config::Source::Worktree,
+        )? {
+            worktree_config
+                .resolve_includes(options)
+                .map_err(|e| GitAiError::GixError(e.to_string()))?;
+            config.append(worktree_config);
+        }
+    }
+
+    config.append(
+        gix_config::File::from_environment_overrides()
+            .map_err(|e| GitAiError::GixError(e.to_string()))?,
+    );
+
+    Ok(config)
+}
+
+pub fn config_get_str_for_path_no_git_exec(
+    path: &Path,
+    key: &str,
+) -> Result<Option<String>, GitAiError> {
+    let paths = discover_repository_paths_no_git_exec(path)?;
+    git_config_file_for_repo_paths(&paths.git_dir, &paths.git_common_dir)
+        .map(|cfg| cfg.string(key).map(|cow| cow.to_string()))
+}
+
+fn repository_object_hash_kind_for_path_no_git_exec(
+    path: &Path,
+) -> Result<gix_index::hash::Kind, GitAiError> {
+    match config_get_str_for_path_no_git_exec(path, "extensions.objectformat")?
+        .as_deref()
+        .map(str::trim)
+    {
+        None | Some("") | Some("sha1") => Ok(gix_index::hash::Kind::Sha1),
+        Some("sha256") => Err(GitAiError::Generic(
+            "SHA-256 repositories are not supported while reading the git index".to_string(),
+        )),
+        Some(other) => Err(GitAiError::Generic(format!(
+            "Unsupported git object format '{}' while reading index",
+            other
+        ))),
+    }
+}
+
 #[allow(dead_code)]
 pub fn from_bare_repository(git_dir: &Path) -> Result<Repository, GitAiError> {
     let workdir = git_dir
@@ -2598,6 +2790,73 @@ pub fn from_bare_repository(git_dir: &Path) -> Result<Repository, GitAiError> {
         canonical_workdir,
         cached_author_identity: std::sync::OnceLock::new(),
     })
+}
+
+fn repository_from_discovered_paths(
+    command_root: &Path,
+    workdir: &Path,
+    git_dir: &Path,
+    git_common_dir: &Path,
+) -> Result<Repository, GitAiError> {
+    if !git_dir.is_dir() {
+        return Err(GitAiError::Generic(format!(
+            "Git directory does not exist: {}",
+            git_dir.display()
+        )));
+    }
+    if !git_common_dir.is_dir() {
+        return Err(GitAiError::Generic(format!(
+            "Git common directory does not exist: {}",
+            git_common_dir.display()
+        )));
+    }
+    if !workdir.is_dir() {
+        return Err(GitAiError::Generic(format!(
+            "Work directory does not exist: {}",
+            workdir.display()
+        )));
+    }
+
+    let canonical_workdir = workdir.canonicalize().map_err(|e| {
+        GitAiError::Generic(format!(
+            "Failed to canonicalize working directory {}: {}",
+            workdir.display(),
+            e
+        ))
+    })?;
+
+    let worktree_ai_dir = worktree_storage_ai_dir(git_dir, git_common_dir);
+    let storage = if worktree_ai_dir == git_dir.join("ai") {
+        RepoStorage::for_repo_path(git_dir, workdir)
+    } else {
+        RepoStorage::for_isolated_worktree_storage(&worktree_ai_dir, workdir)
+    };
+
+    Ok(Repository {
+        global_args: vec!["-C".to_string(), command_root.to_string_lossy().to_string()],
+        storage,
+        git_dir: git_dir.to_path_buf(),
+        git_common_dir: git_common_dir.to_path_buf(),
+        pre_command_base_commit: None,
+        pre_command_refname: None,
+        pre_reset_target_commit: None,
+        pre_update_ref_refname: None,
+        pre_update_ref_old_target: None,
+        pre_update_ref_affects_checked_out_branch: None,
+        workdir: workdir.to_path_buf(),
+        canonical_workdir,
+        cached_author_identity: std::sync::OnceLock::new(),
+    })
+}
+
+pub fn discover_repository_in_path_no_git_exec(path: &Path) -> Result<Repository, GitAiError> {
+    let paths = discover_repository_paths_no_git_exec(path)?;
+    repository_from_discovered_paths(
+        &paths.command_root,
+        &paths.workdir,
+        &paths.git_dir,
+        &paths.git_common_dir,
+    )
 }
 
 pub fn find_repository_in_path(path: &str) -> Result<Repository, GitAiError> {
@@ -2739,12 +2998,18 @@ pub fn exec_git(args: &[String]) -> Result<Output, GitAiError> {
     exec_git_with_profile(args, InternalGitProfile::General)
 }
 
-/// Helper to execute a git command with an explicit internal profile.
-pub fn exec_git_with_profile(
+/// Helper to execute a git command and return output regardless of exit status.
+/// Callers that need success-only behavior should use `exec_git*`.
+pub fn exec_git_allow_nonzero(args: &[String]) -> Result<Output, GitAiError> {
+    exec_git_allow_nonzero_with_profile(args, InternalGitProfile::General)
+}
+
+/// Helper to execute a git command with an explicit internal profile and return output
+/// regardless of exit status.
+pub fn exec_git_allow_nonzero_with_profile(
     args: &[String],
     profile: InternalGitProfile,
 ) -> Result<Output, GitAiError> {
-    // TODO Make sure to handle process signals, etc.
     let effective_args =
         args_with_internal_git_profile(&args_with_disabled_hooks_if_needed(args), profile);
     let mut cmd = Command::new(config::Config::get().git_cmd());
@@ -2759,7 +3024,17 @@ pub fn exec_git_with_profile(
         }
     }
 
-    let output = cmd.output().map_err(GitAiError::IoError)?;
+    cmd.output().map_err(GitAiError::IoError)
+}
+
+/// Helper to execute a git command with an explicit internal profile.
+pub fn exec_git_with_profile(
+    args: &[String],
+    profile: InternalGitProfile,
+) -> Result<Output, GitAiError> {
+    let effective_args =
+        args_with_internal_git_profile(&args_with_disabled_hooks_if_needed(args), profile);
+    let output = exec_git_allow_nonzero_with_profile(args, profile)?;
 
     if !output.status.success() {
         let code = output.status.code();
@@ -3546,6 +3821,13 @@ index 0000000..abc1234 100644
             repo.path().canonicalize().expect("canonical bare"),
             bare.canonicalize().expect("canonical path")
         );
+
+        let discovered =
+            discover_repository_in_path_no_git_exec(&bare).expect("discover bare repo");
+        assert_eq!(
+            discovered.path().canonicalize().expect("canonical bare"),
+            bare.canonicalize().expect("canonical path")
+        );
     }
 
     #[test]
@@ -3616,6 +3898,57 @@ index 0000000..abc1234 100644
                 .starts_with(common_dir.join("ai").join("worktrees")),
             "worktree storage should be isolated under common-dir/ai/worktrees: {}",
             repo.storage.working_logs.display()
+        );
+
+        let discovered =
+            discover_repository_in_path_no_git_exec(&worktree).expect("discover worktree repo");
+        assert_eq!(
+            discovered
+                .common_dir()
+                .canonicalize()
+                .expect("canonical discovered common dir"),
+            common_dir
+                .canonicalize()
+                .expect("canonical expected common dir")
+        );
+        assert!(
+            discovered
+                .storage
+                .working_logs
+                .starts_with(common_dir.join("ai").join("worktrees")),
+            "discovered worktree storage should be isolated under common-dir/ai/worktrees: {}",
+            discovered.storage.working_logs.display()
+        );
+    }
+
+    #[test]
+    fn get_all_staged_file_blob_oids_reads_stage_zero_entries_without_git2() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo_dir = temp.path().join("repo");
+        fs::create_dir_all(&repo_dir).expect("create repo dir");
+
+        run_git(&repo_dir, &["init"]);
+        run_git(&repo_dir, &["config", "user.name", "Test User"]);
+        run_git(&repo_dir, &["config", "user.email", "test@example.com"]);
+
+        fs::write(repo_dir.join("a.txt"), "alpha\n").expect("write a.txt");
+        fs::create_dir_all(repo_dir.join("dir")).expect("create dir");
+        fs::write(repo_dir.join("dir").join("b.txt"), "beta\n").expect("write b.txt");
+
+        run_git(&repo_dir, &["add", "."]);
+
+        let repo = find_repository_in_path(repo_dir.to_str().expect("repo path")).expect("repo");
+        let staged = repo
+            .get_all_staged_file_blob_oids()
+            .expect("read staged blobs");
+
+        assert_eq!(
+            staged.get("a.txt"),
+            Some(&run_git_stdout(&repo_dir, &["rev-parse", ":0:a.txt"]))
+        );
+        assert_eq!(
+            staged.get("dir/b.txt"),
+            Some(&run_git_stdout(&repo_dir, &["rev-parse", ":0:dir/b.txt"]))
         );
     }
 }

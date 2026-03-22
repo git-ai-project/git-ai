@@ -193,6 +193,14 @@ impl Config {
         CONFIG.get_or_init(build_config)
     }
 
+    /// Build a fresh config snapshot from disk/env without using the global cache.
+    ///
+    /// This is useful for long-lived daemon processes that must observe runtime
+    /// config updates (for example, prompt sharing/privacy toggles).
+    pub fn fresh() -> Self {
+        build_config()
+    }
+
     /// Returns the command to invoke git.
     pub fn git_cmd(&self) -> &str {
         &self.git_path
