@@ -1531,6 +1531,220 @@ fn preceding_merge_squash_for_pending_commit(
     Ok(None)
 }
 
+fn commit_has_authorship_log(repo: &Repository, commit_sha: &str) -> bool {
+    if commit_sha.trim().is_empty()
+        || commit_sha == "initial"
+        || !is_valid_oid(commit_sha)
+        || is_zero_oid(commit_sha)
+    {
+        return true;
+    }
+
+    crate::git::refs::get_reference_as_authorship_log_v3(repo, commit_sha).is_ok()
+}
+
+fn rewrite_log_mentions_commit(repo: &Repository, commit_sha: &str) -> Result<bool, GitAiError> {
+    if commit_sha.trim().is_empty()
+        || commit_sha == "initial"
+        || !is_valid_oid(commit_sha)
+        || is_zero_oid(commit_sha)
+    {
+        return Ok(false);
+    }
+
+    for event in repo.storage.read_rewrite_events()? {
+        let mentioned = match event {
+            RewriteLogEvent::Commit { commit } => commit.commit_sha == commit_sha,
+            RewriteLogEvent::CommitAmend { commit_amend } => {
+                commit_amend.amended_commit_sha == commit_sha
+            }
+            RewriteLogEvent::RebaseComplete { rebase_complete } => rebase_complete
+                .new_commits
+                .iter()
+                .any(|new_commit| new_commit == commit_sha),
+            RewriteLogEvent::CherryPickComplete {
+                cherry_pick_complete,
+            } => cherry_pick_complete
+                .new_commits
+                .iter()
+                .any(|new_commit| new_commit == commit_sha),
+            _ => false,
+        };
+        if mentioned {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+fn first_parent_commit_chain_exclusive(
+    repo: &Repository,
+    ancestor_exclusive: Option<&str>,
+    head: &str,
+) -> Result<Vec<String>, GitAiError> {
+    if head.trim().is_empty() || head == "initial" {
+        return Ok(Vec::new());
+    }
+
+    let stop = ancestor_exclusive
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("initial");
+    let mut chain = Vec::new();
+    let mut current = head.to_string();
+
+    for _ in 0..512 {
+        if current == stop {
+            chain.reverse();
+            return Ok(chain);
+        }
+
+        let commit = repo.find_commit(current.clone())?;
+        chain.push(current.clone());
+
+        if commit.parent_count()? == 0 {
+            if stop == "initial" {
+                chain.reverse();
+                return Ok(chain);
+            }
+            return Err(GitAiError::Generic(format!(
+                "commit {} does not reach expected ancestor {} on first-parent chain",
+                head, stop
+            )));
+        }
+
+        current = commit.parent(0)?.id();
+    }
+
+    Err(GitAiError::Generic(format!(
+        "first-parent chain exceeded limit while walking {} toward {}",
+        head, stop
+    )))
+}
+
+fn materialize_commit_authorship_from_persisted_state(
+    repo: &Repository,
+    commit_sha: &str,
+    author: &str,
+) -> Result<bool, GitAiError> {
+    if commit_has_authorship_log(repo, commit_sha) {
+        return Ok(false);
+    }
+    if !rewrite_log_mentions_commit(repo, commit_sha)? {
+        return Ok(false);
+    }
+
+    let parent_sha =
+        commit_parent_head_for_capture(repo, commit_sha).unwrap_or_else(|| "initial".to_string());
+
+    let final_state = committed_file_snapshot_between_commits(
+        repo,
+        if parent_sha == "initial" {
+            None
+        } else {
+            Some(parent_sha.as_str())
+        },
+        commit_sha,
+    )?;
+
+    post_commit_with_final_state(
+        repo,
+        if parent_sha == "initial" {
+            None
+        } else {
+            Some(parent_sha)
+        },
+        commit_sha.to_string(),
+        author.to_string(),
+        true,
+        Some(&final_state),
+    )?;
+
+    Ok(true)
+}
+
+fn attempt_materialize_commit_chain_authorship(
+    repo: &Repository,
+    ancestor_exclusive: Option<&str>,
+    head: &str,
+    author: &str,
+) -> Result<(), GitAiError> {
+    for commit_sha in first_parent_commit_chain_exclusive(repo, ancestor_exclusive, head)? {
+        if commit_has_authorship_log(repo, &commit_sha) {
+            continue;
+        }
+
+        let _ = materialize_commit_authorship_from_persisted_state(repo, &commit_sha, author)?;
+    }
+    Ok(())
+}
+
+fn attempt_materialize_commit_authorship(
+    repo: &Repository,
+    commit_sha: &str,
+    author: &str,
+) -> Result<(), GitAiError> {
+    if commit_has_authorship_log(repo, commit_sha) {
+        return Ok(());
+    }
+
+    let parent = commit_parent_head_for_capture(repo, commit_sha);
+    attempt_materialize_commit_chain_authorship(repo, parent.as_deref(), commit_sha, author)
+}
+
+fn resolve_reset_old_head_for_base(worktree: &Path, base_commit: &str) -> Option<String> {
+    read_ref_oid_for_worktree(worktree, "ORIG_HEAD")
+        .filter(|oid| oid != base_commit && is_valid_oid(oid) && !is_zero_oid(oid))
+        .or_else(|| {
+            resolve_worktree_head_reflog_old_oid_for_new_head(worktree, base_commit)
+                .ok()
+                .flatten()
+                .filter(|oid| oid != base_commit && is_valid_oid(oid) && !is_zero_oid(oid))
+        })
+}
+
+fn recover_reset_working_log_for_commit_replay(
+    repo: &Repository,
+    worktree: &Path,
+    base_commit: &str,
+    author: &str,
+    final_state_override: Option<&HashMap<String, String>>,
+    pathspecs: Option<&[String]>,
+) -> Result<bool, GitAiError> {
+    if base_commit.trim().is_empty()
+        || base_commit == "initial"
+        || working_log_has_tracked_state_for_base(repo, base_commit)
+    {
+        return Ok(false);
+    }
+
+    let Some(old_head) = resolve_reset_old_head_for_base(worktree, base_commit) else {
+        return Ok(false);
+    };
+    if !repo_is_ancestor(repo, base_commit, &old_head) {
+        return Ok(false);
+    }
+
+    if let Err(error) =
+        attempt_materialize_commit_chain_authorship(repo, Some(base_commit), &old_head, author)
+    {
+        debug_log(&format!(
+            "Failed to backfill reset prerequisite notes between {} and {}: {}",
+            base_commit, old_head, error
+        ));
+    }
+    reconstruct_working_log_after_reset(
+        repo,
+        base_commit,
+        &old_head,
+        author,
+        pathspecs,
+        final_state_override.cloned(),
+    )?;
+    Ok(true)
+}
+
 fn seed_merge_squash_working_log_for_commit_replay(
     repo: &Repository,
     base_commit: &str,
@@ -1544,6 +1758,24 @@ fn seed_merge_squash_working_log_for_commit_replay(
         return Ok(());
     };
 
+    let merge_base = repo
+        .merge_base(
+            merge_squash.source_head.clone(),
+            merge_squash.base_head.clone(),
+        )
+        .ok();
+    if let Err(error) = attempt_materialize_commit_chain_authorship(
+        repo,
+        merge_base.as_deref(),
+        &merge_squash.source_head,
+        author,
+    ) {
+        debug_log(&format!(
+            "Failed to backfill squash prerequisite notes for {}: {}",
+            merge_squash.source_head, error
+        ));
+    }
+
     debug_log(&format!(
         "Seeding merge --squash working log before daemon commit replay for base {}",
         base_commit
@@ -1555,6 +1787,49 @@ fn seed_merge_squash_working_log_for_commit_replay(
         &merge_squash.staged_file_blobs,
         author,
     )
+}
+
+fn ensure_rewrite_prerequisites(
+    repo: &Repository,
+    worktree: &Path,
+    rewrite_event: &RewriteLogEvent,
+    author: &str,
+    carryover_snapshot: Option<&HashMap<String, String>>,
+    reset_pathspecs: Option<&[String]>,
+) -> Result<(), GitAiError> {
+    let Some((base_commit, _target_commit)) =
+        commit_replay_context_from_rewrite_event(rewrite_event)
+    else {
+        return Ok(());
+    };
+    if base_commit.trim().is_empty() {
+        return Ok(());
+    }
+
+    if base_commit != "initial"
+        && let Err(error) = attempt_materialize_commit_authorship(repo, &base_commit, author)
+    {
+        debug_log(&format!(
+            "Failed to backfill base commit note for {}: {}",
+            base_commit, error
+        ));
+    }
+
+    seed_merge_squash_working_log_for_commit_replay(repo, &base_commit, author)?;
+    if working_log_has_tracked_state_for_base(repo, &base_commit) {
+        return Ok(());
+    }
+
+    recover_reset_working_log_for_commit_replay(
+        repo,
+        worktree,
+        &base_commit,
+        author,
+        carryover_snapshot,
+        reset_pathspecs,
+    )?;
+
+    Ok(())
 }
 
 fn sync_pre_commit_checkpoint_for_daemon_commit(
@@ -1618,6 +1893,14 @@ fn apply_rewrite_side_effect(
     reset_pathspecs: Option<&[String]>,
 ) -> Result<(), GitAiError> {
     let mut repo = find_repository_in_path(worktree)?;
+    ensure_rewrite_prerequisites(
+        &repo,
+        Path::new(worktree),
+        &rewrite_event,
+        &repo.git_author_identity().name_or_unknown(),
+        carryover_snapshot,
+        reset_pathspecs,
+    )?;
     if !rewrite_event_needs_authorship_processing(&repo, &rewrite_event)? {
         let _ = repo.storage.append_rewrite_event(rewrite_event);
         return Ok(());
@@ -2086,6 +2369,17 @@ fn apply_reset_working_log_side_effect(
 
     let is_backward = repo_is_ancestor(repository, &reset.new_head_sha, &reset.old_head_sha);
     if is_backward {
+        if let Err(error) = attempt_materialize_commit_chain_authorship(
+            repository,
+            Some(&reset.new_head_sha),
+            &reset.old_head_sha,
+            human_author,
+        ) {
+            debug_log(&format!(
+                "Failed to backfill reset-side-effect notes between {} and {}: {}",
+                reset.new_head_sha, reset.old_head_sha, error
+            ));
+        }
         let tracked_files = tracked_working_log_files(repository, &reset.old_head_sha)?;
         if !tracked_files.is_empty() && carryover_snapshot.is_none() {
             return Err(GitAiError::Generic(format!(
