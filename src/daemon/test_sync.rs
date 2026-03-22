@@ -51,7 +51,7 @@ pub fn tracked_parsed_git_invocation_for_test_sync(
 }
 
 pub fn tracks_checkpoint_request_for_test_sync(request: &CheckpointRunRequest) -> bool {
-    !request.is_pre_commit.unwrap_or(false)
+    !request.is_pre_commit()
 }
 
 pub fn test_sync_session_from_invocation(invocation: &ParsedGitInvocation) -> Option<String> {

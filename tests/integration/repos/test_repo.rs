@@ -1518,6 +1518,13 @@ impl TestRepo {
         );
     }
 
+    pub(crate) fn wait_for_next_daemon_checkpoint_completion(&self, baseline_count: u64) -> u64 {
+        self.wait_for_daemon_total_completion_count(
+            baseline_count,
+            baseline_count.saturating_add(1),
+        )
+    }
+
     fn daemon_family_key_for_repo_path(&self, repo_path: &Path) -> String {
         let repo = GitAiRepository::find_repository_in_path(repo_path.to_str().unwrap())
             .unwrap_or_else(|e| {
@@ -1622,7 +1629,7 @@ impl TestRepo {
                 "--hook-input" => {
                     i += 2;
                 }
-                "--show-working-log" | "--reset" => {
+                "--reset" => {
                     i += 1;
                 }
                 _ if arg.starts_with("--hook-input=") || arg.starts_with('-') => {

@@ -9,7 +9,6 @@ pub fn pre_commit(repo: &Repository, default_author: String) -> Result<(), GitAi
         &default_author,
         CheckpointKind::Human,
         false,
-        false,
         true,
         None,
         true, // should skip if NO AI CHECKPOINTS

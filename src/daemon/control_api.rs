@@ -16,16 +16,37 @@ pub enum ControlRequest {
     Shutdown,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "request_type", rename_all = "snake_case")]
+pub enum CheckpointRunRequest {
+    Live(LiveCheckpointRunRequest),
+    Captured(CapturedCheckpointRunRequest),
+}
+
+impl CheckpointRunRequest {
+    pub fn repo_working_dir(&self) -> &str {
+        match self {
+            Self::Live(request) => &request.repo_working_dir,
+            Self::Captured(request) => &request.repo_working_dir,
+        }
+    }
+
+    pub fn is_pre_commit(&self) -> bool {
+        match self {
+            Self::Live(request) => request.is_pre_commit.unwrap_or(false),
+            Self::Captured(_) => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct CheckpointRunRequest {
+pub struct LiveCheckpointRunRequest {
     #[serde(default)]
     pub repo_working_dir: String,
     #[serde(default)]
     pub kind: Option<String>,
     #[serde(default)]
     pub author: Option<String>,
-    #[serde(default)]
-    pub show_working_log: Option<bool>,
     #[serde(default)]
     pub reset: Option<bool>,
     #[serde(default)]
@@ -34,6 +55,14 @@ pub struct CheckpointRunRequest {
     pub is_pre_commit: Option<bool>,
     #[serde(default)]
     pub agent_run_result: Option<AgentRunResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CapturedCheckpointRunRequest {
+    #[serde(default)]
+    pub repo_working_dir: String,
+    #[serde(default)]
+    pub capture_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

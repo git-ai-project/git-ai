@@ -67,7 +67,10 @@ pub mod reducer;
 pub mod test_sync;
 pub mod trace_normalizer;
 
-pub use control_api::{CheckpointRunRequest, ControlRequest, ControlResponse, FamilyStatus};
+pub use control_api::{
+    CapturedCheckpointRunRequest, CheckpointRunRequest, ControlRequest, ControlResponse,
+    FamilyStatus, LiveCheckpointRunRequest,
+};
 
 const PID_META_FILE: &str = "daemon.pid.json";
 const TRACE_INGEST_SEQ_FIELD: &str = "git_ai_ingest_seq";
@@ -1184,30 +1187,42 @@ fn daemon_reflog_delta_from_offsets(
 }
 
 fn apply_checkpoint_side_effect(request: CheckpointRunRequest) -> Result<(), GitAiError> {
-    let repo = find_repository_in_path(&request.repo_working_dir)?;
-    crate::commands::git_hook_handlers::ensure_repo_level_hooks_for_checkpoint(&repo);
+    match request {
+        CheckpointRunRequest::Live(request) => {
+            let repo = find_repository_in_path(&request.repo_working_dir)?;
+            crate::commands::git_hook_handlers::ensure_repo_level_hooks_for_checkpoint(&repo);
 
-    let kind = request
-        .kind
-        .as_deref()
-        .and_then(parse_checkpoint_kind)
-        .or_else(|| request.agent_run_result.as_ref().map(|r| r.checkpoint_kind))
-        .unwrap_or(CheckpointKind::Human);
-    let author = request
-        .author
-        .unwrap_or_else(|| repo.git_author_identity().name_or_unknown());
+            let kind = request
+                .kind
+                .as_deref()
+                .and_then(parse_checkpoint_kind)
+                .or_else(|| request.agent_run_result.as_ref().map(|r| r.checkpoint_kind))
+                .unwrap_or(CheckpointKind::Human);
+            let author = request
+                .author
+                .unwrap_or_else(|| repo.git_author_identity().name_or_unknown());
 
-    let _ = crate::commands::checkpoint::run(
-        &repo,
-        &author,
-        kind,
-        request.show_working_log.unwrap_or(false),
-        request.reset.unwrap_or(false),
-        request.quiet.unwrap_or(true),
-        request.agent_run_result,
-        request.is_pre_commit.unwrap_or(false),
-    )?;
-    Ok(())
+            let _ = crate::commands::checkpoint::run(
+                &repo,
+                &author,
+                kind,
+                request.reset.unwrap_or(false),
+                request.quiet.unwrap_or(true),
+                request.agent_run_result,
+                request.is_pre_commit.unwrap_or(false),
+            )?;
+            Ok(())
+        }
+        CheckpointRunRequest::Captured(request) => {
+            let repo = find_repository_in_path(&request.repo_working_dir)?;
+            crate::commands::git_hook_handlers::ensure_repo_level_hooks_for_checkpoint(&repo);
+            let _ = crate::commands::checkpoint::execute_captured_checkpoint(
+                &repo,
+                &request.capture_id,
+            )?;
+            Ok(())
+        }
+    }
 }
 
 fn parse_checkpoint_kind(value: &str) -> Option<CheckpointKind> {
@@ -2250,7 +2265,6 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
         repo,
         author,
         CheckpointKind::Human,
-        false,
         false,
         true,
         Some(replay_agent_result),
@@ -4661,16 +4675,33 @@ impl ActorDaemonCoordinator {
                     request,
                     respond_to,
                 } => {
+                    let captured_checkpoint_id = match request.as_ref() {
+                        CheckpointRunRequest::Captured(request) => Some(request.capture_id.clone()),
+                        CheckpointRunRequest::Live(_) => None,
+                    };
                     let ack = self
                         .coordinator
-                        .apply_checkpoint(Path::new(&request.repo_working_dir))
+                        .apply_checkpoint(Path::new(request.repo_working_dir()))
                         .await;
                     let should_log_completion =
                         crate::daemon::test_sync::tracks_checkpoint_request_for_test_sync(&request);
-                    let result = match ack {
+                    let mut result = match ack {
                         Ok(ack) => apply_checkpoint_side_effect(*request).map(|_| ack.seq),
                         Err(error) => Err(error),
                     };
+                    if let Some(capture_id) = captured_checkpoint_id
+                        && let Err(cleanup_error) =
+                            crate::commands::checkpoint::delete_captured_checkpoint(&capture_id)
+                    {
+                        if result.is_ok() {
+                            result = Err(cleanup_error);
+                        } else {
+                            debug_log(&format!(
+                                "daemon captured checkpoint cleanup failed for family {} order {} capture {}: {}",
+                                family, order, capture_id, cleanup_error
+                            ));
+                        }
+                    }
                     if let Err(error) = &result {
                         let _ = self.record_side_effect_error(family, order, error);
                         debug_log(&format!(
@@ -5871,7 +5902,7 @@ impl ActorDaemonCoordinator {
         request: CheckpointRunRequest,
         wait: bool,
     ) -> Result<ControlResponse, GitAiError> {
-        let repo_working_dir = request.repo_working_dir.clone();
+        let repo_working_dir = request.repo_working_dir().to_string();
         if repo_working_dir.trim().is_empty() {
             return Err(GitAiError::Generic(
                 "checkpoint request missing repo_working_dir".to_string(),
@@ -6096,6 +6127,14 @@ fn disable_trace2_for_daemon_process() {
 pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
     disable_trace2_for_daemon_process();
     config.ensure_parent_dirs()?;
+    if let Err(error) = crate::commands::checkpoint::prune_stale_captured_checkpoints(
+        Duration::from_secs(60 * 60 * 24),
+    ) {
+        debug_log(&format!(
+            "daemon stale captured checkpoint pruning failed: {}",
+            error
+        ));
+    }
     let _lock = DaemonLock::acquire(&config.lock_path)?;
     let _active_guard = DaemonProcessActiveGuard::enter();
     write_pid_metadata(&config)?;
