@@ -2948,6 +2948,7 @@ impl ActorDaemonCoordinator {
                 }
 
                 while let Some(mut ordered_payload) = pending_by_seq.remove(&next_seq) {
+                    let processed_seq = next_seq;
                     if let Some(object) = ordered_payload.as_object_mut() {
                         object.remove(TRACE_INGEST_SEQ_FIELD);
                     }
@@ -2975,7 +2976,7 @@ impl ActorDaemonCoordinator {
                     }
                     coordinator
                         .processed_trace_ingest_seq
-                        .store(seq as usize, Ordering::SeqCst);
+                        .store(processed_seq as usize, Ordering::SeqCst);
                     coordinator.trace_ingest_progress_notify.notify_waiters();
                     next_seq = next_seq.saturating_add(1);
                 }
