@@ -1517,9 +1517,10 @@ fn preceding_merge_squash_for_pending_commit(
     base_commit: &str,
 ) -> Result<Option<MergeSquashEvent>, GitAiError> {
     let events = repo.storage.read_rewrite_events()?;
-    for event in events {
+    for event in events.into_iter().rev() {
         match event {
             RewriteLogEvent::AuthorshipLogsSynced { .. } => continue,
+            RewriteLogEvent::Commit { .. } | RewriteLogEvent::CommitAmend { .. } => continue,
             RewriteLogEvent::MergeSquash { merge_squash }
                 if merge_squash.base_head == base_commit =>
             {
