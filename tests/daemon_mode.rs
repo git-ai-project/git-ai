@@ -10,9 +10,9 @@ use git_ai::commands::checkpoint::{
 };
 use git_ai::commands::checkpoint_agent::agent_presets::AgentRunResult;
 use git_ai::daemon::{
-    CapturedCheckpointRunRequest, CheckpointRunRequest,
-    ControlRequest, DaemonConfig, DaemonLock, local_socket_connects_with_timeout,
-    open_local_socket_stream_with_timeout, send_control_request,
+    CapturedCheckpointRunRequest, CheckpointRunRequest, ControlRequest, DaemonConfig, DaemonLock,
+    local_socket_connects_with_timeout, open_local_socket_stream_with_timeout,
+    send_control_request,
 };
 use git_ai::git::find_repository_in_path;
 use repos::test_file::ExpectedLineExt;

@@ -174,7 +174,7 @@ fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
         let preferred_flags =
             CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB;
         child.creation_flags(preferred_flags);
-        return match child.spawn() {
+        match child.spawn() {
             Ok(_) => Ok(()),
             Err(preferred_err) => {
                 debug_log(&format!(
@@ -189,7 +189,7 @@ fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
                     )
                 })
             }
-        };
+        }
     }
 
     #[cfg(not(windows))]

@@ -795,12 +795,10 @@ fn handle_checkpoint(args: &[String]) {
                         total_files_edited
                     );
                 }
+            } else if queued_repos > 0 {
+                eprintln!("Checkpoint queued in {:?}", elapsed);
             } else {
-                if queued_repos > 0 {
-                    eprintln!("Checkpoint queued in {:?}", elapsed);
-                } else {
-                    eprintln!("Checkpoint completed in {:?}", elapsed);
-                }
+                eprintln!("Checkpoint completed in {:?}", elapsed);
             }
             return;
         }
@@ -1132,15 +1130,17 @@ fn run_checkpoint_via_daemon_or_local(
                     }
 
                     let request = ControlRequest::CheckpointRun {
-                        request: Box::new(CheckpointRunRequest::Live(LiveCheckpointRunRequest {
-                            repo_working_dir: repo_working_dir.clone(),
-                            kind: Some(checkpoint_kind_to_str(kind).to_string()),
-                            author: Some(author.to_string()),
-                            reset: Some(reset),
-                            quiet: Some(quiet),
-                            is_pre_commit: Some(is_pre_commit),
-                            agent_run_result: agent_run_result.clone(),
-                        })),
+                        request: Box::new(CheckpointRunRequest::Live(Box::new(
+                            LiveCheckpointRunRequest {
+                                repo_working_dir: repo_working_dir.clone(),
+                                kind: Some(checkpoint_kind_to_str(kind).to_string()),
+                                author: Some(author.to_string()),
+                                reset: Some(reset),
+                                quiet: Some(quiet),
+                                is_pre_commit: Some(is_pre_commit),
+                                agent_run_result: agent_run_result.clone(),
+                            },
+                        ))),
                         wait: Some(true),
                     };
                     match send_control_request(&config.control_socket_path, &request) {

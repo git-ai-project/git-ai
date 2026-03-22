@@ -19,7 +19,7 @@ pub enum ControlRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "request_type", rename_all = "snake_case")]
 pub enum CheckpointRunRequest {
-    Live(LiveCheckpointRunRequest),
+    Live(Box<LiveCheckpointRunRequest>),
     Captured(CapturedCheckpointRunRequest),
 }
 

@@ -35,13 +35,15 @@ use crate::{
     commands::checkpoint_agent::agent_presets::AgentRunResult,
     commands::hooks::{push_hooks, stash_hooks},
 };
+#[cfg(not(windows))]
+use interprocess::local_socket::ConnectOptions;
 #[cfg(windows)]
 use interprocess::os::windows::named_pipe::{
     DuplexPipeStream, local_socket::Stream as WindowsLocalSocketStream, pipe_mode::Bytes,
 };
 use interprocess::{
     ConnectWaitMode,
-    local_socket::{ConnectOptions, GenericFilePath, ListenerOptions, Name, prelude::*},
+    local_socket::{GenericFilePath, ListenerOptions, Name, prelude::*},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -6221,9 +6223,9 @@ pub fn open_local_socket_stream_with_timeout(
                 e
             ))
         })?;
-        return Ok(LocalSocketStream::from(WindowsLocalSocketStream::from(
+        Ok(LocalSocketStream::from(WindowsLocalSocketStream::from(
             stream,
-        )));
+        )))
     }
 
     #[cfg(not(windows))]

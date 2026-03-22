@@ -648,7 +648,7 @@ fn normalize_test_git_ai_checkpoint_args(args: &[&str]) -> Vec<String> {
         return original;
     }
 
-    if args.iter().any(|arg| *arg == "--") {
+    if args.contains(&"--") {
         return original;
     }
 
