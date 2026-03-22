@@ -59,6 +59,7 @@
 /// - `gt track` / `gt untrack` - Metadata tracking
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::{TestRepo, get_binary_path, real_git_executable};
+use serde::Deserialize;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::OnceLock;
@@ -175,14 +176,36 @@ fn new_gt_started_log_path() -> PathBuf {
     ))
 }
 
-fn count_gt_started_commands(log_path: &PathBuf) -> u64 {
+#[derive(Deserialize)]
+struct GtStartedLogEntry {
+    #[serde(default)]
+    test_sync_session: Option<String>,
+}
+
+fn gt_started_sessions(log_path: &PathBuf) -> Vec<String> {
     let Ok(content) = std::fs::read_to_string(log_path) else {
-        return 0;
+        return Vec::new();
     };
-    content
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .count() as u64
+
+    let mut sessions = Vec::new();
+    for (idx, line) in content.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let entry: GtStartedLogEntry = serde_json::from_str(line).unwrap_or_else(|error| {
+            panic!(
+                "failed to parse Graphite shim start log entry {} in {}: {}",
+                idx + 1,
+                log_path.display(),
+                error
+            )
+        });
+        if let Some(session) = entry.test_sync_session {
+            sessions.push(session);
+        }
+    }
+
+    sessions
 }
 
 fn apply_deterministic_git_env(command: &mut Command, repo: &TestRepo) {
@@ -256,10 +279,6 @@ fn gt(repo: &TestRepo, args: &[&str]) -> Result<String, String> {
         .args(args)
         .arg("--no-interactive");
 
-    let daemon_completion_baseline = repo
-        .mode()
-        .uses_daemon()
-        .then(|| repo.daemon_completion_count());
     let started_log_path = repo.mode().uses_daemon().then(new_gt_started_log_path);
 
     // Put the test shim first in PATH so `gt` calls it instead of raw git. The
@@ -323,13 +342,9 @@ fn gt(repo: &TestRepo, args: &[&str]) -> Result<String, String> {
         .output()
         .unwrap_or_else(|e| panic!("Failed to execute gt {:?}: {}", args, e));
 
-    if let Some(baseline_count) = daemon_completion_baseline {
-        let started_count = count_gt_started_commands(
-            started_log_path
-                .as_ref()
-                .expect("daemon mode should always create a started log path"),
-        );
-        repo.sync_daemon_external_tracked_completion_delta(baseline_count, started_count);
+    if let Some(started_log_path) = started_log_path.as_ref() {
+        let sessions = gt_started_sessions(started_log_path);
+        repo.sync_daemon_external_completion_sessions(&sessions);
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();

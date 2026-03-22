@@ -1,5 +1,6 @@
 use git_ai::daemon::test_sync::{
-    tracked_parsed_git_invocation_for_test_sync, tracks_parsed_git_invocation_for_test_sync,
+    TEST_SYNC_SESSION_CONFIG_KEY, tracked_parsed_git_invocation_for_test_sync,
+    tracks_parsed_git_invocation_for_test_sync,
 };
 use serde::Serialize;
 use std::env;
@@ -11,12 +12,14 @@ use std::path::PathBuf;
 use std::process::Command;
 #[cfg(not(unix))]
 use std::process::Stdio;
+use uuid::Uuid;
 
 #[derive(Serialize)]
 struct StartedGitInvocationLogEntry {
     command: Option<String>,
     command_args: Vec<String>,
     cwd: Option<String>,
+    test_sync_session: Option<String>,
 }
 
 fn select_target(argv: &[String]) -> Result<(String, bool), String> {
@@ -35,7 +38,11 @@ fn select_target(argv: &[String]) -> Result<(String, bool), String> {
     }
 }
 
-fn append_started_log(log_path: &PathBuf, argv: &[String]) -> Result<(), String> {
+fn append_started_log(
+    log_path: &PathBuf,
+    argv: &[String],
+    test_sync_session: Option<&str>,
+) -> Result<(), String> {
     let cwd = env::current_dir().map_err(|e| format!("read shim cwd failed: {e}"))?;
     let parsed = tracked_parsed_git_invocation_for_test_sync(argv, &cwd);
     if !tracks_parsed_git_invocation_for_test_sync(&parsed) {
@@ -50,6 +57,7 @@ fn append_started_log(log_path: &PathBuf, argv: &[String]) -> Result<(), String>
         command: parsed.command.clone(),
         command_args: parsed.command_args.clone(),
         cwd: Some(cwd.to_string_lossy().to_string()),
+        test_sync_session: test_sync_session.map(str::to_string),
     };
     let mut line = serde_json::to_vec(&entry).map_err(|e| format!("serialize shim log: {e}"))?;
     line.push(b'\n');
@@ -64,6 +72,21 @@ fn append_started_log(log_path: &PathBuf, argv: &[String]) -> Result<(), String>
     file.flush()
         .map_err(|e| format!("flush shim log failed: {e}"))?;
     Ok(())
+}
+
+fn new_test_sync_session() -> String {
+    format!("gt-shim-{}", Uuid::new_v4())
+}
+
+fn argv_with_test_sync_session(argv: &[String], test_sync_session: &str) -> Vec<String> {
+    let mut out = Vec::with_capacity(argv.len() + 2);
+    out.push("-c".to_string());
+    out.push(format!(
+        "{}={}",
+        TEST_SYNC_SESSION_CONFIG_KEY, test_sync_session
+    ));
+    out.extend(argv.iter().cloned());
+    out
 }
 
 #[cfg(unix)]
@@ -103,13 +126,24 @@ fn main() {
     let argv = env::args().skip(1).collect::<Vec<_>>();
     let (target, use_git_ai_wrapper_mode) =
         select_target(&argv).unwrap_or_else(|error| panic!("{error}"));
+    let mut effective_argv = argv.clone();
+    let mut test_sync_session = None;
     if let Ok(log_path) = env::var("GIT_AI_TEST_SYNC_START_LOG") {
         let log_path = PathBuf::from(log_path);
-        if let Err(error) = append_started_log(&log_path, &argv) {
+        let cwd =
+            env::current_dir().unwrap_or_else(|error| panic!("read shim cwd failed: {error}"));
+        let parsed = tracked_parsed_git_invocation_for_test_sync(&argv, &cwd);
+        if tracks_parsed_git_invocation_for_test_sync(&parsed) {
+            test_sync_session = Some(new_test_sync_session());
+            if let Some(session) = test_sync_session.as_deref() {
+                effective_argv = argv_with_test_sync_session(&argv, session);
+            }
+        }
+        if let Err(error) = append_started_log(&log_path, &argv, test_sync_session.as_deref()) {
             panic!("git-ai-test-git-shim failed: {error}");
         }
     }
-    exec_target(&target, &argv, use_git_ai_wrapper_mode);
+    exec_target(&target, &effective_argv, use_git_ai_wrapper_mode);
 }
 
 #[cfg(not(unix))]
@@ -117,11 +151,22 @@ fn main() {
     let argv = env::args().skip(1).collect::<Vec<_>>();
     let (target, use_git_ai_wrapper_mode) =
         select_target(&argv).unwrap_or_else(|error| panic!("{error}"));
+    let mut effective_argv = argv.clone();
+    let mut test_sync_session = None;
     if let Ok(log_path) = env::var("GIT_AI_TEST_SYNC_START_LOG") {
         let log_path = PathBuf::from(log_path);
-        if let Err(error) = append_started_log(&log_path, &argv) {
+        let cwd =
+            env::current_dir().unwrap_or_else(|error| panic!("read shim cwd failed: {error}"));
+        let parsed = tracked_parsed_git_invocation_for_test_sync(&argv, &cwd);
+        if tracks_parsed_git_invocation_for_test_sync(&parsed) {
+            test_sync_session = Some(new_test_sync_session());
+            if let Some(session) = test_sync_session.as_deref() {
+                effective_argv = argv_with_test_sync_session(&argv, session);
+            }
+        }
+        if let Err(error) = append_started_log(&log_path, &argv, test_sync_session.as_deref()) {
             panic!("git-ai-test-git-shim failed: {error}");
         }
     }
-    exec_target(&target, &argv, use_git_ai_wrapper_mode)
+    exec_target(&target, &effective_argv, use_git_ai_wrapper_mode)
 }

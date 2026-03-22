@@ -18,6 +18,31 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
+const DAEMON_TEST_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn local_socket_connects_with_timeout(socket_path: &Path, timeout: Duration) -> Result<(), String> {
+    let start = std::time::Instant::now();
+    loop {
+        match LocalSocketStream::connect(socket_path.to_string_lossy().as_ref()) {
+            Ok(stream) => {
+                drop(stream);
+                return Ok(());
+            }
+            Err(error) => {
+                if start.elapsed() >= timeout {
+                    return Err(format!(
+                        "socket {} was not ready within {:?}: {}",
+                        socket_path.display(),
+                        timeout,
+                        error
+                    ));
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+}
+
 fn git_common_dir(repo: &TestRepo) -> PathBuf {
     let common_dir = PathBuf::from(
         repo.git(&["rev-parse", "--git-common-dir"])
@@ -44,6 +69,8 @@ fn daemon_lock_path(repo: &TestRepo) -> PathBuf {
 }
 
 fn send_trace_frames(trace_socket_path: &Path, payloads: &[Value]) {
+    local_socket_connects_with_timeout(trace_socket_path, DAEMON_TEST_PROBE_TIMEOUT)
+        .expect("failed to observe trace socket readiness");
     let mut stream = LocalSocketStream::connect(trace_socket_path.to_string_lossy().as_ref())
         .expect("failed to connect to trace socket");
     for payload in payloads {
