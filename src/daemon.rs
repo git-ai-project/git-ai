@@ -6126,9 +6126,13 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
 
 fn control_request_response_timeout(request: &ControlRequest) -> Duration {
     match request {
-        ControlRequest::CheckpointRun {
-            wait: Some(true), ..
-        } => DAEMON_CHECKPOINT_RESPONSE_TIMEOUT,
+        // Even "queued" checkpoint requests may block while the daemon waits for
+        // trace ingest to catch up to the current high-water mark before it can
+        // safely enqueue the checkpoint. Using the short control timeout here
+        // lets the client tear down captured checkpoint state while the daemon
+        // is still processing the request, which later surfaces as missing
+        // capture manifests or deleted worktree paths under load.
+        ControlRequest::CheckpointRun { .. } => DAEMON_CHECKPOINT_RESPONSE_TIMEOUT,
         _ => DAEMON_CONTROL_RESPONSE_TIMEOUT,
     }
 }

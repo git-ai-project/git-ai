@@ -48,6 +48,48 @@ impl SystemGitBackend {
     }
 }
 
+fn is_builtin_primary_command(command: &str) -> bool {
+    matches!(
+        command,
+        "add"
+            | "blame"
+            | "branch"
+            | "checkout"
+            | "cherry-pick"
+            | "clean"
+            | "clone"
+            | "commit"
+            | "config"
+            | "diff"
+            | "fetch"
+            | "grep"
+            | "init"
+            | "log"
+            | "ls-files"
+            | "merge"
+            | "mv"
+            | "notes"
+            | "pull"
+            | "push"
+            | "rebase"
+            | "remote"
+            | "reset"
+            | "restore"
+            | "revert"
+            | "rm"
+            | "rev-parse"
+            | "show"
+            | "stash"
+            | "status"
+            | "switch"
+            | "symbolic-ref"
+            | "tag"
+            | "update-ref"
+            | "var"
+            | "worktree"
+    )
+}
+
 impl GitBackend for SystemGitBackend {
     fn resolve_family(&self, worktree: &Path) -> Result<FamilyKey, GitAiError> {
         let worktree_str = worktree.to_string_lossy().to_string();
@@ -162,9 +204,9 @@ impl GitBackend for SystemGitBackend {
         worktree: &Path,
         argv: &[String],
     ) -> Result<Option<String>, GitAiError> {
-        let repository = discover_repository_in_path_no_git_exec(worktree)?;
         let mut current = parse_git_cli_args(git_invocation_tokens(argv));
         let mut seen = HashSet::new();
+        let mut repository = None;
         loop {
             let Some(command) = current.command.clone() else {
                 return Ok(None);
@@ -172,9 +214,15 @@ impl GitBackend for SystemGitBackend {
             if !seen.insert(command.clone()) {
                 return Ok(None);
             }
+            if is_builtin_primary_command(&command) {
+                return Ok(Some(command));
+            }
 
             let key = format!("alias.{}", command);
-            let alias_value = match repository.config_get_str(&key)? {
+            let alias_value = match repository
+                .get_or_insert(discover_repository_in_path_no_git_exec(worktree)?)
+                .config_get_str(&key)?
+            {
                 Some(value) => value,
                 None => return Ok(Some(command)),
             };
@@ -469,4 +517,37 @@ fn parse_alias_tokens(value: &str) -> Option<Vec<String>> {
         tokens.push(current);
     }
     Some(tokens)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GitBackend, SystemGitBackend};
+    use std::path::PathBuf;
+
+    #[test]
+    fn builtin_primary_command_skips_repository_lookup() {
+        let backend = SystemGitBackend::new();
+        let missing_worktree = PathBuf::from("/definitely/missing/git-ai-backend-test");
+        let argv = vec!["git".to_string(), "commit".to_string()];
+
+        let resolved = backend
+            .resolve_primary_command(&missing_worktree, &argv)
+            .expect("builtin commands should not require repository discovery");
+
+        assert_eq!(resolved.as_deref(), Some("commit"));
+    }
+
+    #[test]
+    fn unknown_primary_command_still_requires_repository_lookup() {
+        let backend = SystemGitBackend::new();
+        let missing_worktree = PathBuf::from("/definitely/missing/git-ai-backend-test");
+        let argv = vec!["git".to_string(), "ci".to_string()];
+
+        assert!(
+            backend
+                .resolve_primary_command(&missing_worktree, &argv)
+                .is_err(),
+            "unknown commands should still consult repository alias config"
+        );
+    }
 }

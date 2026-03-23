@@ -407,6 +407,43 @@ fn filtered_pathspecs_for_agent_run_result(
     }
 }
 
+fn resolve_base_override_dirty_file_execution(
+    base_commit: &str,
+    ts: u128,
+    edited_filepaths: &[String],
+    dirty_files: &HashMap<String, String>,
+    ignore_matcher: &IgnoreMatcher,
+) -> Option<ResolvedCheckpointExecution> {
+    let normalized_dirty_files = dirty_files
+        .iter()
+        .map(|(path, content)| (normalize_to_posix(path), content.clone()))
+        .collect::<HashMap<_, _>>();
+    let mut files = Vec::new();
+    let mut resolved_dirty_files = HashMap::new();
+
+    for path in edited_filepaths {
+        if should_ignore_file_with_matcher(path, ignore_matcher) {
+            continue;
+        }
+        let Some(content) = normalized_dirty_files.get(path).cloned() else {
+            continue;
+        };
+        files.push(path.clone());
+        resolved_dirty_files.insert(path.clone(), content);
+    }
+
+    if files.is_empty() {
+        None
+    } else {
+        Some(ResolvedCheckpointExecution {
+            base_commit: base_commit.to_string(),
+            ts,
+            files,
+            dirty_files: resolved_dirty_files,
+        })
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn resolve_live_checkpoint_execution(
     repo: &Repository,
@@ -468,6 +505,27 @@ fn resolve_live_checkpoint_execution(
         "[BENCHMARK] Pathspec filtering took {:?}",
         pathspec_start.elapsed()
     ));
+
+    // Base-override replays already provide the exact file list and content snapshot that
+    // should be checkpointed. Re-running git status here turns daemon commit replay into a
+    // full worktree scan on every commit, which is especially expensive on macOS runners.
+    if base_commit_override.is_some()
+        && let Some(explicit_paths) = filtered_pathspec.as_ref()
+        && let Some(dirty_files) = agent_run_result.and_then(|result| result.dirty_files.as_ref())
+        && let Some(resolved) = resolve_base_override_dirty_file_execution(
+            &base_commit,
+            ts,
+            explicit_paths,
+            dirty_files,
+            &ignore_matcher,
+        )
+    {
+        debug_log(&format!(
+            "[BENCHMARK] Reusing {} explicit dirty file(s) for base override checkpoint",
+            resolved.files.len()
+        ));
+        return Ok(Some(resolved));
+    }
 
     let files_start = Instant::now();
     let files = get_all_tracked_files(

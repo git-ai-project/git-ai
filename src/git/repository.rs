@@ -2524,6 +2524,20 @@ fn resolve_command_base_dir(global_args: &[String]) -> Result<PathBuf, GitAiErro
 }
 
 fn worktree_storage_ai_dir(git_dir: &Path, git_common_dir: &Path) -> PathBuf {
+    if git_dir == git_common_dir {
+        return git_common_dir.join("ai");
+    }
+
+    let worktrees_root = git_common_dir.join("worktrees");
+    if let Ok(relative_worktree_path) = git_dir.strip_prefix(&worktrees_root)
+        && !relative_worktree_path.as_os_str().is_empty()
+    {
+        return git_common_dir
+            .join("ai")
+            .join("worktrees")
+            .join(relative_worktree_path);
+    }
+
     let canonical_git_dir = git_dir
         .canonicalize()
         .unwrap_or_else(|_| git_dir.to_path_buf());
@@ -2545,7 +2559,7 @@ fn worktree_storage_ai_dir(git_dir: &Path, git_common_dir: &Path) -> PathBuf {
             .join(relative_worktree_path);
     }
 
-    let fallback_name = canonical_git_dir
+    let fallback_name = git_dir
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .filter(|name| !name.is_empty())
