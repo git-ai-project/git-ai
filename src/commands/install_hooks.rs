@@ -8,6 +8,8 @@ use crate::mdm::skills_installer;
 use crate::mdm::spinner::{Spinner, print_diff};
 use crate::mdm::utils::{get_current_binary_path, git_shim_path};
 use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
 
 /// Installation status for a tool
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,6 +125,7 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
 
     // Get absolute path to the current binary
     let binary_path = get_current_binary_path()?;
+    persist_install_api_base_config(&binary_path, dry_run)?;
     let params = HookInstallerParams { binary_path };
 
     // Run async operations with smol and convert result
@@ -133,6 +136,72 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
     spawn_background_metrics_db_flush();
 
     Ok(to_hashmap(statuses))
+}
+
+fn persist_install_api_base_config(binary_path: &Path, dry_run: bool) -> Result<bool, GitAiError> {
+    if dry_run {
+        return Ok(false);
+    }
+
+    let api_base = std::env::var("API_BASE").ok().filter(|s| !s.is_empty());
+    let Some(api_base) = api_base else {
+        return Ok(false);
+    };
+
+    let mut file_config = crate::config::load_file_config_public().map_err(GitAiError::Generic)?;
+    let mut changed = false;
+
+    if file_config.api_base_url.as_deref() != Some(api_base.as_str()) {
+        file_config.api_base_url = Some(api_base);
+        changed = true;
+    }
+
+    let git_path_missing = file_config
+        .git_path
+        .as_ref()
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true);
+    if git_path_missing && let Some(git_path) = detect_install_git_path(binary_path) {
+        file_config.git_path = Some(git_path);
+        changed = true;
+    }
+
+    if !changed {
+        return Ok(false);
+    }
+
+    crate::config::save_file_config(&file_config).map_err(GitAiError::Generic)?;
+    Ok(true)
+}
+
+fn detect_install_git_path(binary_path: &Path) -> Option<String> {
+    let install_dir = binary_path.parent()?;
+
+    #[cfg(windows)]
+    {
+        parse_git_og_cmd_path(&fs::read_to_string(install_dir.join("git-og.cmd")).ok()?)
+    }
+
+    #[cfg(not(windows))]
+    {
+        let target = fs::read_link(install_dir.join("git-og")).ok()?;
+        let resolved = if target.is_absolute() {
+            target
+        } else {
+            install_dir.join(target)
+        };
+        Some(resolved.to_string_lossy().to_string())
+    }
+}
+
+#[cfg(windows)]
+fn parse_git_og_cmd_path(contents: &str) -> Option<String> {
+    contents.lines().find_map(|line| {
+        let start = line.find('"')?;
+        let rest = &line[start + 1..];
+        let end = rest.find('"')?;
+        Some(rest[..end].to_string())
+    })
 }
 
 /// Main entry point for uninstall-hooks command
@@ -606,4 +675,187 @@ async fn async_run_uninstall(
     }
 
     Ok(statuses)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+    use std::path::PathBuf;
+    use tempfile::tempdir;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        old: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let old = std::env::var(key).ok();
+            // SAFETY: tests marked `serial` avoid concurrent env mutation.
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, old }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let old = std::env::var(key).ok();
+            // SAFETY: tests marked `serial` avoid concurrent env mutation.
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self { key, old }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: tests marked `serial` avoid concurrent env mutation.
+            unsafe {
+                if let Some(old) = &self.old {
+                    std::env::set_var(self.key, old);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    fn test_binary_path(install_dir: &Path) -> PathBuf {
+        #[cfg(windows)]
+        {
+            install_dir.join("git-ai.exe")
+        }
+
+        #[cfg(not(windows))]
+        {
+            install_dir.join("git-ai")
+        }
+    }
+
+    fn write_install_git_marker(install_dir: &Path, git_path: &str) {
+        #[cfg(windows)]
+        {
+            fs::write(
+                install_dir.join("git-og.cmd"),
+                format!("@echo off\r\n\"{}\" %*\r\n", git_path),
+            )
+            .unwrap();
+        }
+
+        #[cfg(not(windows))]
+        {
+            std::os::unix::fs::symlink(git_path, install_dir.join("git-og")).unwrap();
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn persist_install_api_base_updates_config_and_backfills_git_path() {
+        let temp = tempdir().unwrap();
+        let install_dir = temp.path().join("bin");
+        fs::create_dir_all(&install_dir).unwrap();
+        fs::write(test_binary_path(&install_dir), "").unwrap();
+
+        let expected_git_path = if cfg!(windows) {
+            r"C:\Program Files\Git\bin\git.exe"
+        } else {
+            "/opt/custom/bin/git"
+        };
+        write_install_git_marker(&install_dir, expected_git_path);
+
+        let _home = EnvVarGuard::set("HOME", temp.path().to_str().unwrap());
+        #[cfg(windows)]
+        let _userprofile = EnvVarGuard::set("USERPROFILE", temp.path().to_str().unwrap());
+        let _api_base = EnvVarGuard::set("API_BASE", "https://enterprise.example");
+
+        let changed =
+            persist_install_api_base_config(&test_binary_path(&install_dir), false).unwrap();
+
+        assert!(changed);
+
+        let config = crate::config::load_file_config_public().unwrap();
+        assert_eq!(
+            config.api_base_url.as_deref(),
+            Some("https://enterprise.example")
+        );
+        assert_eq!(config.git_path.as_deref(), Some(expected_git_path));
+    }
+
+    #[test]
+    #[serial]
+    fn persist_install_api_base_preserves_existing_git_path() {
+        let temp = tempdir().unwrap();
+        let install_dir = temp.path().join("bin");
+        fs::create_dir_all(&install_dir).unwrap();
+        fs::write(test_binary_path(&install_dir), "").unwrap();
+        write_install_git_marker(
+            &install_dir,
+            if cfg!(windows) {
+                r"C:\Program Files\Git\bin\git.exe"
+            } else {
+                "/opt/custom/bin/git"
+            },
+        );
+
+        let _home = EnvVarGuard::set("HOME", temp.path().to_str().unwrap());
+        #[cfg(windows)]
+        let _userprofile = EnvVarGuard::set("USERPROFILE", temp.path().to_str().unwrap());
+        let _api_base = EnvVarGuard::set("API_BASE", "https://enterprise.example");
+
+        let existing_git_path = if cfg!(windows) {
+            r"D:\PortableGit\bin\git.exe"
+        } else {
+            "/usr/local/bin/git"
+        };
+        crate::config::save_file_config(&crate::config::FileConfig {
+            git_path: Some(existing_git_path.to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+
+        persist_install_api_base_config(&test_binary_path(&install_dir), false).unwrap();
+
+        let config = crate::config::load_file_config_public().unwrap();
+        assert_eq!(
+            config.api_base_url.as_deref(),
+            Some("https://enterprise.example")
+        );
+        assert_eq!(config.git_path.as_deref(), Some(existing_git_path));
+    }
+
+    #[test]
+    #[serial]
+    fn persist_install_api_base_skips_without_env_or_in_dry_run() {
+        let temp = tempdir().unwrap();
+        let install_dir = temp.path().join("bin");
+        fs::create_dir_all(&install_dir).unwrap();
+        fs::write(test_binary_path(&install_dir), "").unwrap();
+
+        let _home = EnvVarGuard::set("HOME", temp.path().to_str().unwrap());
+        #[cfg(windows)]
+        let _userprofile = EnvVarGuard::set("USERPROFILE", temp.path().to_str().unwrap());
+        let _api_base = EnvVarGuard::remove("API_BASE");
+
+        let changed =
+            persist_install_api_base_config(&test_binary_path(&install_dir), false).unwrap();
+        assert!(!changed);
+        assert!(!temp.path().join(".git-ai").join("config.json").exists());
+
+        let _api_base = EnvVarGuard::set("API_BASE", "https://enterprise.example");
+        let changed =
+            persist_install_api_base_config(&test_binary_path(&install_dir), true).unwrap();
+        assert!(!changed);
+        assert!(!temp.path().join(".git-ai").join("config.json").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn parse_git_og_cmd_path_extracts_wrapped_git_path() {
+        assert_eq!(
+            parse_git_og_cmd_path("@echo off\r\n\"C:\\Program Files\\Git\\bin\\git.exe\" %*\r\n"),
+            Some("C:\\Program Files\\Git\\bin\\git.exe".to_string())
+        );
+    }
 }
