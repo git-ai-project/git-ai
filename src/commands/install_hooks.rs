@@ -854,9 +854,7 @@ mod tests {
     #[test]
     fn parse_git_og_cmd_path_extracts_wrapped_git_path() {
         assert_eq!(
-            parse_git_og_cmd_path(
-                "@echo off\r\n\"C:\\Program Files\\Git\\bin\\git.exe\" %*\r\n"
-            ),
+            parse_git_og_cmd_path("@echo off\r\n\"C:\\Program Files\\Git\\bin\\git.exe\" %*\r\n"),
             Some("C:\\Program Files\\Git\\bin\\git.exe".to_string())
         );
     }
