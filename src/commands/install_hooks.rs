@@ -116,28 +116,6 @@ fn print_amp_plugins_note(installer_id: &str) {
     }
 }
 
-fn read_global_git_config_value(git_cmd: &str, key: &str) -> Result<Option<String>, GitAiError> {
-    let output = Command::new(git_cmd)
-        .args(["config", "--global", "--get", key])
-        .output()?;
-
-    if output.status.success() {
-        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if value.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(value))
-        }
-    } else if output.status.code() == Some(1) {
-        Ok(None)
-    } else {
-        Err(GitAiError::Generic(format!(
-            "failed to read global git config key '{}'",
-            key
-        )))
-    }
-}
-
 fn set_global_git_config_value(git_cmd: &str, key: &str, value: &str) -> Result<(), GitAiError> {
     let status = Command::new(git_cmd)
         .args(["config", "--global", key, value])
@@ -152,19 +130,6 @@ fn set_global_git_config_value(git_cmd: &str, key: &str, value: &str) -> Result<
             key
         )))
     }
-}
-
-fn ensure_global_git_config_value(
-    git_cmd: &str,
-    key: &str,
-    value: &str,
-    dry_run: bool,
-) -> Result<(), GitAiError> {
-    let current = read_global_git_config_value(git_cmd, key)?;
-    if current.as_deref() == Some(value) || dry_run {
-        return Ok(());
-    }
-    set_global_git_config_value(git_cmd, key, value)
 }
 
 fn ensure_global_git_config_dirs() -> Result<(), GitAiError> {
@@ -182,6 +147,23 @@ fn ensure_global_git_config_dirs() -> Result<(), GitAiError> {
     Ok(())
 }
 
+fn remove_global_git_config_section(git_cmd: &str, section: &str) -> Result<(), GitAiError> {
+    let status = Command::new(git_cmd)
+        .args(["config", "--global", "--remove-section", section])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    // Exit code 128 means the section doesn't exist, which is fine.
+    if status.success() || status.code() == Some(128) {
+        Ok(())
+    } else {
+        Err(GitAiError::Generic(format!(
+            "failed to remove global git config section '{}'",
+            section
+        )))
+    }
+}
+
 fn maybe_configure_async_mode_daemon_trace2(dry_run: bool) -> Result<(), GitAiError> {
     let runtime_config = config::Config::fresh();
     if !runtime_config.feature_flags().async_mode {
@@ -193,17 +175,24 @@ fn maybe_configure_async_mode_daemon_trace2(dry_run: bool) -> Result<(), GitAiEr
     let daemon_config = DaemonConfig::from_env_or_default_paths()?;
     let event_target = daemon_config.trace2_event_target();
 
-    ensure_global_git_config_value(
+    if dry_run {
+        return Ok(());
+    }
+
+    // Fully reset any existing trace2 config the user may have set
+    // (e.g. trace2.normalTarget, trace2.perfTarget, trace2.configParams, etc.)
+    // before writing only the keys we need.
+    remove_global_git_config_section(runtime_config.git_cmd(), "trace2")?;
+
+    set_global_git_config_value(
         runtime_config.git_cmd(),
         TRACE2_EVENT_TARGET_KEY,
         &event_target,
-        dry_run,
     )?;
-    ensure_global_git_config_value(
+    set_global_git_config_value(
         runtime_config.git_cmd(),
         TRACE2_EVENT_NESTING_KEY,
         TRACE2_EVENT_NESTING_VALUE,
-        dry_run,
     )?;
     Ok(())
 }

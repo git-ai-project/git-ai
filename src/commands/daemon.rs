@@ -57,7 +57,62 @@ fn handle_start(args: &[String]) -> Result<(), String> {
     if has_flag(args, "--mode") {
         return Err("--mode is no longer supported; daemon always runs in write mode".to_string());
     }
-    ensure_daemon_running(Duration::from_secs(2)).map(|_| ())
+    ensure_daemon_running_attached(Duration::from_secs(2)).map(|_| ())
+}
+
+/// Like `ensure_daemon_running`, but spawns with inherited stderr so the user
+/// sees startup failures before the daemon detaches.
+fn ensure_daemon_running_attached(timeout: Duration) -> Result<DaemonConfig, String> {
+    let config = daemon_config_from_env_or_default_paths()?;
+    if daemon_is_up(&config) {
+        return Ok(config);
+    }
+
+    if daemon_startup_is_blocked(&config) {
+        return Err(format!(
+            "daemon startup blocked: lock held at {}",
+            config.lock_path.display()
+        ));
+    }
+
+    let mut child = spawn_daemon_run_with_piped_stderr(&config)?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        if daemon_is_up(&config) {
+            // Daemon is healthy — let the detached child continue running.
+            return Ok(config);
+        }
+        // Check if the child exited (startup failure).
+        match child.try_wait() {
+            Ok(Some(status)) if !status.success() => {
+                let mut stderr_buf = String::new();
+                if let Some(mut stderr) = child.stderr.take() {
+                    use std::io::Read;
+                    let _ = stderr.read_to_string(&mut stderr_buf);
+                }
+                let detail = if stderr_buf.trim().is_empty() {
+                    format!("daemon process exited with {}", status)
+                } else {
+                    stderr_buf.trim().to_string()
+                };
+                return Err(format!("daemon failed to start: {}", detail));
+            }
+            Ok(Some(_)) => {
+                // Exited successfully but sockets aren't up — unexpected.
+                return Err("daemon process exited before sockets were ready".to_string());
+            }
+            _ => {}
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timed out after {:?} waiting for daemon sockets {} and {}",
+                timeout,
+                config.control_socket_path.display(),
+                config.trace_socket_path.display()
+            ));
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
 }
 
 fn daemon_config_from_env_or_default_paths() -> Result<DaemonConfig, String> {
@@ -195,6 +250,49 @@ fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
     #[cfg(not(windows))]
     {
         child.spawn().map(|_| ()).map_err(|e| e.to_string())
+    }
+}
+
+fn spawn_daemon_run_with_piped_stderr(
+    config: &DaemonConfig,
+) -> Result<std::process::Child, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let runtime_dir = daemon_runtime_dir(config)?;
+    let mut child = Command::new(exe);
+    child
+        .arg("daemon")
+        .arg("run")
+        .current_dir(&runtime_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+
+    #[cfg(windows)]
+    {
+        let preferred_flags =
+            CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB;
+        child.creation_flags(preferred_flags);
+        match child.spawn() {
+            Ok(c) => Ok(c),
+            Err(preferred_err) => {
+                debug_log(&format!(
+                    "detached daemon spawn with CREATE_BREAKAWAY_FROM_JOB failed, retrying without it: {}",
+                    preferred_err
+                ));
+                child.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
+                child.spawn().map_err(|fallback_err| {
+                    format!(
+                        "failed to spawn detached daemon with flags {:#x}: {}; retry without CREATE_BREAKAWAY_FROM_JOB also failed: {}",
+                        preferred_flags, preferred_err, fallback_err
+                    )
+                })
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        child.spawn().map_err(|e| e.to_string())
     }
 }
 
