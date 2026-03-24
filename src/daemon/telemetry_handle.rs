@@ -3,14 +3,24 @@
 //! When async_mode is enabled, this handle is initialized once on process start
 //! and used by the observability and metrics modules to route events through the
 //! daemon instead of writing to per-PID log files.
+//!
+//! The handle maintains a persistent socket connection that is shared across all
+//! callers (telemetry, CAS, and potentially checkpoints). This avoids the
+//! overhead of opening a new connection for every fire-and-forget event.
 
-use crate::daemon::control_api::{CasSyncPayload, ControlRequest, TelemetryEnvelope};
-#[cfg(not(any(test, feature = "test-support")))]
+use crate::daemon::control_api::{
+    CasSyncPayload, ControlRequest, ControlResponse, TelemetryEnvelope,
+};
 use crate::daemon::open_local_socket_stream_with_timeout;
-use crate::daemon::send_control_request_with_timeout;
+use interprocess::local_socket::prelude::*;
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
+
+/// Read/write timeout for the persistent daemon socket.
+/// Prevents indefinite blocking if the daemon becomes unresponsive.
+const DAEMON_SOCKET_IO_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Maximum time to wait for the daemon socket on process start.
 #[cfg(not(any(test, feature = "test-support")))]
@@ -21,6 +31,66 @@ static DAEMON_TELEMETRY_HANDLE: OnceLock<Mutex<Option<DaemonTelemetryHandle>>> =
 
 struct DaemonTelemetryHandle {
     socket_path: PathBuf,
+    conn: BufReader<LocalSocketStream>,
+}
+
+impl DaemonTelemetryHandle {
+    /// Apply read/write timeouts to the underlying socket so that I/O never
+    /// blocks indefinitely (which would hold the global mutex and stall the
+    /// entire process).
+    fn apply_socket_timeouts(stream: &LocalSocketStream) {
+        let timeout = Some(DAEMON_SOCKET_IO_TIMEOUT);
+        let _ = stream.set_recv_timeout(timeout);
+        let _ = stream.set_send_timeout(timeout);
+    }
+
+    /// Send a control request over the persistent connection and read the response.
+    /// On I/O error, attempts to reconnect once before giving up.
+    fn send(&mut self, request: &ControlRequest) -> Result<ControlResponse, String> {
+        match self.send_inner(request) {
+            Ok(resp) => Ok(resp),
+            Err(first_err) => {
+                // Connection may have been dropped by the daemon; try reconnecting once.
+                match open_local_socket_stream_with_timeout(
+                    &self.socket_path,
+                    Duration::from_secs(1),
+                ) {
+                    Ok(stream) => {
+                        Self::apply_socket_timeouts(&stream);
+                        self.conn = BufReader::new(stream);
+                        self.send_inner(request)
+                            .map_err(|e| format!("reconnect ok but send failed: {}", e))
+                    }
+                    Err(reconnect_err) => Err(format!(
+                        "send failed ({}), reconnect also failed ({})",
+                        first_err, reconnect_err
+                    )),
+                }
+            }
+        }
+    }
+
+    fn send_inner(&mut self, request: &ControlRequest) -> Result<ControlResponse, String> {
+        let mut body = serde_json::to_vec(request).map_err(|e| e.to_string())?;
+        body.push(b'\n');
+        self.conn
+            .get_mut()
+            .write_all(&body)
+            .map_err(|e| format!("write: {}", e))?;
+        self.conn
+            .get_mut()
+            .flush()
+            .map_err(|e| format!("flush: {}", e))?;
+
+        let mut line = String::new();
+        self.conn
+            .read_line(&mut line)
+            .map_err(|e| format!("read: {}", e))?;
+        if line.trim().is_empty() {
+            return Err("empty response from daemon".to_string());
+        }
+        serde_json::from_str(line.trim()).map_err(|e| format!("parse: {}", e))
+    }
 }
 
 /// Result of attempting to initialize the global daemon telemetry handle.
@@ -37,7 +107,8 @@ pub enum DaemonTelemetryInitResult {
 ///
 /// Should be called once on process start when `async_mode` is enabled.
 /// Attempts to connect to the daemon control socket (starting the daemon if needed)
-/// with a 2-second timeout.
+/// with a 2-second timeout. The connection is kept open and reused for all
+/// subsequent telemetry and CAS submissions.
 ///
 /// Returns the result indicating success, failure, or skip.
 pub fn init_daemon_telemetry_handle() -> DaemonTelemetryInitResult {
@@ -51,8 +122,7 @@ pub fn init_daemon_telemetry_handle() -> DaemonTelemetryInitResult {
     #[cfg(any(test, feature = "test-support"))]
     {
         let _ = DAEMON_TELEMETRY_HANDLE.get_or_init(|| Mutex::new(None));
-        #[allow(clippy::needless_return)]
-        return DaemonTelemetryInitResult::Skipped;
+        DaemonTelemetryInitResult::Skipped
     }
 
     #[cfg(not(any(test, feature = "test-support")))]
@@ -68,14 +138,16 @@ pub fn init_daemon_telemetry_handle() -> DaemonTelemetryInitResult {
             }
         };
 
-        // Verify we can actually connect to the control socket
+        // Open a persistent connection to the control socket
         match open_local_socket_stream_with_timeout(
             &config.control_socket_path,
             DAEMON_TELEMETRY_CONNECT_TIMEOUT,
         ) {
-            Ok(_stream) => {
+            Ok(stream) => {
+                DaemonTelemetryHandle::apply_socket_timeouts(&stream);
                 let handle = DaemonTelemetryHandle {
                     socket_path: config.control_socket_path,
+                    conn: BufReader::new(stream),
                 };
                 let _ = DAEMON_TELEMETRY_HANDLE.get_or_init(|| Mutex::new(Some(handle)));
                 DaemonTelemetryInitResult::Connected
@@ -96,29 +168,36 @@ pub fn daemon_telemetry_available() -> bool {
         .is_some_and(|guard| guard.is_some())
 }
 
+/// Send a control request over the shared persistent connection.
+///
+/// This is the unified entry point used by telemetry, CAS submissions,
+/// and any other code that needs to talk to the daemon. The connection
+/// is reused across calls; if the socket is dead it will reconnect once.
+///
+/// Returns the daemon's response, or an error string on failure.
+pub fn send_via_daemon(request: &ControlRequest) -> Result<ControlResponse, String> {
+    let Some(handle_mutex) = DAEMON_TELEMETRY_HANDLE.get() else {
+        return Err("daemon telemetry handle not initialized".to_string());
+    };
+    let Ok(mut guard) = handle_mutex.lock() else {
+        return Err("daemon telemetry handle lock poisoned".to_string());
+    };
+    let Some(handle) = guard.as_mut() else {
+        return Err("daemon telemetry handle not connected".to_string());
+    };
+    handle.send(request)
+}
+
 /// Submit telemetry envelopes to the daemon over the control socket.
 ///
-/// Fire-and-forget: sends the request and reads the response but doesn't
-/// propagate errors (silently drops on failure since telemetry is best-effort).
+/// Fire-and-forget: sends the request but doesn't propagate errors
+/// (silently drops on failure since telemetry is best-effort).
 pub fn submit_telemetry(envelopes: Vec<TelemetryEnvelope>) {
     if envelopes.is_empty() {
         return;
     }
-
-    let Some(handle_mutex) = DAEMON_TELEMETRY_HANDLE.get() else {
-        return;
-    };
-    let Ok(guard) = handle_mutex.lock() else {
-        return;
-    };
-    let Some(handle) = guard.as_ref() else {
-        return;
-    };
-
     let request = ControlRequest::SubmitTelemetry { envelopes };
-    // Use a short timeout for telemetry — it's best-effort
-    let _ =
-        send_control_request_with_timeout(&handle.socket_path, &request, Duration::from_secs(1));
+    let _ = send_via_daemon(&request);
 }
 
 /// Submit CAS sync records to the daemon over the control socket.
@@ -128,18 +207,6 @@ pub fn submit_cas(records: Vec<CasSyncPayload>) {
     if records.is_empty() {
         return;
     }
-
-    let Some(handle_mutex) = DAEMON_TELEMETRY_HANDLE.get() else {
-        return;
-    };
-    let Ok(guard) = handle_mutex.lock() else {
-        return;
-    };
-    let Some(handle) = guard.as_ref() else {
-        return;
-    };
-
     let request = ControlRequest::SubmitCas { records };
-    let _ =
-        send_control_request_with_timeout(&handle.socket_path, &request, Duration::from_secs(1));
+    let _ = send_via_daemon(&request);
 }
