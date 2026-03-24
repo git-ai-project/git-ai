@@ -578,6 +578,21 @@ fn enqueue_prompt_messages_to_cas(
             // Enqueue to CAS (returns hash)
             let hash = db_lock.enqueue_cas_object(&messages_json, Some(&metadata))?;
 
+            // In daemon mode, also submit CAS payload over the control socket
+            // so the daemon's telemetry worker can upload it immediately.
+            if crate::daemon::telemetry_handle::daemon_telemetry_available() {
+                let metadata_json = serde_json::to_string(&metadata).ok();
+                let canonical = serde_json_canonicalizer::to_string(&messages_json)
+                    .unwrap_or_else(|_| messages_json.to_string());
+                crate::daemon::telemetry_handle::submit_cas(vec![
+                    crate::daemon::control_api::CasSyncPayload {
+                        hash: hash.clone(),
+                        data: canonical,
+                        metadata: metadata_json,
+                    },
+                ]);
+            }
+
             // Set full URL and clear messages
             prompt.messages_url = Some(format!("{}/cas/{}", api_base_url, hash));
             prompt.messages.clear();
