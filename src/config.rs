@@ -169,10 +169,6 @@ pub struct ConfigPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclude_prompts_in_repositories: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub allow_repositories: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exclude_repositories: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry_oss_disabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disable_version_checks: Option<bool>,
@@ -969,48 +965,18 @@ fn apply_test_config_patch(config: &mut Config) {
     {
         if let Some(patterns) = patch.exclude_prompts_in_repositories {
             config.exclude_prompts_in_repositories = patterns
-                .into_iter()
-                .filter_map(|pattern_str| {
-                    Pattern::new(&pattern_str)
-                        .map_err(|e| {
-                            eprintln!(
-                                "Warning: Invalid test pattern in exclude_prompts_in_repositories '{}': {}",
-                                pattern_str, e
-                            );
-                        })
-                        .ok()
-                })
-                .collect();
-        }
-        if let Some(patterns) = patch.allow_repositories {
-            config.allow_repositories = patterns
-                .into_iter()
-                .filter_map(|pattern_str| {
-                    Pattern::new(&pattern_str)
-                        .map_err(|e| {
-                            eprintln!(
-                                "Warning: Invalid test pattern in allow_repositories '{}': {}",
-                                pattern_str, e
-                            );
-                        })
-                        .ok()
-                })
-                .collect();
-        }
-        if let Some(patterns) = patch.exclude_repositories {
-            config.exclude_repositories = patterns
-                .into_iter()
-                .filter_map(|pattern_str| {
-                    Pattern::new(&pattern_str)
-                        .map_err(|e| {
-                            eprintln!(
-                                "Warning: Invalid test pattern in exclude_repositories '{}': {}",
-                                pattern_str, e
-                            );
-                        })
-                        .ok()
-                })
-                .collect();
+                    .into_iter()
+                    .filter_map(|pattern_str| {
+                        Pattern::new(&pattern_str)
+                            .map_err(|e| {
+                                eprintln!(
+                                    "Warning: Invalid test pattern in exclude_prompts_in_repositories '{}': {}",
+                                    pattern_str, e
+                                );
+                            })
+                            .ok()
+                    })
+                    .collect();
         }
         if let Some(telemetry_oss_disabled) = patch.telemetry_oss_disabled {
             config.telemetry_oss_disabled = telemetry_oss_disabled;

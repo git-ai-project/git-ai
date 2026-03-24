@@ -15,7 +15,6 @@ use crate::commands::hooks::stash_hooks;
 use crate::commands::hooks::switch_hooks;
 use crate::commands::hooks::update_ref_hooks;
 use crate::config;
-use crate::daemon::wrapper_trace::WrapperDaemonTraceSession;
 use crate::git::cli_parser::{ParsedGitInvocation, parse_git_cli_args};
 use crate::git::find_repository;
 use crate::git::repository::{Repository, disable_internal_git_hooks};
@@ -37,13 +36,10 @@ use std::os::windows::process::CommandExt;
 use std::process::Command;
 #[cfg(unix)]
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 #[cfg(unix)]
 static CHILD_PGID: AtomicI32 = AtomicI32::new(0);
-
-const ASYNC_MODE_DAEMON_BRIDGE_ERROR_MESSAGE: &str = "[git-ai] Error starting or connecting to the git-ai daemon. This is most likely an issue with you git-ai installation. Please contact your administrator or open an issue: https://github.com/git-ai-project/git-ai/issues";
-const ASYNC_MODE_DAEMON_FINISH_ERROR_MESSAGE: &str = "[git-ai] Error sending command completion data to the git-ai daemon. Git completed successfully, but git-ai may be out of sync. Please contact your administrator or open an issue: https://github.com/git-ai-project/git-ai/issues";
 
 // Windows NTSTATUS for Ctrl+C interruption (STATUS_CONTROL_C_EXIT, 0xC000013A) from Windows API docs.
 #[cfg(windows)]
@@ -114,7 +110,8 @@ pub fn handle_git(args: &[String]) {
         return;
     }
 
-    if config::Config::get().feature_flags().async_mode && !async_mode_daemon_bridge_enabled() {
+    // Async mode: wrapper should behave as a pure passthrough to git.
+    if config::Config::get().feature_flags().async_mode {
         let exit_status = proxy_to_git(args, false, None);
         exit_with_status(exit_status);
     }
@@ -122,16 +119,6 @@ pub fn handle_git(args: &[String]) {
     let mut parsed_args = parse_git_cli_args(args);
 
     let mut repository_option = find_repository(&parsed_args.global_args).ok();
-
-    if config::Config::get().feature_flags().async_mode {
-        if let Some(repository) = repository_option.as_mut()
-            && let Some(resolved) = resolve_alias_invocation(&parsed_args, repository)
-        {
-            parsed_args = resolved;
-        }
-        let exit_status = proxy_to_git_in_async_mode(args, parsed_args.command.as_deref());
-        exit_with_status(exit_status);
-    }
 
     let has_repo = repository_option.is_some();
 
@@ -592,102 +579,6 @@ fn proxy_to_git(
     exit_on_completion: bool,
     child_hooks_path_override: Option<&str>,
 ) -> std::process::ExitStatus {
-    proxy_to_git_with_command_customizer(
-        args,
-        exit_on_completion,
-        child_hooks_path_override,
-        |_| {},
-    )
-}
-
-fn proxy_to_git_in_async_mode(
-    args: &[String],
-    primary_command_hint: Option<&str>,
-) -> std::process::ExitStatus {
-    let Some(session) = maybe_start_async_wrapper_daemon_trace(args, primary_command_hint) else {
-        return proxy_to_git(args, false, None);
-    };
-
-    let trace_target = session.child_trace_event_target().to_string();
-    let parent_sid = session.child_trace_parent_sid().to_string();
-    let nesting = session.child_trace_nesting_value().to_string();
-    let status = proxy_to_git_with_command_customizer(args, false, None, move |cmd| {
-        cmd.env("GIT_TRACE2_EVENT", &trace_target);
-        cmd.env("GIT_TRACE2_EVENT_NESTING", &nesting);
-        cmd.env("GIT_TRACE2_PARENT_SID", &parent_sid);
-    });
-
-    if let Err(error) = session.finish(trace_exit_code_from_status(&status)) {
-        debug_log(&format!(
-            "async mode wrapper failed to send authoritative daemon boundary: {}",
-            error
-        ));
-        eprintln!("{}", ASYNC_MODE_DAEMON_FINISH_ERROR_MESSAGE);
-    }
-
-    status
-}
-
-fn maybe_start_async_wrapper_daemon_trace(
-    args: &[String],
-    primary_command_hint: Option<&str>,
-) -> Option<WrapperDaemonTraceSession> {
-    if !async_mode_daemon_bridge_enabled() {
-        return None;
-    }
-
-    let config = match crate::commands::daemon::ensure_daemon_running(Duration::from_secs(2)) {
-        Ok(config) => config,
-        Err(error) => {
-            debug_log(&format!(
-                "async mode wrapper could not start daemon bridge, falling back to plain git passthrough: {}",
-                error
-            ));
-            eprintln!("{}", ASYNC_MODE_DAEMON_BRIDGE_ERROR_MESSAGE);
-            return None;
-        }
-    };
-    let cwd = std::env::current_dir().ok()?;
-    let mut raw_argv = Vec::with_capacity(args.len() + 1);
-    raw_argv.push(config::Config::get().git_cmd().to_string());
-    raw_argv.extend(args.iter().cloned());
-
-    match WrapperDaemonTraceSession::start(&config, &cwd, &raw_argv, primary_command_hint) {
-        Ok(session) => Some(session),
-        Err(error) => {
-            debug_log(&format!(
-                "async mode wrapper could not start authoritative daemon trace, falling back to plain git passthrough: {}",
-                error
-            ));
-            eprintln!("{}", ASYNC_MODE_DAEMON_BRIDGE_ERROR_MESSAGE);
-            None
-        }
-    }
-}
-
-fn async_mode_daemon_bridge_enabled() -> bool {
-    [
-        "GIT_AI_DAEMON_HOME",
-        "GIT_AI_DAEMON_CONTROL_SOCKET",
-        "GIT_AI_DAEMON_TRACE_SOCKET",
-    ]
-    .iter()
-    .any(|key| {
-        std::env::var(key)
-            .ok()
-            .is_some_and(|value| !value.trim().is_empty())
-    })
-}
-
-fn proxy_to_git_with_command_customizer<F>(
-    args: &[String],
-    exit_on_completion: bool,
-    child_hooks_path_override: Option<&str>,
-    customize_command: F,
-) -> std::process::ExitStatus
-where
-    F: Fn(&mut Command),
-{
     // debug_log(&format!("proxying to git with args: {:?}", args));
     // debug_log(&format!("prepended global args: {:?}", prepend_global(args)));
     // Use spawn for interactive commands
@@ -708,7 +599,6 @@ where
             }
             cmd.args(args);
             cmd.env(ENV_SKIP_MANAGED_HOOKS, "1");
-            customize_command(&mut cmd);
             unsafe {
                 let setpgid_flag = should_setpgid;
                 cmd.pre_exec(move || {
@@ -735,7 +625,6 @@ where
             }
             cmd.args(args);
             cmd.env(ENV_SKIP_MANAGED_HOOKS, "1");
-            customize_command(&mut cmd);
 
             #[cfg(windows)]
             {
@@ -815,24 +704,6 @@ where
             eprintln!("Failed to execute git command: {}", e);
             std::process::exit(1);
         }
-    }
-}
-
-fn trace_exit_code_from_status(status: &std::process::ExitStatus) -> i32 {
-    #[cfg(unix)]
-    {
-        if let Some(code) = status.code() {
-            return code;
-        }
-        if let Some(signal) = status.signal() {
-            return 128 + signal;
-        }
-        1
-    }
-
-    #[cfg(not(unix))]
-    {
-        status.code().unwrap_or(1)
     }
 }
 

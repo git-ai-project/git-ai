@@ -220,10 +220,7 @@ worktree_test_wrappers! {
 
         let fetched_note = local.read_authorship_note(&seed_sha);
         match mode {
-            GitTestMode::Daemon
-            | GitTestMode::Wrapper
-            | GitTestMode::Both
-            | GitTestMode::WrapperDaemon => assert!(
+            GitTestMode::Daemon | GitTestMode::Wrapper | GitTestMode::Both => assert!(
                 fetched_note.is_none(),
                 "plain git fetch should not import authorship note for commit {} in {:?} mode",
                 seed_sha,

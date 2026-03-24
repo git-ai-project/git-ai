@@ -31,8 +31,6 @@ const DAEMON_TEST_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
 const DAEMON_TEST_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 const DAEMON_TEST_SYNC_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
 const DAEMON_TEST_SYNC_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
-const SHARED_DAEMON_TEST_SYNC_TOTAL_TIMEOUT: Duration = Duration::from_secs(300);
-const SHARED_DAEMON_TEST_SYNC_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const DAEMON_TEST_TRACE_READY_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,7 +39,6 @@ pub enum GitTestMode {
     Hooks,
     Both,
     Daemon,
-    WrapperDaemon,
 }
 
 impl GitTestMode {
@@ -57,17 +54,12 @@ impl GitTestMode {
             "hooks" => Self::Hooks,
             "both" | "wrapper+hooks" | "hooks+wrapper" => Self::Both,
             "daemon" | "trace-daemon" | "pure-daemon" => Self::Daemon,
-            "wrapper-daemon"
-            | "daemon-wrapper"
-            | "wrapper+daemon"
-            | "daemon+wrapper"
-            | "async-wrapper-daemon" => Self::WrapperDaemon,
             _ => Self::Wrapper,
         }
     }
 
     pub fn uses_wrapper(self) -> bool {
-        matches!(self, Self::Wrapper | Self::Both | Self::WrapperDaemon)
+        matches!(self, Self::Wrapper | Self::Both)
     }
 
     pub fn uses_hooks(self) -> bool {
@@ -75,15 +67,7 @@ impl GitTestMode {
     }
 
     pub fn uses_daemon(self) -> bool {
-        matches!(self, Self::Daemon | Self::WrapperDaemon)
-    }
-
-    pub fn uses_trace2_daemon(self) -> bool {
         matches!(self, Self::Daemon)
-    }
-
-    pub fn uses_wrapper_daemon_bridge(self) -> bool {
-        matches!(self, Self::WrapperDaemon)
     }
 }
 
@@ -223,7 +207,7 @@ impl DaemonProcess {
                         let baseline_seq = response
                             .data
                             .as_ref()
-                            .and_then(|data| data.get("processed_trace_seq"))
+                            .and_then(|data| data.get("latest_seq"))
                             .and_then(serde_json::Value::as_u64)
                             .unwrap_or(0);
                         self.wait_until_trace_pipeline_ready(
@@ -302,7 +286,7 @@ impl DaemonProcess {
             let latest_seq = response
                 .data
                 .as_ref()
-                .and_then(|data| data.get("processed_trace_seq"))
+                .and_then(|data| data.get("latest_seq"))
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0);
             if latest_seq > baseline_seq {
@@ -763,45 +747,6 @@ impl Default for TestRepo {
 }
 
 impl TestRepo {
-    fn create_with_mode_and_daemon_scope<F>(
-        git_mode: GitTestMode,
-        daemon_scope: DaemonTestScope,
-        configure: F,
-    ) -> Self
-    where
-        F: FnOnce(&mut Self),
-    {
-        let mut rng = rand::thread_rng();
-        let n: u64 = rng.gen_range(0..10000000000);
-        let base = std::env::temp_dir();
-        let path = base.join(n.to_string());
-        let test_home = base.join(format!("{}-home", n));
-        let test_db_path = resolve_test_db_path(&base, n, &test_home, git_mode);
-
-        // Clone from cached template (git init + config + symbolic-ref already done)
-        clone_template_to(&path);
-
-        let mut repo = Self {
-            path,
-            feature_flags: FeatureFlags::default(),
-            config_patch: None,
-            test_db_path,
-            test_home,
-            git_mode,
-            daemon_scope,
-            daemon_process: None,
-            _base_repo_path: None,
-            _base_test_db_path: None,
-            daemon_family_key: OnceLock::new(),
-        };
-
-        repo.apply_default_config_patch();
-        configure(&mut repo);
-        repo.setup_daemon_mode();
-        repo.setup_git_hooks_mode();
-        repo
-    }
-
     fn parsed_git_invocation_for_tracking(
         &self,
         args: &[&str],
@@ -849,26 +794,6 @@ impl TestRepo {
                 .collect();
             config.insert(
                 "exclude_prompts_in_repositories".to_string(),
-                serde_json::Value::Array(values),
-            );
-        }
-        if let Some(allow) = &patch.allow_repositories {
-            let values = allow
-                .iter()
-                .map(|pattern| serde_json::Value::String(pattern.clone()))
-                .collect();
-            config.insert(
-                "allow_repositories".to_string(),
-                serde_json::Value::Array(values),
-            );
-        }
-        if let Some(exclude) = &patch.exclude_repositories {
-            let values = exclude
-                .iter()
-                .map(|pattern| serde_json::Value::String(pattern.clone()))
-                .collect();
-            config.insert(
-                "exclude_repositories".to_string(),
                 serde_json::Value::Array(values),
             );
         }
@@ -1085,18 +1010,35 @@ impl TestRepo {
         git_mode: GitTestMode,
         daemon_scope: DaemonTestScope,
     ) -> Self {
-        Self::create_with_mode_and_daemon_scope(git_mode, daemon_scope, |_| {})
-    }
+        let mut rng = rand::thread_rng();
+        let n: u64 = rng.gen_range(0..10000000000);
+        let base = std::env::temp_dir();
+        let path = base.join(n.to_string());
+        let test_home = base.join(format!("{}-home", n));
+        let test_db_path = resolve_test_db_path(&base, n, &test_home, git_mode);
 
-    pub fn new_with_mode_and_daemon_scope_configured<F>(
-        git_mode: GitTestMode,
-        daemon_scope: DaemonTestScope,
-        configure: F,
-    ) -> Self
-    where
-        F: FnOnce(&mut Self),
-    {
-        Self::create_with_mode_and_daemon_scope(git_mode, daemon_scope, configure)
+        // Clone from cached template (git init + config + symbolic-ref already done)
+        clone_template_to(&path);
+
+        let mut repo = Self {
+            path,
+            feature_flags: FeatureFlags::default(),
+            config_patch: None,
+            test_db_path,
+            test_home,
+            git_mode,
+            daemon_scope,
+            daemon_process: None,
+            _base_repo_path: None,
+            _base_test_db_path: None,
+            daemon_family_key: OnceLock::new(),
+        };
+
+        repo.apply_default_config_patch();
+        repo.setup_daemon_mode();
+        repo.setup_git_hooks_mode();
+
+        repo
     }
 
     pub fn new_worktree() -> Self {
@@ -1490,8 +1432,6 @@ impl TestRepo {
         baseline_count: u64,
         expected_count: u64,
     ) -> u64 {
-        let total_timeout = self.daemon_test_sync_total_timeout();
-        let idle_timeout = self.daemon_test_sync_idle_timeout();
         let start = Instant::now();
         let mut last_progress = start;
         let mut last_observed_count = baseline_count;
@@ -1523,7 +1463,9 @@ impl TestRepo {
                 last_progress = Instant::now();
                 last_observed_count = observed_count;
             }
-            if start.elapsed() >= total_timeout || last_progress.elapsed() >= idle_timeout {
+            if start.elapsed() >= DAEMON_TEST_SYNC_TOTAL_TIMEOUT
+                || last_progress.elapsed() >= DAEMON_TEST_SYNC_IDLE_TIMEOUT
+            {
                 break;
             }
             thread::sleep(Duration::from_millis(10));
@@ -1536,8 +1478,6 @@ impl TestRepo {
     }
 
     fn wait_for_daemon_completion_sessions(&self, family_key: &str, sessions: &[String]) -> u64 {
-        let total_timeout = self.daemon_test_sync_total_timeout();
-        let idle_timeout = self.daemon_test_sync_idle_timeout();
         let expected: std::collections::HashSet<&str> =
             sessions.iter().map(|session| session.as_str()).collect();
         let start = Instant::now();
@@ -1579,7 +1519,9 @@ impl TestRepo {
                 last_observed_count = tracked_entries.len();
                 last_completed_count = completed.len();
             }
-            if start.elapsed() >= total_timeout || last_progress.elapsed() >= idle_timeout {
+            if start.elapsed() >= DAEMON_TEST_SYNC_TOTAL_TIMEOUT
+                || last_progress.elapsed() >= DAEMON_TEST_SYNC_IDLE_TIMEOUT
+            {
                 break;
             }
 
@@ -1597,8 +1539,6 @@ impl TestRepo {
         baseline_count: u64,
         expected_count: u64,
     ) -> u64 {
-        let total_timeout = self.daemon_test_sync_total_timeout();
-        let idle_timeout = self.daemon_test_sync_idle_timeout();
         let family_key = self.daemon_family_key();
         let start = Instant::now();
         let mut last_progress = start;
@@ -1627,7 +1567,9 @@ impl TestRepo {
                 last_progress = Instant::now();
                 last_observed_count = observed_count;
             }
-            if start.elapsed() >= total_timeout || last_progress.elapsed() >= idle_timeout {
+            if start.elapsed() >= DAEMON_TEST_SYNC_TOTAL_TIMEOUT
+                || last_progress.elapsed() >= DAEMON_TEST_SYNC_IDLE_TIMEOUT
+            {
                 break;
             }
             thread::sleep(Duration::from_millis(10));
@@ -1818,22 +1760,6 @@ impl TestRepo {
         registry.advance_last_synced_completion_count(family_key, observed_count);
     }
 
-    fn daemon_test_sync_total_timeout(&self) -> Duration {
-        if self.daemon_scope == DaemonTestScope::Shared {
-            SHARED_DAEMON_TEST_SYNC_TOTAL_TIMEOUT
-        } else {
-            DAEMON_TEST_SYNC_TOTAL_TIMEOUT
-        }
-    }
-
-    fn daemon_test_sync_idle_timeout(&self) -> Duration {
-        if self.daemon_scope == DaemonTestScope::Shared {
-            SHARED_DAEMON_TEST_SYNC_IDLE_TIMEOUT
-        } else {
-            DAEMON_TEST_SYNC_IDLE_TIMEOUT
-        }
-    }
-
     fn setup_git_hooks_mode(&self) {
         if !self.git_mode.uses_hooks() {
             return;
@@ -1866,7 +1792,7 @@ impl TestRepo {
         // Isolate all git + git-ai config reads from developer machine settings.
         configure_test_home_env(command, &self.test_home);
 
-        if self.git_mode.uses_trace2_daemon() {
+        if self.git_mode.uses_daemon() {
             command.env(
                 "GIT_TRACE2_EVENT",
                 DaemonConfig::trace2_event_target_for_path(&self.daemon_trace_socket_path()),
@@ -1881,38 +1807,6 @@ impl TestRepo {
         if self.git_mode.uses_wrapper() {
             command.env("GIT_AI", "git");
         }
-
-        if self.git_mode.uses_wrapper_daemon_bridge() {
-            command.env("GIT_AI_ASYNC_MODE", "true");
-            command.env("GIT_AI_DAEMON_HOME", self.daemon_home_path());
-            command.env(
-                "GIT_AI_DAEMON_CONTROL_SOCKET",
-                self.daemon_control_socket_path(),
-            );
-            command.env(
-                "GIT_AI_DAEMON_TRACE_SOCKET",
-                self.daemon_trace_socket_path(),
-            );
-        }
-    }
-
-    fn apply_config_patch_env(&self, command: &mut Command) {
-        if let Some(patch) = &self.config_patch
-            && let Ok(patch_json) = serde_json::to_string(patch)
-        {
-            command.env("GIT_AI_TEST_CONFIG_PATCH", patch_json);
-        }
-    }
-
-    fn apply_test_db_env(&self, command: &mut Command) {
-        command.env("GIT_AI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
-        command.env("GITAI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
-    }
-
-    pub(crate) fn configure_test_git_command_env(&self, command: &mut Command) {
-        self.configure_command_env(command);
-        self.apply_config_patch_env(command);
-        self.apply_test_db_env(command);
     }
 
     fn configure_git_ai_env(&self, command: &mut Command) {
@@ -1935,12 +1829,6 @@ impl TestRepo {
         if self.git_mode.uses_hooks() {
             command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
         }
-    }
-
-    fn configure_test_git_ai_command_env(&self, command: &mut Command) {
-        self.configure_git_ai_env(command);
-        self.apply_config_patch_env(command);
-        self.apply_test_db_env(command);
     }
 
     /// Patch the git-ai config for this test repo
@@ -2251,7 +2139,16 @@ impl TestRepo {
                 command.args(&command_args);
             }
 
-            self.configure_test_git_command_env(&mut command);
+            self.configure_command_env(&mut command);
+
+            // Add config patch as environment variable if present
+            if let Some(patch) = &self.config_patch
+                && let Ok(patch_json) = serde_json::to_string(patch)
+            {
+                command.env("GIT_AI_TEST_CONFIG_PATCH", patch_json);
+            }
+            command.env("GIT_AI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
+            command.env("GITAI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
 
             // Add custom environment variables
             for (key, value) in envs {
@@ -2337,7 +2234,16 @@ impl TestRepo {
         command
             .args(&normalized_args)
             .current_dir(&absolute_working_dir);
-        self.configure_test_git_ai_command_env(&mut command);
+        self.configure_git_ai_env(&mut command);
+
+        if let Some(patch) = &self.config_patch
+            && let Ok(patch_json) = serde_json::to_string(patch)
+        {
+            command.env("GIT_AI_TEST_CONFIG_PATCH", patch_json);
+        }
+
+        command.env("GIT_AI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
+        command.env("GITAI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
 
         let output = command
             .output()
@@ -2370,7 +2276,18 @@ impl TestRepo {
 
         let mut command = Command::new(binary_path);
         command.args(&normalized_args).current_dir(&self.path);
-        self.configure_test_git_ai_command_env(&mut command);
+        self.configure_git_ai_env(&mut command);
+
+        // Add config patch as environment variable if present
+        if let Some(patch) = &self.config_patch
+            && let Ok(patch_json) = serde_json::to_string(patch)
+        {
+            command.env("GIT_AI_TEST_CONFIG_PATCH", patch_json);
+        }
+
+        // Add test database path for isolation
+        command.env("GIT_AI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
+        command.env("GITAI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
 
         // Add custom environment variables
         for (key, value) in envs {
@@ -2418,7 +2335,14 @@ impl TestRepo {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        self.configure_test_git_ai_command_env(&mut command);
+        self.configure_git_ai_env(&mut command);
+
+        // Add config patch as environment variable if present
+        if let Some(patch) = &self.config_patch
+            && let Ok(patch_json) = serde_json::to_string(patch)
+        {
+            command.env("GIT_AI_TEST_CONFIG_PATCH", patch_json);
+        }
 
         let mut child = command
             .spawn()
