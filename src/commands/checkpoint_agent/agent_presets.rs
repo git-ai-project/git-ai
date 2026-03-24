@@ -3691,6 +3691,11 @@ impl AgentCheckpointPreset for KimiCodePreset {
             .and_then(|v| v.as_str())
             .map(|path| vec![path.to_string()]);
 
+        // Parse optional transcript from hook_input
+        let transcript: Option<AiTranscript> = hook_data
+            .get("transcript")
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
+
         // Check if this is a PreToolUse event (human checkpoint)
         let hook_event_name = hook_data.get("hook_event_name").and_then(|v| v.as_str());
 
@@ -3711,7 +3716,7 @@ impl AgentCheckpointPreset for KimiCodePreset {
             agent_id,
             agent_metadata: None,
             checkpoint_kind: CheckpointKind::AiAgent,
-            transcript: None,
+            transcript,
             repo_working_dir: Some(cwd.to_string()),
             edited_filepaths: file_path_as_vec,
             will_edit_filepaths: None,
