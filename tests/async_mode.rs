@@ -4,7 +4,6 @@ mod repos;
 use git_ai::daemon::{
     ControlRequest, DaemonConfig, local_socket_connects_with_timeout, send_control_request,
 };
-use git_ai::utils::LockFile;
 use repos::test_repo::{GitTestMode, TestRepo, get_binary_path, real_git_executable};
 use serde_json::Value;
 use std::fs;
@@ -175,24 +174,6 @@ fn daemon_command_output(repo: &TestRepo, args: &[&str], cwd: &Path) -> Output {
     command
         .output()
         .expect("failed to invoke git-ai daemon command")
-}
-
-fn git_wrapper_command_output(
-    repo: &TestRepo,
-    args: &[&str],
-    extra_env: &[(&str, &str)],
-) -> Output {
-    let mut command = Command::new(get_binary_path());
-    command.args(args).current_dir(repo.path());
-    command.env("GIT_AI", "git");
-    configure_test_home_env(&mut command, repo);
-    configure_test_daemon_env(&mut command, repo);
-    for (key, value) in extra_env {
-        command.env(key, value);
-    }
-    command
-        .output()
-        .expect("failed to invoke git wrapper command")
 }
 
 fn daemon_status_response(home_repo: &TestRepo, target_repo: &TestRepo) -> Value {
@@ -387,41 +368,6 @@ fn async_mode_checkpoint_starts_daemon_when_down() {
     wait_for_daemon_sockets(&repo);
     assert_daemon_status_ok_after_launch_repo_removed(&repo, &repo);
     shutdown_daemon(&repo);
-}
-
-#[test]
-fn async_mode_wrapper_reports_daemon_bridge_startup_failure_to_stderr() {
-    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon_config = DaemonConfig::from_home(&repo.daemon_home_path());
-    fs::create_dir_all(
-        daemon_config
-            .lock_path
-            .parent()
-            .expect("daemon lock path should have parent"),
-    )
-    .expect("failed to create daemon lock parent");
-    let _lock =
-        LockFile::try_acquire(&daemon_config.lock_path).expect("failed to acquire daemon lock");
-
-    let output = git_wrapper_command_output(
-        &repo,
-        &["status", "--short"],
-        &[("GIT_AI_ASYNC_MODE", "true")],
-    );
-
-    assert!(
-        output.status.success(),
-        "git status should still succeed when daemon bridge is blocked: stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("[git-ai] Error starting or connecting to the git-ai daemon. This is most likely an issue with you git-ai installation. Please contact your administrator or open an issue: https://github.com/git-ai-project/git-ai/issues"),
-        "stderr should report the daemon bridge startup failure with the user-facing install warning: {}",
-        stderr
-    );
 }
 
 #[test]

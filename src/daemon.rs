@@ -74,7 +74,6 @@ pub mod telemetry_handle;
 pub mod telemetry_worker;
 pub mod test_sync;
 pub mod trace_normalizer;
-pub mod wrapper_trace;
 
 pub use control_api::{
     CapturedCheckpointRunRequest, CheckpointRunRequest, ControlRequest, ControlResponse,
@@ -83,7 +82,6 @@ pub use control_api::{
 
 const PID_META_FILE: &str = "daemon.pid.json";
 const TRACE_INGEST_SEQ_FIELD: &str = "git_ai_ingest_seq";
-const TRACE_REPOSITORY_ALLOWED_FIELD: &str = "git_ai_repository_allowed";
 const DAEMON_CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const DAEMON_CONTROL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 const DAEMON_CHECKPOINT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -3000,7 +2998,6 @@ impl RecentReplayPrerequisite {
 struct TraceIngressState {
     root_worktrees: HashMap<String, PathBuf>,
     root_families: HashMap<String, String>,
-    root_repository_allowed: HashMap<String, bool>,
     root_argv: HashMap<String, Vec<String>>,
     root_pre_repo: HashMap<String, RepoContext>,
     root_inflight_merge_squash_contexts: HashMap<String, MergeSquashSnapshot>,
@@ -3045,7 +3042,6 @@ struct ActorDaemonCoordinator {
         Mutex<HashMap<String, VecDeque<RecentReplayPrerequisite>>>,
     side_effect_errors_by_family: Mutex<HashMap<String, BTreeMap<u64, String>>>,
     side_effect_exec_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
-    repository_policy_by_family: Mutex<HashMap<String, bool>>,
     carryover_snapshots_by_id: Mutex<HashMap<String, HashMap<String, String>>>,
     carryover_snapshot_ids_by_root: Mutex<HashMap<String, Vec<String>>>,
     test_completion_log_dir: Option<PathBuf>,
@@ -3088,7 +3084,6 @@ impl ActorDaemonCoordinator {
             recent_replay_prerequisites_by_family: Mutex::new(HashMap::new()),
             side_effect_errors_by_family: Mutex::new(HashMap::new()),
             side_effect_exec_locks: Mutex::new(HashMap::new()),
-            repository_policy_by_family: Mutex::new(HashMap::new()),
             carryover_snapshots_by_id: Mutex::new(HashMap::new()),
             carryover_snapshot_ids_by_root: Mutex::new(HashMap::new()),
             test_completion_log_dir: std::env::var("GIT_AI_TEST_DB_PATH")
@@ -3489,7 +3484,6 @@ impl ActorDaemonCoordinator {
     fn trace_root_is_tracked(ingress: &TraceIngressState, root: &str) -> bool {
         ingress.root_worktrees.contains_key(root)
             || ingress.root_families.contains_key(root)
-            || ingress.root_repository_allowed.contains_key(root)
             || ingress.root_argv.contains_key(root)
             || ingress.root_pre_repo.contains_key(root)
             || ingress.root_mutating.contains_key(root)
@@ -3644,7 +3638,6 @@ impl ActorDaemonCoordinator {
             .map_err(|_| GitAiError::Generic("trace ingress state lock poisoned".to_string()))?;
         ingress.root_worktrees.remove(root_sid);
         ingress.root_families.remove(root_sid);
-        ingress.root_repository_allowed.remove(root_sid);
         ingress.root_argv.remove(root_sid);
         ingress.root_pre_repo.remove(root_sid);
         ingress.root_inflight_merge_squash_contexts.remove(root_sid);
@@ -3662,40 +3655,6 @@ impl ActorDaemonCoordinator {
         })?;
         queued.remove(root_sid);
         Ok(())
-    }
-
-    fn repository_policy_cache_key_for_worktree(
-        worktree: &Path,
-        family_hint: Option<&str>,
-    ) -> String {
-        family_hint.map(ToString::to_string).unwrap_or_else(|| {
-            worktree
-                .canonicalize()
-                .unwrap_or_else(|_| worktree.to_path_buf())
-                .to_string_lossy()
-                .to_string()
-        })
-    }
-
-    fn repository_allowed_for_worktree(&self, worktree: &Path, family_hint: Option<&str>) -> bool {
-        let cache_key = Self::repository_policy_cache_key_for_worktree(worktree, family_hint);
-        if let Ok(cache) = self.repository_policy_by_family.lock()
-            && let Some(allowed) = cache.get(&cache_key).copied()
-        {
-            return allowed;
-        }
-
-        let config = config::Config::get();
-        let default_allowed = config.is_allowed_repository(&None);
-        let allowed = discover_repository_in_path_no_git_exec(worktree)
-            .map(|repo| config.is_allowed_repository(&Some(repo)))
-            .unwrap_or(default_allowed);
-
-        if let Ok(mut cache) = self.repository_policy_by_family.lock() {
-            cache.insert(cache_key, allowed);
-        }
-
-        allowed
     }
 
     fn discard_carryover_snapshots_for_root(&self, root_sid: &str) -> Result<(), GitAiError> {
@@ -4055,10 +4014,6 @@ impl ActorDaemonCoordinator {
         }
 
         let root = trace_root_sid(&sid).to_string();
-        let authoritative_boundary = payload
-            .get(crate::daemon::wrapper_trace::WRAPPER_AUTHORITATIVE_BOUNDARY_FIELD)
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
         let _ = self.mark_trace_root_activity(&root);
         let mut ingress = match self.trace_ingress_state.lock() {
             Ok(guard) => guard,
@@ -4128,7 +4083,6 @@ impl ActorDaemonCoordinator {
         let Some(worktree) = ingress.root_worktrees.get(&root).cloned() else {
             if is_terminal_root_trace_event(&event, &sid, &root) {
                 ingress.root_families.remove(&root);
-                ingress.root_repository_allowed.remove(&root);
                 ingress.root_mutating.remove(&root);
                 ingress.root_target_repo_only.remove(&root);
                 ingress.root_argv.remove(&root);
@@ -4142,53 +4096,15 @@ impl ActorDaemonCoordinator {
             return;
         };
 
-        let family_hint = ingress.root_families.get(&root).cloned();
-        let repository_allowed = ingress
-            .root_repository_allowed
-            .get(&root)
-            .copied()
-            .unwrap_or_else(|| {
-                let allowed =
-                    self.repository_allowed_for_worktree(&worktree, family_hint.as_deref());
-                ingress
-                    .root_repository_allowed
-                    .insert(root.clone(), allowed);
-                allowed
-            });
-        if !repository_allowed {
-            if let Some(object) = payload.as_object_mut() {
-                object.insert(TRACE_REPOSITORY_ALLOWED_FIELD.to_string(), json!(false));
-            }
-            if is_terminal_root_trace_event(&event, &sid, &root) {
-                ingress.root_worktrees.remove(&root);
-                ingress.root_families.remove(&root);
-                ingress.root_repository_allowed.remove(&root);
-                ingress.root_argv.remove(&root);
-                ingress.root_pre_repo.remove(&root);
-                ingress.root_inflight_merge_squash_contexts.remove(&root);
-                ingress.root_terminal_merge_squash_contexts.remove(&root);
-                ingress.root_mutating.remove(&root);
-                ingress.root_target_repo_only.remove(&root);
-                ingress.root_reflog_refs.remove(&root);
-                ingress.root_head_reflog_start_offsets.remove(&root);
-                ingress.root_family_reflog_start_offsets.remove(&root);
-            }
-            return;
-        }
-
         let should_capture_mutation = *ingress.root_mutating.get(&root).unwrap_or(&false);
         let target_repo_only = *ingress.root_target_repo_only.get(&root).unwrap_or(&false);
-        if !target_repo_only && !ingress.root_pre_repo.contains_key(&root) {
-            if let Some(repo) = payload
-                .get("git_ai_pre_repo")
-                .and_then(|value| serde_json::from_value::<RepoContext>(value.clone()).ok())
-            {
-                ingress.root_pre_repo.insert(root.clone(), repo);
-            } else if let Some(state) = read_head_state_for_worktree(&worktree) {
-                ingress
-                    .root_pre_repo
-                    .insert(root.clone(), repo_context_from_head_state(state));
-            }
+        if !target_repo_only
+            && !ingress.root_pre_repo.contains_key(&root)
+            && let Some(state) = read_head_state_for_worktree(&worktree)
+        {
+            ingress
+                .root_pre_repo
+                .insert(root.clone(), repo_context_from_head_state(state));
         }
         let pre_repo = ingress.root_pre_repo.get(&root).cloned();
         if should_capture_mutation && !target_repo_only {
@@ -4231,9 +4147,7 @@ impl ActorDaemonCoordinator {
 
         let mut inflight_merge_squash_to_cache = None;
         if let Some(object) = payload.as_object_mut() {
-            if object.get("git_ai_pre_repo").is_none()
-                && let Some(repo) = pre_repo.as_ref()
-            {
+            if let Some(repo) = pre_repo.as_ref() {
                 object.insert("git_ai_pre_repo".to_string(), json!(repo));
             }
             if object.get("git_ai_merge_squash_source_head").is_none() {
@@ -4328,9 +4242,7 @@ impl ActorDaemonCoordinator {
         if is_terminal_root_trace_event(&event, &sid, &root)
             && let Some(object) = payload.as_object_mut()
         {
-            if object.get("git_ai_post_repo").is_none()
-                && let Some(state) = post_repo.as_ref()
-            {
+            if let Some(state) = post_repo.as_ref() {
                 object.insert("git_ai_post_repo".to_string(), json!(state));
             }
 
@@ -4400,7 +4312,7 @@ impl ActorDaemonCoordinator {
                 .entry(root.clone())
                 .or_insert(context);
         }
-        if should_capture_mutation && !target_repo_only && !authoritative_boundary {
+        if should_capture_mutation && !target_repo_only {
             if !ingress.root_head_reflog_start_offsets.contains_key(&root)
                 && let Some(offset) = daemon_worktree_head_reflog_offset(&worktree)
             {
@@ -4422,12 +4334,10 @@ impl ActorDaemonCoordinator {
             && let Some(object) = payload.as_object_mut()
         {
             let mut terminal_ref_changes: Option<Vec<crate::daemon::domain::RefChange>> = None;
-            if object.get("git_ai_post_repo").is_none()
-                && let Some(state) = post_repo.as_ref()
-            {
+            if let Some(state) = post_repo.as_ref() {
                 object.insert("git_ai_post_repo".to_string(), json!(state));
             }
-            if should_capture_mutation && !target_repo_only && !authoritative_boundary {
+            if should_capture_mutation && !target_repo_only {
                 if let Some(start_offset) =
                     ingress.root_head_reflog_start_offsets.get(&root).copied()
                 {
@@ -4580,7 +4490,6 @@ impl ActorDaemonCoordinator {
             }
             ingress.root_worktrees.remove(&root);
             ingress.root_families.remove(&root);
-            ingress.root_repository_allowed.remove(&root);
             ingress.root_argv.remove(&root);
             ingress.root_pre_repo.remove(&root);
             ingress.root_inflight_merge_squash_contexts.remove(&root);
@@ -5839,41 +5748,13 @@ impl ActorDaemonCoordinator {
         &self,
         payload: Value,
     ) -> Result<TracePayloadApplyOutcome, GitAiError> {
+        self.maybe_append_pending_root_from_trace_payload(&payload)?;
         let payload_root_sid = Self::trace_payload_root_sid(&payload);
         let event = payload
             .get("event")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        if payload
-            .get(TRACE_REPOSITORY_ALLOWED_FIELD)
-            .and_then(Value::as_bool)
-            == Some(false)
-        {
-            if is_terminal_root_trace_event(
-                &event,
-                payload
-                    .get("sid")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default(),
-                payload_root_sid.as_deref().unwrap_or_default(),
-            ) && let Some(root_sid) = payload_root_sid.as_deref()
-            {
-                if let Some(family) = self
-                    .replace_pending_root_entry(root_sid, FamilySequencerEntry::Canceled)
-                    .await?
-                {
-                    self.clear_trace_root_tracking(root_sid)?;
-                    let _ = self.discard_carryover_snapshots_for_root(root_sid);
-                    let _ = family;
-                    return Ok(TracePayloadApplyOutcome::QueuedFamily);
-                }
-                self.clear_trace_root_tracking(root_sid)?;
-                let _ = self.discard_carryover_snapshots_for_root(root_sid);
-            }
-            return Ok(TracePayloadApplyOutcome::None);
-        }
-        self.maybe_append_pending_root_from_trace_payload(&payload)?;
         let emitted = {
             let mut normalizer = self.normalizer.lock().await;
             normalizer.ingest_payload(&payload)?
@@ -6000,12 +5881,10 @@ impl ActorDaemonCoordinator {
             .status_family(Path::new(&repo_working_dir))
             .await?;
         let latest_seq = status.applied_seq;
-        let processed_trace_seq = self.processed_trace_ingest_seq.load(Ordering::SeqCst) as u64;
         let family_key = family.0;
         Ok(FamilyStatus {
             family_key: family_key.clone(),
             latest_seq,
-            processed_trace_seq,
             last_error: status
                 .last_error
                 .or_else(|| self.latest_side_effect_error(&family_key).ok().flatten()),

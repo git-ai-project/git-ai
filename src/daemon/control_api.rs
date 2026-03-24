@@ -105,7 +105,6 @@ impl ControlResponse {
 pub struct FamilyStatus {
     pub family_key: String,
     pub latest_seq: u64,
-    pub processed_trace_seq: u64,
     pub last_error: Option<String>,
 }
 

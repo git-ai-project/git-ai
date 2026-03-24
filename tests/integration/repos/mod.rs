@@ -84,7 +84,40 @@ macro_rules! subdir_test_variants {
                         };
                         command.current_dir(&arbitrary_dir);
                         command.args(&full_args);
-                        self.inner.configure_test_git_command_env(&mut command);
+                        command.env("HOME", self.inner.test_home_path());
+                        command.env(
+                            "GIT_CONFIG_GLOBAL",
+                            self.inner.test_home_path().join(".gitconfig"),
+                        );
+                        if mode.uses_wrapper() {
+                            command.env("GIT_AI", "git");
+                        }
+                        if mode.uses_hooks() {
+                            command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
+                        }
+                        if mode.uses_daemon() {
+                            let trace_socket = self.inner.daemon_trace_socket_path();
+                            let nesting = std::env::var("GIT_AI_TEST_TRACE2_NESTING")
+                                .unwrap_or_else(|_| "10".to_string());
+                            command.env(
+                                "GIT_TRACE2_EVENT",
+                                git_ai::daemon::DaemonConfig::trace2_event_target_for_path(
+                                    &trace_socket,
+                                ),
+                                );
+                            command.env("GIT_TRACE2_EVENT_NESTING", nesting);
+                        }
+
+                        // Add config patch if present
+                        if let Some(patch) = &self.inner.config_patch {
+                            if let Ok(patch_json) = serde_json::to_string(patch) {
+                                command.env("GIT_AI_TEST_CONFIG_PATCH", patch_json);
+                            }
+                        }
+
+                        // Add test database path for isolation
+                        command.env("GIT_AI_TEST_DB_PATH", self.inner.test_db_path().to_str().unwrap());
+                        command.env("GITAI_TEST_DB_PATH", self.inner.test_db_path().to_str().unwrap());
 
                         let output = command.output().expect(&format!(
                             "Failed to execute git command with -C flag: {:?}", args
@@ -169,7 +202,39 @@ macro_rules! subdir_test_variants {
                             };
                             command.current_dir(&arbitrary_dir);
                             command.args(&full_args);
-                            self.inner.configure_test_git_command_env(&mut command);
+                            command.env("HOME", self.inner.test_home_path());
+                            command.env(
+                                "GIT_CONFIG_GLOBAL",
+                                self.inner.test_home_path().join(".gitconfig"),
+                            );
+                            if mode.uses_wrapper() {
+                                command.env("GIT_AI", "git");
+                            }
+                            if mode.uses_hooks() {
+                                command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
+                            }
+                            if mode.uses_daemon() {
+                                let trace_socket = self.inner.daemon_trace_socket_path();
+                                let nesting = std::env::var("GIT_AI_TEST_TRACE2_NESTING")
+                                    .unwrap_or_else(|_| "10".to_string());
+                                command.env(
+                                    "GIT_TRACE2_EVENT",
+                                    git_ai::daemon::DaemonConfig::trace2_event_target_for_path(
+                                        &trace_socket,
+                                    ),
+                                );
+                                command.env("GIT_TRACE2_EVENT_NESTING", nesting);
+                            }
+
+                            if let Some(patch) = &self.inner.config_patch {
+                                if let Ok(patch_json) = serde_json::to_string(patch) {
+                                    command.env("GIT_AI_TEST_CONFIG_PATCH", patch_json);
+                                }
+                            }
+
+                            // Add test database path for isolation
+                            command.env("GIT_AI_TEST_DB_PATH", self.inner.test_db_path().to_str().unwrap());
+                            command.env("GITAI_TEST_DB_PATH", self.inner.test_db_path().to_str().unwrap());
 
                             // Apply custom env vars
                             for (key, value) in envs {
