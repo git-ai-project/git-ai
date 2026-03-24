@@ -6077,6 +6077,84 @@ fn disable_trace2_for_daemon_process() {
     }
 }
 
+/// How often the daemon wakes up to evaluate whether an update check is due.
+const DAEMON_UPDATE_CHECK_INTERVAL_SECS: u64 = 3600;
+
+/// Granularity of the sleep loop so the thread notices shutdown promptly.
+const DAEMON_UPDATE_SLEEP_TICK_SECS: u64 = 5;
+
+/// Returns the update check interval, respecting an env var override for testing.
+fn daemon_update_check_interval() -> u64 {
+    std::env::var("GIT_AI_DAEMON_UPDATE_CHECK_INTERVAL")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DAEMON_UPDATE_CHECK_INTERVAL_SECS)
+}
+
+/// Background loop that periodically checks for available updates.
+///
+/// Sleeps in short increments so it can exit promptly when the coordinator
+/// signals shutdown.  When an update is detected, it requests a graceful
+/// shutdown so the daemon can self-update after draining in-flight work.
+fn daemon_update_check_loop(coordinator: Arc<ActorDaemonCoordinator>) {
+    use crate::commands::upgrade::{DaemonUpdateCheckResult, check_for_update_available};
+
+    let interval = daemon_update_check_interval().max(1);
+    let tick = DAEMON_UPDATE_SLEEP_TICK_SECS.min(interval);
+
+    loop {
+        let mut elapsed = 0u64;
+        while elapsed < interval {
+            if coordinator.is_shutting_down() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(tick));
+            elapsed += tick;
+        }
+
+        if coordinator.is_shutting_down() {
+            return;
+        }
+
+        match check_for_update_available() {
+            Ok(DaemonUpdateCheckResult::UpdateReady) => {
+                debug_log("daemon update check: newer version available, requesting shutdown");
+                coordinator.request_shutdown();
+                return;
+            }
+            Ok(DaemonUpdateCheckResult::NoUpdate) => {
+                debug_log("daemon update check: no update needed");
+            }
+            Err(err) => {
+                debug_log(&format!("daemon update check failed: {}", err));
+            }
+        }
+    }
+}
+
+/// After the daemon has fully shut down, attempt to install any pending update.
+///
+/// On Unix the installer atomically replaces the binary via `mv`; on Windows
+/// the installer is spawned as a detached process that polls until the exe is
+/// unlocked.
+fn daemon_run_pending_self_update() {
+    use crate::commands::upgrade::{
+        DaemonUpdateCheckResult, check_and_install_update_if_available,
+    };
+
+    match check_and_install_update_if_available() {
+        Ok(DaemonUpdateCheckResult::UpdateReady) => {
+            debug_log("daemon self-update: installation completed successfully");
+        }
+        Ok(DaemonUpdateCheckResult::NoUpdate) => {
+            debug_log("daemon self-update: no update to install");
+        }
+        Err(err) => {
+            debug_log(&format!("daemon self-update: installation failed: {}", err));
+        }
+    }
+}
+
 pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
     disable_trace2_for_daemon_process();
     config.ensure_parent_dirs()?;
@@ -6126,6 +6204,11 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
         }
     });
 
+    let update_coord = coordinator.clone();
+    let update_thread = std::thread::spawn(move || {
+        daemon_update_check_loop(update_coord);
+    });
+
     coordinator.wait_for_shutdown().await;
 
     // best effort wake listeners to allow clean process exit
@@ -6138,10 +6221,19 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
 
     let _ = control_thread.join();
     let _ = trace_thread.join();
+    let _ = update_thread.join();
 
     remove_socket_if_exists(&config.trace_socket_path)?;
     remove_socket_if_exists(&config.control_socket_path)?;
     remove_pid_metadata(&config)?;
+
+    // After clean shutdown, check if we should self-update before exiting.
+    // On Unix the installer can replace the binary while this process is still alive
+    // (the old inode remains valid), so we run it synchronously.
+    // On Windows, run_install_script spawns a detached PowerShell that waits for
+    // the exe to be released, so we just need to exit promptly after spawning it.
+    daemon_run_pending_self_update();
+
     Ok(())
 }
 
