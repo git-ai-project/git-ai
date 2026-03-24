@@ -83,6 +83,17 @@ fn daemon_lock_path(repo: &TestRepo) -> PathBuf {
     DaemonConfig::from_home(&repo.daemon_home_path()).lock_path
 }
 
+fn get_rss_kb(pid: u32) -> Option<u64> {
+    let status = std::fs::read_to_string(format!("/proc/{}/status", pid)).ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            let kb_str = rest.trim().trim_end_matches(" kB").trim();
+            return kb_str.parse().ok();
+        }
+    }
+    None
+}
+
 fn send_trace_frames(trace_socket_path: &Path, payloads: &[Value]) {
     let mut stream =
         open_local_socket_stream_with_timeout(trace_socket_path, DAEMON_TEST_PROBE_TIMEOUT)
@@ -3511,5 +3522,84 @@ fn daemon_update_check_loop_no_update_stays_alive() {
         trace_socket_path: daemon_trace_socket_path(&repo),
         repo_working_dir: repo_workdir_string(&repo),
     };
+    guard.shutdown();
+}
+
+#[test]
+#[serial]
+fn daemon_memory_does_not_grow_unbounded_under_trace_load() {
+    let repo =
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+
+    // Create a base commit so the repo has a valid HEAD.
+    fs::write(repo.path().join("init.txt"), "init\n").expect("write failed");
+    repo.git(&["add", "init.txt"]).expect("add failed");
+    repo.git(&["commit", "-m", "init"]).expect("commit failed");
+
+    let mut guard = DaemonGuard::start(&repo);
+    let pid = guard.child.id();
+
+    // Let the daemon settle after startup.
+    thread::sleep(Duration::from_millis(500));
+    let baseline_rss = get_rss_kb(pid).unwrap_or_else(|| {
+        eprintln!("WARN: /proc/{}/status not readable, skipping RSS check", pid);
+        0
+    });
+    eprintln!("daemon pid={} baseline RSS={}KB", pid, baseline_rss);
+
+    let worktree_str = repo.path().to_string_lossy().to_string();
+
+    // Send 2000 complete git trace lifecycle rounds (start + exit).
+    // Each round simulates a complete `git status` invocation with a unique SID.
+    for batch in 0..20 {
+        let mut frames = Vec::new();
+        for i in 0..100u64 {
+            let sid = format!("stress-{}-{}", batch, i);
+            frames.push(serde_json::json!({
+                "event": "start",
+                "sid": &sid,
+                "argv": ["git", "status"],
+                "time_ns": 1000000000u64 + (batch * 100) as u64 + i,
+            }));
+            frames.push(serde_json::json!({
+                "event": "def_repo",
+                "sid": &sid,
+                "worktree": &worktree_str,
+                "repo": repo.path().join(".git").to_string_lossy().to_string(),
+            }));
+            frames.push(serde_json::json!({
+                "event": "exit",
+                "sid": &sid,
+                "code": 0,
+                "time_ns": 1000000001u64 + (batch * 100) as u64 + i,
+            }));
+        }
+        send_trace_frames(&guard.trace_socket_path, &frames);
+        // Small delay to let the daemon process frames.
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    // Give the daemon time to finish processing all frames.
+    thread::sleep(Duration::from_millis(500));
+
+    let final_rss = get_rss_kb(pid).unwrap_or(0);
+    let growth = final_rss.saturating_sub(baseline_rss);
+    eprintln!(
+        "daemon pid={} final RSS={}KB growth={}KB",
+        pid, final_rss, growth
+    );
+
+    if baseline_rss > 0 && final_rss > 0 {
+        // Memory growth should be bounded. With the leak fixes, growth should stay
+        // well under 50 MB even after 2000 trace rounds.
+        assert!(
+            growth < 50_000,
+            "daemon RSS grew by {}KB after 2000 trace rounds; expected < 50MB",
+            growth,
+        );
+    } else {
+        eprintln!("RSS measurement unavailable, verifying daemon survived load");
+    }
+
     guard.shutdown();
 }

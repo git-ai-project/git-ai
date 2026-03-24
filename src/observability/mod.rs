@@ -152,6 +152,13 @@ fn append_envelope(envelope: LogEnvelope) {
     match &mut obs.mode {
         LogMode::Buffered(buffer) => {
             buffer.push(envelope);
+            // Cap buffered envelopes to prevent unbounded memory growth
+            // in long-running processes (e.g. daemon) when disk mode is unavailable.
+            const MAX_BUFFERED_ENVELOPES: usize = 1024;
+            if buffer.len() > MAX_BUFFERED_ENVELOPES {
+                let excess = buffer.len() - MAX_BUFFERED_ENVELOPES;
+                buffer.drain(0..excess);
+            }
         }
         LogMode::Disk(log_path) => {
             let log_path = log_path.clone();

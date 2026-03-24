@@ -82,7 +82,7 @@ pub struct TraceNormalizer<B: GitBackend> {
     state: TraceNormalizerState,
 }
 
-const COMPLETED_ROOT_RETENTION_LIMIT: usize = 65_536;
+const COMPLETED_ROOT_RETENTION_LIMIT: usize = 16_384;
 
 impl<B: GitBackend> TraceNormalizer<B> {
     pub fn new(backend: Arc<B>) -> Self {

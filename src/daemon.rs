@@ -3070,7 +3070,6 @@ struct ActorDaemonCoordinator {
             crate::daemon::git_backend::SystemGitBackend,
         >,
     >,
-    rewrite_events_by_family: Mutex<HashMap<String, Vec<Value>>>,
     pending_rebase_original_head_by_worktree: Mutex<HashMap<String, String>>,
     pending_cherry_pick_sources_by_worktree: Mutex<HashMap<String, Vec<String>>>,
     inflight_effects_by_family: Mutex<HashMap<String, usize>>,
@@ -3114,7 +3113,6 @@ impl ActorDaemonCoordinator {
                 backend.clone(),
             )),
             backend,
-            rewrite_events_by_family: Mutex::new(HashMap::new()),
             pending_rebase_original_head_by_worktree: Mutex::new(HashMap::new()),
             pending_cherry_pick_sources_by_worktree: Mutex::new(HashMap::new()),
             inflight_effects_by_family: Mutex::new(HashMap::new()),
@@ -3192,6 +3190,41 @@ impl ActorDaemonCoordinator {
             }
         }
         Ok(())
+    }
+
+    /// Garbage-collect empty or idle entries from per-family and per-root maps
+    /// to prevent unbounded memory growth in long-running daemon processes.
+    fn gc_stale_family_state(&self) {
+        // NOTE: Do NOT call normalizer.sweep_orphans() here — it removes ALL
+        // pending/deferred roots unconditionally which destroys in-flight trace
+        // state.  sweep_orphans() is only safe at daemon shutdown.
+        if let Ok(mut map) = self.recent_replay_prerequisites_by_family.lock() {
+            map.retain(|_, entries| !entries.is_empty());
+        }
+        if let Ok(mut map) = self.side_effect_errors_by_family.lock() {
+            map.retain(|_, errors| !errors.is_empty());
+        }
+        if let Ok(mut map) = self.family_sequencers_by_family.lock() {
+            map.retain(|_, state| !state.entries.is_empty());
+        }
+        if let Ok(mut map) = self.side_effect_exec_locks.lock() {
+            map.retain(|_, lock| Arc::strong_count(lock) <= 1);
+        }
+        if let Ok(mut map) = self.carryover_snapshots_by_id.lock() {
+            map.retain(|_, snapshot| !snapshot.is_empty());
+        }
+        if let Ok(mut map) = self.carryover_snapshot_ids_by_root.lock() {
+            map.retain(|_, ids| !ids.is_empty());
+        }
+        if let Ok(mut map) = self.pending_rebase_original_head_by_worktree.lock() {
+            map.shrink_to_fit();
+        }
+        if let Ok(mut map) = self.pending_cherry_pick_sources_by_worktree.lock() {
+            map.retain(|_, sources| !sources.is_empty());
+        }
+        if let Ok(mut map) = self.queued_trace_payloads_by_root.lock() {
+            map.retain(|_, count| *count > 0);
+        }
     }
 
     fn trace_command_participates_in_family_sequencer(primary_command: Option<&str>) -> bool {
@@ -3894,6 +3927,8 @@ impl ActorDaemonCoordinator {
         tokio::spawn(async move {
             let mut next_seq: u64 = 1;
             let mut pending_by_seq: BTreeMap<u64, Value> = BTreeMap::new();
+            let mut gc_counter: u64 = 0;
+            const GC_INTERVAL: u64 = 500;
 
             while let Some(payload) = rx.recv().await {
                 let Some(seq) = payload.get(TRACE_INGEST_SEQ_FIELD).and_then(Value::as_u64) else {
@@ -3912,6 +3947,28 @@ impl ActorDaemonCoordinator {
                     coordinator.request_shutdown();
                     break;
                 };
+
+                if pending_by_seq.len() >= TRACE_INGEST_QUEUE_CAPACITY {
+                    let error = GitAiError::Generic(format!(
+                        "trace ingest reorder buffer overflow at {} entries; next_seq={}",
+                        pending_by_seq.len(),
+                        next_seq
+                    ));
+                    debug_log(&format!("{}", error));
+                    observability::log_error(
+                        &error,
+                        Some(serde_json::json!({
+                            "component": "daemon",
+                            "phase": "trace_ingest_worker",
+                            "reason": "reorder_buffer_overflow",
+                            "buffered_count": pending_by_seq.len(),
+                            "next_seq": next_seq,
+                            "received_seq": seq,
+                        })),
+                    );
+                    coordinator.request_shutdown();
+                    break;
+                }
 
                 if pending_by_seq.insert(seq, payload).is_some() {
                     let error = GitAiError::Generic(format!(
@@ -4005,6 +4062,10 @@ impl ActorDaemonCoordinator {
                         .store(processed_seq as usize, Ordering::SeqCst);
                     coordinator.trace_ingest_progress_notify.notify_waiters();
                     next_seq = next_seq.saturating_add(1);
+                    gc_counter += 1;
+                    if gc_counter % GC_INTERVAL == 0 {
+                        coordinator.gc_stale_family_state();
+                    }
                 }
             }
 
@@ -4798,24 +4859,6 @@ impl ActorDaemonCoordinator {
         let _ = self.end_family_effect(family);
 
         let _ = progressed;
-        Ok(())
-    }
-
-    fn append_rewrite_event_for_family(
-        &self,
-        family: &str,
-        event: Value,
-    ) -> Result<(), GitAiError> {
-        let mut map = self
-            .rewrite_events_by_family
-            .lock()
-            .map_err(|_| GitAiError::Generic("rewrite events map lock poisoned".to_string()))?;
-        let entries = map.entry(family.to_string()).or_insert_with(Vec::new);
-        entries.push(event);
-        if entries.len() > 1024 {
-            let extra = entries.len() - 1024;
-            entries.drain(0..extra);
-        }
         Ok(())
     }
 
@@ -5685,20 +5728,6 @@ impl ActorDaemonCoordinator {
                     self.set_pending_cherry_pick_sources_for_worktree(worktree, source_commits)?;
                 }
             }
-            if let Some(family) = family
-                && saw_pull_event
-                && !cmd.ref_changes.is_empty()
-            {
-                self.append_rewrite_event_for_family(
-                    family,
-                    json!({
-                        "ref_reconcile": {
-                            "command": "pull",
-                            "ref_changes": cmd.ref_changes,
-                        }
-                    }),
-                )?;
-            }
             return Ok(());
         }
 
@@ -5750,9 +5779,7 @@ impl ActorDaemonCoordinator {
             }
         };
 
-        let mut emitted_rewrite_event = false;
         for rewrite_event in rewrite_events {
-            emitted_rewrite_event = true;
             if let Some(worktree) = cmd.worktree.as_ref() {
                 let worktree = worktree.to_string_lossy().to_string();
                 apply_rewrite_side_effect(
@@ -5764,12 +5791,6 @@ impl ActorDaemonCoordinator {
                     reset_pathspecs.as_deref(),
                 )?;
             }
-            if let Some(family) = family {
-                self.append_rewrite_event_for_family(
-                    family,
-                    serde_json::to_value(rewrite_event).map_err(GitAiError::from)?,
-                )?;
-            }
         }
 
         if let Some((new_head, carried_va, snapshot)) = deferred_rewrite_carryover
@@ -5777,28 +5798,6 @@ impl ActorDaemonCoordinator {
         {
             let repo = find_repository_in_path(&worktree.to_string_lossy())?;
             restore_virtual_attribution_carryover(&repo, &new_head, carried_va, snapshot)?;
-        }
-
-        if !emitted_rewrite_event
-            && let Some(family) = family
-            && saw_pull_event
-        {
-            let (old_head, new_head) = Self::resolve_heads_for_command(cmd);
-            let has_head_delta =
-                !old_head.is_empty() && !new_head.is_empty() && old_head != new_head;
-            if !cmd.ref_changes.is_empty() || has_head_delta {
-                self.append_rewrite_event_for_family(
-                    family,
-                    json!({
-                        "ref_reconcile": {
-                            "command": "pull",
-                            "ref_changes": cmd.ref_changes,
-                            "old_head": old_head,
-                            "new_head": new_head,
-                        }
-                    }),
-                )?;
-            }
         }
 
         if matches!(cmd.primary_command.as_deref(), Some("checkout" | "switch")) {
@@ -6438,6 +6437,8 @@ fn daemon_update_check_loop(coordinator: Arc<ActorDaemonCoordinator>) {
         if coordinator.is_shutting_down() {
             return;
         }
+
+        coordinator.gc_stale_family_state();
 
         match check_for_update_available() {
             Ok(DaemonUpdateCheckResult::UpdateReady) => {
