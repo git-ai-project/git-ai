@@ -70,13 +70,15 @@ pub mod family_actor;
 pub mod git_backend;
 pub mod global_actor;
 pub mod reducer;
+pub mod telemetry_handle;
+pub mod telemetry_worker;
 pub mod test_sync;
 pub mod trace_normalizer;
 pub mod wrapper_trace;
 
 pub use control_api::{
     CapturedCheckpointRunRequest, CheckpointRunRequest, ControlRequest, ControlResponse,
-    FamilyStatus, LiveCheckpointRunRequest,
+    FamilyStatus, LiveCheckpointRunRequest, TelemetryEnvelope,
 };
 
 const PID_META_FILE: &str = "daemon.pid.json";
@@ -3048,6 +3050,7 @@ struct ActorDaemonCoordinator {
     carryover_snapshot_ids_by_root: Mutex<HashMap<String, Vec<String>>>,
     test_completion_log_dir: Option<PathBuf>,
     trace_ingest_tx: Mutex<Option<mpsc::Sender<Value>>>,
+    telemetry_worker: Option<crate::daemon::telemetry_worker::DaemonTelemetryWorkerHandle>,
     next_trace_ingest_seq: AtomicUsize,
     next_carryover_snapshot_id: AtomicUsize,
     queued_trace_payloads: AtomicUsize,
@@ -3099,6 +3102,7 @@ impl ActorDaemonCoordinator {
                         })
                 }),
             trace_ingest_tx: Mutex::new(None),
+            telemetry_worker: None,
             next_trace_ingest_seq: AtomicUsize::new(0),
             next_carryover_snapshot_id: AtomicUsize::new(0),
             queued_trace_payloads: AtomicUsize::new(0),
@@ -6022,6 +6026,18 @@ impl ActorDaemonCoordinator {
                         .map(|v| ControlResponse::ok(None, Some(v)))
                         .map_err(GitAiError::from)
                 }),
+            ControlRequest::SubmitTelemetry { envelopes } => {
+                if let Some(worker) = &self.telemetry_worker {
+                    worker.submit_telemetry(envelopes).await;
+                }
+                Ok(ControlResponse::ok(None, None))
+            }
+            ControlRequest::SubmitCas { records } => {
+                if let Some(worker) = &self.telemetry_worker {
+                    worker.submit_cas(records).await;
+                }
+                Ok(ControlResponse::ok(None, None))
+            }
             ControlRequest::Shutdown => Ok(ControlResponse::ok(None, None)),
         };
 
@@ -6199,7 +6215,11 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
     remove_socket_if_exists(&config.trace_socket_path)?;
     remove_socket_if_exists(&config.control_socket_path)?;
 
-    let coordinator = Arc::new(ActorDaemonCoordinator::new());
+    let mut coordinator_inner = ActorDaemonCoordinator::new();
+    // Spawn the telemetry worker inside the daemon's tokio runtime.
+    coordinator_inner.telemetry_worker =
+        Some(crate::daemon::telemetry_worker::spawn_telemetry_worker());
+    let coordinator = Arc::new(coordinator_inner);
     coordinator.start_trace_ingest_worker()?;
     let rt_handle = tokio::runtime::Handle::current();
     let control_socket_path = config.control_socket_path.clone();

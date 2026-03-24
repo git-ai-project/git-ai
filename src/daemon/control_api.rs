@@ -1,4 +1,5 @@
 use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
+use crate::metrics::MetricEvent;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -12,6 +13,10 @@ pub enum ControlRequest {
     },
     #[serde(rename = "status.family")]
     StatusFamily { repo_working_dir: String },
+    #[serde(rename = "telemetry.submit")]
+    SubmitTelemetry { envelopes: Vec<TelemetryEnvelope> },
+    #[serde(rename = "cas.submit")]
+    SubmitCas { records: Vec<CasSyncPayload> },
     #[serde(rename = "shutdown")]
     Shutdown,
 }
@@ -102,4 +107,44 @@ pub struct FamilyStatus {
     pub latest_seq: u64,
     pub processed_trace_seq: u64,
     pub last_error: Option<String>,
+}
+
+/// A telemetry envelope sent from client to daemon.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TelemetryEnvelope {
+    Error {
+        timestamp: String,
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context: Option<Value>,
+    },
+    Performance {
+        timestamp: String,
+        operation: String,
+        duration_ms: u128,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context: Option<Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tags: Option<std::collections::HashMap<String, String>>,
+    },
+    Message {
+        timestamp: String,
+        message: String,
+        level: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context: Option<Value>,
+    },
+    Metrics {
+        events: Vec<MetricEvent>,
+    },
+}
+
+/// A CAS object payload sent from client to daemon for background upload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CasSyncPayload {
+    pub hash: String,
+    pub data: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<String>,
 }

@@ -110,8 +110,43 @@ fn get_observability() -> &'static Mutex<ObservabilityInner> {
     })
 }
 
-/// Append an envelope (buffer if no repo context, write to disk if context set)
+/// Append an envelope (buffer if no repo context, write to disk if context set).
+///
+/// In daemon mode (async_mode enabled), telemetry envelopes are sent over the
+/// control socket instead of being written to disk. The daemon batches and
+/// flushes them every 3 seconds.
 fn append_envelope(envelope: LogEnvelope) {
+    // In daemon mode, route through the control socket instead of disk.
+    if crate::daemon::telemetry_handle::daemon_telemetry_available() {
+        let telemetry_envelope = match &envelope {
+            LogEnvelope::Error(e) => Some(crate::daemon::TelemetryEnvelope::Error {
+                timestamp: e.timestamp.clone(),
+                message: e.message.clone(),
+                context: e.context.clone(),
+            }),
+            LogEnvelope::Performance(p) => Some(crate::daemon::TelemetryEnvelope::Performance {
+                timestamp: p.timestamp.clone(),
+                operation: p.operation.clone(),
+                duration_ms: p.duration_ms,
+                context: p.context.clone(),
+                tags: p.tags.clone(),
+            }),
+            LogEnvelope::Message(m) => Some(crate::daemon::TelemetryEnvelope::Message {
+                timestamp: m.timestamp.clone(),
+                message: m.message.clone(),
+                level: m.level.clone(),
+                context: m.context.clone(),
+            }),
+            LogEnvelope::Metrics(m) => Some(crate::daemon::TelemetryEnvelope::Metrics {
+                events: m.events.clone(),
+            }),
+        };
+        if let Some(te) = telemetry_envelope {
+            crate::daemon::telemetry_handle::submit_telemetry(vec![te]);
+        }
+        return;
+    }
+
     let mut obs = get_observability().lock().unwrap();
 
     match &mut obs.mode {
@@ -176,8 +211,16 @@ pub fn log_message(message: &str, level: &str, context: Option<serde_json::Value
     append_envelope(LogEnvelope::Message(envelope));
 }
 
-/// Spawn a background process to flush logs to Sentry
+/// Spawn a background process to flush logs to Sentry.
+///
+/// In daemon mode, this is a no-op because the daemon's telemetry worker
+/// handles batched flushing on a 3-second interval.
 pub fn spawn_background_flush() {
+    // In daemon mode the telemetry worker handles flushing — skip the subprocess.
+    if crate::daemon::telemetry_handle::daemon_telemetry_available() {
+        return;
+    }
+
     // Skip flush in test builds to prevent race conditions during test cleanup.
     // Tests spawn git-ai as a subprocess which calls this function. If the background
     // flush process is still starting when TestRepo::drop() runs, file handles may

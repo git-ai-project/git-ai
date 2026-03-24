@@ -37,6 +37,23 @@ pub fn handle_git_ai(args: &[String]) {
         return;
     }
 
+    // In daemon/async mode, initialize the global telemetry handle so that
+    // observability and CAS events are routed over the control socket instead
+    // of being written to per-PID log files.
+    if config::Config::get().feature_flags().async_mode {
+        use crate::daemon::telemetry_handle::{
+            DaemonTelemetryInitResult, init_daemon_telemetry_handle,
+        };
+        match init_daemon_telemetry_handle() {
+            DaemonTelemetryInitResult::Connected | DaemonTelemetryInitResult::Skipped => {}
+            DaemonTelemetryInitResult::Failed(err) => {
+                // Hard error for git-ai commands: the daemon must be reachable.
+                eprintln!("error: failed to connect to git-ai daemon: {}", err);
+                std::process::exit(1);
+            }
+        }
+    }
+
     // Start DB warmup early for commands that need database access
     match args[0].as_str() {
         "checkpoint" | "show-prompt" | "share" | "sync-prompts" | "flush-cas" | "search"

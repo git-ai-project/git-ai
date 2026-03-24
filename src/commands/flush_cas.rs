@@ -5,8 +5,16 @@ use std::collections::HashMap;
 
 const ENV_CAS_FLUSH_WORKER: &str = "GIT_AI_CAS_FLUSH_WORKER";
 
-/// Spawn a background process to flush CAS objects to the server
+/// Spawn a background process to flush CAS objects to the server.
+///
+/// In daemon mode, this is a no-op because CAS objects are sent over the
+/// control socket and the daemon's telemetry worker handles upload.
 pub fn spawn_background_cas_flush() {
+    // In daemon mode the telemetry worker handles CAS flushing — skip the subprocess.
+    if crate::daemon::telemetry_handle::daemon_telemetry_available() {
+        return;
+    }
+
     let _ =
         crate::utils::spawn_internal_git_ai_subcommand("flush-cas", &[], ENV_CAS_FLUSH_WORKER, &[]);
 }
