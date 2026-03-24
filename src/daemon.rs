@@ -6204,6 +6204,14 @@ const DAEMON_UPDATE_CHECK_INTERVAL_SECS: u64 = 3600;
 /// Granularity of the sleep loop so the thread notices shutdown promptly.
 const DAEMON_UPDATE_SLEEP_TICK_SECS: u64 = 5;
 
+/// Returns the update check interval, respecting an env var override for testing.
+fn daemon_update_check_interval() -> u64 {
+    std::env::var("GIT_AI_DAEMON_UPDATE_CHECK_INTERVAL")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DAEMON_UPDATE_CHECK_INTERVAL_SECS)
+}
+
 /// Background loop that periodically checks for available updates.
 ///
 /// Sleeps in short increments so it can exit promptly when the coordinator
@@ -6212,16 +6220,17 @@ const DAEMON_UPDATE_SLEEP_TICK_SECS: u64 = 5;
 fn daemon_update_check_loop(coordinator: Arc<ActorDaemonCoordinator>) {
     use crate::commands::upgrade::{DaemonUpdateCheckResult, check_for_update_available};
 
+    let interval = daemon_update_check_interval();
+    let tick = DAEMON_UPDATE_SLEEP_TICK_SECS.min(interval);
+
     loop {
         let mut elapsed = 0u64;
-        while elapsed < DAEMON_UPDATE_CHECK_INTERVAL_SECS {
+        while elapsed < interval {
             if coordinator.is_shutting_down() {
                 return;
             }
-            std::thread::sleep(std::time::Duration::from_secs(
-                DAEMON_UPDATE_SLEEP_TICK_SECS,
-            ));
-            elapsed += DAEMON_UPDATE_SLEEP_TICK_SECS;
+            std::thread::sleep(std::time::Duration::from_secs(tick));
+            elapsed += tick;
         }
 
         if coordinator.is_shutting_down() {

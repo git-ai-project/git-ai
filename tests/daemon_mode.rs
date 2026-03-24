@@ -3273,3 +3273,235 @@ fn daemon_pure_trace_socket_parallel_worktree_streams_preserve_exact_line_attrib
         &env_refs,
     );
 }
+
+// ---------------------------------------------------------------------------
+// Daemon auto-update integration tests
+// ---------------------------------------------------------------------------
+
+/// Seed a fake update cache at `$HOME/.git-ai/internal/update_check` so the
+/// daemon subprocess discovers a "pending update" without hitting any network.
+fn seed_update_cache_for_test(test_home: &Path, available: bool) {
+    let cache_dir = test_home.join(".git-ai").join("internal");
+    fs::create_dir_all(&cache_dir).expect("failed to create cache dir");
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let cache = if available {
+        serde_json::json!({
+            "last_checked_at": now,
+            "available_tag": "v99.99.99",
+            "available_semver": "99.99.99",
+            "channel": "latest"
+        })
+    } else {
+        serde_json::json!({
+            "last_checked_at": now,
+            "available_tag": null,
+            "available_semver": null,
+            "channel": "latest"
+        })
+    };
+    fs::write(
+        cache_dir.join("update_check"),
+        serde_json::to_vec(&cache).unwrap(),
+    )
+    .expect("failed to write update cache");
+}
+
+/// Spawn a daemon process with the given extra environment variables.
+/// Returns the child process once the daemon is ready (control socket responds).
+fn spawn_daemon_with_env(repo: &TestRepo, extra_env: &[(&str, String)]) -> Child {
+    let daemon_home = repo.daemon_home_path();
+    let control_socket = daemon_control_socket_path(repo);
+    let trace_socket = daemon_trace_socket_path(repo);
+
+    let mut command = Command::new(get_binary_path());
+    command
+        .arg("daemon")
+        .arg("run")
+        .current_dir(repo.path())
+        .env("GIT_AI_TEST_DB_PATH", repo.test_db_path())
+        .env("GITAI_TEST_DB_PATH", repo.test_db_path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    configure_test_home_env(&mut command, repo.test_home_path());
+    configure_test_daemon_env(&mut command, &daemon_home, &control_socket, &trace_socket);
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+
+    let mut child = command.spawn().expect("failed to spawn daemon subprocess");
+
+    // Wait for daemon to become ready.
+    let workdir = repo_workdir_string(repo);
+    for _ in 0..200 {
+        if child.try_wait().expect("failed to poll daemon").is_some() {
+            panic!("daemon exited before becoming ready");
+        }
+        if send_control_request(
+            &control_socket,
+            &ControlRequest::StatusFamily {
+                repo_working_dir: workdir.clone(),
+            },
+        )
+        .is_ok()
+            && local_socket_connects_with_timeout(&trace_socket, DAEMON_TEST_PROBE_TIMEOUT).is_ok()
+        {
+            return child;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!("daemon did not become ready");
+}
+
+/// Config patch JSON that enables version checks and auto-updates (they
+/// default to disabled in non-OSS debug builds).
+fn update_enabled_config_patch() -> String {
+    serde_json::json!({
+        "disable_version_checks": false,
+        "disable_auto_updates": false
+    })
+    .to_string()
+}
+
+/// Verifies the daemon update check loop lifecycle: when a cached update is
+/// present and the check interval is short, the daemon should detect the
+/// pending update, request a graceful shutdown, and exit on its own.
+#[test]
+#[serial]
+fn daemon_update_check_loop_detects_cached_update_and_shuts_down() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+
+    // Seed update cache with a pending update before starting the daemon.
+    seed_update_cache_for_test(repo.test_home_path(), true);
+
+    let mut child = spawn_daemon_with_env(
+        &repo,
+        &[
+            ("GIT_AI_DAEMON_UPDATE_CHECK_INTERVAL", "1".to_string()),
+            ("GIT_AI_TEST_CONFIG_PATCH", update_enabled_config_patch()),
+        ],
+    );
+
+    // The daemon should self-shutdown after detecting the cached update.
+    // With a 1-second interval the tick is clamped to 1s, so it should
+    // exit within a few seconds.
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Some(status) = child.try_wait().expect("failed to poll daemon") {
+            assert!(
+                status.success(),
+                "daemon should exit cleanly after update-triggered shutdown, got: {}",
+                status
+            );
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("daemon did not self-shutdown within 15s after detecting cached update");
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    // Lock file should be released after clean shutdown.
+    let lock_path = daemon_lock_path(&repo);
+    assert!(
+        !lock_path.exists() || DaemonLock::acquire(&lock_path).is_ok(),
+        "daemon lock should be released after shutdown"
+    );
+
+    // Control socket should no longer be reachable.
+    assert!(
+        send_control_request(
+            &daemon_control_socket_path(&repo),
+            &ControlRequest::StatusFamily {
+                repo_working_dir: repo_workdir_string(&repo),
+            },
+        )
+        .is_err(),
+        "control socket should be closed after daemon exit"
+    );
+}
+
+/// When auto-updates are disabled via config, the daemon should NOT
+/// self-shutdown even when the update cache indicates a newer version.
+#[test]
+#[serial]
+fn daemon_update_check_loop_respects_disabled_auto_updates() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+
+    // Seed update cache with a pending update.
+    seed_update_cache_for_test(repo.test_home_path(), true);
+
+    // Keep version checks enabled but disable auto-updates.
+    let config_patch = serde_json::json!({
+        "disable_version_checks": false,
+        "disable_auto_updates": true
+    })
+    .to_string();
+
+    let mut child = spawn_daemon_with_env(
+        &repo,
+        &[
+            ("GIT_AI_DAEMON_UPDATE_CHECK_INTERVAL", "1".to_string()),
+            ("GIT_AI_TEST_CONFIG_PATCH", config_patch),
+        ],
+    );
+
+    // Give the daemon enough time for 2+ update check cycles.
+    thread::sleep(Duration::from_secs(5));
+
+    // Daemon should still be running (auto-updates disabled).
+    assert!(
+        child.try_wait().expect("failed to poll daemon").is_none(),
+        "daemon should remain running when auto_updates_disabled is true"
+    );
+
+    // Clean up: send manual shutdown.
+    let mut guard = DaemonGuard {
+        child,
+        control_socket_path: daemon_control_socket_path(&repo),
+        trace_socket_path: daemon_trace_socket_path(&repo),
+        repo_working_dir: repo_workdir_string(&repo),
+    };
+    guard.shutdown();
+}
+
+/// When the update cache indicates no available update, the daemon should
+/// stay alive through multiple check cycles.
+#[test]
+#[serial]
+fn daemon_update_check_loop_no_update_stays_alive() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+
+    // Seed update cache with NO pending update.
+    seed_update_cache_for_test(repo.test_home_path(), false);
+
+    let mut child = spawn_daemon_with_env(
+        &repo,
+        &[
+            ("GIT_AI_DAEMON_UPDATE_CHECK_INTERVAL", "1".to_string()),
+            ("GIT_AI_TEST_CONFIG_PATCH", update_enabled_config_patch()),
+        ],
+    );
+
+    // Give the daemon enough time for 2+ check cycles.
+    thread::sleep(Duration::from_secs(5));
+
+    // Daemon should still be running since there's no update.
+    assert!(
+        child.try_wait().expect("failed to poll daemon").is_none(),
+        "daemon should remain running when no update is cached"
+    );
+
+    // Clean up: send manual shutdown.
+    let mut guard = DaemonGuard {
+        child,
+        control_socket_path: daemon_control_socket_path(&repo),
+        trace_socket_path: daemon_trace_socket_path(&repo),
+        repo_working_dir: repo_workdir_string(&repo),
+    };
+    guard.shutdown();
+}
