@@ -6571,10 +6571,17 @@ fn checkpoint_control_response_timeout(
     use_ci_or_test_budget: bool,
 ) -> Duration {
     match request {
+        // If the caller explicitly asked to wait for checkpoint completion, use
+        // the longer budget even in product mode because the request is
+        // intentionally synchronous.
+        ControlRequest::CheckpointRun { wait, .. } if wait.unwrap_or(false) => {
+            DAEMON_CHECKPOINT_RESPONSE_TIMEOUT
+        }
         // Queued checkpoint requests can block behind trace-ingest ordering. In
         // CI/test we allow the longer budget so replay-heavy daemon tests don't
         // tear down captured state mid-request. Product mode keeps the short
-        // control timeout for all checkpoint requests to preserve responsiveness.
+        // control timeout for fire-and-forget checkpoint requests to preserve
+        // responsiveness.
         ControlRequest::CheckpointRun { .. } if use_ci_or_test_budget => {
             DAEMON_CHECKPOINT_RESPONSE_TIMEOUT
         }
@@ -6922,7 +6929,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn checkpoint_requests_use_short_timeout_in_product_env() {
+    fn queued_checkpoint_requests_use_short_timeout_in_product_env() {
         let _unset_ci = EnvVarGuard::unset("CI");
         let _unset_test = EnvVarGuard::unset("GIT_AI_TEST_DB_PATH");
         let _unset_legacy_test = EnvVarGuard::unset("GITAI_TEST_DB_PATH");
@@ -6931,9 +6938,18 @@ mod tests {
             control_request_response_timeout(&queued_checkpoint_request()),
             DAEMON_CONTROL_RESPONSE_TIMEOUT
         );
+    }
+
+    #[test]
+    #[serial]
+    fn waited_checkpoint_requests_use_long_timeout_in_product_env() {
+        let _unset_ci = EnvVarGuard::unset("CI");
+        let _unset_test = EnvVarGuard::unset("GIT_AI_TEST_DB_PATH");
+        let _unset_legacy_test = EnvVarGuard::unset("GITAI_TEST_DB_PATH");
+
         assert_eq!(
             control_request_response_timeout(&waited_checkpoint_request()),
-            DAEMON_CONTROL_RESPONSE_TIMEOUT
+            DAEMON_CHECKPOINT_RESPONSE_TIMEOUT
         );
     }
 }
