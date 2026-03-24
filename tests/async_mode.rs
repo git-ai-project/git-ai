@@ -547,7 +547,7 @@ fn daemon_telemetry_and_cas_over_persistent_connection() {
         .expect("should connect to daemon control socket");
     let mut reader = BufReader::new(stream);
 
-    // 1. Send a telemetry envelope with metric events
+    // 1. Send telemetry envelopes (Message + Error variants)
     let telemetry_req = ControlRequest::SubmitTelemetry {
         envelopes: vec![
             TelemetryEnvelope::Message {
@@ -556,12 +556,10 @@ fn daemon_telemetry_and_cas_over_persistent_connection() {
                 level: "info".to_string(),
                 context: None,
             },
-            TelemetryEnvelope::Performance {
+            TelemetryEnvelope::Error {
                 timestamp: "2026-01-01T00:00:01Z".to_string(),
-                operation: "test_op".to_string(),
-                duration_ms: 42,
+                message: "integration test error event".to_string(),
                 context: None,
-                tags: None,
             },
         ],
     };
