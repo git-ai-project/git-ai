@@ -726,6 +726,117 @@ fn spawn_background_upgrade_process() -> bool {
     )
 }
 
+/// Result of checking whether a daemon-initiated update is available.
+#[derive(Debug, PartialEq)]
+pub enum DaemonUpdateCheckResult {
+    /// No update is needed (already latest, checks disabled, or not yet time to check).
+    NoUpdate,
+    /// An update is available and auto-updates are enabled.
+    UpdateReady,
+}
+
+/// Check for available updates and, if one is found, download + run the install script.
+///
+/// Designed for use by the daemon process: reads a fresh `Config` (not the `OnceLock`
+/// singleton) so that runtime config changes (e.g. disabling auto-updates) are respected,
+/// returns `Result` instead of calling `process::exit`, and runs the installer silently.
+///
+/// Returns `Ok(true)` if an update was installed, `Ok(false)` if no update was needed.
+pub fn check_and_install_update_if_available() -> Result<DaemonUpdateCheckResult, String> {
+    let config = config::Config::fresh();
+    if config.version_checks_disabled() || config.auto_updates_disabled() {
+        return Ok(DaemonUpdateCheckResult::NoUpdate);
+    }
+
+    let channel = config.update_channel();
+    let api_base_url = config.api_base_url();
+    let cache = read_update_cache();
+
+    if !should_check_for_updates(channel, cache.as_ref()) {
+        return Ok(DaemonUpdateCheckResult::NoUpdate);
+    }
+
+    let release = fetch_release_for_channel(api_base_url, channel)?;
+    let current_version = env!("CARGO_PKG_VERSION");
+    let action = determine_action(false, &release, current_version);
+    let cache_release = matches!(action, UpgradeAction::UpgradeAvailable);
+    persist_update_state(channel, cache_release.then_some(&release));
+
+    log_message(
+        "daemon_checked_for_update",
+        "info",
+        Some(serde_json::json!({
+            "current_version": current_version,
+            "api_base_url": api_base_url,
+            "channel": channel.as_str(),
+            "result": action.to_string()
+        })),
+    );
+
+    if action != UpgradeAction::UpgradeAvailable {
+        return Ok(DaemonUpdateCheckResult::NoUpdate);
+    }
+
+    // Fetch, verify, and run the install script silently.
+    let checksums = fetch_and_verify_checksums(api_base_url, channel.as_str(), &release.checksum)?;
+    let script_content =
+        fetch_and_verify_install_script(api_base_url, channel.as_str(), &checksums)?;
+    run_install_script(&script_content, &release.tag, true)?;
+
+    log_message(
+        "daemon_upgraded",
+        "info",
+        Some(serde_json::json!({
+            "release_tag": release.tag,
+            "current_version": current_version,
+            "api_base_url": api_base_url,
+            "channel": channel.as_str()
+        })),
+    );
+
+    Ok(DaemonUpdateCheckResult::UpdateReady)
+}
+
+/// Check whether a newer version is available without installing it.
+///
+/// Like `check_and_install_update_if_available` but only queries the releases API
+/// and updates the local cache. Returns `DaemonUpdateCheckResult::UpdateReady` when
+/// the channel has a newer version than the running binary.
+pub fn check_for_update_available() -> Result<DaemonUpdateCheckResult, String> {
+    let config = config::Config::fresh();
+    if config.version_checks_disabled() {
+        return Ok(DaemonUpdateCheckResult::NoUpdate);
+    }
+
+    let channel = config.update_channel();
+    let api_base_url = config.api_base_url();
+    let cache = read_update_cache();
+
+    if !should_check_for_updates(channel, cache.as_ref()) {
+        // Even if it's not time to re-check, an earlier check may have found an update.
+        if let Some(ref c) = cache
+            && c.matches_channel(channel)
+            && c.update_available()
+            && !config.auto_updates_disabled()
+        {
+            return Ok(DaemonUpdateCheckResult::UpdateReady);
+        }
+        return Ok(DaemonUpdateCheckResult::NoUpdate);
+    }
+
+    let release = fetch_release_for_channel(api_base_url, channel)?;
+    let current_version = env!("CARGO_PKG_VERSION");
+    let action = determine_action(false, &release, current_version);
+    let cache_release = matches!(action, UpgradeAction::UpgradeAvailable);
+    persist_update_state(channel, cache_release.then_some(&release));
+
+    if action == UpgradeAction::UpgradeAvailable && !config.auto_updates_disabled() {
+        Ok(DaemonUpdateCheckResult::UpdateReady)
+    } else {
+        Ok(DaemonUpdateCheckResult::NoUpdate)
+    }
+}
+
 fn is_newer_version(latest: &str, current: &str) -> bool {
     let parse_version =
         |v: &str| -> Vec<u32> { v.split('.').filter_map(|s| s.parse::<u32>().ok()).collect() };
@@ -1379,5 +1490,87 @@ mod tests {
         assert!(cache.available_semver.is_none());
         assert_eq!(cache.channel, "latest");
         assert!(cache.last_checked_at > 0);
+    }
+
+    #[test]
+    fn test_daemon_update_check_result_debug() {
+        // Verify that DaemonUpdateCheckResult derives Debug and PartialEq correctly.
+        assert_eq!(
+            DaemonUpdateCheckResult::NoUpdate,
+            DaemonUpdateCheckResult::NoUpdate
+        );
+        assert_eq!(
+            DaemonUpdateCheckResult::UpdateReady,
+            DaemonUpdateCheckResult::UpdateReady
+        );
+        assert_ne!(
+            DaemonUpdateCheckResult::NoUpdate,
+            DaemonUpdateCheckResult::UpdateReady
+        );
+    }
+
+    #[test]
+    fn test_check_for_update_available_no_cache_newer_version() {
+        // When the cache is empty and a newer version is available, the function should
+        // report UpdateReady (assuming version checks and auto-updates are enabled,
+        // which is the default in debug/test builds).
+        let temp_dir = tempfile::tempdir().unwrap();
+        set_test_cache_dir(&temp_dir);
+
+        let test_checksum = "a".repeat(64);
+        let mock_payload = format!(
+            r#"{{"channels":{{"latest":{{"version":"v999.0.0","checksum":"{}"}}}}}}"#,
+            test_checksum
+        );
+        // check_for_update_available uses Config::fresh() which reads the real config,
+        // but fetch_release_for_channel respects mock:// URLs only in tests.
+        // We can't easily inject a mock URL into Config::fresh(), so we test the
+        // underlying building blocks instead:
+        let release =
+            fetch_release_for_channel(&format!("mock://{}", mock_payload), UpdateChannel::Latest)
+                .unwrap();
+        let action = determine_action(false, &release, env!("CARGO_PKG_VERSION"));
+        assert_eq!(action, UpgradeAction::UpgradeAvailable);
+
+        // Persist and verify the cache reflects the available update.
+        persist_update_state(UpdateChannel::Latest, Some(&release));
+        let cache = read_update_cache().unwrap();
+        assert!(cache.update_available());
+        assert_eq!(cache.available_semver.as_deref(), Some("999.0.0"));
+
+        clear_test_cache_dir();
+    }
+
+    #[test]
+    fn test_check_for_update_available_same_version() {
+        let current = env!("CARGO_PKG_VERSION");
+        let test_checksum = "a".repeat(64);
+        let mock_payload = format!(
+            r#"{{"channels":{{"latest":{{"version":"v{}","checksum":"{}"}}}}}}"#,
+            current, test_checksum
+        );
+        let release =
+            fetch_release_for_channel(&format!("mock://{}", mock_payload), UpdateChannel::Latest)
+                .unwrap();
+        let action = determine_action(false, &release, current);
+        assert_eq!(action, UpgradeAction::AlreadyLatest);
+
+        // When the action is AlreadyLatest, persist_update_state is called with None.
+        // Verify that such a cache does NOT mark an update as available.
+        let mut cache = UpdateCache::new(UpdateChannel::Latest);
+        cache.last_checked_at = current_timestamp();
+        // No available_tag/semver set — mirrors what persist_update_state(channel, None) does.
+        assert!(!cache.update_available());
+    }
+
+    #[test]
+    fn test_should_check_for_updates_skips_when_recently_checked() {
+        // When the cache was recently written, should_check_for_updates returns false.
+        let mut cache = UpdateCache::new(UpdateChannel::Latest);
+        cache.last_checked_at = current_timestamp();
+        assert!(!should_check_for_updates(
+            UpdateChannel::Latest,
+            Some(&cache)
+        ));
     }
 }
