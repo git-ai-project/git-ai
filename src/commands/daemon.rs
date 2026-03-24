@@ -168,7 +168,13 @@ fn handle_run(args: &[String]) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     runtime
         .block_on(async move { crate::daemon::run_daemon(config).await })
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    // Daemon is fully dead (lock released, sockets removed, threads joined).
+    // Now safe to self-update — install.sh can start a fresh daemon.
+    crate::daemon::daemon_run_pending_self_update();
+
+    Ok(())
 }
 
 pub(crate) fn ensure_daemon_running(timeout: Duration) -> Result<DaemonConfig, String> {
@@ -213,7 +219,7 @@ fn daemon_startup_is_blocked(config: &DaemonConfig) -> bool {
     }
 }
 
-fn daemon_is_up(config: &DaemonConfig) -> bool {
+pub(crate) fn daemon_is_up(config: &DaemonConfig) -> bool {
     local_socket_connects_with_timeout(&config.control_socket_path, Duration::from_millis(100))
         .is_ok()
         && local_socket_connects_with_timeout(&config.trace_socket_path, Duration::from_millis(100))

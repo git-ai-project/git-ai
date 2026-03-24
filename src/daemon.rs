@@ -6461,7 +6461,7 @@ fn daemon_update_check_loop(coordinator: Arc<ActorDaemonCoordinator>) {
 /// On Unix the installer atomically replaces the binary via `mv`; on Windows
 /// the installer is spawned as a detached process that polls until the exe is
 /// unlocked.
-fn daemon_run_pending_self_update() {
+pub(crate) fn daemon_run_pending_self_update() {
     use crate::commands::upgrade::{
         DaemonUpdateCheckResult, check_and_install_update_if_available,
     };
@@ -6550,13 +6550,6 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
     remove_socket_if_exists(&config.trace_socket_path)?;
     remove_socket_if_exists(&config.control_socket_path)?;
     remove_pid_metadata(&config)?;
-
-    // After clean shutdown, check if we should self-update before exiting.
-    // On Unix the installer can replace the binary while this process is still alive
-    // (the old inode remains valid), so we run it synchronously.
-    // On Windows, run_install_script spawns a detached PowerShell that waits for
-    // the exe to be released, so we just need to exit promptly after spawning it.
-    daemon_run_pending_self_update();
 
     Ok(())
 }

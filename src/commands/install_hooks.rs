@@ -197,6 +197,48 @@ fn maybe_configure_async_mode_daemon_trace2(dry_run: bool) -> Result<(), GitAiEr
     Ok(())
 }
 
+fn maybe_ensure_daemon(dry_run: bool) {
+    if dry_run {
+        return;
+    }
+
+    let runtime_config = config::Config::fresh();
+    if !runtime_config.feature_flags().async_mode {
+        return;
+    }
+
+    // Don't touch daemon inside test harnesses
+    if std::env::var_os("GIT_AI_TEST_DB_PATH").is_some()
+        || std::env::var_os("GITAI_TEST_DB_PATH").is_some()
+    {
+        return;
+    }
+
+    let Ok(daemon_config) = DaemonConfig::from_env_or_default_paths() else {
+        return;
+    };
+
+    // If daemon is already running, shut it down first so it restarts
+    // with the freshly-written trace2 config.
+    if crate::commands::daemon::daemon_is_up(&daemon_config) {
+        let _ = crate::daemon::send_control_request(
+            &daemon_config.control_socket_path,
+            &crate::daemon::ControlRequest::Shutdown,
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while crate::commands::daemon::daemon_is_up(&daemon_config) {
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    // Start daemon (or restart after shutdown above). Best-effort.
+    let _ = crate::commands::daemon::ensure_daemon_running(std::time::Duration::from_secs(2));
+}
+
 /// Main entry point for install-hooks command
 pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
     // Parse flags
@@ -213,6 +255,7 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
 
     // In async mode, daemon trace2 config must be in place before any install work starts.
     maybe_configure_async_mode_daemon_trace2(dry_run)?;
+    maybe_ensure_daemon(dry_run);
 
     // Get absolute path to the current binary
     let binary_path = get_current_binary_path()?;
