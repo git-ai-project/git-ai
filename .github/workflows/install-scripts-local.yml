@@ -140,7 +140,7 @@ jobs:
 
       - name: Upload E2E test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-install-${{ matrix.agent.name }}-${{ matrix.os }}
           path: /tmp/e2e-results/
@@ -434,7 +434,7 @@ jobs:
 
       - name: Upload E2E test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-install-${{ matrix.agent.name }}-windows-latest
           path: C:\e2e-results\

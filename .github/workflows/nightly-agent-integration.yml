@@ -214,7 +214,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tier1-${{ matrix.agent }}-${{ matrix.channel }}
           path: /tmp/test-results/
@@ -310,7 +310,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tier2-${{ matrix.agent }}-${{ matrix.channel }}
           path: /tmp/test-results/

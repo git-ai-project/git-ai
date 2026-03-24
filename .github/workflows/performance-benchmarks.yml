@@ -56,7 +56,7 @@ jobs:
 
       - name: Upload smoke benchmark artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pr-smoke-nasty-benchmarks
           path: .benchmarks/pr-smoke/artifacts/**
@@ -120,7 +120,7 @@ jobs:
 
       - name: Upload nightly benchmark artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nightly-performance-benchmarks
           path: |
