@@ -91,6 +91,7 @@ fn daemon_startup_timeout() -> Duration {
 
 /// Like `ensure_daemon_running`, but spawns with inherited stderr so the user
 /// sees startup failures before the daemon detaches.
+#[cfg(not(windows))]
 fn ensure_daemon_running_attached(timeout: Duration) -> Result<DaemonConfig, String> {
     let config = daemon_config_from_env_or_default_paths()?;
     if daemon_is_up(&config) {
@@ -304,6 +305,7 @@ fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
     }
 }
 
+#[cfg(not(windows))]
 fn spawn_daemon_run_with_piped_stderr(
     config: &DaemonConfig,
 ) -> Result<std::process::Child, String> {
