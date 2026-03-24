@@ -151,7 +151,13 @@ pub fn post_checkout_hook(
 
 /// Remove attributions for specific files from working log (pathspec checkout case).
 fn remove_attributions_for_pathspecs(repository: &Repository, head: &str, pathspecs: &[String]) {
-    let working_log = repository.storage.working_log_for_base_commit(head);
+    let working_log = match repository.storage.working_log_for_base_commit(head) {
+        Ok(wl) => wl,
+        Err(e) => {
+            debug_log(&format!("Failed to get working log for {}: {}", head, e));
+            return;
+        }
+    };
 
     // Filter INITIAL attributions
     let initial = working_log.read_initial_attributions();

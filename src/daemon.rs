@@ -579,7 +579,7 @@ fn tracked_working_log_files(
         return Ok(HashSet::new());
     }
 
-    let working_log = repo.storage.working_log_for_base_commit(base_commit);
+    let working_log = repo.storage.working_log_for_base_commit(base_commit)?;
     let initial = working_log.read_initial_attributions();
     let mut files: HashSet<String> = initial.files.keys().cloned().collect();
     files.extend(working_log.all_touched_files()?);
@@ -1320,7 +1320,7 @@ fn remove_working_log_attributions_for_pathspecs(
     head: &str,
     pathspecs: &[String],
 ) -> Result<(), GitAiError> {
-    let working_log = repository.storage.working_log_for_base_commit(head);
+    let working_log = repository.storage.working_log_for_base_commit(head)?;
 
     let initial = working_log.read_initial_attributions();
     if !initial.files.is_empty() {
@@ -1577,7 +1577,10 @@ fn working_log_has_tracked_state_for_base(repo: &Repository, base_commit: &str) 
         return false;
     }
 
-    let working_log = repo.storage.working_log_for_base_commit(base_commit);
+    let working_log = match repo.storage.working_log_for_base_commit(base_commit) {
+        Ok(wl) => wl,
+        Err(_) => return false,
+    };
     let initial = working_log.read_initial_attributions();
     if !initial.files.is_empty() {
         return true;
@@ -1629,7 +1632,7 @@ fn restore_recent_working_log_snapshot(
     }
 
     repo.storage
-        .working_log_for_base_commit(base_commit)
+        .working_log_for_base_commit(base_commit)?
         .write_initial_attributions_with_contents(
             snapshot.files.clone(),
             snapshot.prompts.clone(),
@@ -2252,7 +2255,7 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
     if changed_files.is_empty() {
         return Ok(());
     }
-    let working_log = repo.storage.working_log_for_base_commit(&base_commit);
+    let working_log = repo.storage.working_log_for_base_commit(&base_commit)?;
     let (changed_files, dirty_files) =
         filter_commit_replay_files(&working_log, changed_files, dirty_files);
     if changed_files.is_empty() {
@@ -2410,7 +2413,7 @@ fn rewrite_event_needs_authorship_processing(
     let Some((base_commit, _)) = commit_replay_context_from_rewrite_event(rewrite_event) else {
         return Ok(true);
     };
-    let working_log = repo.storage.working_log_for_base_commit(&base_commit);
+    let working_log = repo.storage.working_log_for_base_commit(&base_commit)?;
     let has_initial = !working_log.read_initial_attributions().files.is_empty();
     if has_initial {
         return Ok(true);
@@ -3894,13 +3897,55 @@ impl ActorDaemonCoordinator {
                     }
                     let ordered_payload_root = Self::trace_payload_root_sid(&ordered_payload);
 
-                    if let Err(error) = coordinator
-                        .clone()
-                        .ingest_trace_payload_fast(ordered_payload)
-                        .await
-                    {
-                        debug_log(&format!("daemon trace ingest error: {}", error));
-                    }
+                    let ingest_result = {
+                        let coord = coordinator.clone();
+                        let future = coord.ingest_trace_payload_fast(ordered_payload);
+                        let caught = std::panic::AssertUnwindSafe(future);
+                        match futures::FutureExt::catch_unwind(caught).await {
+                            Ok(Ok(())) => Ok(()),
+                            Ok(Err(error)) => {
+                                debug_log(&format!("daemon trace ingest error: {}", error));
+                                observability::log_error(
+                                    &error,
+                                    Some(serde_json::json!({
+                                        "component": "daemon",
+                                        "phase": "trace_ingest_worker",
+                                        "reason": "ingest_error",
+                                        "sequence": processed_seq,
+                                        "root_sid": ordered_payload_root,
+                                    })),
+                                );
+                                Err(error)
+                            }
+                            Err(panic_payload) => {
+                                let panic_msg =
+                                    if let Some(s) = panic_payload.downcast_ref::<String>() {
+                                        s.clone()
+                                    } else if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                                        s.to_string()
+                                    } else {
+                                        "unknown panic".to_string()
+                                    };
+                                let error = GitAiError::Generic(format!(
+                                    "trace ingest worker panic: {}",
+                                    panic_msg
+                                ));
+                                debug_log(&format!("daemon trace ingest panic: {}", panic_msg));
+                                observability::log_error(
+                                    &error,
+                                    Some(serde_json::json!({
+                                        "component": "daemon",
+                                        "phase": "trace_ingest_worker",
+                                        "reason": "panic_in_ingest",
+                                        "panic_message": panic_msg,
+                                        "sequence": processed_seq,
+                                    })),
+                                );
+                                Err(error)
+                            }
+                        }
+                    };
+                    let _ = ingest_result;
                     let _ = coordinator.queued_trace_payloads.fetch_update(
                         Ordering::SeqCst,
                         Ordering::SeqCst,
@@ -3979,9 +4024,19 @@ impl ActorDaemonCoordinator {
                     error
                 ));
             }
-            return Err(GitAiError::Generic(
-                "trace ingest queue send failed".to_string(),
-            ));
+            let error = GitAiError::Generic(
+                "trace ingest queue send failed: worker may have crashed".to_string(),
+            );
+            observability::log_error(
+                &error,
+                Some(serde_json::json!({
+                    "component": "daemon",
+                    "phase": "enqueue_trace_payload",
+                    "reason": "ingest_worker_channel_closed",
+                })),
+            );
+            self.request_shutdown();
+            return Err(error);
         }
         Ok(())
     }

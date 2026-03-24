@@ -2403,7 +2403,9 @@ impl TestRepo {
             .unwrap_or_else(|| "initial".to_string());
 
         // Get the working log for the current HEAD commit
-        repo.storage.working_log_for_base_commit(&commit_sha)
+        repo.storage
+            .working_log_for_base_commit(&commit_sha)
+            .unwrap()
     }
 
     pub fn read_authorship_note(&self, commit_sha: &str) -> Option<String> {

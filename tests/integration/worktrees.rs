@@ -386,8 +386,8 @@ crate::worktree_test_wrappers! {
             "distinct linked worktrees must not share the same working_logs path"
         );
 
-        let wl_one = repo_one.storage.working_log_for_base_commit("initial");
-        let wl_two = repo_two.storage.working_log_for_base_commit("initial");
+        let wl_one = repo_one.storage.working_log_for_base_commit("initial").unwrap();
+        let wl_two = repo_two.storage.working_log_for_base_commit("initial").unwrap();
         fs::write(wl_one.dir.join("sentinel"), "one").expect("write sentinel one");
         assert!(
             !wl_two.dir.join("sentinel").exists(),

@@ -925,6 +925,7 @@ fn daemon_test_mode_human_checkpoint_direct_file_arg_queues_as_scoped_capture() 
     let checkpoints = git_ai_repo
         .storage
         .working_log_for_base_commit(&base_commit)
+        .unwrap()
         .read_all_checkpoints()
         .expect("checkpoints should be readable");
     assert!(
@@ -2251,7 +2252,11 @@ fn daemon_commit_replay_recovers_same_head_pathspec_reset_when_working_log_is_mi
 
     let head = current_head_sha(&repo);
     let git_ai_repo = repo_storage(&repo);
-    let working_log_dir = git_ai_repo.storage.working_log_for_base_commit(&head).dir;
+    let working_log_dir = git_ai_repo
+        .storage
+        .working_log_for_base_commit(&head)
+        .unwrap()
+        .dir;
     let backup_dir = repo.path().join(".git-ai-test-pathspec-reset-backup");
     if backup_dir.exists() {
         fs::remove_dir_all(&backup_dir).expect("failed to clear pathspec reset backup");
@@ -2272,7 +2277,10 @@ fn daemon_commit_replay_recovers_same_head_pathspec_reset_when_working_log_is_mi
         .expect("commit after same-head pathspec reset should succeed");
 
     let new_head = current_head_sha(&repo);
-    let new_working_log = git_ai_repo.storage.working_log_for_base_commit(&new_head);
+    let new_working_log = git_ai_repo
+        .storage
+        .working_log_for_base_commit(&new_head)
+        .unwrap();
     let initial = new_working_log.read_initial_attributions();
     let note = repo
         .read_authorship_note(&new_head)

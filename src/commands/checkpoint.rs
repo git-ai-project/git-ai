@@ -510,7 +510,7 @@ fn resolve_live_checkpoint_execution(
 
     let storage_start = Instant::now();
     let repo_storage = repo.storage.clone();
-    let mut working_log = repo_storage.working_log_for_base_commit(&base_commit);
+    let mut working_log = repo_storage.working_log_for_base_commit(&base_commit)?;
     debug_log(&format!(
         "[BENCHMARK] Storage initialization took {:?}",
         storage_start.elapsed()
@@ -647,7 +647,7 @@ fn execute_resolved_checkpoint(
 ) -> Result<(usize, usize, usize), GitAiError> {
     let mut working_log = repo
         .storage
-        .working_log_for_base_commit(&resolved.base_commit);
+        .working_log_for_base_commit(&resolved.base_commit)?;
     if !resolved.dirty_files.is_empty() {
         working_log.set_dirty_files(Some(resolved.dirty_files.clone()));
     }
@@ -885,7 +885,7 @@ pub fn prepare_captured_checkpoint(
 
         let live_working_log = repo
             .storage
-            .working_log_for_base_commit(&resolved.base_commit);
+            .working_log_for_base_commit(&resolved.base_commit)?;
         let mut files = Vec::with_capacity(resolved.files.len());
         for file_path in &resolved.files {
             let source = if let Some(content) = resolved.dirty_files.get(file_path).cloned() {
@@ -2569,7 +2569,10 @@ mod tests {
 
         // Manually inject a checkpoint with an external file path (simulating the bug)
         // This is what happens when a file outside the repo was tracked before the fix
-        let working_log = repo.storage.working_log_for_base_commit(&base_commit);
+        let working_log = repo
+            .storage
+            .working_log_for_base_commit(&base_commit)
+            .unwrap();
 
         let external_entry = WorkingLogEntry::new(
             "/external/path/outside/repo.txt".to_string(),
@@ -2717,7 +2720,10 @@ mod tests {
             .ok()
             .and_then(|head| head.target().ok())
             .unwrap_or_else(|| "initial".to_string());
-        let working_log = gitai_repo.storage.working_log_for_base_commit(&base_commit);
+        let working_log = gitai_repo
+            .storage
+            .working_log_for_base_commit(&base_commit)
+            .unwrap();
         let checkpoints = working_log.read_all_checkpoints().unwrap();
         let latest = checkpoints.last().unwrap();
         let entry = latest
@@ -2760,7 +2766,10 @@ mod tests {
             .ok()
             .and_then(|head| head.target().ok())
             .unwrap_or_else(|| "initial".to_string());
-        let working_log = gitai_repo.storage.working_log_for_base_commit(&base_commit);
+        let working_log = gitai_repo
+            .storage
+            .working_log_for_base_commit(&base_commit)
+            .unwrap();
         let checkpoints = working_log.read_all_checkpoints().unwrap();
         let latest = checkpoints.last().unwrap();
 
@@ -2809,7 +2818,10 @@ mod tests {
             .ok()
             .and_then(|head| head.target().ok())
             .unwrap_or_else(|| "initial".to_string());
-        let working_log = gitai_repo.storage.working_log_for_base_commit(&base_commit);
+        let working_log = gitai_repo
+            .storage
+            .working_log_for_base_commit(&base_commit)
+            .unwrap();
         let checkpoints = working_log.read_all_checkpoints().unwrap();
         let latest = checkpoints.last().unwrap();
 
@@ -2854,7 +2866,10 @@ mod tests {
             .ok()
             .and_then(|head| head.target().ok())
             .unwrap_or_else(|| "initial".to_string());
-        let working_log = gitai_repo.storage.working_log_for_base_commit(&base_commit);
+        let working_log = gitai_repo
+            .storage
+            .working_log_for_base_commit(&base_commit)
+            .unwrap();
         let checkpoints = working_log.read_all_checkpoints().unwrap();
         let latest = checkpoints.last().unwrap();
 
@@ -2884,7 +2899,10 @@ mod tests {
             .ok()
             .and_then(|head| head.target().ok())
             .unwrap_or_else(|| "initial".to_string());
-        let working_log = repo.storage.working_log_for_base_commit(&base_commit);
+        let working_log = repo
+            .storage
+            .working_log_for_base_commit(&base_commit)
+            .unwrap();
 
         let mut test_file = tmp_repo
             .write_file("whitespace.txt", "Seed line\n", true)

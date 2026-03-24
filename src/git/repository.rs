@@ -2469,9 +2469,9 @@ pub fn find_repository(global_args: &[String]) -> Result<Repository, GitAiError>
 
     let worktree_ai_dir = worktree_storage_ai_dir(&git_dir, &git_common_dir);
     let storage = if worktree_ai_dir == git_dir.join("ai") {
-        RepoStorage::for_repo_path(&git_dir, &workdir)
+        RepoStorage::for_repo_path(&git_dir, &workdir)?
     } else {
-        RepoStorage::for_isolated_worktree_storage(&worktree_ai_dir, &workdir)
+        RepoStorage::for_isolated_worktree_storage(&worktree_ai_dir, &workdir)?
     };
 
     Ok(Repository {
@@ -2784,9 +2784,9 @@ pub fn from_bare_repository(git_dir: &Path) -> Result<Repository, GitAiError> {
 
     let worktree_ai_dir = worktree_storage_ai_dir(git_dir, git_dir);
     let storage = if worktree_ai_dir == git_dir.join("ai") {
-        RepoStorage::for_repo_path(git_dir, &workdir)
+        RepoStorage::for_repo_path(git_dir, &workdir)?
     } else {
-        RepoStorage::for_isolated_worktree_storage(&worktree_ai_dir, &workdir)
+        RepoStorage::for_isolated_worktree_storage(&worktree_ai_dir, &workdir)?
     };
 
     Ok(Repository {
@@ -2841,9 +2841,9 @@ fn repository_from_discovered_paths(
 
     let worktree_ai_dir = worktree_storage_ai_dir(git_dir, git_common_dir);
     let storage = if worktree_ai_dir == git_dir.join("ai") {
-        RepoStorage::for_repo_path(git_dir, workdir)
+        RepoStorage::for_repo_path(git_dir, workdir)?
     } else {
-        RepoStorage::for_isolated_worktree_storage(&worktree_ai_dir, workdir)
+        RepoStorage::for_isolated_worktree_storage(&worktree_ai_dir, workdir)?
     };
 
     Ok(Repository {

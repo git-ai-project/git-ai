@@ -84,7 +84,7 @@ pub fn post_commit_with_final_state(
 
     // Initialize the new storage system
     let repo_storage = &repo.storage;
-    let working_log = repo_storage.working_log_for_base_commit(&parent_sha);
+    let working_log = repo_storage.working_log_for_base_commit(&parent_sha)?;
 
     // Refresh prompts/transcripts under the same checkpoints lock used by append_checkpoint so
     // concurrent checkpoint appends cannot be lost between a read and rewrite of the JSONL file.
@@ -297,7 +297,7 @@ pub fn post_commit_with_final_state(
 
     // Write INITIAL file for uncommitted AI attributions (if any)
     if !initial_attributions.files.is_empty() {
-        let new_working_log = repo_storage.working_log_for_base_commit(&commit_sha);
+        let new_working_log = repo_storage.working_log_for_base_commit(&commit_sha)?;
         let initial_file_contents =
             working_va.snapshot_contents_for_files(initial_attributions.files.keys());
         new_working_log.write_initial_attributions_with_contents(

@@ -266,7 +266,7 @@ pub(crate) fn restore_stash_attributions(
 
     // Write INITIAL attributions to working log
     if !initial_files.is_empty() || !initial_prompts.is_empty() {
-        let working_log = repo.storage.working_log_for_base_commit(head_sha);
+        let working_log = repo.storage.working_log_for_base_commit(head_sha)?;
         let initial_file_contents =
             load_stashed_file_contents(repo, stash_sha, initial_files.keys())?;
         working_log.write_initial_attributions_with_contents(
@@ -475,7 +475,7 @@ fn delete_working_log_for_files(
         return Ok(());
     }
 
-    let working_log = repo.storage.working_log_for_base_commit(base_commit);
+    let working_log = repo.storage.working_log_for_base_commit(base_commit)?;
 
     // Read current initial attributions
     let mut initial_attrs = working_log.read_initial_attributions();

@@ -311,7 +311,7 @@ impl VirtualAttributions {
         base_commit: String,
         human_author: Option<String>,
     ) -> Result<Self, GitAiError> {
-        let working_log = repo.storage.working_log_for_base_commit(&base_commit);
+        let working_log = repo.storage.working_log_for_base_commit(&base_commit)?;
         let initial_attributions = working_log.read_initial_attributions();
         let checkpoints = working_log.read_all_checkpoints().unwrap_or_default();
 
@@ -459,7 +459,7 @@ impl VirtualAttributions {
         human_author: Option<String>,
         final_state_snapshot: &HashMap<String, String>,
     ) -> Result<Self, GitAiError> {
-        let working_log = repo.storage.working_log_for_base_commit(&base_commit);
+        let working_log = repo.storage.working_log_for_base_commit(&base_commit)?;
         let initial_attributions = working_log.read_initial_attributions();
         let checkpoints = working_log.read_all_checkpoints().unwrap_or_default();
 
@@ -586,7 +586,7 @@ impl VirtualAttributions {
         base_commit: String,
         human_author: Option<String>,
     ) -> Result<Self, GitAiError> {
-        let working_log = repo.storage.working_log_for_base_commit(&base_commit);
+        let working_log = repo.storage.working_log_for_base_commit(&base_commit)?;
         let initial_attributions = working_log.read_initial_attributions();
         let checkpoints = working_log.read_all_checkpoints().unwrap_or_default();
 
@@ -1983,7 +1983,16 @@ pub fn restore_stashed_va(
 
     // Write INITIAL attributions to working log for new HEAD
     if !initial_attributions.files.is_empty() || !initial_attributions.prompts.is_empty() {
-        let working_log = repository.storage.working_log_for_base_commit(new_head);
+        let working_log = match repository.storage.working_log_for_base_commit(new_head) {
+            Ok(wl) => wl,
+            Err(e) => {
+                debug_log(&format!(
+                    "Failed to get working log for {}: {}",
+                    new_head, e
+                ));
+                return;
+            }
+        };
         let initial_file_contents =
             merged_va.snapshot_contents_for_files(initial_attributions.files.keys());
         if let Err(e) = working_log.write_initial_attributions_with_contents(

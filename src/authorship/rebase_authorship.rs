@@ -171,10 +171,10 @@ fn migrate_working_log_after_rebase(
     if !repo.storage.has_working_log(new_head) {
         repo.storage.rename_working_log(original_head, new_head)?;
     } else {
-        let old_wl = repo.storage.working_log_for_base_commit(original_head);
+        let old_wl = repo.storage.working_log_for_base_commit(original_head)?;
         let initial = old_wl.read_initial_attributions();
         if !initial.files.is_empty() {
-            let new_wl = repo.storage.working_log_for_base_commit(new_head);
+            let new_wl = repo.storage.working_log_for_base_commit(new_head)?;
             new_wl.write_initial(initial)?;
             debug_log(&format!(
                 "Migrated INITIAL attributions from {} to {}",
@@ -288,7 +288,7 @@ pub fn prepare_working_log_after_squash(
     if !initial_attributions.files.is_empty() {
         let working_log = repo
             .storage
-            .working_log_for_base_commit(target_branch_head_sha);
+            .working_log_for_base_commit(target_branch_head_sha)?;
         let initial_file_contents =
             merged_va.snapshot_contents_for_files(initial_attributions.files.keys());
         working_log.write_initial_attributions_with_contents(
@@ -363,7 +363,7 @@ pub fn prepare_working_log_after_squash_from_final_state(
     if !initial_attributions.files.is_empty() {
         let working_log = repo
             .storage
-            .working_log_for_base_commit(target_branch_head_sha);
+            .working_log_for_base_commit(target_branch_head_sha)?;
         let initial_file_contents =
             merged_va.snapshot_contents_for_files(initial_attributions.files.keys());
         working_log.write_initial_attributions_with_contents(
@@ -436,7 +436,7 @@ pub fn restore_virtual_attribution_carryover(
         return Ok(());
     }
 
-    let working_log = repo.storage.working_log_for_base_commit(new_head);
+    let working_log = repo.storage.working_log_for_base_commit(new_head)?;
     working_log.write_initial_attributions_with_contents(
         initial_attributions.files,
         initial_attributions.prompts,
@@ -1702,7 +1702,7 @@ pub fn rewrite_authorship_after_commit_amend_with_snapshot(
     let changed_files = repo.list_commit_files(amended_commit, None)?;
     let mut pathspecs: HashSet<String> = changed_files.into_iter().collect();
 
-    let working_log = repo.storage.working_log_for_base_commit(original_commit);
+    let working_log = repo.storage.working_log_for_base_commit(original_commit)?;
     let touched_files = working_log.all_touched_files()?;
     pathspecs.extend(touched_files);
 
@@ -1794,7 +1794,7 @@ pub fn rewrite_authorship_after_commit_amend_with_snapshot(
 
     // Save INITIAL file for uncommitted attributions
     if !initial_attributions.files.is_empty() {
-        let new_working_log = repo.storage.working_log_for_base_commit(amended_commit);
+        let new_working_log = repo.storage.working_log_for_base_commit(amended_commit)?;
         let initial_file_contents =
             working_va.snapshot_contents_for_files(initial_attributions.files.keys());
         new_working_log.write_initial_attributions_with_contents(
@@ -2047,7 +2047,9 @@ pub fn reconstruct_working_log_after_reset(
     ));
 
     // Step 7: Write INITIAL file
-    let new_working_log = repo.storage.working_log_for_base_commit(target_commit_sha);
+    let new_working_log = repo
+        .storage
+        .working_log_for_base_commit(target_commit_sha)?;
     new_working_log.reset_working_log()?;
 
     if !initial_attributions.files.is_empty() {
@@ -3725,7 +3727,8 @@ mod tests {
         let old_wl = repo
             .gitai_repo()
             .storage
-            .working_log_for_base_commit(&original_head);
+            .working_log_for_base_commit(&original_head)
+            .unwrap();
         old_wl
             .write_initial_attributions(initial_files.clone(), prompts.clone())
             .expect("write INITIAL");
@@ -3769,7 +3772,8 @@ mod tests {
         let new_wl = repo
             .gitai_repo()
             .storage
-            .working_log_for_base_commit(&new_head);
+            .working_log_for_base_commit(&new_head)
+            .unwrap();
         let migrated = new_wl.read_initial_attributions();
 
         assert_eq!(
@@ -3839,7 +3843,8 @@ mod tests {
         let new_wl = repo
             .gitai_repo()
             .storage
-            .working_log_for_base_commit(&new_head);
+            .working_log_for_base_commit(&new_head)
+            .unwrap();
         let migrated = new_wl.read_initial_attributions();
         assert!(
             migrated.files.is_empty(),
@@ -3938,7 +3943,8 @@ mod tests {
         let old_wl = repo
             .gitai_repo()
             .storage
-            .working_log_for_base_commit(&original_head);
+            .working_log_for_base_commit(&original_head)
+            .unwrap();
         old_wl
             .write_initial_attributions(initial_files, prompts)
             .expect("write multi-file INITIAL");
@@ -3974,6 +3980,7 @@ mod tests {
             .gitai_repo()
             .storage
             .working_log_for_base_commit(&new_head)
+            .unwrap()
             .read_initial_attributions();
 
         assert_eq!(migrated.files.len(), 2, "both files should be migrated");
@@ -4048,7 +4055,8 @@ mod tests {
         let old_wl = repo
             .gitai_repo()
             .storage
-            .working_log_for_base_commit(&original_head);
+            .working_log_for_base_commit(&original_head)
+            .unwrap();
         old_wl
             .write_initial_attributions(old_initial_files, old_prompts)
             .expect("write old INITIAL");
@@ -4064,7 +4072,8 @@ mod tests {
         let new_wl = repo
             .gitai_repo()
             .storage
-            .working_log_for_base_commit(&new_head);
+            .working_log_for_base_commit(&new_head)
+            .unwrap();
         let checkpoint = Checkpoint::new(
             CheckpointKind::AiAgent,
             "diff".to_string(),
@@ -4097,7 +4106,8 @@ mod tests {
         let merged_wl = repo
             .gitai_repo()
             .storage
-            .working_log_for_base_commit(&new_head);
+            .working_log_for_base_commit(&new_head)
+            .unwrap();
         let migrated = merged_wl.read_initial_attributions();
 
         assert_eq!(
@@ -4190,7 +4200,8 @@ mod tests {
         let old_wl = repo
             .gitai_repo()
             .storage
-            .working_log_for_base_commit(&original_head);
+            .working_log_for_base_commit(&original_head)
+            .unwrap();
         old_wl
             .write_initial_attributions(initial_files, prompts)
             .expect("write INITIAL for uncommitted utils.py");
@@ -4232,7 +4243,8 @@ mod tests {
         let new_wl = repo
             .gitai_repo()
             .storage
-            .working_log_for_base_commit(&new_head);
+            .working_log_for_base_commit(&new_head)
+            .unwrap();
         let migrated = new_wl.read_initial_attributions();
 
         assert_eq!(
@@ -4316,7 +4328,8 @@ mod tests {
         let v1_wl = repo
             .gitai_repo()
             .storage
-            .working_log_for_base_commit(&v1_head);
+            .working_log_for_base_commit(&v1_head)
+            .unwrap();
         v1_wl
             .write_initial_attributions(initial_files.clone(), prompts.clone())
             .expect("write INITIAL on v1");
@@ -4352,6 +4365,7 @@ mod tests {
             .gitai_repo()
             .storage
             .working_log_for_base_commit(&amend_sha)
+            .unwrap()
             .read_initial_attributions();
         assert_eq!(amend_initial.files.len(), 1, "INITIAL should survive amend");
         assert!(amend_initial.files.contains_key("utils.py"));
@@ -4386,6 +4400,7 @@ mod tests {
             .gitai_repo()
             .storage
             .working_log_for_base_commit(&rebase_new_head)
+            .unwrap()
             .read_initial_attributions();
         assert_eq!(
             final_initial.files.len(),
@@ -4509,7 +4524,8 @@ mod tests {
         let old_wl = repo
             .gitai_repo()
             .storage
-            .working_log_for_base_commit(&original_head);
+            .working_log_for_base_commit(&original_head)
+            .unwrap();
         old_wl
             .write_initial_attributions(initial_files, prompts)
             .expect("write multi-tool INITIAL");
@@ -4545,6 +4561,7 @@ mod tests {
             .gitai_repo()
             .storage
             .working_log_for_base_commit(&new_head)
+            .unwrap()
             .read_initial_attributions();
 
         assert_eq!(

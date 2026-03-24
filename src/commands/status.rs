@@ -66,7 +66,7 @@ fn run_status(json: bool) -> Result<(), GitAiError> {
     let head = repo.head()?;
     let head_sha = head.target()?;
 
-    let working_log = repo.storage.working_log_for_base_commit(&head_sha);
+    let working_log = repo.storage.working_log_for_base_commit(&head_sha)?;
     let checkpoints = working_log.read_all_checkpoints()?;
 
     if checkpoints.is_empty() {

@@ -34,15 +34,18 @@ pub struct RepoStorage {
 }
 
 impl RepoStorage {
-    pub fn for_repo_path(repo_path: &Path, repo_workdir: &Path) -> RepoStorage {
+    pub fn for_repo_path(repo_path: &Path, repo_workdir: &Path) -> Result<RepoStorage, GitAiError> {
         Self::for_ai_dir(&repo_path.join("ai"), repo_workdir)
     }
 
-    pub fn for_isolated_worktree_storage(ai_dir: &Path, repo_workdir: &Path) -> RepoStorage {
+    pub fn for_isolated_worktree_storage(
+        ai_dir: &Path,
+        repo_workdir: &Path,
+    ) -> Result<RepoStorage, GitAiError> {
         Self::for_ai_dir(ai_dir, repo_workdir)
     }
 
-    fn for_ai_dir(ai_dir: &Path, repo_workdir: &Path) -> RepoStorage {
+    fn for_ai_dir(ai_dir: &Path, repo_workdir: &Path) -> Result<RepoStorage, GitAiError> {
         let working_logs_dir = ai_dir.join("working_logs");
         let rewrite_log_file = ai_dir.join("rewrite_log");
         let logs_dir = ai_dir.join("logs");
@@ -55,8 +58,8 @@ impl RepoStorage {
             logs: logs_dir,
         };
 
-        config.ensure_config_directory().unwrap();
-        config
+        config.ensure_config_directory()?;
+        Ok(config)
     }
 
     fn ensure_config_directory(&self) -> Result<(), GitAiError> {
@@ -81,20 +84,23 @@ impl RepoStorage {
         self.working_logs.join(sha).exists()
     }
 
-    pub fn working_log_for_base_commit(&self, sha: &str) -> PersistedWorkingLog {
+    pub fn working_log_for_base_commit(
+        &self,
+        sha: &str,
+    ) -> Result<PersistedWorkingLog, GitAiError> {
         let working_log_dir = self.working_logs.join(sha);
-        fs::create_dir_all(&working_log_dir).unwrap();
+        fs::create_dir_all(&working_log_dir)?;
         let canonical_workdir = self
             .repo_workdir
             .canonicalize()
             .unwrap_or_else(|_| self.repo_workdir.clone());
-        PersistedWorkingLog::new(
+        Ok(PersistedWorkingLog::new(
             working_log_dir,
             sha,
             self.repo_workdir.clone(),
             canonical_workdir,
             None,
-        )
+        ))
     }
 
     pub fn delete_working_log_for_base_commit(&self, sha: &str) -> Result<(), GitAiError> {
@@ -764,7 +770,8 @@ mod tests {
 
         // Create RepoStorage
         let _repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap());
+            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
+                .unwrap();
 
         // Verify .git/ai directory exists
         let ai_dir = tmp_repo.repo().path().join("ai");
@@ -798,7 +805,8 @@ mod tests {
 
         // Create RepoStorage
         let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap());
+            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
+                .unwrap();
 
         // Add some content to rewrite_log
         let rewrite_log_file = tmp_repo.repo().path().join("ai").join("rewrite_log");
@@ -833,8 +841,11 @@ mod tests {
 
         // Create RepoStorage and PersistedWorkingLog
         let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap());
-        let working_log = repo_storage.working_log_for_base_commit("test-commit-sha");
+            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
+                .unwrap();
+        let working_log = repo_storage
+            .working_log_for_base_commit("test-commit-sha")
+            .unwrap();
 
         // Test persisting a file version
         let content = "Hello, World!\nThis is a test file.";
@@ -877,8 +888,11 @@ mod tests {
 
         // Create RepoStorage and PersistedWorkingLog
         let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap());
-        let working_log = repo_storage.working_log_for_base_commit("test-commit-sha");
+            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
+                .unwrap();
+        let working_log = repo_storage
+            .working_log_for_base_commit("test-commit-sha")
+            .unwrap();
 
         // Create a test checkpoint
         let checkpoint = Checkpoint::new(
@@ -934,8 +948,11 @@ mod tests {
 
         // Create RepoStorage and PersistedWorkingLog
         let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap());
-        let working_log = repo_storage.working_log_for_base_commit("test-commit-sha");
+            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
+                .unwrap();
+        let working_log = repo_storage
+            .working_log_for_base_commit("test-commit-sha")
+            .unwrap();
 
         // Build three checkpoints: missing version, wrong version, and correct version
         let base_checkpoint = Checkpoint::new(
@@ -987,8 +1004,11 @@ mod tests {
 
         // Create RepoStorage and PersistedWorkingLog
         let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap());
-        let working_log = repo_storage.working_log_for_base_commit("test-commit-sha");
+            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
+                .unwrap();
+        let working_log = repo_storage
+            .working_log_for_base_commit("test-commit-sha")
+            .unwrap();
 
         // Add some blobs
         let content = "Test content";
@@ -1056,11 +1076,14 @@ mod tests {
 
         // Create RepoStorage
         let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap());
+            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
+                .unwrap();
 
         // Create working log for a specific commit
         let commit_sha = "abc123def456";
-        let working_log = repo_storage.working_log_for_base_commit(commit_sha);
+        let working_log = repo_storage
+            .working_log_for_base_commit(commit_sha)
+            .unwrap();
 
         // Verify the directory was created
         assert!(
@@ -1089,8 +1112,11 @@ mod tests {
     fn test_write_initial_with_contents_persists_snapshot_blob() {
         let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
         let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap());
-        let working_log = repo_storage.working_log_for_base_commit("test-commit-sha");
+            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
+                .unwrap();
+        let working_log = repo_storage
+            .working_log_for_base_commit("test-commit-sha")
+            .unwrap();
 
         let mut attributions = HashMap::new();
         attributions.insert(
@@ -1124,8 +1150,11 @@ mod tests {
     fn test_write_initial_empty_removes_existing_file() {
         let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
         let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap());
-        let working_log = repo_storage.working_log_for_base_commit("test-commit-sha");
+            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
+                .unwrap();
+        let working_log = repo_storage
+            .working_log_for_base_commit("test-commit-sha")
+            .unwrap();
 
         let mut attributions = HashMap::new();
         attributions.insert(
