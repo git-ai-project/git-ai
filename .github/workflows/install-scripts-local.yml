@@ -50,7 +50,7 @@ jobs:
       - name: Build git-ai
         run: cargo build --release --bin git-ai
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '22'
 
@@ -184,7 +184,7 @@ jobs:
       - name: Build git-ai
         run: cargo build --release --bin git-ai
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '22'
 
