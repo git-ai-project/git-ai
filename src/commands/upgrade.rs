@@ -735,13 +735,16 @@ pub enum DaemonUpdateCheckResult {
     UpdateReady,
 }
 
-/// Check for available updates and, if one is found, download + run the install script.
+/// Install a previously-detected update.
 ///
-/// Designed for use by the daemon process: reads a fresh `Config` (not the `OnceLock`
-/// singleton) so that runtime config changes (e.g. disabling auto-updates) are respected,
-/// returns `Result` instead of calling `process::exit`, and runs the installer silently.
+/// Designed for use by the daemon process **after** a clean shutdown.  Reads
+/// the on-disk update cache (written earlier by `check_for_update_available`)
+/// to decide whether an update is pending, bypassing the 24-hour time guard.
+/// Uses `Config::fresh()` (not the `OnceLock` singleton) so the daemon
+/// respects runtime config changes (e.g. disabling auto-updates).
 ///
-/// Returns `Ok(true)` if an update was installed, `Ok(false)` if no update was needed.
+/// Returns `Ok(UpdateReady)` if the install script ran, `Ok(NoUpdate)` if
+/// no pending update was found or updates are disabled.
 pub fn check_and_install_update_if_available() -> Result<DaemonUpdateCheckResult, String> {
     let config = config::Config::fresh();
     if config.version_checks_disabled() || config.auto_updates_disabled() {
@@ -750,38 +753,51 @@ pub fn check_and_install_update_if_available() -> Result<DaemonUpdateCheckResult
 
     let channel = config.update_channel();
     let api_base_url = config.api_base_url();
-    let cache = read_update_cache();
 
-    if !should_check_for_updates(channel, cache.as_ref()) {
+    // Read the cache that check_for_update_available() populated earlier.
+    // We intentionally skip should_check_for_updates() here because the
+    // hourly check loop already confirmed an update is available and
+    // persisted that fact — re-checking the 24h guard would always say
+    // "too soon" and the install would never run.
+    let cache = read_update_cache();
+    let has_pending_update = cache
+        .as_ref()
+        .is_some_and(|c| c.matches_channel(channel) && c.update_available());
+
+    if !has_pending_update {
         return Ok(DaemonUpdateCheckResult::NoUpdate);
     }
 
+    // Re-fetch the release to get the tag needed for the installer.
     let release = fetch_release_for_channel(api_base_url, channel)?;
     let current_version = env!("CARGO_PKG_VERSION");
     let action = determine_action(false, &release, current_version);
-    let cache_release = matches!(action, UpgradeAction::UpgradeAvailable);
-    persist_update_state(channel, cache_release.then_some(&release));
+
+    if action != UpgradeAction::UpgradeAvailable {
+        // Cache was stale or version changed between check and install.
+        persist_update_state(channel, None);
+        return Ok(DaemonUpdateCheckResult::NoUpdate);
+    }
 
     log_message(
-        "daemon_checked_for_update",
+        "daemon_installing_update",
         "info",
         Some(serde_json::json!({
             "current_version": current_version,
+            "release_tag": release.tag,
             "api_base_url": api_base_url,
-            "channel": channel.as_str(),
-            "result": action.to_string()
+            "channel": channel.as_str()
         })),
     );
-
-    if action != UpgradeAction::UpgradeAvailable {
-        return Ok(DaemonUpdateCheckResult::NoUpdate);
-    }
 
     // Fetch, verify, and run the install script silently.
     let checksums = fetch_and_verify_checksums(api_base_url, channel.as_str(), &release.checksum)?;
     let script_content =
         fetch_and_verify_install_script(api_base_url, channel.as_str(), &checksums)?;
     run_install_script(&script_content, &release.tag, true)?;
+
+    // Clear the cached update now that we've installed it.
+    persist_update_state(channel, None);
 
     log_message(
         "daemon_upgraded",
