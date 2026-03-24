@@ -1080,7 +1080,14 @@ fn run_checkpoint_via_daemon_or_local(
     if daemon_checkpoint_delegate_enabled() {
         let repo_working_dir = repo.workdir().map(|p| p.to_string_lossy().to_string()).ok();
         if let Some(repo_working_dir) = repo_working_dir {
-            match crate::commands::daemon::ensure_daemon_running(Duration::from_secs(10)) {
+            let is_test = std::env::var_os("GIT_AI_TEST_DB_PATH").is_some()
+                || std::env::var_os("GITAI_TEST_DB_PATH").is_some();
+            let checkpoint_daemon_timeout = if cfg!(windows) || is_test {
+                Duration::from_secs(10)
+            } else {
+                Duration::from_secs(5)
+            };
+            match crate::commands::daemon::ensure_daemon_running(checkpoint_daemon_timeout) {
                 Ok(config) => {
                     if allow_captured_async
                         && crate::commands::checkpoint::explicit_capture_target_paths(
