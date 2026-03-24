@@ -487,13 +487,19 @@ fn flush_cas(records: Vec<CasSyncPayload>) {
     }
 
     for chunk in cas_objects.chunks(50) {
+        let hashes: Vec<String> = chunk.iter().map(|o| o.hash.clone()).collect();
         let request = CasUploadRequest {
             objects: chunk.to_vec(),
         };
         match client.upload_cas(request) {
             Ok(_response) => {
-                // CAS records sent via control socket are not in the internal DB queue,
-                // so no cleanup needed — just log success.
+                // Delete successfully uploaded records from the internal DB queue
+                // so they don't accumulate as stale entries.
+                if let Ok(db) = crate::authorship::internal_db::InternalDatabase::global()
+                    && let Ok(mut db_lock) = db.lock()
+                {
+                    let _ = db_lock.delete_cas_by_hashes(&hashes);
+                }
                 debug_log(&format!(
                     "daemon telemetry: uploaded {} CAS objects",
                     chunk.len()

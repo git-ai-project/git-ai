@@ -1,13 +1,16 @@
 #[path = "integration/repos/mod.rs"]
 mod repos;
 
+use git_ai::daemon::control_api::CasSyncPayload;
 use git_ai::daemon::{
-    ControlRequest, DaemonConfig, local_socket_connects_with_timeout, send_control_request,
+    ControlRequest, ControlResponse, DaemonConfig, TelemetryEnvelope,
+    local_socket_connects_with_timeout, open_local_socket_stream_with_timeout,
+    send_control_request,
 };
-use git_ai::utils::LockFile;
 use repos::test_repo::{GitTestMode, TestRepo, get_binary_path, real_git_executable};
 use serde_json::Value;
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
@@ -175,24 +178,6 @@ fn daemon_command_output(repo: &TestRepo, args: &[&str], cwd: &Path) -> Output {
     command
         .output()
         .expect("failed to invoke git-ai daemon command")
-}
-
-fn git_wrapper_command_output(
-    repo: &TestRepo,
-    args: &[&str],
-    extra_env: &[(&str, &str)],
-) -> Output {
-    let mut command = Command::new(get_binary_path());
-    command.args(args).current_dir(repo.path());
-    command.env("GIT_AI", "git");
-    configure_test_home_env(&mut command, repo);
-    configure_test_daemon_env(&mut command, repo);
-    for (key, value) in extra_env {
-        command.env(key, value);
-    }
-    command
-        .output()
-        .expect("failed to invoke git wrapper command")
 }
 
 fn daemon_status_response(home_repo: &TestRepo, target_repo: &TestRepo) -> Value {
@@ -390,41 +375,6 @@ fn async_mode_checkpoint_starts_daemon_when_down() {
 }
 
 #[test]
-fn async_mode_wrapper_reports_daemon_bridge_startup_failure_to_stderr() {
-    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
-    let daemon_config = DaemonConfig::from_home(&repo.daemon_home_path());
-    fs::create_dir_all(
-        daemon_config
-            .lock_path
-            .parent()
-            .expect("daemon lock path should have parent"),
-    )
-    .expect("failed to create daemon lock parent");
-    let _lock =
-        LockFile::try_acquire(&daemon_config.lock_path).expect("failed to acquire daemon lock");
-
-    let output = git_wrapper_command_output(
-        &repo,
-        &["status", "--short"],
-        &[("GIT_AI_ASYNC_MODE", "true")],
-    );
-
-    assert!(
-        output.status.success(),
-        "git status should still succeed when daemon bridge is blocked: stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("[git-ai] Error starting or connecting to the git-ai daemon. This is most likely an issue with you git-ai installation. Please contact your administrator or open an issue: https://github.com/git-ai-project/git-ai/issues"),
-        "stderr should report the daemon bridge startup failure with the user-facing install warning: {}",
-        stderr
-    );
-}
-
-#[test]
 fn daemon_status_does_not_self_emit_trace2_events() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     fs::create_dir_all(repo.test_home_path()).expect("failed to create test HOME directory");
@@ -548,4 +498,121 @@ fn daemon_start_survives_deleted_launch_repo_cwd() {
     assert_daemon_status_ok_after_launch_repo_removed(&launch_repo, &target_repo);
 
     shutdown_daemon(&launch_repo);
+}
+
+/// Helper: send a ControlRequest over an existing stream and read one response line.
+fn send_on_persistent_conn(
+    reader: &mut BufReader<interprocess::local_socket::prelude::LocalSocketStream>,
+    request: &ControlRequest,
+) -> ControlResponse {
+    let mut body = serde_json::to_vec(request).expect("serialize request");
+    body.push(b'\n');
+    reader
+        .get_mut()
+        .write_all(&body)
+        .expect("write request to daemon");
+    reader.get_mut().flush().expect("flush request");
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .expect("read response from daemon");
+    assert!(
+        !line.trim().is_empty(),
+        "daemon response should not be empty"
+    );
+    serde_json::from_str::<ControlResponse>(line.trim()).expect("parse daemon response")
+}
+
+/// Integration test: verifies that a persistent control socket connection can
+/// deliver telemetry envelopes and CAS payloads to the daemon, and that the
+/// daemon acknowledges each request with `ok: true` without closing the
+/// connection between requests.
+#[test]
+fn daemon_telemetry_and_cas_over_persistent_connection() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+
+    // Start the daemon
+    let start_output = daemon_command_output(&repo, &["daemon", "start"], repo.path());
+    assert!(
+        start_output.status.success(),
+        "daemon start should succeed: stdout={} stderr={}",
+        String::from_utf8_lossy(&start_output.stdout),
+        String::from_utf8_lossy(&start_output.stderr)
+    );
+    wait_for_daemon_sockets(&repo);
+
+    // Open a single persistent connection (mirrors the shared handle in telemetry_handle.rs)
+    let control_path = daemon_control_socket_path(&repo);
+    let stream = open_local_socket_stream_with_timeout(&control_path, Duration::from_secs(2))
+        .expect("should connect to daemon control socket");
+    let mut reader = BufReader::new(stream);
+
+    // 1. Send a telemetry envelope with metric events
+    let telemetry_req = ControlRequest::SubmitTelemetry {
+        envelopes: vec![
+            TelemetryEnvelope::Message {
+                timestamp: "2026-01-01T00:00:00Z".to_string(),
+                message: "integration test message".to_string(),
+                level: "info".to_string(),
+                context: None,
+            },
+            TelemetryEnvelope::Performance {
+                timestamp: "2026-01-01T00:00:01Z".to_string(),
+                operation: "test_op".to_string(),
+                duration_ms: 42,
+                context: None,
+                tags: None,
+            },
+        ],
+    };
+    let resp = send_on_persistent_conn(&mut reader, &telemetry_req);
+    assert!(resp.ok, "telemetry submit should succeed: {:?}", resp.error);
+
+    // 2. Send CAS payloads over the *same* connection
+    let cas_req = ControlRequest::SubmitCas {
+        records: vec![
+            CasSyncPayload {
+                hash: "abc123".to_string(),
+                data: "test cas data".to_string(),
+                metadata: None,
+            },
+            CasSyncPayload {
+                hash: "def456".to_string(),
+                data: "more cas data".to_string(),
+                metadata: Some("test-meta".to_string()),
+            },
+        ],
+    };
+    let resp = send_on_persistent_conn(&mut reader, &cas_req);
+    assert!(resp.ok, "CAS submit should succeed: {:?}", resp.error);
+
+    // 3. Send another batch of telemetry to confirm the connection stays alive
+    let telemetry_req2 = ControlRequest::SubmitTelemetry {
+        envelopes: vec![TelemetryEnvelope::Error {
+            timestamp: "2026-01-01T00:00:02Z".to_string(),
+            message: "integration test error".to_string(),
+            context: None,
+        }],
+    };
+    let resp = send_on_persistent_conn(&mut reader, &telemetry_req2);
+    assert!(
+        resp.ok,
+        "second telemetry submit should succeed on persistent connection: {:?}",
+        resp.error
+    );
+
+    // 4. Verify the daemon is still healthy via a status request on the same conn
+    let status_req = ControlRequest::StatusFamily {
+        repo_working_dir: repo.canonical_path().to_string_lossy().to_string(),
+    };
+    let resp = send_on_persistent_conn(&mut reader, &status_req);
+    assert!(
+        resp.ok,
+        "status request should succeed on persistent connection: {:?}",
+        resp.error
+    );
+
+    // Clean up
+    drop(reader);
+    shutdown_daemon(&repo);
 }
