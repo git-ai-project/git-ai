@@ -6220,7 +6220,7 @@ fn daemon_update_check_interval() -> u64 {
 fn daemon_update_check_loop(coordinator: Arc<ActorDaemonCoordinator>) {
     use crate::commands::upgrade::{DaemonUpdateCheckResult, check_for_update_available};
 
-    let interval = daemon_update_check_interval();
+    let interval = daemon_update_check_interval().max(1);
     let tick = DAEMON_UPDATE_SLEEP_TICK_SECS.min(interval);
 
     loop {
