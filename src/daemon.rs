@@ -4063,7 +4063,7 @@ impl ActorDaemonCoordinator {
                     coordinator.trace_ingest_progress_notify.notify_waiters();
                     next_seq = next_seq.saturating_add(1);
                     gc_counter += 1;
-                    if gc_counter % GC_INTERVAL == 0 {
+                    if gc_counter.is_multiple_of(GC_INTERVAL) {
                         coordinator.gc_stale_family_state();
                     }
                 }
@@ -6614,7 +6614,6 @@ pub fn open_local_socket_stream_with_timeout(
             .name(local_socket_name(socket_path)?)
             .wait_mode(ConnectWaitMode::Timeout(timeout))
             .connect_sync()
-            .map(DaemonClientStream::from)
             .map_err(|e| {
                 GitAiError::Generic(format!(
                     "timed out after {:?} connecting daemon socket {}: {}",
