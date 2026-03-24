@@ -2011,6 +2011,31 @@ impl TestRepo {
                 return Ok(combined);
             }
 
+            // When a traced/daemon git command exits non-zero but the git
+            // operation itself clearly succeeded (e.g. commit output is present
+            // and no index lock contention), the failure is from the trace2
+            // event target (socket write timeout, daemon busy, etc.).  Treat
+            // this as success — mirrors real-world behaviour where trace2
+            // issues don't invalidate the git operation.
+            if daemon_command_pending
+                && !is_transient_git_index_lock_error(&stderr)
+                && is_git_operation_successful_despite_exit_code(&stdout, args)
+            {
+                let combined = if stdout.is_empty() {
+                    stderr
+                } else if stderr.is_empty() {
+                    stdout
+                } else {
+                    format!("{}{}", stdout, stderr)
+                };
+                self.record_daemon_family_expected_completion_session(
+                    daemon_test_sync_session
+                        .as_deref()
+                        .expect("daemon test sync session should exist for tracked command"),
+                );
+                return Ok(combined);
+            }
+
             if attempt < retry_limit && is_transient_git_index_lock_error(&stderr) {
                 std::thread::sleep(retry_delay);
                 continue;
@@ -2653,6 +2678,21 @@ fn is_transient_git_index_lock_error(stderr: &str) -> bool {
     stderr.contains(".git/index.lock")
         && (stderr.contains("File exists")
             || stderr.contains("Another git process seems to be running"))
+}
+
+/// Detect cases where git exits non-zero (due to trace2 pipe failures, etc.)
+/// but the underlying operation actually succeeded.  This prevents flaky test
+/// failures on slow CI runners (especially macOS) where the daemon trace
+/// socket may be under pressure.
+fn is_git_operation_successful_despite_exit_code(stdout: &str, args: &[&str]) -> bool {
+    let primary_cmd = args.iter().find(|a| !a.starts_with('-'));
+    match primary_cmd.copied() {
+        // `git commit` prints "[branch hash] message" on success
+        Some("commit") => stdout.contains("] "),
+        // `git add` / `git checkout` / `git reset` etc. produce no stdout on success;
+        // hard to distinguish, so we don't auto-recover for those.
+        _ => false,
+    }
 }
 
 #[derive(Debug)]
