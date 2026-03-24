@@ -5,12 +5,15 @@
 //! daemon instead of writing to per-PID log files.
 
 use crate::daemon::control_api::{CasSyncPayload, ControlRequest, TelemetryEnvelope};
-use crate::daemon::{open_local_socket_stream_with_timeout, send_control_request_with_timeout};
+#[cfg(not(any(test, feature = "test-support")))]
+use crate::daemon::open_local_socket_stream_with_timeout;
+use crate::daemon::send_control_request_with_timeout;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 /// Maximum time to wait for the daemon socket on process start.
+#[cfg(not(any(test, feature = "test-support")))]
 const DAEMON_TELEMETRY_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Global handle to the daemon control socket for telemetry submission.
