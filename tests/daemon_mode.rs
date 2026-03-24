@@ -3542,7 +3542,10 @@ fn daemon_memory_does_not_grow_unbounded_under_trace_load() {
     // Let the daemon settle after startup.
     thread::sleep(Duration::from_millis(500));
     let baseline_rss = get_rss_kb(pid).unwrap_or_else(|| {
-        eprintln!("WARN: /proc/{}/status not readable, skipping RSS check", pid);
+        eprintln!(
+            "WARN: /proc/{}/status not readable, skipping RSS check",
+            pid
+        );
         0
     });
     eprintln!("daemon pid={} baseline RSS={}KB", pid, baseline_rss);

@@ -6651,11 +6651,12 @@ fn open_windows_named_pipe_client_with_timeout(
 
 fn set_daemon_client_stream_timeouts(
     stream: &mut DaemonClientStream,
-    _socket_path: &Path,
+    socket_path: &Path,
     timeout: Duration,
 ) -> Result<(), GitAiError> {
     #[cfg(windows)]
     {
+        let _ = socket_path;
         match stream {
             DaemonClientStream::WindowsPipe(pipe) => {
                 pipe.set_read_timeout(Some(timeout));
