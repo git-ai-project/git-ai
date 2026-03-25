@@ -91,20 +91,7 @@ fn is_repo_admin_command(command: &str) -> bool {
 }
 
 fn is_read_only_command(command: &str) -> bool {
-    matches!(
-        command,
-        "status"
-            | "diff"
-            | "log"
-            | "show"
-            | "rev-parse"
-            | "for-each-ref"
-            | "cat-file"
-            | "blame"
-            | "grep"
-            | "help"
-            | "version"
-    )
+    crate::git::command_classification::is_definitely_read_only_command(command)
 }
 
 #[cfg(test)]

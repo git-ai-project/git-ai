@@ -2,12 +2,15 @@ use crate::daemon::domain::{FamilyKey, RefChange, RepoContext};
 use crate::error::GitAiError;
 use crate::git::cli_parser::parse_git_cli_args;
 use crate::git::find_repository_in_path;
+use crate::git::repo_state::common_dir_for_worktree;
 use crate::git::repository::discover_repository_in_path_no_git_exec;
 use crate::git::repository::exec_git_allow_nonzero;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReflogCut {
@@ -39,13 +42,172 @@ pub trait GitBackend: Send + Sync + 'static {
     fn init_target(&self, argv: &[String], cwd_hint: Option<&Path>) -> Option<PathBuf>;
 }
 
-#[derive(Debug, Default)]
-pub struct SystemGitBackend;
+const ALIAS_CACHE_TTL_SECS: u64 = 60;
+
+struct AliasCacheEntry {
+    /// Resolved alias name → expansion value (e.g. "ci" → "commit -v")
+    aliases: HashMap<String, String>,
+    refreshed_at: Instant,
+    /// Set to true while a background thread is refreshing this entry,
+    /// preventing thundering-herd spawns when many events arrive after TTL.
+    refresh_in_progress: bool,
+}
+
+pub struct SystemGitBackend {
+    alias_cache: Arc<Mutex<HashMap<String, AliasCacheEntry>>>,
+}
+
+impl std::fmt::Debug for SystemGitBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SystemGitBackend").finish()
+    }
+}
+
+impl Default for SystemGitBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl SystemGitBackend {
     pub fn new() -> Self {
-        Self
+        Self {
+            alias_cache: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
+
+    /// Look up a single alias from the per-family cache.
+    ///
+    /// Uses stale-while-revalidate: if the cache entry is expired, the stale
+    /// value is returned immediately and a background thread refreshes it.
+    /// This ensures alias resolution is never on the critical path.
+    fn resolve_alias_cached(
+        &self,
+        worktree: &Path,
+        alias_name: &str,
+    ) -> Result<Option<String>, GitAiError> {
+        let family_key = match common_dir_for_worktree(worktree) {
+            Some(common_dir) => common_dir
+                .canonicalize()
+                .unwrap_or(common_dir)
+                .to_string_lossy()
+                .to_string(),
+            None => return self.resolve_alias_uncached(worktree, alias_name),
+        };
+
+        let cache = self
+            .alias_cache
+            .lock()
+            .map_err(|_| GitAiError::Generic("alias cache lock poisoned".to_string()))?;
+
+        if let Some(entry) = cache.get(&family_key) {
+            let result = entry.aliases.get(alias_name).cloned();
+            if entry.refreshed_at.elapsed().as_secs() >= ALIAS_CACHE_TTL_SECS
+                && !entry.refresh_in_progress
+            {
+                // Stale — return cached value but kick off background refresh.
+                // Mark in-progress to prevent thundering-herd thread spawns.
+                drop(cache);
+                if let Ok(mut cache) = self.alias_cache.lock()
+                    && let Some(entry) = cache.get_mut(&family_key)
+                {
+                    entry.refresh_in_progress = true;
+                }
+                let worktree = worktree.to_path_buf();
+                let family_key = family_key.clone();
+                let alias_cache = self.alias_cache.clone();
+                std::thread::spawn(move || {
+                    refresh_alias_cache(&worktree, &family_key, &alias_cache);
+                });
+            }
+            return Ok(result);
+        }
+        drop(cache);
+
+        // Cold miss — must load synchronously for the first call
+        self.refresh_alias_cache_sync(worktree, &family_key)?;
+        let cache = self
+            .alias_cache
+            .lock()
+            .map_err(|_| GitAiError::Generic("alias cache lock poisoned".to_string()))?;
+        Ok(cache
+            .get(&family_key)
+            .and_then(|entry| entry.aliases.get(alias_name).cloned()))
+    }
+
+    /// Synchronously load all aliases for a family into the cache.
+    fn refresh_alias_cache_sync(
+        &self,
+        worktree: &Path,
+        family_key: &str,
+    ) -> Result<(), GitAiError> {
+        refresh_alias_cache(worktree, family_key, &self.alias_cache);
+        Ok(())
+    }
+
+    /// Fallback when we can't determine a family key for caching.
+    fn resolve_alias_uncached(
+        &self,
+        worktree: &Path,
+        alias_name: &str,
+    ) -> Result<Option<String>, GitAiError> {
+        let repo = discover_repository_in_path_no_git_exec(worktree)?;
+        let key = format!("alias.{}", alias_name);
+        repo.config_get_str(&key)
+    }
+}
+
+/// Load aliases from disk and store them in the cache. Safe to call from any
+/// thread — errors are silently swallowed when running as a background refresh.
+fn refresh_alias_cache(
+    worktree: &Path,
+    family_key: &str,
+    alias_cache: &Mutex<HashMap<String, AliasCacheEntry>>,
+) {
+    let aliases = match discover_repository_in_path_no_git_exec(worktree)
+        .and_then(|repo| repo.get_git_config_file().map(|cfg| read_all_aliases_from_config(&cfg)))
+    {
+        Ok(aliases) => aliases,
+        Err(_) => {
+            // Clear refresh_in_progress so a future attempt can retry.
+            if let Ok(mut cache) = alias_cache.lock()
+                && let Some(entry) = cache.get_mut(family_key)
+            {
+                entry.refresh_in_progress = false;
+            }
+            return;
+        }
+    };
+    if let Ok(mut cache) = alias_cache.lock() {
+        cache.insert(
+            family_key.to_string(),
+            AliasCacheEntry {
+                aliases,
+                refreshed_at: Instant::now(),
+                refresh_in_progress: false,
+            },
+        );
+    }
+}
+
+fn read_all_aliases_from_config(config: &gix_config::File<'_>) -> HashMap<String, String> {
+    let mut aliases = HashMap::new();
+    let Some(sections) = config.sections_by_name("alias") else {
+        return aliases;
+    };
+    for section in sections {
+        let body = section.body();
+        for key in body.value_names() {
+            let key_str = key.to_string();
+            if key_str.is_empty() {
+                continue;
+            }
+            if let Some(value) = body.value(&key_str) {
+                aliases.insert(key_str, value.to_string());
+            }
+        }
+    }
+    aliases
 }
 
 fn is_builtin_primary_command(command: &str) -> bool {
@@ -54,20 +216,36 @@ fn is_builtin_primary_command(command: &str) -> bool {
         "add"
             | "blame"
             | "branch"
+            | "cat-file"
+            | "check-attr"
+            | "check-ignore"
+            | "check-mailmap"
             | "checkout"
             | "cherry-pick"
             | "clean"
             | "clone"
             | "commit"
             | "config"
+            | "count-objects"
+            | "describe"
             | "diff"
+            | "diff-files"
+            | "diff-index"
+            | "diff-tree"
             | "fetch"
+            | "for-each-ref"
             | "grep"
+            | "hash-object"
+            | "help"
             | "init"
             | "log"
             | "ls-files"
+            | "ls-tree"
             | "merge"
+            | "merge-base"
+            | "mktree"
             | "mv"
+            | "name-rev"
             | "notes"
             | "pull"
             | "push"
@@ -75,9 +253,11 @@ fn is_builtin_primary_command(command: &str) -> bool {
             | "remote"
             | "reset"
             | "restore"
+            | "rev-list"
+            | "rev-parse"
             | "revert"
             | "rm"
-            | "rev-parse"
+            | "shortlog"
             | "show"
             | "stash"
             | "status"
@@ -86,6 +266,9 @@ fn is_builtin_primary_command(command: &str) -> bool {
             | "tag"
             | "update-ref"
             | "var"
+            | "verify-commit"
+            | "verify-tag"
+            | "version"
             | "worktree"
     )
 }
@@ -206,7 +389,6 @@ impl GitBackend for SystemGitBackend {
     ) -> Result<Option<String>, GitAiError> {
         let mut current = parse_git_cli_args(git_invocation_tokens(argv));
         let mut seen = HashSet::new();
-        let mut repository = None;
         loop {
             let Some(command) = current.command.clone() else {
                 return Ok(None);
@@ -218,11 +400,7 @@ impl GitBackend for SystemGitBackend {
                 return Ok(Some(command));
             }
 
-            let key = format!("alias.{}", command);
-            let alias_value = match repository
-                .get_or_insert(discover_repository_in_path_no_git_exec(worktree)?)
-                .config_get_str(&key)?
-            {
+            let alias_value = match self.resolve_alias_cached(worktree, &command)? {
                 Some(value) => value,
                 None => return Ok(Some(command)),
             };

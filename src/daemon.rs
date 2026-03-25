@@ -557,6 +557,14 @@ fn trace_argv_primary_command(argv: &[String]) -> Option<String> {
     None
 }
 
+fn trace_command_is_definitely_read_only(primary_command: Option<&str>) -> bool {
+    use crate::git::command_classification::is_definitely_read_only_command;
+    match primary_command {
+        Some(cmd) => is_definitely_read_only_command(cmd),
+        None => false,
+    }
+}
+
 fn trace_command_may_mutate_refs(primary_command: Option<&str>) -> bool {
     matches!(
         primary_command,
@@ -3210,6 +3218,9 @@ struct TraceIngressState {
     root_head_reflog_start_offsets: HashMap<String, u64>,
     root_family_reflog_start_offsets: HashMap<String, HashMap<String, u64>>,
     root_last_activity_ns: HashMap<String, u64>,
+    /// Roots whose start event was identified as definitely read-only. All
+    /// subsequent events for these roots (including exit) take the fast path.
+    root_definitely_read_only: HashSet<String>,
     root_open_connections: HashMap<String, usize>,
     root_close_fallback_enqueued: HashSet<String>,
 }
@@ -4345,6 +4356,71 @@ impl ActorDaemonCoordinator {
         }
 
         let root = trace_root_sid(&sid).to_string();
+
+        // Fast path: for commands that are definitively read-only (check-ignore,
+        // rev-parse, status, etc.), skip all expensive filesystem I/O (worktree
+        // resolution, HEAD state reads, reflog captures) and do only lightweight
+        // bookkeeping. This dramatically reduces CPU when IDEs fire many read-only
+        // git commands per second.
+        let early_primary = trace_payload_primary_command(payload)
+            .or_else(|| {
+                let argv = trace_payload_argv(payload);
+                trace_argv_primary_command(&argv)
+            });
+        // Check if this specific event's command is read-only, OR if this root
+        // was already identified as read-only from a prior event (e.g. the start
+        // event set the flag, and now the exit event can also take the fast path).
+        let event_is_read_only = trace_command_is_definitely_read_only(early_primary.as_deref());
+        // For events with no command info (exit/atexit), defer to the cached flag
+        // inside the lock to avoid a double-lock.
+        let may_be_read_only = event_is_read_only || early_primary.is_none();
+        if may_be_read_only {
+            let mut ingress = match self.trace_ingress_state.lock() {
+                Ok(guard) => guard,
+                Err(_) => return,
+            };
+            // If the event itself wasn't identified as read-only, check the root flag.
+            if !event_is_read_only
+                && !ingress.root_definitely_read_only.contains(&root)
+            {
+                // Not read-only — drop the lock and fall through to the full path.
+                drop(ingress);
+            } else {
+                // Activity tracking (folded here to avoid a separate lock acquisition)
+                ingress
+                    .root_last_activity_ns
+                    .insert(root.clone(), now_unix_nanos() as u64);
+                ingress.root_close_fallback_enqueued.remove(&root);
+                // Minimal state tracking for connection lifecycle
+                if let Some(worktree) = trace_payload_worktree_hint(payload) {
+                    ingress.root_worktrees.insert(root.clone(), worktree);
+                }
+                let payload_argv = trace_payload_argv(payload);
+                if event == "start" && sid == root && !payload_argv.is_empty() {
+                    ingress.root_argv.insert(root.clone(), payload_argv);
+                    ingress.root_definitely_read_only.insert(root.clone());
+                }
+                ingress.root_mutating.entry(root.clone()).or_insert(false);
+                // Cleanup on terminal event
+                if is_terminal_root_trace_event(&event, &sid, &root) {
+                    ingress.root_families.remove(&root);
+                    ingress.root_mutating.remove(&root);
+                    ingress.root_target_repo_only.remove(&root);
+                    ingress.root_argv.remove(&root);
+                    ingress.root_pre_repo.remove(&root);
+                    ingress.root_worktrees.remove(&root);
+                    ingress.root_inflight_merge_squash_contexts.remove(&root);
+                    ingress.root_terminal_merge_squash_contexts.remove(&root);
+                    ingress.root_reflog_refs.remove(&root);
+                    ingress.root_head_reflog_start_offsets.remove(&root);
+                    ingress.root_family_reflog_start_offsets.remove(&root);
+                    ingress.root_last_activity_ns.remove(&root);
+                    ingress.root_definitely_read_only.remove(&root);
+                }
+                return;
+            }
+        }
+
         let _ = self.mark_trace_root_activity(&root);
         let mut ingress = match self.trace_ingress_state.lock() {
             Ok(guard) => guard,

@@ -1409,7 +1409,7 @@ impl Repository {
             .map_err(|e| GitAiError::GixError(e.to_string()))
     }
 
-    fn get_git_config_file(&self) -> Result<gix_config::File<'static>, GitAiError> {
+    pub(crate) fn get_git_config_file(&self) -> Result<gix_config::File<'static>, GitAiError> {
         git_config_file_for_repo_paths(self.path(), self.common_dir())
     }
 

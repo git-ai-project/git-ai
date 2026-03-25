@@ -743,6 +743,19 @@ fn proxy_to_git(
     child_hooks_path_override: Option<&str>,
     wrapper_invocation_id: Option<&str>,
 ) -> std::process::ExitStatus {
+    // Suppress trace2 for read-only commands to avoid hitting the daemon with
+    // events that can never produce meaningful state changes. Skip suppression
+    // when a wrapper_invocation_id is set (async mode) because the daemon
+    // expects trace2 events to match wrapper state entries — suppressing them
+    // would leak wrapper state entries that never get cleaned up.
+    let suppress_trace2 = wrapper_invocation_id.is_none() && {
+        let parsed = parse_git_cli_args(args);
+        parsed
+            .command
+            .as_deref()
+            .is_some_and(crate::git::command_classification::is_definitely_read_only_command)
+    };
+
     // Use spawn for interactive commands
     let child = {
         #[cfg(unix)]
@@ -761,6 +774,9 @@ fn proxy_to_git(
             }
             cmd.args(args);
             cmd.env(ENV_SKIP_MANAGED_HOOKS, "1");
+            if suppress_trace2 {
+                cmd.env("GIT_TRACE2_EVENT", "0");
+            }
             if let Some(id) = wrapper_invocation_id {
                 cmd.env("GIT_AI_WRAPPER_INVOCATION_ID", id);
                 cmd.env("GIT_TRACE2_ENV_VARS", "GIT_AI_WRAPPER_INVOCATION_ID");
@@ -791,6 +807,9 @@ fn proxy_to_git(
             }
             cmd.args(args);
             cmd.env(ENV_SKIP_MANAGED_HOOKS, "1");
+            if suppress_trace2 {
+                cmd.env("GIT_TRACE2_EVENT", "0");
+            }
             if let Some(id) = wrapper_invocation_id {
                 cmd.env("GIT_AI_WRAPPER_INVOCATION_ID", id);
                 cmd.env("GIT_TRACE2_ENV_VARS", "GIT_AI_WRAPPER_INVOCATION_ID");
