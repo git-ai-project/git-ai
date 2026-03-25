@@ -181,8 +181,8 @@ impl AgentCheckpointPreset for ClaudePreset {
                 Ok(BashCheckpointAction::Checkpoint(paths)) => Some(paths),
                 Ok(BashCheckpointAction::NoChanges) => None,
                 Ok(BashCheckpointAction::Fallback) => {
-                    // Fall back to git status
-                    bash_tool::git_status_fallback(Path::new(cwd)).ok()
+                    // git_status_fallback already failed inside handle_bash_tool
+                    None
                 }
                 Ok(BashCheckpointAction::TakePreSnapshot) => None, // shouldn't happen on post
                 Err(e) => {
@@ -557,7 +557,8 @@ impl AgentCheckpointPreset for GeminiPreset {
                 Ok(BashCheckpointAction::Checkpoint(paths)) => Some(paths),
                 Ok(BashCheckpointAction::NoChanges) => None,
                 Ok(BashCheckpointAction::Fallback) => {
-                    bash_tool::git_status_fallback(Path::new(cwd)).ok()
+                    // git_status_fallback already failed inside handle_bash_tool
+                    None
                 }
                 Ok(BashCheckpointAction::TakePreSnapshot) => None,
                 Err(e) => {
@@ -1015,7 +1016,8 @@ impl AgentCheckpointPreset for ContinueCliPreset {
                 Ok(BashCheckpointAction::Checkpoint(paths)) => Some(paths),
                 Ok(BashCheckpointAction::NoChanges) => None,
                 Ok(BashCheckpointAction::Fallback) => {
-                    bash_tool::git_status_fallback(Path::new(cwd)).ok()
+                    // git_status_fallback already failed inside handle_bash_tool
+                    None
                 }
                 Ok(BashCheckpointAction::TakePreSnapshot) => None,
                 Err(e) => {
@@ -3008,7 +3010,8 @@ impl AgentCheckpointPreset for DroidPreset {
                 Ok(BashCheckpointAction::Checkpoint(paths)) => Some(paths),
                 Ok(BashCheckpointAction::NoChanges) => None,
                 Ok(BashCheckpointAction::Fallback) => {
-                    bash_tool::git_status_fallback(Path::new(cwd)).ok()
+                    // git_status_fallback already failed inside handle_bash_tool
+                    None
                 }
                 Ok(BashCheckpointAction::TakePreSnapshot) => None,
                 Err(e) => {
