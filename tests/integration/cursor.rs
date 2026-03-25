@@ -196,7 +196,7 @@ fn test_cursor_preset_multi_root_workspace_detection() {
                 r##"{{
         "conversation_id": "test-conversation-id",
         "workspace_roots": [{}],
-        "hook_event_name": "beforeSubmitPrompt"{},
+        "hook_event_name": "preToolUse"{},
         "model": "model-name-from-hook-test"
     }}"##,
                 workspace_roots_json.join(", "),
@@ -297,7 +297,7 @@ fn test_cursor_preset_human_checkpoint_no_filepath() {
     let hook_input = r##"{
         "conversation_id": "test-conversation-id",
         "workspace_roots": ["/Users/test/workspace"],
-        "hook_event_name": "beforeSubmitPrompt",
+        "hook_event_name": "preToolUse",
         "file_path": "/Users/test/workspace/src/main.rs",
         "model": "model-name-from-hook-test"
     }"##;
@@ -328,7 +328,7 @@ fn test_cursor_checkpoint_stdin_with_utf8_bom() {
         serde_json::json!({
             "conversation_id": "test-conversation-id",
             "workspace_roots": [repo.canonical_path().to_string_lossy().to_string()],
-            "hook_event_name": "beforeSubmitPrompt",
+            "hook_event_name": "preToolUse",
             "model": "model-name-from-hook-test"
         })
     );
