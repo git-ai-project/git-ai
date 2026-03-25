@@ -844,10 +844,12 @@ fn execute_resolved_checkpoint(
         }
     }
 
-    let agent_tool = if effective_kind != CheckpointKind::Human
-        && let Some(agent_run_result) = &agent_run_result
-    {
-        Some(agent_run_result.agent_id.tool.as_str())
+    let agent_tool = if effective_kind != CheckpointKind::Human {
+        if let Some(agent_run_result) = &agent_run_result {
+            Some(agent_run_result.agent_id.tool.clone())
+        } else {
+            cloud_agent_id.as_ref().map(|aid| aid.tool.clone())
+        }
     } else {
         None
     };
@@ -863,7 +865,7 @@ fn execute_resolved_checkpoint(
     };
 
     if !quiet {
-        let log_author = agent_tool.unwrap_or(author);
+        let log_author = agent_tool.as_deref().unwrap_or(author);
         let files_with_entries = entries.len();
         let total_uncommitted_files = resolved.files.len();
 
