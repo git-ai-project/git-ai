@@ -24,31 +24,31 @@ pub fn handle_daemon(args: &[String]) {
     match args[0].as_str() {
         "start" => {
             if let Err(e) = handle_start(&args[1..]) {
-                eprintln!("Failed to start daemon: {}", e);
+                eprintln!("Failed to start: {}", e);
                 std::process::exit(1);
             }
         }
         "run" => {
             if let Err(e) = handle_run(&args[1..]) {
-                eprintln!("Failed to run daemon: {}", e);
+                eprintln!("Failed to run: {}", e);
                 std::process::exit(1);
             }
         }
         "status" => {
             let repo = parse_repo_arg(&args[1..]).unwrap_or_else(default_repo_path);
             if let Err(e) = handle_status(repo) {
-                eprintln!("Failed to get daemon status: {}", e);
+                eprintln!("Failed to get status: {}", e);
                 std::process::exit(1);
             }
         }
         "shutdown" => {
             if let Err(e) = handle_shutdown() {
-                eprintln!("Failed to shut down daemon: {}", e);
+                eprintln!("Failed to shut down: {}", e);
                 std::process::exit(1);
             }
         }
         _ => {
-            eprintln!("Unknown daemon subcommand: {}", args[0]);
+            eprintln!("Unknown subcommand: {}", args[0]);
             print_help();
             std::process::exit(1);
         }
@@ -264,7 +264,7 @@ fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
     #[cfg(windows)]
     {
         let script = format!(
-            "Start-Process -FilePath {} -ArgumentList @('daemon','run') -WorkingDirectory {} -WindowStyle Hidden",
+            "Start-Process -FilePath {} -ArgumentList @('d','run') -WorkingDirectory {} -WindowStyle Hidden",
             powershell_single_quote_literal(exe.as_os_str()),
             powershell_single_quote_literal(Path::new(&runtime_dir).as_os_str())
         );
@@ -305,7 +305,7 @@ fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
     {
         let mut child = Command::new(exe);
         child
-            .arg("daemon")
+            .arg("d")
             .arg("run")
             .current_dir(&runtime_dir)
             .stdin(Stdio::null())
@@ -323,7 +323,7 @@ fn spawn_daemon_run_with_piped_stderr(
     let runtime_dir = daemon_runtime_dir(config)?;
     let mut child = Command::new(exe);
     child
-        .arg("daemon")
+        .arg("d")
         .arg("run")
         .current_dir(&runtime_dir)
         .stdin(Stdio::null())
@@ -410,11 +410,11 @@ fn is_help(value: &str) -> bool {
 }
 
 fn print_help() {
-    eprintln!("git-ai daemon - run and control git-ai daemon mode");
+    eprintln!("git-ai d - run and control git-ai background service");
     eprintln!();
     eprintln!("Usage:");
-    eprintln!("  git-ai daemon start");
-    eprintln!("  git-ai daemon run");
-    eprintln!("  git-ai daemon status [--repo <path>]");
-    eprintln!("  git-ai daemon shutdown");
+    eprintln!("  git-ai d start");
+    eprintln!("  git-ai d run");
+    eprintln!("  git-ai d status [--repo <path>]");
+    eprintln!("  git-ai d shutdown");
 }

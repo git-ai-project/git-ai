@@ -127,7 +127,7 @@ impl DaemonProcess {
 
         let mut command = Command::new(get_binary_path());
         command
-            .arg("daemon")
+            .arg("d")
             .arg("run")
             .current_dir(test_home)
             .env("GIT_AI_TEST_DB_PATH", test_db_path)
@@ -145,7 +145,7 @@ impl DaemonProcess {
 
         let mut child = command
             .spawn()
-            .expect("failed to spawn git-ai daemon subprocess for test mode");
+            .expect("failed to spawn git-ai subprocess for test mode");
         let pid = child.id();
 
         let daemon = Self {

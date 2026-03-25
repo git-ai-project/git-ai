@@ -301,7 +301,9 @@ impl DaemonLock {
             fs::create_dir_all(parent)?;
         }
         let lock = LockFile::try_acquire(path).ok_or_else(|| {
-            GitAiError::Generic("git-ai daemon is already running (lock held)".to_string())
+            GitAiError::Generic(
+                "git-ai background service is already running (lock held)".to_string(),
+            )
         })?;
         Ok(Self { _lock: lock })
     }
@@ -6124,7 +6126,7 @@ impl ActorDaemonCoordinator {
 
             if tokio::time::Instant::now() >= deadline {
                 eprintln!(
-                    "git-ai daemon: wrapper state timeout for invocation {} (pre={}, post={}), using daemon state",
+                    "git-ai: wrapper state timeout for invocation {} (pre={}, post={}), using internal state",
                     invocation_id, has_pre, has_post
                 );
                 let mut states = self

@@ -285,7 +285,10 @@ fn maybe_ensure_daemon(dry_run: bool) {
     if let Err(e) =
         crate::commands::daemon::ensure_daemon_running(std::time::Duration::from_secs(5))
     {
-        eprintln!("[git-ai] warning: failed to start daemon: {}", e);
+        eprintln!(
+            "[git-ai] warning: failed to start background service: {}",
+            e
+        );
     }
 }
 

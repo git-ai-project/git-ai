@@ -37,13 +37,13 @@ pub fn handle_git_ai(args: &[String]) {
         return;
     }
 
-    // In daemon/async mode, initialize the global telemetry handle so that
+    // In async mode, initialize the global telemetry handle so that
     // observability and CAS events are routed over the control socket instead
     // of being written to per-PID log files.
     //
-    // Skip for commands that must work without a running daemon (help, version,
-    // config, daemon management, debug, upgrade) so users can always diagnose
-    // and recover from a broken daemon state.
+    // Skip for commands that must work without a running background service
+    // (help, version, config, d management, debug, upgrade) so users can
+    // always diagnose and recover from a broken state.
     if config::Config::get().feature_flags().async_mode {
         let needs_daemon = !matches!(
             args[0].as_str(),
@@ -54,6 +54,7 @@ pub fn handle_git_ai(args: &[String]) {
                 | "--version"
                 | "-v"
                 | "config"
+                | "d"
                 | "daemon"
                 | "debug"
                 | "upgrade"
@@ -68,8 +69,11 @@ pub fn handle_git_ai(args: &[String]) {
             match init_daemon_telemetry_handle() {
                 DaemonTelemetryInitResult::Connected | DaemonTelemetryInitResult::Skipped => {}
                 DaemonTelemetryInitResult::Failed(err) => {
-                    // Hard error for git-ai commands: the daemon must be reachable.
-                    eprintln!("error: failed to connect to git-ai daemon: {}", err);
+                    // Hard error for git-ai commands: the background service must be reachable.
+                    eprintln!(
+                        "error: failed to connect to git-ai background service: {}",
+                        err
+                    );
                     std::process::exit(1);
                 }
             }
@@ -106,7 +110,7 @@ pub fn handle_git_ai(args: &[String]) {
         "debug" => {
             commands::debug::handle_debug(&args[1..]);
         }
-        "daemon" => {
+        "d" | "daemon" => {
             commands::daemon::handle_daemon(&args[1..]);
         }
         "stats" => {
@@ -291,7 +295,7 @@ fn print_help() {
     eprintln!("    --add <key> <value>   Add to array or upsert into object");
     eprintln!("    unset <key>           Remove config value (reverts to default)");
     eprintln!("  debug              Print support/debug diagnostics");
-    eprintln!("  daemon             Run and control git-ai daemon mode");
+    eprintln!("  d                  Run and control git-ai background service");
     eprintln!("  install-hooks      Install git hooks for AI authorship tracking");
     eprintln!("  uninstall-hooks    Remove git-ai hooks from all detected tools");
     eprintln!("  git-hooks ensure   Ensure repo-local git-ai hooks are installed/healed");
@@ -1299,7 +1303,7 @@ fn log_daemon_checkpoint_delegate_failure(
     message: &str,
 ) {
     eprintln!(
-        "[git-ai] daemon checkpoint delegate {}: {}; falling back to local checkpoint",
+        "[git-ai] checkpoint delegate {}: {}; falling back to local checkpoint",
         phase, message
     );
 

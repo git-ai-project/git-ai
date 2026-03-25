@@ -150,7 +150,7 @@ impl DaemonGuard {
         let trace_socket_path = daemon_trace_socket_path(repo);
         let mut command = Command::new(get_binary_path());
         command
-            .arg("daemon")
+            .arg("d")
             .arg("run")
             .current_dir(repo.path())
             .env("GIT_AI_TEST_DB_PATH", repo.test_db_path())
@@ -165,9 +165,7 @@ impl DaemonGuard {
             &trace_socket_path,
         );
 
-        let child = command
-            .spawn()
-            .expect("failed to spawn git-ai daemon subprocess");
+        let child = command.spawn().expect("failed to spawn git-ai subprocess");
         let mut daemon = Self {
             child,
             control_socket_path,
@@ -593,7 +591,7 @@ fn daemon_start_spawns_detached_run_process() {
 
     let mut command = Command::new(get_binary_path());
     command
-        .arg("daemon")
+        .arg("d")
         .arg("start")
         .current_dir(repo.path())
         .env("GIT_AI_TEST_DB_PATH", repo.test_db_path())
@@ -3337,7 +3335,7 @@ fn spawn_daemon_with_env(repo: &TestRepo, extra_env: &[(&str, String)]) -> Child
 
     let mut command = Command::new(get_binary_path());
     command
-        .arg("daemon")
+        .arg("d")
         .arg("run")
         .current_dir(repo.path())
         .env("GIT_AI_TEST_DB_PATH", repo.test_db_path())
