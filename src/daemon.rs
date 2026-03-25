@@ -4362,11 +4362,10 @@ impl ActorDaemonCoordinator {
         // resolution, HEAD state reads, reflog captures) and do only lightweight
         // bookkeeping. This dramatically reduces CPU when IDEs fire many read-only
         // git commands per second.
-        let early_primary = trace_payload_primary_command(payload)
-            .or_else(|| {
-                let argv = trace_payload_argv(payload);
-                trace_argv_primary_command(&argv)
-            });
+        let early_primary = trace_payload_primary_command(payload).or_else(|| {
+            let argv = trace_payload_argv(payload);
+            trace_argv_primary_command(&argv)
+        });
         // Check if this specific event's command is read-only, OR if this root
         // was already identified as read-only from a prior event (e.g. the start
         // event set the flag, and now the exit event can also take the fast path).
@@ -4380,9 +4379,7 @@ impl ActorDaemonCoordinator {
                 Err(_) => return,
             };
             // If the event itself wasn't identified as read-only, check the root flag.
-            if !event_is_read_only
-                && !ingress.root_definitely_read_only.contains(&root)
-            {
+            if !event_is_read_only && !ingress.root_definitely_read_only.contains(&root) {
                 // Not read-only — drop the lock and fall through to the full path.
                 drop(ingress);
             } else {

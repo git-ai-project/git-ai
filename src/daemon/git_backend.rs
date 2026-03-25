@@ -164,9 +164,10 @@ fn refresh_alias_cache(
     family_key: &str,
     alias_cache: &Mutex<HashMap<String, AliasCacheEntry>>,
 ) {
-    let aliases = match discover_repository_in_path_no_git_exec(worktree)
-        .and_then(|repo| repo.get_git_config_file().map(|cfg| read_all_aliases_from_config(&cfg)))
-    {
+    let aliases = match discover_repository_in_path_no_git_exec(worktree).and_then(|repo| {
+        repo.get_git_config_file()
+            .map(|cfg| read_all_aliases_from_config(&cfg))
+    }) {
         Ok(aliases) => aliases,
         Err(_) => {
             // Clear refresh_in_progress so a future attempt can retry.
