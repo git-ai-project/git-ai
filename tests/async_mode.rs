@@ -716,6 +716,40 @@ fn async_mode_post_commit_still_processing_when_no_daemon() {
 }
 
 #[test]
+fn async_mode_post_commit_shows_stats_with_commit_alias() {
+    let repo = TestRepo::new_with_mode(GitTestMode::WrapperDaemon);
+
+    // Configure a git alias: cm = commit (mimics common user setup)
+    repo.git(&["config", "alias.cm", "commit"]).unwrap();
+
+    // Base commit (human only).
+    let mut file = repo.filename("alias_test.txt");
+    file.set_contents(crate::lines!["Base line 1", "Base line 2"]);
+    repo.stage_all_and_commit("Base commit").unwrap();
+
+    // Add AI-attributed lines.
+    file.insert_at(2, crate::lines!["AI line 1".ai(), "AI line 2".ai()]);
+
+    repo.git(&["add", "-A"]).expect("add should succeed");
+
+    // Commit using the alias instead of "commit" directly.
+    let output = repo
+        .git_with_env(
+            &["cm", "-m", "AI additions via alias"],
+            &[("GIT_AI_TEST_FORCE_TTY", "1")],
+            None,
+        )
+        .expect("aliased commit should succeed");
+
+    // The wrapper should resolve the alias and still show the stats bar.
+    assert!(
+        output.contains("you") && output.contains("ai"),
+        "expected stats output when committing via alias, got:\n{}",
+        output
+    );
+}
+
+#[test]
 fn async_mode_post_commit_skips_stats_for_large_commit() {
     let repo = TestRepo::new_with_mode(GitTestMode::WrapperDaemon);
 

@@ -116,9 +116,17 @@ pub fn handle_git(args: &[String]) {
         // Initialize the daemon telemetry handle so we can send wrapper state
         let _ = crate::daemon::telemetry_handle::init_daemon_telemetry_handle();
 
-        let parsed = parse_git_cli_args(args);
+        let mut parsed = parse_git_cli_args(args);
         let repository = find_repository(&parsed.global_args).ok();
         let worktree = repository.as_ref().and_then(|r| r.workdir().ok());
+
+        // Resolve aliases so that e.g. `git cm` (alias for `commit`) is
+        // recognised as a commit for post-commit stats display.
+        if let Some(repo) = repository.as_ref()
+            && let Some(resolved) = resolve_alias_invocation(&parsed, repo)
+        {
+            parsed = resolved;
+        }
 
         let pre_state = worktree
             .as_deref()
