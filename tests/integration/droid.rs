@@ -302,7 +302,7 @@ fn test_droid_tool_results_are_not_parsed_as_user_messages() {
 fn test_droid_e2e_prefers_latest_checkpoint_for_prompts() {
     use crate::repos::test_repo::TestRepo;
 
-    let mut repo = TestRepo::new_dedicated_daemon();
+    let mut repo = TestRepo::new();
 
     repo.patch_git_ai_config(|patch| {
         patch.exclude_prompts_in_repositories = Some(vec![]);

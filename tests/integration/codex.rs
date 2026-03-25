@@ -161,7 +161,7 @@ fn test_find_rollout_path_for_session_in_home() {
 fn test_codex_e2e_commit_resync_uses_latest_rollout() {
     use crate::repos::test_repo::TestRepo;
 
-    let mut repo = TestRepo::new_dedicated_daemon();
+    let mut repo = TestRepo::new();
     repo.patch_git_ai_config(|patch| {
         patch.exclude_prompts_in_repositories = Some(vec![]);
     });

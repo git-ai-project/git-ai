@@ -1,6 +1,6 @@
 use git_ai::git::repository;
 
-use crate::repos::test_repo::{GitTestMode, TestRepo};
+use crate::repos::test_repo::TestRepo;
 use git_ai::commands::git_handlers::CommandHooksContext;
 use git_ai::commands::hooks::commit_hooks::{
     commit_post_command_hook, commit_pre_command_hook, get_commit_default_author,
@@ -22,17 +22,13 @@ fn make_commit_invocation(args: &[&str]) -> ParsedGitInvocation {
     }
 }
 
-fn direct_test_repo() -> TestRepo {
-    TestRepo::new_with_mode(GitTestMode::Wrapper)
-}
-
 // ==============================================================================
 // Pre-Commit Hook Tests
 // ==============================================================================
 
 #[test]
 fn test_pre_commit_hook_success() {
-    let repo = direct_test_repo();
+    let repo = TestRepo::new();
 
     // Create an initial commit so HEAD exists
     repo.filename("initial.txt")
@@ -60,7 +56,7 @@ fn test_pre_commit_hook_success() {
 
 #[test]
 fn test_pre_commit_hook_dry_run() {
-    let repo = direct_test_repo();
+    let repo = TestRepo::new();
 
     repo.filename("test.txt")
         .set_contents(vec!["initial content"])
@@ -77,7 +73,7 @@ fn test_pre_commit_hook_dry_run() {
 
 #[test]
 fn test_pre_commit_hook_captures_head() {
-    let repo = direct_test_repo();
+    let repo = TestRepo::new();
 
     // Create an initial commit so HEAD exists
     repo.filename("initial.txt")
@@ -108,7 +104,7 @@ fn test_pre_commit_hook_captures_head() {
 
 #[test]
 fn test_post_commit_hook_success() {
-    let repo = direct_test_repo();
+    let repo = TestRepo::new();
 
     repo.filename("test.txt")
         .set_contents(vec!["content"])
@@ -147,7 +143,7 @@ fn test_post_commit_hook_success() {
 
 #[test]
 fn test_post_commit_hook_amend() {
-    let repo = direct_test_repo();
+    let repo = TestRepo::new();
 
     // Create initial commit
     repo.filename("test.txt")
@@ -194,7 +190,7 @@ fn test_post_commit_hook_amend() {
 
 #[test]
 fn test_post_commit_hook_dry_run() {
-    let repo = direct_test_repo();
+    let repo = TestRepo::new();
 
     repo.filename("test.txt")
         .set_contents(vec!["content"])
@@ -228,7 +224,7 @@ fn test_post_commit_hook_dry_run() {
 
 #[test]
 fn test_post_commit_hook_failed_status() {
-    let repo = direct_test_repo();
+    let repo = TestRepo::new();
 
     repo.filename("test.txt")
         .set_contents(vec!["content"])
@@ -271,7 +267,7 @@ fn test_post_commit_hook_failed_status() {
 
 #[test]
 fn test_post_commit_hook_pre_hook_failed() {
-    let repo = direct_test_repo();
+    let repo = TestRepo::new();
 
     repo.filename("test.txt")
         .set_contents(vec!["content"])
@@ -310,7 +306,7 @@ fn test_post_commit_hook_pre_hook_failed() {
 
 #[test]
 fn test_post_commit_hook_porcelain_suppresses_output() {
-    let repo = direct_test_repo();
+    let repo = TestRepo::new();
 
     repo.filename("test.txt")
         .set_contents(vec!["content"])
@@ -343,7 +339,7 @@ fn test_post_commit_hook_porcelain_suppresses_output() {
 
 #[test]
 fn test_post_commit_hook_quiet_suppresses_output() {
-    let repo = direct_test_repo();
+    let repo = TestRepo::new();
 
     repo.filename("test.txt")
         .set_contents(vec!["content"])
@@ -379,7 +375,7 @@ fn test_post_commit_hook_quiet_suppresses_output() {
 
 #[test]
 fn test_get_commit_default_author_from_config() {
-    let repo = direct_test_repo();
+    let repo = TestRepo::new();
     let repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
 
     let args = vec![];
@@ -395,7 +391,7 @@ fn test_get_commit_default_author_from_config() {
 #[test]
 #[ignore]
 fn test_get_commit_default_author_from_author_flag() {
-    let repo = direct_test_repo();
+    let repo = TestRepo::new();
     let repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
 
     let args = vec![
@@ -414,7 +410,7 @@ fn test_get_commit_default_author_from_author_flag() {
 #[test]
 #[ignore]
 fn test_get_commit_default_author_from_author_equals() {
-    let repo = direct_test_repo();
+    let repo = TestRepo::new();
     let repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
 
     let args = vec!["--author=Custom Author <custom@example.com>".to_string()];
@@ -430,7 +426,7 @@ fn test_get_commit_default_author_from_author_equals() {
 #[ignore]
 #[serial_test::serial]
 fn test_get_commit_default_author_env_precedence() {
-    let repo = direct_test_repo();
+    let repo = TestRepo::new();
     let repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
 
     // Set environment variable
@@ -459,7 +455,7 @@ fn test_get_commit_default_author_env_precedence() {
 #[ignore]
 #[serial_test::serial]
 fn test_get_commit_default_author_email_env() {
-    let repo = direct_test_repo();
+    let repo = TestRepo::new();
     let repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
 
     // Set EMAIL environment variable
@@ -484,7 +480,7 @@ fn test_get_commit_default_author_email_env() {
 #[ignore]
 #[serial_test::serial]
 fn test_get_commit_default_author_name_only() {
-    let repo = direct_test_repo();
+    let repo = TestRepo::new();
     let repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
 
     unsafe {
@@ -643,7 +639,7 @@ fn test_extract_author_not_present() {
 
 #[test]
 fn test_commit_full_flow() {
-    let repo = direct_test_repo();
+    let repo = TestRepo::new();
 
     // Stage file
     repo.filename("test.txt")
@@ -687,7 +683,7 @@ fn test_commit_full_flow() {
 
 #[test]
 fn test_commit_amend_full_flow() {
-    let repo = direct_test_repo();
+    let repo = TestRepo::new();
 
     // Initial commit
     repo.filename("test.txt")

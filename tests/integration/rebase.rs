@@ -6,17 +6,6 @@ use git_ai::authorship::working_log::AgentId;
 use git_ai::git::refs::notes_add;
 use std::collections::HashMap;
 
-fn test_mode_uses_daemon() -> bool {
-    matches!(
-        std::env::var("GIT_AI_TEST_GIT_MODE")
-            .ok()
-            .as_deref()
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("daemon") | Some("trace-daemon") | Some("pure-daemon") | Some("wrapper-daemon")
-    )
-}
-
 /// Test simple rebase with no conflicts where trees are identical - multiple commits
 #[test]
 fn test_rebase_no_conflicts_identical_trees() {
@@ -487,18 +476,18 @@ fn test_rebase_with_explicit_branch_argument_preserves_authorship() {
     repo.stage_all_and_commit("main advances").unwrap();
 
     // Invoke rebase with explicit branch arg while currently on main.
-    let output = repo.git(&["rebase", &main_branch, "feature"]).unwrap();
-    if !test_mode_uses_daemon() {
-        assert!(
-            output.contains("Commit mapping: 1 original -> 1 new"),
-            "Expected explicit-branch rebase to map one original commit to one rebased commit. Output:\n{}",
-            output
-        );
-    }
+    repo.git(&["rebase", &main_branch, "feature"]).unwrap();
 
     // HEAD should now be on feature after the rebase operation; verify AI blame survived.
     feature_file
         .assert_lines_and_blame(crate::lines!["// AI feature".ai(), "fn feature() {}".ai()]);
+
+    // Verify the rebased commit carries an authorship note via git notes.
+    let rebased_head = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    assert!(
+        repo.read_authorship_note(&rebased_head).is_some(),
+        "Rebased commit should have an authorship note"
+    );
 }
 
 /// Test `git rebase --root --onto <base> <branch>` when invoked from another branch.
@@ -526,17 +515,8 @@ fn test_rebase_root_with_explicit_branch_argument_preserves_authorship() {
     repo.stage_all_and_commit("main advances").unwrap();
 
     // Invoke root rebase with explicit branch arg while currently on main.
-    let output = repo
-        .git(&["rebase", "--root", "--onto", &main_branch, "feature"])
+    repo.git(&["rebase", "--root", "--onto", &main_branch, "feature"])
         .unwrap();
-
-    if !test_mode_uses_daemon() {
-        assert!(
-            output.contains("Commit mapping: 1 original -> 1 new"),
-            "Expected root explicit-branch rebase to map one original commit to one rebased commit. Output:\n{}",
-            output
-        );
-    }
 
     let rebased_feature_head = repo.git(&["rev-parse", "HEAD"]).unwrap();
     assert_ne!(
@@ -548,6 +528,13 @@ fn test_rebase_root_with_explicit_branch_argument_preserves_authorship() {
     // HEAD should now be on feature after the rebase operation; verify AI blame survived.
     feature_file
         .assert_lines_and_blame(crate::lines!["// AI feature".ai(), "fn feature() {}".ai()]);
+
+    // Verify the rebased commit carries an authorship note via git notes.
+    assert!(
+        repo.read_authorship_note(rebased_feature_head.trim())
+            .is_some(),
+        "Rebased commit should have an authorship note"
+    );
 }
 
 /// Test interactive rebase with commit reordering - verifies interactive rebase works
@@ -1460,7 +1447,7 @@ cat {} > "$1"
 /// when the real post-commit pipeline injects them.
 #[test]
 fn test_rebase_preserves_custom_attributes_from_config() {
-    let mut repo = TestRepo::new_dedicated_daemon();
+    let mut repo = TestRepo::new();
 
     // Configure custom attributes via config patch
     let mut attrs = HashMap::new();

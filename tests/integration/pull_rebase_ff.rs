@@ -509,20 +509,9 @@ fn test_pull_rebase_committed_and_autostash_preserves_all_authorship() {
 fn test_pull_rebase_skip_commit_does_not_map_entire_upstream_history() {
     let (local, _upstream, local_ai_sha) = setup_pull_rebase_skip_test();
 
-    let output = local
+    local
         .git(&["pull", "--rebase"])
         .expect("pull --rebase should succeed");
-
-    // Local commit was duplicated upstream via equivalent patch, so rebase should skip it.
-    // Depending on execution mode, we either see git-ai mapping output (wrapper/hooks) or
-    // raw git skip output (daemon passthrough wrapper path).
-    let saw_git_ai_mapping = output.contains("Commit mapping: 1 original -> 0 new");
-    let saw_git_skip_notice = output.contains("skipped previously applied commit");
-    assert!(
-        saw_git_ai_mapping || saw_git_skip_notice,
-        "Expected skipped-commit signal in pull --rebase output (git-ai mapping or git skip notice). Output:\n{}",
-        output
-    );
 
     // HEAD should move away from original local commit onto upstream tip.
     let new_head = local
@@ -533,6 +522,34 @@ fn test_pull_rebase_skip_commit_does_not_map_entire_upstream_history() {
     assert_ne!(
         new_head, local_ai_sha,
         "HEAD should have moved to upstream history after skipped rebase"
+    );
+
+    // Local commit was duplicated upstream via equivalent patch, so rebase should skip it.
+    // Verify via git notes that the upstream-only commits (upstream_extra_1, upstream_extra_2)
+    // did NOT receive AI authorship notes from the skipped local commit.
+    // Walk backwards from HEAD: HEAD = upstream_extra_2, HEAD~1 = upstream_extra_1
+    let upstream_extra_2 = new_head.clone();
+    let upstream_extra_1 = local
+        .git(&["rev-parse", "HEAD~1"])
+        .expect("rev-parse HEAD~1")
+        .trim()
+        .to_string();
+
+    assert!(
+        local.read_authorship_note(&upstream_extra_2).is_none()
+            || !local
+                .read_authorship_note(&upstream_extra_2)
+                .unwrap()
+                .contains("ai_feature.txt"),
+        "upstream_extra_2 should not have AI authorship notes from the skipped local commit"
+    );
+    assert!(
+        local.read_authorship_note(&upstream_extra_1).is_none()
+            || !local
+                .read_authorship_note(&upstream_extra_1)
+                .unwrap()
+                .contains("ai_feature.txt"),
+        "upstream_extra_1 should not have AI authorship notes from the skipped local commit"
     );
 }
 

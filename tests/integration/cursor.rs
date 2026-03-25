@@ -451,59 +451,15 @@ fn test_cursor_e2e_with_resync() {
     use tempfile::TempDir;
 
     let repo = TestRepo::new();
-    // Create a temp directory for the modified database
-    let temp_dir = TempDir::new().expect("Failed to create temp directory");
-    let temp_db_path = temp_dir.path().join("modified_cursor_test.vscdb");
-
-    // Copy the fixture database to the temp location
     let db_path = fixture_path("cursor_test.vscdb");
+
+    // Copy the fixture database to a temp location so we can modify it in-place later.
+    // Using a single path for both checkpoint and commit ensures the daemon's metadata
+    // fallback (__test_cursor_db_path) points to the right file in all execution modes.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let temp_db_path = temp_dir.path().join("cursor_test.vscdb");
     fs::copy(&db_path, &temp_db_path).expect("Failed to copy database");
     let temp_db_path_str = temp_db_path.to_string_lossy().to_string();
-
-    // Modify one of the messages in the temp database
-    {
-        let conn = Connection::open(&temp_db_path).expect("Failed to open temp database");
-
-        // Find and update one of the bubble messages with recognizable text
-        // First, get a bubble key
-        let bubble_key: String = conn
-            .query_row(
-                "SELECT key FROM cursorDiskKV WHERE key LIKE 'bubbleId:00812842-49fe-4699-afae-bb22cda3f6e1:%' LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .expect("Should find at least one bubble");
-
-        // Get the current value and parse it as JSON
-        let current_value: String = conn
-            .query_row(
-                "SELECT value FROM cursorDiskKV WHERE key = ?",
-                [&bubble_key],
-                |row| row.get(0),
-            )
-            .expect("Should get bubble value");
-
-        let mut bubble_json: serde_json::Value =
-            serde_json::from_str(&current_value).expect("Should parse bubble JSON");
-
-        // Modify the text field with our recognizable marker
-        if let Some(obj) = bubble_json.as_object_mut() {
-            obj.insert(
-                "text".to_string(),
-                serde_json::Value::String(
-                    "RESYNC_TEST_MESSAGE: This message was updated after checkpoint".to_string(),
-                ),
-            );
-        }
-
-        // Update the database with the modified JSON
-        let updated_value = serde_json::to_string(&bubble_json).expect("Should serialize JSON");
-        conn.execute(
-            "UPDATE cursorDiskKV SET value = ? WHERE key = ?",
-            [&updated_value, &bubble_key],
-        )
-        .expect("Should update bubble");
-    }
 
     // Create parent directory for the test file
     let src_dir = repo.path().join("src");
@@ -520,7 +476,7 @@ fn test_cursor_e2e_with_resync() {
     let edited_content = "fn main() {\n    println!(\"Hello, World!\");\n    // This is from Cursor\n    println!(\"Additional line from Cursor\");\n}\n";
     fs::write(&file_path, edited_content).unwrap();
 
-    // Run checkpoint with the ORIGINAL database (not yet modified)
+    // Run checkpoint with the UNMODIFIED temp database.
     // Note: Using a test model name to verify it comes from hook input, not DB (DB has "gpt-5")
     let hook_input = serde_json::json!({
         "conversation_id": TEST_CONVERSATION_ID,
@@ -540,8 +496,49 @@ fn test_cursor_e2e_with_resync() {
 
     println!("Checkpoint output: {}", result);
 
-    // Now commit after modifying the same database in-place - this tests the resync logic in
-    // post_commit without relying on an out-of-band daemon env override channel.
+    // Now modify the temp database IN PLACE — same path the checkpoint stored in metadata.
+    // This tests that post-commit resync re-reads the DB and picks up changes.
+    {
+        let conn = Connection::open(&temp_db_path).expect("Failed to open temp database");
+
+        let bubble_key: String = conn
+            .query_row(
+                "SELECT key FROM cursorDiskKV WHERE key LIKE 'bubbleId:00812842-49fe-4699-afae-bb22cda3f6e1:%' LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("Should find at least one bubble");
+
+        let current_value: String = conn
+            .query_row(
+                "SELECT value FROM cursorDiskKV WHERE key = ?",
+                [&bubble_key],
+                |row| row.get(0),
+            )
+            .expect("Should get bubble value");
+
+        let mut bubble_json: serde_json::Value =
+            serde_json::from_str(&current_value).expect("Should parse bubble JSON");
+
+        if let Some(obj) = bubble_json.as_object_mut() {
+            obj.insert(
+                "text".to_string(),
+                serde_json::Value::String(
+                    "RESYNC_TEST_MESSAGE: This message was updated after checkpoint".to_string(),
+                ),
+            );
+        }
+
+        let updated_value = serde_json::to_string(&bubble_json).expect("Should serialize JSON");
+        conn.execute(
+            "UPDATE cursorDiskKV SET value = ? WHERE key = ?",
+            [&updated_value, &bubble_key],
+        )
+        .expect("Should update bubble");
+    }
+
+    // Commit — no env var needed. In wrapper mode the metadata fallback resolves the DB path;
+    // in daemon mode the daemon reads __test_cursor_db_path from checkpoint metadata.
     repo.git(&["add", "-A"]).expect("add --all should succeed");
     let commit = repo.commit("Add cursor edits").unwrap();
 
