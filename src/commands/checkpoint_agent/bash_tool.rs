@@ -292,8 +292,11 @@ pub fn load_tracked_files(repo_root: &Path) -> Result<HashSet<PathBuf>, GitAiErr
 pub fn build_gitignore(repo_root: &Path) -> Result<Gitignore, GitAiError> {
     let mut builder = GitignoreBuilder::new(repo_root);
 
-    // Walk up from repo root collecting .gitignore files
-    fn collect_gitignores(builder: &mut GitignoreBuilder, dir: &Path) {
+    // Recursively collect .gitignore files from the repo tree.
+    // Depth-limited to avoid excessive traversal on very deep trees.
+    const MAX_GITIGNORE_DEPTH: usize = 10;
+
+    fn collect_gitignores(builder: &mut GitignoreBuilder, dir: &Path, depth: usize) {
         let gitignore_path = dir.join(".gitignore");
         if gitignore_path.exists()
             && let Some(err) = builder.add(&gitignore_path)
@@ -305,27 +308,22 @@ pub fn build_gitignore(repo_root: &Path) -> Result<Gitignore, GitAiError> {
             ));
         }
 
-        // Also check subdirectories for nested .gitignore files
+        if depth >= MAX_GITIGNORE_DEPTH {
+            return;
+        }
+
+        // Recurse into subdirectories to find nested .gitignore files
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() && !path.ends_with(".git") {
-                    let nested_gitignore = path.join(".gitignore");
-                    if nested_gitignore.exists()
-                        && let Some(err) = builder.add(&nested_gitignore)
-                    {
-                        debug_log(&format!(
-                            "Warning: failed to parse {}: {}",
-                            nested_gitignore.display(),
-                            err
-                        ));
-                    }
+                    collect_gitignores(builder, &path, depth + 1);
                 }
             }
         }
     }
 
-    collect_gitignores(&mut builder, repo_root);
+    collect_gitignores(&mut builder, repo_root, 0);
 
     builder
         .build()
@@ -375,12 +373,16 @@ pub fn snapshot(
 
     let mut entries = HashMap::new();
 
-    // Use the ignore crate walker for efficient traversal
+    // Use the ignore crate walker for efficient traversal.
+    // Enable git_ignore so the walker prunes ignored directories (node_modules/,
+    // target/, etc.) during traversal rather than visiting all their files only
+    // to filter them out later. The frozen gitignore from build_gitignore() is
+    // still used separately in diff() for Tier 2 filtering of new files.
     let walker = WalkBuilder::new(repo_root)
         .hidden(false) // Don't skip hidden files
-        .git_ignore(false) // We handle gitignore ourselves (frozen rules)
-        .git_global(false)
-        .git_exclude(false)
+        .git_ignore(true) // Prune ignored directories during traversal
+        .git_global(true)
+        .git_exclude(true)
         .filter_entry(|entry| {
             // Skip .git directory itself
             let path = entry.path();
@@ -433,6 +435,20 @@ pub fn snapshot(
             Err(e) => {
                 debug_log(&format!("Failed to stat {}: {}", abs_path.display(), e));
                 // ENOENT is fine (deleted during walk), others are warnings
+            }
+        }
+    }
+
+    // Second pass: ensure all git-tracked files are included even if the
+    // walker's gitignore pruning skipped them (e.g. a tracked *.log file
+    // that matches a .gitignore pattern). This preserves the Tier 1 guarantee
+    // that tracked files are always in the snapshot.
+    for tracked in &tracked_files {
+        let normalized = normalize_path(tracked);
+        if let std::collections::hash_map::Entry::Vacant(entry) = entries.entry(normalized) {
+            let abs_path = repo_root.join(tracked);
+            if let Ok(meta) = fs::symlink_metadata(&abs_path) {
+                entry.insert(StatEntry::from_metadata(&meta));
             }
         }
     }
