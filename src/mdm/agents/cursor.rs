@@ -137,8 +137,11 @@ impl HookInstaller for CursorInstaller {
             params.binary_path.display(),
             CURSOR_PRE_TOOL_USE_CMD
         );
-        let post_tool_use_cmd =
-            format!("{} {}", params.binary_path.display(), CURSOR_POST_TOOL_USE_CMD);
+        let post_tool_use_cmd = format!(
+            "{} {}",
+            params.binary_path.display(),
+            CURSOR_POST_TOOL_USE_CMD
+        );
 
         // Desired hooks payload for Cursor
         let desired: Value = json!({
