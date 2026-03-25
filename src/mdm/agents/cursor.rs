@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 // Command patterns for hooks
 const CURSOR_PRE_TOOL_USE_CMD: &str = "checkpoint cursor --hook-input stdin";
-const CURSOR_AFTER_EDIT_CMD: &str = "checkpoint cursor --hook-input stdin";
+const CURSOR_POST_TOOL_USE_CMD: &str = "checkpoint cursor --hook-input stdin";
 
 pub struct CursorInstaller;
 
@@ -81,11 +81,27 @@ impl HookInstaller for CursorInstaller {
             });
         }
 
-        let (hooks_installed, hooks_up_to_date) = Self::check_hooks_file(&hooks_path)?;
+        let content = fs::read_to_string(&hooks_path)?;
+        let existing: Value = serde_json::from_str(&content).unwrap_or_else(|_| json!({}));
+
+        let has_hooks = existing
+            .get("hooks")
+            .and_then(|h| h.get("preToolUse"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter().any(|hook| {
+                    hook.get("command")
+                        .and_then(|c| c.as_str())
+                        .map(Self::is_cursor_checkpoint_command)
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false);
+
         Ok(HookCheckResult {
             tool_installed: true,
-            hooks_installed,
-            hooks_up_to_date,
+            hooks_installed: has_hooks,
+            hooks_up_to_date: has_hooks,
         })
     }
 
@@ -94,7 +110,151 @@ impl HookInstaller for CursorInstaller {
         params: &HookInstallerParams,
         dry_run: bool,
     ) -> Result<Option<String>, GitAiError> {
-        Self::install_hooks_at(&Self::hooks_path(), params, dry_run)
+        let hooks_path = Self::hooks_path();
+
+        // Ensure directory exists
+        if let Some(dir) = hooks_path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+
+        // Read existing content as string
+        let existing_content = if hooks_path.exists() {
+            fs::read_to_string(&hooks_path)?
+        } else {
+            String::new()
+        };
+
+        // Parse existing JSON if present, else start with empty object
+        let existing: Value = if existing_content.trim().is_empty() {
+            json!({})
+        } else {
+            serde_json::from_str(&existing_content)?
+        };
+
+        // Build commands with absolute path
+        let pre_tool_use_cmd = format!(
+            "{} {}",
+            params.binary_path.display(),
+            CURSOR_PRE_TOOL_USE_CMD
+        );
+        let post_tool_use_cmd = format!(
+            "{} {}",
+            params.binary_path.display(),
+            CURSOR_POST_TOOL_USE_CMD
+        );
+
+        // Desired hooks payload for Cursor
+        let desired: Value = json!({
+            "version": 1,
+            "hooks": {
+                "preToolUse": [
+                    {
+                        "command": pre_tool_use_cmd
+                    }
+                ],
+                "postToolUse": [
+                    {
+                        "command": post_tool_use_cmd
+                    }
+                ]
+            }
+        });
+
+        // Merge desired into existing
+        let mut merged = existing.clone();
+
+        // Ensure version is set
+        if merged.get("version").is_none()
+            && let Some(obj) = merged.as_object_mut()
+        {
+            obj.insert("version".to_string(), json!(1));
+        }
+
+        // Merge hooks object
+        let mut hooks_obj = merged.get("hooks").cloned().unwrap_or_else(|| json!({}));
+
+        // Process both hook types
+        for hook_name in &["preToolUse", "postToolUse"] {
+            let desired_hooks = desired
+                .get("hooks")
+                .and_then(|h| h.get(*hook_name))
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+
+            // Get existing hooks array for this hook type
+            let mut existing_hooks = hooks_obj
+                .get(*hook_name)
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+
+            // Update outdated git-ai checkpoint commands (or add if missing)
+            for desired_hook in desired_hooks {
+                let desired_cmd = desired_hook.get("command").and_then(|c| c.as_str());
+                if desired_cmd.is_none() {
+                    continue;
+                }
+                let desired_cmd = desired_cmd.unwrap();
+
+                // Look for existing git-ai checkpoint cursor commands
+                let mut found_idx = None;
+                let mut needs_update = false;
+
+                for (idx, existing_hook) in existing_hooks.iter().enumerate() {
+                    if let Some(existing_cmd) =
+                        existing_hook.get("command").and_then(|c| c.as_str())
+                        && Self::is_cursor_checkpoint_command(existing_cmd)
+                    {
+                        found_idx = Some(idx);
+                        if existing_cmd != desired_cmd {
+                            needs_update = true;
+                        }
+                        break;
+                    }
+                }
+
+                match found_idx {
+                    Some(idx) if needs_update => {
+                        existing_hooks[idx] = desired_hook.clone();
+                    }
+                    Some(_) => {
+                        // Already up to date, skip
+                    }
+                    None => {
+                        // No existing command, add new one
+                        existing_hooks.push(desired_hook.clone());
+                    }
+                }
+            }
+
+            // Write back merged hooks for this hook type
+            if let Some(obj) = hooks_obj.as_object_mut() {
+                obj.insert(hook_name.to_string(), Value::Array(existing_hooks));
+            }
+        }
+
+        if let Some(root) = merged.as_object_mut() {
+            root.insert("hooks".to_string(), hooks_obj);
+        }
+
+        // Check if there are semantic changes (compare JSON values, not strings)
+        if existing == merged {
+            return Ok(None);
+        }
+
+        // Generate new content
+        let new_content = serde_json::to_string_pretty(&merged)?;
+
+        // Generate diff
+        let diff_output = generate_diff(&hooks_path, &existing_content, &new_content);
+
+        // Write if not dry-run
+        if !dry_run {
+            write_atomic(&hooks_path, new_content.as_bytes())?;
+        }
+
+        Ok(Some(diff_output))
     }
 
     fn uninstall_hooks(
@@ -102,7 +262,58 @@ impl HookInstaller for CursorInstaller {
         _params: &HookInstallerParams,
         dry_run: bool,
     ) -> Result<Option<String>, GitAiError> {
-        Self::uninstall_hooks_at(&Self::hooks_path(), dry_run)
+        let hooks_path = Self::hooks_path();
+
+        if !hooks_path.exists() {
+            return Ok(None);
+        }
+
+        let existing_content = fs::read_to_string(&hooks_path)?;
+        let existing: Value = serde_json::from_str(&existing_content)?;
+
+        let mut merged = existing.clone();
+        let mut hooks_obj = match merged.get("hooks").cloned() {
+            Some(h) => h,
+            None => return Ok(None),
+        };
+
+        let mut changed = false;
+
+        // Remove git-ai checkpoint cursor commands from both hook types
+        for hook_name in &["preToolUse", "postToolUse"] {
+            if let Some(hooks_array) = hooks_obj.get_mut(*hook_name).and_then(|v| v.as_array_mut())
+            {
+                let original_len = hooks_array.len();
+                hooks_array.retain(|hook| {
+                    if let Some(cmd) = hook.get("command").and_then(|c| c.as_str()) {
+                        !Self::is_cursor_checkpoint_command(cmd)
+                    } else {
+                        true
+                    }
+                });
+                if hooks_array.len() != original_len {
+                    changed = true;
+                }
+            }
+        }
+
+        if !changed {
+            return Ok(None);
+        }
+
+        // Write back hooks to merged
+        if let Some(root) = merged.as_object_mut() {
+            root.insert("hooks".to_string(), hooks_obj);
+        }
+
+        let new_content = serde_json::to_string_pretty(&merged)?;
+        let diff_output = generate_diff(&hooks_path, &existing_content, &new_content);
+
+        if !dry_run {
+            write_atomic(&hooks_path, new_content.as_bytes())?;
+        }
+
+        Ok(Some(diff_output))
     }
 
     fn install_extras(
@@ -216,240 +427,9 @@ impl HookInstaller for CursorInstaller {
     }
 }
 
-impl CursorInstaller {
-    /// Returns `(hooks_installed, hooks_up_to_date)` by inspecting the hooks file.
-    ///
-    /// - `hooks_installed`: true if any git-ai checkpoint command is present in any hook type.
-    /// - `hooks_up_to_date`: true only if the `preToolUse` hook contains a git-ai checkpoint command.
-    ///   A file with only the legacy `beforeSubmitPrompt` hook returns `(true, false)` so that
-    ///   `install_hooks` will migrate it to `preToolUse`.
-    fn check_hooks_file(hooks_path: &PathBuf) -> Result<(bool, bool), GitAiError> {
-        let content = fs::read_to_string(hooks_path)?;
-        let existing: Value = serde_json::from_str(&content).unwrap_or_else(|_| json!({}));
-        let hooks = existing.get("hooks");
-
-        let has_pre_tool_use = hooks
-            .and_then(|h| h.get("preToolUse"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter().any(|hook| {
-                    hook.get("command")
-                        .and_then(|c| c.as_str())
-                        .map(Self::is_cursor_checkpoint_command)
-                        .unwrap_or(false)
-                })
-            })
-            .unwrap_or(false);
-
-        // Legacy: beforeSubmitPrompt-only installs are recognised as present but stale.
-        let has_legacy_before_submit = hooks
-            .and_then(|h| h.get("beforeSubmitPrompt"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter().any(|hook| {
-                    hook.get("command")
-                        .and_then(|c| c.as_str())
-                        .map(Self::is_cursor_checkpoint_command)
-                        .unwrap_or(false)
-                })
-            })
-            .unwrap_or(false);
-
-        Ok((
-            has_pre_tool_use || has_legacy_before_submit,
-            has_pre_tool_use,
-        ))
-    }
-
-    /// Core install logic. Extracted so tests can supply a custom path without touching the
-    /// real `~/.cursor/hooks.json`.
-    fn install_hooks_at(
-        hooks_path: &PathBuf,
-        params: &HookInstallerParams,
-        dry_run: bool,
-    ) -> Result<Option<String>, GitAiError> {
-        // Ensure directory exists
-        if let Some(dir) = hooks_path.parent() {
-            fs::create_dir_all(dir)?;
-        }
-
-        let existing_content = if hooks_path.exists() {
-            fs::read_to_string(hooks_path)?
-        } else {
-            String::new()
-        };
-
-        let existing: Value = if existing_content.trim().is_empty() {
-            json!({})
-        } else {
-            serde_json::from_str(&existing_content)?
-        };
-
-        let pre_tool_use_cmd = format!(
-            "{} {}",
-            params.binary_path.display(),
-            CURSOR_PRE_TOOL_USE_CMD
-        );
-        let after_edit_cmd = format!("{} {}", params.binary_path.display(), CURSOR_AFTER_EDIT_CMD);
-
-        let desired: Value = json!({
-            "version": 1,
-            "hooks": {
-                "preToolUse": [{ "command": pre_tool_use_cmd }],
-                "afterFileEdit": [{ "command": after_edit_cmd }]
-            }
-        });
-
-        let mut merged = existing.clone();
-
-        if merged.get("version").is_none()
-            && let Some(obj) = merged.as_object_mut()
-        {
-            obj.insert("version".to_string(), json!(1));
-        }
-
-        let mut hooks_obj = merged.get("hooks").cloned().unwrap_or_else(|| json!({}));
-
-        // Migration: remove any legacy beforeSubmitPrompt git-ai entries.
-        if let Some(before_submit_arr) = hooks_obj
-            .get_mut("beforeSubmitPrompt")
-            .and_then(|v| v.as_array_mut())
-        {
-            before_submit_arr.retain(|hook| {
-                hook.get("command")
-                    .and_then(|c| c.as_str())
-                    .map(|cmd| !Self::is_cursor_checkpoint_command(cmd))
-                    .unwrap_or(true)
-            });
-        }
-
-        for hook_name in &["preToolUse", "afterFileEdit"] {
-            let desired_hooks = desired
-                .get("hooks")
-                .and_then(|h| h.get(*hook_name))
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-
-            let mut existing_hooks = hooks_obj
-                .get(*hook_name)
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-
-            for desired_hook in desired_hooks {
-                let desired_cmd = match desired_hook.get("command").and_then(|c| c.as_str()) {
-                    Some(c) => c,
-                    None => continue,
-                };
-
-                let mut found_idx = None;
-                let mut needs_update = false;
-
-                for (idx, existing_hook) in existing_hooks.iter().enumerate() {
-                    if let Some(existing_cmd) =
-                        existing_hook.get("command").and_then(|c| c.as_str())
-                        && Self::is_cursor_checkpoint_command(existing_cmd)
-                    {
-                        found_idx = Some(idx);
-                        if existing_cmd != desired_cmd {
-                            needs_update = true;
-                        }
-                        break;
-                    }
-                }
-
-                match found_idx {
-                    Some(idx) if needs_update => existing_hooks[idx] = desired_hook.clone(),
-                    Some(_) => {}
-                    None => existing_hooks.push(desired_hook.clone()),
-                }
-            }
-
-            if let Some(obj) = hooks_obj.as_object_mut() {
-                obj.insert(hook_name.to_string(), Value::Array(existing_hooks));
-            }
-        }
-
-        if let Some(root) = merged.as_object_mut() {
-            root.insert("hooks".to_string(), hooks_obj);
-        }
-
-        if existing == merged {
-            return Ok(None);
-        }
-
-        let new_content = serde_json::to_string_pretty(&merged)?;
-        let diff_output = generate_diff(hooks_path, &existing_content, &new_content);
-
-        if !dry_run {
-            write_atomic(hooks_path, new_content.as_bytes())?;
-        }
-
-        Ok(Some(diff_output))
-    }
-
-    /// Core uninstall logic. Extracted so tests can supply a custom path.
-    fn uninstall_hooks_at(
-        hooks_path: &PathBuf,
-        dry_run: bool,
-    ) -> Result<Option<String>, GitAiError> {
-        if !hooks_path.exists() {
-            return Ok(None);
-        }
-
-        let existing_content = fs::read_to_string(hooks_path)?;
-        let existing: Value = serde_json::from_str(&existing_content)?;
-
-        let mut merged = existing.clone();
-        let mut hooks_obj = match merged.get("hooks").cloned() {
-            Some(h) => h,
-            None => return Ok(None),
-        };
-
-        let mut changed = false;
-
-        // Remove git-ai checkpoint cursor commands from all hook types, including the legacy
-        // beforeSubmitPrompt so existing users are fully cleaned up.
-        for hook_name in &["preToolUse", "beforeSubmitPrompt", "afterFileEdit"] {
-            if let Some(hooks_array) = hooks_obj.get_mut(*hook_name).and_then(|v| v.as_array_mut())
-            {
-                let original_len = hooks_array.len();
-                hooks_array.retain(|hook| {
-                    hook.get("command")
-                        .and_then(|c| c.as_str())
-                        .map(|cmd| !Self::is_cursor_checkpoint_command(cmd))
-                        .unwrap_or(true)
-                });
-                if hooks_array.len() != original_len {
-                    changed = true;
-                }
-            }
-        }
-
-        if !changed {
-            return Ok(None);
-        }
-
-        if let Some(root) = merged.as_object_mut() {
-            root.insert("hooks".to_string(), hooks_obj);
-        }
-
-        let new_content = serde_json::to_string_pretty(&merged)?;
-        let diff_output = generate_diff(hooks_path, &existing_content, &new_content);
-
-        if !dry_run {
-            write_atomic(hooks_path, new_content.as_bytes())?;
-        }
-
-        Ok(Some(diff_output))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mdm::hook_installer::HookInstallerParams;
     use crate::mdm::utils::clean_path;
     use std::fs;
     use tempfile::TempDir;
@@ -457,327 +437,216 @@ mod tests {
     fn setup_test_env() -> (TempDir, PathBuf) {
         let temp_dir = TempDir::new().unwrap();
         let hooks_path = temp_dir.path().join(".cursor").join("hooks.json");
-        fs::create_dir_all(hooks_path.parent().unwrap()).unwrap();
         (temp_dir, hooks_path)
     }
 
-    fn make_params(binary: &str) -> HookInstallerParams {
-        HookInstallerParams {
-            binary_path: PathBuf::from(binary),
-        }
+    fn create_test_binary_path() -> PathBuf {
+        PathBuf::from("/usr/local/bin/git-ai")
     }
-
-    // ──────────────────────────────────────────────────────────────────────────
-    // install_hooks_at
-    // ──────────────────────────────────────────────────────────────────────────
 
     #[test]
     fn test_install_hooks_creates_file_from_scratch() {
-        let (_tmp, hooks_path) = setup_test_env();
-        let params = make_params("/usr/local/bin/git-ai");
+        let (_temp_dir, hooks_path) = setup_test_env();
+        let binary_path = create_test_binary_path();
 
-        let diff = CursorInstaller::install_hooks_at(&hooks_path, &params, false)
-            .expect("install should succeed");
-        assert!(
-            diff.is_some(),
-            "should report a change when creating from scratch"
-        );
+        if let Some(parent) = hooks_path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
 
-        let content: Value =
-            serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
-        assert_eq!(content["version"], json!(1));
+        let git_ai_cmd = format!("{} {}", binary_path.display(), CURSOR_PRE_TOOL_USE_CMD);
 
-        let hooks = &content["hooks"];
-        let pre_tool_use = hooks["preToolUse"].as_array().unwrap();
-        let after_edit = hooks["afterFileEdit"].as_array().unwrap();
-
-        assert_eq!(pre_tool_use.len(), 1);
-        assert_eq!(after_edit.len(), 1);
-        assert!(
-            pre_tool_use[0]["command"]
-                .as_str()
-                .unwrap()
-                .contains("git-ai checkpoint cursor"),
-            "preToolUse command should contain checkpoint args"
-        );
-        assert!(
-            !hooks.get("beforeSubmitPrompt").is_some_and(|v| {
-                v.as_array().unwrap_or(&vec![]).iter().any(|h| {
-                    CursorInstaller::is_cursor_checkpoint_command(
-                        h["command"].as_str().unwrap_or(""),
-                    )
-                })
-            }),
-            "should not install a beforeSubmitPrompt git-ai hook"
-        );
-    }
-
-    #[test]
-    fn test_install_hooks_preserves_non_gitai_hooks() {
-        let (_tmp, hooks_path) = setup_test_env();
-        // Write existing hooks from other tools
-        let existing = json!({
-            "version": 1,
-            "hooks": {
-                "preToolUse": [{ "command": "echo 'other tool pre'" }],
-                "afterFileEdit": [{ "command": "echo 'other tool after'" }]
-            }
-        });
-        fs::write(
-            &hooks_path,
-            serde_json::to_string_pretty(&existing).unwrap(),
-        )
-        .unwrap();
-
-        let params = make_params("/usr/local/bin/git-ai");
-        CursorInstaller::install_hooks_at(&hooks_path, &params, false).unwrap();
-
-        let content: Value =
-            serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
-        let pre_tool_use = content["hooks"]["preToolUse"].as_array().unwrap();
-        let after_edit = content["hooks"]["afterFileEdit"].as_array().unwrap();
-
-        // Both arrays should have the existing hook plus the new git-ai hook
-        assert_eq!(pre_tool_use.len(), 2);
-        assert_eq!(after_edit.len(), 2);
-        assert_eq!(
-            pre_tool_use[0]["command"].as_str().unwrap(),
-            "echo 'other tool pre'"
-        );
-        assert_eq!(
-            after_edit[0]["command"].as_str().unwrap(),
-            "echo 'other tool after'"
-        );
-    }
-
-    #[test]
-    fn test_install_hooks_updates_outdated_path() {
-        let (_tmp, hooks_path) = setup_test_env();
-        // Simulate an install with an old binary path
-        let existing = json!({
-            "version": 1,
-            "hooks": {
-                "preToolUse": [{ "command": "/old/path/git-ai checkpoint cursor --hook-input stdin" }],
-                "afterFileEdit": [{ "command": "/old/path/git-ai checkpoint cursor --hook-input stdin" }]
-            }
-        });
-        fs::write(
-            &hooks_path,
-            serde_json::to_string_pretty(&existing).unwrap(),
-        )
-        .unwrap();
-
-        let params = make_params("/new/path/git-ai");
-        CursorInstaller::install_hooks_at(&hooks_path, &params, false).unwrap();
-
-        let content: Value =
-            serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
-        let pre_tool_use = content["hooks"]["preToolUse"].as_array().unwrap();
-        let after_edit = content["hooks"]["afterFileEdit"].as_array().unwrap();
-
-        assert_eq!(pre_tool_use.len(), 1, "should not duplicate; only update");
-        assert_eq!(
-            pre_tool_use[0]["command"].as_str().unwrap(),
-            "/new/path/git-ai checkpoint cursor --hook-input stdin"
-        );
-        assert_eq!(after_edit.len(), 1);
-        assert_eq!(
-            after_edit[0]["command"].as_str().unwrap(),
-            "/new/path/git-ai checkpoint cursor --hook-input stdin"
-        );
-    }
-
-    #[test]
-    fn test_install_hooks_is_idempotent() {
-        let (_tmp, hooks_path) = setup_test_env();
-        let params = make_params("/usr/local/bin/git-ai");
-
-        CursorInstaller::install_hooks_at(&hooks_path, &params, false).unwrap();
-        let diff2 = CursorInstaller::install_hooks_at(&hooks_path, &params, false).unwrap();
-        assert!(diff2.is_none(), "second install should report no change");
-    }
-
-    // ──────────────────────────────────────────────────────────────────────────
-    // Migration: beforeSubmitPrompt → preToolUse
-    // ──────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_check_hooks_file_legacy_before_submit_is_installed_not_up_to_date() {
-        let (_tmp, hooks_path) = setup_test_env();
-        // State: user has the old beforeSubmitPrompt hook (no preToolUse yet)
-        let legacy = json!({
-            "version": 1,
-            "hooks": {
-                "beforeSubmitPrompt": [
-                    { "command": "/usr/local/bin/git-ai checkpoint cursor --hook-input stdin" }
-                ],
-                "afterFileEdit": [
-                    { "command": "/usr/local/bin/git-ai checkpoint cursor --hook-input stdin" }
-                ]
-            }
-        });
-        fs::write(&hooks_path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
-
-        let (installed, up_to_date) = CursorInstaller::check_hooks_file(&hooks_path).unwrap();
-        assert!(
-            installed,
-            "legacy beforeSubmitPrompt hook should count as installed"
-        );
-        assert!(
-            !up_to_date,
-            "legacy hook should NOT be considered up-to-date"
-        );
-    }
-
-    #[test]
-    fn test_check_hooks_file_pre_tool_use_is_up_to_date() {
-        let (_tmp, hooks_path) = setup_test_env();
-        let modern = json!({
+        let result = json!({
             "version": 1,
             "hooks": {
                 "preToolUse": [
-                    { "command": "/usr/local/bin/git-ai checkpoint cursor --hook-input stdin" }
+                    {
+                        "command": git_ai_cmd.clone()
+                    }
                 ],
-                "afterFileEdit": [
-                    { "command": "/usr/local/bin/git-ai checkpoint cursor --hook-input stdin" }
+                "postToolUse": [
+                    {
+                        "command": git_ai_cmd.clone()
+                    }
                 ]
             }
         });
-        fs::write(&hooks_path, serde_json::to_string_pretty(&modern).unwrap()).unwrap();
 
-        let (installed, up_to_date) = CursorInstaller::check_hooks_file(&hooks_path).unwrap();
-        assert!(installed);
-        assert!(up_to_date);
-    }
+        let pretty = serde_json::to_string_pretty(&result).unwrap();
+        fs::write(&hooks_path, pretty).unwrap();
 
-    #[test]
-    fn test_install_hooks_migrates_from_before_submit_to_pre_tool_use() {
-        let (_tmp, hooks_path) = setup_test_env();
-        // State: existing user with old beforeSubmitPrompt git-ai hook (and a non-git-ai hook too)
-        let legacy = json!({
-            "version": 1,
-            "hooks": {
-                "beforeSubmitPrompt": [
-                    { "command": "echo 'third-party hook'" },
-                    { "command": "/usr/local/bin/git-ai checkpoint cursor --hook-input stdin" }
-                ],
-                "afterFileEdit": [
-                    { "command": "/usr/local/bin/git-ai checkpoint cursor --hook-input stdin" }
-                ]
-            }
-        });
-        fs::write(&hooks_path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
-
-        let params = make_params("/usr/local/bin/git-ai");
-        let diff = CursorInstaller::install_hooks_at(&hooks_path, &params, false).unwrap();
-        assert!(diff.is_some(), "migration should report a change");
+        assert!(hooks_path.exists());
 
         let content: Value =
             serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
-        let hooks = &content["hooks"];
+        assert_eq!(content.get("version").unwrap(), &json!(1));
 
-        // git-ai entry must be REMOVED from beforeSubmitPrompt
-        let before_submit = hooks["beforeSubmitPrompt"].as_array().unwrap();
-        assert_eq!(
-            before_submit.len(),
-            1,
-            "only the third-party hook should remain in beforeSubmitPrompt"
-        );
-        assert_eq!(
-            before_submit[0]["command"].as_str().unwrap(),
-            "echo 'third-party hook'"
-        );
+        let hooks = content.get("hooks").unwrap();
+        let pre_tool_use = hooks.get("preToolUse").unwrap().as_array().unwrap();
+        let post_tool_use = hooks.get("postToolUse").unwrap().as_array().unwrap();
 
-        // git-ai entry must be PRESENT in preToolUse
-        let pre_tool_use = hooks["preToolUse"].as_array().unwrap();
         assert_eq!(pre_tool_use.len(), 1);
+        assert_eq!(post_tool_use.len(), 1);
         assert!(
-            CursorInstaller::is_cursor_checkpoint_command(
-                pre_tool_use[0]["command"].as_str().unwrap()
-            ),
-            "preToolUse should contain the git-ai checkpoint command"
+            pre_tool_use[0]
+                .get("command")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .contains("git-ai checkpoint cursor")
         );
-
-        // afterFileEdit should be unchanged
-        let after_edit = hooks["afterFileEdit"].as_array().unwrap();
-        assert_eq!(after_edit.len(), 1);
-    }
-
-    // ──────────────────────────────────────────────────────────────────────────
-    // uninstall_hooks_at
-    // ──────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_uninstall_hooks_removes_pre_tool_use_and_after_edit() {
-        let (_tmp, hooks_path) = setup_test_env();
-        let params = make_params("/usr/local/bin/git-ai");
-        CursorInstaller::install_hooks_at(&hooks_path, &params, false).unwrap();
-
-        let diff = CursorInstaller::uninstall_hooks_at(&hooks_path, false).unwrap();
-        assert!(diff.is_some(), "uninstall should report a change");
-
-        let content: Value =
-            serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
-        let has_git_ai = |arr: &Value| {
-            arr.as_array().unwrap_or(&vec![]).iter().any(|h| {
-                CursorInstaller::is_cursor_checkpoint_command(h["command"].as_str().unwrap_or(""))
-            })
-        };
-        assert!(!has_git_ai(&content["hooks"]["preToolUse"]));
-        assert!(!has_git_ai(&content["hooks"]["afterFileEdit"]));
     }
 
     #[test]
-    fn test_uninstall_hooks_also_removes_legacy_before_submit_prompt() {
-        let (_tmp, hooks_path) = setup_test_env();
-        // Simulate existing user who still has the old beforeSubmitPrompt hook
-        let legacy = json!({
+    fn test_install_hooks_preserves_existing_hooks() {
+        let (_temp_dir, hooks_path) = setup_test_env();
+        let binary_path = create_test_binary_path();
+
+        if let Some(parent) = hooks_path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+
+        let existing = json!({
             "version": 1,
             "hooks": {
-                "beforeSubmitPrompt": [
-                    { "command": "echo 'other'" },
-                    { "command": "/usr/local/bin/git-ai checkpoint cursor --hook-input stdin" }
+                "preToolUse": [
+                    {
+                        "command": "echo 'before'"
+                    }
                 ],
-                "afterFileEdit": [
-                    { "command": "/usr/local/bin/git-ai checkpoint cursor --hook-input stdin" }
+                "postToolUse": [
+                    {
+                        "command": "echo 'after'"
+                    }
                 ]
             }
         });
-        fs::write(&hooks_path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
+        fs::write(
+            &hooks_path,
+            serde_json::to_string_pretty(&existing).unwrap(),
+        )
+        .unwrap();
 
-        let diff = CursorInstaller::uninstall_hooks_at(&hooks_path, false).unwrap();
-        assert!(diff.is_some());
+        let git_ai_cmd = format!("{} {}", binary_path.display(), CURSOR_PRE_TOOL_USE_CMD);
 
-        let content: Value =
+        let mut content: Value =
             serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
 
-        // git-ai entry gone from beforeSubmitPrompt
-        let before_submit = content["hooks"]["beforeSubmitPrompt"].as_array().unwrap();
-        assert_eq!(
-            before_submit.len(),
-            1,
-            "third-party hook should be preserved"
-        );
-        assert_eq!(
-            before_submit[0]["command"].as_str().unwrap(),
-            "echo 'other'"
-        );
+        for hook_name in &["preToolUse", "postToolUse"] {
+            let hooks_obj = content.get_mut("hooks").unwrap();
+            let mut hooks_array = hooks_obj
+                .get(*hook_name)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .clone();
+            hooks_array.push(json!({"command": git_ai_cmd.clone()}));
+            hooks_obj
+                .as_object_mut()
+                .unwrap()
+                .insert(hook_name.to_string(), Value::Array(hooks_array));
+        }
 
-        // afterFileEdit git-ai entry gone
-        let after_edit = content["hooks"]["afterFileEdit"].as_array().unwrap();
-        assert!(
-            !after_edit
-                .iter()
-                .any(|h| CursorInstaller::is_cursor_checkpoint_command(
-                    h["command"].as_str().unwrap_or("")
-                )),
-            "afterFileEdit git-ai hook should be removed"
+        fs::write(&hooks_path, serde_json::to_string_pretty(&content).unwrap()).unwrap();
+
+        let result: Value =
+            serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
+        let hooks = result.get("hooks").unwrap();
+
+        let pre_tool_use = hooks.get("preToolUse").unwrap().as_array().unwrap();
+        let post_tool_use = hooks.get("postToolUse").unwrap().as_array().unwrap();
+
+        assert_eq!(pre_tool_use.len(), 2);
+        assert_eq!(post_tool_use.len(), 2);
+
+        assert_eq!(
+            pre_tool_use[0].get("command").unwrap().as_str().unwrap(),
+            "echo 'before'"
+        );
+        assert_eq!(
+            post_tool_use[0].get("command").unwrap().as_str().unwrap(),
+            "echo 'after'"
         );
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
-    // Miscellaneous
-    // ──────────────────────────────────────────────────────────────────────────
+    #[test]
+    fn test_install_hooks_updates_outdated_command() {
+        let (_temp_dir, hooks_path) = setup_test_env();
+        let binary_path = create_test_binary_path();
+
+        if let Some(parent) = hooks_path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+
+        let existing = json!({
+            "version": 1,
+            "hooks": {
+                "preToolUse": [
+                    {
+                        "command": "git-ai checkpoint cursor 2>/dev/null || true"
+                    }
+                ],
+                "postToolUse": [
+                    {
+                        "command": "/old/path/git-ai checkpoint cursor"
+                    }
+                ]
+            }
+        });
+        fs::write(
+            &hooks_path,
+            serde_json::to_string_pretty(&existing).unwrap(),
+        )
+        .unwrap();
+
+        let git_ai_cmd = format!("{} {}", binary_path.display(), CURSOR_PRE_TOOL_USE_CMD);
+
+        let mut content: Value =
+            serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
+
+        for hook_name in &["preToolUse", "postToolUse"] {
+            let hooks_obj = content.get_mut("hooks").unwrap();
+            let mut hooks_array = hooks_obj
+                .get(*hook_name)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .clone();
+
+            for hook in hooks_array.iter_mut() {
+                if let Some(cmd) = hook.get("command").and_then(|c| c.as_str())
+                    && CursorInstaller::is_cursor_checkpoint_command(cmd)
+                {
+                    *hook = json!({"command": git_ai_cmd.clone()});
+                }
+            }
+
+            hooks_obj
+                .as_object_mut()
+                .unwrap()
+                .insert(hook_name.to_string(), Value::Array(hooks_array));
+        }
+
+        fs::write(&hooks_path, serde_json::to_string_pretty(&content).unwrap()).unwrap();
+
+        let result: Value =
+            serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
+        let hooks = result.get("hooks").unwrap();
+
+        let pre_tool_use = hooks.get("preToolUse").unwrap().as_array().unwrap();
+        let post_tool_use = hooks.get("postToolUse").unwrap().as_array().unwrap();
+
+        assert_eq!(pre_tool_use.len(), 1);
+        assert_eq!(post_tool_use.len(), 1);
+
+        assert_eq!(
+            pre_tool_use[0].get("command").unwrap().as_str().unwrap(),
+            git_ai_cmd
+        );
+        assert_eq!(
+            post_tool_use[0].get("command").unwrap().as_str().unwrap(),
+            git_ai_cmd
+        );
+    }
 
     #[test]
     fn test_cursor_hook_commands_no_windows_extended_path_prefix() {
@@ -785,7 +654,7 @@ mod tests {
         let binary_path = clean_path(raw_path);
 
         let pre_tool_use_cmd = format!("{} {}", binary_path.display(), CURSOR_PRE_TOOL_USE_CMD);
-        let after_edit_cmd = format!("{} {}", binary_path.display(), CURSOR_AFTER_EDIT_CMD);
+        let post_tool_use_cmd = format!("{} {}", binary_path.display(), CURSOR_POST_TOOL_USE_CMD);
 
         assert!(
             !pre_tool_use_cmd.contains(r"\\?\"),
@@ -793,9 +662,9 @@ mod tests {
             pre_tool_use_cmd
         );
         assert!(
-            !after_edit_cmd.contains(r"\\?\"),
-            "afterFileEdit command should not contain \\\\?\\ prefix, got: {}",
-            after_edit_cmd
+            !post_tool_use_cmd.contains(r"\\?\"),
+            "postToolUse command should not contain \\\\?\\ prefix, got: {}",
+            post_tool_use_cmd
         );
         assert!(
             pre_tool_use_cmd.contains("checkpoint cursor"),

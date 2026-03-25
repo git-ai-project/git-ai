@@ -1396,10 +1396,15 @@ impl AgentCheckpointPreset for CursorPreset {
             .map(|s| s.to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
+        // Legacy hooks no longer installed; exit silently for existing users who haven't reinstalled.
+        if hook_event_name == "beforeSubmitPrompt" || hook_event_name == "afterFileEdit" {
+            std::process::exit(0);
+        }
+
         // Validate hook_event_name
-        if hook_event_name != "preToolUse" && hook_event_name != "afterFileEdit" {
+        if hook_event_name != "preToolUse" && hook_event_name != "postToolUse" {
             return Err(GitAiError::PresetError(format!(
-                "Invalid hook_event_name: {}. Expected 'preToolUse' or 'afterFileEdit'",
+                "Invalid hook_event_name: {}. Expected 'preToolUse' or 'postToolUse'",
                 hook_event_name
             )));
         }

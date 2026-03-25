@@ -375,7 +375,7 @@ fn test_cursor_e2e_with_attribution() {
     let hook_input = serde_json::json!({
         "conversation_id": TEST_CONVERSATION_ID,
         "workspace_roots": [repo.canonical_path().to_string_lossy().to_string()],
-        "hook_event_name": "afterFileEdit",
+        "hook_event_name": "postToolUse",
         "file_path": file_path.to_string_lossy().to_string(),
         "model": "model-name-from-hook-test"
     })
@@ -481,7 +481,7 @@ fn test_cursor_e2e_with_resync() {
     let hook_input = serde_json::json!({
         "conversation_id": TEST_CONVERSATION_ID,
         "workspace_roots": [repo.canonical_path().to_string_lossy().to_string()],
-        "hook_event_name": "afterFileEdit",
+        "hook_event_name": "postToolUse",
         "file_path": file_path.to_string_lossy().to_string(),
         "model": "model-name-from-hook-test"
     })
