@@ -643,13 +643,16 @@ pub fn git_status_fallback(repo_root: &Path) -> Result<Vec<String>, GitAiError> 
         let line = String::from_utf8_lossy(part);
 
         if line.starts_with("1 ") || line.starts_with("u ") {
-            // Ordinary or unmerged entry: last space-separated field is the path
-            if let Some(path) = line.split(' ').next_back() {
+            // Ordinary entry: 8 fields before path; unmerged: 10 fields before path
+            let n = if line.starts_with("u ") { 11 } else { 9 };
+            let fields: Vec<&str> = line.splitn(n, ' ').collect();
+            if let Some(path) = fields.last() {
                 changed_files.push(crate::utils::normalize_to_posix(path));
             }
         } else if line.starts_with("2 ") {
-            // Rename/copy: path is last field, plus next NUL-delimited original path
-            if let Some(path) = line.split(' ').next_back() {
+            // Rename/copy: 9 fields before path
+            let fields: Vec<&str> = line.splitn(10, ' ').collect();
+            if let Some(path) = fields.last() {
                 changed_files.push(crate::utils::normalize_to_posix(path));
             }
             // Skip the original path
