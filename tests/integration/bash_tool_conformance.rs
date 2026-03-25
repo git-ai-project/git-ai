@@ -1065,6 +1065,84 @@ fn test_build_gitignore_nested_subdirectory_rules() {
 }
 
 #[test]
+fn test_build_gitignore_deeply_nested_rules() {
+    let repo = TestRepo::new();
+    let root = repo_root(&repo);
+
+    // Top-level .gitignore ignores *.log
+    add_and_commit(&repo, ".gitignore", "*.log\n", "top-level gitignore");
+    // Depth-2 .gitignore in src/generated/ ignores *.gen
+    fs::create_dir_all(root.join("src/generated")).expect("create nested dir");
+    fs::write(root.join("src/generated/.gitignore"), "*.gen\n").expect("write deep gitignore");
+    add_and_commit(
+        &repo,
+        "src/generated/keep.rs",
+        "fn keep() {}",
+        "add placeholder",
+    );
+
+    let gitignore = build_gitignore(&root).expect("build_gitignore should succeed");
+
+    // *.log should be ignored (from top-level)
+    assert!(
+        gitignore.matched(Path::new("debug.log"), false).is_ignore(),
+        "*.log should be ignored by top-level gitignore"
+    );
+    // *.gen should be ignored (from depth-2 src/generated/.gitignore)
+    assert!(
+        gitignore
+            .matched(Path::new("src/generated/output.gen"), false)
+            .is_ignore(),
+        "*.gen should be ignored by deeply nested gitignore"
+    );
+    // *.rs should NOT be ignored at any depth
+    assert!(
+        !gitignore
+            .matched(Path::new("src/generated/keep.rs"), false)
+            .is_ignore(),
+        "*.rs should not be ignored"
+    );
+}
+
+#[test]
+fn test_snapshot_walker_prunes_ignored_directories() {
+    let repo = TestRepo::new();
+    let root = repo_root(&repo);
+
+    // Gitignore that ignores an entire directory (like node_modules/)
+    add_and_commit(&repo, ".gitignore", "ignored_dir/\n", "ignore a directory");
+    add_and_commit(&repo, "tracked.txt", "tracked", "add tracked file");
+
+    // Create the ignored directory with many files
+    let ignored_dir = root.join("ignored_dir");
+    fs::create_dir_all(&ignored_dir).expect("create ignored dir");
+    for i in 0..100 {
+        fs::write(ignored_dir.join(format!("file_{}.txt", i)), "noise").expect("write file");
+    }
+
+    let snap = snapshot(&root, "sess", "t1").expect("snapshot should succeed");
+
+    // Tracked file should be in the snapshot
+    assert!(
+        snap.entries
+            .keys()
+            .any(|p| p.display().to_string().contains("tracked.txt")),
+        "tracked.txt should be in snapshot"
+    );
+
+    // None of the ignored_dir files should be in the snapshot
+    let ignored_count = snap
+        .entries
+        .keys()
+        .filter(|p| p.display().to_string().contains("ignored_dir"))
+        .count();
+    assert_eq!(
+        ignored_count, 0,
+        "files in ignored_dir/ should not appear in snapshot"
+    );
+}
+
+#[test]
 fn test_snapshot_nested_gitignore_excludes_matching_new_files() {
     let repo = TestRepo::new();
     let root = repo_root(&repo);
