@@ -106,13 +106,34 @@ pub fn handle_git(args: &[String]) {
     // and delegate directly to the real git so existing completion scripts work.
     if in_shell_completion_context() {
         let orig_args: Vec<String> = std::env::args().skip(1).collect();
-        proxy_to_git(&orig_args, true, None);
+        proxy_to_git(&orig_args, true, None, None);
         return;
     }
 
-    // Async mode: wrapper should behave as a pure passthrough to git.
+    // Async mode: wrapper should behave as a pure passthrough to git,
+    // but capture and send authoritative pre/post state to the daemon.
     if config::Config::get().feature_flags().async_mode {
-        let exit_status = proxy_to_git(args, false, None);
+        // Initialize the daemon telemetry handle so we can send wrapper state
+        let _ = crate::daemon::telemetry_handle::init_daemon_telemetry_handle();
+
+        let parsed = parse_git_cli_args(args);
+        let worktree = find_repository(&parsed.global_args)
+            .ok()
+            .and_then(|repo| repo.workdir().ok());
+
+        let pre_state = worktree
+            .as_deref()
+            .and_then(crate::git::repo_state::read_head_state_for_worktree);
+        let invocation_id = uuid::Uuid::new_v4().to_string();
+
+        let exit_status = proxy_to_git(args, false, None, Some(&invocation_id));
+
+        let post_state = worktree
+            .as_deref()
+            .and_then(crate::git::repo_state::read_head_state_for_worktree);
+
+        send_wrapper_states_to_daemon(&invocation_id, worktree.as_deref(), pre_state, post_state);
+
         exit_with_status(exit_status);
     }
 
@@ -136,7 +157,7 @@ pub fn handle_git(args: &[String]) {
     // Note: clone aliases (e.g., alias.cl = clone) won't trigger clone hooks because
     // alias resolution requires a Repository object, which doesn't exist yet for clone.
     if parsed_args.command.as_deref() == Some("clone") && !parsed_args.is_help && !skip_hooks {
-        let exit_status = proxy_to_git(&parsed_args.to_invocation_vec(), false, None);
+        let exit_status = proxy_to_git(&parsed_args.to_invocation_vec(), false, None, None);
         if exit_status_was_interrupted(&exit_status) {
             exit_with_status(exit_status);
         }
@@ -173,6 +194,7 @@ pub fn handle_git(args: &[String]) {
             &parsed_args.to_invocation_vec(),
             false,
             child_hooks_path_override.as_deref(),
+            None,
         );
         if exit_status_was_interrupted(&exit_status) {
             exit_with_status(exit_status);
@@ -204,6 +226,7 @@ pub fn handle_git(args: &[String]) {
             &parsed_args.to_invocation_vec(),
             false,
             child_hooks_path_override.as_deref(),
+            None,
         )
     };
     exit_with_status(exit_status);
@@ -574,13 +597,42 @@ fn resolve_child_git_hooks_path_override(
     Some(hooks_path)
 }
 
+fn send_wrapper_states_to_daemon(
+    invocation_id: &str,
+    worktree: Option<&std::path::Path>,
+    pre_state: Option<crate::git::repo_state::HeadState>,
+    post_state: Option<crate::git::repo_state::HeadState>,
+) {
+    let Some(wt) = worktree else { return };
+    let wt_str = wt.to_string_lossy().to_string();
+    let to_repo_context =
+        |s: crate::git::repo_state::HeadState| crate::daemon::domain::RepoContext {
+            head: s.head,
+            branch: s.branch,
+            detached: s.detached,
+        };
+    if let Some(pre) = pre_state {
+        crate::daemon::telemetry_handle::send_wrapper_pre_state(
+            invocation_id,
+            &wt_str,
+            to_repo_context(pre),
+        );
+    }
+    if let Some(post) = post_state {
+        crate::daemon::telemetry_handle::send_wrapper_post_state(
+            invocation_id,
+            &wt_str,
+            to_repo_context(post),
+        );
+    }
+}
+
 fn proxy_to_git(
     args: &[String],
     exit_on_completion: bool,
     child_hooks_path_override: Option<&str>,
+    wrapper_invocation_id: Option<&str>,
 ) -> std::process::ExitStatus {
-    // debug_log(&format!("proxying to git with args: {:?}", args));
-    // debug_log(&format!("prepended global args: {:?}", prepend_global(args)));
     // Use spawn for interactive commands
     let child = {
         #[cfg(unix)]
@@ -599,6 +651,10 @@ fn proxy_to_git(
             }
             cmd.args(args);
             cmd.env(ENV_SKIP_MANAGED_HOOKS, "1");
+            if let Some(id) = wrapper_invocation_id {
+                cmd.env("GIT_AI_WRAPPER_INVOCATION_ID", id);
+                cmd.env("GIT_TRACE2_ENV_VARS", "GIT_AI_WRAPPER_INVOCATION_ID");
+            }
             unsafe {
                 let setpgid_flag = should_setpgid;
                 cmd.pre_exec(move || {
@@ -625,6 +681,10 @@ fn proxy_to_git(
             }
             cmd.args(args);
             cmd.env(ENV_SKIP_MANAGED_HOOKS, "1");
+            if let Some(id) = wrapper_invocation_id {
+                cmd.env("GIT_AI_WRAPPER_INVOCATION_ID", id);
+                cmd.env("GIT_TRACE2_ENV_VARS", "GIT_AI_WRAPPER_INVOCATION_ID");
+            }
 
             #[cfg(windows)]
             {

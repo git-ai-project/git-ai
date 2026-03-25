@@ -40,7 +40,7 @@ macro_rules! define_feature_flags {
 
         impl FeatureFlags {
             /// Merge flags with a base, applying any Some values as overrides
-            fn merge_with(base: Self, overrides: DeserializableFeatureFlags) -> Self {
+            pub(crate) fn merge_with(base: Self, overrides: DeserializableFeatureFlags) -> Self {
                 FeatureFlags {
                     $($field: overrides.$file_name.unwrap_or(base.$field),)*
                 }

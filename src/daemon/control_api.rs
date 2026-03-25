@@ -1,4 +1,5 @@
 use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
+use crate::daemon::domain::RepoContext;
 use crate::metrics::MetricEvent;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -17,6 +18,18 @@ pub enum ControlRequest {
     SubmitTelemetry { envelopes: Vec<TelemetryEnvelope> },
     #[serde(rename = "cas.submit")]
     SubmitCas { records: Vec<CasSyncPayload> },
+    #[serde(rename = "wrapper.pre_state")]
+    WrapperPreState {
+        invocation_id: String,
+        repo_working_dir: String,
+        repo_context: RepoContext,
+    },
+    #[serde(rename = "wrapper.post_state")]
+    WrapperPostState {
+        invocation_id: String,
+        repo_working_dir: String,
+        repo_context: RepoContext,
+    },
     #[serde(rename = "shutdown")]
     Shutdown,
 }

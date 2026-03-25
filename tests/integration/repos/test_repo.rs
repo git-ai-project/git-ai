@@ -45,6 +45,7 @@ pub enum GitTestMode {
     Hooks,
     Both,
     Daemon,
+    WrapperDaemon,
 }
 
 impl GitTestMode {
@@ -60,12 +61,13 @@ impl GitTestMode {
             "hooks" => Self::Hooks,
             "both" | "wrapper+hooks" | "hooks+wrapper" => Self::Both,
             "daemon" | "trace-daemon" | "pure-daemon" => Self::Daemon,
+            "wrapper-daemon" => Self::WrapperDaemon,
             _ => Self::Wrapper,
         }
     }
 
     pub fn uses_wrapper(self) -> bool {
-        matches!(self, Self::Wrapper | Self::Both)
+        matches!(self, Self::Wrapper | Self::Both | Self::WrapperDaemon)
     }
 
     pub fn uses_hooks(self) -> bool {
@@ -73,7 +75,7 @@ impl GitTestMode {
     }
 
     pub fn uses_daemon(self) -> bool {
-        matches!(self, Self::Daemon)
+        matches!(self, Self::Daemon | Self::WrapperDaemon)
     }
 }
 
@@ -838,6 +840,9 @@ impl TestRepo {
                 serde_json::Value::Object(attrs_map),
             );
         }
+        if let Some(feature_flags) = &patch.feature_flags {
+            config.insert("feature_flags".to_string(), feature_flags.clone());
+        }
 
         let config_dir = home.join(".git-ai");
         fs::create_dir_all(&config_dir).expect("failed to create test HOME config directory");
@@ -859,9 +864,15 @@ impl TestRepo {
     }
 
     fn apply_default_config_patch(&mut self) {
+        let git_mode = self.git_mode;
         self.patch_git_ai_config(|patch| {
             patch.exclude_prompts_in_repositories = Some(vec![]); // No exclusions = share everywhere
             patch.prompt_storage = Some("notes".to_string()); // Use notes mode for tests
+            if git_mode == GitTestMode::WrapperDaemon {
+                patch.feature_flags = Some(serde_json::json!({
+                    "async_mode": true
+                }));
+            }
         });
     }
 
@@ -1821,6 +1832,20 @@ impl TestRepo {
 
         if self.git_mode.uses_wrapper() {
             command.env("GIT_AI", "git");
+        }
+
+        // In WrapperDaemon mode, the wrapper needs the daemon socket paths
+        // to initialize the telemetry handle and send wrapper state.
+        if self.git_mode == GitTestMode::WrapperDaemon {
+            command.env("GIT_AI_DAEMON_HOME", self.daemon_home_path());
+            command.env(
+                "GIT_AI_DAEMON_CONTROL_SOCKET",
+                self.daemon_control_socket_path(),
+            );
+            command.env(
+                "GIT_AI_DAEMON_TRACE_SOCKET",
+                self.daemon_trace_socket_path(),
+            );
         }
     }
 

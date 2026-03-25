@@ -3092,8 +3092,16 @@ struct ActorDaemonCoordinator {
     processed_trace_ingest_seq: AtomicUsize,
     trace_ingest_progress_notify: Notify,
     trace_ingress_state: Mutex<TraceIngressState>,
+    wrapper_states: Mutex<HashMap<String, WrapperStateEntry>>,
+    wrapper_state_notify: Notify,
     shutting_down: AtomicBool,
     shutdown_notify: Notify,
+}
+
+struct WrapperStateEntry {
+    pre_repo: Option<RepoContext>,
+    post_repo: Option<RepoContext>,
+    received_at_ns: u128,
 }
 
 enum TracePayloadApplyOutcome {
@@ -3143,6 +3151,8 @@ impl ActorDaemonCoordinator {
             processed_trace_ingest_seq: AtomicUsize::new(0),
             trace_ingest_progress_notify: Notify::new(),
             trace_ingress_state: Mutex::new(TraceIngressState::default()),
+            wrapper_states: Mutex::new(HashMap::new()),
+            wrapper_state_notify: Notify::new(),
             shutting_down: AtomicBool::new(false),
             shutdown_notify: Notify::new(),
         }
@@ -5904,9 +5914,12 @@ impl ActorDaemonCoordinator {
         }
         match self.apply_trace_payload_to_state(payload).await? {
             TracePayloadApplyOutcome::None | TracePayloadApplyOutcome::QueuedFamily => {}
-            TracePayloadApplyOutcome::Applied(applied) => {
+            TracePayloadApplyOutcome::Applied(mut applied) => {
                 if let Some(family) = applied.command.family_key.as_ref().map(|key| key.0.clone()) {
                     self.begin_family_effect(&family)?;
+                    if applied.command.wrapper_invocation_id.is_some() {
+                        self.apply_wrapper_state_overlay(&mut applied.command).await;
+                    }
                     let result = self
                         .maybe_apply_side_effects_for_applied_command(Some(&family), &applied)
                         .await;
@@ -6012,12 +6025,128 @@ impl ActorDaemonCoordinator {
                 }
                 Ok(ControlResponse::ok(None, None))
             }
+            ControlRequest::WrapperPreState {
+                invocation_id,
+                repo_context,
+                ..
+            } => {
+                self.store_wrapper_state(&invocation_id, Some(repo_context), None);
+                Ok(ControlResponse::ok(None, None))
+            }
+            ControlRequest::WrapperPostState {
+                invocation_id,
+                repo_context,
+                ..
+            } => {
+                self.store_wrapper_state(&invocation_id, None, Some(repo_context));
+                Ok(ControlResponse::ok(None, None))
+            }
             ControlRequest::Shutdown => Ok(ControlResponse::ok(None, None)),
         };
 
         match result {
             Ok(response) => response,
             Err(error) => ControlResponse::err(error.to_string()),
+        }
+    }
+
+    fn store_wrapper_state(
+        &self,
+        invocation_id: &str,
+        pre_repo: Option<RepoContext>,
+        post_repo: Option<RepoContext>,
+    ) {
+        let mut states = self
+            .wrapper_states
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let entry = states
+            .entry(invocation_id.to_string())
+            .or_insert_with(|| WrapperStateEntry {
+                pre_repo: None,
+                post_repo: None,
+                received_at_ns: now_unix_nanos(),
+            });
+        if let Some(pre) = pre_repo {
+            entry.pre_repo = Some(pre);
+        }
+        if let Some(post) = post_repo {
+            entry.post_repo = Some(post);
+        }
+        entry.received_at_ns = now_unix_nanos();
+        drop(states);
+        self.wrapper_state_notify.notify_waiters();
+    }
+
+    async fn apply_wrapper_state_overlay(
+        &self,
+        command: &mut crate::daemon::domain::NormalizedCommand,
+    ) {
+        let Some(invocation_id) = command.wrapper_invocation_id.as_ref() else {
+            return;
+        };
+        let invocation_id = invocation_id.clone();
+        let timeout = self.wrapper_state_wait_timeout();
+        let deadline = tokio::time::Instant::now() + timeout;
+
+        loop {
+            // Register interest in notifications BEFORE checking state.
+            // This prevents a race where notify_waiters() fires between
+            // our check and our await, causing a lost wakeup.
+            let notified = self.wrapper_state_notify.notified();
+
+            let (has_pre, has_post) = {
+                let states = self
+                    .wrapper_states
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                match states.get(&invocation_id) {
+                    Some(entry) => (entry.pre_repo.is_some(), entry.post_repo.is_some()),
+                    None => (false, false),
+                }
+            };
+
+            if has_pre && has_post {
+                let mut states = self
+                    .wrapper_states
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if let Some(entry) = states.remove(&invocation_id) {
+                    if let Some(pre) = entry.pre_repo {
+                        command.pre_repo = Some(pre);
+                    }
+                    if let Some(post) = entry.post_repo {
+                        command.post_repo = Some(post);
+                    }
+                }
+                return;
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                eprintln!(
+                    "git-ai daemon: wrapper state timeout for invocation {} (pre={}, post={}), using daemon state",
+                    invocation_id, has_pre, has_post
+                );
+                let mut states = self
+                    .wrapper_states
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                states.remove(&invocation_id);
+                return;
+            }
+
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let _ = tokio::time::timeout(remaining, notified).await;
+        }
+    }
+
+    fn wrapper_state_wait_timeout(&self) -> Duration {
+        let is_test = std::env::var_os("GIT_AI_TEST_DB_PATH").is_some()
+            || std::env::var_os("GITAI_TEST_DB_PATH").is_some();
+        if is_test {
+            Duration::from_secs(20)
+        } else {
+            Duration::from_millis(750)
         }
     }
 }

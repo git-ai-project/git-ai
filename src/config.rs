@@ -178,6 +178,8 @@ pub struct ConfigPatch {
     pub prompt_storage: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_attributes: Option<HashMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feature_flags: Option<serde_json::Value>,
 }
 
 impl Config {
@@ -1000,6 +1002,16 @@ fn apply_test_config_patch(config: &mut Config) {
         }
         if let Some(custom_attributes) = patch.custom_attributes {
             config.custom_attributes = custom_attributes;
+        }
+        if let Some(feature_flags_value) = patch.feature_flags
+            && let Ok(deserialized) = serde_json::from_value::<
+                crate::feature_flags::DeserializableFeatureFlags,
+            >(feature_flags_value)
+        {
+            config.feature_flags = crate::feature_flags::FeatureFlags::merge_with(
+                config.feature_flags.clone(),
+                deserialized,
+            );
         }
     }
 }

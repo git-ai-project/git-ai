@@ -66,6 +66,8 @@ pub struct NormalizedCommand {
     pub stash_target_oid: Option<String>,
     pub ref_changes: Vec<RefChange>,
     pub confidence: Confidence,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wrapper_invocation_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

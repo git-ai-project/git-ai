@@ -13,7 +13,7 @@ fn test_mode_uses_daemon() -> bool {
             .as_deref()
             .map(str::to_ascii_lowercase)
             .as_deref(),
-        Some("daemon") | Some("trace-daemon") | Some("pure-daemon")
+        Some("daemon") | Some("trace-daemon") | Some("pure-daemon") | Some("wrapper-daemon")
     )
 }
 
