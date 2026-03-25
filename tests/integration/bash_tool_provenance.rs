@@ -9,7 +9,7 @@
 
 use crate::repos::test_repo::TestRepo;
 use git_ai::commands::checkpoint_agent::bash_tool::{
-    BashCheckpointAction, HookEvent, diff, handle_bash_tool, snapshot,
+    BashCheckpointAction, HookEvent, diff, git_status_fallback, handle_bash_tool, snapshot,
 };
 use std::fs;
 use std::process::Command;
@@ -1426,5 +1426,44 @@ fn test_bash_provenance_snapshot_diff_rm_deletion() {
         deleted.iter().any(|p| p.contains("removable.txt")),
         "removable.txt should appear in deleted via direct snapshot/diff; got {:?}",
         deleted
+    );
+}
+
+// ───────────────────────────────────────────────────────────────────
+// 13. git_status_fallback parsing correctness
+// ───────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_git_status_fallback_files_with_spaces() {
+    let repo = TestRepo::new();
+    let root = repo_root(&repo);
+
+    // Create and track a file with spaces in its name
+    add_and_commit(&repo, "file with spaces.txt", "original", "add spaced file");
+
+    // Modify it so git status reports it
+    write_file(&repo, "file with spaces.txt", "modified");
+
+    let changed = git_status_fallback(&root).unwrap();
+    assert!(
+        changed.iter().any(|p| p == "file with spaces.txt"),
+        "git_status_fallback should return full path with spaces; got {:?}",
+        changed
+    );
+}
+
+#[test]
+fn test_git_status_fallback_new_untracked_with_spaces() {
+    let repo = TestRepo::new();
+    let root = repo_root(&repo);
+
+    // Create an untracked file with spaces
+    write_file(&repo, "my new file.rs", "content");
+
+    let changed = git_status_fallback(&root).unwrap();
+    assert!(
+        changed.iter().any(|p| p == "my new file.rs"),
+        "git_status_fallback should return full untracked path with spaces; got {:?}",
+        changed
     );
 }
