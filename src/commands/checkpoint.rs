@@ -1448,10 +1448,15 @@ fn get_checkpoint_entry_for_file(
     // Pre-commit fast path:
     // If this file has no prior AI attribution and no INITIAL attribution,
     // we can skip it entirely. Human-only files do not affect AI authorship.
+    // Exception: when cloud_default_ai_attribution is enabled, we need to
+    // process human files so they can be attributed to the most recent AI.
     if is_pre_commit
         && kind == CheckpointKind::Human
         && !has_prior_ai_edits
         && initial_attrs_for_file.is_empty()
+        && !Config::get()
+            .get_feature_flags()
+            .cloud_default_ai_attribution
     {
         return Ok(None);
     }
