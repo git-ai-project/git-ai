@@ -135,10 +135,11 @@ pub fn handle_git(args: &[String]) {
 
         // After a successful commit, wait briefly for the daemon to produce an
         // authorship note so we can show stats inline (same UX as plain wrapper mode).
-        if exit_status.success() && parsed.command.as_deref() == Some("commit") {
-            if let Some(repo) = repository.as_ref() {
-                maybe_show_async_post_commit_stats(&parsed, repo);
-            }
+        if exit_status.success()
+            && parsed.command.as_deref() == Some("commit")
+            && let Some(repo) = repository.as_ref()
+        {
+            maybe_show_async_post_commit_stats(&parsed, repo);
         }
 
         exit_with_status(exit_status);
@@ -691,14 +692,13 @@ fn maybe_show_async_post_commit_stats(parsed: &ParsedGitInvocation, repo: &Repos
         repo,
         &commit_sha,
         &ignore_patterns,
-    ) {
-        if estimate.should_skip() {
-            eprintln!(
-                "[git-ai] Skipped git-ai stats for large commit. Run `git ai stats {}` to compute stats on demand.",
-                commit_sha
-            );
-            return;
-        }
+    ) && estimate.should_skip()
+    {
+        eprintln!(
+            "[git-ai] Skipped git-ai stats for large commit. Run `git ai stats {}` to compute stats on demand.",
+            commit_sha
+        );
+        return;
     }
 
     // Compute and display the full stats.
