@@ -1397,9 +1397,9 @@ impl AgentCheckpointPreset for CursorPreset {
             .unwrap_or_else(|| "unknown".to_string());
 
         // Validate hook_event_name
-        if hook_event_name != "beforeSubmitPrompt" && hook_event_name != "afterFileEdit" {
+        if hook_event_name != "preToolUse" && hook_event_name != "afterFileEdit" {
             return Err(GitAiError::PresetError(format!(
-                "Invalid hook_event_name: {}. Expected 'beforeSubmitPrompt' or 'afterFileEdit'",
+                "Invalid hook_event_name: {}. Expected 'preToolUse' or 'afterFileEdit'",
                 hook_event_name
             )));
         }
@@ -1433,7 +1433,7 @@ impl AgentCheckpointPreset for CursorPreset {
             })?
         };
 
-        if hook_event_name == "beforeSubmitPrompt" {
+        if hook_event_name == "preToolUse" {
             // early return, we're just adding a human checkpoint.
             return Ok(AgentRunResult {
                 agent_id: AgentId {
