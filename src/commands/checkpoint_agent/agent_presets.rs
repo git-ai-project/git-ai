@@ -3,6 +3,9 @@ use crate::{
         transcript::{AiTranscript, Message},
         working_log::{AgentId, CheckpointKind},
     },
+    commands::checkpoint_agent::bash_tool::{
+        self, Agent, BashCheckpointAction, HookEvent, ToolClass,
+    },
     error::GitAiError,
     git::repository::find_repository_for_file,
     observability::log_error,
@@ -76,6 +79,12 @@ impl AgentCheckpointPreset for ClaudePreset {
             .and_then(|v| v.as_str())
             .ok_or_else(|| GitAiError::PresetError("cwd not found in hook_input".to_string()))?;
 
+        // Extract tool_name for bash tool classification
+        let tool_name = hook_data
+            .get("tool_name")
+            .and_then(|v| v.as_str())
+            .or_else(|| hook_data.get("toolName").and_then(|v| v.as_str()));
+
         // Extract the ID from the filename
         // Example: /Users/aidancunniffe/.claude/projects/-Users-aidancunniffe-Desktop-ghq/cb947e5b-246e-4253-a953-631f7e464c6b.jsonl
         let path = Path::new(transcript_path);
@@ -129,7 +138,29 @@ impl AgentCheckpointPreset for ClaudePreset {
         // Check if this is a PreToolUse event (human checkpoint)
         let hook_event_name = hook_data.get("hook_event_name").and_then(|v| v.as_str());
 
+        // Determine if this is a bash tool invocation
+        let is_bash_tool = tool_name
+            .map(|name| bash_tool::classify_tool(Agent::Claude, name) == ToolClass::Bash)
+            .unwrap_or(false);
+
+        // Extract session_id for bash tool snapshot correlation
+        let session_id = hook_data
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or(filename); // Fall back to transcript filename UUID
+
         if hook_event_name == Some("PreToolUse") {
+            // For bash tools, take a pre-snapshot before the tool executes
+            if is_bash_tool {
+                let repo_root = Path::new(cwd);
+                let _ = bash_tool::handle_bash_tool(
+                    HookEvent::PreToolUse,
+                    repo_root,
+                    session_id,
+                    "bash", // tool_use_id: sequential per session
+                );
+            }
+
             // Early return for human checkpoint
             return Ok(AgentRunResult {
                 agent_id,
@@ -143,13 +174,35 @@ impl AgentCheckpointPreset for ClaudePreset {
             });
         }
 
+        // PostToolUse: for bash tools, diff snapshots to detect changed files
+        let edited_filepaths = if is_bash_tool {
+            let repo_root = Path::new(cwd);
+            match bash_tool::handle_bash_tool(HookEvent::PostToolUse, repo_root, session_id, "bash")
+            {
+                Ok(BashCheckpointAction::Checkpoint(paths)) => Some(paths),
+                Ok(BashCheckpointAction::NoChanges) => None,
+                Ok(BashCheckpointAction::Fallback) => {
+                    // Fall back to git status
+                    bash_tool::git_status_fallback(Path::new(cwd)).ok()
+                }
+                Ok(BashCheckpointAction::TakePreSnapshot) => None, // shouldn't happen on post
+                Err(e) => {
+                    crate::utils::debug_log(&format!("Bash tool post-hook error: {}", e));
+                    // Fall back to git status
+                    bash_tool::git_status_fallback(Path::new(cwd)).ok()
+                }
+            }
+        } else {
+            file_path_as_vec
+        };
+
         Ok(AgentRunResult {
             agent_id,
             agent_metadata: Some(agent_metadata),
             checkpoint_kind: CheckpointKind::AiAgent,
             transcript: Some(transcript),
             repo_working_dir: Some(cwd.to_string()),
-            edited_filepaths: file_path_as_vec,
+            edited_filepaths,
             will_edit_filepaths: None,
             dirty_files: None,
         })
@@ -421,6 +474,12 @@ impl AgentCheckpointPreset for GeminiPreset {
             .and_then(|v| v.as_str())
             .ok_or_else(|| GitAiError::PresetError("cwd not found in hook_input".to_string()))?;
 
+        // Extract tool_name for bash tool classification
+        let tool_name = hook_data
+            .get("tool_name")
+            .and_then(|v| v.as_str())
+            .or_else(|| hook_data.get("toolName").and_then(|v| v.as_str()));
+
         // Parse into transcript and extract model
         let (transcript, model) =
             match GeminiPreset::transcript_and_model_from_gemini_json(transcript_path) {
@@ -462,7 +521,22 @@ impl AgentCheckpointPreset for GeminiPreset {
         // Check if this is a PreToolUse event (human checkpoint)
         let hook_event_name = hook_data.get("hook_event_name").and_then(|v| v.as_str());
 
+        // Determine if this is a bash tool invocation
+        let is_bash_tool = tool_name
+            .map(|name| bash_tool::classify_tool(Agent::Gemini, name) == ToolClass::Bash)
+            .unwrap_or(false);
+
         if hook_event_name == Some("BeforeTool") {
+            // For bash tools, take a pre-snapshot before the tool executes
+            if is_bash_tool {
+                let repo_root = Path::new(cwd);
+                let _ = bash_tool::handle_bash_tool(
+                    HookEvent::PreToolUse,
+                    repo_root,
+                    session_id,
+                    "bash",
+                );
+            }
             // Early return for human checkpoint
             return Ok(AgentRunResult {
                 agent_id,
@@ -476,13 +550,33 @@ impl AgentCheckpointPreset for GeminiPreset {
             });
         }
 
+        // PostToolUse: for bash tools, diff snapshots to detect changed files
+        let edited_filepaths = if is_bash_tool {
+            let repo_root = Path::new(cwd);
+            match bash_tool::handle_bash_tool(HookEvent::PostToolUse, repo_root, session_id, "bash")
+            {
+                Ok(BashCheckpointAction::Checkpoint(paths)) => Some(paths),
+                Ok(BashCheckpointAction::NoChanges) => None,
+                Ok(BashCheckpointAction::Fallback) => {
+                    bash_tool::git_status_fallback(Path::new(cwd)).ok()
+                }
+                Ok(BashCheckpointAction::TakePreSnapshot) => None,
+                Err(e) => {
+                    crate::utils::debug_log(&format!("Bash tool post-hook error: {}", e));
+                    bash_tool::git_status_fallback(Path::new(cwd)).ok()
+                }
+            }
+        } else {
+            file_path_as_vec
+        };
+
         Ok(AgentRunResult {
             agent_id,
             agent_metadata: Some(agent_metadata),
             checkpoint_kind: CheckpointKind::AiAgent,
             transcript: Some(transcript),
             repo_working_dir: Some(cwd.to_string()),
-            edited_filepaths: file_path_as_vec,
+            edited_filepaths,
             will_edit_filepaths: None,
             dirty_files: None,
         })
@@ -834,6 +928,12 @@ impl AgentCheckpointPreset for ContinueCliPreset {
             .and_then(|v| v.as_str())
             .ok_or_else(|| GitAiError::PresetError("cwd not found in hook_input".to_string()))?;
 
+        // Extract tool_name for bash tool classification
+        let tool_name = hook_data
+            .get("tool_name")
+            .and_then(|v| v.as_str())
+            .or_else(|| hook_data.get("toolName").and_then(|v| v.as_str()));
+
         // Extract model from hook_input (required)
         let model = hook_data
             .get("model")
@@ -884,7 +984,22 @@ impl AgentCheckpointPreset for ContinueCliPreset {
         // Check if this is a PreToolUse event (human checkpoint)
         let hook_event_name = hook_data.get("hook_event_name").and_then(|v| v.as_str());
 
+        // Determine if this is a bash tool invocation
+        let is_bash_tool = tool_name
+            .map(|name| bash_tool::classify_tool(Agent::ContinueCli, name) == ToolClass::Bash)
+            .unwrap_or(false);
+
         if hook_event_name == Some("PreToolUse") {
+            // For bash tools, take a pre-snapshot before the tool executes
+            if is_bash_tool {
+                let repo_root = Path::new(cwd);
+                let _ = bash_tool::handle_bash_tool(
+                    HookEvent::PreToolUse,
+                    repo_root,
+                    session_id,
+                    "bash",
+                );
+            }
             // Early return for human checkpoint
             return Ok(AgentRunResult {
                 agent_id,
@@ -898,13 +1013,33 @@ impl AgentCheckpointPreset for ContinueCliPreset {
             });
         }
 
+        // PostToolUse: for bash tools, diff snapshots to detect changed files
+        let edited_filepaths = if is_bash_tool {
+            let repo_root = Path::new(cwd);
+            match bash_tool::handle_bash_tool(HookEvent::PostToolUse, repo_root, session_id, "bash")
+            {
+                Ok(BashCheckpointAction::Checkpoint(paths)) => Some(paths),
+                Ok(BashCheckpointAction::NoChanges) => None,
+                Ok(BashCheckpointAction::Fallback) => {
+                    bash_tool::git_status_fallback(Path::new(cwd)).ok()
+                }
+                Ok(BashCheckpointAction::TakePreSnapshot) => None,
+                Err(e) => {
+                    crate::utils::debug_log(&format!("Bash tool post-hook error: {}", e));
+                    bash_tool::git_status_fallback(Path::new(cwd)).ok()
+                }
+            }
+        } else {
+            file_path_as_vec
+        };
+
         Ok(AgentRunResult {
             agent_id,
             agent_metadata: Some(agent_metadata),
             checkpoint_kind: CheckpointKind::AiAgent,
             transcript: Some(transcript),
             repo_working_dir: Some(cwd.to_string()),
-            edited_filepaths: file_path_as_vec,
+            edited_filepaths,
             will_edit_filepaths: None,
             dirty_files: None,
         })
@@ -2849,8 +2984,23 @@ impl AgentCheckpointPreset for DroidPreset {
             agent_metadata.insert("tool_name".to_string(), name.to_string());
         }
 
+        // Determine if this is a bash tool invocation
+        let is_bash_tool = tool_name
+            .map(|name| bash_tool::classify_tool(Agent::Droid, name) == ToolClass::Bash)
+            .unwrap_or(false);
+
         // Check if this is a PreToolUse event (human checkpoint)
         if hook_event_name == "PreToolUse" {
+            // For bash tools, take a pre-snapshot before the tool executes
+            if is_bash_tool {
+                let repo_root = Path::new(cwd);
+                let _ = bash_tool::handle_bash_tool(
+                    HookEvent::PreToolUse,
+                    repo_root,
+                    &agent_id.id,
+                    "bash",
+                );
+            }
             return Ok(AgentRunResult {
                 agent_id,
                 agent_metadata: None,
@@ -2863,6 +3013,30 @@ impl AgentCheckpointPreset for DroidPreset {
             });
         }
 
+        // PostToolUse: for bash tools, diff snapshots to detect changed files
+        let edited_filepaths = if is_bash_tool {
+            let repo_root = Path::new(cwd);
+            match bash_tool::handle_bash_tool(
+                HookEvent::PostToolUse,
+                repo_root,
+                &agent_id.id,
+                "bash",
+            ) {
+                Ok(BashCheckpointAction::Checkpoint(paths)) => Some(paths),
+                Ok(BashCheckpointAction::NoChanges) => None,
+                Ok(BashCheckpointAction::Fallback) => {
+                    bash_tool::git_status_fallback(Path::new(cwd)).ok()
+                }
+                Ok(BashCheckpointAction::TakePreSnapshot) => None,
+                Err(e) => {
+                    crate::utils::debug_log(&format!("Bash tool post-hook error: {}", e));
+                    bash_tool::git_status_fallback(Path::new(cwd)).ok()
+                }
+            }
+        } else {
+            file_path_as_vec
+        };
+
         // PostToolUse event - AI checkpoint
         Ok(AgentRunResult {
             agent_id,
@@ -2870,7 +3044,7 @@ impl AgentCheckpointPreset for DroidPreset {
             checkpoint_kind: CheckpointKind::AiAgent,
             transcript: Some(transcript),
             repo_working_dir: Some(cwd.to_string()),
-            edited_filepaths: file_path_as_vec,
+            edited_filepaths,
             will_edit_filepaths: None,
             dirty_files: None,
         })
