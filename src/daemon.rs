@@ -705,6 +705,36 @@ fn exact_final_state_for_commit_replay(
     Ok(Some(final_state))
 }
 
+fn normalize_line_endings_for_snapshot_compare(content: &str) -> std::borrow::Cow<'_, str> {
+    if !content.contains('\r') {
+        return std::borrow::Cow::Borrowed(content);
+    }
+    std::borrow::Cow::Owned(content.replace("\r\n", "\n").replace('\r', "\n"))
+}
+
+fn normalize_commit_carryover_snapshot(
+    carryover_snapshot: Option<&HashMap<String, String>>,
+    committed_final_state: Option<&HashMap<String, String>>,
+) -> Option<HashMap<String, String>> {
+    let Some(carryover_snapshot) = carryover_snapshot else {
+        return None;
+    };
+
+    let mut normalized = carryover_snapshot.clone();
+    if let Some(committed_final_state) = committed_final_state {
+        for (file_path, committed_content) in committed_final_state {
+            if let Some(snapshot_content) = normalized.get_mut(file_path)
+                && normalize_line_endings_for_snapshot_compare(snapshot_content)
+                    == normalize_line_endings_for_snapshot_compare(committed_content)
+            {
+                *snapshot_content = committed_content.clone();
+            }
+        }
+    }
+
+    Some(normalized)
+}
+
 fn ref_change_span(
     ref_changes: &[crate::daemon::domain::RefChange],
     predicate: impl Fn(&crate::daemon::domain::RefChange) -> bool,
@@ -2383,19 +2413,27 @@ fn apply_rewrite_side_effect(
     if let RewriteLogEvent::Stash { stash } = &rewrite_event {
         apply_stash_rewrite_side_effect(&mut repo, stash)?;
     }
-    let deferred_commit_carryover =
-        deferred_commit_carryover_context(&repo, &rewrite_event, &author, carryover_snapshot)?;
+    let committed_final_state = stable_final_state_for_commit_rewrite(&repo, &rewrite_event)?;
+    let normalized_carryover_snapshot =
+        normalize_commit_carryover_snapshot(carryover_snapshot, committed_final_state.as_ref());
+    let normalized_carryover_snapshot_ref = normalized_carryover_snapshot.as_ref();
+    let deferred_commit_carryover = deferred_commit_carryover_context(
+        &repo,
+        &rewrite_event,
+        &author,
+        normalized_carryover_snapshot_ref,
+    )?;
     sync_pre_commit_checkpoint_for_daemon_commit(
         &repo,
         &rewrite_event,
         &author,
-        carryover_snapshot,
+        normalized_carryover_snapshot_ref,
     )?;
     let log = repo.storage.append_rewrite_event(rewrite_event.clone())?;
-    let committed_final_state = stable_final_state_for_commit_rewrite(&repo, &rewrite_event)?;
     match &rewrite_event {
         RewriteLogEvent::Commit { commit } => {
-            let final_state_override = carryover_snapshot.or(committed_final_state.as_ref());
+            let final_state_override =
+                normalized_carryover_snapshot_ref.or(committed_final_state.as_ref());
             post_commit_with_final_state(
                 &repo,
                 commit.base_commit.clone(),
@@ -2406,7 +2444,8 @@ fn apply_rewrite_side_effect(
             )?;
         }
         RewriteLogEvent::CommitAmend { commit_amend } => {
-            let final_state_override = carryover_snapshot.or(committed_final_state.as_ref());
+            let final_state_override =
+                normalized_carryover_snapshot_ref.or(committed_final_state.as_ref());
             rewrite_authorship_after_commit_amend_with_snapshot(
                 &repo,
                 &commit_amend.original_commit,
@@ -7096,5 +7135,35 @@ mod tests {
             control_request_response_timeout(&waited_checkpoint_request()),
             DAEMON_CHECKPOINT_RESPONSE_TIMEOUT
         );
+    }
+
+    #[test]
+    fn normalize_commit_carryover_snapshot_reuses_committed_blob_for_crlf_only_diff() {
+        let carryover = HashMap::from([(
+            "example.txt".to_string(),
+            "line 1\r\nline 2\r\n".to_string(),
+        )]);
+        let committed =
+            HashMap::from([("example.txt".to_string(), "line 1\nline 2\n".to_string())]);
+
+        let normalized =
+            normalize_commit_carryover_snapshot(Some(&carryover), Some(&committed)).unwrap();
+
+        assert_eq!(normalized.get("example.txt"), committed.get("example.txt"));
+    }
+
+    #[test]
+    fn normalize_commit_carryover_snapshot_preserves_real_post_commit_edits() {
+        let carryover = HashMap::from([(
+            "example.txt".to_string(),
+            "line 1\r\nline 2\r\nextra line\r\n".to_string(),
+        )]);
+        let committed =
+            HashMap::from([("example.txt".to_string(), "line 1\nline 2\n".to_string())]);
+
+        let normalized =
+            normalize_commit_carryover_snapshot(Some(&carryover), Some(&committed)).unwrap();
+
+        assert_eq!(normalized.get("example.txt"), carryover.get("example.txt"));
     }
 }
