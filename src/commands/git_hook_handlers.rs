@@ -265,6 +265,10 @@ fn managed_git_hooks_dir_for_repo(repo: &Repository) -> PathBuf {
     repo_ai_dir(repo).join(GIT_HOOKS_DIR_NAME)
 }
 
+fn default_git_hooks_dir_for_repo(repo: &Repository) -> PathBuf {
+    repo.common_dir().join(GIT_HOOKS_DIR_NAME)
+}
+
 fn managed_git_hooks_dir_from_context() -> Option<PathBuf> {
     if let Some(repo) = find_hook_repository_from_context() {
         return Some(managed_git_hooks_dir_for_repo(&repo));
@@ -774,6 +778,14 @@ fn is_disallowed_forward_hooks_path(
     is_managed_hooks_path(path, repo)
 }
 
+fn default_forward_hooks_path(repo: &Repository, managed_hooks_dir: &Path) -> Option<PathBuf> {
+    let default_hooks_dir = default_git_hooks_dir_for_repo(repo);
+    if is_disallowed_forward_hooks_path(&default_hooks_dir, Some(repo), Some(managed_hooks_dir)) {
+        return None;
+    }
+    Some(default_hooks_dir)
+}
+
 fn select_forward_target_for_repo(
     repo: &Repository,
     managed_hooks_dir: &Path,
@@ -821,23 +833,15 @@ fn select_forward_target_for_repo(
         }
     }
 
-    if let Some(state) = prior_state {
-        if let Some(saved_forward_path) = state.forward_hooks_path.as_deref().map(str::trim)
-            && !saved_forward_path.is_empty()
-        {
-            let saved_path = PathBuf::from(saved_forward_path);
-            if !is_disallowed_forward_hooks_path(&saved_path, Some(repo), Some(managed_hooks_dir)) {
-                return (
-                    state.forward_mode.clone(),
-                    Some(saved_forward_path.to_string()),
-                    state.original_local_hooks_path.clone(),
-                );
-            }
-        }
-        if matches!(state.forward_mode, ForwardMode::None) {
+    if let Some(state) = prior_state
+        && let Some(saved_forward_path) = state.forward_hooks_path.as_deref().map(str::trim)
+        && !saved_forward_path.is_empty()
+    {
+        let saved_path = PathBuf::from(saved_forward_path);
+        if !is_disallowed_forward_hooks_path(&saved_path, Some(repo), Some(managed_hooks_dir)) {
             return (
-                ForwardMode::None,
-                None,
+                state.forward_mode.clone(),
+                Some(saved_forward_path.to_string()),
                 state.original_local_hooks_path.clone(),
             );
         }
@@ -858,6 +862,24 @@ fn select_forward_target_for_repo(
                 None,
             );
         }
+    }
+
+    if let Some(default_hooks_dir) = default_forward_hooks_path(repo, managed_hooks_dir) {
+        return (
+            ForwardMode::RepoLocal,
+            Some(default_hooks_dir.to_string_lossy().to_string()),
+            None,
+        );
+    }
+
+    if let Some(state) = prior_state
+        && matches!(state.forward_mode, ForwardMode::None)
+    {
+        return (
+            ForwardMode::None,
+            None,
+            state.original_local_hooks_path.clone(),
+        );
     }
 
     (ForwardMode::None, None, None)
@@ -1208,6 +1230,11 @@ fn should_forward_repo_state_first(repo: Option<&Repository>) -> Option<PathBuf>
         .or_else(repo_state_path_from_env)?;
     let state = read_repo_hook_state(&state_path).ok().flatten()?;
 
+    let feature_flags = config::Config::get().get_feature_flags().clone();
+    if feature_flags.git_hooks_enabled && feature_flags.git_hooks_externally_managed {
+        return None;
+    }
+
     let managed_hooks_dir = if !state.managed_hooks_path.trim().is_empty() {
         Some(PathBuf::from(state.managed_hooks_path.trim()))
     } else if let Some(repo) = repo {
@@ -1231,7 +1258,11 @@ fn should_forward_repo_state_first(repo: Option<&Repository>) -> Option<PathBuf>
                 .filter(|value| !value.is_empty())
                 .map(PathBuf::from)
         }
-        ForwardMode::None => None,
+        ForwardMode::None => repo.and_then(|repo| {
+            managed_hooks_dir
+                .as_deref()
+                .and_then(|managed_dir| default_forward_hooks_path(repo, managed_dir))
+        }),
     }?;
 
     if is_disallowed_forward_hooks_path(&candidate, fallback_repo, managed_hooks_dir.as_deref()) {

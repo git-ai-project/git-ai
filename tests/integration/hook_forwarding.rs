@@ -70,6 +70,11 @@ fn managed_hooks_dir(repo: &TestRepo) -> PathBuf {
 }
 
 #[cfg(unix)]
+fn default_hooks_dir(repo: &TestRepo) -> PathBuf {
+    git_common_dir(repo).join("hooks")
+}
+
+#[cfg(unix)]
 fn hook_state_path(repo: &TestRepo) -> PathBuf {
     git_common_dir(repo).join("ai").join("git_hooks_state.json")
 }
@@ -620,6 +625,65 @@ fn hooks_mode_managed_hooks_still_produce_authorship_with_forwarding() {
 // 15. Wrapper mode does not set up repo-local hook directory
 // ---------------------------------------------------------------------------
 
+#[cfg(unix)]
+#[test]
+#[serial]
+fn wrapper_mode_preserves_default_post_checkout_hook_after_ensure() {
+    let _mode = EnvVarGuard::set("GIT_AI_TEST_GIT_MODE", "wrapper");
+
+    let repo = TestRepo::new();
+
+    fs::write(repo.path().join("base.txt"), "base\n").expect("failed to write base file");
+    repo.stage_all_and_commit("base commit")
+        .expect("initial commit should succeed");
+
+    let hooks_dir = default_hooks_dir(&repo);
+    fs::create_dir_all(&hooks_dir).expect("failed to create default hooks dir");
+
+    let marker_path = git_dir(&repo).join("post-checkout-marker.txt");
+    let post_checkout_hook = hooks_dir.join("post-checkout");
+    fs::write(
+        &post_checkout_hook,
+        format!(
+            "#!/bin/sh\nprintf '%s %s %s\\n' \"$1\" \"$2\" \"$3\" >> '{}'\n",
+            marker_path.to_string_lossy()
+        ),
+    )
+    .expect("failed to write post-checkout hook");
+    set_executable(&post_checkout_hook);
+
+    repo.git_ai(&["git-hooks", "ensure"])
+        .expect("git-hooks ensure should succeed");
+
+    let state_raw = fs::read_to_string(hook_state_path(&repo)).expect("state should exist");
+    let state: serde_json::Value = serde_json::from_str(&state_raw).expect("state should be JSON");
+    assert_eq!(state["forward_mode"].as_str(), Some("repo_local"));
+    let saved_forward_path = state["forward_hooks_path"]
+        .as_str()
+        .expect("forward_hooks_path should be recorded");
+    assert_eq!(
+        fs::canonicalize(saved_forward_path).expect("saved forward hooks path should exist"),
+        fs::canonicalize(&hooks_dir).expect("default hooks dir should exist"),
+        "default hooks dir should be saved as the forward target"
+    );
+    assert!(
+        state["original_local_hooks_path"].is_null(),
+        "default hooks dir should not be restored as an explicit local hooksPath"
+    );
+
+    repo.git(&["checkout", "-b", "wrapper-default-post-checkout"])
+        .expect("checkout should succeed");
+
+    let marker = fs::read_to_string(&marker_path).expect("marker should exist");
+    let lines: Vec<&str> = marker.lines().collect();
+    assert_eq!(lines.len(), 1, "post-checkout should fire exactly once");
+    assert!(
+        lines[0].ends_with(" 1"),
+        "post-checkout should receive branch-checkout flag 1; got: {}",
+        lines[0]
+    );
+}
+
 #[test]
 #[serial]
 fn wrapper_mode_does_not_install_hook_symlinks() {
@@ -649,6 +713,7 @@ crate::reuse_tests_in_worktree_with_attrs!(
     hooks_mode_state_file_records_forward_target,
     hooks_mode_managed_hooks_always_installed,
     hooks_mode_managed_hooks_still_produce_authorship_with_forwarding,
+    wrapper_mode_preserves_default_post_checkout_hook_after_ensure,
 );
 
 crate::reuse_tests_in_worktree_with_attrs!(
