@@ -576,7 +576,9 @@ fn resolve_live_checkpoint_execution(
         if has_no_ai_edits
             && !has_initial_attributions
             && !Config::get().get_feature_flags().inter_commit_move
-            && !Config::get().get_feature_flags().cloud_default_ai_attribution
+            && !Config::get()
+                .get_feature_flags()
+                .cloud_default_ai_attribution
         {
             debug_log("No AI edits in pre-commit checkpoint, skipping");
             return Ok(None);
@@ -1528,10 +1530,7 @@ fn get_checkpoint_entry_for_file(
     // Non-pre-commit fast path:
     // Preserve existing `git-ai checkpoint` behavior for human-only files by writing an
     // attribution-empty entry while still capturing line stats.
-    if kind == CheckpointKind::Human
-        && !has_prior_ai_edits
-        && initial_attrs_for_file.is_empty()
-    {
+    if kind == CheckpointKind::Human && !has_prior_ai_edits && initial_attrs_for_file.is_empty() {
         let previous_content = if let Some(state) = previous_state.as_ref() {
             working_log
                 .get_file_version(&state.blob_sha)
@@ -1787,8 +1786,15 @@ async fn get_checkpoint_entries(
     is_pre_commit: bool,
     head_commit_override: Option<&str>,
     pre_detected_cloud_env_tool: Option<&str>,
-) -> Result<(Vec<WorkingLogEntry>, Vec<FileLineStats>, CheckpointKind, Option<AgentId>), GitAiError>
-{
+) -> Result<
+    (
+        Vec<WorkingLogEntry>,
+        Vec<FileLineStats>,
+        CheckpointKind,
+        Option<AgentId>,
+    ),
+    GitAiError,
+> {
     let entries_fn_start = Instant::now();
 
     // Read INITIAL attributions from working log (empty if file doesn't exist)
