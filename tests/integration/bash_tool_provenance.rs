@@ -1467,3 +1467,58 @@ fn test_git_status_fallback_new_untracked_with_spaces() {
         changed
     );
 }
+
+#[test]
+fn test_git_status_fallback_rename_reports_both_paths() {
+    let repo = TestRepo::new();
+    let root = repo_root(&repo);
+
+    // Create and track a file, then rename it (staged rename)
+    add_and_commit(&repo, "before.txt", "content", "add file");
+    std::fs::rename(root.join("before.txt"), root.join("after.txt")).unwrap();
+    repo.git_og(&["add", "-A"]).expect("git add should succeed");
+
+    let changed = git_status_fallback(&root).unwrap();
+    assert!(
+        changed.iter().any(|p| p == "after.txt"),
+        "git_status_fallback should report new rename path; got {:?}",
+        changed
+    );
+    assert!(
+        changed.iter().any(|p| p == "before.txt"),
+        "git_status_fallback should report original rename path for attribution preservation; got {:?}",
+        changed
+    );
+}
+
+#[test]
+fn test_bash_provenance_mv_directory_rename() {
+    let repo = TestRepo::new();
+    let root = repo_root(&repo);
+
+    // Create files in a subdirectory and track them
+    add_and_commit(&repo, "src/lib.rs", "fn main() {}", "add src");
+    add_and_commit(&repo, "src/utils.rs", "fn helper() {}", "add utils");
+
+    handle_bash_tool(HookEvent::PreToolUse, &root, "mvdir-sess", "mvdir-t1")
+        .expect("PreToolUse should succeed");
+
+    run_bash(&repo, "mv", &["src", "lib"]);
+
+    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "mvdir-sess", "mvdir-t1")
+        .expect("PostToolUse should succeed");
+
+    let paths = checkpoint_paths(&post_action);
+    // Old paths should appear as deleted
+    assert!(
+        paths.iter().any(|p| p.contains("src/lib.rs")),
+        "src/lib.rs should appear in checkpoint (deleted); got {:?}",
+        paths
+    );
+    // New paths should appear as created
+    assert!(
+        paths.iter().any(|p| p.contains("lib/lib.rs")),
+        "lib/lib.rs should appear in checkpoint (created); got {:?}",
+        paths
+    );
+}
