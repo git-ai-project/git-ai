@@ -2930,6 +2930,22 @@ fn pid_metadata_path(config: &DaemonConfig) -> PathBuf {
         .join(PID_META_FILE)
 }
 
+/// Returns the log file path for the currently running daemon, if any.
+/// Reads the PID from daemon.pid.json and constructs the log path.
+pub fn daemon_log_file_path(config: &DaemonConfig) -> Result<PathBuf, GitAiError> {
+    let meta_path = pid_metadata_path(config);
+    let contents = fs::read_to_string(&meta_path).map_err(|e| {
+        GitAiError::Generic(format!(
+            "failed to read daemon pid metadata at {}: {}",
+            meta_path.display(),
+            e
+        ))
+    })?;
+    let meta: DaemonPidMeta = serde_json::from_str(&contents)?;
+    let log_dir = config.internal_dir.join("daemon").join("logs");
+    Ok(log_dir.join(format!("{}.log", meta.pid)))
+}
+
 fn write_pid_metadata(config: &DaemonConfig) -> Result<(), GitAiError> {
     let meta = DaemonPidMeta {
         pid: std::process::id(),

@@ -1,11 +1,13 @@
 use crate::daemon::{
-    ControlRequest, DaemonConfig, local_socket_connects_with_timeout, send_control_request,
+    ControlRequest, DaemonConfig, daemon_log_file_path, local_socket_connects_with_timeout,
+    send_control_request,
 };
 use crate::utils::LockFile;
 #[cfg(windows)]
 use crate::utils::{
     CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, debug_log,
 };
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
@@ -44,6 +46,12 @@ pub fn handle_daemon(args: &[String]) {
         "shutdown" => {
             if let Err(e) = handle_shutdown() {
                 eprintln!("Failed to shut down: {}", e);
+                std::process::exit(1);
+            }
+        }
+        "tail" => {
+            if let Err(e) = handle_tail(&args[1..]) {
+                eprintln!("Failed to tail daemon log: {}", e);
                 std::process::exit(1);
             }
         }
@@ -371,6 +379,96 @@ fn handle_status(repo_working_dir: String) -> Result<(), String> {
     Ok(())
 }
 
+fn handle_tail(args: &[String]) -> Result<(), String> {
+    let config = daemon_config_from_env_or_default_paths()?;
+    if !daemon_is_up(&config) {
+        return Err("daemon is not running".to_string());
+    }
+
+    let log_path =
+        daemon_log_file_path(&config).map_err(|e| format!("cannot locate daemon log: {}", e))?;
+    if !log_path.exists() {
+        return Err(format!("daemon log file not found: {}", log_path.display()));
+    }
+
+    let full = has_flag(args, "--full") || has_flag(args, "-f");
+    let lines: usize = parse_number_arg(args, "-n")
+        .or_else(|| parse_number_arg(args, "--lines"))
+        .unwrap_or(20);
+
+    let file = std::fs::File::open(&log_path)
+        .map_err(|e| format!("cannot open {}: {}", log_path.display(), e))?;
+
+    if full {
+        // Print entire file then continue tailing.
+        let reader = BufReader::new(&file);
+        for line in reader.lines() {
+            let line = line.map_err(|e| e.to_string())?;
+            println!("{}", line);
+        }
+    } else {
+        // Print last N lines.
+        print_last_n_lines(&file, lines).map_err(|e| e.to_string())?;
+    }
+
+    // Tail: poll for new content.
+    tail_file(file).map_err(|e| e.to_string())
+}
+
+fn parse_number_arg(args: &[String], flag: &str) -> Option<usize> {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == flag && i + 1 < args.len() {
+            return args[i + 1].parse().ok();
+        }
+        i += 1;
+    }
+    None
+}
+
+fn print_last_n_lines(file: &std::fs::File, n: usize) -> Result<(), std::io::Error> {
+    use std::io::Read;
+    let metadata = file.metadata()?;
+    let file_size = metadata.len();
+    if file_size == 0 {
+        return Ok(());
+    }
+
+    // Read up to 64KB from the end to find the last N lines.
+    let read_size = file_size.min(64 * 1024) as usize;
+    let mut buf = vec![0u8; read_size];
+    let mut f = file;
+    f.seek(SeekFrom::End(-(read_size as i64)))?;
+    f.read_exact(&mut buf)?;
+
+    let text = String::from_utf8_lossy(&buf);
+    let all_lines: Vec<&str> = text.lines().collect();
+    let start = all_lines.len().saturating_sub(n);
+    for line in &all_lines[start..] {
+        println!("{}", line);
+    }
+
+    // Seek to end for tailing.
+    f.seek(SeekFrom::End(0))?;
+    Ok(())
+}
+
+fn tail_file(file: std::fs::File) -> Result<(), std::io::Error> {
+    let mut reader = BufReader::new(file);
+    // Seek to end in case print_last_n_lines didn't (full mode).
+    reader.seek(SeekFrom::End(0))?;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line)?;
+        if n > 0 {
+            print!("{}", line);
+        } else {
+            thread::sleep(Duration::from_millis(200));
+        }
+    }
+}
+
 fn handle_shutdown() -> Result<(), String> {
     let config = daemon_config_from_env_or_default_paths()?;
     let response = send_control_request(&config.control_socket_path, &ControlRequest::Shutdown)
@@ -417,4 +515,5 @@ fn print_help() {
     eprintln!("  git-ai d run");
     eprintln!("  git-ai d status [--repo <path>]");
     eprintln!("  git-ai d shutdown");
+    eprintln!("  git-ai d tail [-n <lines>] [--full]");
 }
