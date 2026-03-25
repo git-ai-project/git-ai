@@ -730,6 +730,7 @@ fn test_bash_provenance_ls_is_readonly() {
 }
 
 #[test]
+#[cfg(not(target_os = "windows"))] // Windows `find` is not POSIX find
 fn test_bash_provenance_find_is_readonly() {
     let repo = TestRepo::new();
     let root = repo_root(&repo);
