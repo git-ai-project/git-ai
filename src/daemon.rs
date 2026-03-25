@@ -2992,7 +2992,8 @@ fn setup_daemon_log_file(config: &DaemonConfig) -> Result<DaemonLogGuard, GitAiE
     let log_dir = daemon_log_dir(config);
     fs::create_dir_all(&log_dir)?;
 
-    prune_stale_daemon_logs(&log_dir);
+    let prune_dir = log_dir.clone();
+    std::thread::spawn(move || prune_stale_daemon_logs(&prune_dir));
 
     let log_path = log_dir.join(format!("{}.log", std::process::id()));
     let file = OpenOptions::new()
@@ -3015,10 +3016,12 @@ fn setup_daemon_log_file(config: &DaemonConfig) -> Result<DaemonLogGuard, GitAiE
     Ok(DaemonLogGuard { _file: file })
 }
 
-/// Remove log files from previous daemon runs. We keep only files whose PID is
-/// still alive to avoid unbounded growth.
+/// Remove log files from previous daemon runs that are older than one week and
+/// whose PID is no longer alive, to avoid unbounded growth while keeping recent
+/// logs available for debugging.
 #[cfg(unix)]
 fn prune_stale_daemon_logs(log_dir: &Path) {
+    let one_week = std::time::Duration::from_secs(7 * 24 * 60 * 60);
     let entries = match fs::read_dir(log_dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -3033,7 +3036,16 @@ fn prune_stale_daemon_logs(log_dir: &Path) {
             Ok(p) => p,
             Err(_) => continue,
         };
-        if !process_alive(pid) {
+        if process_alive(pid) {
+            continue;
+        }
+        let dominated = path
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > one_week);
+        if dominated {
             let _ = fs::remove_file(&path);
         }
     }
