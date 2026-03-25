@@ -330,6 +330,52 @@ pub fn run(
     )
 }
 
+/// Like `run`, but accepts a pre-detected cloud env tool name from the caller.
+/// Used by the daemon to propagate the cloud tool detected in the wrapper process,
+/// since the daemon's own environment doesn't have the cloud agent env vars.
+#[allow(clippy::too_many_arguments)]
+pub fn run_with_captured_cloud_env_tool(
+    repo: &Repository,
+    author: &str,
+    kind: CheckpointKind,
+    reset: bool,
+    quiet: bool,
+    agent_run_result: Option<AgentRunResult>,
+    is_pre_commit: bool,
+    captured_cloud_env_tool: Option<String>,
+) -> Result<(usize, usize, usize), GitAiError> {
+    let checkpoint_start = Instant::now();
+    debug_log("[BENCHMARK] Starting checkpoint run");
+    let resolved = resolve_live_checkpoint_execution(
+        repo,
+        kind,
+        agent_run_result.as_ref(),
+        is_pre_commit,
+        None,
+        BaseOverrideResolutionPolicy::AllowFallback,
+    )?;
+    let Some(resolved) = resolved else {
+        debug_log(&format!(
+            "[BENCHMARK] Total checkpoint run took {:?}",
+            checkpoint_start.elapsed()
+        ));
+        return Ok((0, 0, 0));
+    };
+
+    execute_resolved_checkpoint(
+        repo,
+        author,
+        kind,
+        reset,
+        quiet,
+        agent_run_result,
+        is_pre_commit,
+        resolved,
+        checkpoint_start,
+        captured_cloud_env_tool,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run_with_base_commit_override(
     repo: &Repository,
@@ -1678,7 +1724,7 @@ fn get_checkpoint_entry_for_file(
 
 /// Detect the cloud environment tool name from environment variables.
 /// Returns a tool name like "cursor-agent", "claude-web", "devin", or "unknown".
-fn detect_cloud_env_tool() -> String {
+pub(crate) fn detect_cloud_env_tool() -> String {
     // Explicit CLOUD_AGENT_TOOL env var takes highest priority
     if let Ok(tool) = std::env::var("CLOUD_AGENT_TOOL")
         && !tool.is_empty()

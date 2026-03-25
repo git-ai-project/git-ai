@@ -1175,6 +1175,14 @@ fn run_checkpoint_via_daemon_or_local(
                         }
                     }
 
+                    // Detect cloud env tool in the wrapper process (where env
+                    // vars from the caller are available) so the daemon can
+                    // use it without needing to re-read the wrapper's env.
+                    let captured_cloud_env_tool = if kind == CheckpointKind::Human {
+                        Some(crate::commands::checkpoint::detect_cloud_env_tool())
+                    } else {
+                        None
+                    };
                     let request = ControlRequest::CheckpointRun {
                         request: Box::new(CheckpointRunRequest::Live(Box::new(
                             LiveCheckpointRunRequest {
@@ -1185,6 +1193,7 @@ fn run_checkpoint_via_daemon_or_local(
                                 quiet: Some(quiet),
                                 is_pre_commit: Some(is_pre_commit),
                                 agent_run_result: agent_run_result.clone(),
+                                captured_cloud_env_tool,
                             },
                         ))),
                         wait: Some(true),

@@ -73,6 +73,11 @@ pub struct LiveCheckpointRunRequest {
     pub is_pre_commit: Option<bool>,
     #[serde(default)]
     pub agent_run_result: Option<AgentRunResult>,
+    /// Cloud env tool detected at capture time (in the wrapper process).
+    /// Propagated to the daemon so it doesn't need to re-detect from env vars
+    /// that only exist in the wrapper's environment.
+    #[serde(default)]
+    pub captured_cloud_env_tool: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
