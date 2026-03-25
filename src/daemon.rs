@@ -3004,8 +3004,12 @@ fn setup_daemon_log_file(config: &DaemonConfig) -> Result<DaemonLogGuard, GitAiE
     // SAFETY: dup2 is a standard POSIX call; we redirect stdout/stderr to our
     // open log file descriptor. The file is kept alive by the returned guard.
     unsafe {
-        libc::dup2(fd, libc::STDOUT_FILENO);
-        libc::dup2(fd, libc::STDERR_FILENO);
+        if libc::dup2(fd, libc::STDOUT_FILENO) == -1 {
+            return Err(GitAiError::Generic("dup2 stdout failed".to_string()));
+        }
+        if libc::dup2(fd, libc::STDERR_FILENO) == -1 {
+            return Err(GitAiError::Generic("dup2 stderr failed".to_string()));
+        }
     }
 
     Ok(DaemonLogGuard { _file: file })
