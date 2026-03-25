@@ -211,7 +211,8 @@ impl HookInstaller for WindsurfInstaller {
             });
         }
 
-        // Check all hook locations — hooks are installed only if present in every location
+        // Check all hook locations
+        let mut any_installed = false;
         let mut all_installed = true;
         for hooks_path in Self::hooks_paths() {
             if !hooks_path.exists() {
@@ -238,14 +239,16 @@ impl HookInstaller for WindsurfInstaller {
                     .unwrap_or(false)
             });
 
-            if !has_hooks {
+            if has_hooks {
+                any_installed = true;
+            } else {
                 all_installed = false;
             }
         }
 
         Ok(HookCheckResult {
             tool_installed: true,
-            hooks_installed: all_installed,
+            hooks_installed: any_installed,
             hooks_up_to_date: all_installed,
         })
     }
