@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -293,10 +293,34 @@ pub fn build_gitignore(repo_root: &Path) -> Result<Gitignore, GitAiError> {
     let mut builder = GitignoreBuilder::new(repo_root);
 
     // Recursively collect .gitignore files from the repo tree.
-    // Depth-limited to avoid excessive traversal on very deep trees.
+    // Depth-limited and time-limited to avoid excessive traversal.
     const MAX_GITIGNORE_DEPTH: usize = 10;
 
-    fn collect_gitignores(builder: &mut GitignoreBuilder, dir: &Path, depth: usize) {
+    /// Well-known directory names that are almost always gitignored.
+    /// Skipping these avoids descending into very large ignored trees
+    /// (e.g. `node_modules/`) when we cannot yet match against the
+    /// partially-built gitignore ruleset.
+    const SKIP_DIR_NAMES: &[&str] = &[
+        "node_modules",
+        "target",
+        ".build",
+        "vendor",
+        "__pycache__",
+        ".venv",
+        "dist",
+        "build",
+    ];
+
+    fn collect_gitignores(
+        builder: &mut GitignoreBuilder,
+        dir: &Path,
+        depth: usize,
+        deadline: Instant,
+    ) {
+        if depth >= MAX_GITIGNORE_DEPTH || Instant::now() > deadline {
+            return;
+        }
+
         let gitignore_path = dir.join(".gitignore");
         if gitignore_path.exists()
             && let Some(err) = builder.add(&gitignore_path)
@@ -308,22 +332,25 @@ pub fn build_gitignore(repo_root: &Path) -> Result<Gitignore, GitAiError> {
             ));
         }
 
-        if depth >= MAX_GITIGNORE_DEPTH {
-            return;
-        }
-
         // Recurse into subdirectories to find nested .gitignore files
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() && !path.ends_with(".git") {
-                    collect_gitignores(builder, &path, depth + 1);
+                    // Skip well-known large ignored directory trees.
+                    if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                        && SKIP_DIR_NAMES.contains(&name)
+                    {
+                        continue;
+                    }
+                    collect_gitignores(builder, &path, depth + 1, deadline);
                 }
             }
         }
     }
 
-    collect_gitignores(&mut builder, repo_root, 0);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    collect_gitignores(&mut builder, repo_root, 0, deadline);
 
     builder
         .build()
