@@ -650,12 +650,18 @@ pub fn git_status_fallback(repo_root: &Path) -> Result<Vec<String>, GitAiError> 
                 changed_files.push(crate::utils::normalize_to_posix(path));
             }
         } else if line.starts_with("2 ") {
-            // Rename/copy: 9 fields before path
+            // Rename/copy: 9 fields before new path, then NUL-delimited original path
             let fields: Vec<&str> = line.splitn(10, ' ').collect();
             if let Some(path) = fields.last() {
                 changed_files.push(crate::utils::normalize_to_posix(path));
             }
-            // Skip the original path
+            // Also include the original path (next NUL-delimited entry)
+            if i + 1 < parts.len() {
+                let orig = String::from_utf8_lossy(parts[i + 1]);
+                if !orig.is_empty() {
+                    changed_files.push(crate::utils::normalize_to_posix(&orig));
+                }
+            }
             i += 1;
         } else if let Some(path) = line.strip_prefix("? ") {
             // Untracked: path follows "? "
