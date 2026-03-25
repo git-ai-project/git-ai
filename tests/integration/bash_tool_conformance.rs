@@ -7,13 +7,16 @@
 
 use crate::repos::test_repo::TestRepo;
 use git_ai::commands::checkpoint_agent::bash_tool::{
-    Agent, BashCheckpointAction, HookEvent, ToolClass, build_gitignore, classify_tool,
-    cleanup_stale_snapshots, diff, git_status_fallback, handle_bash_tool, normalize_path, snapshot,
+    Agent, BashCheckpointAction, HookEvent, StatDiffResult, StatEntry, StatFileType, StatSnapshot,
+    ToolClass, build_gitignore, classify_tool, cleanup_stale_snapshots, diff, git_status_fallback,
+    handle_bash_tool, load_and_consume_snapshot, normalize_path, save_snapshot, snapshot,
 };
+use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -998,4 +1001,681 @@ fn test_bash_tool_detect_file_in_subdirectory() {
         "deeply nested module.rs should be detected; got {:?}",
         all
     );
+}
+
+// ===========================================================================
+// normalize_path — case folding
+// ===========================================================================
+
+#[test]
+fn test_normalize_path_case_folding() {
+    let mixed = Path::new("Src/Main.RS");
+    let normalized = normalize_path(mixed);
+    // On macOS/Windows, should be lowercased; on Linux, unchanged
+    if cfg!(any(target_os = "macos", target_os = "windows")) {
+        assert_eq!(
+            normalized,
+            PathBuf::from("src/main.rs"),
+            "normalize_path should lowercase on case-insensitive platforms"
+        );
+    } else {
+        assert_eq!(
+            normalized,
+            PathBuf::from("Src/Main.RS"),
+            "normalize_path should preserve case on case-sensitive platforms"
+        );
+    }
+}
+
+// ===========================================================================
+// Nested subdirectory .gitignore
+// ===========================================================================
+
+#[test]
+fn test_build_gitignore_nested_subdirectory_rules() {
+    let repo = TestRepo::new();
+    let root = repo_root(&repo);
+
+    // Top-level .gitignore ignores *.log
+    add_and_commit(&repo, ".gitignore", "*.log\n", "top-level gitignore");
+    // Nested .gitignore in src/ ignores *.tmp
+    add_and_commit(&repo, "src/.gitignore", "*.tmp\n", "nested gitignore");
+
+    let gitignore = build_gitignore(&root).expect("build_gitignore should succeed");
+
+    // *.log should be ignored (from top-level)
+    assert!(
+        gitignore.matched(Path::new("debug.log"), false).is_ignore(),
+        "*.log should be ignored by top-level gitignore"
+    );
+    // *.tmp should be ignored (from nested src/.gitignore)
+    assert!(
+        gitignore
+            .matched(Path::new("src/data.tmp"), false)
+            .is_ignore(),
+        "*.tmp should be ignored by nested src/.gitignore"
+    );
+    // *.rs should NOT be ignored
+    assert!(
+        !gitignore
+            .matched(Path::new("src/main.rs"), false)
+            .is_ignore(),
+        "*.rs should not be ignored"
+    );
+}
+
+#[test]
+fn test_snapshot_nested_gitignore_excludes_matching_new_files() {
+    let repo = TestRepo::new();
+    let root = repo_root(&repo);
+
+    add_and_commit(&repo, ".gitignore", "", "root gitignore");
+    add_and_commit(&repo, "src/.gitignore", "*.generated\n", "nested gitignore");
+
+    let pre = snapshot(&root, "sess", "t1").expect("pre-snapshot should succeed");
+
+    // Create both an ignored and a non-ignored file under src/
+    write_file(&repo, "src/output.generated", "generated code");
+    write_file(&repo, "src/real.rs", "fn real() {}");
+
+    let post = snapshot(&root, "sess", "t2").expect("post-snapshot should succeed");
+    let result = diff(&pre, &post);
+
+    let created: Vec<String> = result
+        .created
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect();
+    assert!(
+        created.iter().any(|p| p.contains("real.rs")),
+        "real.rs should be created; got {:?}",
+        created
+    );
+    assert!(
+        !created.iter().any(|p| p.contains("output.generated")),
+        "output.generated should be excluded by nested gitignore; got {:?}",
+        created
+    );
+}
+
+// ===========================================================================
+// Snapshot save/load round-trip and snapshot consumption
+// ===========================================================================
+
+#[test]
+fn test_snapshot_save_load_round_trip() {
+    let repo = TestRepo::new();
+    let root = repo_root(&repo);
+
+    add_and_commit(&repo, "tracked.txt", "content", "initial");
+
+    let snap = snapshot(&root, "rt-sess", "rt-tool").expect("snapshot should succeed");
+    let entry_count = snap.entries.len();
+    let key = snap.invocation_key.clone();
+
+    save_snapshot(&snap).expect("save_snapshot should succeed");
+
+    // Load and consume — should get the snapshot back
+    let loaded = load_and_consume_snapshot(&root, &key)
+        .expect("load should succeed")
+        .expect("snapshot should exist");
+    assert_eq!(loaded.entries.len(), entry_count);
+    assert_eq!(loaded.invocation_key, key);
+    // gitignore is skipped during serialization
+    assert!(loaded.gitignore.is_none());
+
+    // Second load — should return None (consumed)
+    let second = load_and_consume_snapshot(&root, &key).expect("load should succeed");
+    assert!(
+        second.is_none(),
+        "snapshot should be consumed after first load"
+    );
+}
+
+#[test]
+fn test_gitignore_filtering_through_save_load_round_trip() {
+    let repo = TestRepo::new();
+    let root = repo_root(&repo);
+
+    add_and_commit(&repo, ".gitignore", "*.log\n", "add gitignore");
+    add_and_commit(&repo, "base.txt", "base", "initial");
+
+    // Use handle_bash_tool to go through save/load path
+    handle_bash_tool(HookEvent::PreToolUse, &root, "gi-rt", "gi-t1")
+        .expect("PreToolUse should succeed");
+
+    // Create both ignored and non-ignored files
+    write_file(&repo, "output.log", "log data");
+    write_file(&repo, "result.txt", "result data");
+
+    let action = handle_bash_tool(HookEvent::PostToolUse, &root, "gi-rt", "gi-t1")
+        .expect("PostToolUse should succeed");
+
+    match action {
+        BashCheckpointAction::Checkpoint(paths) => {
+            assert!(
+                paths.iter().any(|p| p.contains("result.txt")),
+                "result.txt should be in checkpoint; got {:?}",
+                paths
+            );
+            assert!(
+                !paths.iter().any(|p| p.contains("output.log")),
+                "output.log should be excluded by gitignore after round-trip; got {:?}",
+                paths
+            );
+        }
+        BashCheckpointAction::NoChanges => {
+            panic!("Expected Checkpoint, got NoChanges");
+        }
+        _ => panic!("Expected Checkpoint"),
+    }
+}
+
+// ===========================================================================
+// Stale snapshot cleanup — actually removes old snapshots
+// ===========================================================================
+
+#[test]
+fn test_cleanup_stale_snapshots_removes_old_files() {
+    let repo = TestRepo::new();
+    let root = repo_root(&repo);
+    add_and_commit(&repo, "init.txt", "init", "initial");
+
+    // Save a snapshot
+    let snap = snapshot(&root, "stale-sess", "stale-t1").expect("snapshot should succeed");
+    save_snapshot(&snap).expect("save should succeed");
+
+    // Manually backdate the snapshot file to be older than SNAPSHOT_STALE_SECS
+    let git_dir = Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .current_dir(&root)
+        .output()
+        .expect("git rev-parse should succeed");
+    let git_dir_str = String::from_utf8_lossy(&git_dir.stdout).trim().to_string();
+    let cache_dir = root.join(&git_dir_str).join("ai").join("bash_snapshots");
+
+    // Find the snapshot file and backdate it
+    let entries: Vec<_> = fs::read_dir(&cache_dir)
+        .expect("cache dir should exist")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+        .collect();
+    assert!(
+        !entries.is_empty(),
+        "should have at least one snapshot file"
+    );
+
+    for entry in &entries {
+        // Set mtime to 10 minutes ago (well past 300s stale threshold)
+        let ten_min_ago = SystemTime::now() - Duration::from_secs(600);
+        filetime::set_file_mtime(
+            entry.path(),
+            filetime::FileTime::from_system_time(ten_min_ago),
+        )
+        .unwrap_or_else(|_| {
+            // filetime crate may not be available; use touch -t as fallback
+            let _ = Command::new("touch")
+                .args(["-t", "202001010000", &entry.path().display().to_string()])
+                .output();
+        });
+    }
+
+    cleanup_stale_snapshots(&root).expect("cleanup should succeed");
+
+    // Verify the files are gone
+    let remaining: Vec<_> = fs::read_dir(&cache_dir)
+        .expect("cache dir should exist")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+        .collect();
+    assert!(
+        remaining.is_empty(),
+        "stale snapshot files should be removed; found {:?}",
+        remaining.iter().map(|e| e.path()).collect::<Vec<_>>()
+    );
+}
+
+// ===========================================================================
+// diff with gitignore=None passes all new files through
+// ===========================================================================
+
+#[test]
+fn test_diff_no_gitignore_includes_all_new_files() {
+    let now = SystemTime::now();
+    let pre = StatSnapshot {
+        entries: HashMap::new(),
+        tracked_files: HashSet::new(),
+        gitignore: None,
+        taken_at: None,
+        invocation_key: "test:1".to_string(),
+        repo_root: PathBuf::from("/tmp"),
+    };
+
+    let mut post_entries = HashMap::new();
+    // A file that would normally be gitignored (*.log)
+    post_entries.insert(
+        normalize_path(Path::new("debug.log")),
+        StatEntry {
+            exists: true,
+            mtime: Some(now),
+            ctime: Some(now),
+            size: 100,
+            mode: 0o644,
+            file_type: StatFileType::Regular,
+        },
+    );
+    // A normal file
+    post_entries.insert(
+        normalize_path(Path::new("main.rs")),
+        StatEntry {
+            exists: true,
+            mtime: Some(now),
+            ctime: Some(now),
+            size: 50,
+            mode: 0o644,
+            file_type: StatFileType::Regular,
+        },
+    );
+
+    let post = StatSnapshot {
+        entries: post_entries,
+        tracked_files: HashSet::new(),
+        gitignore: None,
+        taken_at: None,
+        invocation_key: "test:2".to_string(),
+        repo_root: PathBuf::from("/tmp"),
+    };
+
+    let result = diff(&pre, &post);
+    // Without gitignore, both files should appear as created
+    assert_eq!(
+        result.created.len(),
+        2,
+        "Both files should be created when gitignore is None; got {:?}",
+        result.created
+    );
+}
+
+// ===========================================================================
+// Tracked file deleted then recreated (in pre.tracked_files but absent
+// from pre.entries)
+// ===========================================================================
+
+#[test]
+fn test_diff_tracked_file_deleted_then_recreated() {
+    let repo = TestRepo::new();
+    let root = repo_root(&repo);
+
+    // Track a .log file and add a gitignore that would exclude *.log
+    add_and_commit(&repo, "important.log", "data", "track log");
+    add_and_commit(&repo, ".gitignore", "*.log\n", "add gitignore");
+
+    // Delete the file before pre-snapshot
+    fs::remove_file(repo.path().join("important.log")).expect("remove should succeed");
+
+    let pre = snapshot(&root, "sess", "t1").expect("pre-snapshot should succeed");
+    // Verify the file is NOT in pre.entries (it was deleted)
+    assert!(
+        !pre.entries
+            .keys()
+            .any(|p| p.display().to_string().contains("important.log")),
+        "important.log should not be in pre.entries since it was deleted"
+    );
+    // But it IS in tracked_files (git index still knows about it)
+    assert!(
+        pre.tracked_files
+            .iter()
+            .any(|p| p.display().to_string().contains("important.log")),
+        "important.log should still be in tracked_files"
+    );
+
+    // Recreate the file
+    write_file(&repo, "important.log", "recreated data");
+
+    let post = snapshot(&root, "sess", "t2").expect("post-snapshot should succeed");
+    let result = diff(&pre, &post);
+
+    // The file should appear as created despite matching gitignore,
+    // because it's in pre.tracked_files
+    let created: Vec<String> = result
+        .created
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect();
+    assert!(
+        created.iter().any(|p| p.contains("important.log")),
+        "tracked important.log should appear as created even with gitignore; got {:?}",
+        created
+    );
+}
+
+// ===========================================================================
+// git_status_fallback — unmerged/conflict files (u prefix)
+// ===========================================================================
+
+#[test]
+fn test_git_status_fallback_merge_conflict() {
+    let repo = TestRepo::new();
+    let root = repo_root(&repo);
+
+    // Create a file on main branch
+    add_and_commit(&repo, "conflict.txt", "main content", "initial");
+
+    // Create a branch, modify the file, commit
+    repo.git_og(&["checkout", "-b", "feature"])
+        .expect("checkout should succeed");
+    write_file(&repo, "conflict.txt", "feature content");
+    repo.git_og(&["add", "conflict.txt"])
+        .expect("add should succeed");
+    repo.git_og(&["commit", "-m", "feature change"])
+        .expect("commit should succeed");
+
+    // Go back to main, modify the same file differently, commit
+    repo.git_og(&["checkout", "master"])
+        .or_else(|_| repo.git_og(&["checkout", "main"]))
+        .expect("checkout main should succeed");
+    write_file(&repo, "conflict.txt", "main diverged content");
+    repo.git_og(&["add", "conflict.txt"])
+        .expect("add should succeed");
+    repo.git_og(&["commit", "-m", "main diverged"])
+        .expect("commit should succeed");
+
+    // Attempt merge — this should produce a conflict
+    let merge_result = repo.git_og(&["merge", "feature", "--no-edit"]);
+    // If merge succeeds (auto-resolved), skip the test
+    if merge_result.is_ok() {
+        return; // Auto-resolved, no conflict to test
+    }
+
+    let changed = git_status_fallback(&root).expect("git_status_fallback should succeed");
+    assert!(
+        changed.iter().any(|p| p.contains("conflict.txt")),
+        "git_status_fallback should report conflicted file; got {:?}",
+        changed
+    );
+}
+
+// ===========================================================================
+// git_status_fallback — staged deletion
+// ===========================================================================
+
+#[test]
+fn test_git_status_fallback_staged_deletion() {
+    let repo = TestRepo::new();
+    let root = repo_root(&repo);
+
+    add_and_commit(&repo, "to-delete.txt", "content", "initial");
+    repo.git_og(&["rm", "to-delete.txt"])
+        .expect("git rm should succeed");
+
+    let changed = git_status_fallback(&root).expect("git_status_fallback should succeed");
+    assert!(
+        changed.iter().any(|p| p.contains("to-delete.txt")),
+        "git_status_fallback should report staged deletion; got {:?}",
+        changed
+    );
+}
+
+// ===========================================================================
+// git_status_fallback — rename with spaces in both paths
+// ===========================================================================
+
+#[test]
+fn test_git_status_fallback_rename_with_spaces() {
+    let repo = TestRepo::new();
+    let root = repo_root(&repo);
+
+    add_and_commit(&repo, "old file name.txt", "content", "add spaced file");
+    fs::rename(
+        root.join("old file name.txt"),
+        root.join("new file name.txt"),
+    )
+    .expect("rename should succeed");
+    repo.git_og(&["add", "-A"]).expect("git add should succeed");
+
+    let changed = git_status_fallback(&root).expect("git_status_fallback should succeed");
+    assert!(
+        changed.iter().any(|p| p == "new file name.txt"),
+        "should report new path with spaces; got {:?}",
+        changed
+    );
+    assert!(
+        changed.iter().any(|p| p == "old file name.txt"),
+        "should report original path with spaces; got {:?}",
+        changed
+    );
+}
+
+// ===========================================================================
+// StatDiffResult::is_empty with single non-empty category
+// ===========================================================================
+
+#[test]
+fn test_stat_diff_result_is_empty_single_category() {
+    let created_only = StatDiffResult {
+        created: vec![PathBuf::from("new.txt")],
+        modified: vec![],
+        deleted: vec![],
+    };
+    assert!(!created_only.is_empty());
+
+    let modified_only = StatDiffResult {
+        created: vec![],
+        modified: vec![PathBuf::from("changed.txt")],
+        deleted: vec![],
+    };
+    assert!(!modified_only.is_empty());
+
+    let deleted_only = StatDiffResult {
+        created: vec![],
+        modified: vec![],
+        deleted: vec![PathBuf::from("removed.txt")],
+    };
+    assert!(!deleted_only.is_empty());
+}
+
+// ===========================================================================
+// StatEntry — symlink file type
+// ===========================================================================
+
+#[cfg(unix)]
+#[test]
+fn test_stat_entry_symlink_type() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let target = tmp.path().join("target.txt");
+    let link = tmp.path().join("link.txt");
+    fs::write(&target, "target content").unwrap();
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let meta = fs::symlink_metadata(&link).unwrap();
+    let entry = StatEntry::from_metadata(&meta);
+    assert_eq!(entry.file_type, StatFileType::Symlink);
+    assert!(entry.exists);
+}
+
+// ===========================================================================
+// StatEntry — ctime is populated
+// ===========================================================================
+
+#[test]
+fn test_stat_entry_has_ctime() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    fs::write(tmp.path(), "hello").unwrap();
+    let meta = fs::symlink_metadata(tmp.path()).unwrap();
+    let entry = StatEntry::from_metadata(&meta);
+    assert!(
+        entry.ctime.is_some(),
+        "ctime should be populated on real files"
+    );
+}
+
+// ===========================================================================
+// Snapshot — hidden files (dotfiles) are included
+// ===========================================================================
+
+#[test]
+fn test_snapshot_includes_hidden_files() {
+    let repo = TestRepo::new();
+    let root = repo_root(&repo);
+
+    add_and_commit(&repo, ".hidden_config", "secret=val", "add hidden file");
+
+    let snap = snapshot(&root, "sess", "t1").expect("snapshot should succeed");
+    assert!(
+        snap.entries
+            .keys()
+            .any(|p| p.display().to_string().contains(".hidden_config")),
+        "snapshot should include hidden (dotfiles); got keys: {:?}",
+        snap.entries.keys().collect::<Vec<_>>()
+    );
+}
+
+// ===========================================================================
+// Walker error — permission denied on subdirectory
+// ===========================================================================
+
+#[cfg(unix)]
+#[test]
+fn test_snapshot_handles_permission_denied_directory() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = TestRepo::new();
+    let root = repo_root(&repo);
+
+    add_and_commit(&repo, "accessible.txt", "ok", "initial");
+    add_and_commit(&repo, "restricted/file.txt", "restricted", "add restricted");
+
+    // Remove read/execute permission on the restricted directory
+    let restricted_dir = repo.path().join("restricted");
+    let mut perms = fs::metadata(&restricted_dir).unwrap().permissions();
+    perms.set_mode(0o000);
+    fs::set_permissions(&restricted_dir, perms).expect("chmod should succeed");
+
+    // Snapshot should still succeed (walker errors are skipped)
+    let snap = snapshot(&root, "sess", "t1");
+
+    // Restore permissions before assertion (for cleanup)
+    let mut perms = fs::metadata(&restricted_dir)
+        .unwrap_or_else(|_| fs::symlink_metadata(&restricted_dir).unwrap())
+        .permissions();
+    perms.set_mode(0o755);
+    let _ = fs::set_permissions(&restricted_dir, perms);
+
+    let snap = snap.expect("snapshot should succeed despite permission errors");
+    // accessible.txt should be in the snapshot
+    assert!(
+        snap.entries
+            .keys()
+            .any(|p| p.display().to_string().contains("accessible.txt")),
+        "accessible.txt should be in snapshot"
+    );
+}
+
+// ===========================================================================
+// handle_bash_tool — PostToolUse without PreToolUse, clean repo → NoChanges
+// ===========================================================================
+
+#[test]
+fn test_post_hook_without_pre_clean_repo_returns_no_changes() {
+    let repo = TestRepo::new();
+    let root = repo_root(&repo);
+
+    add_and_commit(&repo, "clean.txt", "clean", "initial");
+    // No PreToolUse, no modifications — git status fallback should find nothing
+
+    let action = handle_bash_tool(HookEvent::PostToolUse, &root, "sess", "missing")
+        .expect("PostToolUse should succeed");
+
+    assert!(
+        matches!(
+            action,
+            BashCheckpointAction::NoChanges | BashCheckpointAction::Fallback
+        ),
+        "Clean repo without pre-snapshot should return NoChanges or Fallback"
+    );
+}
+
+// ===========================================================================
+// Multiple files in different states detected simultaneously
+// ===========================================================================
+
+#[test]
+fn test_diff_all_three_categories_simultaneously() {
+    let repo = TestRepo::new();
+    let root = repo_root(&repo);
+
+    add_and_commit(&repo, "keep.txt", "original", "initial");
+    add_and_commit(&repo, "remove.txt", "doomed", "add removal target");
+
+    let pre = snapshot(&root, "sess", "t1").expect("pre-snapshot");
+
+    thread::sleep(Duration::from_millis(50));
+    write_file(&repo, "keep.txt", "modified");
+    write_file(&repo, "brand-new.txt", "new");
+    fs::remove_file(repo.path().join("remove.txt")).expect("delete");
+
+    let post = snapshot(&root, "sess", "t2").expect("post-snapshot");
+    let result = diff(&pre, &post);
+
+    assert_eq!(result.created.len(), 1, "one file created");
+    assert_eq!(result.modified.len(), 1, "one file modified");
+    assert_eq!(result.deleted.len(), 1, "one file deleted");
+    assert!(
+        result
+            .created
+            .iter()
+            .any(|p| p.display().to_string().contains("brand-new.txt"))
+    );
+    assert!(
+        result
+            .modified
+            .iter()
+            .any(|p| p.display().to_string().contains("keep.txt"))
+    );
+    assert!(
+        result
+            .deleted
+            .iter()
+            .any(|p| p.display().to_string().contains("remove.txt"))
+    );
+}
+
+// ===========================================================================
+// handle_bash_tool full orchestration — rename detection through pre/post
+// ===========================================================================
+
+#[test]
+fn test_handle_bash_tool_detects_rename() {
+    let repo = TestRepo::new();
+    let root = repo_root(&repo);
+
+    add_and_commit(&repo, "original.txt", "content", "initial");
+
+    handle_bash_tool(HookEvent::PreToolUse, &root, "rename-sess", "rename-t1")
+        .expect("PreToolUse should succeed");
+
+    fs::rename(
+        repo.path().join("original.txt"),
+        repo.path().join("renamed.txt"),
+    )
+    .expect("rename should succeed");
+
+    let action = handle_bash_tool(HookEvent::PostToolUse, &root, "rename-sess", "rename-t1")
+        .expect("PostToolUse should succeed");
+
+    match action {
+        BashCheckpointAction::Checkpoint(paths) => {
+            assert!(
+                paths.iter().any(|p| p.contains("original.txt")),
+                "should report deleted original; got {:?}",
+                paths
+            );
+            assert!(
+                paths.iter().any(|p| p.contains("renamed.txt")),
+                "should report created rename target; got {:?}",
+                paths
+            );
+        }
+        _ => panic!("Expected Checkpoint for rename"),
+    }
 }
