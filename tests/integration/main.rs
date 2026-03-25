@@ -12,6 +12,8 @@ mod ai_tab;
 mod amend;
 mod amp;
 mod attribution_tracker_comprehensive;
+mod bash_tool_benchmark;
+mod bash_tool_conformance;
 mod blame_comprehensive;
 mod blame_flags;
 mod blame_subdirectory;
