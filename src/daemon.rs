@@ -6405,6 +6405,11 @@ const DAEMON_UPDATE_CHECK_INTERVAL_SECS: u64 = 3600;
 /// Granularity of the sleep loop so the thread notices shutdown promptly.
 const DAEMON_UPDATE_SLEEP_TICK_SECS: u64 = 5;
 
+/// Maximum daemon uptime before a proactive restart (24.5 hours).
+/// Deliberately offset from the 24h update-check cadence so the uptime restart
+/// never races with an update-triggered shutdown.
+const DAEMON_MAX_UPTIME_SECS: u64 = 24 * 3600 + 30 * 60;
+
 /// Returns the update check interval, respecting an env var override for testing.
 fn daemon_update_check_interval() -> u64 {
     std::env::var("GIT_AI_DAEMON_UPDATE_CHECK_INTERVAL")
@@ -6413,12 +6418,21 @@ fn daemon_update_check_interval() -> u64 {
         .unwrap_or(DAEMON_UPDATE_CHECK_INTERVAL_SECS)
 }
 
+/// Returns the maximum uptime in nanoseconds, respecting an env var override for testing.
+fn daemon_max_uptime_ns() -> u128 {
+    let secs = std::env::var("GIT_AI_DAEMON_MAX_UPTIME_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DAEMON_MAX_UPTIME_SECS);
+    secs as u128 * 1_000_000_000
+}
+
 /// Background loop that periodically checks for available updates.
 ///
 /// Sleeps in short increments so it can exit promptly when the coordinator
 /// signals shutdown.  When an update is detected, it requests a graceful
 /// shutdown so the daemon can self-update after draining in-flight work.
-fn daemon_update_check_loop(coordinator: Arc<ActorDaemonCoordinator>) {
+fn daemon_update_check_loop(coordinator: Arc<ActorDaemonCoordinator>, started_at_ns: u128) {
     use crate::commands::upgrade::{DaemonUpdateCheckResult, check_for_update_available};
 
     let interval = daemon_update_check_interval().max(1);
@@ -6452,6 +6466,13 @@ fn daemon_update_check_loop(coordinator: Arc<ActorDaemonCoordinator>) {
             Err(err) => {
                 debug_log(&format!("daemon update check failed: {}", err));
             }
+        }
+
+        let uptime_ns = now_unix_nanos().saturating_sub(started_at_ns);
+        if uptime_ns >= daemon_max_uptime_ns() {
+            debug_log("daemon uptime exceeded max, requesting restart");
+            coordinator.request_shutdown();
+            return;
         }
     }
 }
@@ -6528,9 +6549,10 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
         }
     });
 
+    let started_at_ns = now_unix_nanos();
     let update_coord = coordinator.clone();
     let update_thread = std::thread::spawn(move || {
-        daemon_update_check_loop(update_coord);
+        daemon_update_check_loop(update_coord, started_at_ns);
     });
 
     coordinator.wait_for_shutdown().await;
