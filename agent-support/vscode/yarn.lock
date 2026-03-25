@@ -2587,10 +2587,10 @@ ora@^8.1.0:
     string-width "^7.2.0"
     strip-ansi "^7.1.0"
 
-ovsx@0.10.9:
-  version "0.10.9"
-  resolved "https://registry.yarnpkg.com/ovsx/-/ovsx-0.10.9.tgz#f85672581bb02e5d407c2d07d6ae86d8ce4eb879"
-  integrity sha512-gY6912U50YzzNdAEFr9IxAqu59pKySXZzJUxzHRzi3/h/fWFdDDFCCXyjik6VL4TmiVKeor1Yv/cg7I3KfOUuQ==
+ovsx@0.10.10:
+  version "0.10.10"
+  resolved "https://registry.yarnpkg.com/ovsx/-/ovsx-0.10.10.tgz#011db3ddcc68a3b447b5f4ad2a4547b3b06803d1"
+  integrity sha512-/X5J4VLKPUGGaMynW9hgvsGg9jmwsK/3RhODeA2yzdeDbb8PUSNcg5GQ9aPDJW/znlqNvAwQcXAyE+Cq0RRvAQ==
   dependencies:
     "@vscode/vsce" "^3.7.1"
     commander "^6.2.1"
