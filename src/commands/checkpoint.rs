@@ -976,7 +976,10 @@ pub fn prepare_captured_checkpoint(
                 .get_feature_flags()
                 .cloud_default_ai_attribution
         {
-            Some(detect_cloud_env_tool())
+            Some(
+                crate::utils::detect_background_agent_tool()
+                    .unwrap_or_else(|| "unknown".to_string()),
+            )
         } else {
             None
         };
@@ -1707,39 +1710,6 @@ fn get_checkpoint_entry_for_file(
     Ok(Some((entry, stats)))
 }
 
-/// Detect the cloud environment tool name from environment variables.
-/// Returns a tool name like "cursor-agent", "claude-web", "devin", or "unknown".
-pub(crate) fn detect_cloud_env_tool() -> String {
-    // Explicit CLOUD_AGENT_TOOL env var takes highest priority
-    if let Ok(tool) = std::env::var("CLOUD_AGENT_TOOL")
-        && !tool.is_empty()
-    {
-        return tool;
-    }
-    // Check specific agent env vars
-    if std::env::var("CURSOR_AGENT")
-        .map(|v| v == "1")
-        .unwrap_or(false)
-    {
-        return "cursor-agent".to_string();
-    }
-    if std::env::var("CLAUDE_CODE_REMOTE")
-        .map(|v| v == "true")
-        .unwrap_or(false)
-    {
-        return "claude-web".to_string();
-    }
-    // Check for any CLOUD_AGENT_* prefix env var (excluding CLOUD_AGENT_TOOL already handled)
-    if std::env::vars().any(|(k, _)| k.starts_with("CLOUD_AGENT_") && k != "CLOUD_AGENT_TOOL") {
-        return "cloud-agent".to_string();
-    }
-    // Path-based detection
-    if std::path::Path::new("/opt/.devin").is_dir() {
-        return "devin".to_string();
-    }
-    "unknown".to_string()
-}
-
 /// When cloud_default_ai_attribution is enabled, resolve the effective agent_id
 /// and author_id for a human checkpoint by looking at previous AI checkpoints
 /// or falling back to cloud env detection.
@@ -1763,7 +1733,9 @@ fn resolve_cloud_attribution_for_human(
     // the wrapper process in daemon mode), otherwise detect from current env.
     let tool = pre_detected_cloud_env_tool
         .map(|t| t.to_string())
-        .unwrap_or_else(detect_cloud_env_tool);
+        .unwrap_or_else(|| {
+            crate::utils::detect_background_agent_tool().unwrap_or_else(|| "unknown".to_string())
+        });
     let agent_id = AgentId {
         tool,
         id: "cloud-default".to_string(),
@@ -1826,10 +1798,13 @@ async fn get_checkpoint_entries(
     // When cloud_default_ai_attribution is enabled and this is a human checkpoint,
     // promote it to AiAgent so the working log and all downstream processing
     // treat it as an AI checkpoint attributed to the resolved cloud agent.
+    // Also treat a non-None pre_detected_cloud_env_tool as implying the flag,
+    // since the wrapper already decided cloud attribution applies.
     let cloud_attribution = if kind == CheckpointKind::Human
-        && Config::get()
+        && (Config::get()
             .get_feature_flags()
             .cloud_default_ai_attribution
+            || pre_detected_cloud_env_tool.is_some())
     {
         Some(resolve_cloud_attribution_for_human(
             previous_checkpoints,

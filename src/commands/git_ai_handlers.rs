@@ -1179,7 +1179,10 @@ fn run_checkpoint_via_daemon_or_local(
                     // vars from the caller are available) so the daemon can
                     // use it without needing to re-read the wrapper's env.
                     let captured_cloud_env_tool = if kind == CheckpointKind::Human {
-                        Some(crate::commands::checkpoint::detect_cloud_env_tool())
+                        Some(
+                            crate::utils::detect_background_agent_tool()
+                                .unwrap_or_else(|| "unknown".to_string()),
+                        )
                     } else {
                         None
                     };
