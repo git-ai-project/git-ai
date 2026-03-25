@@ -257,7 +257,8 @@ impl AgentCheckpointPreset for OpenCodePreset {
                 Ok(BashCheckpointAction::Checkpoint(paths)) => Some(paths),
                 Ok(BashCheckpointAction::NoChanges) => None,
                 Ok(BashCheckpointAction::Fallback) => {
-                    bash_tool::git_status_fallback(Path::new(&cwd)).ok()
+                    // git_status_fallback already failed inside handle_bash_tool
+                    None
                 }
                 Ok(BashCheckpointAction::TakePreSnapshot) => None,
                 Err(e) => {
