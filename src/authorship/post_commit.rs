@@ -348,6 +348,38 @@ fn should_skip_expensive_post_commit_stats(estimate: &StatsCostEstimate) -> bool
         || estimate.files_with_additions >= STATS_SKIP_MAX_FILES_WITH_ADDITIONS
 }
 
+/// Public result of the stats cost estimate for a commit, used by the async
+/// wrapper path to decide whether to skip expensive stats computation.
+pub struct StatsSkipEstimate {
+    should_skip: bool,
+}
+
+impl StatsSkipEstimate {
+    pub fn should_skip(&self) -> bool {
+        self.should_skip
+    }
+}
+
+/// Estimate whether stats computation for `commit_sha` would be too expensive.
+/// Resolves the parent commit automatically. Intended for callers outside the
+/// normal post-commit flow (e.g. the async wrapper path).
+pub fn estimate_stats_cost_for_head(
+    repo: &Repository,
+    commit_sha: &str,
+    ignore_patterns: &[String],
+) -> Result<StatsSkipEstimate, GitAiError> {
+    let commit = repo.find_commit(commit_sha.to_string())?;
+    let parent_sha = if commit.parent_count().unwrap_or(0) > 0 {
+        commit.parent(0).map(|p| p.id()).unwrap_or_else(|_| "initial".to_string())
+    } else {
+        "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()
+    };
+    let estimate = estimate_stats_cost(repo, &parent_sha, commit_sha, ignore_patterns)?;
+    Ok(StatsSkipEstimate {
+        should_skip: should_skip_expensive_post_commit_stats(&estimate),
+    })
+}
+
 fn estimate_stats_cost(
     repo: &Repository,
     parent_sha: &str,

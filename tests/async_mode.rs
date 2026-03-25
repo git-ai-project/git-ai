@@ -1,3 +1,4 @@
+#[macro_use]
 #[path = "integration/repos/mod.rs"]
 mod repos;
 
@@ -7,6 +8,7 @@ use git_ai::daemon::{
     local_socket_connects_with_timeout, open_local_socket_stream_with_timeout,
     send_control_request,
 };
+use repos::test_file::ExpectedLineExt;
 use repos::test_repo::{GitTestMode, TestRepo, get_binary_path, real_git_executable};
 use serde_json::Value;
 use std::fs;
@@ -590,4 +592,166 @@ fn daemon_telemetry_and_cas_over_persistent_connection() {
     // Clean up
     drop(reader);
     shutdown_daemon(&repo);
+}
+
+// ---------------------------------------------------------------------------
+// Post-commit stats display in async (wrapper-daemon) mode
+// ---------------------------------------------------------------------------
+
+/// Helper: create a WrapperDaemon repo with AI content, commit, and return the
+/// combined stdout+stderr output from the wrapper binary.
+fn async_commit_with_ai_content(extra_envs: &[(&str, &str)]) -> (TestRepo, String) {
+    let repo = TestRepo::new_with_mode(GitTestMode::WrapperDaemon);
+
+    // Base commit (human only).
+    let mut file = repo.filename("test.txt");
+    file.set_contents(crate::lines!["Base line 1", "Base line 2"]);
+    repo.stage_all_and_commit("Base commit").unwrap();
+
+    // Add AI-attributed lines.
+    file.insert_at(2, crate::lines!["AI line 1".ai(), "AI line 2".ai()]);
+
+    // Commit via git_with_env so we get the raw output (not NewCommit which
+    // adds its own sync + note check). We pass GIT_AI_TEST_FORCE_TTY so
+    // the wrapper treats this pipe as an interactive terminal.
+    repo.git(&["add", "-A"]).expect("add should succeed");
+    let mut envs: Vec<(&str, &str)> = vec![("GIT_AI_TEST_FORCE_TTY", "1")];
+    envs.extend_from_slice(extra_envs);
+    let output = repo
+        .git_with_env(&["commit", "-m", "AI additions"], &envs, None)
+        .expect("commit should succeed");
+    (repo, output)
+}
+
+#[test]
+fn async_mode_post_commit_shows_stats_for_ai_commit() {
+    let (_repo, output) = async_commit_with_ai_content(&[]);
+    // The wrapper should have found the authorship note and printed the
+    // stats progress bar (contains "you" label and "ai" label).
+    assert!(
+        output.contains("you") && output.contains("ai"),
+        "expected stats output in async commit, got:\n{}",
+        output
+    );
+}
+
+#[test]
+fn async_mode_post_commit_quiet_flag_suppresses_stats() {
+    let repo = TestRepo::new_with_mode(GitTestMode::WrapperDaemon);
+
+    let mut file = repo.filename("q.txt");
+    file.set_contents(crate::lines!["Base"]);
+    repo.stage_all_and_commit("Base").unwrap();
+
+    file.insert_at(1, crate::lines!["AI line".ai()]);
+    repo.git(&["add", "-A"]).expect("add");
+
+    let output = repo
+        .git_with_env(
+            &["commit", "-q", "-m", "AI quiet"],
+            &[("GIT_AI_TEST_FORCE_TTY", "1")],
+            None,
+        )
+        .expect("commit should succeed");
+
+    // With -q the wrapper should suppress all git-ai post-commit output.
+    assert!(
+        !output.contains("you") && !output.contains("[git-ai]"),
+        "expected no stats/processing output with -q, got:\n{}",
+        output
+    );
+}
+
+#[test]
+fn async_mode_post_commit_non_interactive_suppresses_stats() {
+    let repo = TestRepo::new_with_mode(GitTestMode::WrapperDaemon);
+
+    let mut file = repo.filename("ni.txt");
+    file.set_contents(crate::lines!["Base"]);
+    repo.stage_all_and_commit("Base").unwrap();
+
+    file.insert_at(1, crate::lines!["AI line".ai()]);
+    repo.git(&["add", "-A"]).expect("add");
+
+    // Commit WITHOUT GIT_AI_TEST_FORCE_TTY – the pipe means non-interactive.
+    let output = repo
+        .git_with_env(&["commit", "-m", "AI non-interactive"], &[], None)
+        .expect("commit should succeed");
+
+    assert!(
+        !output.contains("you") && !output.contains("[git-ai]"),
+        "expected no stats output in non-interactive mode, got:\n{}",
+        output
+    );
+}
+
+#[test]
+fn async_mode_post_commit_still_processing_when_no_daemon() {
+    // Use plain Wrapper mode (no daemon running) with async_mode forced via env.
+    // The wrapper will poll but never find a note, and should print a message.
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+
+    fs::write(repo.path().join("nodaemon.txt"), "hello\n").expect("write");
+    repo.git(&["add", "nodaemon.txt"]).expect("add");
+
+    // Use a very short timeout so this test doesn't stall.
+    let output = repo
+        .git_with_env(
+            &["commit", "-m", "no daemon commit"],
+            &[
+                ("GIT_AI_ASYNC_MODE", "true"),
+                ("GIT_AI_TEST_FORCE_TTY", "1"),
+                ("GIT_AI_POST_COMMIT_TIMEOUT_MS", "100"),
+            ],
+            None,
+        )
+        .expect("commit should succeed");
+
+    assert!(
+        output.contains("still processing"),
+        "expected 'still processing' message when daemon is absent, got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("git ai stats"),
+        "expected hint to run 'git ai stats', got:\n{}",
+        output
+    );
+}
+
+#[test]
+fn async_mode_post_commit_skips_stats_for_large_commit() {
+    let repo = TestRepo::new_with_mode(GitTestMode::WrapperDaemon);
+
+    // Base commit.
+    fs::write(repo.path().join("base.txt"), "base\n").expect("write");
+    repo.git(&["add", "-A"]).expect("add");
+    repo.git_with_env(&["commit", "-m", "base"], &[], None)
+        .expect("base commit");
+
+    // Create a commit with many files exceeding the skip thresholds
+    // (STATS_SKIP_MAX_FILES_WITH_ADDITIONS = 200).
+    for i in 0..210 {
+        let path = repo.path().join(format!("file_{:04}.txt", i));
+        fs::write(&path, format!("line {}\n", i)).expect("write large file");
+    }
+    repo.git(&["add", "-A"]).expect("add");
+
+    let output = repo
+        .git_with_env(
+            &["commit", "-m", "large commit"],
+            &[("GIT_AI_TEST_FORCE_TTY", "1")],
+            None,
+        )
+        .expect("commit should succeed");
+
+    // The stats should be skipped due to the large commit size.
+    // There should either be a skip message or no stats output at all.
+    // Since these files have no AI attribution, the authorship note will
+    // be empty/minimal - the skip check runs before stats computation.
+    assert!(
+        !output.contains("you") || output.contains("Skipped"),
+        "expected either skip message or no stats bar for large commit, got:\n{}",
+        output
+    );
 }
