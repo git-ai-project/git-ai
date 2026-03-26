@@ -433,8 +433,15 @@ pub fn snapshot(
 
         let abs_path = entry.path();
 
-        // Skip directories themselves (we only stat files)
-        if abs_path.is_dir() {
+        // Skip directories themselves (we only stat files).
+        // Use entry.file_type() (lstat semantics) instead of abs_path.is_dir()
+        // to avoid following symlinks — a symlink to a directory should be
+        // snapshotted as a symlink entry, not skipped.
+        if entry
+            .file_type()
+            .map(|ft| ft.is_dir())
+            .unwrap_or_else(|| abs_path.is_dir())
+        {
             continue;
         }
 
