@@ -250,11 +250,7 @@ pub fn handle_git(args: &[String]) {
 }
 
 fn should_passthrough_read_only_command(parsed_args: &ParsedGitInvocation) -> bool {
-    !parsed_args.is_help
-        && parsed_args
-            .command
-            .as_deref()
-            .is_some_and(crate::git::command_classification::is_definitely_read_only_command)
+    crate::git::command_classification::is_read_only_invocation(parsed_args)
 }
 
 /// Handle alias invocations
@@ -767,10 +763,7 @@ fn proxy_to_git(
     // would leak wrapper state entries that never get cleaned up.
     let suppress_trace2 = wrapper_invocation_id.is_none() && {
         let parsed = parse_git_cli_args(args);
-        parsed
-            .command
-            .as_deref()
-            .is_some_and(crate::git::command_classification::is_definitely_read_only_command)
+        crate::git::command_classification::is_read_only_invocation(&parsed)
     };
 
     // Use spawn for interactive commands
@@ -1090,6 +1083,12 @@ mod tests {
     #[test]
     fn passthrough_read_only_command_for_status() {
         let parsed = parse_git_cli_args(&["status".to_string(), "--short".to_string()]);
+        assert!(should_passthrough_read_only_command(&parsed));
+    }
+
+    #[test]
+    fn passthrough_read_only_command_for_branch_show_current() {
+        let parsed = parse_git_cli_args(&["branch".to_string(), "--show-current".to_string()]);
         assert!(should_passthrough_read_only_command(&parsed));
     }
 

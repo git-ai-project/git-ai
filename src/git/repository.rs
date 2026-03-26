@@ -95,6 +95,19 @@ fn args_with_disabled_hooks_if_needed(args: &[String]) -> Vec<String> {
     out
 }
 
+fn apply_internal_git_command_env(cmd: &mut Command) {
+    cmd.env_remove("GIT_EXTERNAL_DIFF");
+    cmd.env_remove("GIT_DIFF_OPTS");
+
+    // Internal helper git invocations never need trace2 output. Disabling every
+    // trace2 stream here avoids extra named-pipe/process overhead on Windows when
+    // users have global trace2 targets configured for the wrapper daemon.
+    cmd.env("GIT_TRACE2", "0");
+    cmd.env("GIT_TRACE2_EVENT", "0");
+    cmd.env("GIT_TRACE2_PERF", "0");
+    cmd.env("GIT_TRACE2_BRIEF", "0");
+}
+
 fn first_git_subcommand_index(args: &[String]) -> Option<usize> {
     let mut index = 0usize;
 
@@ -2354,6 +2367,10 @@ impl Repository {
 }
 
 pub fn find_repository(global_args: &[String]) -> Result<Repository, GitAiError> {
+    if let Some(repository) = try_find_repository_no_git_exec(global_args)? {
+        return Ok(repository);
+    }
+
     let mut rev_parse_args = global_args.to_owned();
     rev_parse_args.push("rev-parse".to_string());
     // Use --git-dir instead of --absolute-git-dir for compatibility with Git < 2.13
@@ -2440,21 +2457,12 @@ pub fn find_repository(global_args: &[String]) -> Result<Repository, GitAiError>
     }
 
     // Ensure all internal git commands use a stable repository root consistently.
-    let mut normalized_global_args = global_args.to_owned();
     let command_root = if is_bare {
         git_dir.display().to_string()
     } else {
         workdir.display().to_string()
     };
-
-    if normalized_global_args.is_empty() {
-        normalized_global_args = vec!["-C".to_string(), command_root];
-    } else if normalized_global_args.len() == 2
-        && normalized_global_args[0] == "-C"
-        && normalized_global_args[1] != command_root
-    {
-        normalized_global_args[1] = command_root;
-    }
+    let normalized_global_args = normalize_global_args_for_repo_root(global_args, &command_root);
 
     // Canonicalize workdir for reliable path comparisons (especially on Windows)
     // On Windows, canonical paths use the \\?\ UNC prefix, which makes path.starts_with()
@@ -2489,6 +2497,122 @@ pub fn find_repository(global_args: &[String]) -> Result<Repository, GitAiError>
         canonical_workdir,
         cached_author_identity: std::sync::OnceLock::new(),
     })
+}
+
+fn try_find_repository_no_git_exec(
+    global_args: &[String],
+) -> Result<Option<Repository>, GitAiError> {
+    let Some(base_dir) = resolve_fast_discovery_base_dir(global_args)? else {
+        return Ok(None);
+    };
+
+    let paths = match discover_repository_paths_no_git_exec(&base_dir) {
+        Ok(paths) => paths,
+        Err(_) => return Ok(None),
+    };
+
+    let normalized_global_args =
+        normalize_global_args_for_repo_root(global_args, &paths.command_root.to_string_lossy());
+
+    repository_from_discovered_paths(
+        normalized_global_args,
+        &paths.workdir,
+        &paths.git_dir,
+        &paths.git_common_dir,
+    )
+    .map(Some)
+}
+
+fn resolve_fast_discovery_base_dir(global_args: &[String]) -> Result<Option<PathBuf>, GitAiError> {
+    let mut base: Option<PathBuf> = None;
+    let mut idx = 0usize;
+
+    while idx < global_args.len() {
+        let arg = &global_args[idx];
+
+        if arg == "-C" {
+            let path_arg = global_args.get(idx + 1).ok_or_else(|| {
+                GitAiError::Generic("Missing path after -C in global git args".to_string())
+            })?;
+            base = Some(apply_global_c_arg(base.as_ref(), path_arg)?);
+            idx += 2;
+            continue;
+        }
+
+        if let Some(path_arg) = arg.strip_prefix("-C")
+            && !path_arg.is_empty()
+        {
+            base = Some(apply_global_c_arg(base.as_ref(), path_arg)?);
+            idx += 1;
+            continue;
+        }
+
+        if is_fast_discovery_safe_global_flag(arg) {
+            idx += 1;
+            continue;
+        }
+
+        return Ok(None);
+    }
+
+    Ok(Some(match base {
+        Some(base) => base,
+        None => std::env::current_dir().map_err(GitAiError::IoError)?,
+    }))
+}
+
+fn apply_global_c_arg(base: Option<&PathBuf>, path_arg: &str) -> Result<PathBuf, GitAiError> {
+    let next_base = PathBuf::from(path_arg);
+    Ok(if next_base.is_absolute() {
+        next_base
+    } else {
+        let current = match base {
+            Some(existing) => existing.clone(),
+            None => std::env::current_dir().map_err(GitAiError::IoError)?,
+        };
+        current.join(next_base)
+    })
+}
+
+fn is_fast_discovery_safe_global_flag(arg: &str) -> bool {
+    matches!(
+        arg,
+        "-p" | "--paginate"
+            | "-P"
+            | "--no-pager"
+            | "--no-replace-objects"
+            | "--no-lazy-fetch"
+            | "--no-optional-locks"
+            | "--no-advice"
+            | "--literal-pathspecs"
+            | "--glob-pathspecs"
+            | "--noglob-pathspecs"
+            | "--icase-pathspecs"
+    )
+}
+
+fn normalize_global_args_for_repo_root(global_args: &[String], command_root: &str) -> Vec<String> {
+    let mut normalized = vec!["-C".to_string(), command_root.to_string()];
+    let mut idx = 0usize;
+
+    while idx < global_args.len() {
+        let arg = &global_args[idx];
+
+        if arg == "-C" {
+            idx += 2;
+            continue;
+        }
+
+        if arg.starts_with("-C") && arg.len() > 2 {
+            idx += 1;
+            continue;
+        }
+
+        normalized.push(arg.clone());
+        idx += 1;
+    }
+
+    normalized
 }
 
 fn resolve_command_base_dir(global_args: &[String]) -> Result<PathBuf, GitAiError> {
@@ -2807,7 +2931,7 @@ pub fn from_bare_repository(git_dir: &Path) -> Result<Repository, GitAiError> {
 }
 
 fn repository_from_discovered_paths(
-    command_root: &Path,
+    global_args: Vec<String>,
     workdir: &Path,
     git_dir: &Path,
     git_common_dir: &Path,
@@ -2847,7 +2971,7 @@ fn repository_from_discovered_paths(
     };
 
     Ok(Repository {
-        global_args: vec!["-C".to_string(), command_root.to_string_lossy().to_string()],
+        global_args,
         storage,
         git_dir: git_dir.to_path_buf(),
         git_common_dir: git_common_dir.to_path_buf(),
@@ -2865,8 +2989,10 @@ fn repository_from_discovered_paths(
 
 pub fn discover_repository_in_path_no_git_exec(path: &Path) -> Result<Repository, GitAiError> {
     let paths = discover_repository_paths_no_git_exec(path)?;
+    let global_args =
+        normalize_global_args_for_repo_root(&[], &paths.command_root.to_string_lossy());
     repository_from_discovered_paths(
-        &paths.command_root,
+        global_args,
         &paths.workdir,
         &paths.git_dir,
         &paths.git_common_dir,
@@ -3028,8 +3154,7 @@ pub fn exec_git_allow_nonzero_with_profile(
         args_with_internal_git_profile(&args_with_disabled_hooks_if_needed(args), profile);
     let mut cmd = Command::new(config::Config::get().git_cmd());
     cmd.args(&effective_args);
-    cmd.env_remove("GIT_EXTERNAL_DIFF");
-    cmd.env_remove("GIT_DIFF_OPTS");
+    apply_internal_git_command_env(&mut cmd);
 
     #[cfg(windows)]
     {
@@ -3082,8 +3207,7 @@ pub fn exec_git_stdin_with_profile(
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    cmd.env_remove("GIT_EXTERNAL_DIFF");
-    cmd.env_remove("GIT_DIFF_OPTS");
+    apply_internal_git_command_env(&mut cmd);
 
     #[cfg(windows)]
     {
@@ -3147,8 +3271,7 @@ pub fn exec_git_stdin_with_env_with_profile(
     for (k, v) in env.iter() {
         cmd.env(k, v);
     }
-    cmd.env_remove("GIT_EXTERNAL_DIFF");
-    cmd.env_remove("GIT_DIFF_OPTS");
+    apply_internal_git_command_env(&mut cmd);
 
     #[cfg(windows)]
     {
@@ -3804,6 +3927,49 @@ index 0000000..abc1234 100644
 
         let resolved = resolve_command_base_dir(&args).expect("resolve base dir");
         assert_eq!(resolved, base.join("nested").join("..").join("repo"));
+    }
+
+    #[test]
+    fn resolve_fast_discovery_base_dir_supports_common_global_flags() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let base = temp.path().join("root");
+        let args = vec![
+            "--no-pager".to_string(),
+            "-C".to_string(),
+            base.to_string_lossy().to_string(),
+            "--literal-pathspecs".to_string(),
+        ];
+
+        let resolved = resolve_fast_discovery_base_dir(&args).expect("resolve fast discovery dir");
+        assert_eq!(resolved, Some(base));
+    }
+
+    #[test]
+    fn resolve_fast_discovery_base_dir_rejects_git_dir_override() {
+        let args = vec!["--git-dir".to_string(), ".git".to_string()];
+        let resolved = resolve_fast_discovery_base_dir(&args).expect("resolve fast discovery dir");
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn normalize_global_args_for_repo_root_collapses_chained_c_args() {
+        let args = vec![
+            "--no-pager".to_string(),
+            "-C".to_string(),
+            "nested".to_string(),
+            "--literal-pathspecs".to_string(),
+        ];
+
+        let normalized = normalize_global_args_for_repo_root(&args, "/repo/root");
+        assert_eq!(
+            normalized,
+            vec![
+                "-C".to_string(),
+                "/repo/root".to_string(),
+                "--no-pager".to_string(),
+                "--literal-pathspecs".to_string(),
+            ]
+        );
     }
 
     #[test]
