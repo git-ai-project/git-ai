@@ -110,13 +110,21 @@ pub fn handle_git(args: &[String]) {
         return;
     }
 
-    let parsed_args = parse_git_cli_args(args);
+    let mut parsed_args = parse_git_cli_args(args);
 
     // Direct read-only commands never participate in git-ai hooks, so avoid the
     // wrapper's repository/config preflight entirely and behave like a pure
     // passthrough. This keeps commands like `git status` fast on Windows.
     if should_passthrough_read_only_command(&parsed_args) {
         let exit_status = proxy_to_git(args, false, None, None);
+        exit_with_status(exit_status);
+    }
+
+    let mut repository_option = find_repository(&parsed_args.global_args).ok();
+    parsed_args = resolve_wrapper_invocation(&parsed_args, repository_option.as_ref());
+
+    if should_passthrough_read_only_command(&parsed_args) {
+        let exit_status = proxy_to_git(&parsed_args.to_invocation_vec(), false, None, None);
         exit_with_status(exit_status);
     }
 
@@ -130,8 +138,7 @@ pub fn handle_git(args: &[String]) {
             debug_log(&format!("wrapper: daemon telemetry init failed: {}", e));
         }
 
-        let repository = find_repository(&parsed_args.global_args).ok();
-        let worktree = repository.as_ref().and_then(|r| r.workdir().ok());
+        let worktree = repository_option.as_ref().and_then(|r| r.workdir().ok());
 
         let pre_state = worktree
             .as_deref()
@@ -142,7 +149,12 @@ pub fn handle_git(args: &[String]) {
         // processes the atexit trace event and starts the wrapper state timeout.
         send_wrapper_pre_state_to_daemon(&invocation_id, worktree.as_deref(), &pre_state);
 
-        let exit_status = proxy_to_git(args, false, None, Some(&invocation_id));
+        let exit_status = proxy_to_git(
+            &parsed_args.to_invocation_vec(),
+            false,
+            None,
+            Some(&invocation_id),
+        );
 
         let post_state = worktree
             .as_deref()
@@ -154,17 +166,13 @@ pub fn handle_git(args: &[String]) {
         // authorship note so we can show stats inline (same UX as plain wrapper mode).
         if exit_status.success()
             && parsed_args.command.as_deref() == Some("commit")
-            && let Some(repo) = repository.as_ref()
+            && let Some(repo) = repository_option.as_ref()
         {
             maybe_show_async_post_commit_stats(&parsed_args, repo);
         }
 
         exit_with_status(exit_status);
     }
-
-    let mut parsed_args = parsed_args;
-
-    let mut repository_option = find_repository(&parsed_args.global_args).ok();
 
     let has_repo = repository_option.is_some();
 
@@ -203,10 +211,6 @@ pub fn handle_git(args: &[String]) {
         };
 
         let repository = repository_option.as_mut().unwrap();
-
-        if let Some(resolved) = resolve_alias_invocation(&parsed_args, repository) {
-            parsed_args = resolved;
-        }
 
         let pre_command_start = Instant::now();
         run_pre_command_hooks(&mut command_hooks_context, &mut parsed_args, repository);
@@ -259,6 +263,15 @@ pub fn handle_git(args: &[String]) {
 
 fn should_passthrough_read_only_command(parsed_args: &ParsedGitInvocation) -> bool {
     crate::git::command_classification::is_read_only_invocation(parsed_args)
+}
+
+fn resolve_wrapper_invocation(
+    parsed_args: &ParsedGitInvocation,
+    repository: Option<&Repository>,
+) -> ParsedGitInvocation {
+    repository
+        .and_then(|repo| resolve_alias_invocation(parsed_args, repo))
+        .unwrap_or_else(|| parsed_args.clone())
 }
 
 /// Handle alias invocations
@@ -981,7 +994,7 @@ fn in_shell_completion_context() -> bool {
 mod tests {
     use super::parse_alias_tokens;
     use super::{
-        parse_git_cli_args, resolve_child_git_hooks_path_override,
+        parse_git_cli_args, resolve_child_git_hooks_path_override, resolve_wrapper_invocation,
         should_passthrough_read_only_command,
     };
     use crate::git::find_repository_in_path;
@@ -1139,6 +1152,75 @@ mod tests {
     fn passthrough_read_only_command_accepts_top_level_version() {
         let parsed = parse_git_cli_args(&["--version".to_string()]);
         assert!(should_passthrough_read_only_command(&parsed));
+    }
+
+    #[test]
+    fn wrapper_resolves_read_only_alias_before_passthrough() {
+        let temp = tempdir().expect("tempdir should create");
+        let output = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(temp.path())
+            .output()
+            .expect("git init should run");
+        assert!(
+            output.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let alias_output = Command::new("git")
+            .args(["config", "alias.st", "status --short"])
+            .current_dir(temp.path())
+            .output()
+            .expect("git config alias should run");
+        assert!(
+            alias_output.status.success(),
+            "git config alias failed: {}",
+            String::from_utf8_lossy(&alias_output.stderr)
+        );
+
+        let repo = find_repository_in_path(&temp.path().to_string_lossy())
+            .expect("repository should be discovered");
+        let parsed = parse_git_cli_args(&["st".to_string()]);
+        let resolved = resolve_wrapper_invocation(&parsed, Some(&repo));
+
+        assert_eq!(resolved.command.as_deref(), Some("status"));
+        assert!(resolved.command_args.iter().any(|arg| arg == "--short"));
+        assert!(should_passthrough_read_only_command(&resolved));
+    }
+
+    #[test]
+    fn wrapper_resolves_mutating_alias_before_passthrough() {
+        let temp = tempdir().expect("tempdir should create");
+        let output = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(temp.path())
+            .output()
+            .expect("git init should run");
+        assert!(
+            output.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let alias_output = Command::new("git")
+            .args(["config", "alias.ci", "commit"])
+            .current_dir(temp.path())
+            .output()
+            .expect("git config alias should run");
+        assert!(
+            alias_output.status.success(),
+            "git config alias failed: {}",
+            String::from_utf8_lossy(&alias_output.stderr)
+        );
+
+        let repo = find_repository_in_path(&temp.path().to_string_lossy())
+            .expect("repository should be discovered");
+        let parsed = parse_git_cli_args(&["ci".to_string(), "-m".to_string(), "msg".to_string()]);
+        let resolved = resolve_wrapper_invocation(&parsed, Some(&repo));
+
+        assert_eq!(resolved.command.as_deref(), Some("commit"));
+        assert!(!should_passthrough_read_only_command(&resolved));
     }
 
     #[cfg(unix)]
