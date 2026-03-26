@@ -125,16 +125,25 @@ impl SystemGitBackend {
         }
         drop(cache);
 
-        // Cold miss — must load synchronously for the first call
+        // Cold miss — must load synchronously for the first call.
+        // If the sync refresh fails (e.g. repo discovery error), the cache won't
+        // contain the family key. Fall back to uncached resolution which correctly
+        // propagates errors.
         self.refresh_alias_cache_sync(worktree, &family_key)?;
         let cache = self
             .alias_cache
             .lock()
             .map_err(|_| GitAiError::Generic("alias cache lock poisoned".to_string()))?;
-        let normalized_alias = alias_name.to_ascii_lowercase();
-        Ok(cache
-            .get(&family_key)
-            .and_then(|entry| entry.aliases.get(&normalized_alias).cloned()))
+        match cache.get(&family_key) {
+            Some(entry) => {
+                let normalized_alias = alias_name.to_ascii_lowercase();
+                Ok(entry.aliases.get(&normalized_alias).cloned())
+            }
+            None => {
+                drop(cache);
+                self.resolve_alias_uncached(worktree, alias_name)
+            }
+        }
     }
 
     /// Synchronously load all aliases for a family into the cache.
