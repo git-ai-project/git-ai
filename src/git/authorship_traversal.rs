@@ -163,6 +163,11 @@ fn parse_cat_file_batch_output_with_oids(
 }
 
 /// Extract file paths from a note blob content
+/// Public wrapper for extracting file paths from a note's attestation section.
+pub fn extract_file_paths_from_note_public(content: &str, files: &mut HashSet<String>) {
+    extract_file_paths_from_note(content, files);
+}
+
 fn extract_file_paths_from_note(content: &str, files: &mut HashSet<String>) {
     // Find the divider and slice before it, then add minimal metadata to make it parseable
     if let Some(divider_pos) = content.find("\n---\n") {
