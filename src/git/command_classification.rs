@@ -38,8 +38,8 @@ pub fn is_definitely_read_only_command(command: &str) -> bool {
 }
 
 pub fn is_read_only_invocation(parsed: &ParsedGitInvocation) -> bool {
-    if parsed.is_help {
-        return false;
+    if parsed.is_help || parsed.command.is_none() {
+        return true;
     }
 
     if parsed
@@ -54,6 +54,10 @@ pub fn is_read_only_invocation(parsed: &ParsedGitInvocation) -> bool {
         Some("branch") => is_read_only_branch_invocation(parsed),
         Some("stash") => is_read_only_stash_invocation(parsed),
         Some("tag") => is_read_only_tag_invocation(parsed),
+        Some("remote") => is_read_only_remote_invocation(parsed),
+        Some("config") => is_read_only_config_invocation(parsed),
+        Some("worktree") => is_read_only_worktree_invocation(parsed),
+        Some("submodule") => is_read_only_submodule_invocation(parsed),
         _ => false,
     }
 }
@@ -172,6 +176,77 @@ fn is_read_only_tag_invocation(parsed: &ParsedGitInvocation) -> bool {
         || parsed.pos_command(0).is_none()
 }
 
+fn is_read_only_remote_invocation(parsed: &ParsedGitInvocation) -> bool {
+    let mutating_subcommands = [
+        "add",
+        "rename",
+        "remove",
+        "rm",
+        "set-head",
+        "set-branches",
+        "set-url",
+        "prune",
+        "update",
+    ];
+
+    match parsed.pos_command(0).as_deref() {
+        None => true,
+        Some(subcommand) if mutating_subcommands.contains(&subcommand) => false,
+        Some("show" | "get-url") => true,
+        Some(_) => false,
+    }
+}
+
+fn is_read_only_config_invocation(parsed: &ParsedGitInvocation) -> bool {
+    let mutating_flags = [
+        "--add",
+        "--replace-all",
+        "--unset",
+        "--unset-all",
+        "--rename-section",
+        "--remove-section",
+        "--edit",
+    ];
+    if command_args_contain_any(&parsed.command_args, &mutating_flags) {
+        return false;
+    }
+
+    let read_only_flags = [
+        "--blob",
+        "--default",
+        "--get",
+        "--get-all",
+        "--get-regexp",
+        "--get-urlmatch",
+        "--includes",
+        "--list",
+        "--name-only",
+        "--no-includes",
+        "--null",
+        "--show-origin",
+        "--show-scope",
+        "--type",
+        "-l",
+        "-z",
+    ];
+
+    command_args_contain_any(&parsed.command_args, &read_only_flags)
+}
+
+fn is_read_only_worktree_invocation(parsed: &ParsedGitInvocation) -> bool {
+    matches!(
+        parsed.command_args.first().map(String::as_str),
+        Some("list")
+    )
+}
+
+fn is_read_only_submodule_invocation(parsed: &ParsedGitInvocation) -> bool {
+    matches!(
+        parsed.command_args.first().map(String::as_str),
+        Some("status" | "summary")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,5 +316,55 @@ mod tests {
     fn read_only_invocation_detects_stash_list() {
         let parsed = parse_git_cli_args(&["stash".to_string(), "list".to_string()]);
         assert!(is_read_only_invocation(&parsed));
+    }
+
+    #[test]
+    fn read_only_invocation_detects_top_level_version() {
+        let parsed = parse_git_cli_args(&["--version".to_string()]);
+        assert!(is_read_only_invocation(&parsed));
+    }
+
+    #[test]
+    fn read_only_invocation_detects_commit_help() {
+        let parsed = parse_git_cli_args(&["commit".to_string(), "--help".to_string()]);
+        assert!(is_read_only_invocation(&parsed));
+    }
+
+    #[test]
+    fn read_only_invocation_detects_remote_listing() {
+        let parsed = parse_git_cli_args(&["remote".to_string(), "-v".to_string()]);
+        assert!(is_read_only_invocation(&parsed));
+    }
+
+    #[test]
+    fn read_only_invocation_rejects_remote_add() {
+        let parsed = parse_git_cli_args(&[
+            "remote".to_string(),
+            "add".to_string(),
+            "origin".to_string(),
+            "https://example.com/repo".to_string(),
+        ]);
+        assert!(!is_read_only_invocation(&parsed));
+    }
+
+    #[test]
+    fn read_only_invocation_detects_config_list() {
+        let parsed = parse_git_cli_args(&[
+            "config".to_string(),
+            "--list".to_string(),
+            "--show-origin".to_string(),
+        ]);
+        assert!(is_read_only_invocation(&parsed));
+    }
+
+    #[test]
+    fn read_only_invocation_rejects_config_set() {
+        let parsed = parse_git_cli_args(&[
+            "config".to_string(),
+            "--add".to_string(),
+            "demo.key".to_string(),
+            "value".to_string(),
+        ]);
+        assert!(!is_read_only_invocation(&parsed));
     }
 }

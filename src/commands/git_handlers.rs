@@ -1100,9 +1100,15 @@ mod tests {
     }
 
     #[test]
-    fn passthrough_read_only_command_rejects_help_invocations() {
+    fn passthrough_read_only_command_accepts_help_invocations() {
         let parsed = parse_git_cli_args(&["status".to_string(), "--help".to_string()]);
-        assert!(!should_passthrough_read_only_command(&parsed));
+        assert!(should_passthrough_read_only_command(&parsed));
+    }
+
+    #[test]
+    fn passthrough_read_only_command_accepts_top_level_version() {
+        let parsed = parse_git_cli_args(&["--version".to_string()]);
+        assert!(should_passthrough_read_only_command(&parsed));
     }
 
     #[cfg(unix)]
