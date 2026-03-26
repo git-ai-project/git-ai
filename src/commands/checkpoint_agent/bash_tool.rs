@@ -412,8 +412,7 @@ pub fn snapshot(
         .git_exclude(true)
         .filter_entry(|entry| {
             // Skip .git directory itself
-            let path = entry.path();
-            !path.components().any(|c| c.as_os_str() == ".git")
+            entry.file_name() != ".git"
         })
         .build();
 
