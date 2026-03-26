@@ -5,7 +5,7 @@ pub fn handle_personal_dashboard(_args: &[String]) {
     let config = config::Config::get();
     let api_base_url = config.api_base_url();
 
-    let dashboard_url = format!("{}/me", api_base_url);
+    let dashboard_url = format!("{}/dashboard", api_base_url);
 
     eprintln!("Opening dashboard: {}", dashboard_url);
 
