@@ -612,6 +612,340 @@ pub fn rewrite_authorship_after_squash_or_rebase(
     Ok(())
 }
 
+/// Reconstruct attribution state from existing authorship notes instead of running
+/// expensive git blame operations. This reads notes from ALL original commits in batch
+/// and merges their attributions to get the full state at original_head.
+///
+/// Returns: (attributions, file_contents, prompts) or None if reconstruction fails.
+#[allow(clippy::type_complexity)]
+fn try_reconstruct_attributions_from_notes(
+    repo: &Repository,
+    original_head: &str,
+    original_commits: &[String],
+    pathspecs: &[String],
+    is_squash_rebase: bool,
+) -> Option<(
+    HashMap<
+        String,
+        (
+            Vec<crate::authorship::attribution_tracker::Attribution>,
+            Vec<crate::authorship::attribution_tracker::LineAttribution>,
+        ),
+    >,
+    HashMap<String, String>,
+    BTreeMap<String, BTreeMap<String, crate::authorship::authorship_log::PromptRecord>>,
+)> {
+    use crate::authorship::attribution_tracker::LineAttribution;
+    use crate::authorship::attribution_tracker::line_attributions_to_attributions;
+    use crate::authorship::authorship_log_serialization::AuthorshipLog;
+
+    // Get file contents at original_head for all pathspecs in one batch call
+    let file_contents = batch_read_file_contents_at_commit(repo, original_head, pathspecs).ok()?;
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+
+    // Optimization: try reading ONLY the note at original_head first.
+    // If it covers all pathspecs, we can skip reading notes from all other commits.
+    let pathspec_set: HashSet<&str> = pathspecs.iter().map(String::as_str).collect();
+    let head_note = load_note_contents_for_commits(repo, &[original_head.to_string()]).ok()?;
+    let head_log = head_note
+        .get(original_head)
+        .and_then(|content| AuthorshipLog::deserialize_from_string(content).ok());
+
+    let mut file_line_authors: HashMap<String, HashMap<String, String>> = HashMap::new();
+    let mut prompts: BTreeMap<
+        String,
+        BTreeMap<String, crate::authorship::authorship_log::PromptRecord>,
+    > = BTreeMap::new();
+
+    if let Some(ref head_log) = head_log {
+        // Build line_content→author map from original_head note using original_head file contents
+        for file_attestation in &head_log.attestations {
+            let file_path = &file_attestation.file_path;
+            if !pathspec_set.contains(file_path.as_str()) {
+                continue;
+            }
+            let head_content = file_contents.get(file_path).cloned().unwrap_or_default();
+            let lines: Vec<&str> = head_content.lines().collect();
+            let line_map = file_line_authors.entry(file_path.clone()).or_default();
+            for entry in &file_attestation.entries {
+                for range in &entry.line_ranges {
+                    let (start, end) = match range {
+                        crate::authorship::authorship_log::LineRange::Single(l) => (*l, *l),
+                        crate::authorship::authorship_log::LineRange::Range(s, e) => (*s, *e),
+                    };
+                    for line_num in start..=end {
+                        if let Some(line_content) = lines.get(line_num.saturating_sub(1) as usize) {
+                            line_map.insert(line_content.to_string(), entry.hash.clone());
+                        }
+                    }
+                }
+            }
+        }
+        for (prompt_id, prompt_record) in &head_log.metadata.prompts {
+            prompts
+                .entry(prompt_id.clone())
+                .or_default()
+                .insert(original_head.to_string(), prompt_record.clone());
+        }
+    }
+
+    // In a normal (non-squash) rebase, each commit's note is the cumulative state at that
+    // commit. The head note contains complete attribution for all files it covers.
+    // Only squash rebases need the full scan because multiple commits contribute attributions
+    // that get merged into fewer output commits.
+    let head_covered_files: HashSet<&str> = file_line_authors.keys().map(String::as_str).collect();
+    let need_full_scan = if head_log.is_none() {
+        true
+    } else if is_squash_rebase {
+        // Squash rebase: need attributions from ALL commits
+        true
+    } else {
+        // Normal rebase: head note covers all files, but check if any pathspecs are missing
+        pathspecs.iter().any(|p| {
+            let has_content = file_contents.get(p).map(|c| !c.is_empty()).unwrap_or(false);
+            has_content && !head_covered_files.contains(p.as_str())
+        })
+    };
+
+    if need_full_scan {
+        // Full scan: read notes from ALL original commits
+        let note_contents = load_note_contents_for_commits(repo, original_commits).ok()?;
+        if note_contents.is_empty() && head_log.is_none() {
+            return None;
+        }
+
+        let mut commits_with_notes: Vec<String> = Vec::new();
+        let mut parsed_logs: Vec<(String, AuthorshipLog)> = Vec::new();
+        for (commit, content) in &note_contents {
+            if commit == original_head {
+                continue; // Already processed
+            }
+            if let Ok(log) = AuthorshipLog::deserialize_from_string(content) {
+                commits_with_notes.push(commit.clone());
+                parsed_logs.push((commit.clone(), log));
+            }
+        }
+
+        if !parsed_logs.is_empty() {
+            // Batch read file contents for commits with notes
+            let mut all_refs: Vec<(String, String)> = Vec::new();
+            for commit in &commits_with_notes {
+                for path in pathspecs {
+                    all_refs.push((commit.clone(), path.clone()));
+                }
+            }
+
+            let mut commit_file_contents: HashMap<String, HashMap<String, String>> = HashMap::new();
+            if !all_refs.is_empty() {
+                let mut args = repo.global_args_for_exec();
+                args.push("cat-file".to_string());
+                args.push("--batch".to_string());
+                let stdin_data: String = all_refs
+                    .iter()
+                    .map(|(commit, path)| format!("{}:{}", commit, path))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    + "\n";
+                if let Ok(output) = exec_git_stdin(&args, stdin_data.as_bytes()) {
+                    let data = &output.stdout;
+                    let mut pos = 0usize;
+                    let mut ref_idx = 0usize;
+                    while pos < data.len() && ref_idx < all_refs.len() {
+                        let header_end = match data[pos..].iter().position(|&b| b == b'\n') {
+                            Some(idx) => pos + idx,
+                            None => break,
+                        };
+                        let header = std::str::from_utf8(&data[pos..header_end]).unwrap_or("");
+                        let parts: Vec<&str> = header.split_whitespace().collect();
+                        let (commit, path) = &all_refs[ref_idx];
+                        if parts.len() >= 2 && parts[1] == "missing" {
+                            commit_file_contents
+                                .entry(commit.clone())
+                                .or_default()
+                                .insert(path.clone(), String::new());
+                            pos = header_end + 1;
+                            ref_idx += 1;
+                            continue;
+                        }
+                        if parts.len() < 3 {
+                            pos = header_end + 1;
+                            ref_idx += 1;
+                            continue;
+                        }
+                        let size: usize = parts[2].parse().unwrap_or(0);
+                        let content_start = header_end + 1;
+                        let content_end = content_start + size;
+                        if content_end <= data.len() {
+                            let content =
+                                String::from_utf8_lossy(&data[content_start..content_end])
+                                    .to_string();
+                            commit_file_contents
+                                .entry(commit.clone())
+                                .or_default()
+                                .insert(path.clone(), content);
+                        }
+                        pos = content_end;
+                        if pos < data.len() && data[pos] == b'\n' {
+                            pos += 1;
+                        }
+                        ref_idx += 1;
+                    }
+                }
+            }
+
+            for (commit, authorship_log) in &parsed_logs {
+                let empty_contents = HashMap::new();
+                let commit_contents = commit_file_contents.get(commit).unwrap_or(&empty_contents);
+                for file_attestation in &authorship_log.attestations {
+                    let file_path = &file_attestation.file_path;
+                    if !pathspec_set.contains(file_path.as_str()) {
+                        continue;
+                    }
+                    let commit_content =
+                        commit_contents.get(file_path).cloned().unwrap_or_default();
+                    let lines: Vec<&str> = commit_content.lines().collect();
+                    let line_map = file_line_authors.entry(file_path.clone()).or_default();
+                    for entry in &file_attestation.entries {
+                        for range in &entry.line_ranges {
+                            let (start, end) = match range {
+                                crate::authorship::authorship_log::LineRange::Single(l) => (*l, *l),
+                                crate::authorship::authorship_log::LineRange::Range(s, e) => {
+                                    (*s, *e)
+                                }
+                            };
+                            for line_num in start..=end {
+                                if let Some(line_content) =
+                                    lines.get(line_num.saturating_sub(1) as usize)
+                                {
+                                    line_map.insert(line_content.to_string(), entry.hash.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                for (prompt_id, prompt_record) in &authorship_log.metadata.prompts {
+                    prompts
+                        .entry(prompt_id.clone())
+                        .or_default()
+                        .insert(commit.clone(), prompt_record.clone());
+                }
+            }
+        }
+    }
+
+    if file_line_authors.is_empty() {
+        return None;
+    }
+
+    // Build attributions at original_head using the line content -> author map
+    let mut attributions = HashMap::new();
+    for file_path in pathspecs {
+        let line_map = match file_line_authors.get(file_path) {
+            Some(m) => m,
+            None => continue,
+        };
+        let content = file_contents.get(file_path).cloned().unwrap_or_default();
+        let lines: Vec<&str> = content.lines().collect();
+
+        let mut line_attrs: Vec<LineAttribution> = Vec::new();
+        for (line_idx, line_content) in lines.iter().enumerate() {
+            if let Some(author_id) = line_map.get(*line_content) {
+                let line_num = (line_idx + 1) as u32;
+                line_attrs.push(LineAttribution {
+                    start_line: line_num,
+                    end_line: line_num,
+                    author_id: author_id.clone(),
+                    overrode: None,
+                });
+            }
+        }
+
+        if !line_attrs.is_empty() {
+            line_attrs.sort_by_key(|a| a.start_line);
+            let char_attrs = line_attributions_to_attributions(&line_attrs, &content, ts);
+            attributions.insert(file_path.clone(), (char_attrs, line_attrs));
+        }
+    }
+
+    Some((attributions, file_contents, prompts))
+}
+
+/// Batch read file contents at a specific commit for multiple file paths.
+/// Uses a single `git cat-file --batch` call for efficiency.
+fn batch_read_file_contents_at_commit(
+    repo: &Repository,
+    commit_sha: &str,
+    file_paths: &[String],
+) -> Result<HashMap<String, String>, GitAiError> {
+    if file_paths.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    // Build pathspecs like "commit:path" for batch cat-file
+    let mut args = repo.global_args_for_exec();
+    args.push("cat-file".to_string());
+    args.push("--batch".to_string());
+
+    let stdin_data: String = file_paths
+        .iter()
+        .map(|path| format!("{}:{}", commit_sha, path))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+
+    let output = exec_git_stdin(&args, stdin_data.as_bytes())?;
+    let data = &output.stdout;
+
+    let mut results = HashMap::new();
+    let mut pos = 0usize;
+    let mut path_idx = 0usize;
+
+    while pos < data.len() && path_idx < file_paths.len() {
+        let header_end = match data[pos..].iter().position(|&b| b == b'\n') {
+            Some(idx) => pos + idx,
+            None => break,
+        };
+
+        let header = std::str::from_utf8(&data[pos..header_end]).unwrap_or("");
+        let parts: Vec<&str> = header.split_whitespace().collect();
+
+        if parts.len() >= 2 && parts[1] == "missing" {
+            // File doesn't exist at this commit
+            results.insert(file_paths[path_idx].clone(), String::new());
+            pos = header_end + 1;
+            path_idx += 1;
+            continue;
+        }
+
+        if parts.len() < 3 {
+            pos = header_end + 1;
+            path_idx += 1;
+            continue;
+        }
+
+        let size: usize = parts[2].parse().unwrap_or(0);
+        let content_start = header_end + 1;
+        let content_end = content_start + size;
+
+        if content_end <= data.len() {
+            let content = String::from_utf8_lossy(&data[content_start..content_end]).to_string();
+            results.insert(file_paths[path_idx].clone(), content);
+        }
+
+        pos = content_end;
+        if pos < data.len() && data[pos] == b'\n' {
+            pos += 1;
+        }
+        path_idx += 1;
+    }
+
+    Ok(results)
+}
+
 pub fn rewrite_authorship_after_rebase_v2(
     repo: &Repository,
     original_head: &str,
@@ -619,6 +953,8 @@ pub fn rewrite_authorship_after_rebase_v2(
     new_commits: &[String],
     _human_author: &str,
 ) -> Result<(), GitAiError> {
+    let rewrite_start = std::time::Instant::now();
+    let mut timing_phases: Vec<(String, u128)> = Vec::new();
     // Handle edge case: no commits to process
     if new_commits.is_empty() {
         return Ok(());
@@ -626,7 +962,17 @@ pub fn rewrite_authorship_after_rebase_v2(
 
     // Filter out commits that already have authorship logs (these are commits from the target branch).
     // Only process newly created rebased commits.
+    let phase_start = std::time::Instant::now();
     let commits_with_logs = commits_with_authorship_notes(repo, new_commits)?;
+    timing_phases.push((
+        "commits_with_authorship_notes".to_string(),
+        phase_start.elapsed().as_millis(),
+    ));
+    debug_performance_log(&format!(
+        "rebase_v2: commits_with_authorship_notes ({} commits) in {}ms",
+        new_commits.len(),
+        phase_start.elapsed().as_millis()
+    ));
     let force_process_existing_notes = original_commits.len() > new_commits.len();
     let commits_to_process: Vec<String> = new_commits
         .iter()
@@ -670,8 +1016,18 @@ pub fn rewrite_authorship_after_rebase_v2(
         .collect();
 
     // Step 1: Extract pathspecs from all original commits and narrow to AI-touched files.
+    let phase_start = std::time::Instant::now();
     let pathspecs = get_pathspecs_from_commits(repo, original_commits)?;
+    timing_phases.push((
+        "get_pathspecs_from_commits".to_string(),
+        phase_start.elapsed().as_millis(),
+    ));
+    let phase_start = std::time::Instant::now();
     let pathspecs = filter_pathspecs_to_ai_touched_files(repo, original_commits, &pathspecs)?;
+    timing_phases.push((
+        format!("filter_pathspecs_to_ai_touched ({} files)", pathspecs.len()),
+        phase_start.elapsed().as_millis(),
+    ));
 
     if pathspecs.is_empty() {
         // No AI-touched files were rewritten. Preserve metadata-only / prompt-only notes by remapping
@@ -709,30 +1065,52 @@ pub fn rewrite_authorship_after_rebase_v2(
         return Ok(());
     }
 
-    // Step 2: Create VirtualAttributions from original_head (before rebase)
-    // Compute merge base to bound blame depth — without this, blame walks entire file history
-    let new_head = new_commits.last().unwrap();
-    let merge_base = repo
-        .merge_base(original_head.to_string(), new_head.to_string())
-        .ok();
+    // Step 2: Create attribution state from original_head (before rebase)
+    // Try fast reconstruction from existing notes first (avoids expensive blame)
+    let va_phase_start = std::time::Instant::now();
 
-    let repo_clone = repo.clone();
-    let original_head_clone = original_head.to_string();
-    let pathspecs_clone = pathspecs.clone();
+    let (
+        mut current_attributions,
+        mut current_file_contents,
+        initial_prompts,
+        rebase_ts,
+        original_head_state_attrs,
+    ) = if let Some((attrs, contents, prompts)) = try_reconstruct_attributions_from_notes(
+        repo,
+        original_head,
+        original_commits,
+        &pathspecs,
+        force_process_existing_notes,
+    ) {
+        debug_log("Using fast note-based attribution reconstruction (skipping blame)");
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let original_attrs = attrs.clone();
+        (attrs, contents, prompts, ts, original_attrs)
+    } else {
+        debug_log("Falling back to VirtualAttributions (blame-based reconstruction)");
+        // Fall back to the expensive blame-based approach
+        let new_head = new_commits.last().unwrap();
+        let merge_base = repo
+            .merge_base(original_head.to_string(), new_head.to_string())
+            .ok();
 
-    let current_va = smol::block_on(async {
-        crate::authorship::virtual_attribution::VirtualAttributions::new_for_base_commit(
-            repo_clone,
-            original_head_clone,
-            &pathspecs_clone,
-            merge_base,
-        )
-        .await
-    })?;
+        let repo_clone = repo.clone();
+        let original_head_clone = original_head.to_string();
+        let pathspecs_clone = pathspecs.clone();
 
-    // Clone the original VA to use for restoring attributions when content reappears
-    // This handles commit splitting where content from original_head gets re-applied
-    let original_head_state_va = {
+        let current_va = smol::block_on(async {
+            crate::authorship::virtual_attribution::VirtualAttributions::new_for_base_commit(
+                repo_clone,
+                original_head_clone,
+                &pathspecs_clone,
+                merge_base,
+            )
+            .await
+        })?;
+
         let mut attrs = HashMap::new();
         let mut contents = HashMap::new();
         for file in current_va.files() {
@@ -745,40 +1123,65 @@ pub fn rewrite_authorship_after_rebase_v2(
                 contents.insert(file, content.clone());
             }
         }
-        crate::authorship::virtual_attribution::VirtualAttributions::new(
-            current_va.repo().clone(),
-            current_va.base_commit().to_string(),
-            attrs,
-            contents,
-            current_va.timestamp(),
-        )
-    };
-    let original_head_line_to_author =
-        build_original_head_line_author_maps(&original_head_state_va);
 
-    // Materialize current state once, then update only changed files per commit.
-    let mut current_attributions: HashMap<
-        String,
-        (
-            Vec<crate::authorship::attribution_tracker::Attribution>,
-            Vec<crate::authorship::attribution_tracker::LineAttribution>,
-        ),
-    > = HashMap::new();
-    let mut current_file_contents: HashMap<String, String> = HashMap::new();
-    for file in current_va.files() {
-        if let Some(char_attrs) = current_va.get_char_attributions(&file)
-            && let Some(line_attrs) = current_va.get_line_attributions(&file)
-        {
-            current_attributions.insert(file.clone(), (char_attrs.clone(), line_attrs.clone()));
+        let mut prompts: BTreeMap<
+            String,
+            BTreeMap<String, crate::authorship::authorship_log::PromptRecord>,
+        > = BTreeMap::new();
+        for (prompt_id, commit_map) in current_va.prompts() {
+            prompts.insert(prompt_id.clone(), commit_map.clone());
         }
-        if let Some(content) = current_va.get_file_content(&file) {
-            current_file_contents.insert(file, content.clone());
+
+        let ts = current_va.timestamp();
+        let original_attrs = attrs.clone();
+        (attrs, contents, prompts, ts, original_attrs)
+    };
+
+    timing_phases.push((
+        format!("attribution_reconstruction ({} pathspecs)", pathspecs.len()),
+        va_phase_start.elapsed().as_millis(),
+    ));
+
+    // Build original_head line-to-author maps for content restoration during transform
+    let original_head_line_to_author: HashMap<String, HashMap<String, String>> = {
+        let mut maps = HashMap::new();
+        for (file_path, (_, line_attrs)) in &original_head_state_attrs {
+            let mut line_map = HashMap::new();
+            if let Some(content) = current_file_contents.get(file_path) {
+                let lines: Vec<&str> = content.lines().collect();
+                for attr in line_attrs {
+                    if attr.author_id
+                        != crate::authorship::working_log::CheckpointKind::Human.to_str()
+                    {
+                        for line_num in attr.start_line..=attr.end_line {
+                            if let Some(line_content) =
+                                lines.get(line_num.saturating_sub(1) as usize)
+                            {
+                                line_map.insert(line_content.to_string(), attr.author_id.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            if !line_map.is_empty() {
+                maps.insert(file_path.clone(), line_map);
+            }
         }
-    }
+        maps
+    };
+
+    // Build VirtualAttributions wrapper for original_head_state (needed by transform)
+    let original_head_state_va = crate::authorship::virtual_attribution::VirtualAttributions::new(
+        repo.clone(),
+        original_head.to_string(),
+        original_head_state_attrs,
+        current_file_contents.clone(),
+        rebase_ts,
+    );
 
     let mut current_prompts =
         crate::authorship::virtual_attribution::VirtualAttributions::merge_prompts_picking_newest(
-            &[current_va.prompts(), original_head_state_va.prompts()],
+            &[&initial_prompts, original_head_state_va.prompts()],
         );
     let mut prompt_line_metrics =
         build_prompt_line_metrics_from_attributions(&current_attributions);
@@ -797,13 +1200,13 @@ pub fn rewrite_authorship_after_rebase_v2(
         .collect();
 
     let mut current_authorship_log = build_authorship_log_from_state(
-        current_va.base_commit(),
+        original_head,
         &current_prompts,
         &current_attributions,
         &existing_files,
     );
-    let rebase_ts = current_va.timestamp();
 
+    let phase_start = std::time::Instant::now();
     let commit_tree_pairs = build_first_parent_tree_pairs(repo, &commits_to_process)?;
     let mut changed_contents_by_commit = collect_changed_file_contents_for_commit_pairs(
         repo,
@@ -811,13 +1214,52 @@ pub fn rewrite_authorship_after_rebase_v2(
         &pathspecs_lookup,
         &pathspecs,
     )?;
+    timing_phases.push((
+        format!(
+            "build_tree_pairs+collect_contents ({} commits)",
+            commits_to_process.len()
+        ),
+        phase_start.elapsed().as_millis(),
+    ));
     let mut pending_note_entries: Vec<(String, String)> =
         Vec::with_capacity(commits_to_process.len());
     let mut pending_note_debug: Vec<(String, usize)> = Vec::with_capacity(commits_to_process.len());
     let mut original_note_content_by_new_commit: HashMap<String, String> = HashMap::new();
     let mut original_note_content_loaded = false;
 
+    // Determine whether we can use the fast line-lookup path (no char-level diffs).
+    // This is possible when we successfully reconstructed from notes.
+    let use_line_lookup_fast_path = !original_head_line_to_author.is_empty();
+
+    // For the fast path, pre-serialize the metadata JSON template once (only base_commit_sha changes).
+    // Cache per-file attestation text so we only re-serialize changed files.
+    let mut cached_file_attestation_text: HashMap<String, String> = HashMap::new();
+    let metadata_json_template: Option<String> = if use_line_lookup_fast_path {
+        // Serialize metadata once with a placeholder we'll replace per commit
+        let mut template_meta = current_authorship_log.metadata.clone();
+        template_meta.base_commit_sha = "BASE_COMMIT_SHA_PLACEHOLDER".to_string();
+        template_meta.prompts = flatten_prompts_for_metadata(&current_prompts);
+        serde_json::to_string(&template_meta).ok()
+    } else {
+        None
+    };
+
+    // Pre-cache attestation text for all files in the initial state
+    if use_line_lookup_fast_path {
+        for file_attestation in &current_authorship_log.attestations {
+            cached_file_attestation_text.insert(
+                file_attestation.file_path.clone(),
+                serialize_file_attestation(file_attestation),
+            );
+        }
+    }
+
     // Step 3: Process each new commit in order (oldest to newest)
+    let loop_start = std::time::Instant::now();
+    let mut loop_transform_ms = 0u128;
+    let mut loop_serialize_ms = 0u128;
+    let mut loop_attestation_ms = 0u128;
+    let mut loop_metrics_ms = 0u128;
     for (idx, new_commit) in commits_to_process.iter().enumerate() {
         debug_log(&format!(
             "Processing commit {}/{}: {}",
@@ -832,18 +1274,7 @@ pub fn rewrite_authorship_after_rebase_v2(
 
         // Only transform attributions for files that actually changed.
         if !changed_files_in_commit.is_empty() {
-            let mut previous_line_attrs_by_file: HashMap<
-                String,
-                Vec<crate::authorship::attribution_tracker::LineAttribution>,
-            > = HashMap::new();
-            for file_path in &changed_files_in_commit {
-                if let Some((_, line_attrs)) = current_attributions.get(file_path) {
-                    previous_line_attrs_by_file.insert(file_path.clone(), line_attrs.clone());
-                }
-            }
-
             // Update file existence from this commit's deltas before transformation.
-            // Empty content means the file is absent at this commit (deleted or missing).
             for (file_path, content) in &new_content_for_changed_files {
                 if content.is_empty() {
                     existing_files.remove(file_path);
@@ -852,86 +1283,211 @@ pub fn rewrite_authorship_after_rebase_v2(
                 }
             }
 
-            transform_changed_files_to_final_state(
-                &mut current_attributions,
-                &mut current_file_contents,
-                new_content_for_changed_files,
-                Some(&original_head_state_va),
-                Some(&original_head_line_to_author),
-                rebase_ts,
-            )?;
-            for line_attrs in previous_line_attrs_by_file.values() {
-                subtract_prompt_line_metrics_for_line_attributions(
-                    &mut prompt_line_metrics,
-                    line_attrs,
-                );
-            }
-            for file_path in &changed_files_in_commit {
-                if let Some((_, line_attrs)) = current_attributions.get(file_path) {
-                    add_prompt_line_metrics_for_line_attributions(
+            let t0 = std::time::Instant::now();
+            if use_line_lookup_fast_path {
+                // Fast path: directly look up each line's author from the content→author map.
+                // No diffing needed - just scan the new file content line by line.
+                for (file_path, new_content) in &new_content_for_changed_files {
+                    if new_content.is_empty() {
+                        // File deleted - remove from cache
+                        cached_file_attestation_text.remove(file_path);
+                        current_attributions.remove(file_path);
+                        continue;
+                    }
+                    let line_map = original_head_line_to_author.get(file_path);
+                    let mut line_attrs: Vec<
+                        crate::authorship::attribution_tracker::LineAttribution,
+                    > = Vec::new();
+                    for (line_idx, line_content) in new_content.lines().enumerate() {
+                        if let Some(author_id) = line_map.and_then(|m| m.get(line_content)) {
+                            let line_num = (line_idx + 1) as u32;
+                            line_attrs.push(
+                                crate::authorship::attribution_tracker::LineAttribution {
+                                    start_line: line_num,
+                                    end_line: line_num,
+                                    author_id: author_id.clone(),
+                                    overrode: None,
+                                },
+                            );
+                        }
+                    }
+                    // Update cached attestation text for this file
+                    if let Some(file_attestation) =
+                        build_file_attestation_from_line_attributions(file_path, &line_attrs)
+                    {
+                        cached_file_attestation_text.insert(
+                            file_path.clone(),
+                            serialize_file_attestation(&file_attestation),
+                        );
+                    } else {
+                        cached_file_attestation_text.remove(file_path);
+                    }
+                    // Build char attributions from line attrs
+                    let char_attrs =
+                        crate::authorship::attribution_tracker::line_attributions_to_attributions(
+                            &line_attrs,
+                            new_content,
+                            rebase_ts,
+                        );
+                    current_attributions.insert(file_path.clone(), (char_attrs, line_attrs));
+                    current_file_contents.insert(file_path.clone(), new_content.clone());
+                }
+            } else {
+                // Slow path: use character-level diff transform (original behavior)
+                let mut previous_line_attrs_by_file: HashMap<
+                    String,
+                    Vec<crate::authorship::attribution_tracker::LineAttribution>,
+                > = HashMap::new();
+                for file_path in &changed_files_in_commit {
+                    if let Some((_, line_attrs)) = current_attributions.get(file_path) {
+                        previous_line_attrs_by_file.insert(file_path.clone(), line_attrs.clone());
+                    }
+                }
+                transform_changed_files_to_final_state(
+                    &mut current_attributions,
+                    &mut current_file_contents,
+                    new_content_for_changed_files,
+                    Some(&original_head_state_va),
+                    Some(&original_head_line_to_author),
+                    rebase_ts,
+                )?;
+                for line_attrs in previous_line_attrs_by_file.values() {
+                    subtract_prompt_line_metrics_for_line_attributions(
                         &mut prompt_line_metrics,
                         line_attrs,
                     );
                 }
+                for file_path in &changed_files_in_commit {
+                    if let Some((_, line_attrs)) = current_attributions.get(file_path) {
+                        add_prompt_line_metrics_for_line_attributions(
+                            &mut prompt_line_metrics,
+                            line_attrs,
+                        );
+                    }
+                }
             }
-            apply_prompt_line_metrics_to_prompts(&mut current_prompts, &prompt_line_metrics);
+            loop_transform_ms += t0.elapsed().as_millis();
 
-            // Update only files touched by this commit.
-            for file_path in &changed_files_in_commit {
-                upsert_file_attestation(
-                    &mut current_authorship_log,
-                    file_path,
-                    current_attributions
-                        .get(file_path)
-                        .map(|(_, line_attrs)| line_attrs.as_slice())
-                        .unwrap_or(&[]),
-                    existing_files.contains(file_path),
-                );
+            if !use_line_lookup_fast_path {
+                let t0 = std::time::Instant::now();
+                apply_prompt_line_metrics_to_prompts(&mut current_prompts, &prompt_line_metrics);
+                loop_metrics_ms += t0.elapsed().as_millis();
+
+                // Update only files touched by this commit (slow path updates authorship_log).
+                let t0 = std::time::Instant::now();
+                for file_path in &changed_files_in_commit {
+                    upsert_file_attestation(
+                        &mut current_authorship_log,
+                        file_path,
+                        current_attributions
+                            .get(file_path)
+                            .map(|(_, line_attrs)| line_attrs.as_slice())
+                            .unwrap_or(&[]),
+                        existing_files.contains(file_path),
+                    );
+                }
+                loop_attestation_ms += t0.elapsed().as_millis();
             }
         }
 
-        // Ensure stale deleted files are never emitted.
-        current_authorship_log
-            .attestations
-            .retain(|attestation| existing_files.contains(&attestation.file_path));
-
-        current_authorship_log.metadata.base_commit_sha = new_commit.clone();
-        current_authorship_log.metadata.prompts = flatten_prompts_for_metadata(&current_prompts);
-
-        let computed_note_has_payload = !current_authorship_log.attestations.is_empty()
-            || !current_authorship_log.metadata.prompts.is_empty();
-        let authorship_json = if computed_note_has_payload {
-            Some(current_authorship_log.serialize_to_string().map_err(|_| {
-                GitAiError::Generic("Failed to serialize authorship log".to_string())
-            })?)
-        } else {
-            if !original_note_content_loaded {
-                original_note_content_by_new_commit =
-                    load_note_contents_for_commit_pairs(repo, &commit_pairs_to_process)?;
-                original_note_content_loaded = true;
+        let t0 = std::time::Instant::now();
+        let authorship_json = if use_line_lookup_fast_path {
+            // Fast serialization: assemble note from cached per-file text + templated metadata
+            let has_attestations = cached_file_attestation_text.values().any(|v| !v.is_empty());
+            if has_attestations || metadata_json_template.is_some() {
+                let mut output = String::with_capacity(4096);
+                // Write cached attestation sections (only existing files)
+                for (file_path, text) in &cached_file_attestation_text {
+                    if existing_files.contains(file_path) && !text.is_empty() {
+                        output.push_str(text);
+                    }
+                }
+                output.push_str("---\n");
+                if let Some(ref template) = metadata_json_template {
+                    output.push_str(&template.replace("BASE_COMMIT_SHA_PLACEHOLDER", new_commit));
+                }
+                Some(output)
+            } else {
+                None
             }
-            original_note_content_by_new_commit
-                .get(new_commit)
-                .map(|raw_note| remap_note_content_for_target_commit(raw_note, new_commit))
+        } else {
+            // Original slow-path serialization
+            current_authorship_log
+                .attestations
+                .retain(|attestation| existing_files.contains(&attestation.file_path));
+            current_authorship_log.metadata.base_commit_sha = new_commit.clone();
+            current_authorship_log.metadata.prompts =
+                flatten_prompts_for_metadata(&current_prompts);
+
+            let computed_note_has_payload = !current_authorship_log.attestations.is_empty()
+                || !current_authorship_log.metadata.prompts.is_empty();
+            if computed_note_has_payload {
+                Some(current_authorship_log.serialize_to_string().map_err(|_| {
+                    GitAiError::Generic("Failed to serialize authorship log".to_string())
+                })?)
+            } else {
+                if !original_note_content_loaded {
+                    original_note_content_by_new_commit =
+                        load_note_contents_for_commit_pairs(repo, &commit_pairs_to_process)?;
+                    original_note_content_loaded = true;
+                }
+                original_note_content_by_new_commit
+                    .get(new_commit)
+                    .map(|raw_note| remap_note_content_for_target_commit(raw_note, new_commit))
+            }
         };
+        loop_serialize_ms += t0.elapsed().as_millis();
         if let Some(authorship_json) = authorship_json {
+            let file_count = cached_file_attestation_text
+                .values()
+                .filter(|v| !v.is_empty())
+                .count();
             pending_note_entries.push((new_commit.clone(), authorship_json));
-            pending_note_debug.push((
-                new_commit.clone(),
-                current_authorship_log.attestations.len(),
-            ));
+            pending_note_debug.push((new_commit.clone(), file_count));
         }
     }
 
+    timing_phases.push((
+        format!(
+            "commit_processing_loop ({} commits)",
+            commits_to_process.len()
+        ),
+        loop_start.elapsed().as_millis(),
+    ));
+    timing_phases.push(("  loop:transform".to_string(), loop_transform_ms));
+    timing_phases.push(("  loop:serialize".to_string(), loop_serialize_ms));
+    timing_phases.push(("  loop:attestation".to_string(), loop_attestation_ms));
+    timing_phases.push(("  loop:metrics".to_string(), loop_metrics_ms));
+
+    let phase_start = std::time::Instant::now();
     if !pending_note_entries.is_empty() {
         crate::git::refs::notes_add_batch(repo, &pending_note_entries)?;
     }
+    timing_phases.push((
+        format!("notes_add_batch ({} entries)", pending_note_entries.len()),
+        phase_start.elapsed().as_millis(),
+    ));
 
     for (commit_sha, file_count) in pending_note_debug {
         debug_log(&format!(
             "Saved authorship log for commit {} ({} files)",
             commit_sha, file_count
         ));
+    }
+
+    let total_ms = rewrite_start.elapsed().as_millis();
+    debug_performance_log(&format!(
+        "rebase_v2: TOTAL rewrite_authorship_after_rebase_v2 in {}ms",
+        total_ms
+    ));
+
+    // Write detailed timing breakdown for benchmarking
+    if let Ok(timing_path) = std::env::var("GIT_AI_REBASE_TIMING_FILE") {
+        let mut summary = format!("TOTAL={}ms\n", total_ms);
+        for (name, ms) in &timing_phases {
+            summary.push_str(&format!("  {}={}ms\n", name, ms));
+        }
+        let _ = std::fs::write(&timing_path, summary);
     }
 
     Ok(())
@@ -2682,6 +3238,48 @@ fn build_file_attestation_from_line_attributions(
     }
 }
 
+/// Serialize a single FileAttestation to its text representation.
+/// Used for caching per-file attestation text in the fast serialization path.
+fn serialize_file_attestation(
+    file_attestation: &crate::authorship::authorship_log_serialization::FileAttestation,
+) -> String {
+    use std::fmt::Write;
+    let mut output = String::with_capacity(256);
+    let file_path = if file_attestation.file_path.contains(' ')
+        || file_attestation.file_path.contains('\t')
+        || file_attestation.file_path.contains('\n')
+    {
+        format!("\"{}\"", &file_attestation.file_path)
+    } else {
+        file_attestation.file_path.clone()
+    };
+    output.push_str(&file_path);
+    output.push('\n');
+    for entry in &file_attestation.entries {
+        output.push_str("  ");
+        output.push_str(&entry.hash);
+        output.push(' ');
+        // Format line ranges inline (avoid allocation overhead of format_line_ranges)
+        let mut first = true;
+        for range in &entry.line_ranges {
+            if !first {
+                output.push(',');
+            }
+            first = false;
+            match range {
+                crate::authorship::authorship_log::LineRange::Single(line) => {
+                    let _ = write!(output, "{}", line);
+                }
+                crate::authorship::authorship_log::LineRange::Range(start, end) => {
+                    let _ = write!(output, "{}-{}", start, end);
+                }
+            }
+        }
+        output.push('\n');
+    }
+    output
+}
+
 fn upsert_file_attestation(
     authorship_log: &mut AuthorshipLog,
     file_path: &str,
@@ -2803,49 +3401,6 @@ fn apply_prompt_line_metrics_to_prompts(
             record.overriden_lines = prompt_metrics.overridden_lines;
         }
     }
-}
-
-fn build_original_head_line_author_maps(
-    original_head_state: &crate::authorship::virtual_attribution::VirtualAttributions,
-) -> HashMap<String, HashMap<String, String>> {
-    let mut by_file: HashMap<String, HashMap<String, String>> = HashMap::new();
-
-    for file_path in original_head_state.files() {
-        let Some(original_content) = original_head_state.get_file_content(&file_path) else {
-            continue;
-        };
-        let Some(original_line_attrs) = original_head_state.get_line_attributions(&file_path)
-        else {
-            continue;
-        };
-        if original_line_attrs.is_empty() {
-            continue;
-        }
-
-        let original_lines: Vec<&str> = original_content.lines().collect();
-        let mut line_to_author: HashMap<String, String> = HashMap::new();
-        for line_attr in original_line_attrs {
-            if line_attr.author_id == crate::authorship::working_log::CheckpointKind::Human.to_str()
-            {
-                continue;
-            }
-            for line_num in line_attr.start_line..=line_attr.end_line {
-                let line_idx = (line_num as usize).saturating_sub(1);
-                if line_idx < original_lines.len() {
-                    line_to_author.insert(
-                        original_lines[line_idx].to_string(),
-                        line_attr.author_id.clone(),
-                    );
-                }
-            }
-        }
-
-        if !line_to_author.is_empty() {
-            by_file.insert(file_path, line_to_author);
-        }
-    }
-
-    by_file
 }
 
 fn content_has_intersection_with_author_map(
