@@ -178,8 +178,8 @@ impl AuthorshipLog {
         // Write divider
         output.push_str("---\n");
 
-        // Write JSON metadata section (compact format for performance)
-        let json_str = serde_json::to_string(&self.metadata).map_err(|_| fmt::Error)?;
+        // Write JSON metadata section
+        let json_str = serde_json::to_string_pretty(&self.metadata).map_err(|_| fmt::Error)?;
         output.push_str(&json_str);
 
         Ok(output)

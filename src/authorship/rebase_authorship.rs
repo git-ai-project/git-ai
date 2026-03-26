@@ -1306,7 +1306,7 @@ pub fn rewrite_authorship_after_rebase_v2(
         let mut template_meta = current_authorship_log.metadata.clone();
         template_meta.base_commit_sha = "BASE_COMMIT_SHA_PLACEHOLDER".to_string();
         template_meta.prompts = flatten_prompts_for_metadata(&current_prompts);
-        serde_json::to_string(&template_meta).ok().map(|template| {
+        serde_json::to_string_pretty(&template_meta).ok().map(|template| {
             let parts: Vec<&str> = template.splitn(2, "BASE_COMMIT_SHA_PLACEHOLDER").collect();
             (
                 parts[0].to_string(),
