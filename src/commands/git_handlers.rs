@@ -112,14 +112,6 @@ pub fn handle_git(args: &[String]) {
 
     let mut parsed_args = parse_git_cli_args(args);
 
-    // Direct read-only commands never participate in git-ai hooks, so avoid the
-    // wrapper's repository/config preflight entirely and behave like a pure
-    // passthrough. This keeps commands like `git status` fast on Windows.
-    if should_passthrough_read_only_command(&parsed_args) {
-        let exit_status = proxy_to_git(args, false, None, None);
-        exit_with_status(exit_status);
-    }
-
     let mut repository_option = find_repository(&parsed_args.global_args).ok();
     parsed_args = resolve_wrapper_invocation(&parsed_args, repository_option.as_ref());
 
@@ -1220,6 +1212,41 @@ mod tests {
         let resolved = resolve_wrapper_invocation(&parsed, Some(&repo));
 
         assert_eq!(resolved.command.as_deref(), Some("commit"));
+        assert!(!should_passthrough_read_only_command(&resolved));
+    }
+
+    #[test]
+    fn wrapper_does_not_passthrough_builtin_name_shadowed_by_mutating_alias() {
+        let temp = tempdir().expect("tempdir should create");
+        let output = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(temp.path())
+            .output()
+            .expect("git init should run");
+        assert!(
+            output.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let alias_output = Command::new("git")
+            .args(["config", "alias.status", "branch aliased HEAD"])
+            .current_dir(temp.path())
+            .output()
+            .expect("git config alias should run");
+        assert!(
+            alias_output.status.success(),
+            "git config alias failed: {}",
+            String::from_utf8_lossy(&alias_output.stderr)
+        );
+
+        let repo = find_repository_in_path(&temp.path().to_string_lossy())
+            .expect("repository should be discovered");
+        let parsed = parse_git_cli_args(&["status".to_string()]);
+
+        let resolved = resolve_wrapper_invocation(&parsed, Some(&repo));
+        assert_eq!(resolved.command.as_deref(), Some("branch"));
+        assert!(resolved.command_args.iter().any(|arg| arg == "aliased"));
         assert!(!should_passthrough_read_only_command(&resolved));
     }
 
