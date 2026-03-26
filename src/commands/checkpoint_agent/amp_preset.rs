@@ -159,7 +159,7 @@ impl AgentCheckpointPreset for AmpPreset {
                     HookEvent::PreToolUse,
                     repo_root,
                     &agent_id.id,
-                    "bash",
+                    hook_input.tool_use_id.as_deref().unwrap_or("bash"),
                 );
             }
             return Ok(AgentRunResult {
@@ -181,7 +181,7 @@ impl AgentCheckpointPreset for AmpPreset {
                     HookEvent::PostToolUse,
                     Path::new(cwd.as_str()),
                     &agent_id.id,
-                    "bash",
+                    hook_input.tool_use_id.as_deref().unwrap_or("bash"),
                 ) {
                     Ok(BashCheckpointAction::Checkpoint(paths)) => Some(paths),
                     Ok(BashCheckpointAction::NoChanges) => None,
