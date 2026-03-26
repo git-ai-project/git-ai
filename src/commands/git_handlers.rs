@@ -110,14 +110,23 @@ pub fn handle_git(args: &[String]) {
         return;
     }
 
+    let parsed_args = parse_git_cli_args(args);
+
+    // Direct read-only commands never participate in git-ai hooks, so avoid the
+    // wrapper's repository/config preflight entirely and behave like a pure
+    // passthrough. This keeps commands like `git status` fast on Windows.
+    if should_passthrough_read_only_command(&parsed_args) {
+        let exit_status = proxy_to_git(args, false, None, None);
+        exit_with_status(exit_status);
+    }
+
     // Async mode: wrapper should behave as a pure passthrough to git,
     // but capture and send authoritative pre/post state to the daemon.
     if config::Config::get().feature_flags().async_mode {
         // Initialize the daemon telemetry handle so we can send wrapper state
         let _ = crate::daemon::telemetry_handle::init_daemon_telemetry_handle();
 
-        let parsed = parse_git_cli_args(args);
-        let repository = find_repository(&parsed.global_args).ok();
+        let repository = find_repository(&parsed_args.global_args).ok();
         let worktree = repository.as_ref().and_then(|r| r.workdir().ok());
 
         let pre_state = worktree
@@ -136,16 +145,16 @@ pub fn handle_git(args: &[String]) {
         // After a successful commit, wait briefly for the daemon to produce an
         // authorship note so we can show stats inline (same UX as plain wrapper mode).
         if exit_status.success()
-            && parsed.command.as_deref() == Some("commit")
+            && parsed_args.command.as_deref() == Some("commit")
             && let Some(repo) = repository.as_ref()
         {
-            maybe_show_async_post_commit_stats(&parsed, repo);
+            maybe_show_async_post_commit_stats(&parsed_args, repo);
         }
 
         exit_with_status(exit_status);
     }
 
-    let mut parsed_args = parse_git_cli_args(args);
+    let mut parsed_args = parsed_args;
 
     let mut repository_option = find_repository(&parsed_args.global_args).ok();
 
@@ -238,6 +247,14 @@ pub fn handle_git(args: &[String]) {
         )
     };
     exit_with_status(exit_status);
+}
+
+fn should_passthrough_read_only_command(parsed_args: &ParsedGitInvocation) -> bool {
+    !parsed_args.is_help
+        && parsed_args
+            .command
+            .as_deref()
+            .is_some_and(crate::git::command_classification::is_definitely_read_only_command)
 }
 
 /// Handle alias invocations
@@ -940,7 +957,10 @@ fn in_shell_completion_context() -> bool {
 #[cfg(test)]
 mod tests {
     use super::parse_alias_tokens;
-    use super::{parse_git_cli_args, resolve_child_git_hooks_path_override};
+    use super::{
+        parse_git_cli_args, resolve_child_git_hooks_path_override,
+        should_passthrough_read_only_command,
+    };
     use crate::git::find_repository_in_path;
     use std::process::Command;
     use tempfile::tempdir;
@@ -1065,6 +1085,25 @@ mod tests {
             resolve_child_git_hooks_path_override(&parsed, Some(&repo)),
             None
         );
+    }
+
+    #[test]
+    fn passthrough_read_only_command_for_status() {
+        let parsed = parse_git_cli_args(&["status".to_string(), "--short".to_string()]);
+        assert!(should_passthrough_read_only_command(&parsed));
+    }
+
+    #[test]
+    fn passthrough_read_only_command_rejects_mutating_commands() {
+        let parsed =
+            parse_git_cli_args(&["commit".to_string(), "-m".to_string(), "msg".to_string()]);
+        assert!(!should_passthrough_read_only_command(&parsed));
+    }
+
+    #[test]
+    fn passthrough_read_only_command_rejects_help_invocations() {
+        let parsed = parse_git_cli_args(&["status".to_string(), "--help".to_string()]);
+        assert!(!should_passthrough_read_only_command(&parsed));
     }
 
     #[cfg(unix)]

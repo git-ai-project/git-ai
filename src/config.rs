@@ -209,6 +209,10 @@ impl Config {
     }
 
     pub fn is_allowed_repository(&self, repository: &Option<Repository>) -> bool {
+        if self.allow_repositories.is_empty() && self.exclude_repositories.is_empty() {
+            return true;
+        }
+
         // Fetch remotes once and reuse for both exclude and allow checks
         let remotes = repository
             .as_ref()
