@@ -2559,6 +2559,120 @@ fn daemon_pure_trace_socket_cherry_pick_continue_emits_complete_event() {
 
 #[test]
 #[serial]
+fn daemon_pure_trace_socket_cherry_pick_with_short_sha_emits_complete_event() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let _daemon = DaemonGuard::start(&repo);
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let env = git_trace_env(&trace_socket);
+    let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
+    let default_branch = repo.current_branch();
+    let completion_baseline = repo.daemon_total_completion_count();
+    let mut expected_top_level_completions = 0u64;
+
+    // Create base commit
+    fs::write(repo.path().join("short-sha-test.txt"), "base\n").expect("failed to write base");
+    traced_git_with_env(
+        &repo,
+        &["add", "short-sha-test.txt"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("add should succeed");
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "base"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("base commit should succeed");
+
+    // Create topic branch with a commit
+    traced_git_with_env(
+        &repo,
+        &["checkout", "-b", "topic-short-sha"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("topic branch checkout should succeed");
+    fs::write(repo.path().join("short-sha-test.txt"), "topic content\n")
+        .expect("failed to write topic change");
+    traced_git_with_env(
+        &repo,
+        &["add", "short-sha-test.txt"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("topic add should succeed");
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "topic change"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("topic commit should succeed");
+
+    // Get the full SHA and derive a short (7-char) prefix
+    let topic_full_sha = repo
+        .git(&["rev-parse", "topic-short-sha"])
+        .expect("topic rev-parse should succeed")
+        .trim()
+        .to_string();
+    let topic_short_sha = &topic_full_sha[..7];
+
+    // Switch back to default branch
+    traced_git_with_env(
+        &repo,
+        &["checkout", default_branch.as_str()],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("checkout default branch should succeed");
+
+    // Cherry-pick using the SHORT SHA -- this is the key part of the test
+    traced_git_with_env(
+        &repo,
+        &["cherry-pick", topic_short_sha],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("cherry-pick with short SHA should succeed");
+
+    wait_for_expected_top_level_completions(
+        &repo,
+        completion_baseline,
+        expected_top_level_completions,
+    );
+
+    let rewrite_log_path = git_common_dir(&repo).join("ai").join("rewrite_log");
+    let rewrite_log = fs::read_to_string(&rewrite_log_path)
+        .expect("rewrite log should exist after cherry-pick with short SHA");
+    assert!(
+        rewrite_log
+            .lines()
+            .any(|line| line.contains("\"cherry_pick_complete\"")),
+        "daemon should emit cherry_pick_complete even when cherry-pick uses a short SHA, rewrite_log: {}",
+        rewrite_log
+    );
+
+    // Verify the source commits in the event contain the FULL SHA, not the short one
+    for line in rewrite_log.lines() {
+        if line.contains("\"cherry_pick_complete\"") {
+            assert!(
+                line.contains(&topic_full_sha),
+                "cherry_pick_complete event should contain full resolved SHA {}, got: {}",
+                topic_full_sha, line
+            );
+            assert!(
+                !line.contains(&format!("\"{}\"", topic_short_sha))
+                    || line.contains(&topic_full_sha),
+                "cherry_pick_complete should not contain unresolved short SHA"
+            );
+        }
+    }
+}
+
+#[test]
+#[serial]
 fn daemon_pure_trace_socket_switch_tracks_success_and_conflict_failure() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);

@@ -2669,22 +2669,33 @@ fn strict_cherry_pick_mappings_from_command(
             context, new_head
         )));
     }
-    let mut source_commits = pending_source_commits;
-    if source_commits.is_empty() {
-        source_commits = cherry_pick_source_commits_from_command(cmd);
-    }
-    if source_commits.is_empty() {
-        return Err(GitAiError::Generic(format!(
-            "{} missing cherry-pick source commits",
-            context
-        )));
-    }
     let worktree = cmd.worktree.as_deref().ok_or_else(|| {
         GitAiError::Generic(format!(
             "{} missing worktree for cherry-pick mapping new={}",
             context, new_head
         ))
     })?;
+    // Resolve source commits: prefer pending (cached from start event), fall
+    // back to parsing command args.  Either path may contain short SHAs or
+    // symbolic refs, so resolve them to full OIDs via git rev-parse.  This
+    // runs in the async side-effect path, not the daemon critical path.
+    let mut source_refs = pending_source_commits;
+    if source_refs.is_empty() {
+        source_refs = cherry_pick_source_refs_from_command(cmd);
+    }
+    if source_refs.is_empty() {
+        return Err(GitAiError::Generic(format!(
+            "{} missing cherry-pick source commits",
+            context
+        )));
+    }
+    let source_commits = resolve_cherry_pick_source_refs(&source_refs, worktree, context)?;
+    if source_commits.is_empty() {
+        return Err(GitAiError::Generic(format!(
+            "{} cherry-pick source refs resolved to no valid commits",
+            context
+        )));
+    }
     let (original_head, new_commits) = resolve_linear_head_commit_chain_for_worktree(
         worktree,
         new_head,
@@ -2703,13 +2714,12 @@ fn strict_cherry_pick_mappings_from_command(
     Ok((original_head, source_commits, new_commits))
 }
 
-fn append_unique_oid(target: &mut Vec<String>, value: &str) {
-    if is_valid_oid(value) && !is_zero_oid(value) && !target.iter().any(|seen| seen == value) {
-        target.push(value.to_string());
-    }
-}
-
-fn cherry_pick_source_commits_from_command(
+/// Collect positional arguments from a cherry-pick command as potential commit
+/// references. Unlike the full-OID-only `is_valid_oid` check, this accepts short SHA prefixes and
+/// symbolic refs (e.g. branch names) that git would resolve on the command line.
+/// Resolution to full OIDs happens later in `resolve_cherry_pick_source_refs`
+/// which runs in the async side-effect path.
+fn cherry_pick_source_refs_from_command(
     cmd: &crate::daemon::domain::NormalizedCommand,
 ) -> Vec<String> {
     let mut out = Vec::new();
@@ -2733,9 +2743,40 @@ fn cherry_pick_source_commits_from_command(
         if arg.starts_with('-') {
             continue;
         }
-        append_unique_oid(&mut out, arg);
+        if !arg.is_empty() && !out.iter().any(|seen: &String| seen == arg) {
+            out.push(arg.to_string());
+        }
     }
     out
+}
+
+/// Resolve cherry-pick source refs (which may be short SHAs, branch names, or
+/// full OIDs) to full commit OIDs. This calls `git rev-parse` and MUST only be
+/// invoked from the async side-effect path, never the daemon critical path.
+fn resolve_cherry_pick_source_refs(
+    source_refs: &[String],
+    worktree: &Path,
+    context: &str,
+) -> Result<Vec<String>, GitAiError> {
+    let mut resolved = Vec::new();
+    let repo = find_repository_in_path(worktree.to_string_lossy().as_ref())?;
+    for src in source_refs {
+        if is_valid_oid(src) && !is_zero_oid(src) {
+            resolved.push(src.clone());
+        } else {
+            let obj = repo.revparse_single(src).map_err(|err| {
+                GitAiError::Generic(format!(
+                    "{} failed to resolve cherry-pick source ref '{}': {}",
+                    context, src, err
+                ))
+            })?;
+            let oid = obj.peel_to_commit().map(|c| c.id()).unwrap_or_else(|_| obj.id());
+            if is_valid_oid(&oid) && !is_zero_oid(&oid) {
+                resolved.push(oid);
+            }
+        }
+    }
+    Ok(resolved)
 }
 
 fn rebase_is_control_mode(cmd: &crate::daemon::domain::NormalizedCommand) -> bool {
@@ -5972,8 +6013,8 @@ impl ActorDaemonCoordinator {
                 if cmd.invoked_args.iter().any(|arg| arg == "--abort") {
                     self.clear_pending_cherry_pick_sources_for_worktree(worktree)?;
                 } else if cmd.exit_code != 0 {
-                    let source_commits = cherry_pick_source_commits_from_command(cmd);
-                    self.set_pending_cherry_pick_sources_for_worktree(worktree, source_commits)?;
+                    let source_refs = cherry_pick_source_refs_from_command(cmd);
+                    self.set_pending_cherry_pick_sources_for_worktree(worktree, source_refs)?;
                 }
             }
             return Ok(());
