@@ -58,21 +58,6 @@
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::{GitTestMode, TestRepo, get_binary_path, real_git_executable};
 
-/// Tests for `commit-tree` + `update-ref` plumbing paths (restack, move, etc.) only work
-/// in wrapper mode where the `update-ref` post-command hook fires synchronously.
-/// In daemon and wrapper-daemon modes, the authorship rewrite may happen asynchronously
-/// and is not guaranteed to complete before the test checks attribution.
-fn skip_unless_wrapper_mode() -> bool {
-    let mode = std::env::var("GIT_AI_TEST_GIT_MODE").unwrap_or_else(|_| "wrapper".to_string());
-    if !matches!(GitTestMode::from_mode_name(&mode), GitTestMode::Wrapper) {
-        eprintln!(
-            "SKIP: commit-tree/update-ref plumbing attribution tests only run in wrapper mode (current: {})",
-            mode
-        );
-        return true;
-    }
-    false
-}
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::process::Command;
@@ -622,9 +607,6 @@ fn test_gt_modify_new_commit_preserves_attribution() {
 /// The wrapper's `update-ref` post-hook intercepts the ref move and remaps authorship notes.
 #[test]
 fn test_gt_modify_restacks_children_preserves_attribution() {
-    if skip_unless_wrapper_mode() {
-        return;
-    }
     require_gt!();
     let repo = TestRepo::new();
     setup_initial_commit(&repo);
@@ -746,9 +728,6 @@ fn test_gt_squash_mixed_ai_human_across_commits() {
 /// The wrapper's `update-ref` post-hook intercepts the ref move and remaps authorship notes.
 #[test]
 fn test_gt_restack_preserves_attribution() {
-    if skip_unless_wrapper_mode() {
-        return;
-    }
     require_gt!();
     let repo = TestRepo::new();
     setup_initial_commit(&repo);
@@ -787,9 +766,6 @@ fn test_gt_restack_preserves_attribution() {
 /// the full stack after restacking via `commit-tree` + `update-ref`.
 #[test]
 fn test_gt_restack_three_branch_stack() {
-    if skip_unless_wrapper_mode() {
-        return;
-    }
     require_gt!();
     let repo = TestRepo::new();
     setup_initial_commit(&repo);
@@ -908,9 +884,6 @@ fn test_gt_fold_with_mixed_content() {
 /// The wrapper's `update-ref` post-hook intercepts the ref move and remaps authorship notes.
 #[test]
 fn test_gt_move_preserves_attribution() {
-    if skip_unless_wrapper_mode() {
-        return;
-    }
     require_gt!();
     let repo = TestRepo::new();
     setup_initial_commit(&repo);
@@ -1077,8 +1050,7 @@ fn test_gt_navigation_preserves_attribution() {
 // Group 10: gt delete / gt pop — Branch deletion
 // ===========================================================================
 
-/// KNOWN_ISSUE:COMMIT_TREE — `gt delete` restacks children using `git commit-tree` +
-/// `git update-ref`, bypassing git-ai attribution tracking entirely.
+/// `gt delete` requires an interactive terminal even with `--force`.
 #[test]
 #[ignore]
 fn test_gt_delete_restacks_children_preserves_attribution() {
@@ -1245,9 +1217,6 @@ fn test_gt_undo_create_preserves_attribution() {
 /// via `commit-tree`), and verify attribution is preserved across the entire stack.
 #[test]
 fn test_gt_full_stack_workflow() {
-    if skip_unless_wrapper_mode() {
-        return;
-    }
     require_gt!();
     let repo = TestRepo::new();
     setup_initial_commit(&repo);

@@ -42,7 +42,14 @@ impl AnalyzerRegistry {
         };
 
         let history: Arc<dyn CommandAnalyzer> = Arc::new(history::HistoryAnalyzer);
-        for command in ["commit", "reset", "rebase", "cherry-pick", "merge"] {
+        for command in [
+            "commit",
+            "reset",
+            "rebase",
+            "cherry-pick",
+            "merge",
+            "update-ref",
+        ] {
             registry.register_command(command, history.clone());
         }
 

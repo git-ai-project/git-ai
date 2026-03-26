@@ -4,7 +4,10 @@ use crate::daemon::domain::{
 };
 use crate::error::GitAiError;
 use crate::git::cli_parser::{explicit_rebase_branch_arg, parse_git_cli_args};
-use crate::git::repo_state::{is_valid_git_oid, resolve_worktree_head_reflog_old_oid_for_new_head};
+use crate::git::repo_state::{
+    is_valid_git_oid, resolve_reflog_old_oid_for_ref_new_oid_in_worktree,
+    resolve_worktree_head_reflog_old_oid_for_new_head,
+};
 #[cfg(test)]
 use std::fs;
 
@@ -126,6 +129,17 @@ impl CommandAnalyzer for HistoryAnalyzer {
                         reference: "HEAD".to_string(),
                         old: old_head,
                         new: new_head,
+                    });
+                }
+            }
+            "update-ref" => {
+                if let Some((ref_name, old_oid, new_oid)) =
+                    parse_update_ref_heads(cmd, &args, state.refs)
+                {
+                    events.push(SemanticEvent::RefUpdated {
+                        reference: ref_name,
+                        old: old_oid,
+                        new: new_oid,
                     });
                 }
             }
@@ -428,6 +442,80 @@ fn change_span(changes: &[&crate::daemon::domain::RefChange]) -> Option<(String,
         return None;
     }
     Some((old_head.to_string(), new_head.to_string()))
+}
+
+/// Parse `update-ref <ref> <new_oid> [<old_oid>]` arguments, returning
+/// (ref_name, old_oid, new_oid) for branch refs only.  Falls back to
+/// `state.refs` for the old OID when the command provides only two positionals,
+/// then to the reflog of the target ref.
+fn parse_update_ref_heads(
+    cmd: &NormalizedCommand,
+    args: &[String],
+    refs: &std::collections::HashMap<String, String>,
+) -> Option<(String, String, String)> {
+    let mut positionals = Vec::new();
+    let mut i = 0usize;
+    while i < args.len() {
+        let arg = &args[i];
+        match arg.as_str() {
+            "update-ref" => {
+                i += 1;
+                continue;
+            }
+            "--stdin" | "--batch-updates" | "-d" | "--delete" => return None,
+            "-m" | "--message" => {
+                i += 2;
+                continue;
+            }
+            "--create-reflog" | "--no-deref" => {
+                i += 1;
+                continue;
+            }
+            _ if arg.starts_with("--message=") => {
+                i += 1;
+                continue;
+            }
+            _ if arg.starts_with('-') => return None,
+            _ => {
+                positionals.push(arg.clone());
+                i += 1;
+            }
+        }
+    }
+
+    let (ref_name, new_oid, old_oid_arg) = match positionals.as_slice() {
+        [ref_name, new_oid] => (ref_name.clone(), new_oid.clone(), None),
+        [ref_name, new_oid, old_oid] => (ref_name.clone(), new_oid.clone(), Some(old_oid.clone())),
+        _ => return None,
+    };
+
+    if !ref_name.starts_with("refs/heads/") {
+        return None;
+    }
+
+    let old_oid = old_oid_arg
+        .filter(|oid| !oid.is_empty() && !is_zero_oid(oid))
+        .or_else(|| refs.get(&ref_name).cloned())
+        .or_else(|| {
+            // The command has already executed; read the old value from the
+            // reflog entry that recorded this update-ref.
+            let worktree = cmd.worktree.as_deref()?;
+            resolve_worktree_head_reflog_old_oid_for_new_head(worktree, &new_oid)
+                .ok()
+                .flatten()
+                .or_else(|| {
+                    resolve_reflog_old_oid_for_ref_new_oid_in_worktree(
+                        worktree, &ref_name, &new_oid,
+                    )
+                })
+        })
+        .filter(|oid| !oid.is_empty() && !is_zero_oid(oid))?;
+
+    if old_oid == new_oid {
+        return None;
+    }
+
+    Some((ref_name, old_oid, new_oid))
 }
 
 fn infer_reset_kind(args: &[String]) -> ResetKind {

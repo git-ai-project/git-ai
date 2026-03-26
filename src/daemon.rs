@@ -5549,13 +5549,59 @@ impl ActorDaemonCoordinator {
                         crate::daemon::domain::ResetKind::Soft => ResetKind::Soft,
                         _ => ResetKind::Mixed,
                     };
-                    out.push(RewriteLogEvent::reset(ResetEvent::new(
-                        rewrite_kind,
-                        keep,
-                        merge,
-                        new_head.clone(),
-                        old_head.clone(),
-                    )));
+                    // For non-hard resets where the head actually moved, check
+                    // whether the reset is really a rebase-like operation (e.g.
+                    // Graphite restack on the checked-out branch).  If we can
+                    // build commit mappings, emit a rebase_complete event so
+                    // authorship notes get remapped -- mirroring what the wrapper
+                    // does via `apply_wrapper_plumbing_rewrite_if_possible`.
+                    let emitted_rebase = if !matches!(kind, crate::daemon::domain::ResetKind::Hard)
+                        && old_head != new_head
+                        && is_valid_oid(old_head)
+                        && !is_zero_oid(old_head)
+                        && is_valid_oid(new_head)
+                        && !is_zero_oid(new_head)
+                    {
+                        if let Ok(repository) = repository_for_rewrite_context(cmd, "reset_rewrite")
+                        {
+                            if let Some((original_commits, new_commits)) =
+                                maybe_rebase_mappings_from_repository(
+                                    &repository,
+                                    old_head,
+                                    new_head,
+                                    None,
+                                    "reset_rewrite",
+                                )?
+                            {
+                                out.push(RewriteLogEvent::rebase_complete(
+                                    RebaseCompleteEvent::new(
+                                        old_head.clone(),
+                                        new_head.clone(),
+                                        false,
+                                        original_commits,
+                                        new_commits,
+                                    ),
+                                ));
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+
+                    if !emitted_rebase {
+                        out.push(RewriteLogEvent::reset(ResetEvent::new(
+                            rewrite_kind,
+                            keep,
+                            merge,
+                            new_head.clone(),
+                            old_head.clone(),
+                        )));
+                    }
                 }
                 crate::daemon::domain::SemanticEvent::RebaseComplete {
                     old_head,
@@ -5812,6 +5858,34 @@ impl ActorDaemonCoordinator {
                         if let Some(worktree) = cmd.worktree.as_ref() {
                             self.clear_pending_rebase_original_head_for_worktree(worktree)?;
                         }
+                    }
+                }
+                crate::daemon::domain::SemanticEvent::RefUpdated {
+                    reference,
+                    old,
+                    new,
+                } => {
+                    if reference.starts_with("refs/heads/")
+                        && !old.is_empty()
+                        && !new.is_empty()
+                        && let Ok(repository) =
+                            repository_for_rewrite_context(cmd, "update_ref_rewrite")
+                        && let Some((original_commits, new_commits)) =
+                            maybe_rebase_mappings_from_repository(
+                                &repository,
+                                old,
+                                new,
+                                None,
+                                "update_ref_rewrite",
+                            )?
+                    {
+                        out.push(RewriteLogEvent::rebase_complete(RebaseCompleteEvent::new(
+                            old.clone(),
+                            new.clone(),
+                            false,
+                            original_commits,
+                            new_commits,
+                        )));
                     }
                 }
                 _ => {}
