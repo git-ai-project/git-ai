@@ -211,26 +211,19 @@ fn is_read_only_config_invocation(parsed: &ParsedGitInvocation) -> bool {
         return false;
     }
 
-    let read_only_flags = [
+    // Only explicit query actions are safe to fast-path. Other config flags like
+    // --type or --show-origin are modifiers and can still participate in writes.
+    let read_only_actions = [
         "--blob",
-        "--default",
         "--get",
         "--get-all",
         "--get-regexp",
         "--get-urlmatch",
-        "--includes",
         "--list",
-        "--name-only",
-        "--no-includes",
-        "--null",
-        "--show-origin",
-        "--show-scope",
-        "--type",
         "-l",
-        "-z",
     ];
 
-    command_args_contain_any(&parsed.command_args, &read_only_flags)
+    command_args_contain_any(&parsed.command_args, &read_only_actions)
 }
 
 fn is_read_only_worktree_invocation(parsed: &ParsedGitInvocation) -> bool {
@@ -366,5 +359,28 @@ mod tests {
             "value".to_string(),
         ]);
         assert!(!is_read_only_invocation(&parsed));
+    }
+
+    #[test]
+    fn read_only_invocation_rejects_config_write_with_type_modifier() {
+        let parsed = parse_git_cli_args(&[
+            "config".to_string(),
+            "--type=bool".to_string(),
+            "demo.enabled".to_string(),
+            "true".to_string(),
+        ]);
+        assert!(!is_read_only_invocation(&parsed));
+    }
+
+    #[test]
+    fn read_only_invocation_accepts_config_get_with_modifiers() {
+        let parsed = parse_git_cli_args(&[
+            "config".to_string(),
+            "--show-origin".to_string(),
+            "--type=bool".to_string(),
+            "--get".to_string(),
+            "demo.enabled".to_string(),
+        ]);
+        assert!(is_read_only_invocation(&parsed));
     }
 }

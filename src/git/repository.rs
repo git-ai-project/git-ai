@@ -2592,6 +2592,10 @@ fn is_fast_discovery_safe_global_flag(arg: &str) -> bool {
 }
 
 fn normalize_global_args_for_repo_root(global_args: &[String], command_root: &str) -> Vec<String> {
+    if !global_args_are_safe_to_rebase(global_args) {
+        return global_args.to_vec();
+    }
+
     let mut normalized = vec!["-C".to_string(), command_root.to_string()];
     let mut idx = 0usize;
 
@@ -2613,6 +2617,33 @@ fn normalize_global_args_for_repo_root(global_args: &[String], command_root: &st
     }
 
     normalized
+}
+
+fn global_args_are_safe_to_rebase(global_args: &[String]) -> bool {
+    let mut idx = 0usize;
+
+    while idx < global_args.len() {
+        let arg = &global_args[idx];
+
+        if arg == "-C" {
+            idx += 2;
+            continue;
+        }
+
+        if arg.starts_with("-C") && arg.len() > 2 {
+            idx += 1;
+            continue;
+        }
+
+        if is_fast_discovery_safe_global_flag(arg) {
+            idx += 1;
+            continue;
+        }
+
+        return false;
+    }
+
+    true
 }
 
 fn resolve_command_base_dir(global_args: &[String]) -> Result<PathBuf, GitAiError> {
@@ -3496,6 +3527,7 @@ fn parse_hunk_header(line: &str) -> Option<(Vec<u32>, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -3970,6 +4002,55 @@ index 0000000..abc1234 100644
                 "--literal-pathspecs".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn normalize_global_args_for_repo_root_preserves_relative_git_dir_and_work_tree() {
+        let args = vec![
+            "--git-dir".to_string(),
+            "sub/repo/.git".to_string(),
+            "--work-tree".to_string(),
+            "sub/repo".to_string(),
+        ];
+
+        let normalized = normalize_global_args_for_repo_root(&args, "/repo/root");
+        assert_eq!(normalized, args);
+    }
+
+    #[test]
+    #[serial]
+    fn find_repository_preserves_relative_git_dir_and_work_tree_for_internal_commands() {
+        struct CurrentDirGuard(PathBuf);
+
+        impl Drop for CurrentDirGuard {
+            fn drop(&mut self) {
+                std::env::set_current_dir(&self.0).expect("restore current dir");
+            }
+        }
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let outer = temp.path().join("outer");
+        let repo_dir = outer.join("sub").join("repo");
+        fs::create_dir_all(&repo_dir).expect("create repo dir");
+
+        run_git(&repo_dir, &["init"]);
+
+        let previous_dir = std::env::current_dir().expect("current dir");
+        let _guard = CurrentDirGuard(previous_dir);
+        std::env::set_current_dir(&outer).expect("set current dir");
+
+        let args = vec![
+            "--git-dir".to_string(),
+            "sub/repo/.git".to_string(),
+            "--work-tree".to_string(),
+            "sub/repo".to_string(),
+        ];
+        let repo = find_repository(&args).expect("find repository");
+        let output = repo
+            .git(&["config", "--get", "core.repositoryformatversion"])
+            .expect("internal git command should preserve relative repo args");
+
+        assert_eq!(output.trim(), "0");
     }
 
     #[test]
