@@ -221,8 +221,16 @@ fn maybe_teardown_async_mode(dry_run: bool) {
     }
 
     // Shut down any leftover daemon from when async_mode was enabled.
+    // Use a control-socket-only check instead of daemon_is_up(), which
+    // requires both the control AND trace sockets to be connectable.
+    // If the trace socket is down but the control socket is up, we still
+    // need to send the shutdown — otherwise the daemon lingers.
     if let Ok(daemon_config) = DaemonConfig::from_env_or_default_paths()
-        && crate::commands::daemon::daemon_is_up(&daemon_config)
+        && crate::daemon::local_socket_connects_with_timeout(
+            &daemon_config.control_socket_path,
+            std::time::Duration::from_millis(100),
+        )
+        .is_ok()
     {
         let _ = crate::daemon::send_control_request(
             &daemon_config.control_socket_path,
