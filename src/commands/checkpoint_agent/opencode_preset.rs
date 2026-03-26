@@ -27,6 +27,8 @@ struct OpenCodeHookInput {
     tool_input: Option<ToolInput>,
     #[serde(default)]
     tool_name: Option<String>,
+    #[serde(default, alias = "toolUseId")]
+    tool_use_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -176,6 +178,7 @@ impl AgentCheckpointPreset for OpenCodePreset {
             cwd,
             tool_input,
             tool_name: _,
+            tool_use_id,
         } = hook_input;
 
         // Extract file_path from tool_input if present
@@ -221,6 +224,8 @@ impl AgentCheckpointPreset for OpenCodePreset {
             agent_metadata.insert("__test_storage_path".to_string(), test_path);
         }
 
+        let tool_use_id = tool_use_id.as_deref().unwrap_or("bash");
+
         // Check if this is a PreToolUse event (human checkpoint)
         if hook_event_name == "PreToolUse" {
             // For bash tools, take a pre-snapshot before the tool executes
@@ -230,7 +235,7 @@ impl AgentCheckpointPreset for OpenCodePreset {
                     HookEvent::PreToolUse,
                     repo_root,
                     &agent_id.id,
-                    "bash",
+                    tool_use_id,
                 );
             }
             return Ok(AgentRunResult {
@@ -252,7 +257,7 @@ impl AgentCheckpointPreset for OpenCodePreset {
                 HookEvent::PostToolUse,
                 repo_root,
                 &agent_id.id,
-                "bash",
+                tool_use_id,
             ) {
                 Ok(BashCheckpointAction::Checkpoint(paths)) => Some(paths),
                 Ok(BashCheckpointAction::NoChanges) => None,

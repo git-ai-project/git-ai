@@ -148,6 +148,12 @@ impl AgentCheckpointPreset for ClaudePreset {
             .and_then(|v| v.as_str())
             .unwrap_or(filename); // Fall back to transcript filename UUID
 
+        let tool_use_id = hook_data
+            .get("tool_use_id")
+            .or_else(|| hook_data.get("toolUseId"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("bash");
+
         if hook_event_name == Some("PreToolUse") {
             // For bash tools, take a pre-snapshot before the tool executes
             if is_bash_tool {
@@ -156,7 +162,7 @@ impl AgentCheckpointPreset for ClaudePreset {
                     HookEvent::PreToolUse,
                     repo_root,
                     session_id,
-                    "bash", // tool_use_id: sequential per session
+                    tool_use_id,
                 );
             }
 
@@ -176,8 +182,12 @@ impl AgentCheckpointPreset for ClaudePreset {
         // PostToolUse: for bash tools, diff snapshots to detect changed files
         let edited_filepaths = if is_bash_tool {
             let repo_root = Path::new(cwd);
-            match bash_tool::handle_bash_tool(HookEvent::PostToolUse, repo_root, session_id, "bash")
-            {
+            match bash_tool::handle_bash_tool(
+                HookEvent::PostToolUse,
+                repo_root,
+                session_id,
+                tool_use_id,
+            ) {
                 Ok(BashCheckpointAction::Checkpoint(paths)) => Some(paths),
                 Ok(BashCheckpointAction::NoChanges) => None,
                 Ok(BashCheckpointAction::Fallback) => {
@@ -525,6 +535,12 @@ impl AgentCheckpointPreset for GeminiPreset {
             .map(|name| bash_tool::classify_tool(Agent::Gemini, name) == ToolClass::Bash)
             .unwrap_or(false);
 
+        let tool_use_id = hook_data
+            .get("tool_use_id")
+            .or_else(|| hook_data.get("toolUseId"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("bash");
+
         if hook_event_name == Some("BeforeTool") {
             // For bash tools, take a pre-snapshot before the tool executes
             if is_bash_tool {
@@ -533,7 +549,7 @@ impl AgentCheckpointPreset for GeminiPreset {
                     HookEvent::PreToolUse,
                     repo_root,
                     session_id,
-                    "bash",
+                    tool_use_id,
                 );
             }
             // Early return for human checkpoint
@@ -552,8 +568,12 @@ impl AgentCheckpointPreset for GeminiPreset {
         // PostToolUse: for bash tools, diff snapshots to detect changed files
         let edited_filepaths = if is_bash_tool {
             let repo_root = Path::new(cwd);
-            match bash_tool::handle_bash_tool(HookEvent::PostToolUse, repo_root, session_id, "bash")
-            {
+            match bash_tool::handle_bash_tool(
+                HookEvent::PostToolUse,
+                repo_root,
+                session_id,
+                tool_use_id,
+            ) {
                 Ok(BashCheckpointAction::Checkpoint(paths)) => Some(paths),
                 Ok(BashCheckpointAction::NoChanges) => None,
                 Ok(BashCheckpointAction::Fallback) => {
@@ -984,6 +1004,12 @@ impl AgentCheckpointPreset for ContinueCliPreset {
             .map(|name| bash_tool::classify_tool(Agent::ContinueCli, name) == ToolClass::Bash)
             .unwrap_or(false);
 
+        let tool_use_id = hook_data
+            .get("tool_use_id")
+            .or_else(|| hook_data.get("toolUseId"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("bash");
+
         if hook_event_name == Some("PreToolUse") {
             // For bash tools, take a pre-snapshot before the tool executes
             if is_bash_tool {
@@ -992,7 +1018,7 @@ impl AgentCheckpointPreset for ContinueCliPreset {
                     HookEvent::PreToolUse,
                     repo_root,
                     session_id,
-                    "bash",
+                    tool_use_id,
                 );
             }
             // Early return for human checkpoint
@@ -1011,8 +1037,12 @@ impl AgentCheckpointPreset for ContinueCliPreset {
         // PostToolUse: for bash tools, diff snapshots to detect changed files
         let edited_filepaths = if is_bash_tool {
             let repo_root = Path::new(cwd);
-            match bash_tool::handle_bash_tool(HookEvent::PostToolUse, repo_root, session_id, "bash")
-            {
+            match bash_tool::handle_bash_tool(
+                HookEvent::PostToolUse,
+                repo_root,
+                session_id,
+                tool_use_id,
+            ) {
                 Ok(BashCheckpointAction::Checkpoint(paths)) => Some(paths),
                 Ok(BashCheckpointAction::NoChanges) => None,
                 Ok(BashCheckpointAction::Fallback) => {
@@ -2974,6 +3004,12 @@ impl AgentCheckpointPreset for DroidPreset {
             .map(|name| bash_tool::classify_tool(Agent::Droid, name) == ToolClass::Bash)
             .unwrap_or(false);
 
+        let tool_use_id = hook_data
+            .get("tool_use_id")
+            .or_else(|| hook_data.get("toolUseId"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("bash");
+
         // Check if this is a PreToolUse event (human checkpoint)
         if hook_event_name == "PreToolUse" {
             // For bash tools, take a pre-snapshot before the tool executes
@@ -2983,7 +3019,7 @@ impl AgentCheckpointPreset for DroidPreset {
                     HookEvent::PreToolUse,
                     repo_root,
                     &agent_id.id,
-                    "bash",
+                    tool_use_id,
                 );
             }
             return Ok(AgentRunResult {
@@ -3005,7 +3041,7 @@ impl AgentCheckpointPreset for DroidPreset {
                 HookEvent::PostToolUse,
                 repo_root,
                 &agent_id.id,
-                "bash",
+                tool_use_id,
             ) {
                 Ok(BashCheckpointAction::Checkpoint(paths)) => Some(paths),
                 Ok(BashCheckpointAction::NoChanges) => None,
