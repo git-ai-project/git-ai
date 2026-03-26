@@ -14,6 +14,7 @@ pub fn reduce_family_command(
     let analysis = analyzers.analyze(&cmd, AnalysisView { refs: &state.refs })?;
     apply_ref_changes(state, &cmd);
     apply_post_repo_refs(state, &cmd, &analysis);
+    apply_analysis_ref_updates(state, &analysis);
     apply_worktree_state(state, &cmd);
 
     state.applied_seq = state.applied_seq.saturating_add(1);
@@ -121,6 +122,19 @@ fn should_apply_post_repo_refs(cmd: &NormalizedCommand, analysis: &AnalysisResul
     })
 }
 
+/// Update tracked refs from `RefUpdated` analysis events.  This covers
+/// plumbing commands like `update-ref` where trace2 does not emit
+/// `reference:` events and no `post_repo` snapshot is available.
+fn apply_analysis_ref_updates(state: &mut FamilyState, analysis: &AnalysisResult) {
+    for event in &analysis.events {
+        if let crate::daemon::domain::SemanticEvent::RefUpdated { reference, new, .. } = event
+            && !new.is_empty()
+        {
+            state.refs.insert(reference.clone(), new.clone());
+        }
+    }
+}
+
 fn apply_worktree_state(state: &mut FamilyState, cmd: &NormalizedCommand) {
     let Some(worktree) = cmd.worktree.as_ref() else {
         return;
@@ -202,7 +216,7 @@ mod tests {
         assert_eq!(applied.seq, 1);
         assert!(matches!(
             analysis.class,
-            crate::daemon::domain::CommandClass::RefMutation
+            crate::daemon::domain::CommandClass::HistoryRewrite
         ));
         assert_eq!(
             state.refs.get("refs/heads/main").map(String::as_str),

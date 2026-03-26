@@ -76,6 +76,7 @@ mod pull_rebase_ff;
 mod push_upstream_authorship;
 mod realistic_complex_edits;
 mod rebase;
+mod rebase_benchmark;
 mod rebase_hooks_comprehensive;
 mod reset;
 mod reset_hooks_comprehensive;

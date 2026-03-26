@@ -8,22 +8,20 @@
 /// - When the `CI` environment variable is set, tests will FAIL if `gt` is not available
 /// - When not in CI, tests will be SKIPPED if `gt` is not available
 ///
-/// ## Known Issue: `gt` rebase operations use git plumbing commands
+/// ## Graphite's `commit-tree` + `update-ref` plumbing path
 ///
 /// Graphite's restack/move/absorb/split operations internally use `git commit-tree` +
-/// `git update-ref` (low-level plumbing commands) instead of `git rebase`. This completely
-/// bypasses git-ai's attribution tracking because:
-///   1. `git commit-tree` does not trigger any git hooks (pre-commit, post-commit, post-rewrite)
-///   2. `git update-ref` moves branch pointers without any hook invocation
-///   3. git-ai's wrapper-mode post-command hooks only fire for recognized commands like `rebase`
+/// `git update-ref` (low-level plumbing commands) instead of `git rebase`.
 ///
-/// As a result, when `gt` restacks branches, the new commits created by `commit-tree` have no
-/// associated attribution notes. The old commit SHAs still have their notes, but the new SHAs
-/// that replace them do not.
+/// git-ai's wrapper-mode `update-ref` post-hook intercepts the ref move, detects the
+/// non-fast-forward rewrite, and remaps authorship notes to the new commit SHAs. This
+/// covers the core operations: restack, move, modify (with child restacking), and
+/// full stack workflows.
 ///
-/// Tests affected by this are marked with `#[ignore]` and tagged with "KNOWN_ISSUE:COMMIT_TREE".
-/// They document the CORRECT expected behavior and will pass once git-ai handles `commit-tree`
-/// or Graphite changes its rebase strategy.
+/// Remaining known issues (still `#[ignore]`):
+///   - `gt absorb` and `gt split --by-file` lose attribution (update-ref hook cannot
+///     reconstruct the mapping for these more complex rewrite patterns)
+///   - `gt delete --force` and `gt undo` require interactive mode even with `--no-interactive`
 ///
 /// ## Commands NOT tested (require GitHub authentication / remote):
 /// - `gt submit` - Pushes to GitHub, creates/updates PRs
@@ -47,18 +45,19 @@
 /// - `gt create` - Create new branch with commit
 /// - `gt modify` - Amend/new commit with automatic restack
 /// - `gt squash` - Squash all commits in branch into one
-/// - `gt restack` - Rebase stack to ensure parent lineage (KNOWN_ISSUE: loses attribution)
+/// - `gt restack` - Rebase stack to ensure parent lineage
 /// - `gt fold` - Fold branch into parent
-/// - `gt move` - Move branch to new parent (KNOWN_ISSUE: loses attribution)
+/// - `gt move` - Move branch to new parent
 /// - `gt split --by-file` - Split branch by file (KNOWN_ISSUE: loses attribution)
 /// - `gt absorb` - Absorb staged changes into stack (KNOWN_ISSUE: loses attribution)
 /// - `gt checkout` / `gt up` / `gt down` / `gt top` / `gt bottom` - Navigation
-/// - `gt delete` - Delete branch, restack children (KNOWN_ISSUE: restack loses attribution)
+/// - `gt delete` - Delete branch, restack children (KNOWN_ISSUE: requires interactive mode)
 /// - `gt pop` - Delete branch, retain working tree
 /// - `gt rename` - Rename branch
 /// - `gt track` / `gt untrack` - Metadata tracking
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::{GitTestMode, TestRepo, get_binary_path, real_git_executable};
+
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::process::Command;
@@ -604,10 +603,9 @@ fn test_gt_modify_new_commit_preserves_attribution() {
     file2.assert_lines_and_blame(crate::lines!["ai line 2".ai(),]);
 }
 
-/// KNOWN_ISSUE:COMMIT_TREE — `gt modify` amends via `commit-tree` when restacking children,
-/// so the child branch commits lose their attribution notes.
+/// `gt modify` amends via `commit-tree` when restacking children.
+/// The wrapper's `update-ref` post-hook intercepts the ref move and remaps authorship notes.
 #[test]
-#[ignore]
 fn test_gt_modify_restacks_children_preserves_attribution() {
     require_gt!();
     let repo = TestRepo::new();
@@ -726,10 +724,9 @@ fn test_gt_squash_mixed_ai_human_across_commits() {
 // Group 4: gt restack — Rebase stack operations
 // ===========================================================================
 
-/// KNOWN_ISSUE:COMMIT_TREE — `gt restack` uses `git commit-tree` + `git update-ref`
-/// instead of `git rebase`, bypassing git-ai attribution tracking entirely.
+/// `gt restack` uses `git commit-tree` + `git update-ref`.
+/// The wrapper's `update-ref` post-hook intercepts the ref move and remaps authorship notes.
 #[test]
-#[ignore]
 fn test_gt_restack_preserves_attribution() {
     require_gt!();
     let repo = TestRepo::new();
@@ -765,12 +762,9 @@ fn test_gt_restack_preserves_attribution() {
     file1.assert_lines_and_blame(crate::lines!["branch1 ai".ai(), "branch1 human".human(),]);
 }
 
-/// KNOWN_ISSUE:COMMIT_TREE — `gt restack` uses `git commit-tree` + `git update-ref`
-/// instead of `git rebase`, bypassing git-ai attribution tracking entirely.
-/// Note: this test may pass if no actual restacking is needed (no trunk advancement),
-/// but is marked ignored for consistency with the restack group.
+/// `gt restack` with a 3-branch stack — verifies attribution is preserved across
+/// the full stack after restacking via `commit-tree` + `update-ref`.
 #[test]
-#[ignore]
 fn test_gt_restack_three_branch_stack() {
     require_gt!();
     let repo = TestRepo::new();
@@ -886,10 +880,9 @@ fn test_gt_fold_with_mixed_content() {
 // Group 6: gt move — Move branch to new parent
 // ===========================================================================
 
-/// KNOWN_ISSUE:COMMIT_TREE — `gt move` uses `git commit-tree` + `git update-ref`
-/// instead of `git rebase`, bypassing git-ai attribution tracking entirely.
+/// `gt move` uses `git commit-tree` + `git update-ref`.
+/// The wrapper's `update-ref` post-hook intercepts the ref move and remaps authorship notes.
 #[test]
-#[ignore]
 fn test_gt_move_preserves_attribution() {
     require_gt!();
     let repo = TestRepo::new();
@@ -1057,8 +1050,7 @@ fn test_gt_navigation_preserves_attribution() {
 // Group 10: gt delete / gt pop — Branch deletion
 // ===========================================================================
 
-/// KNOWN_ISSUE:COMMIT_TREE — `gt delete` restacks children using `git commit-tree` +
-/// `git update-ref`, bypassing git-ai attribution tracking entirely.
+/// `gt delete` requires an interactive terminal even with `--force`.
 #[test]
 #[ignore]
 fn test_gt_delete_restacks_children_preserves_attribution() {
@@ -1221,10 +1213,9 @@ fn test_gt_undo_create_preserves_attribution() {
 // Group 14: Complex multi-operation workflows
 // ===========================================================================
 
-/// KNOWN_ISSUE:COMMIT_TREE — This workflow test includes a `gt modify` on a middle branch
-/// which triggers restacking of children via `git commit-tree`, losing their attribution.
+/// Full stack workflow: create 3-branch stack, modify middle branch (triggering child restack
+/// via `commit-tree`), and verify attribution is preserved across the entire stack.
 #[test]
-#[ignore]
 fn test_gt_full_stack_workflow() {
     require_gt!();
     let repo = TestRepo::new();
