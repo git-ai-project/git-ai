@@ -6947,10 +6947,9 @@ fn daemon_update_check_loop(coordinator: Arc<ActorDaemonCoordinator>, started_at
                 .shutdown_condvar_mutex
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            let _ = coordinator.shutdown_condvar.wait_timeout(
-                guard,
-                std::time::Duration::from_secs(interval),
-            );
+            let _ = coordinator
+                .shutdown_condvar
+                .wait_timeout(guard, std::time::Duration::from_secs(interval));
         }
 
         if coordinator.is_shutting_down() {
