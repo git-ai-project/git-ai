@@ -30,6 +30,17 @@ const MAX_TRACKED_FILES: usize = 500_000;
 /// Pre-snapshots older than this are garbage-collected (seconds).
 const SNAPSHOT_STALE_SECS: u64 = 300;
 
+/// Grace window in nanoseconds for low-resolution filesystem mtime comparison.
+#[allow(dead_code)]
+const MTIME_GRACE_WINDOW_NS: u128 = (_MTIME_GRACE_WINDOW_SECS as u128) * 1_000_000_000;
+
+/// Maximum number of stale files before skipping content capture.
+#[allow(dead_code)]
+const MAX_STALE_FILES_FOR_CAPTURE: usize = 1000;
+
+/// Maximum file size for content capture (10 MB).
+const MAX_CAPTURE_FILE_SIZE: u64 = 10 * 1024 * 1024; // used by capture_file_contents
+
 // ---------------------------------------------------------------------------
 // Core types
 // ---------------------------------------------------------------------------
@@ -176,6 +187,22 @@ pub enum BashCheckpointAction {
 pub enum HookEvent {
     PreToolUse,
     PostToolUse,
+}
+
+/// Result from `handle_bash_tool` combining the action with optional captured checkpoint info.
+#[allow(dead_code)]
+pub struct BashToolResult {
+    /// The checkpoint action (unchanged from previous API).
+    pub action: BashCheckpointAction,
+    /// If set, a captured checkpoint was prepared and needs submission by the handler.
+    pub captured_checkpoint: Option<CapturedCheckpointInfo>,
+}
+
+/// Info about a captured checkpoint prepared by the bash tool.
+#[allow(dead_code)]
+pub struct CapturedCheckpointInfo {
+    pub capture_id: String,
+    pub repo_working_dir: String,
 }
 
 /// Per-agent tool classification.
@@ -721,6 +748,60 @@ pub fn git_status_fallback(repo_root: &Path) -> Result<Vec<String>, GitAiError> 
     }
 
     Ok(changed_files)
+}
+
+// ---------------------------------------------------------------------------
+// Captured-checkpoint helpers
+// ---------------------------------------------------------------------------
+
+/// Convert a `SystemTime` to nanoseconds since UNIX epoch for watermark comparison.
+#[allow(dead_code)]
+fn system_time_to_nanos(t: SystemTime) -> u128 {
+    t.duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+}
+
+/// Read file contents for captured checkpoint, skipping binary/large/unreadable files.
+#[allow(dead_code)]
+fn capture_file_contents(repo_root: &Path, file_paths: &[PathBuf]) -> HashMap<String, String> {
+    let mut contents = HashMap::new();
+    for rel_path in file_paths {
+        let abs_path = repo_root.join(rel_path);
+        match fs::metadata(&abs_path) {
+            Ok(meta) if meta.len() > MAX_CAPTURE_FILE_SIZE => {
+                debug_log(&format!(
+                    "Skipping large file for capture: {} ({} bytes)",
+                    rel_path.display(),
+                    meta.len()
+                ));
+                continue;
+            }
+            Err(e) => {
+                debug_log(&format!(
+                    "Skipping unreadable file for capture: {}: {}",
+                    rel_path.display(),
+                    e
+                ));
+                continue;
+            }
+            _ => {}
+        }
+        match fs::read_to_string(&abs_path) {
+            Ok(content) => {
+                let key = crate::utils::normalize_to_posix(&rel_path.to_string_lossy());
+                contents.insert(key, content);
+            }
+            Err(e) => {
+                debug_log(&format!(
+                    "Skipping non-UTF8/unreadable file for capture: {}: {}",
+                    rel_path.display(),
+                    e
+                ));
+            }
+        }
+    }
+    contents
 }
 
 // ---------------------------------------------------------------------------
