@@ -20,11 +20,23 @@ pub const GIT_AI_VERSION: &str = concat!("development:", env!("CARGO_PKG_VERSION
 #[cfg(not(debug_assertions))]
 pub const GIT_AI_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Per-file change detail within a single checkpoint
+/// Per-file change detail within a single checkpoint.
+/// Line ranges use the same compact string format as the attestation section:
+/// a single line is `"n"`, a range is `"n-m"`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileChangeDetail {
-    pub added_lines: Vec<(u32, u32)>,
-    pub deleted_lines: Vec<(u32, u32)>,
+    pub added_lines: Vec<String>,
+    pub deleted_lines: Vec<String>,
+}
+
+/// Format a (start, end) tuple as a compact line range string.
+/// Single lines (start == end) are written as `"n"`, ranges as `"n-m"`.
+pub fn format_line_range_tuple(start: u32, end: u32) -> String {
+    if start == end {
+        start.to_string()
+    } else {
+        format!("{}-{}", start, end)
+    }
 }
 
 /// One entry in the per-checkpoint change history stored in the authorship note
@@ -33,7 +45,9 @@ pub struct ChangeHistoryEntry {
     pub timestamp: u64,
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub author_id: Option<String>,
+    pub conversation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

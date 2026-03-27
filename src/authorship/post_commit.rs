@@ -176,24 +176,36 @@ pub fn post_commit_with_final_state(
                 use crate::authorship::authorship_log_serialization::{
                     ChangeHistoryEntry, FileChangeDetail,
                 };
-                let (author_id, model) = if let Some(aid) = &cp.agent_id {
+                let (conversation_id, agent_type, model) = if let Some(aid) = &cp.agent_id {
                     (
                         Some(crate::authorship::authorship_log_serialization::generate_short_hash(
                             &aid.id, &aid.tool,
                         )),
+                        Some(aid.tool.clone()),
                         Some(aid.model.clone()),
                     )
                 } else {
-                    (None, None)
+                    (None, None, None)
                 };
 
                 let mut files = std::collections::BTreeMap::new();
                 for entry in &cp.entries {
+                    use crate::authorship::authorship_log_serialization::format_line_range_tuple;
+                    let fmt = |ranges: &[(u32, u32)]| -> Vec<String> {
+                        ranges
+                            .iter()
+                            .map(|&(s, e)| format_line_range_tuple(s, e))
+                            .collect()
+                    };
                     files.insert(
                         entry.file.clone(),
                         FileChangeDetail {
-                            added_lines: entry.added_line_ranges.clone().unwrap_or_default(),
-                            deleted_lines: entry.deleted_line_ranges.clone().unwrap_or_default(),
+                            added_lines: fmt(
+                                entry.added_line_ranges.as_deref().unwrap_or(&[]),
+                            ),
+                            deleted_lines: fmt(
+                                entry.deleted_line_ranges.as_deref().unwrap_or(&[]),
+                            ),
                         },
                     );
                 }
@@ -201,7 +213,8 @@ pub fn post_commit_with_final_state(
                 ChangeHistoryEntry {
                     timestamp: cp.timestamp,
                     kind: cp.kind.to_str(),
-                    author_id,
+                    conversation_id,
+                    agent_type,
                     prompt_id: cp.prompt_id.clone(),
                     model,
                     files,
@@ -544,24 +557,45 @@ fn update_prompts_to_latest(checkpoints: &mut [Checkpoint]) -> Result<(), GitAiE
             // Apply the update to the last checkpoint only
             match result {
                 PromptUpdateResult::Updated(latest_transcript, latest_model) => {
-                    let checkpoint = &mut checkpoints[last_idx];
-                    // Backfill prompt_id if it was missed at checkpoint time (transcript race)
-                    if checkpoint.prompt_id.is_none() {
-                        checkpoint.prompt_id = latest_transcript
-                            .messages
-                            .iter()
-                            .rev()
-                            .find_map(|m| {
-                                if matches!(
-                                    m,
-                                    crate::authorship::transcript::Message::User { .. }
-                                ) {
-                                    m.id().cloned()
-                                } else {
-                                    None
-                                }
-                            });
+                    // Build a timeline of (unix_ts, bubble_id) for user messages so we can
+                    // assign the correct prompt_id to every checkpoint in this conversation.
+                    // If a message has no parseable timestamp we use 0, which matches any
+                    // checkpoint (better to assign something than leave it null).
+                    let user_msg_timeline: Vec<(u64, Option<String>)> = latest_transcript
+                        .messages
+                        .iter()
+                        .filter(|m| {
+                            matches!(m, crate::authorship::transcript::Message::User { .. })
+                        })
+                        .map(|m| {
+                            let ts = m
+                                .timestamp()
+                                .and_then(|ts_str| {
+                                    chrono::DateTime::parse_from_rfc3339(ts_str).ok()
+                                })
+                                .map(|dt| dt.timestamp() as u64)
+                                .unwrap_or(0);
+                            (ts, m.id().cloned())
+                        })
+                        .collect();
+
+                    // Backfill prompt_id for ALL checkpoints in this conversation that lack
+                    // one. At checkpoint creation time, Cursor's SQLite DB may not yet have
+                    // persisted the triggering user message, so earlier checkpoints in a
+                    // prompt batch frequently miss their prompt_id.
+                    // Strategy: assign the last user message whose timestamp <= checkpoint ts.
+                    for &idx in &indices {
+                        if checkpoints[idx].prompt_id.is_none() {
+                            let cp_ts = checkpoints[idx].timestamp;
+                            checkpoints[idx].prompt_id = user_msg_timeline
+                                .iter()
+                                .filter(|(msg_ts, _)| *msg_ts == 0 || *msg_ts <= cp_ts)
+                                .last()
+                                .and_then(|(_, id)| id.clone());
+                        }
                     }
+
+                    let checkpoint = &mut checkpoints[last_idx];
                     checkpoint.transcript = Some(latest_transcript);
                     if let Some(agent_id) = &mut checkpoint.agent_id {
                         agent_id.model = latest_model;

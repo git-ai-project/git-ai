@@ -154,9 +154,10 @@ Add new structs:
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChangeHistoryEntry {
     pub timestamp: u64,
-    pub kind: String,              // "human" or "ai_agent"
-    pub author_id: Option<String>, // session hash (links to prompts map key)
-    pub prompt_id: Option<String>, // bubbleId of triggering user message
+    pub kind: String,                   // "human" or "ai_agent"
+    pub conversation_id: Option<String>, // session hash (links to prompts map key)
+    pub agent_type: Option<String>,      // tool name, e.g. "cursor"
+    pub prompt_id: Option<String>,       // bubbleId of triggering user message
     pub model: Option<String>,
     pub files: BTreeMap<String, FileChangeDetail>,
     pub line_stats: CheckpointLineStats,
@@ -191,7 +192,8 @@ In `post_commit_with_final_state` (line 69), after loading and refreshing checkp
 - For each checkpoint, build a `ChangeHistoryEntry`:
   - `timestamp` from `checkpoint.timestamp`
   - `kind` from `checkpoint.kind`
-  - `author_id` from `generate_short_hash(agent_id.id, agent_id.tool)` (same hash used in attestations)
+  - `conversation_id` from `generate_short_hash(agent_id.id, agent_id.tool)` (same hash used in attestations)
+  - `agent_type` from `agent_id.tool` (e.g. `"cursor"`)
   - `prompt_id` from `checkpoint.prompt_id`
   - `model` from `agent_id.model`
   - `files` from each `WorkingLogEntry`'s `added_line_ranges` / `deleted_line_ranges`
@@ -232,7 +234,8 @@ The git note metadata JSON section will look like:
     {
       "timestamp": 1711468800,
       "kind": "ai_agent",
-      "author_id": "abc123def4567890",
+      "conversation_id": "abc123def4567890",
+      "agent_type": "cursor",
       "prompt_id": "bubble-1",
       "model": "claude-4.6-opus",
       "files": {
@@ -246,9 +249,6 @@ The git note metadata JSON section will look like:
     {
       "timestamp": 1711468900,
       "kind": "human",
-      "author_id": null,
-      "prompt_id": null,
-      "model": null,
       "files": {
         "src/auth.rs": {
           "added_lines": [[16, 18]],
