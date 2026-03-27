@@ -971,7 +971,53 @@ pub fn grep_ai_notes(repo: &Repository, pattern: &str) -> Result<Vec<String>, Gi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::feature_flags::FeatureFlags;
     use crate::git::test_utils::TmpRepo;
+    use serial_test::serial;
+
+    struct TestFeatureFlagsGuard;
+
+    impl TestFeatureFlagsGuard {
+        fn new() -> Self {
+            crate::config::Config::clear_test_feature_flags();
+            Self
+        }
+    }
+
+    impl Drop for TestFeatureFlagsGuard {
+        fn drop(&mut self) {
+            crate::config::Config::clear_test_feature_flags();
+        }
+    }
+
+    fn set_test_sharded_notes(enabled: bool) {
+        let mut flags = FeatureFlags::default();
+        flags.sharded_notes = enabled;
+        crate::config::Config::set_test_feature_flags(flags);
+    }
+
+    fn create_commit_without_authorship_note(
+        tmp_repo: &TmpRepo,
+        filename: &str,
+        contents: &str,
+        message: &str,
+    ) -> String {
+        tmp_repo
+            .write_file(filename, contents, true)
+            .expect("write file for manual commit");
+
+        let mut args = tmp_repo.gitai_repo().global_args_for_exec();
+        args.extend_from_slice(&["add".to_string(), ".".to_string()]);
+        exec_git(&args).expect("stage files");
+
+        let mut args = tmp_repo.gitai_repo().global_args_for_exec();
+        args.extend_from_slice(&["commit".to_string(), "-m".to_string(), message.to_string()]);
+        exec_git(&args).expect("create manual commit");
+
+        tmp_repo
+            .get_head_commit_sha()
+            .expect("get manual commit sha")
+    }
 
     #[test]
     fn test_parse_batch_check_blob_oid_accepts_sha1_and_sha256() {
@@ -1025,6 +1071,118 @@ mod tests {
             "0000000000000000000000000000000000000000",
         );
         assert!(non_existent_content.is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn test_notes_add_respects_sharded_notes_flag_for_writes() {
+        let _guard = TestFeatureFlagsGuard::new();
+        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
+        set_test_sharded_notes(false);
+
+        tmp_repo
+            .commit_with_message("Initial commit")
+            .expect("Failed to create initial commit");
+        let commit_a = tmp_repo
+            .get_head_commit_sha()
+            .expect("Failed to get first commit SHA");
+
+        set_test_sharded_notes(false);
+        notes_add(
+            tmp_repo.gitai_repo(),
+            &commit_a,
+            "{\"mode\":\"legacy-only\"}",
+        )
+        .expect("add non-sharded note");
+
+        let shard_ref_a = format!("refs/notes/ai-s/{}", &commit_a[..2]);
+        assert!(
+            !ref_exists(tmp_repo.gitai_repo(), &shard_ref_a),
+            "default-off write should not create shard refs"
+        );
+
+        tmp_repo
+            .write_file("second.txt", "second\n", true)
+            .expect("write second file");
+        tmp_repo
+            .commit_with_message("Second commit")
+            .expect("create second commit");
+        let commit_b = tmp_repo
+            .get_head_commit_sha()
+            .expect("Failed to get second commit SHA");
+
+        set_test_sharded_notes(true);
+        notes_add(tmp_repo.gitai_repo(), &commit_b, "{\"mode\":\"sharded\"}")
+            .expect("add sharded note");
+
+        let shard_ref_b = format!("refs/notes/ai-s/{}", &commit_b[..2]);
+        assert!(
+            ref_exists(tmp_repo.gitai_repo(), &shard_ref_b),
+            "enabling the flag should create the shard ref"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_shard_reads_are_ignored_when_flag_is_disabled() {
+        let _guard = TestFeatureFlagsGuard::new();
+        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
+        set_test_sharded_notes(false);
+        let commit_sha = create_commit_without_authorship_note(
+            &tmp_repo,
+            "shard-only.txt",
+            "shard only\n",
+            "Manual commit without authorship note",
+        );
+        let shard_ref = format!("ai-s/{}", &commit_sha[..2]);
+
+        let mut args = tmp_repo.gitai_repo().global_args_for_exec();
+        args.extend_from_slice(&[
+            "notes".to_string(),
+            format!("--ref={}", shard_ref),
+            "add".to_string(),
+            "-f".to_string(),
+            "-m".to_string(),
+            "{\"note\":\"shard-only\"}".to_string(),
+            commit_sha.clone(),
+        ]);
+        exec_git(&args).expect("add shard-only note");
+
+        set_test_sharded_notes(false);
+        assert!(
+            show_authorship_note(tmp_repo.gitai_repo(), &commit_sha).is_none(),
+            "default-off reads should ignore shard-only notes"
+        );
+        assert!(
+            note_blob_oids_for_commits(tmp_repo.gitai_repo(), std::slice::from_ref(&commit_sha))
+                .expect("resolve note blob oids")
+                .is_empty(),
+            "default-off blob lookup should ignore shard-only notes"
+        );
+        assert!(
+            commits_with_authorship_notes(tmp_repo.gitai_repo(), std::slice::from_ref(&commit_sha))
+                .expect("resolve commit note presence")
+                .is_empty(),
+            "default-off note existence checks should ignore shard-only notes"
+        );
+
+        set_test_sharded_notes(true);
+        assert_eq!(
+            show_authorship_note(tmp_repo.gitai_repo(), &commit_sha).as_deref(),
+            Some("{\"note\":\"shard-only\"}")
+        );
+        assert!(
+            note_blob_oids_for_commits(tmp_repo.gitai_repo(), std::slice::from_ref(&commit_sha))
+                .expect("resolve note blob oids with sharding")
+                .contains_key(&commit_sha),
+            "enabled shard reads should discover shard-only notes"
+        );
+        assert!(
+            commits_with_authorship_notes(tmp_repo.gitai_repo(), std::slice::from_ref(&commit_sha))
+                .expect("resolve commit note presence with sharding")
+                .contains(&commit_sha),
+            "enabled note existence checks should discover shard-only notes"
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-fn enable_sharded_notes(repo: &mut TestRepo) {
+fn set_sharded_notes(repo: &mut TestRepo, enabled: bool) {
     repo.patch_git_ai_config(|patch| {
         let mut flags = match patch.feature_flags.take() {
             Some(existing) if existing.is_object() => existing,
@@ -14,9 +14,26 @@ fn enable_sharded_notes(repo: &mut TestRepo) {
         let flags_obj = flags
             .as_object_mut()
             .expect("feature_flags value should be an object");
-        flags_obj.insert("sharded_notes".to_string(), json!(true));
+        flags_obj.insert("sharded_notes".to_string(), json!(enabled));
         patch.feature_flags = Some(flags);
     });
+}
+
+fn enable_sharded_notes(repo: &mut TestRepo) {
+    set_sharded_notes(repo, true);
+}
+
+fn disable_sharded_notes(repo: &mut TestRepo) {
+    set_sharded_notes(repo, false);
+}
+
+fn git_ref_exists(repo_path: &Path, ref_name: &str) -> bool {
+    Command::new("git")
+        .args(["-C", repo_path.to_str().unwrap()])
+        .args(["show-ref", "--verify", "--quiet", ref_name])
+        .status()
+        .expect("git should run")
+        .success()
 }
 
 #[test]
@@ -163,33 +180,6 @@ fn test_fetch_and_push_authorship_notes_internal_commands_json() {
     let fetch_after_json: serde_json::Value =
         serde_json::from_str(fetch_after.trim()).expect("fetch output should be JSON");
     assert_eq!(fetch_after_json["notes_existence"], "found");
-}
-
-fn set_sharded_notes(repo: &mut TestRepo, enabled: bool) {
-    repo.patch_git_ai_config(|patch| {
-        let mut flags = match patch.feature_flags.take() {
-            Some(existing) if existing.is_object() => existing,
-            _ => json!({}),
-        };
-        let flags_obj = flags
-            .as_object_mut()
-            .expect("feature_flags value should be an object");
-        flags_obj.insert("sharded_notes".to_string(), json!(enabled));
-        patch.feature_flags = Some(flags);
-    });
-}
-
-fn enable_sharded_notes(repo: &mut TestRepo) {
-    set_sharded_notes(repo, true);
-}
-
-fn git_ref_exists(repo_path: &Path, ref_name: &str) -> bool {
-    Command::new("git")
-        .args(["-C", repo_path.to_str().unwrap()])
-        .args(["show-ref", "--verify", "--quiet", ref_name])
-        .status()
-        .expect("git should run")
-        .success()
 }
 
 /// Helper to run a raw git command with stdin piped, returning trimmed stdout.
@@ -600,7 +590,7 @@ fn test_sharded_notes_mixed_team_interop() {
         .stage_all_and_commit("sharded client commit")
         .expect("commit should succeed");
     mirror
-        .git(&["push", "origin", "HEAD"])
+        .git_og(&["push", "origin", "HEAD"])
         .expect("push code should succeed");
 
     let request = json!({ "remote_name": "origin" }).to_string();
@@ -634,5 +624,125 @@ fn test_sharded_notes_mixed_team_interop() {
     );
 
     // Clean up
+    let _ = fs::remove_dir_all(&clone2_path);
+}
+
+#[test]
+fn test_non_sharded_push_does_not_push_existing_shard_refs() {
+    let (mut mirror, upstream) = TestRepo::new_with_remote();
+    enable_sharded_notes(&mut mirror);
+
+    fs::write(
+        mirror.path().join("local-shard-only.txt"),
+        "local shard should stay local when flag is off\n",
+    )
+    .expect("should write file");
+    let commit = mirror
+        .stage_all_and_commit("create local shard ref")
+        .expect("commit should succeed");
+    mirror
+        .git_og(&["push", "origin", "HEAD"])
+        .expect("push code should succeed");
+
+    let shard_ref_full = format!("refs/notes/ai-s/{}", &commit.commit_sha[..2]);
+    assert!(
+        git_ref_exists(mirror.path(), &shard_ref_full),
+        "local shard ref should exist before disabling the flag"
+    );
+    assert!(
+        !git_ref_exists(upstream.path(), &shard_ref_full),
+        "upstream should not have the shard ref before notes are pushed"
+    );
+
+    disable_sharded_notes(&mut mirror);
+
+    let request = json!({ "remote_name": "origin" }).to_string();
+    let push_output = mirror
+        .git_ai(&["push-authorship-notes", "--json", &request])
+        .expect("legacy-only push should succeed");
+    let push_json: serde_json::Value =
+        serde_json::from_str(push_output.trim()).expect("valid JSON");
+    assert_eq!(push_json["ok"], true);
+
+    let legacy_note = git_plumbing(
+        upstream.path(),
+        &["notes", "--ref=ai", "show", &commit.commit_sha],
+        None,
+    );
+    assert!(
+        !legacy_note.trim().is_empty(),
+        "legacy note should still be pushed with the flag disabled"
+    );
+    assert!(
+        !git_ref_exists(upstream.path(), &shard_ref_full),
+        "default-off push should not propagate shard refs that already exist locally"
+    );
+}
+
+#[test]
+fn test_non_sharded_fetch_does_not_fetch_shards_from_upstream() {
+    let (mut mirror, upstream) = TestRepo::new_with_remote();
+    enable_sharded_notes(&mut mirror);
+
+    fs::write(
+        mirror.path().join("remote-shard.txt"),
+        "remote shard should stay remote when flag is off\n",
+    )
+    .expect("should write file");
+    let commit = mirror
+        .stage_all_and_commit("create upstream shard ref")
+        .expect("commit should succeed");
+    mirror
+        .git_og(&["push", "origin", "HEAD"])
+        .expect("push code should succeed");
+
+    let request = json!({ "remote_name": "origin" }).to_string();
+    mirror
+        .git_ai(&["push-authorship-notes", "--json", &request])
+        .expect("sharded push should succeed");
+
+    let shard_ref_full = format!("refs/notes/ai-s/{}", &commit.commit_sha[..2]);
+    assert!(
+        git_ref_exists(upstream.path(), &shard_ref_full),
+        "upstream should have the shard ref before the non-sharded fetch"
+    );
+
+    let base = std::env::temp_dir();
+    let clone2_path = base.join(format!("non-sharded-fetch-clone-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&clone2_path);
+
+    let clone_output = Command::new("git")
+        .args([
+            "clone",
+            upstream.path().to_str().unwrap(),
+            clone2_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("clone should succeed");
+    assert!(clone_output.status.success(), "clone2 should succeed");
+
+    let clone2 = TestRepo::new_at_path_with_mode(&clone2_path, mirror.mode());
+    let fetch_output = clone2
+        .git_ai(&["fetch-authorship-notes", "--json", &request])
+        .expect("legacy-only fetch should succeed");
+    let fetch_json: serde_json::Value =
+        serde_json::from_str(fetch_output.trim()).expect("valid JSON");
+    assert_eq!(fetch_json["notes_existence"], "found");
+
+    let legacy_note = git_plumbing(
+        clone2.path(),
+        &["notes", "--ref=ai", "show", &commit.commit_sha],
+        None,
+    );
+    assert!(
+        !legacy_note.trim().is_empty(),
+        "legacy note should still be fetched with the flag disabled"
+    );
+    assert!(
+        !git_ref_exists(clone2.path(), &shard_ref_full),
+        "default-off fetch should not materialize shard refs locally"
+    );
+
+    drop(clone2);
     let _ = fs::remove_dir_all(&clone2_path);
 }
