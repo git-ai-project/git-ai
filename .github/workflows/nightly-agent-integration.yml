@@ -20,10 +20,11 @@ on:
 env:
   GIT_AI_DEBUG: "1"
   CARGO_INCREMENTAL: "0"
-  # Keep sync mode for nightly integration tests: these scripts do not
-  # start a daemon or set force-TTY / timeout env vars, so async mode
-  # would race.  The BATS e2e tests handle async mode separately.
-  GIT_AI_ASYNC_MODE: "false"
+  # Async mode: each job starts a per-job daemon via
+  # start-async-daemon.sh which exports GIT_AI_TEST_FORCE_TTY and
+  # GIT_AI_POST_COMMIT_TIMEOUT_MS so the wrapper polls for authorship
+  # notes after commits.
+  GIT_AI_ASYNC_MODE: "true"
 
 jobs:
   # ── Version Resolution ─────────────────────────────────────────────────────
@@ -203,6 +204,11 @@ jobs:
           cd /tmp/test-repo
           git-ai install
 
+      - name: Start async daemon
+        run: |
+          source "$GITHUB_WORKSPACE/scripts/nightly/start-async-daemon.sh" \
+            "$GITHUB_WORKSPACE/target/release/git-ai"
+
       - name: Verify hook wiring
         run: |
           export PATH="$GITHUB_WORKSPACE/target/release:$PATH"
@@ -215,6 +221,12 @@ jobs:
           bash "$GITHUB_WORKSPACE/scripts/nightly/test-synthetic-checkpoint.sh" \
             "${{ matrix.agent }}" \
             /tmp/test-repo
+
+      - name: Stop async daemon
+        if: always()
+        run: |
+          bash "$GITHUB_WORKSPACE/scripts/nightly/stop-async-daemon.sh" \
+            "$GITHUB_WORKSPACE/target/release/git-ai"
 
       - name: Upload test results
         if: always()
@@ -290,6 +302,11 @@ jobs:
           cd /tmp/test-repo
           git-ai install
 
+      - name: Start async daemon
+        run: |
+          source "$GITHUB_WORKSPACE/scripts/nightly/start-async-daemon.sh" \
+            "$GITHUB_WORKSPACE/target/release/git-ai"
+
       - name: Run live agent test (with retry)
         uses: nick-fields/retry@v2
         with:
@@ -311,6 +328,12 @@ jobs:
           export PATH="$GITHUB_WORKSPACE/target/release:$PATH"
           bash "$GITHUB_WORKSPACE/scripts/nightly/verify-attribution.sh" "${{ matrix.agent }}"
         continue-on-error: ${{ matrix.channel == 'latest' }}
+
+      - name: Stop async daemon
+        if: always()
+        run: |
+          bash "$GITHUB_WORKSPACE/scripts/nightly/stop-async-daemon.sh" \
+            "$GITHUB_WORKSPACE/target/release/git-ai"
 
       - name: Upload test results
         if: always()

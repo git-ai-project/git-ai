@@ -20,10 +20,12 @@ on:
   workflow_dispatch:
 
 env:
-  # Keep sync mode for install-script tests: these shell scripts do not
-  # start a daemon or set force-TTY / timeout env vars, so async mode
-  # would race.  The BATS e2e tests handle async mode separately.
-  GIT_AI_ASYNC_MODE: "false"
+  # Async mode: each Unix job starts a per-job daemon via
+  # start-async-daemon.sh which exports GIT_AI_TEST_FORCE_TTY and
+  # GIT_AI_POST_COMMIT_TIMEOUT_MS so the wrapper polls for authorship
+  # notes after commits.  Windows jobs override this to "false" because
+  # Unix-domain sockets are not available there.
+  GIT_AI_ASYNC_MODE: "true"
 
 jobs:
   install-local-unix:
@@ -136,6 +138,11 @@ jobs:
           cd /tmp/e2e-test-repo
           "$INSTALL_DIR/git-ai" install
 
+      - name: Start async daemon
+        run: |
+          source "$GITHUB_WORKSPACE/scripts/nightly/start-async-daemon.sh" \
+            "$HOME/.git-ai/bin/git-ai"
+
       - name: Run synthetic agent commit
         env:
           RESULTS_DIR: /tmp/e2e-results/${{ matrix.agent.name }}
@@ -152,6 +159,12 @@ jobs:
           bash "$GITHUB_WORKSPACE/scripts/nightly/verify-synthetic-attribution.sh" \
             "${{ matrix.agent.name }}" /tmp/e2e-test-repo
 
+      - name: Stop async daemon
+        if: always()
+        run: |
+          bash "$GITHUB_WORKSPACE/scripts/nightly/stop-async-daemon.sh" \
+            "$HOME/.git-ai/bin/git-ai"
+
       - name: Upload E2E test results
         if: always()
         uses: actions/upload-artifact@v4
@@ -164,6 +177,9 @@ jobs:
   install-local-windows:
     name: E2E ${{ matrix.agent.name }} on windows-latest
     runs-on: windows-latest
+    env:
+      # Windows does not support Unix-domain sockets for the async daemon.
+      GIT_AI_ASYNC_MODE: "false"
     if: >-
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
