@@ -1480,7 +1480,15 @@ fn get_checkpoint_entry_for_file(
         }
 
         let stats = compute_file_line_stats(&previous_content, &current_content);
-        let entry = WorkingLogEntry::new(file_path, file_content_hash, Vec::new(), Vec::new());
+        let (added_ranges, deleted_ranges) =
+            compute_line_change_ranges(&previous_content, &current_content);
+        let mut entry = WorkingLogEntry::new(file_path, file_content_hash, Vec::new(), Vec::new());
+        if !added_ranges.is_empty() {
+            entry.added_line_ranges = Some(added_ranges);
+        }
+        if !deleted_ranges.is_empty() {
+            entry.deleted_line_ranges = Some(deleted_ranges);
+        }
         return Ok(Some((entry, stats)));
     }
 
@@ -1953,11 +1961,29 @@ fn compute_line_change_ranges(
                 new_line += num_lines;
             }
             LineChangeTag::Delete => {
-                deleted.push((old_line, old_line + num_lines - 1));
+                let range_end = old_line + num_lines - 1;
+                if let Some(last) = deleted.last_mut() {
+                    if last.1 + 1 == old_line {
+                        last.1 = range_end;
+                    } else {
+                        deleted.push((old_line, range_end));
+                    }
+                } else {
+                    deleted.push((old_line, range_end));
+                }
                 old_line += num_lines;
             }
             LineChangeTag::Insert => {
-                added.push((new_line, new_line + num_lines - 1));
+                let range_end = new_line + num_lines - 1;
+                if let Some(last) = added.last_mut() {
+                    if last.1 + 1 == new_line {
+                        last.1 = range_end;
+                    } else {
+                        added.push((new_line, range_end));
+                    }
+                } else {
+                    added.push((new_line, range_end));
+                }
                 new_line += num_lines;
             }
         }
