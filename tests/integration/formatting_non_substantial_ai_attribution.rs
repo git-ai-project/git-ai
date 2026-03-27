@@ -293,6 +293,150 @@ fn test_complex_sectioned_file_ai_formats_only_selected_sections() {
     ]);
 }
 
+#[test]
+fn test_ai_rewrites_markdown_table_byte_identical_separator_attributed_to_ai() {
+    let repo = TestRepo::new();
+    let mut file = repo.filename("table.md");
+
+    // Human creates a markdown table
+    file.set_contents(crate::lines![
+        "# Data",
+        "",
+        "| Name | Value |",
+        "| --- | --- |",
+        "| alpha | 1 |",
+        "| beta | 2 |",
+    ]);
+    repo.stage_all_and_commit("Initial table").unwrap();
+
+    // AI rewrites the table with different data but byte-identical separator
+    file.set_contents(crate::lines![
+        "# Data",
+        "",
+        "| Name | Score |".ai(),
+        "| --- | --- |".ai(),
+        "| gamma | 100 |".ai(),
+        "| delta | 200 |".ai(),
+    ]);
+    repo.stage_all_and_commit("AI rewrites table").unwrap();
+
+    // Changed lines should be AI; byte-identical separator stays human (git didn't see it change)
+    file.assert_lines_and_blame(crate::lines![
+        "# Data".human(),
+        "".human(),
+        "| Name | Score |".ai(),
+        "| --- | --- |".human(),
+        "| gamma | 100 |".ai(),
+        "| delta | 200 |".ai(),
+    ]);
+}
+
+#[test]
+fn test_ai_rewrites_table_reformatted_lines_all_attributed_to_ai() {
+    let repo = TestRepo::new();
+    let mut file = repo.filename("table2.md");
+
+    // Human creates a markdown table with tight formatting
+    file.set_contents(crate::lines![
+        "# Results",
+        "",
+        "|Name|Value|",
+        "|---|---|",
+        "|alpha|1|",
+        "|beta|2|",
+    ]);
+    repo.stage_all_and_commit("Initial tight table").unwrap();
+
+    // AI reformats and rewrites the table with different data + spacing
+    file.set_contents(crate::lines![
+        "# Results",
+        "",
+        "| Name  | Score |".ai(),
+        "| ----- | ----- |".ai(),
+        "| gamma | 100   |".ai(),
+        "| delta | 200   |".ai(),
+    ]);
+    repo.stage_all_and_commit("AI reformats table").unwrap();
+
+    // All reformatted lines should be AI
+    file.assert_lines_and_blame(crate::lines![
+        "# Results".human(),
+        "".human(),
+        "| Name  | Score |".ai(),
+        "| ----- | ----- |".ai(),
+        "| gamma | 100   |".ai(),
+        "| delta | 200   |".ai(),
+    ]);
+}
+
+#[test]
+fn test_ai_rewrite_with_byte_identical_line_in_gap() {
+    let repo = TestRepo::new();
+    let mut file = repo.filename("config.yaml");
+
+    // Human creates a config with a separator
+    file.set_contents(crate::lines!["key1: alpha", "---", "key2: beta",]);
+    repo.stage_all_and_commit("Initial config").unwrap();
+
+    // AI rewrites the values and the separator (even though it's byte-identical)
+    file.set_contents(crate::lines![
+        "key1: gamma".ai(),
+        "---".ai(),
+        "key2: delta".ai(),
+    ]);
+    repo.stage_all_and_commit("AI updates config values")
+        .unwrap();
+
+    // Changed lines are AI; byte-identical separator stays human (git didn't see it change)
+    file.assert_lines_and_blame(crate::lines![
+        "key1: gamma".ai(),
+        "---".human(),
+        "key2: delta".ai(),
+    ]);
+}
+
+#[test]
+fn test_ai_edits_around_large_human_section_preserves_human_attribution() {
+    let repo = TestRepo::new();
+    let mut file = repo.filename("mixed.py");
+
+    // Human creates a file with multiple sections
+    file.set_contents(crate::lines![
+        "# header",
+        "line1 = 1",
+        "line2 = 2",
+        "line3 = 3",
+        "line4 = 4",
+        "line5 = 5",
+        "# footer",
+    ]);
+    repo.stage_all_and_commit("Initial file").unwrap();
+
+    // AI changes just the header and footer, leaving 5 human lines in between
+    file.set_contents(crate::lines![
+        "# new header".ai(),
+        "line1 = 1",
+        "line2 = 2",
+        "line3 = 3",
+        "line4 = 4",
+        "line5 = 5",
+        "# new footer".ai(),
+    ]);
+    repo.stage_all_and_commit("AI updates header and footer")
+        .unwrap();
+
+    // Human lines between AI edits should stay human
+    file.assert_lines_and_blame(crate::lines![
+        "# new header".ai(),
+        "line1 = 1".human(),
+        "line2 = 2".human(),
+        "line3 = 3".human(),
+        "line4 = 4".human(),
+        "line5 = 5".human(),
+        "# new footer".ai(),
+    ]);
+}
+
 crate::reuse_tests_in_worktree!(
     test_ai_reflow_human_single_line_call_is_fully_ai,
     test_ai_indentation_only_change_on_human_block_attributes_touched_line_to_ai,
@@ -304,4 +448,8 @@ crate::reuse_tests_in_worktree!(
     test_iterative_human_ai_human_ai_series_assert_each_commit_state,
     test_multi_file_ai_formatting_commit_tracks_exact_line_blame_in_each_file,
     test_complex_sectioned_file_ai_formats_only_selected_sections,
+    test_ai_rewrites_markdown_table_byte_identical_separator_attributed_to_ai,
+    test_ai_rewrites_table_reformatted_lines_all_attributed_to_ai,
+    test_ai_rewrite_with_byte_identical_line_in_gap,
+    test_ai_edits_around_large_human_section_preserves_human_attribution,
 );
