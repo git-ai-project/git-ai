@@ -500,13 +500,11 @@ fn parse_update_ref_heads(
             // The command has already executed; read the old value from the
             // reflog entry that recorded this update-ref.
             let worktree = cmd.worktree.as_deref()?;
-            resolve_worktree_head_reflog_old_oid_for_new_head(worktree, &new_oid)
-                .ok()
-                .flatten()
+            resolve_reflog_old_oid_for_ref_new_oid_in_worktree(worktree, &ref_name, &new_oid)
                 .or_else(|| {
-                    resolve_reflog_old_oid_for_ref_new_oid_in_worktree(
-                        worktree, &ref_name, &new_oid,
-                    )
+                    resolve_worktree_head_reflog_old_oid_for_new_head(worktree, &new_oid)
+                        .ok()
+                        .flatten()
                 })
         })
         .filter(|oid| !oid.is_empty() && !is_zero_oid(oid))?;

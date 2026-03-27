@@ -5912,6 +5912,11 @@ impl ActorDaemonCoordinator {
                     if reference.starts_with("refs/heads/")
                         && !old.is_empty()
                         && !new.is_empty()
+                        && old != new
+                        && is_valid_oid(old)
+                        && !is_zero_oid(old)
+                        && is_valid_oid(new)
+                        && !is_zero_oid(new)
                         && let Ok(repository) =
                             repository_for_rewrite_context(cmd, "update_ref_rewrite")
                         && let Some((original_commits, new_commits)) =
