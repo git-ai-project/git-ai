@@ -481,6 +481,9 @@ const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 fn handle_shutdown(args: &[String]) -> Result<(), String> {
     let config = daemon_config_from_env_or_default_paths()?;
     if has_flag(args, "--hard") {
+        if !daemon_is_up(&config) && !daemon_startup_is_blocked(&config) {
+            return Err("background service is not running".to_string());
+        }
         hard_kill_daemon(&config)
     } else {
         soft_shutdown_daemon(&config)
@@ -590,6 +593,11 @@ fn wait_for_daemon_dead(config: &DaemonConfig, timeout: Duration) -> bool {
 /// Used by internal callers (install-hooks, upgrade) that need the daemon stopped
 /// before proceeding.
 pub(crate) fn stop_daemon(config: &DaemonConfig, timeout: Duration) -> Result<(), String> {
+    // Nothing to do if daemon isn't running.
+    if !daemon_is_up(config) && !daemon_startup_is_blocked(config) {
+        return Ok(());
+    }
+
     // Attempt soft shutdown via control socket if reachable.
     if local_socket_connects_with_timeout(&config.control_socket_path, Duration::from_millis(100))
         .is_ok()

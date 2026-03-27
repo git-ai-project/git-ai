@@ -3995,16 +3995,19 @@ fn daemon_shutdown_hard_when_not_running_is_not_error() {
     // It should not panic / crash.
     let output = bg_command(&repo, "shutdown", &["--hard"]);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    // Acceptable: success, or non-zero with a readable error about missing pid.
-    if !output.status.success() {
-        assert!(
-            stderr.contains("pid")
-                || stderr.contains("not found")
-                || stderr.contains("No such file"),
-            "shutdown --hard on cold config should fail gracefully: {}",
-            stderr
-        );
-    }
+    // Should fail with a readable error about the service not running.
+    assert!(
+        !output.status.success(),
+        "shutdown --hard on cold config should fail"
+    );
+    assert!(
+        stderr.contains("not running")
+            || stderr.contains("pid")
+            || stderr.contains("not found")
+            || stderr.contains("No such file"),
+        "shutdown --hard on cold config should fail gracefully: {}",
+        stderr
+    );
 }
 
 #[test]
