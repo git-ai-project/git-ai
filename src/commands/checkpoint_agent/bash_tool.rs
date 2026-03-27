@@ -3,9 +3,13 @@
 //! Detects file changes made by bash/shell tool calls by comparing filesystem
 //! metadata snapshots taken before and after tool execution.
 
+use crate::authorship::working_log::{AgentId, CheckpointKind};
+use crate::commands::checkpoint::prepare_captured_checkpoint;
+use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
 use crate::daemon::control_api::ControlRequest;
 use crate::daemon::{DaemonConfig, send_control_request_with_timeout};
 use crate::error::GitAiError;
+use crate::git::find_repository_in_path;
 use crate::utils::debug_log;
 use ignore::WalkBuilder;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
@@ -33,11 +37,9 @@ const MAX_TRACKED_FILES: usize = 500_000;
 const SNAPSHOT_STALE_SECS: u64 = 300;
 
 /// Grace window in nanoseconds for low-resolution filesystem mtime comparison.
-#[allow(dead_code)]
 const MTIME_GRACE_WINDOW_NS: u128 = (_MTIME_GRACE_WINDOW_SECS as u128) * 1_000_000_000;
 
 /// Maximum number of stale files before skipping content capture.
-#[allow(dead_code)]
 const MAX_STALE_FILES_FOR_CAPTURE: usize = 1000;
 
 /// Maximum file size for content capture (10 MB).
@@ -757,7 +759,6 @@ pub fn git_status_fallback(repo_root: &Path) -> Result<Vec<String>, GitAiError> 
 // ---------------------------------------------------------------------------
 
 /// Convert a `SystemTime` to nanoseconds since UNIX epoch for watermark comparison.
-#[allow(dead_code)]
 fn system_time_to_nanos(t: SystemTime) -> u128 {
     t.duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
@@ -765,7 +766,6 @@ fn system_time_to_nanos(t: SystemTime) -> u128 {
 }
 
 /// Read file contents for captured checkpoint, skipping binary/large/unreadable files.
-#[allow(dead_code)]
 fn capture_file_contents(repo_root: &Path, file_paths: &[PathBuf]) -> HashMap<String, String> {
     let mut contents = HashMap::new();
     for rel_path in file_paths {
@@ -815,7 +815,6 @@ fn capture_file_contents(repo_root: &Path, file_paths: &[PathBuf]) -> HashMap<St
 /// Returns `None` on any failure (daemon not running, socket error, parse
 /// error, etc.) for graceful degradation — the caller simply skips the
 /// captured-checkpoint path when watermarks are unavailable.
-#[allow(dead_code)]
 fn query_daemon_watermarks(repo_working_dir: &str) -> Option<HashMap<String, u128>> {
     let config = DaemonConfig::from_env_or_default_paths().ok()?;
     let request = ControlRequest::SnapshotWatermarks {
@@ -849,7 +848,6 @@ fn query_daemon_watermarks(repo_working_dir: &str) -> Option<HashMap<String, u12
 /// exceeds the watermark for that path by more than `MTIME_GRACE_WINDOW_NS`.
 /// Files not present in the watermark map are considered stale if they exist
 /// in the snapshot.
-#[allow(dead_code)]
 fn find_stale_files(snapshot: &StatSnapshot, watermarks: &HashMap<String, u128>) -> Vec<PathBuf> {
     let mut stale = Vec::new();
     for (rel_path, entry) in &snapshot.entries {
@@ -877,6 +875,110 @@ fn find_stale_files(snapshot: &StatSnapshot, watermarks: &HashMap<String, u128>)
     }
     stale.sort();
     stale
+}
+
+// ---------------------------------------------------------------------------
+// Pre/post hook captured-checkpoint helpers
+// ---------------------------------------------------------------------------
+
+/// Attempt to prepare a captured checkpoint during the pre-hook.
+///
+/// Queries daemon watermarks, identifies stale files (modified since the last
+/// checkpoint), captures their contents, and prepares a captured checkpoint
+/// with `CheckpointKind::Human` and `will_edit_filepaths`.
+///
+/// Returns `None` on any failure or when no stale files are found, allowing
+/// the caller to proceed without a captured checkpoint.
+fn attempt_pre_hook_capture(
+    snap: &StatSnapshot,
+    repo_root: &Path,
+) -> Option<CapturedCheckpointInfo> {
+    let repo_working_dir = repo_root.to_string_lossy().to_string();
+
+    // 1. Query daemon watermarks (graceful degradation on failure).
+    let watermarks = query_daemon_watermarks(&repo_working_dir)?;
+
+    // 2. Find stale files.
+    let stale_files = find_stale_files(snap, &watermarks);
+    if stale_files.is_empty() {
+        debug_log("Pre-hook capture: no stale files found, skipping");
+        return None;
+    }
+    if stale_files.len() > MAX_STALE_FILES_FOR_CAPTURE {
+        debug_log(&format!(
+            "Pre-hook capture: {} stale files exceeds limit of {}, skipping",
+            stale_files.len(),
+            MAX_STALE_FILES_FOR_CAPTURE,
+        ));
+        return None;
+    }
+
+    // 3. Capture file contents for the stale files.
+    let contents = capture_file_contents(repo_root, &stale_files);
+
+    // 4. Open the repository.
+    let repo = match find_repository_in_path(&repo_working_dir) {
+        Ok(r) => r,
+        Err(e) => {
+            debug_log(&format!("Pre-hook capture: failed to open repo: {}", e));
+            return None;
+        }
+    };
+
+    // 5. Build stale paths as posix-normalized strings.
+    let stale_paths: Vec<String> = stale_files
+        .iter()
+        .map(|p| crate::utils::normalize_to_posix(&p.to_string_lossy()))
+        .collect();
+
+    // 6. Build a synthetic AgentRunResult for the captured checkpoint.
+    let agent_run_result = AgentRunResult {
+        agent_id: AgentId {
+            tool: "bash-tool".to_string(),
+            id: "pre-hook".to_string(),
+            model: String::new(),
+        },
+        agent_metadata: None,
+        checkpoint_kind: CheckpointKind::Human,
+        transcript: None,
+        repo_working_dir: Some(repo_working_dir.clone()),
+        edited_filepaths: None,
+        will_edit_filepaths: Some(stale_paths),
+        dirty_files: Some(contents),
+    };
+
+    // 7. Prepare the captured checkpoint.
+    match prepare_captured_checkpoint(
+        &repo,
+        "bash-tool", // author
+        CheckpointKind::Human,
+        false, // reset
+        Some(&agent_run_result),
+        false, // is_pre_commit
+        None,  // base_commit_override
+    ) {
+        Ok(Some(capture)) => {
+            debug_log(&format!(
+                "Pre-hook captured checkpoint prepared: {} ({} files)",
+                capture.capture_id, capture.file_count,
+            ));
+            Some(CapturedCheckpointInfo {
+                capture_id: capture.capture_id,
+                repo_working_dir: capture.repo_working_dir,
+            })
+        }
+        Ok(None) => {
+            debug_log("Pre-hook capture: prepare_captured_checkpoint returned None");
+            None
+        }
+        Err(e) => {
+            debug_log(&format!(
+                "Pre-hook capture: prepare_captured_checkpoint failed: {}",
+                e
+            ));
+            None
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -909,9 +1011,13 @@ pub fn handle_bash_tool(
                         "Pre-snapshot stored for invocation {}",
                         invocation_key
                     ));
+
+                    // Attempt watermark-based pre-hook content capture.
+                    let captured_checkpoint = attempt_pre_hook_capture(&snap, repo_root);
+
                     Ok(BashToolResult {
                         action: BashCheckpointAction::TakePreSnapshot,
-                        captured_checkpoint: None,
+                        captured_checkpoint,
                     })
                 }
                 Err(e) => {
