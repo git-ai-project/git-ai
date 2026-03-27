@@ -1291,6 +1291,27 @@ fn apply_checkpoint_side_effect(request: CheckpointRunRequest) -> Result<(), Git
     }
 }
 
+fn compute_watermarks_from_stat(
+    repo_working_dir: &str,
+    file_paths: &[String],
+) -> std::collections::HashMap<String, u128> {
+    let repo_root = std::path::Path::new(repo_working_dir);
+    let mut watermarks = std::collections::HashMap::new();
+    for path in file_paths {
+        let full_path = repo_root.join(path);
+        if let Ok(metadata) = std::fs::metadata(&full_path)
+            && let Ok(mtime) = metadata.modified()
+        {
+            let nanos = mtime
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            watermarks.insert(path.clone(), nanos);
+        }
+    }
+    watermarks
+}
+
 fn parse_checkpoint_kind(value: &str) -> Option<CheckpointKind> {
     match value {
         "human" => Some(CheckpointKind::Human),
@@ -5229,6 +5250,22 @@ impl ActorDaemonCoordinator {
                         CheckpointRunRequest::Captured(request) => Some(request.capture_id.clone()),
                         CheckpointRunRequest::Live(_) => None,
                     };
+                    let repo_wd = request.repo_working_dir().to_string();
+                    let checkpoint_file_paths: Vec<String> = match request.as_ref() {
+                        CheckpointRunRequest::Live(req) => req
+                            .agent_run_result
+                            .as_ref()
+                            .and_then(|r| r.edited_filepaths.clone())
+                            .unwrap_or_default(),
+                        CheckpointRunRequest::Captured(req) => {
+                            crate::commands::checkpoint::load_captured_checkpoint_manifest(
+                                &req.capture_id,
+                            )
+                            .ok()
+                            .map(|m| m.files.iter().map(|f| f.path.clone()).collect())
+                            .unwrap_or_default()
+                        }
+                    };
                     let ack = self
                         .coordinator
                         .apply_checkpoint(Path::new(request.repo_working_dir()))
@@ -5239,6 +5276,16 @@ impl ActorDaemonCoordinator {
                         Ok(ack) => apply_checkpoint_side_effect(*request).map(|_| ack.seq),
                         Err(error) => Err(error),
                     };
+                    if result.is_ok() && !checkpoint_file_paths.is_empty() {
+                        let watermarks =
+                            compute_watermarks_from_stat(&repo_wd, &checkpoint_file_paths);
+                        if !watermarks.is_empty() {
+                            let _ = self
+                                .coordinator
+                                .update_watermarks_family(Path::new(&repo_wd), watermarks)
+                                .await;
+                        }
+                    }
                     if let Some(capture_id) = captured_checkpoint_id
                         && let Err(cleanup_error) =
                             crate::commands::checkpoint::delete_captured_checkpoint(&capture_id)
