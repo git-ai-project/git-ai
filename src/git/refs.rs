@@ -16,7 +16,16 @@ pub const AI_AUTHORSHIP_PUSH_REFSPEC: &str = "refs/notes/ai:refs/notes/ai";
 pub const AI_SHARDED_NOTES_PREFIX: &str = "refs/notes/ai-s/";
 
 /// Return the shard suffix (first 2 hex chars) for a given commit SHA.
+/// Panics if commit_sha is shorter than 2 characters (should never happen with real SHAs).
 pub fn shard_for_commit(commit_sha: &str) -> &str {
+    debug_assert!(
+        commit_sha.len() >= 2,
+        "shard_for_commit called with SHA shorter than 2 chars: {:?}",
+        commit_sha
+    );
+    if commit_sha.len() < 2 {
+        return "00";
+    }
     &commit_sha[..2]
 }
 
