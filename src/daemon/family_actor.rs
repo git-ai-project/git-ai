@@ -14,6 +14,7 @@ pub enum FamilyMsg {
     ),
     ApplyCheckpoint(oneshot::Sender<Result<ApplyAck, GitAiError>>),
     Status(oneshot::Sender<Result<FamilyStatus, GitAiError>>),
+    GetWatermarks(oneshot::Sender<Result<HashMap<String, u128>, GitAiError>>),
     Shutdown,
 }
 
@@ -53,6 +54,17 @@ impl FamilyActorHandle {
             .map_err(|_| GitAiError::Generic("family actor status send failed".to_string()))?;
         rx.await
             .map_err(|_| GitAiError::Generic("family actor status receive failed".to_string()))?
+    }
+
+    pub async fn watermarks(&self) -> Result<HashMap<String, u128>, GitAiError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(FamilyMsg::GetWatermarks(tx))
+            .await
+            .map_err(|_| GitAiError::Generic("family actor watermarks send failed".to_string()))?;
+        rx.await.map_err(|_| {
+            GitAiError::Generic("family actor watermarks receive failed".to_string())
+        })?
     }
 
     pub async fn shutdown(&self) -> Result<(), GitAiError> {
@@ -101,6 +113,9 @@ pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
                         applied_seq: state.applied_seq,
                         last_error: state.last_error.clone(),
                     }));
+                }
+                FamilyMsg::GetWatermarks(respond_to) => {
+                    let _ = respond_to.send(Ok(state.file_snapshot_watermarks.clone()));
                 }
                 FamilyMsg::Shutdown => break,
             }
