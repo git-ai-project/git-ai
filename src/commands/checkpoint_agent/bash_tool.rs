@@ -1505,4 +1505,136 @@ mod tests {
         assert!(paths.contains(&"changed.txt".to_string()));
         assert!(paths.contains(&"removed.txt".to_string()));
     }
+
+    // -----------------------------------------------------------------------
+    // system_time_to_nanos tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_system_time_to_nanos() {
+        let t = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        assert_eq!(system_time_to_nanos(t), 1_000_000_000);
+    }
+
+    #[test]
+    fn test_system_time_to_nanos_epoch() {
+        assert_eq!(system_time_to_nanos(SystemTime::UNIX_EPOCH), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // find_stale_files tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: build a minimal `StatSnapshot` with the given entries.
+    fn make_snapshot(entries: HashMap<PathBuf, StatEntry>) -> StatSnapshot {
+        StatSnapshot {
+            entries,
+            tracked_files: HashSet::new(),
+            gitignore: None,
+            taken_at: None,
+            invocation_key: "test:stale".to_string(),
+            repo_root: PathBuf::from("/tmp"),
+        }
+    }
+
+    /// Helper: build a `StatEntry` for a regular file with the given mtime.
+    fn make_entry(mtime_secs: u64, exists: bool) -> StatEntry {
+        let mtime = if exists {
+            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(mtime_secs))
+        } else {
+            None
+        };
+        StatEntry {
+            exists,
+            mtime,
+            ctime: mtime, // ctime not used by find_stale_files
+            size: 100,
+            mode: 0o644,
+            file_type: StatFileType::Regular,
+        }
+    }
+
+    #[test]
+    fn test_find_stale_files_empty_watermarks() {
+        // File with mtime=100s. Empty watermarks -> no watermark for the file,
+        // so it is treated as stale (never checkpointed).
+        let mut entries = HashMap::new();
+        entries.insert(
+            normalize_path(Path::new("src/main.rs")),
+            make_entry(100, true),
+        );
+        let snapshot = make_snapshot(entries);
+        let watermarks: HashMap<String, u128> = HashMap::new();
+
+        let stale = find_stale_files(&snapshot, &watermarks);
+        assert_eq!(stale.len(), 1);
+    }
+
+    #[test]
+    fn test_find_stale_files_within_grace_window() {
+        // File with mtime=100s, watermark at 99s.
+        // Difference is 1s which is within the 2s grace window -> NOT stale.
+        let mut entries = HashMap::new();
+        let path = normalize_path(Path::new("src/lib.rs"));
+        entries.insert(path, make_entry(100, true));
+        let snapshot = make_snapshot(entries);
+
+        let mut watermarks = HashMap::new();
+        watermarks.insert("src/lib.rs".to_string(), Duration::from_secs(99).as_nanos());
+
+        let stale = find_stale_files(&snapshot, &watermarks);
+        assert!(
+            stale.is_empty(),
+            "file within grace window should not be stale"
+        );
+    }
+
+    #[test]
+    fn test_find_stale_files_beyond_grace_window() {
+        // File with mtime=100s, watermark at 95s.
+        // Difference is 5s which exceeds the 2s grace window -> stale.
+        let mut entries = HashMap::new();
+        let path = normalize_path(Path::new("src/lib.rs"));
+        entries.insert(path, make_entry(100, true));
+        let snapshot = make_snapshot(entries);
+
+        let mut watermarks = HashMap::new();
+        watermarks.insert("src/lib.rs".to_string(), Duration::from_secs(95).as_nanos());
+
+        let stale = find_stale_files(&snapshot, &watermarks);
+        assert_eq!(stale.len(), 1, "file beyond grace window should be stale");
+    }
+
+    #[test]
+    fn test_find_stale_files_nonexistent_skipped() {
+        // File with exists=false should not appear in stale list.
+        let mut entries = HashMap::new();
+        entries.insert(normalize_path(Path::new("gone.rs")), make_entry(100, false));
+        let snapshot = make_snapshot(entries);
+        let watermarks: HashMap<String, u128> = HashMap::new();
+
+        let stale = find_stale_files(&snapshot, &watermarks);
+        assert!(stale.is_empty(), "nonexistent file should not be stale");
+    }
+
+    // -----------------------------------------------------------------------
+    // capture_file_contents tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_capture_file_contents_reads_text_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("hello.txt");
+        fs::write(&file_path, "hello world").unwrap();
+
+        let contents = capture_file_contents(dir.path(), &[PathBuf::from("hello.txt")]);
+        assert_eq!(contents.get("hello.txt").unwrap(), "hello world",);
+    }
+
+    #[test]
+    fn test_capture_file_contents_skips_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let contents = capture_file_contents(dir.path(), &[PathBuf::from("nonexistent.txt")]);
+        assert!(contents.is_empty());
+    }
 }
