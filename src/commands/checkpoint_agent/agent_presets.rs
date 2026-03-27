@@ -2500,6 +2500,7 @@ impl GithubCopilotPreset {
             "edit",
             "multiedit",
             "applypatch",
+            "apply_patch",
             "copilot_insertedit",
             "copilot_replacestring",
             "vscode_editfile_internal",
@@ -2515,6 +2516,24 @@ impl GithubCopilotPreset {
         }
 
         lower.contains("edit") || lower.contains("write") || lower.contains("replace")
+    }
+
+    fn collect_apply_patch_paths_from_text(raw: &str, out: &mut Vec<String>) {
+        for line in raw.lines() {
+            let trimmed = line.trim();
+            let maybe_path = trimmed
+                .strip_prefix("*** Update File: ")
+                .or_else(|| trimmed.strip_prefix("*** Add File: "))
+                .or_else(|| trimmed.strip_prefix("*** Delete File: "))
+                .or_else(|| trimmed.strip_prefix("*** Move to: "));
+
+            if let Some(path) = maybe_path {
+                let path = path.trim();
+                if !path.is_empty() && !out.iter().any(|existing| existing == path) {
+                    out.push(path.to_string());
+                }
+            }
+        }
     }
 
     fn extract_filepaths_from_vscode_hook_payload(
@@ -2584,6 +2603,7 @@ impl GithubCopilotPreset {
                 if s.starts_with("file://") {
                     out.push(s.to_string());
                 }
+                Self::collect_apply_patch_paths_from_text(s, out);
             }
             _ => {}
         }
@@ -3443,6 +3463,9 @@ impl GithubCopilotPreset {
                 for item in arr {
                     Self::collect_copilot_filepaths(item, out);
                 }
+            }
+            serde_json::Value::String(s) => {
+                Self::collect_apply_patch_paths_from_text(s, out);
             }
             _ => {}
         }

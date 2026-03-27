@@ -1192,6 +1192,38 @@ fn test_copilot_preset_vscode_create_file_tool_is_supported() {
 }
 
 #[test]
+fn test_copilot_preset_vscode_apply_patch_tool_is_supported() {
+    use git_ai::commands::checkpoint_agent::agent_presets::{
+        AgentCheckpointFlags, AgentCheckpointPreset,
+    };
+
+    let hook_input = json!({
+        "hookEventName": "PreToolUse",
+        "cwd": "/Users/test/project",
+        "toolName": "apply_patch",
+        "transcript_path": "/Users/test/Library/Application Support/Code/User/workspaceStorage/workspace-id/GitHub.copilot-chat/transcripts/copilot-session-apply-patch.jsonl",
+        "toolInput": "*** Begin Patch\n*** Update File: src/main.ts\n@@\n-old\n+new\n*** End Patch",
+        "sessionId": "copilot-session-apply-patch"
+    });
+
+    let flags = AgentCheckpointFlags {
+        hook_input: Some(hook_input.to_string()),
+    };
+
+    let preset = GithubCopilotPreset;
+    let result = preset.run(flags).expect("Expected human checkpoint");
+
+    assert_eq!(
+        result.checkpoint_kind,
+        git_ai::authorship::working_log::CheckpointKind::Human
+    );
+    assert_eq!(
+        result.will_edit_filepaths,
+        Some(vec!["/Users/test/project/src/main.ts".to_string()])
+    );
+}
+
+#[test]
 fn test_copilot_preset_vscode_editfiles_files_array_is_supported() {
     use git_ai::commands::checkpoint_agent::agent_presets::{
         AgentCheckpointFlags, AgentCheckpointPreset,
@@ -1270,6 +1302,52 @@ fn test_copilot_preset_vscode_posttooluse_ai_checkpoint() {
     );
     assert_eq!(result.agent_id.tool, "github-copilot");
     assert_eq!(result.agent_id.id, "copilot-session-post");
+    assert_eq!(
+        result.edited_filepaths,
+        Some(vec!["/Users/test/project/src/main.ts".to_string()])
+    );
+}
+
+#[test]
+fn test_copilot_preset_vscode_apply_patch_posttooluse_ai_checkpoint() {
+    use git_ai::commands::checkpoint_agent::agent_presets::{
+        AgentCheckpointFlags, AgentCheckpointPreset,
+    };
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let transcripts_dir = temp_dir
+        .path()
+        .join("workspaceStorage")
+        .join("workspace-id")
+        .join("GitHub.copilot-chat")
+        .join("transcripts");
+    fs::create_dir_all(&transcripts_dir).unwrap();
+    let transcript_path = transcripts_dir.join("copilot-session-apply-patch-post.jsonl");
+    fs::write(&transcript_path, r#"{"requests": []}"#).unwrap();
+    let session_path = transcript_path.to_string_lossy().to_string();
+
+    let hook_input = json!({
+        "hookEventName": "PostToolUse",
+        "cwd": "/Users/test/project",
+        "toolName": "apply_patch",
+        "toolInput": "*** Begin Patch\n*** Update File: src/main.ts\n@@\n-old\n+new\n*** End Patch",
+        "sessionId": "copilot-session-apply-patch-post",
+        "transcript_path": session_path
+    });
+
+    let flags = AgentCheckpointFlags {
+        hook_input: Some(hook_input.to_string()),
+    };
+
+    let preset = GithubCopilotPreset;
+    let result = preset.run(flags).expect("Expected AI checkpoint");
+
+    assert_eq!(
+        result.checkpoint_kind,
+        git_ai::authorship::working_log::CheckpointKind::AiAgent
+    );
+    assert_eq!(result.agent_id.tool, "github-copilot");
+    assert_eq!(result.agent_id.id, "copilot-session-apply-patch-post");
     assert_eq!(
         result.edited_filepaths,
         Some(vec!["/Users/test/project/src/main.ts".to_string()])
