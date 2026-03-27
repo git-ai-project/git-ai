@@ -3094,14 +3094,28 @@ pub fn exec_git_stdin_with_profile(
 
     let mut child = cmd.spawn().map_err(GitAiError::IoError)?;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        use std::io::Write;
-        if let Err(e) = stdin.write_all(stdin_data) {
-            return Err(GitAiError::IoError(e));
-        }
-    }
+    // Write stdin in a separate thread to avoid deadlock: if we write all stdin
+    // before reading stdout, the child's stdout pipe buffer can fill up, causing
+    // the child to block on write, which prevents it from consuming more stdin,
+    // which blocks our write_all. Writing concurrently avoids this.
+    let stdin_handle = child.stdin.take().map(|mut stdin| {
+        let data = stdin_data.to_vec();
+        std::thread::spawn(move || {
+            use std::io::Write;
+            stdin.write_all(&data)
+        })
+    });
 
     let output = child.wait_with_output().map_err(GitAiError::IoError)?;
+
+    if let Some(handle) = stdin_handle {
+        if let Err(e) = handle.join().expect("stdin writer thread panicked") {
+            // Broken pipe is expected if the child exits before consuming all input
+            if e.kind() != std::io::ErrorKind::BrokenPipe {
+                return Err(GitAiError::IoError(e));
+            }
+        }
+    }
 
     if !output.status.success() {
         let code = output.status.code();
@@ -3159,14 +3173,24 @@ pub fn exec_git_stdin_with_env_with_profile(
 
     let mut child = cmd.spawn().map_err(GitAiError::IoError)?;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        use std::io::Write;
-        if let Err(e) = stdin.write_all(stdin_data) {
-            return Err(GitAiError::IoError(e));
-        }
-    }
+    // Write stdin in a separate thread to avoid deadlock (see exec_git_stdin_with_profile).
+    let stdin_handle = child.stdin.take().map(|mut stdin| {
+        let data = stdin_data.to_vec();
+        std::thread::spawn(move || {
+            use std::io::Write;
+            stdin.write_all(&data)
+        })
+    });
 
     let output = child.wait_with_output().map_err(GitAiError::IoError)?;
+
+    if let Some(handle) = stdin_handle {
+        if let Err(e) = handle.join().expect("stdin writer thread panicked") {
+            if e.kind() != std::io::ErrorKind::BrokenPipe {
+                return Err(GitAiError::IoError(e));
+            }
+        }
+    }
 
     if !output.status.success() {
         let code = output.status.code();
