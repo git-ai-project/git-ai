@@ -9,7 +9,8 @@
 
 use crate::repos::test_repo::TestRepo;
 use git_ai::commands::checkpoint_agent::bash_tool::{
-    BashCheckpointAction, HookEvent, diff, git_status_fallback, handle_bash_tool, snapshot,
+    BashCheckpointAction, BashToolResult, HookEvent, diff, git_status_fallback, handle_bash_tool,
+    snapshot,
 };
 use std::fs;
 use std::process::Command;
@@ -61,7 +62,8 @@ fn run_bash(repo: &TestRepo, program: &str, args: &[&str]) -> std::process::Outp
 }
 
 /// Assert that a BashCheckpointAction::Checkpoint contains the expected path.
-fn assert_checkpoint_contains(action: &BashCheckpointAction, expected_path: &str) {
+fn assert_checkpoint_contains(result: &BashToolResult, expected_path: &str) {
+    let action = &result.action;
     match action {
         BashCheckpointAction::Checkpoint(paths) => {
             assert!(
@@ -87,8 +89,8 @@ fn assert_checkpoint_contains(action: &BashCheckpointAction, expected_path: &str
 }
 
 /// Assert that a BashCheckpointAction::Checkpoint does NOT contain a path.
-fn assert_checkpoint_excludes(action: &BashCheckpointAction, excluded_path: &str) {
-    if let BashCheckpointAction::Checkpoint(paths) = action {
+fn assert_checkpoint_excludes(result: &BashToolResult, excluded_path: &str) {
+    if let BashCheckpointAction::Checkpoint(paths) = &result.action {
         assert!(
             !paths.iter().any(|p| p.contains(excluded_path)),
             "Expected checkpoint NOT to contain '{}'; got {:?}",
@@ -99,7 +101,8 @@ fn assert_checkpoint_excludes(action: &BashCheckpointAction, excluded_path: &str
 }
 
 /// Assert that a BashCheckpointAction is NoChanges.
-fn assert_no_changes(action: &BashCheckpointAction) {
+fn assert_no_changes(result: &BashToolResult) {
+    let action = &result.action;
     assert!(
         matches!(action, BashCheckpointAction::NoChanges),
         "Expected NoChanges, got {:?}",
@@ -115,8 +118,8 @@ fn assert_no_changes(action: &BashCheckpointAction) {
 }
 
 /// Get the checkpoint paths from an action, panicking if not a Checkpoint.
-fn checkpoint_paths(action: &BashCheckpointAction) -> &[String] {
-    match action {
+fn checkpoint_paths(result: &BashToolResult) -> &[String] {
+    match &result.action {
         BashCheckpointAction::Checkpoint(paths) => paths,
         other => panic!(
             "Expected Checkpoint, got {:?}",
@@ -142,7 +145,10 @@ fn test_bash_provenance_echo_redirect_creates_file() {
 
     let pre_action = handle_bash_tool(HookEvent::PreToolUse, &root, "echo-sess", "echo-t1")
         .expect("PreToolUse should succeed");
-    assert!(matches!(pre_action, BashCheckpointAction::TakePreSnapshot));
+    assert!(matches!(
+        pre_action.action,
+        BashCheckpointAction::TakePreSnapshot
+    ));
 
     run_bash(&repo, "sh", &["-c", "echo 'hello world' > created.txt"]);
 
@@ -1205,7 +1211,7 @@ fn test_bash_provenance_sequential_tool_uses_same_session() {
     let pre1 = handle_bash_tool(HookEvent::PreToolUse, &root, "seq-sess", "seq-use1")
         .expect("PreToolUse 1 should succeed");
     assert!(
-        matches!(pre1, BashCheckpointAction::TakePreSnapshot),
+        matches!(pre1.action, BashCheckpointAction::TakePreSnapshot),
         "First PreToolUse should return TakePreSnapshot"
     );
 
@@ -1220,7 +1226,7 @@ fn test_bash_provenance_sequential_tool_uses_same_session() {
     let pre2 = handle_bash_tool(HookEvent::PreToolUse, &root, "seq-sess", "seq-use2")
         .expect("PreToolUse 2 should succeed");
     assert!(
-        matches!(pre2, BashCheckpointAction::TakePreSnapshot),
+        matches!(pre2.action, BashCheckpointAction::TakePreSnapshot),
         "Second PreToolUse should return TakePreSnapshot"
     );
 

@@ -251,15 +251,20 @@ impl AgentCheckpointPreset for OpenCodePreset {
         }
 
         // PostToolUse: for bash tools, diff snapshots to detect changed files
-        let edited_filepaths = if is_bash_tool {
+        let bash_result = if is_bash_tool {
             let repo_root = Path::new(&cwd);
-            match bash_tool::handle_bash_tool(
+            Some(bash_tool::handle_bash_tool(
                 HookEvent::PostToolUse,
                 repo_root,
                 &agent_id.id,
                 tool_use_id,
-            ) {
-                Ok(BashCheckpointAction::Checkpoint(paths)) => Some(paths),
+            ))
+        } else {
+            None
+        };
+        let edited_filepaths = if is_bash_tool {
+            match bash_result.as_ref().unwrap().as_ref().map(|r| &r.action) {
+                Ok(BashCheckpointAction::Checkpoint(paths)) => Some(paths.clone()),
                 Ok(BashCheckpointAction::NoChanges) => None,
                 Ok(BashCheckpointAction::Fallback) => {
                     // git_status_fallback already failed inside handle_bash_tool
