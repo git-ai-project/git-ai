@@ -2035,9 +2035,10 @@ fn run_diff_tree_for_commits(
     let mut pos = 0usize;
 
     for commit_sha in commit_shas {
-        // When feeding commit SHAs to diff-tree --stdin, the output format is:
-        // "<commit_sha>\n" followed by diff entries
-        let header_end = match data[pos..].iter().position(|&b| b == b'\n') {
+        // When feeding commit SHAs to diff-tree --stdin with -z, the output format is:
+        // "<commit_sha>\0" followed by diff entries (all null-terminated).
+        // Without -z, the commit SHA is newline-terminated.
+        let header_end = match data[pos..].iter().position(|&b| b == 0) {
             Some(idx) => pos + idx,
             None => {
                 // Commit may have no parent (root commit) — diff-tree may omit it.
