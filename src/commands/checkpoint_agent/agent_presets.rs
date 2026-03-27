@@ -1409,12 +1409,12 @@ impl AgentCheckpointPreset for CursorPreset {
             )));
         }
 
-        // Only checkpoint on file-mutating tools (Write, Delete)
+        // Only checkpoint on file-mutating tools (Write, Delete, StrReplace)
         let tool_name = hook_data
             .get("tool_name")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        if !matches!(tool_name, "Write" | "Delete") {
+        if !matches!(tool_name, "Write" | "Delete" | "StrReplace") {
             return Err(GitAiError::PresetError(format!(
                 "Skipping Cursor hook for non-edit tool_name '{}'.",
                 tool_name
