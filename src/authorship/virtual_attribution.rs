@@ -1297,6 +1297,70 @@ impl VirtualAttributions {
                 }
             }
 
+            // Gap-fill: include AI-attributed lines that are not in committed hunks
+            // (byte-identical lines within an AI rewrite) when they sit between
+            // committed AI lines from the same author.
+            {
+                let mut committed_ai: std::collections::HashMap<String, Vec<u32>> =
+                    std::collections::HashMap::new();
+                for (author, lines) in &committed_lines_map {
+                    if *author != CheckpointKind::Human.to_str() {
+                        committed_ai
+                            .entry(author.clone())
+                            .or_default()
+                            .extend(lines.iter());
+                    }
+                }
+                for lines in committed_ai.values_mut() {
+                    lines.sort_unstable();
+                    lines.dedup();
+                }
+
+                let mut gap_fills: Vec<(String, u32)> = Vec::new();
+                for line_attr in line_attrs {
+                    if line_attr.author_id == CheckpointKind::Human.to_str() {
+                        continue;
+                    }
+                    if let Some(committed) = committed_ai.get(&line_attr.author_id) {
+                        for workdir_line_num in line_attr.start_line..=line_attr.end_line {
+                            if unstaged_lines.binary_search(&workdir_line_num).is_ok() {
+                                continue;
+                            }
+                            let adjustment = unstaged_lines
+                                .iter()
+                                .filter(|&&l| l < workdir_line_num)
+                                .count() as u32;
+                            let commit_line_num = workdir_line_num - adjustment;
+
+                            let already_committed = if let Some(hunks) = file_committed_hunks {
+                                hunks.iter().any(|hunk| hunk.contains(commit_line_num))
+                            } else {
+                                false
+                            };
+                            if already_committed {
+                                continue;
+                            }
+
+                            // Check if this line fills a small gap (≤1 line) between committed AI lines
+                            let pos = committed.partition_point(|&l| l < commit_line_num);
+                            let adjacent_before =
+                                pos > 0 && commit_line_num - committed[pos - 1] <= 2;
+                            let adjacent_after =
+                                pos < committed.len() && committed[pos] - commit_line_num <= 2;
+                            if adjacent_before && adjacent_after {
+                                gap_fills.push((line_attr.author_id.clone(), commit_line_num));
+                            }
+                        }
+                    }
+                }
+                for (author_id, line_num) in gap_fills {
+                    committed_lines_map
+                        .entry(author_id)
+                        .or_default()
+                        .push(line_num);
+                }
+            }
+
             // Add committed attributions to authorship log
             if !committed_lines_map.is_empty() {
                 // Create attestation entries from committed lines

@@ -1036,8 +1036,15 @@ fn overlay_ai_authorship(
     let mut simulated_authorship_logs: HashMap<String, AuthorshipLog> = HashMap::new();
     // Cache for foreign prompts to avoid repeated grepping
     let mut foreign_prompts_cache: HashMap<String, Option<PromptRecord>> = HashMap::new();
+    // Track which lines are AI-attributed and which commit each line belongs to (for gap-filling)
+    let mut ai_lines_set: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut line_commit_map: HashMap<u32, String> = HashMap::new();
 
     for hunk in blame_hunks {
+        // Record per-line commit mapping for gap-filling
+        for line_num in hunk.range.0..=hunk.range.1 {
+            line_commit_map.insert(line_num, hunk.commit_sha.clone());
+        }
         // Check if we've already looked up this commit's authorship
         let authorship_log = if let Some(cached) = commit_authorship_cache.get(&hunk.commit_sha) {
             cached.clone()
@@ -1078,6 +1085,7 @@ fn overlay_ai_authorship(
                             line_authors
                                 .insert(current_line_num, prompt_record.agent_id.tool.clone());
                         }
+                        ai_lines_set.insert(current_line_num);
                         prompt_records.insert(prompt_hash, prompt_record.clone());
                     } else {
                         // Has authorship log but line not AI = human-authored
@@ -1162,6 +1170,7 @@ fn overlay_ai_authorship(
                 } else {
                     line_authors.insert(line_num, tool.to_string());
                 }
+                ai_lines_set.insert(line_num);
             }
         } else {
             // No authorship log for this commit and not a known agent
@@ -1173,6 +1182,130 @@ fn overlay_ai_authorship(
                     line_authors.insert(line_num, CheckpointKind::Human.to_str().to_string());
                 } else {
                     line_authors.insert(line_num, hunk.original_author.clone());
+                }
+            }
+        }
+    }
+
+    // Gap-filling: re-attribute small gaps of byte-identical lines between AI lines.
+    // When AI rewrites a region (e.g., a markdown table), git blame may attribute
+    // byte-identical lines (like separators) to the original commit. We re-attribute
+    // such lines to AI when ALL of:
+    // 1. The gap is small (≤ GAP_FILL_MAX lines)
+    // 2. The gap line's commit differs from the AI commit
+    // 3. The gap line's commit is an ancestor of the AI commit (pre-existing line)
+    // 4. The AI commit's authorship log claims this line position as AI
+    // 5. The AI commit's file has the same content at this line position (guards
+    //    against false matches from coordinate drift after subsequent edits)
+    {
+        const GAP_FILL_MAX: u32 = 3;
+
+        // Collect sorted AI line positions
+        let mut ai_lines_sorted: Vec<u32> = ai_lines_set.iter().copied().collect();
+        ai_lines_sorted.sort_unstable();
+
+        // Cache ancestry checks and AI commit file contents
+        let mut ancestry_cache: HashMap<(String, String), bool> = HashMap::new();
+        let mut ai_commit_lines_cache: HashMap<String, Option<Vec<String>>> = HashMap::new();
+
+        // Read current file content for content comparison
+        let current_file_lines: Option<Vec<String>> = {
+            let file_full_path = repo.workdir().ok().map(|w| w.join(file_path));
+            file_full_path.and_then(|p| fs::read_to_string(p).ok()).map(|content| {
+                content.lines().map(|l| l.to_string()).collect()
+            })
+        };
+
+        // Find small gaps between consecutive AI lines and fill them
+        for window in ai_lines_sorted.windows(2) {
+            let (start, end) = (window[0], window[1]);
+            let gap_size = end - start - 1;
+            if gap_size == 0 || gap_size > GAP_FILL_MAX {
+                continue;
+            }
+
+            // Get the AI commit SHA from the line at the start of the gap
+            let ai_commit = match line_commit_map.get(&start) {
+                Some(c) => c.clone(),
+                None => continue,
+            };
+
+            // All gap lines must pass the eligibility checks
+            let all_gap_lines_eligible = (start + 1..end).all(|line| {
+                let gap_commit = match line_commit_map.get(&line) {
+                    Some(c) => c.clone(),
+                    None => return false,
+                };
+
+                // Same commit — trust the authorship log's attribution
+                if gap_commit == ai_commit {
+                    return false;
+                }
+
+                // Check ancestry: gap commit must be older than AI commit
+                let ancestor_key = (gap_commit.clone(), ai_commit.clone());
+                let is_ancestor = *ancestry_cache.entry(ancestor_key).or_insert_with(|| {
+                    let mut args = repo.global_args_for_exec();
+                    args.push("merge-base".to_string());
+                    args.push("--is-ancestor".to_string());
+                    args.push(gap_commit);
+                    args.push(ai_commit.clone());
+                    exec_git(&args).is_ok()
+                });
+                if !is_ancestor {
+                    return false;
+                }
+
+                // Check if the AI commit's authorship log claims this line as AI
+                let in_attestation = if let Some(Some(ai_log)) = commit_authorship_cache.get(&ai_commit) {
+                    ai_log.attestations.iter().any(|f| {
+                        f.file_path == file_path
+                            && f.entries.iter().any(|entry| {
+                                entry.line_ranges.iter().any(|lr| lr.contains(line))
+                            })
+                    })
+                } else {
+                    false
+                };
+                if !in_attestation {
+                    return false;
+                }
+
+                // Verify the AI commit's file has the same content at this line.
+                // This guards against coordinate drift: the attestation uses commit-time
+                // line numbers, and subsequent edits may have shifted line positions.
+                let ai_lines = ai_commit_lines_cache
+                    .entry(ai_commit.clone())
+                    .or_insert_with(|| {
+                        let mut show_args = repo.global_args_for_exec();
+                        show_args.push("show".to_string());
+                        show_args.push(format!("{}:{}", ai_commit, file_path));
+                        exec_git(&show_args).ok().map(|output| {
+                            String::from_utf8_lossy(&output.stdout)
+                                .lines()
+                                .map(|l| l.to_string())
+                                .collect()
+                        })
+                    });
+
+                match (ai_lines.as_ref(), current_file_lines.as_ref()) {
+                    (Some(ai), Some(current)) => {
+                        let idx = (line - 1) as usize;
+                        match (ai.get(idx), current.get(idx)) {
+                            (Some(ai_line), Some(cur_line)) => ai_line == cur_line,
+                            _ => false,
+                        }
+                    }
+                    _ => false,
+                }
+            });
+
+            if all_gap_lines_eligible {
+                // Fill the gap with the AI tool name from the start of the gap
+                if let Some(tool) = line_authors.get(&start).cloned() {
+                    for line in (start + 1)..end {
+                        line_authors.insert(line, tool.clone());
+                    }
                 }
             }
         }
