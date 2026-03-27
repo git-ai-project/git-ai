@@ -291,11 +291,10 @@ fn is_read_only_reflog_invocation(parsed: &ParsedGitInvocation) -> bool {
 /// `git notes add/append/copy/edit/merge/prune/remove` are mutating.
 /// Bare `git notes` defaults to `list`.
 fn is_read_only_notes_invocation(parsed: &ParsedGitInvocation) -> bool {
-    match parsed.command_args.first().map(String::as_str) {
-        None => true,
-        Some("list" | "show" | "get-ref") => true,
-        _ => false,
-    }
+    matches!(
+        parsed.command_args.first().map(String::as_str),
+        None | Some("list" | "show" | "get-ref")
+    )
 }
 
 #[cfg(test)]

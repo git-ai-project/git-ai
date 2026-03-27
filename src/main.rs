@@ -1,4 +1,15 @@
+use clap::Parser;
 use git_ai::commands;
+
+#[derive(Parser)]
+#[command(name = "git-ai")]
+#[command(about = "git proxy with AI authorship tracking", long_about = None)]
+#[command(disable_help_flag = true, disable_version_flag = true)]
+struct Cli {
+    /// Git command and arguments
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    args: Vec<String>,
+}
 
 fn main() {
     // Get the binary name that was called
@@ -19,20 +30,21 @@ fn main() {
             commands::git_hook_handlers::handle_git_hook_invocation(&binary_name, &hook_args);
         std::process::exit(exit_code);
     }
-    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    let cli = Cli::parse();
 
     #[cfg(debug_assertions)]
     {
         if std::env::var("GIT_AI").as_deref() == Ok("git") {
-            commands::git_handlers::handle_git(&args);
+            commands::git_handlers::handle_git(&cli.args);
             return;
         }
     }
 
     if binary_name == "git-ai" || binary_name == "git-ai.exe" {
-        commands::git_ai_handlers::handle_git_ai(&args);
+        commands::git_ai_handlers::handle_git_ai(&cli.args);
         std::process::exit(0);
     }
 
-    commands::git_handlers::handle_git(&args);
+    commands::git_handlers::handle_git(&cli.args);
 }
