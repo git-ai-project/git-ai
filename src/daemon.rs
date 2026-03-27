@@ -1641,6 +1641,7 @@ fn build_human_replay_agent_result(
         edited_filepaths: None,
         will_edit_filepaths: Some(files),
         dirty_files: Some(dirty_files),
+        captured_checkpoint_id: None,
     }
 }
 
