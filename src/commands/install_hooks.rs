@@ -9,7 +9,6 @@ use crate::mdm::hook_installer::HookInstallerParams;
 use crate::mdm::skills_installer;
 use crate::mdm::spinner::{Spinner, print_diff};
 use crate::mdm::utils::{get_current_binary_path, git_shim_path};
-use crate::utils::LockFile;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -221,21 +220,10 @@ fn maybe_teardown_async_mode(dry_run: bool) {
     }
 
     // Shut down any leftover daemon from when async_mode was enabled.
-    // Use a control-socket-only check instead of daemon_is_up(), which
-    // requires both the control AND trace sockets to be connectable.
-    // If the trace socket is down but the control socket is up, we still
-    // need to send the shutdown — otherwise the daemon lingers.
-    if let Ok(daemon_config) = DaemonConfig::from_env_or_default_paths()
-        && crate::daemon::local_socket_connects_with_timeout(
-            &daemon_config.control_socket_path,
-            std::time::Duration::from_millis(100),
-        )
-        .is_ok()
-    {
-        let _ = crate::daemon::send_control_request(
-            &daemon_config.control_socket_path,
-            &crate::daemon::ControlRequest::Shutdown,
-        );
+    // Uses stop_daemon which tries soft shutdown then escalates to hard kill.
+    if let Ok(daemon_config) = DaemonConfig::from_env_or_default_paths() {
+        let _ =
+            crate::commands::daemon::stop_daemon(&daemon_config, std::time::Duration::from_secs(5));
     }
 }
 
@@ -260,41 +248,11 @@ fn maybe_ensure_daemon(dry_run: bool) {
         return;
     };
 
-    // If daemon is already running, shut it down first so it restarts
-    // with the freshly-written trace2 config.
-    if crate::commands::daemon::daemon_is_up(&daemon_config) {
-        let _ = crate::daemon::send_control_request(
-            &daemon_config.control_socket_path,
-            &crate::daemon::ControlRequest::Shutdown,
-        );
-
-        // Wait for both sockets to go down AND the lock to be released,
-        // so the restart doesn't hit "startup blocked" from the dying process.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            let sockets_down = !crate::commands::daemon::daemon_is_up(&daemon_config);
-            let lock_free = LockFile::try_acquire(&daemon_config.lock_path)
-                .map(|l| {
-                    drop(l);
-                    true
-                })
-                .unwrap_or(false);
-            if sockets_down && lock_free {
-                break;
-            }
-            if std::time::Instant::now() >= deadline {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-    }
-
-    // Start daemon (or restart after shutdown above). Best-effort.
-    if let Err(e) =
-        crate::commands::daemon::ensure_daemon_running(std::time::Duration::from_secs(5))
-    {
+    // Restart daemon so it picks up the freshly-written trace2 config.
+    // Uses soft shutdown → hard kill escalation if needed.
+    if let Err(e) = crate::commands::daemon::restart_daemon(&daemon_config) {
         eprintln!(
-            "[git-ai] warning: failed to start background service: {}",
+            "[git-ai] warning: failed to restart background service: {}",
             e
         );
     }

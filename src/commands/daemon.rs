@@ -1,6 +1,6 @@
 use crate::daemon::{
     ControlRequest, DaemonConfig, daemon_log_file_path, local_socket_connects_with_timeout,
-    send_control_request,
+    read_daemon_pid, send_control_request,
 };
 use crate::utils::LockFile;
 #[cfg(windows)]
@@ -44,8 +44,14 @@ pub fn handle_daemon(args: &[String]) {
             }
         }
         "shutdown" => {
-            if let Err(e) = handle_shutdown() {
+            if let Err(e) = handle_shutdown(&args[1..]) {
                 eprintln!("Failed to shut down: {}", e);
+                std::process::exit(1);
+            }
+        }
+        "restart" => {
+            if let Err(e) = handle_restart(&args[1..]) {
+                eprintln!("Failed to restart: {}", e);
                 std::process::exit(1);
             }
         }
@@ -469,8 +475,52 @@ fn tail_file(file: std::fs::File) -> Result<(), std::io::Error> {
     }
 }
 
-fn handle_shutdown() -> Result<(), String> {
+/// Timeout for graceful shutdown before a hard kill during restart.
+const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn handle_shutdown(args: &[String]) -> Result<(), String> {
     let config = daemon_config_from_env_or_default_paths()?;
+    if has_flag(args, "--hard") {
+        if !daemon_is_up(&config) && !daemon_startup_is_blocked(&config) {
+            return Err("background service is not running".to_string());
+        }
+        hard_kill_daemon(&config)
+    } else {
+        soft_shutdown_daemon(&config)
+    }
+}
+
+fn handle_restart(args: &[String]) -> Result<(), String> {
+    let config = daemon_config_from_env_or_default_paths()?;
+    let hard = has_flag(args, "--hard");
+
+    // Only attempt shutdown if daemon appears to be running.
+    let was_running = daemon_is_up(&config) || daemon_startup_is_blocked(&config);
+    if was_running {
+        if hard {
+            hard_kill_daemon(&config)?;
+        } else {
+            // Attempt soft shutdown; escalate to hard kill on timeout.
+            let _ = send_control_request(&config.control_socket_path, &ControlRequest::Shutdown);
+            if !wait_for_daemon_dead(&config, GRACEFUL_SHUTDOWN_TIMEOUT) {
+                eprintln!("graceful shutdown timed out, force-killing daemon");
+                hard_kill_daemon(&config)?;
+            }
+        }
+    }
+
+    // Start a fresh daemon.
+    #[cfg(windows)]
+    {
+        ensure_daemon_running(daemon_startup_timeout()).map(|_| ())
+    }
+    #[cfg(not(windows))]
+    {
+        ensure_daemon_running_attached(daemon_startup_timeout()).map(|_| ())
+    }
+}
+
+fn soft_shutdown_daemon(config: &DaemonConfig) -> Result<(), String> {
     let response = send_control_request(&config.control_socket_path, &ControlRequest::Shutdown)
         .map_err(|e| e.to_string())?;
     println!(
@@ -478,6 +528,99 @@ fn handle_shutdown() -> Result<(), String> {
         serde_json::to_string_pretty(&response).map_err(|e| e.to_string())?
     );
     Ok(())
+}
+
+#[cfg(unix)]
+fn hard_kill_daemon(config: &DaemonConfig) -> Result<(), String> {
+    let pid = read_daemon_pid(config).map_err(|e| format!("cannot read daemon pid: {}", e))?;
+    let ret = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+    if ret != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ESRCH) {
+            // Process already dead — not an error.
+            return Ok(());
+        }
+        return Err(format!("kill -9 {} failed: {}", pid, err));
+    }
+    // Wait briefly for the OS to reap the process and release the lock.
+    let _ = wait_for_daemon_dead(config, Duration::from_secs(2));
+    Ok(())
+}
+
+#[cfg(windows)]
+fn hard_kill_daemon(config: &DaemonConfig) -> Result<(), String> {
+    let pid = read_daemon_pid(config).map_err(|e| format!("cannot read daemon pid: {}", e))?;
+    let output = Command::new("taskkill")
+        .args(["/F", "/PID", &pid.to_string()])
+        .output()
+        .map_err(|e| format!("failed to run taskkill: {}", e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Process already dead is not an error.
+        if !stderr.contains("not found") {
+            return Err(format!(
+                "taskkill /F /PID {} failed: {}",
+                pid,
+                stderr.trim()
+            ));
+        }
+    }
+    let _ = wait_for_daemon_dead(config, Duration::from_secs(2));
+    Ok(())
+}
+
+fn wait_for_daemon_dead(config: &DaemonConfig, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let sockets_down = !daemon_is_up(config);
+        let lock_free = LockFile::try_acquire(&config.lock_path)
+            .map(|l| {
+                drop(l);
+                true
+            })
+            .unwrap_or(false);
+        if sockets_down && lock_free {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Shut down the running daemon (soft then hard) and wait for it to fully exit.
+/// Used by internal callers (install-hooks, upgrade) that need the daemon stopped
+/// before proceeding.
+pub(crate) fn stop_daemon(config: &DaemonConfig, timeout: Duration) -> Result<(), String> {
+    // Nothing to do if daemon isn't running.
+    if !daemon_is_up(config) && !daemon_startup_is_blocked(config) {
+        return Ok(());
+    }
+
+    // Attempt soft shutdown via control socket if reachable.
+    if local_socket_connects_with_timeout(&config.control_socket_path, Duration::from_millis(100))
+        .is_ok()
+    {
+        let _ = send_control_request(&config.control_socket_path, &ControlRequest::Shutdown);
+    }
+
+    if wait_for_daemon_dead(config, timeout) {
+        return Ok(());
+    }
+
+    // Soft shutdown didn't work — escalate.
+    hard_kill_daemon(config)
+}
+
+/// Shut down the running daemon and start a fresh one. Escalates to hard kill
+/// if the soft shutdown doesn't complete within GRACEFUL_SHUTDOWN_TIMEOUT.
+pub(crate) fn restart_daemon(config: &DaemonConfig) -> Result<(), String> {
+    let was_running = daemon_is_up(config) || daemon_startup_is_blocked(config);
+    if was_running {
+        stop_daemon(config, GRACEFUL_SHUTDOWN_TIMEOUT)?;
+    }
+    ensure_daemon_running(Duration::from_secs(5)).map(|_| ())
 }
 
 fn parse_repo_arg(args: &[String]) -> Option<String> {
@@ -514,6 +657,7 @@ fn print_help() {
     eprintln!("  git-ai bg start");
     eprintln!("  git-ai bg run");
     eprintln!("  git-ai bg status [--repo <path>]");
-    eprintln!("  git-ai bg shutdown");
+    eprintln!("  git-ai bg shutdown [--hard]");
+    eprintln!("  git-ai bg restart [--hard]");
     eprintln!("  git-ai bg tail [-n <lines>] [--full]");
 }

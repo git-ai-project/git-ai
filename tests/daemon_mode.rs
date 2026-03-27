@@ -11,7 +11,7 @@ use git_ai::commands::checkpoint::{
 use git_ai::commands::checkpoint_agent::agent_presets::AgentRunResult;
 use git_ai::daemon::{
     CapturedCheckpointRunRequest, CheckpointRunRequest, ControlRequest, DaemonConfig, DaemonLock,
-    local_socket_connects_with_timeout, open_local_socket_stream_with_timeout,
+    local_socket_connects_with_timeout, open_local_socket_stream_with_timeout, read_daemon_pid,
     send_control_request,
 };
 use git_ai::git::find_repository_in_path;
@@ -3839,4 +3839,220 @@ fn daemon_memory_does_not_grow_unbounded_under_trace_load() {
     }
 
     guard.shutdown();
+}
+
+fn bg_command(repo: &TestRepo, subcommand: &str, extra_args: &[&str]) -> Output {
+    let daemon_home = repo.daemon_home_path();
+    let control_socket_path = daemon_control_socket_path(repo);
+    let trace_socket_path = daemon_trace_socket_path(repo);
+    let mut command = Command::new(get_binary_path());
+    command.arg("bg").arg(subcommand);
+    for arg in extra_args {
+        command.arg(arg);
+    }
+    command
+        .current_dir(repo.path())
+        .env("GIT_AI_TEST_DB_PATH", repo.test_db_path())
+        .env("GITAI_TEST_DB_PATH", repo.test_db_path());
+    configure_test_home_env(&mut command, repo.test_home_path());
+    configure_test_daemon_env(
+        &mut command,
+        &daemon_home,
+        &control_socket_path,
+        &trace_socket_path,
+    );
+    command.output().expect("failed to invoke bg command")
+}
+
+use std::process::Output;
+
+#[test]
+#[serial]
+fn daemon_shutdown_hard_kills_process() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let mut guard = DaemonGuard::start(&repo);
+    guard.wait_until_ready();
+
+    let config = DaemonConfig::from_home(&repo.daemon_home_path());
+    let pid = read_daemon_pid(&config).expect("should read daemon pid");
+
+    // Verify daemon process is alive.
+    assert!(
+        process_exists(pid),
+        "daemon process {} should be alive before hard shutdown",
+        pid
+    );
+
+    let output = bg_command(&repo, "shutdown", &["--hard"]);
+    assert!(
+        output.status.success(),
+        "shutdown --hard should succeed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Reap the child so the zombie doesn't linger (our test process is the parent).
+    let _ = guard.child.wait();
+
+    // Process should be dead.
+    for _ in 0..40 {
+        if !process_exists(pid) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        !process_exists(pid),
+        "daemon process {} should be dead after hard shutdown",
+        pid
+    );
+}
+
+#[test]
+#[serial]
+fn daemon_restart_brings_up_new_process() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let mut guard = DaemonGuard::start(&repo);
+    guard.wait_until_ready();
+
+    let config = DaemonConfig::from_home(&repo.daemon_home_path());
+    let old_pid = read_daemon_pid(&config).expect("should read daemon pid");
+
+    // Reap the child first — on Linux the killed process is a zombie until we wait.
+    let _ = guard.child.kill();
+    let _ = guard.child.wait();
+
+    let output = bg_command(&repo, "restart", &[]);
+    assert!(
+        output.status.success(),
+        "restart should succeed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // New daemon should be up with a different PID.
+    let new_pid = read_daemon_pid(&config).expect("should read new daemon pid");
+    assert_ne!(old_pid, new_pid, "restart should produce a new daemon PID");
+
+    // New daemon should be responsive.
+    let status = send_control_request(
+        &daemon_control_socket_path(&repo),
+        &ControlRequest::StatusFamily {
+            repo_working_dir: repo_workdir_string(&repo),
+        },
+    );
+    assert!(
+        status.is_ok(),
+        "new daemon should respond to status request"
+    );
+
+    // Clean up the new detached daemon.
+    let _ = send_control_request(
+        &daemon_control_socket_path(&repo),
+        &ControlRequest::Shutdown,
+    );
+}
+
+#[test]
+#[serial]
+fn daemon_restart_hard_kills_and_restarts() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let mut guard = DaemonGuard::start(&repo);
+    guard.wait_until_ready();
+
+    let config = DaemonConfig::from_home(&repo.daemon_home_path());
+    let old_pid = read_daemon_pid(&config).expect("should read daemon pid");
+
+    // Reap the child first — on Linux the killed process is a zombie until we wait.
+    let _ = guard.child.kill();
+    let _ = guard.child.wait();
+
+    let output = bg_command(&repo, "restart", &["--hard"]);
+    assert!(
+        output.status.success(),
+        "restart --hard should succeed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // New daemon should be up.
+    let new_pid = read_daemon_pid(&config).expect("should read new daemon pid");
+    assert_ne!(
+        old_pid, new_pid,
+        "hard restart should produce a new daemon PID"
+    );
+
+    // Clean up.
+    let _ = send_control_request(
+        &daemon_control_socket_path(&repo),
+        &ControlRequest::Shutdown,
+    );
+}
+
+#[test]
+#[serial]
+fn daemon_shutdown_hard_when_not_running_fails_gracefully() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+
+    // Don't start any daemon — just run shutdown --hard on a cold config.
+    // It should not panic / crash.
+    let output = bg_command(&repo, "shutdown", &["--hard"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Should fail with a readable error about the service not running.
+    assert!(
+        !output.status.success(),
+        "shutdown --hard on cold config should fail"
+    );
+    assert!(
+        stderr.contains("not running")
+            || stderr.contains("pid")
+            || stderr.contains("not found")
+            || stderr.contains("No such file"),
+        "shutdown --hard on cold config should fail gracefully: {}",
+        stderr
+    );
+}
+
+#[test]
+#[serial]
+fn daemon_restart_when_not_running_starts_fresh() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+
+    // No daemon running — restart should just start a new one.
+    let output = bg_command(&repo, "restart", &[]);
+    assert!(
+        output.status.success(),
+        "restart with no running daemon should succeed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Daemon should be up.
+    let status = send_control_request(
+        &daemon_control_socket_path(&repo),
+        &ControlRequest::StatusFamily {
+            repo_working_dir: repo_workdir_string(&repo),
+        },
+    );
+    assert!(
+        status.is_ok(),
+        "daemon should be reachable after restart from cold state"
+    );
+
+    // Clean up.
+    let _ = send_control_request(
+        &daemon_control_socket_path(&repo),
+        &ControlRequest::Shutdown,
+    );
+}
+
+fn process_exists(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+    #[cfg(windows)]
+    {
+        Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
+            .unwrap_or(false)
+    }
 }
