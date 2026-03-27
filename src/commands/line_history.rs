@@ -56,6 +56,8 @@ pub fn handle_line_history(args: &[String]) {
         eprintln!("Usage: git-ai line-history <file> <line> [--commit <sha>]");
         std::process::exit(1);
     }
+
+    
     let file = &args[0];
     let line: u32 = match args[1].parse() {
         Ok(n) => n,
