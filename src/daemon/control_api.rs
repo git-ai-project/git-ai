@@ -30,6 +30,8 @@ pub enum ControlRequest {
         repo_working_dir: String,
         repo_context: RepoContext,
     },
+    #[serde(rename = "snapshot.watermarks")]
+    SnapshotWatermarks { repo_working_dir: String },
     #[serde(rename = "shutdown")]
     Shutdown,
 }

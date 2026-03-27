@@ -44,6 +44,15 @@ impl<B: GitBackend> Coordinator<B> {
         actor.apply_checkpoint().await
     }
 
+    pub async fn watermarks_family(
+        &self,
+        repo_working_dir: &Path,
+    ) -> Result<HashMap<String, u128>, GitAiError> {
+        let family = self.backend.resolve_family(repo_working_dir)?;
+        let actor = self.get_or_create_family_actor(family).await;
+        actor.watermarks().await
+    }
+
     pub async fn status_family(&self, repo_working_dir: &Path) -> Result<FamilyStatus, GitAiError> {
         let family = self.backend.resolve_family(repo_working_dir)?;
         let actor = self.get_or_create_family_actor(family).await;
