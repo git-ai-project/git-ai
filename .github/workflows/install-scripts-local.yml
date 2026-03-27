@@ -20,9 +20,10 @@ on:
   workflow_dispatch:
 
 env:
-  # Async mode is now fully supported: the wrapper polls for authorship
-  # notes and test helpers wait for the daemon to finish processing.
-  GIT_AI_ASYNC_MODE: "true"
+  # Keep sync mode for install-script tests: these shell scripts do not
+  # start a daemon or set force-TTY / timeout env vars, so async mode
+  # would race.  The BATS e2e tests handle async mode separately.
+  GIT_AI_ASYNC_MODE: "false"
 
 jobs:
   install-local-unix:
