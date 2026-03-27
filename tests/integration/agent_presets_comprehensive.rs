@@ -1,7 +1,8 @@
 use git_ai::authorship::working_log::CheckpointKind;
 use git_ai::commands::checkpoint_agent::agent_presets::{
     AgentCheckpointFlags, AgentCheckpointPreset, AiTabPreset, ClaudePreset, CodexPreset,
-    ContinueCliPreset, CursorPreset, DroidPreset, GeminiPreset, GithubCopilotPreset,
+    ContinueCliPreset, CursorPreset, DroidPreset, FirebenderPreset, GeminiPreset,
+    GithubCopilotPreset,
 };
 use git_ai::commands::checkpoint_agent::amp_preset::AmpPreset;
 use git_ai::error::GitAiError;
@@ -1239,4 +1240,55 @@ fn test_gemini_transcript_tool_call_without_args() {
     assert_eq!(tool_uses.len(), 1);
 
     fs::remove_file(temp_file).ok();
+}
+
+#[test]
+fn test_firebender_preset_accepts_firebender_event_names() {
+    let preset = FirebenderPreset;
+    let hook_input = json!({
+        "hook_event_name": "afterFileEdit",
+        "model": "gpt-5.3-codex",
+        "repo_working_dir": "/project",
+        "file_path": "/project/src/main.kt"
+    })
+    .to_string();
+
+    let result = preset
+        .run(AgentCheckpointFlags {
+            hook_input: Some(hook_input),
+        })
+        .expect("Should succeed for afterFileEdit");
+
+    assert_eq!(result.checkpoint_kind, CheckpointKind::AiAgent);
+    assert_eq!(result.agent_id.tool, "firebender");
+    assert_eq!(result.agent_id.model, "gpt-5.3-codex");
+    assert_eq!(
+        result.edited_filepaths,
+        Some(vec!["/project/src/main.kt".to_string()])
+    );
+}
+
+#[test]
+fn test_firebender_preset_falls_back_to_workspace_root_repo() {
+    let preset = FirebenderPreset;
+    let hook_input = json!({
+        "hook_event_name": "beforeSubmitPrompt",
+        "model": "claude-sonnet-4-6",
+        "workspace_roots": ["/repo/root"],
+        "file_path": "/repo/root/file.ts"
+    })
+    .to_string();
+
+    let result = preset
+        .run(AgentCheckpointFlags {
+            hook_input: Some(hook_input),
+        })
+        .expect("Should succeed for beforeSubmitPrompt");
+
+    assert_eq!(result.checkpoint_kind, CheckpointKind::Human);
+    assert_eq!(result.repo_working_dir, Some("/repo/root".to_string()));
+    assert_eq!(
+        result.will_edit_filepaths,
+        Some(vec!["/repo/root/file.ts".to_string()])
+    );
 }

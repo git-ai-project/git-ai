@@ -3599,8 +3599,10 @@ struct FirebenderHookInput {
     hook_event_name: String,
     model: String,
     repo_working_dir: Option<String>,
+    workspace_roots: Option<Vec<String>>,
     will_edit_filepaths: Option<Vec<String>>,
     edited_filepaths: Option<Vec<String>>,
+    file_path: Option<String>,
     completion_id: Option<String>,
     dirty_files: Option<HashMap<String, String>>,
 }
@@ -3618,18 +3620,40 @@ impl AgentCheckpointPreset for FirebenderPreset {
             hook_event_name,
             model,
             repo_working_dir,
+            workspace_roots,
             will_edit_filepaths,
             edited_filepaths,
+            file_path,
             completion_id,
             dirty_files,
         } = hook_input;
 
-        if hook_event_name != "before_edit" && hook_event_name != "after_edit" {
-            return Err(GitAiError::PresetError(format!(
-                "Unsupported hook_event_name '{}' for firebender preset (expected 'before_edit' or 'after_edit')",
-                hook_event_name
-            )));
+        let normalized_event = match hook_event_name.as_str() {
+            "before_edit" | "beforeSubmitPrompt" => "before_edit",
+            "after_edit" | "afterFileEdit" => "after_edit",
+            _ => {
+                return Err(GitAiError::PresetError(format!(
+                    "Unsupported hook_event_name '{}' for firebender preset (expected 'before_edit' or 'after_edit')",
+                    hook_event_name
+                )));
+            }
+        };
+
+        let mut resolved_will_edit = will_edit_filepaths;
+        let mut resolved_edited = edited_filepaths;
+        if let Some(path) = file_path.filter(|p| !p.trim().is_empty()) {
+            if normalized_event == "before_edit" && resolved_will_edit.is_none() {
+                resolved_will_edit = Some(vec![path.clone()]);
+            }
+            if normalized_event == "after_edit" && resolved_edited.is_none() {
+                resolved_edited = Some(vec![path]);
+            }
         }
+
+        let repo_working_dir = repo_working_dir
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| workspace_roots.and_then(|roots| roots.into_iter().next()));
 
         let model = model.trim().to_string();
         if model.is_empty() {
@@ -3637,10 +3661,6 @@ impl AgentCheckpointPreset for FirebenderPreset {
                 "model must be a non-empty string for firebender preset".to_string(),
             ));
         }
-
-        let repo_working_dir = repo_working_dir
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
 
         let agent_id = AgentId {
             tool: "firebender".to_string(),
@@ -3651,7 +3671,7 @@ impl AgentCheckpointPreset for FirebenderPreset {
             model,
         };
 
-        if hook_event_name == "before_edit" {
+        if normalized_event == "before_edit" {
             return Ok(AgentRunResult {
                 agent_id,
                 agent_metadata: None,
@@ -3659,7 +3679,7 @@ impl AgentCheckpointPreset for FirebenderPreset {
                 transcript: None,
                 repo_working_dir,
                 edited_filepaths: None,
-                will_edit_filepaths,
+                will_edit_filepaths: resolved_will_edit,
                 dirty_files,
             });
         }
@@ -3670,7 +3690,7 @@ impl AgentCheckpointPreset for FirebenderPreset {
             checkpoint_kind: CheckpointKind::AiAgent,
             transcript: None,
             repo_working_dir,
-            edited_filepaths,
+            edited_filepaths: resolved_edited,
             will_edit_filepaths: None,
             dirty_files,
         })
