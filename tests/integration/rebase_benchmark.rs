@@ -297,6 +297,311 @@ fn benchmark_rebase_with_perf_json() {
     }
 }
 
+/// Benchmark diff-based attribution transfer with large files and content changes.
+/// This tests the scenario where rebasing changes file content (main branch modifies
+/// AI-tracked files), forcing the diff-based path instead of the fast-path note remap.
+///
+/// Scale: 50 commits × 10 files × 200 lines = significant AI-authored content.
+/// The diff-based path should complete the per-commit processing loop in <10ms total.
+#[test]
+#[ignore]
+fn benchmark_rebase_diff_based_large() {
+    let num_feature_commits: usize = std::env::var("REBASE_BENCH_FEATURE_COMMITS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(50);
+    let num_ai_files: usize = std::env::var("REBASE_BENCH_AI_FILES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10);
+    let lines_per_file: usize = std::env::var("REBASE_BENCH_LINES_PER_FILE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(200);
+
+    println!("\n=== Diff-Based Large Rebase Benchmark ===");
+    println!("Feature commits: {}", num_feature_commits);
+    println!("AI files: {}", num_ai_files);
+    println!("Lines per file: {}", lines_per_file);
+    println!("==========================================\n");
+
+    let repo = TestRepo::new();
+
+    // Create initial commit with shared files (both branches will modify)
+    {
+        for file_idx in 0..num_ai_files {
+            let filename = format!("shared/mod_{}/f_{}.rs", file_idx, file_idx);
+            let mut file = repo.filename(&filename);
+            let mut lines: Vec<crate::repos::test_file::ExpectedLine> = Vec::new();
+            lines.push(format!("// Header for module {}", file_idx).into());
+            lines.push("// Main branch will add lines above this marker".into());
+            for line_idx in 0..lines_per_file {
+                lines.push(format!("// Initial AI code mod{} line{}", file_idx, line_idx).ai());
+            }
+            file.set_contents(lines);
+        }
+        repo.stage_all_and_commit("Initial shared files").unwrap();
+    }
+
+    let default_branch = repo.current_branch();
+
+    // Create feature branch with AI commits
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    let setup_start = Instant::now();
+    for commit_idx in 0..num_feature_commits {
+        for file_idx in 0..num_ai_files {
+            let filename = format!("shared/mod_{}/f_{}.rs", file_idx, file_idx);
+            let path = repo.path().join(&filename);
+            let current = fs::read_to_string(&path).unwrap_or_default();
+            let new_content = format!(
+                "{}\n// AI addition v{} mod{}",
+                current, commit_idx, file_idx
+            );
+            fs::write(&path, &new_content).unwrap();
+            repo.git_ai(&["checkpoint", "mock_ai", &filename]).unwrap();
+        }
+        repo.git(&["add", "-A"]).unwrap();
+        repo.stage_all_and_commit(&format!("AI feature {}", commit_idx))
+            .unwrap();
+
+        if (commit_idx + 1) % 10 == 0 {
+            println!(
+                "  Feature commit {}/{} ({:.1}s)",
+                commit_idx + 1,
+                num_feature_commits,
+                setup_start.elapsed().as_secs_f64()
+            );
+        }
+    }
+    println!("Feature setup: {:.1}s", setup_start.elapsed().as_secs_f64());
+
+    // Advance main branch with modifications to AI-tracked files (forces content changes on rebase)
+    repo.git(&["checkout", &default_branch]).unwrap();
+    for main_idx in 0..5 {
+        for file_idx in 0..num_ai_files {
+            let filename = format!("shared/mod_{}/f_{}.rs", file_idx, file_idx);
+            let path = repo.path().join(&filename);
+            let current = fs::read_to_string(&path).unwrap_or_default();
+            let new_content = current.replacen(
+                "// Main branch will add lines above this marker",
+                &format!(
+                    "// Main addition {} for mod{}\n// Main branch will add lines above this marker",
+                    main_idx, file_idx
+                ),
+                1,
+            );
+            fs::write(&path, &new_content).unwrap();
+        }
+        repo.git(&["add", "-A"]).unwrap();
+        repo.stage_all_and_commit(&format!("Main change {}", main_idx))
+            .unwrap();
+    }
+
+    // Unrelated main commits
+    for i in 0..10 {
+        let filename = format!("main_only/change_{}.txt", i);
+        let mut file = repo.filename(&filename);
+        file.set_contents(crate::lines![format!("main only {}", i)]);
+        repo.stage_all_and_commit(&format!("Main unrelated {}", i))
+            .unwrap();
+    }
+
+    // Rebase feature onto main
+    repo.git(&["checkout", "feature"]).unwrap();
+    let timing_file = repo.path().join("..").join("rebase_timing_diff.txt");
+    let timing_path = timing_file.to_str().unwrap().to_string();
+
+    println!("\n--- Starting diff-based rebase ---");
+    let rebase_start = Instant::now();
+    let result = repo.git_with_env(
+        &["rebase", &default_branch],
+        &[
+            ("GIT_AI_DEBUG_PERFORMANCE", "1"),
+            ("GIT_AI_REBASE_TIMING_FILE", &timing_path),
+        ],
+        None,
+    );
+    let rebase_duration = rebase_start.elapsed();
+
+    match &result {
+        Ok(_) => println!("Rebase succeeded in {:.3}s", rebase_duration.as_secs_f64()),
+        Err(e) => println!(
+            "Rebase FAILED in {:.3}s: {}",
+            rebase_duration.as_secs_f64(),
+            e
+        ),
+    }
+    result.unwrap();
+
+    if let Ok(timing_data) = fs::read_to_string(&timing_file) {
+        println!("\n=== PHASE TIMING BREAKDOWN ===");
+        print!("{}", timing_data);
+        println!("===============================");
+    }
+
+    println!("\n=== DIFF-BASED LARGE BENCHMARK RESULTS ===");
+    println!(
+        "Total rebase time: {:.3}s ({:.0}ms)",
+        rebase_duration.as_secs_f64(),
+        rebase_duration.as_millis()
+    );
+    println!(
+        "Per-commit average: {:.1}ms",
+        rebase_duration.as_millis() as f64 / num_feature_commits as f64
+    );
+    println!("============================================\n");
+}
+
+/// Benchmark comparing the notes-based fast path vs blame-based slow path.
+/// Runs the same rebase twice: once with notes (fast) and once without (blame fallback).
+///
+/// Run with: cargo test --test integration benchmark_blame_vs_diff -- --ignored --nocapture
+#[test]
+#[ignore]
+fn benchmark_blame_vs_diff() {
+    let num_feature_commits: usize = std::env::var("REBASE_BENCH_FEATURE_COMMITS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30);
+    let num_ai_files: usize = std::env::var("REBASE_BENCH_AI_FILES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5);
+    let lines_per_file: usize = std::env::var("REBASE_BENCH_LINES_PER_FILE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(50);
+
+    println!("\n=== Blame vs Diff-Based Benchmark ===");
+    println!("Feature commits: {}", num_feature_commits);
+    println!("AI files: {}", num_ai_files);
+    println!("Lines per file: {}", lines_per_file);
+    println!("======================================\n");
+
+    // Helper closure to create a test repo with the same setup
+    let create_repo = |strip_notes: bool| -> (std::time::Duration, String) {
+        let repo = TestRepo::new();
+        for file_idx in 0..num_ai_files {
+            let filename = format!("shared/mod_{}/f_{}.rs", file_idx, file_idx);
+            let mut file = repo.filename(&filename);
+            let mut lines: Vec<crate::repos::test_file::ExpectedLine> = Vec::new();
+            lines.push(format!("// Header for module {}", file_idx).into());
+            lines.push("// Main branch marker".into());
+            for line_idx in 0..lines_per_file {
+                lines.push(format!("// AI code mod{} line{}", file_idx, line_idx).ai());
+            }
+            file.set_contents(lines);
+        }
+        repo.stage_all_and_commit("Initial shared files").unwrap();
+        let default_branch = repo.current_branch();
+
+        repo.git(&["checkout", "-b", "feature"]).unwrap();
+        for commit_idx in 0..num_feature_commits {
+            for file_idx in 0..num_ai_files {
+                let filename = format!("shared/mod_{}/f_{}.rs", file_idx, file_idx);
+                let path = repo.path().join(&filename);
+                let current = fs::read_to_string(&path).unwrap_or_default();
+                let new_content = format!(
+                    "{}\n// AI addition v{} mod{}",
+                    current, commit_idx, file_idx
+                );
+                fs::write(&path, &new_content).unwrap();
+                repo.git_ai(&["checkpoint", "mock_ai", &filename]).unwrap();
+            }
+            repo.git(&["add", "-A"]).unwrap();
+            repo.stage_all_and_commit(&format!("AI feature {}", commit_idx))
+                .unwrap();
+        }
+
+        if strip_notes {
+            // Delete the authorship notes ref to force the blame-based fallback
+            let _ = repo.git(&["update-ref", "-d", "refs/notes/git-ai-authorship"]);
+        }
+
+        repo.git(&["checkout", &default_branch]).unwrap();
+        for main_idx in 0..5 {
+            for file_idx in 0..num_ai_files {
+                let filename = format!("shared/mod_{}/f_{}.rs", file_idx, file_idx);
+                let path = repo.path().join(&filename);
+                let current = fs::read_to_string(&path).unwrap_or_default();
+                let new_content = current.replacen(
+                    "// Main branch marker",
+                    &format!(
+                        "// Main addition {} mod{}\n// Main branch marker",
+                        main_idx, file_idx
+                    ),
+                    1,
+                );
+                fs::write(&path, &new_content).unwrap();
+            }
+            repo.git(&["add", "-A"]).unwrap();
+            repo.stage_all_and_commit(&format!("Main {}", main_idx))
+                .unwrap();
+        }
+
+        repo.git(&["checkout", "feature"]).unwrap();
+        let timing_file = repo.path().join("..").join(if strip_notes {
+            "timing_no_notes.txt"
+        } else {
+            "timing_with_notes.txt"
+        });
+        let timing_path = timing_file.to_str().unwrap().to_string();
+
+        let rebase_start = Instant::now();
+        repo.git_with_env(
+            &["rebase", &default_branch],
+            &[
+                ("GIT_AI_DEBUG_PERFORMANCE", "1"),
+                ("GIT_AI_REBASE_TIMING_FILE", &timing_path),
+            ],
+            None,
+        )
+        .unwrap();
+        let duration = rebase_start.elapsed();
+
+        let timing_data = fs::read_to_string(&timing_file).unwrap_or_default();
+        (duration, timing_data)
+    };
+
+    // Run with notes (diff-based fast path)
+    let (with_notes_dur, with_notes_timing) = create_repo(false);
+    println!("--- WITH NOTES (diff-based path) ---");
+    print!("{}", with_notes_timing);
+    println!("Total rebase: {:.0}ms\n", with_notes_dur.as_millis());
+
+    // Run without notes (blame-based slow path)
+    let (no_notes_dur, no_notes_timing) = create_repo(true);
+    println!("--- WITHOUT NOTES (blame-based fallback) ---");
+    print!("{}", no_notes_timing);
+    println!("Total rebase: {:.0}ms\n", no_notes_dur.as_millis());
+
+    let authorship_with =
+        extract_timing(&with_notes_timing, "TOTAL").unwrap_or(with_notes_dur.as_millis() as u64);
+    let authorship_without =
+        extract_timing(&no_notes_timing, "TOTAL").unwrap_or(no_notes_dur.as_millis() as u64);
+
+    if authorship_without > 0 {
+        let speedup = authorship_without as f64 / authorship_with.max(1) as f64;
+        println!("=== COMPARISON ===");
+        println!("Authorship rewrite with notes:    {}ms", authorship_with);
+        println!("Authorship rewrite without notes: {}ms", authorship_without);
+        println!("Speedup:                          {:.1}x", speedup);
+        println!("==================\n");
+    }
+}
+
+fn extract_timing(data: &str, key: &str) -> Option<u64> {
+    for line in data.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with(key)
+            && let Some(val) = trimmed.split('=').nth(1)
+        {
+            return val.trim_end_matches("ms").parse().ok();
+        }
+    }
+    None
+}
+
 /// Benchmark that forces the SLOW path (VirtualAttributions + blame) by having
 /// main branch also modify AI-touched files. This causes blob differences
 /// between original and rebased commits, making the fast-path note remap fail.
@@ -473,4 +778,243 @@ fn benchmark_rebase_slow_path() {
         rebase_duration.as_millis() as f64 / num_feature_commits as f64
     );
     println!("====================================\n");
+}
+
+/// Large-scale benchmark with mixed file sizes for PR comparison.
+///
+/// Creates:
+/// - 200 AI-tracked files (150 × 1000 lines, 50 × 5000 lines)
+/// - 150 feature commits, each modifying all files (ensuring AI attribution on every commit)
+/// - Main branch also modifies the same files (forces diff-based path, not blob-copy fast path)
+///
+/// Run with: cargo test --package git-ai --test integration benchmark_large_scale_mixed -- --ignored --nocapture
+#[test]
+#[ignore]
+fn benchmark_large_scale_mixed() {
+    let num_small_files: usize = std::env::var("BENCH_SMALL_FILES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(150);
+    let num_large_files: usize = std::env::var("BENCH_LARGE_FILES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(50);
+    let small_file_lines: usize = std::env::var("BENCH_SMALL_LINES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1000);
+    let large_file_lines: usize = std::env::var("BENCH_LARGE_LINES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5000);
+    let num_feature_commits: usize = std::env::var("BENCH_FEATURE_COMMITS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(150);
+    let num_main_commits: usize = std::env::var("BENCH_MAIN_COMMITS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10);
+
+    let total_files = num_small_files + num_large_files;
+    let total_initial_lines =
+        num_small_files * small_file_lines + num_large_files * large_file_lines;
+
+    println!("\n=== Large-Scale Mixed Benchmark ===");
+    println!(
+        "Small files: {} × {} lines",
+        num_small_files, small_file_lines
+    );
+    println!(
+        "Large files: {} × {} lines",
+        num_large_files, large_file_lines
+    );
+    println!("Total files: {}", total_files);
+    println!("Total initial lines: {}", total_initial_lines);
+    println!("Feature commits: {}", num_feature_commits);
+    println!("Main commits: {}", num_main_commits);
+    println!("====================================\n");
+
+    let repo = TestRepo::new();
+    let setup_start = Instant::now();
+
+    // Create initial commit with all files
+    {
+        for file_idx in 0..total_files {
+            let lines_for_file = if file_idx < num_small_files {
+                small_file_lines
+            } else {
+                large_file_lines
+            };
+            let filename = format!("src/mod_{}/file_{}.rs", file_idx % 20, file_idx);
+            let mut file = repo.filename(&filename);
+            let mut lines: Vec<crate::repos::test_file::ExpectedLine> = Vec::new();
+            lines.push(format!("// Module {} header", file_idx).into());
+            lines.push("// MAIN_MARKER".into());
+            for line_idx in 0..lines_for_file {
+                lines.push(
+                    format!(
+                        "fn func_{}_{}() {{ /* AI generated */ }}",
+                        file_idx, line_idx
+                    )
+                    .ai(),
+                );
+            }
+            file.set_contents(lines);
+        }
+        repo.stage_all_and_commit("Initial: all AI files").unwrap();
+    }
+    println!(
+        "Initial commit setup: {:.1}s",
+        setup_start.elapsed().as_secs_f64()
+    );
+
+    let default_branch = repo.current_branch();
+
+    // Create feature branch
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    let feature_start = Instant::now();
+
+    for commit_idx in 0..num_feature_commits {
+        // Each commit modifies a subset of files (rotating window of ~20 files)
+        // but touches enough to exercise the diff path
+        let files_per_commit = 20.min(total_files);
+        let start_file = (commit_idx * 7) % total_files; // rotating start to vary which files
+
+        for i in 0..files_per_commit {
+            let file_idx = (start_file + i) % total_files;
+            let filename = format!("src/mod_{}/file_{}.rs", file_idx % 20, file_idx);
+            let path = repo.path().join(&filename);
+            let current = fs::read_to_string(&path).unwrap_or_default();
+            // Append AI-authored line at the end
+            let new_content = format!(
+                "{}\nfn feature_{}_in_{}() {{ /* AI commit {} */ }}",
+                current, commit_idx, file_idx, commit_idx
+            );
+            fs::write(&path, &new_content).unwrap();
+            repo.git_ai(&["checkpoint", "mock_ai", &filename]).unwrap();
+        }
+        repo.git(&["add", "-A"]).unwrap();
+        repo.stage_all_and_commit(&format!("AI feature {}", commit_idx))
+            .unwrap();
+
+        if (commit_idx + 1) % 25 == 0 {
+            println!(
+                "  Feature commit {}/{} ({:.1}s)",
+                commit_idx + 1,
+                num_feature_commits,
+                feature_start.elapsed().as_secs_f64()
+            );
+        }
+    }
+    println!(
+        "Feature branch setup: {:.1}s ({} commits)",
+        feature_start.elapsed().as_secs_f64(),
+        num_feature_commits
+    );
+
+    // Advance main branch — modify AI-tracked files to force diff-based path
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let main_start = Instant::now();
+    for main_idx in 0..num_main_commits {
+        // Main modifies a different rotating set of files at the MARKER line
+        let files_per_main = 30.min(total_files);
+        let start_file = (main_idx * 13) % total_files;
+        for i in 0..files_per_main {
+            let file_idx = (start_file + i) % total_files;
+            let filename = format!("src/mod_{}/file_{}.rs", file_idx % 20, file_idx);
+            let path = repo.path().join(&filename);
+            let current = fs::read_to_string(&path).unwrap_or_default();
+            let new_content = current.replacen(
+                "// MAIN_MARKER",
+                &format!(
+                    "// Main change {} in file {}\n// MAIN_MARKER",
+                    main_idx, file_idx
+                ),
+                1,
+            );
+            fs::write(&path, &new_content).unwrap();
+        }
+        repo.git(&["add", "-A"]).unwrap();
+        repo.stage_all_and_commit(&format!("Main {}", main_idx))
+            .unwrap();
+    }
+    // Add unrelated main commits
+    for i in 0..5 {
+        let mut f = repo.filename(&format!("main_only/f_{}.txt", i));
+        f.set_contents(crate::lines![format!("main only {}", i)]);
+        repo.stage_all_and_commit(&format!("Main unrelated {}", i))
+            .unwrap();
+    }
+    println!(
+        "Main branch setup: {:.1}s",
+        main_start.elapsed().as_secs_f64()
+    );
+    println!("Total setup: {:.1}s", setup_start.elapsed().as_secs_f64());
+
+    // Rebase using benchmark_git for structured timing
+    repo.git(&["checkout", "feature"]).unwrap();
+
+    println!(
+        "\n--- Starting rebase ({} commits onto {}) ---",
+        num_feature_commits, &default_branch
+    );
+    let wall_start = Instant::now();
+    let bench_result = repo.benchmark_git(&["rebase", &default_branch]);
+    let wall_duration = wall_start.elapsed();
+
+    match &bench_result {
+        Ok(bench) => {
+            let git_ms = bench.git_duration.as_millis();
+            let total_ms = bench.total_duration.as_millis();
+            let pre_ms = bench.pre_command_duration.as_millis();
+            let post_ms = bench.post_command_duration.as_millis();
+            let overhead_ms = total_ms.saturating_sub(git_ms);
+            let overhead_pct = if git_ms > 0 {
+                overhead_ms as f64 / git_ms as f64 * 100.0
+            } else {
+                0.0
+            };
+
+            println!("\n╔══════════════════════════════════════════════════════════╗");
+            println!("║          LARGE-SCALE BENCHMARK RESULTS                  ║");
+            println!("╠══════════════════════════════════════════════════════════╣");
+            println!(
+                "║  Files:          {} ({} × {}L + {} × {}L)",
+                total_files, num_small_files, small_file_lines, num_large_files, large_file_lines
+            );
+            println!("║  Initial lines:  {}", total_initial_lines);
+            println!("║  Commits:        {}", num_feature_commits);
+            println!("╠══════════════════════════════════════════════════════════╣");
+            println!("║  Wall time:      {:.3}s", wall_duration.as_secs_f64());
+            println!("║  Total (wrapper): {}ms", total_ms);
+            println!("║  Git rebase:     {}ms", git_ms);
+            println!("║  Pre-command:    {}ms", pre_ms);
+            println!("║  Post-command:   {}ms", post_ms);
+            println!(
+                "║  Overhead:       {}ms ({:.1}% of git time)",
+                overhead_ms, overhead_pct
+            );
+            println!(
+                "║  Per-commit avg: {:.1}ms total, {:.1}ms git, {:.1}ms overhead",
+                total_ms as f64 / num_feature_commits as f64,
+                git_ms as f64 / num_feature_commits as f64,
+                overhead_ms as f64 / num_feature_commits as f64,
+            );
+            println!("╚══════════════════════════════════════════════════════════╝\n");
+        }
+        Err(e) => {
+            println!(
+                "Benchmark failed after {:.3}s: {}",
+                wall_duration.as_secs_f64(),
+                e
+            );
+            println!(
+                "Wall time: {:.3}s ({:.0}ms)",
+                wall_duration.as_secs_f64(),
+                wall_duration.as_millis()
+            );
+            panic!("Benchmark failed: {}", e);
+        }
+    }
 }

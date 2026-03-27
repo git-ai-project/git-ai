@@ -2629,6 +2629,17 @@ fn processed_rebase_new_heads(repository: &Repository) -> Result<HashSet<String>
     Ok(out)
 }
 
+/// Check whether `ancestor` is an ancestor of `descendant` using
+/// `git merge-base --is-ancestor`.
+fn is_ancestor_commit(repository: &Repository, ancestor: &str, descendant: &str) -> bool {
+    let mut args = repository.global_args_for_exec();
+    args.push("merge-base".to_string());
+    args.push("--is-ancestor".to_string());
+    args.push(ancestor.to_string());
+    args.push(descendant.to_string());
+    crate::git::repository::exec_git(&args).is_ok()
+}
+
 fn maybe_rebase_mappings_from_repository(
     repository: &Repository,
     old_head: &str,
@@ -5637,6 +5648,7 @@ impl ActorDaemonCoordinator {
                         && !is_zero_oid(new_head)
                     {
                         if let Ok(repository) = repository_for_rewrite_context(cmd, "reset_rewrite")
+                            && !is_ancestor_commit(&repository, new_head, old_head)
                         {
                             if let Some((original_commits, new_commits)) =
                                 maybe_rebase_mappings_from_repository(
@@ -5942,8 +5954,14 @@ impl ActorDaemonCoordinator {
                     if reference.starts_with("refs/heads/")
                         && !old.is_empty()
                         && !new.is_empty()
+                        && old != new
+                        && is_valid_oid(old)
+                        && !is_zero_oid(old)
+                        && is_valid_oid(new)
+                        && !is_zero_oid(new)
                         && let Ok(repository) =
                             repository_for_rewrite_context(cmd, "update_ref_rewrite")
+                        && !is_ancestor_commit(&repository, new, old)
                         && let Some((original_commits, new_commits)) =
                             maybe_rebase_mappings_from_repository(
                                 &repository,

@@ -1517,6 +1517,181 @@ fn test_rebase_preserves_custom_attributes_from_config() {
     feature_file.assert_lines_and_blame(crate::lines!["// AI feature code".ai()]);
 }
 
+/// Regression test: prompt metrics (accepted_lines) must update per commit, not be frozen
+/// from the initial state. When commit 1 has 2 AI lines and commit 2 adds 2 more
+/// (total 4), the rebased notes should reflect different accepted_lines.
+#[test]
+fn test_rebase_prompt_metrics_update_per_commit() {
+    let repo = TestRepo::new();
+    let default_branch = repo.current_branch();
+
+    // Initial setup
+    let mut base_file = repo.filename("base.txt");
+    base_file.set_contents(crate::lines!["base content"]);
+    repo.stage_all_and_commit("Initial").unwrap();
+
+    // Create feature branch
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+    // Commit 1: add 2 AI lines
+    let mut ai_file = repo.filename("feature.txt");
+    ai_file.set_contents(crate::lines!["line1".ai(), "line2".ai()]);
+    let commit1 = repo.stage_all_and_commit("AI commit 1 - 2 lines").unwrap();
+
+    // Commit 2: add 2 more AI lines (total 4)
+    ai_file.set_contents(crate::lines![
+        "line1".ai(),
+        "line2".ai(),
+        "line3".ai(),
+        "line4".ai()
+    ]);
+    let commit2 = repo.stage_all_and_commit("AI commit 2 - 4 lines").unwrap();
+
+    // Verify pre-rebase: commit 1 has 2 accepted, commit 2 has 4
+    let note1 = repo
+        .read_authorship_note(&commit1.commit_sha)
+        .expect("commit 1 should have note");
+    let log1 = AuthorshipLog::deserialize_from_string(&note1).expect("parse note 1");
+    let note2 = repo
+        .read_authorship_note(&commit2.commit_sha)
+        .expect("commit 2 should have note");
+    let log2 = AuthorshipLog::deserialize_from_string(&note2).expect("parse note 2");
+
+    let pre_accepted_1: u32 = log1
+        .metadata
+        .prompts
+        .values()
+        .map(|p| p.accepted_lines)
+        .sum();
+    let pre_accepted_2: u32 = log2
+        .metadata
+        .prompts
+        .values()
+        .map(|p| p.accepted_lines)
+        .sum();
+    assert!(
+        pre_accepted_1 < pre_accepted_2,
+        "precondition: commit 2 ({}) should have more accepted_lines than commit 1 ({})",
+        pre_accepted_2,
+        pre_accepted_1
+    );
+
+    // Advance default branch
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let mut other_file = repo.filename("other.txt");
+    other_file.set_contents(crate::lines!["other"]);
+    repo.stage_all_and_commit("Main advances").unwrap();
+
+    // Rebase feature
+    repo.git(&["checkout", "feature"]).unwrap();
+    repo.git(&["rebase", &default_branch]).unwrap();
+
+    // Get rebased commit SHAs
+    let rebased_tip = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let rebased_parent = repo
+        .git(&["rev-parse", "HEAD~1"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    // Verify post-rebase: metrics should differ between the two commits
+    let rebased_note1 = repo
+        .read_authorship_note(&rebased_parent)
+        .expect("rebased commit 1 should have note");
+    let rebased_log1 =
+        AuthorshipLog::deserialize_from_string(&rebased_note1).expect("parse rebased note 1");
+    let rebased_note2 = repo
+        .read_authorship_note(&rebased_tip)
+        .expect("rebased commit 2 should have note");
+    let rebased_log2 =
+        AuthorshipLog::deserialize_from_string(&rebased_note2).expect("parse rebased note 2");
+
+    let post_accepted_1: u32 = rebased_log1
+        .metadata
+        .prompts
+        .values()
+        .map(|p| p.accepted_lines)
+        .sum();
+    let post_accepted_2: u32 = rebased_log2
+        .metadata
+        .prompts
+        .values()
+        .map(|p| p.accepted_lines)
+        .sum();
+
+    assert!(
+        post_accepted_1 < post_accepted_2,
+        "regression: rebased commit 2 ({}) should have more accepted_lines than commit 1 ({}). \
+         If equal, the fast path is freezing metrics across commits.",
+        post_accepted_2,
+        post_accepted_1
+    );
+}
+
+/// Regression test: attributions should survive a delete-recreate cycle within a rebase.
+/// If a file is deleted in commit N and recreated in commit N+1, the recreated file
+/// should inherit attributions from the pre-deletion state via positional diff transfer.
+#[test]
+fn test_rebase_file_delete_recreate_preserves_attribution() {
+    let repo = TestRepo::new();
+    let default_branch = repo.current_branch();
+
+    // Initial setup
+    let mut base_file = repo.filename("base.txt");
+    base_file.set_contents(crate::lines!["base content"]);
+    repo.stage_all_and_commit("Initial").unwrap();
+
+    // Create feature branch with AI file
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    let mut ai_file = repo.filename("feature.txt");
+    ai_file.set_contents(crate::lines!["line1".ai(), "line2".ai(), "line3".ai()]);
+    repo.stage_all_and_commit("Add AI file").unwrap();
+
+    // Delete the file
+    repo.git(&["rm", "feature.txt"]).unwrap();
+    repo.stage_all_and_commit("Delete AI file").unwrap();
+
+    // Recreate the file with same content
+    ai_file.set_contents(crate::lines!["line1".ai(), "line2".ai(), "line3".ai()]);
+    let recreate_commit = repo.stage_all_and_commit("Recreate AI file").unwrap();
+
+    // Verify pre-rebase: recreated file has attributions
+    let pre_note = repo
+        .read_authorship_note(&recreate_commit.commit_sha)
+        .expect("recreated commit should have note");
+    let pre_log = AuthorshipLog::deserialize_from_string(&pre_note).expect("parse pre note");
+    assert!(
+        !pre_log.attestations.is_empty(),
+        "precondition: recreated file should have attestations"
+    );
+
+    // Advance default branch
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let mut other_file = repo.filename("other.txt");
+    other_file.set_contents(crate::lines!["other"]);
+    repo.stage_all_and_commit("Main advances").unwrap();
+
+    // Rebase feature
+    repo.git(&["checkout", "feature"]).unwrap();
+    repo.git(&["rebase", &default_branch]).unwrap();
+
+    // Check rebased tip (the recreate commit)
+    let rebased_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let rebased_note = repo
+        .read_authorship_note(&rebased_sha)
+        .expect("rebased recreate commit should have note");
+    let rebased_log =
+        AuthorshipLog::deserialize_from_string(&rebased_note).expect("parse rebased note");
+
+    assert!(
+        !rebased_log.attestations.is_empty(),
+        "regression: file recreated after deletion should still have attestations after rebase"
+    );
+
+    // Verify the AI attribution itself survived
+    ai_file.assert_lines_and_blame(crate::lines!["line1".ai(), "line2".ai(), "line3".ai()]);
+}
+
 crate::reuse_tests_in_worktree!(
     test_rebase_no_conflicts_identical_trees,
     test_rebase_with_different_trees,
@@ -1543,6 +1718,8 @@ crate::reuse_tests_in_worktree!(
     test_rebase_exec,
     test_rebase_preserve_merges,
     test_rebase_commit_splitting,
+    test_rebase_prompt_metrics_update_per_commit,
+    test_rebase_file_delete_recreate_preserves_attribution,
 );
 
 crate::reuse_tests_in_worktree_with_attrs!(
