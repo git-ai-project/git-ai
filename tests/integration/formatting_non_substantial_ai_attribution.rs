@@ -375,11 +375,7 @@ fn test_ai_rewrite_with_byte_identical_line_in_gap() {
     let mut file = repo.filename("config.yaml");
 
     // Human creates a config with a separator
-    file.set_contents(crate::lines![
-        "key1: alpha",
-        "---",
-        "key2: beta",
-    ]);
+    file.set_contents(crate::lines!["key1: alpha", "---", "key2: beta",]);
     repo.stage_all_and_commit("Initial config").unwrap();
 
     // AI rewrites the values and the separator (even though it's byte-identical)
@@ -388,7 +384,8 @@ fn test_ai_rewrite_with_byte_identical_line_in_gap() {
         "---".ai(),
         "key2: delta".ai(),
     ]);
-    repo.stage_all_and_commit("AI updates config values").unwrap();
+    repo.stage_all_and_commit("AI updates config values")
+        .unwrap();
 
     // The byte-identical separator between AI lines should be attributed to AI
     file.assert_lines_and_blame(crate::lines![

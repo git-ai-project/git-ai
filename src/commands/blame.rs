@@ -1211,9 +1211,9 @@ fn overlay_ai_authorship(
         // Read current file content for content comparison
         let current_file_lines: Option<Vec<String>> = {
             let file_full_path = repo.workdir().ok().map(|w| w.join(file_path));
-            file_full_path.and_then(|p| fs::read_to_string(p).ok()).map(|content| {
-                content.lines().map(|l| l.to_string()).collect()
-            })
+            file_full_path
+                .and_then(|p| fs::read_to_string(p).ok())
+                .map(|content| content.lines().map(|l| l.to_string()).collect())
         };
 
         // Find small gaps between consecutive AI lines and fill them
@@ -1257,16 +1257,17 @@ fn overlay_ai_authorship(
                 }
 
                 // Check if the AI commit's authorship log claims this line as AI
-                let in_attestation = if let Some(Some(ai_log)) = commit_authorship_cache.get(&ai_commit) {
-                    ai_log.attestations.iter().any(|f| {
-                        f.file_path == file_path
-                            && f.entries.iter().any(|entry| {
-                                entry.line_ranges.iter().any(|lr| lr.contains(line))
-                            })
-                    })
-                } else {
-                    false
-                };
+                let in_attestation =
+                    if let Some(Some(ai_log)) = commit_authorship_cache.get(&ai_commit) {
+                        ai_log.attestations.iter().any(|f| {
+                            f.file_path == file_path
+                                && f.entries.iter().any(|entry| {
+                                    entry.line_ranges.iter().any(|lr| lr.contains(line))
+                                })
+                        })
+                    } else {
+                        false
+                    };
                 if !in_attestation {
                     return false;
                 }
