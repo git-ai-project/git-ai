@@ -947,7 +947,7 @@ pub fn prepare_captured_checkpoint(
     }))
 }
 
-fn load_captured_checkpoint_manifest(
+pub(crate) fn load_captured_checkpoint_manifest(
     capture_id: &str,
 ) -> Result<PreparedCheckpointManifest, GitAiError> {
     let manifest_path = async_checkpoint_manifest_path(capture_id)?;

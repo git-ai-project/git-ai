@@ -158,14 +158,17 @@ impl AgentCheckpointPreset for ClaudePreset {
 
         if hook_event_name == Some("PreToolUse") {
             // For bash tools, take a pre-snapshot before the tool executes
+            let mut pre_hook_captured_id = None;
             if is_bash_tool {
                 let repo_root = Path::new(cwd);
-                let _ = bash_tool::handle_bash_tool(
+                pre_hook_captured_id = bash_tool::handle_bash_tool(
                     HookEvent::PreToolUse,
                     repo_root,
                     session_id,
                     tool_use_id,
-                );
+                )
+                .ok()
+                .and_then(|r| r.captured_checkpoint.map(|info| info.capture_id));
             }
 
             // Early return for human checkpoint
@@ -178,7 +181,7 @@ impl AgentCheckpointPreset for ClaudePreset {
                 edited_filepaths: None,
                 will_edit_filepaths: file_path_as_vec,
                 dirty_files: None,
-                captured_checkpoint_id: None,
+                captured_checkpoint_id: pre_hook_captured_id,
             });
         }
 
@@ -558,14 +561,17 @@ impl AgentCheckpointPreset for GeminiPreset {
 
         if hook_event_name == Some("BeforeTool") {
             // For bash tools, take a pre-snapshot before the tool executes
+            let mut pre_hook_captured_id = None;
             if is_bash_tool {
                 let repo_root = Path::new(cwd);
-                let _ = bash_tool::handle_bash_tool(
+                pre_hook_captured_id = bash_tool::handle_bash_tool(
                     HookEvent::PreToolUse,
                     repo_root,
                     session_id,
                     tool_use_id,
-                );
+                )
+                .ok()
+                .and_then(|r| r.captured_checkpoint.map(|info| info.capture_id));
             }
             // Early return for human checkpoint
             return Ok(AgentRunResult {
@@ -577,7 +583,7 @@ impl AgentCheckpointPreset for GeminiPreset {
                 edited_filepaths: None,
                 will_edit_filepaths: file_path_as_vec,
                 dirty_files: None,
-                captured_checkpoint_id: None,
+                captured_checkpoint_id: pre_hook_captured_id,
             });
         }
 
@@ -1042,14 +1048,17 @@ impl AgentCheckpointPreset for ContinueCliPreset {
 
         if hook_event_name == Some("PreToolUse") {
             // For bash tools, take a pre-snapshot before the tool executes
+            let mut pre_hook_captured_id = None;
             if is_bash_tool {
                 let repo_root = Path::new(cwd);
-                let _ = bash_tool::handle_bash_tool(
+                pre_hook_captured_id = bash_tool::handle_bash_tool(
                     HookEvent::PreToolUse,
                     repo_root,
                     session_id,
                     tool_use_id,
-                );
+                )
+                .ok()
+                .and_then(|r| r.captured_checkpoint.map(|info| info.capture_id));
             }
             // Early return for human checkpoint
             return Ok(AgentRunResult {
@@ -1061,7 +1070,7 @@ impl AgentCheckpointPreset for ContinueCliPreset {
                 edited_filepaths: None,
                 will_edit_filepaths: file_path_as_vec,
                 dirty_files: None,
-                captured_checkpoint_id: None,
+                captured_checkpoint_id: pre_hook_captured_id,
             });
         }
 
@@ -3063,14 +3072,17 @@ impl AgentCheckpointPreset for DroidPreset {
         // Check if this is a PreToolUse event (human checkpoint)
         if hook_event_name == "PreToolUse" {
             // For bash tools, take a pre-snapshot before the tool executes
+            let mut pre_hook_captured_id = None;
             if is_bash_tool {
                 let repo_root = Path::new(cwd);
-                let _ = bash_tool::handle_bash_tool(
+                pre_hook_captured_id = bash_tool::handle_bash_tool(
                     HookEvent::PreToolUse,
                     repo_root,
                     &agent_id.id,
                     tool_use_id,
-                );
+                )
+                .ok()
+                .and_then(|r| r.captured_checkpoint.map(|info| info.capture_id));
             }
             return Ok(AgentRunResult {
                 agent_id,
@@ -3081,7 +3093,7 @@ impl AgentCheckpointPreset for DroidPreset {
                 edited_filepaths: None,
                 will_edit_filepaths: file_path_as_vec,
                 dirty_files: None,
-                captured_checkpoint_id: None,
+                captured_checkpoint_id: pre_hook_captured_id,
             });
         }
 

@@ -153,14 +153,17 @@ impl AgentCheckpointPreset for AmpPreset {
 
         if is_pre_tool_use {
             // For bash tools, take a pre-snapshot before the tool executes
+            let mut pre_hook_captured_id = None;
             if is_bash_tool && let Some(ref cwd) = hook_input.cwd {
                 let repo_root = Path::new(cwd.as_str());
-                let _ = bash_tool::handle_bash_tool(
+                pre_hook_captured_id = bash_tool::handle_bash_tool(
                     HookEvent::PreToolUse,
                     repo_root,
                     &agent_id.id,
                     hook_input.tool_use_id.as_deref().unwrap_or("bash"),
-                );
+                )
+                .ok()
+                .and_then(|r| r.captured_checkpoint.map(|info| info.capture_id));
             }
             return Ok(AgentRunResult {
                 agent_id,
@@ -171,7 +174,7 @@ impl AgentCheckpointPreset for AmpPreset {
                 edited_filepaths: None,
                 will_edit_filepaths: file_paths,
                 dirty_files: None,
-                captured_checkpoint_id: None,
+                captured_checkpoint_id: pre_hook_captured_id,
             });
         }
 
