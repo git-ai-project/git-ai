@@ -19,20 +19,94 @@ setup() {
         echo "Please run 'cargo build' or 'cargo build --release' first" >&3
         exit 1
     fi
-    
-    # Create shell functions to alias git-ai and git commands
+
+    # ── Async-mode daemon setup ───────────────────────────────────────────
+    # Create an isolated HOME for the daemon so its config, sockets and
+    # global gitconfig do not interfere with the developer machine.
+    export TEST_DAEMON_HOME="$(mktemp -d)"
+    export ORIGINAL_HOME="$HOME"
+    export HOME="$TEST_DAEMON_HOME"
+    export GIT_CONFIG_GLOBAL="$TEST_DAEMON_HOME/.gitconfig"
+
+    # Locate real git so the config can reference it explicitly.
+    REAL_GIT="$(command -v git)"
+
+    # Write daemon / wrapper config that enables async_mode.
+    mkdir -p "$TEST_DAEMON_HOME/.git-ai"
+    cat > "$TEST_DAEMON_HOME/.git-ai/config.json" <<CONF
+{
+    "git_path": "$REAL_GIT",
+    "disable_auto_updates": true,
+    "feature_flags": {
+        "async_mode": true,
+        "git_hooks_enabled": false
+    },
+    "quiet": false
+}
+CONF
+
+    # Socket paths the daemon will listen on and the wrapper will connect to.
+    export GIT_AI_DAEMON_HOME="$TEST_DAEMON_HOME"
+    export GIT_AI_DAEMON_CONTROL_SOCKET="$TEST_DAEMON_HOME/control.sock"
+    export GIT_AI_DAEMON_TRACE_SOCKET="$TEST_DAEMON_HOME/trace.sock"
+
+    # Tell the wrapper this is async mode.
+    export GIT_AI_ASYNC_MODE=true
+
+    # Force the wrapper to treat piped stdout as interactive so it polls
+    # for the authorship note after every commit.
+    export GIT_AI_TEST_FORCE_TTY=1
+
+    # Give the daemon plenty of time to produce the note (CI can be slow).
+    export GIT_AI_POST_COMMIT_TIMEOUT_MS=30000
+
+    # Start the daemon in the background.
+    "$GIT_AI_BINARY" bg run &
+    DAEMON_PID=$!
+    export DAEMON_PID
+
+    # Wait for the daemon sockets to appear (up to ~5 s).
+    for _i in $(seq 1 200); do
+        [ -S "$GIT_AI_DAEMON_CONTROL_SOCKET" ] && [ -S "$GIT_AI_DAEMON_TRACE_SOCKET" ] && break
+        sleep 0.025
+    done
+    if [ ! -S "$GIT_AI_DAEMON_CONTROL_SOCKET" ] || [ ! -S "$GIT_AI_DAEMON_TRACE_SOCKET" ]; then
+        echo "ERROR: daemon sockets did not appear after 5 s" >&3
+        exit 1
+    fi
+
+    # ── Shell helpers ─────────────────────────────────────────────────────
     git-ai() {
+        GIT_AI_DAEMON_HOME="$TEST_DAEMON_HOME" \
+        GIT_AI_DAEMON_CONTROL_SOCKET="$TEST_DAEMON_HOME/control.sock" \
+        GIT_AI_DAEMON_TRACE_SOCKET="$TEST_DAEMON_HOME/trace.sock" \
+        GIT_AI_DAEMON_CHECKPOINT_DELEGATE=true \
         "$GIT_AI_BINARY" "$@"
     }
     export -f git-ai
 
     git() {
-        GIT_AI=git "$GIT_AI_BINARY" "$@"
+        GIT_AI=git \
+        GIT_AI_ASYNC_MODE=true \
+        GIT_AI_TEST_FORCE_TTY=1 \
+        GIT_AI_POST_COMMIT_TIMEOUT_MS=30000 \
+        GIT_AI_DAEMON_HOME="$TEST_DAEMON_HOME" \
+        GIT_AI_DAEMON_CONTROL_SOCKET="$TEST_DAEMON_HOME/control.sock" \
+        GIT_AI_DAEMON_TRACE_SOCKET="$TEST_DAEMON_HOME/trace.sock" \
+        GIT_TRACE2_EVENT="af_unix:stream:$TEST_DAEMON_HOME/trace.sock" \
+        GIT_TRACE2_EVENT_NESTING=10 \
+        "$GIT_AI_BINARY" "$@"
     }
-    
     export -f git
-    
-    # Initialize a git repo
+
+    # ── Global gitconfig defaults ─────────────────────────────────────────
+    # Set default branch name before any git init so tests always get "main".
+    "$REAL_GIT" config --global init.defaultBranch main
+
+    # ── Set up trace2 via global gitconfig ────────────────────────────────
+    git-ai install-hooks --dry-run=false 2>/dev/null || true
+
+    # ── Initialise test repository ───────────────────────────────────────
     git init
     git config user.email "test@example.com"
     git config user.name "Test User"
@@ -41,7 +115,6 @@ setup() {
     echo "# Test Project" > README.md
     git add README.md
     git commit -m "Initial commit"
-    git config init.defaultBranch main
     
     # Check if jq is available (needed for JSON parsing tests)
     if ! command -v jq &> /dev/null; then
@@ -51,14 +124,51 @@ setup() {
 }
 
 teardown() {
-    # Clean up temporary directory
+    # Shut down the daemon gracefully; fall back to kill.
+    if [ -n "$DAEMON_PID" ]; then
+        GIT_AI_DAEMON_HOME="$TEST_DAEMON_HOME" \
+        GIT_AI_DAEMON_CONTROL_SOCKET="$TEST_DAEMON_HOME/control.sock" \
+        GIT_AI_DAEMON_TRACE_SOCKET="$TEST_DAEMON_HOME/trace.sock" \
+        "$GIT_AI_BINARY" bg shutdown 2>/dev/null || true
+        # Give the process a moment to exit.
+        for _i in $(seq 1 40); do
+            kill -0 "$DAEMON_PID" 2>/dev/null || break
+            sleep 0.05
+        done
+        kill -9 "$DAEMON_PID" 2>/dev/null || true
+        wait "$DAEMON_PID" 2>/dev/null || true
+    fi
+
+    # Restore HOME so cleanup doesn't affect the daemon home.
+    export HOME="$ORIGINAL_HOME"
+
+    # Clean up temporary directories.
     cd "$ORIGINAL_DIR"
-    rm -rf "$TEST_TEMP_DIR"
+    rm -rf "$TEST_TEMP_DIR" "$TEST_DAEMON_HOME"
 }
 
 # ============================================================================
 # Helper Functions
 # ============================================================================
+
+# Wait for the daemon to produce an authorship note on a given commit.
+# In async mode the daemon writes notes asynchronously; after non-commit
+# operations (rebase, cherry-pick, merge --squash) we need to poll.
+# Usage:
+#   wait_for_note <commit_sha>   # defaults to HEAD if omitted
+wait_for_note() {
+    local commit="${1:-HEAD}"
+    local sha
+    sha=$(GIT_AI=git "$GIT_AI_BINARY" rev-parse "$commit" 2>/dev/null) || sha="$commit"
+    for _i in $(seq 1 800); do
+        if GIT_AI=git "$GIT_AI_BINARY" notes --ref=ai list "$sha" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.025
+    done
+    echo "WARNING: authorship note not found for $sha after 20 s" >&3
+    return 1
+}
 
 # Helper function to get clean JSON from git-ai stats
 # Usage:
@@ -1265,6 +1375,9 @@ EOF
     git checkout feature-branch
     git rebase main
     
+    # Wait for the daemon to rewrite the authorship note for the rebased commit.
+    wait_for_note HEAD
+    
     # Step 6: Verify AI authorship is preserved after rebase
     echo "=== Stats AFTER rebase ===" >&3
     feature_commit_after=$(git rev-parse HEAD)
@@ -1441,6 +1554,9 @@ EOF
     # Continue rebase (set GIT_EDITOR to bypass interactive editor)
     echo "=== Continuing rebase after conflict resolution ===" >&3
     GIT_EDITOR=true git rebase --continue
+    
+    # Wait for the daemon to rewrite the authorship note for the rebased commit.
+    wait_for_note HEAD
     
     # Step 6: Verify AI authorship is preserved after conflict resolution
     echo "=== Stats AFTER conflict resolution ===" >&3
@@ -1848,6 +1964,9 @@ EOF
     unset GIT_SEQUENCE_EDITOR
     unset GIT_EDITOR
     
+    # Wait for the daemon to rewrite the authorship note for the squashed commit.
+    wait_for_note HEAD
+    
     # Verify that the rebase resulted in one commit
     squashed_commit_sha=$(git rev-parse HEAD)
     new_commit_count=$(git rev-list --count HEAD ^$base_commit_sha)
@@ -2154,6 +2273,9 @@ EOF
     
     # Step 6: Verify authorship is preserved after rebase
     feature_commit_after=$(git rev-parse HEAD)
+    
+    # Wait for the daemon to rewrite the authorship note for the rebased commit.
+    wait_for_note "$feature_commit_after"
     
     echo "=== Feature commit stats AFTER rebase ===" >&3
     stats_feature_after=$(get_stats_json "$feature_commit_after")

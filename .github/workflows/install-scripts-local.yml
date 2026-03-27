@@ -20,9 +20,9 @@ on:
   workflow_dispatch:
 
 env:
-  # Force wrapper mode (not async/daemon) so post-commit hooks fire
-  # synchronously and attribution notes are written in-process.
-  GIT_AI_ASYNC_MODE: "false"
+  # Async mode is now fully supported: the wrapper polls for authorship
+  # notes and test helpers wait for the daemon to finish processing.
+  GIT_AI_ASYNC_MODE: "true"
 
 jobs:
   install-local-unix:
