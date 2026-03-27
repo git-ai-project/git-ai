@@ -238,6 +238,12 @@ impl AgentCheckpointPreset for AmpPreset {
             agent_metadata.insert("thread_id".to_string(), thread_id);
         }
 
+        let bash_captured_checkpoint_id = bash_result
+            .as_ref()
+            .and_then(|r| r.as_ref().ok())
+            .and_then(|r| r.captured_checkpoint.as_ref())
+            .map(|info| info.capture_id.clone());
+
         Ok(AgentRunResult {
             agent_id,
             agent_metadata: if agent_metadata.is_empty() {
@@ -251,7 +257,7 @@ impl AgentCheckpointPreset for AmpPreset {
             edited_filepaths,
             will_edit_filepaths: None,
             dirty_files: None,
-            captured_checkpoint_id: None,
+            captured_checkpoint_id: bash_captured_checkpoint_id,
         })
     }
 }

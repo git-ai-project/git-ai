@@ -281,6 +281,12 @@ impl AgentCheckpointPreset for OpenCodePreset {
             file_path_as_vec
         };
 
+        let bash_captured_checkpoint_id = bash_result
+            .as_ref()
+            .and_then(|r| r.as_ref().ok())
+            .and_then(|r| r.captured_checkpoint.as_ref())
+            .map(|info| info.capture_id.clone());
+
         // PostToolUse event - AI checkpoint
         Ok(AgentRunResult {
             agent_id,
@@ -291,7 +297,7 @@ impl AgentCheckpointPreset for OpenCodePreset {
             edited_filepaths,
             will_edit_filepaths: None,
             dirty_files: None,
-            captured_checkpoint_id: None,
+            captured_checkpoint_id: bash_captured_checkpoint_id,
         })
     }
 }
