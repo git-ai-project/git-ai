@@ -1634,7 +1634,7 @@ impl CursorPreset {
     }
 
     // Get the Cursor database path
-    fn cursor_global_database_path() -> Result<PathBuf, GitAiError> {
+    pub fn cursor_global_database_path() -> Result<PathBuf, GitAiError> {
         if let Ok(global_db_path) = std::env::var("GIT_AI_CURSOR_GLOBAL_DB_PATH") {
             return Ok(PathBuf::from(global_db_path));
         }
@@ -1866,6 +1866,57 @@ impl CursorPreset {
         }
 
         Ok(None)
+    }
+
+    /// Return all Cursor conversation UUIDs present in the database.
+    /// Reads every `composerData:<uuid>` key from `cursorDiskKV` and strips the prefix.
+    pub fn list_all_cursor_conversation_ids(
+        db_path: &Path,
+    ) -> Result<Vec<String>, GitAiError> {
+        let conn = Self::open_sqlite_readonly(db_path)?;
+        let mut stmt = conn
+            .prepare("SELECT key FROM cursorDiskKV WHERE key LIKE 'composerData:%'")
+            .map_err(|e| GitAiError::Generic(format!("Query failed: {}", e)))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| GitAiError::Generic(format!("Query failed: {}", e)))?;
+
+        let mut ids = Vec::new();
+        while let Ok(Some(row)) = rows.next() {
+            let key: String = row
+                .get(0)
+                .map_err(|e| GitAiError::Generic(format!("Failed to read key: {}", e)))?;
+            if let Some(uuid) = key.strip_prefix("composerData:") {
+                ids.push(uuid.to_string());
+            }
+        }
+        Ok(ids)
+    }
+
+    /// Return the Unix timestamp (seconds) of the last bubble in a conversation,
+    /// or `None` if the conversation is missing, uses a legacy format, or has no
+    /// parseable timestamp.
+    pub fn get_last_bubble_timestamp(db_path: &Path, conversation_id: &str) -> Option<u64> {
+        let data = Self::fetch_composer_payload(db_path, conversation_id).ok()?;
+
+        let headers = data
+            .get("fullConversationHeadersOnly")
+            .and_then(|v| v.as_array())?;
+
+        let last_bubble_id = headers
+            .iter()
+            .rev()
+            .find_map(|h| h.get("bubbleId").and_then(|v| v.as_str()).map(|s| s.to_string()))?;
+
+        let bubble = Self::fetch_bubble_content_from_db(db_path, conversation_id, &last_bubble_id)
+            .ok()
+            .flatten()?;
+
+        let created_at = bubble.get("createdAt").and_then(|v| v.as_str())?;
+
+        chrono::DateTime::parse_from_rfc3339(created_at)
+            .ok()
+            .map(|dt| dt.timestamp() as u64)
     }
 }
 
