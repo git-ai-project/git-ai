@@ -2514,13 +2514,18 @@ fn try_find_repository_no_git_exec(
     let normalized_global_args =
         normalize_global_args_for_repo_root(global_args, &paths.command_root.to_string_lossy());
 
-    repository_from_discovered_paths(
+    // If construction fails (e.g. canonicalize fails due to permissions/symlinks,
+    // or core.worktree config makes the assumed workdir incorrect), fall back to
+    // the git-exec discovery path rather than propagating the error.
+    match repository_from_discovered_paths(
         normalized_global_args,
         &paths.workdir,
         &paths.git_dir,
         &paths.git_common_dir,
-    )
-    .map(Some)
+    ) {
+        Ok(repo) => Ok(Some(repo)),
+        Err(_) => Ok(None),
+    }
 }
 
 fn resolve_fast_discovery_base_dir(global_args: &[String]) -> Result<Option<PathBuf>, GitAiError> {

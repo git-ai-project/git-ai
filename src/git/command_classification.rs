@@ -97,29 +97,29 @@ fn is_read_only_branch_invocation(parsed: &ParsedGitInvocation) -> bool {
         return false;
     }
 
-    let read_only_listing_flags = [
+    // Flags that *trigger* list mode — their presence alone means read-only.
+    let list_mode_triggers = [
         "--all",
         "--contains",
         "--format",
-        "--ignore-case",
         "--list",
         "--merged",
-        "--no-color",
-        "--no-column",
         "--no-contains",
         "--no-merged",
         "--points-at",
         "--remotes",
         "--show-current",
         "--sort",
-        "--verbose",
         "-a",
         "-l",
         "-r",
-        "-v",
     ];
 
-    command_args_contain_any(&parsed.command_args, &read_only_listing_flags)
+    // Flags that only *modify* list output (e.g. -v, --no-color) but do NOT
+    // trigger list mode on their own. `git branch -v feature` creates a branch
+    // named "feature" — -v only means "verbose" in list mode, it does not
+    // activate list mode.
+    command_args_contain_any(&parsed.command_args, &list_mode_triggers)
         || parsed.pos_command(0).is_none()
 }
 
@@ -290,6 +290,18 @@ mod tests {
     #[test]
     fn read_only_invocation_rejects_branch_creation() {
         let parsed = parse_git_cli_args(&["branch".to_string(), "feature".to_string()]);
+        assert!(!is_read_only_invocation(&parsed));
+    }
+
+    #[test]
+    fn read_only_invocation_rejects_branch_create_with_verbose_flag() {
+        // `git branch -v feature` creates a branch; -v is a list-output modifier,
+        // not a list-mode trigger.
+        let parsed = parse_git_cli_args(&[
+            "branch".to_string(),
+            "-v".to_string(),
+            "feature".to_string(),
+        ]);
         assert!(!is_read_only_invocation(&parsed));
     }
 
