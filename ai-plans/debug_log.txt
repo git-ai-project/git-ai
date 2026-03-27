@@ -1,91 +1,50 @@
-[1774582899739] No AI edits in pre-commit checkpoint, skipping
-[1774582899795] Working log written: 0 checkpoints to /Users/Andrew/School/ReSeSS_Research/tool_testing/git-ai-testing/.git/ai/working_logs/5f7ac0f349119f409cb84d98a3a1a9db08415126/checkpoints.jsonl
-[1774582899795] Post-commit checkpoint summary: 0 checkpoints
-[1774582899819] Git note written for commit 379372a1705656cc205320f837411fc7431dd7a0. Note size: 170 bytes
+
 --- NOTE CONTENT ---
----
-{
-  "schema_version": "authorship/4.0.0",
-  "git_ai_version": "development:1.1.21",
-  "base_commit_sha": "379372a1705656cc205320f837411fc7431dd7a0",
-  "prompts": {}
-}
---- END NOTE ---
-[1774582899996] Debug mode: moved checkpoint directory from 5f7ac0f349119f409cb84d98a3a1a9db08415126 to old-5f7ac0f349119f409cb84d98a3a1a9db08415126
-[1774582902182] started pushing authorship notes to remote: origin
-[1774582902200] pre-push authorship fetch: ["-C", "/Users/Andrew/School/ReSeSS_Research/tool_testing/git-ai-testing", "--no-pager", "-c", "core.hooksPath=/dev/null", "fetch", "--no-tags", "--recurse-submodules=no", "--no-write-fetch-head", "--no-write-commit-graph", "--no-auto-maintenance", "origin", "+refs/notes/ai:refs/notes/ai-remote/origin"]
-[1774582902681] pre-push: merging refs/notes/ai-remote/origin into refs/notes/ai
-[1774582902681] Merging notes from refs/notes/ai-remote/origin into refs/notes/ai
-[1774582902692] pushing authorship refs (no force): ["-C", "/Users/Andrew/School/ReSeSS_Research/tool_testing/git-ai-testing", "--no-pager", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "--no-recurse-submodules", "--no-verify", "--no-signed", "origin", "refs/notes/ai:refs/notes/ai"]
-[1774582998650] CursorPreset: hook_event_name=preToolUse, conversation_id=0058f47c-2f1e-4a47-aa9b-5c24be841b45, workspace_roots=["/Users/Andrew/School/ReSeSS_Research/tool_testing"]
-[1774582998650] CursorPreset: resolved repo_working_dir=/Users/Andrew/School/ReSeSS_Research/tool_testing
-[1774582998698] CursorPreset: hook_event_name=postToolUse, conversation_id=0058f47c-2f1e-4a47-aa9b-5c24be841b45, workspace_roots=["/Users/Andrew/School/ReSeSS_Research/tool_testing"]
-[1774582998698] CursorPreset: resolved repo_working_dir=/Users/Andrew/School/ReSeSS_Research/tool_testing
-[1774583002449] CursorPreset: hook_event_name=preToolUse, conversation_id=0058f47c-2f1e-4a47-aa9b-5c24be841b45, workspace_roots=["/Users/Andrew/School/ReSeSS_Research/tool_testing"]
-[1774583002449] CursorPreset: resolved repo_working_dir=/Users/Andrew/School/ReSeSS_Research/tool_testing/git-ai-testing
-[1774583002870] CursorPreset: hook_event_name=preToolUse, conversation_id=0058f47c-2f1e-4a47-aa9b-5c24be841b45, workspace_roots=["/Users/Andrew/School/ReSeSS_Research/tool_testing"]
-[1774583002870] CursorPreset: resolved repo_working_dir=/Users/Andrew/School/ReSeSS_Research/tool_testing/git-ai-testing
-[1774583003034] CursorPreset: hook_event_name=postToolUse, conversation_id=0058f47c-2f1e-4a47-aa9b-5c24be841b45, workspace_roots=["/Users/Andrew/School/ReSeSS_Research/tool_testing"]
-[1774583003035] CursorPreset: resolved repo_working_dir=/Users/Andrew/School/ReSeSS_Research/tool_testing/git-ai-testing
-[1774583003185]   File entry: utils.py | added_ranges=Some([(1, 15)]) | deleted_ranges=None | stats={+15 -0}
-[1774583003185] Checkpoint created: kind=ai_agent, agent_id=Some("cursor:0058f47c-2f1e-4a47-aa9b-5c24be841b45"), files=[utils.py], line_stats={+15 -0}, diff_hash=2f8fd6a8ae8181720d9e318c04af5adad6ced7144f6a6908c055c606f33fd7bf
-[1774583003186] Working log written: 1 checkpoints to /Users/Andrew/School/ReSeSS_Research/tool_testing/git-ai-testing/.git/ai/working_logs/379372a1705656cc205320f837411fc7431dd7a0/checkpoints.jsonl
-[1774583006450] CursorPreset: hook_event_name=preToolUse, conversation_id=0058f47c-2f1e-4a47-aa9b-5c24be841b45, workspace_roots=["/Users/Andrew/School/ReSeSS_Research/tool_testing"]
-[1774583006450] CursorPreset: resolved repo_working_dir=/Users/Andrew/School/ReSeSS_Research/tool_testing/git-ai-testing
-[1774583006759] CursorPreset: hook_event_name=postToolUse, conversation_id=0058f47c-2f1e-4a47-aa9b-5c24be841b45, workspace_roots=["/Users/Andrew/School/ReSeSS_Research/tool_testing"]
-[1774583006759] CursorPreset: resolved repo_working_dir=/Users/Andrew/School/ReSeSS_Research/tool_testing/git-ai-testing
-[1774583006942]   File entry: arithmetic_ops.py | added_ranges=Some([(1, 13)]) | deleted_ranges=None | stats={+13 -0}
-[1774583006942] Checkpoint created: kind=ai_agent, agent_id=Some("cursor:0058f47c-2f1e-4a47-aa9b-5c24be841b45"), files=[arithmetic_ops.py], line_stats={+13 -0}, diff_hash=a71b6a37ea13aa9f05ca00c7d7c1386093cc9deae7c682ef3560c9a4b6ede4d2
-[1774583006943] Working log written: 2 checkpoints to /Users/Andrew/School/ReSeSS_Research/tool_testing/git-ai-testing/.git/ai/working_logs/379372a1705656cc205320f837411fc7431dd7a0/checkpoints.jsonl
-[1774583093099] CursorPreset: hook_event_name=preToolUse, conversation_id=0058f47c-2f1e-4a47-aa9b-5c24be841b45, workspace_roots=["/Users/Andrew/School/ReSeSS_Research/tool_testing"]
-[1774583093100] CursorPreset: resolved repo_working_dir=/Users/Andrew/School/ReSeSS_Research/tool_testing/git-ai-testing
-[1774583093257]   File entry: arithmetic_ops.py | added_ranges=Some([(6, 6), (9, 14)]) | deleted_ranges=Some([(6, 6), (8, 9), (11, 11)]) | stats={+7 -4}
-[1774583093257] Checkpoint created: kind=human, agent_id=None, files=[arithmetic_ops.py], line_stats={+7 -4}, diff_hash=a03f3737ffccd16c7bc66dcba36b409f00963060fd87101d8e243363b723fd15
-[1774583093258] Working log written: 3 checkpoints to /Users/Andrew/School/ReSeSS_Research/tool_testing/git-ai-testing/.git/ai/working_logs/379372a1705656cc205320f837411fc7431dd7a0/checkpoints.jsonl
-[1774583093344] CursorPreset: hook_event_name=postToolUse, conversation_id=0058f47c-2f1e-4a47-aa9b-5c24be841b45, workspace_roots=["/Users/Andrew/School/ReSeSS_Research/tool_testing"]
-[1774583093344] CursorPreset: resolved repo_working_dir=/Users/Andrew/School/ReSeSS_Research/tool_testing/git-ai-testing
-[1774583093481]   File entry: utils.py | added_ranges=Some([(4, 4)]) | deleted_ranges=Some([(4, 4)]) | stats={+1 -1}
-[1774583093482] Checkpoint created: kind=ai_agent, agent_id=Some("cursor:0058f47c-2f1e-4a47-aa9b-5c24be841b45"), files=[utils.py], line_stats={+1 -1}, diff_hash=b01d6c61e1bdda939f6e3db5631dd80f21ee756ea2a034074087ea96706521c6
-[1774583093484] Working log written: 4 checkpoints to /Users/Andrew/School/ReSeSS_Research/tool_testing/git-ai-testing/.git/ai/working_logs/379372a1705656cc205320f837411fc7431dd7a0/checkpoints.jsonl
-[1774583103447] CursorPreset: hook_event_name=preToolUse, conversation_id=0058f47c-2f1e-4a47-aa9b-5c24be841b45, workspace_roots=["/Users/Andrew/School/ReSeSS_Research/tool_testing"]
-[1774583103448] CursorPreset: resolved repo_working_dir=/Users/Andrew/School/ReSeSS_Research/tool_testing/git-ai-testing
-[1774583103597] CursorPreset: hook_event_name=postToolUse, conversation_id=0058f47c-2f1e-4a47-aa9b-5c24be841b45, workspace_roots=["/Users/Andrew/School/ReSeSS_Research/tool_testing"]
-[1774583103597] CursorPreset: resolved repo_working_dir=/Users/Andrew/School/ReSeSS_Research/tool_testing/git-ai-testing
-[1774583103747]   File entry: arithmetic_ops.py | added_ranges=Some([(4, 4), (6, 6), (8, 9), (11, 16)]) | deleted_ranges=Some([(4, 4), (6, 6), (8, 10), (12, 14)]) | stats={+10 -8}
-[1774583103747] Checkpoint created: kind=ai_agent, agent_id=Some("cursor:0058f47c-2f1e-4a47-aa9b-5c24be841b45"), files=[arithmetic_ops.py], line_stats={+10 -8}, diff_hash=c756224e74ab3640b8901f55ab0ce0d19cd1308a519d54e582dfef4f3142a7c1
-[1774583103748] Working log written: 5 checkpoints to /Users/Andrew/School/ReSeSS_Research/tool_testing/git-ai-testing/.git/ai/working_logs/379372a1705656cc205320f837411fc7431dd7a0/checkpoints.jsonl
-[1774583122842] Working log written: 5 checkpoints to /Users/Andrew/School/ReSeSS_Research/tool_testing/git-ai-testing/.git/ai/working_logs/379372a1705656cc205320f837411fc7431dd7a0/checkpoints.jsonl
-[1774583122854] Post-commit checkpoint summary: 5 checkpoints
-[1774583122854]   [0] kind=ai_agent, agent=Some("cursor:0058f47c-2f1e-4a47-aa9b-5c24be841b45"), model=Some("claude-4.6-sonnet-medium-thinking"), files=[utils.py]
-[1774583122854]   [1] kind=ai_agent, agent=Some("cursor:0058f47c-2f1e-4a47-aa9b-5c24be841b45"), model=Some("claude-4.6-sonnet-medium-thinking"), files=[arithmetic_ops.py]
-[1774583122855]   [2] kind=human, agent=None, model=None, files=[arithmetic_ops.py]
-[1774583122855]   [3] kind=ai_agent, agent=Some("cursor:0058f47c-2f1e-4a47-aa9b-5c24be841b45"), model=Some("claude-4.6-sonnet-medium-thinking"), files=[utils.py]
-[1774583122855]   [4] kind=ai_agent, agent=Some("cursor:0058f47c-2f1e-4a47-aa9b-5c24be841b45"), model=Some("claude-4.6-sonnet-medium-thinking"), files=[arithmetic_ops.py]
-[1774583122948] Git note written for commit 10d62ba0642e36eb106107b8442776b2f88cffca. Note size: 5605 bytes
---- NOTE CONTENT ---
-arithmetic_ops.py
-  6b9e6092aa7893b0 1-9,11-18
 utils.py
-  6b9e6092aa7893b0 1-15
+  1e2a02c819901fe3 4,10
+  491bdfce37bc60ba 1-3,5-9,11-15
+arithmetic_ops.py
+  491bdfce37bc60ba 1-2,27-29,31-32,37,39-40,42,45
+  1e2a02c819901fe3 30,33-36,38
 ---
 {
   "schema_version": "authorship/4.0.0",
   "git_ai_version": "development:1.1.21",
-  "base_commit_sha": "10d62ba0642e36eb106107b8442776b2f88cffca",
+  "base_commit_sha": "9392506308c10afe77681cb387d1239a9113bf71",
   "prompts": {
-    "6b9e6092aa7893b0": {
+    "1e2a02c819901fe3": {
       "agent_id": {
         "tool": "cursor",
-        "id": "0058f47c-2f1e-4a47-aa9b-5c24be841b45",
+        "id": "f95e661b-e4f2-438c-8fee-63eb9d7ae370",
         "model": "claude-4.6-sonnet-medium-thinking"
       },
       "human_author": "Andrew Wang <awang60@student.ubc.ca>",
       "messages": [
         {
           "type": "user",
-          "text": "@git-ai-testing/arithmetic_ops.py Add a new method that takes a random number and adds it to 5. \n\nThe random nunmber should be generated in a util file called utils.",
-          "timestamp": "2026-03-27T03:43:14.931Z",
-          "id": "607eee96-d248-48b3-a180-7f6777b1077a"
+          "text": "@git-ai-testing/utils.py change it to random from 1-50. \n\nAlso allow @git-ai-testing/arithmetic_ops.py to pass in ranges.",
+          "timestamp": "2026-03-27T04:22:55.723Z",
+          "id": "4d44e9ae-c332-4476-b5ad-d4c0eb111d72"
+        }
+      ],
+      "total_additions": 8,
+      "total_deletions": 4,
+      "accepted_lines": 8,
+      "overriden_lines": 0
+    },
+    "491bdfce37bc60ba": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "4dbaa6d6-52bf-42c0-ad00-21c11b34e685",
+        "model": "claude-4.6-sonnet-medium-thinking"
+      },
+      "human_author": "Andrew Wang <awang60@student.ubc.ca>",
+      "messages": [
+        {
+          "type": "user",
+          "text": "@git-ai-testing/arithmetic_ops.py add a method that takes a random number and does a few operations on it before returning. \n\nThe random number should come from a util method in a new utils file.",
+          "timestamp": "2026-03-27T04:21:42.918Z",
+          "id": "27eaad96-0547-4afa-99e5-be1599d85dc4"
         },
         {
           "type": "tool_use",
@@ -94,46 +53,39 @@ utils.py
             "globPattern": "*.py",
             "targetDirectory": "/Users/Andrew/School/ReSeSS_Research/tool_testing/git-ai-testing"
           },
-          "id": "1da5aca8-436e-40f6-9264-2fd63f9c9415"
+          "id": "500bc0ba-c7bd-4431-846a-b30e1f6eebc6"
         },
         {
           "type": "assistant",
-          "text": "I'll create the `utils.py` file with a random number generator, then add the new method to `arithmetic_ops.py`.",
-          "timestamp": "2026-03-27T03:43:20.259Z",
-          "id": "09455a10-6e67-4740-be3e-6307ce5dff38"
+          "text": "Now I'll create the `utils.py` file with a random number utility, then add the new method to `arithmetic_ops.py`.",
+          "timestamp": "2026-03-27T04:21:48.121Z",
+          "id": "b1946406-e97b-475f-af54-100ce07005eb"
         },
         {
           "type": "assistant",
-          "text": "Here's what was done:\n\n- **`utils.py`** (new file) — contains `get_random_number(low, high)` which wraps `random.randint` and returns a random integer (defaults to the range 1–100).\n- **`arithmetic_ops.py`** — added `add_random_to_five()` which calls `get_random_number()` from `utils` and returns `5 + <random number>`.",
-          "timestamp": "2026-03-27T03:43:28.219Z",
-          "id": "b3ec8495-efcc-48b3-b2fb-9fd01cb74b14"
-        },
-        {
-          "type": "user",
-          "text": "Change random number to be 1 to 50 instead. also pass it in in @git-ai-testing/arithmetic_ops.py",
-          "timestamp": "2026-03-27T03:44:48.291Z",
-          "id": "c731cd19-618c-4e83-b5af-6557fc1e4850"
+          "text": "Here's what was added:\n\n**`utils.py`** (new file) — contains `get_random_number(low, high)` which returns a random float using `random.uniform`.\n\n**`arithmetic_ops.py`** — imports `get_random_number` and adds `process_random()`, which:\n1. Gets a random number from `get_random_number()`\n2. Squares it\n3. Halves the result\n4. Subtracts the original number\n5. Returns the final value",
+          "timestamp": "2026-03-27T04:21:58.526Z",
+          "id": "f47217ba-c850-4c8b-8bb4-273a4c7dc2ff"
         }
       ],
-      "total_additions": 39,
-      "total_deletions": 9,
-      "accepted_lines": 32,
-      "overriden_lines": 0
+      "total_additions": 33,
+      "total_deletions": 0,
+      "accepted_lines": 25,
+      "overriden_lines": 1
     }
   },
   "change_history": [
     {
-      "timestamp": 1774583003,
+      "timestamp": 1774585311,
       "kind": "ai_agent",
-      "author_id": "6b9e6092aa7893b0",
+      "conversation_id": "491bdfce37bc60ba",
+      "agent_type": "cursor",
+      "prompt_id": "27eaad96-0547-4afa-99e5-be1599d85dc4",
       "model": "claude-4.6-sonnet-medium-thinking",
       "files": {
         "utils.py": {
           "added_lines": [
-            [
-              1,
-              15
-            ]
+            "1-15"
           ],
           "deleted_lines": []
         }
@@ -146,164 +98,125 @@ utils.py
       }
     },
     {
-      "timestamp": 1774583006,
+      "timestamp": 1774585314,
       "kind": "ai_agent",
-      "author_id": "6b9e6092aa7893b0",
+      "conversation_id": "491bdfce37bc60ba",
+      "agent_type": "cursor",
+      "prompt_id": "27eaad96-0547-4afa-99e5-be1599d85dc4",
       "model": "claude-4.6-sonnet-medium-thinking",
       "files": {
         "arithmetic_ops.py": {
           "added_lines": [
-            [
-              1,
-              13
-            ]
+            "1-2"
           ],
           "deleted_lines": []
         }
       },
       "line_stats": {
-        "additions": 13,
+        "additions": 2,
         "deletions": 0,
-        "additions_sloc": 8,
+        "additions_sloc": 1,
         "deletions_sloc": 0
       }
     },
     {
-      "timestamp": 1774583093,
+      "timestamp": 1774585317,
+      "kind": "ai_agent",
+      "conversation_id": "491bdfce37bc60ba",
+      "agent_type": "cursor",
+      "prompt_id": "27eaad96-0547-4afa-99e5-be1599d85dc4",
+      "model": "claude-4.6-sonnet-medium-thinking",
+      "files": {
+        "arithmetic_ops.py": {
+          "added_lines": [
+            "27-42"
+          ],
+          "deleted_lines": []
+        }
+      },
+      "line_stats": {
+        "additions": 16,
+        "deletions": 0,
+        "additions_sloc": 11,
+        "deletions_sloc": 0
+      }
+    },
+    {
+      "timestamp": 1774585383,
       "kind": "human",
       "files": {
         "arithmetic_ops.py": {
           "added_lines": [
-            [
-              6,
-              6
-            ],
-            [
-              9,
-              14
-            ]
+            "37",
+            "40-41"
           ],
           "deleted_lines": [
-            [
-              6,
-              6
-            ],
-            [
-              8,
-              9
-            ],
-            [
-              11,
-              11
-            ]
+            "33-35",
+            "40"
           ]
         }
       },
       "line_stats": {
-        "additions": 7,
+        "additions": 3,
         "deletions": 4,
-        "additions_sloc": 5,
-        "deletions_sloc": 4
+        "additions_sloc": 2,
+        "deletions_sloc": 3
       }
     },
     {
-      "timestamp": 1774583093,
+      "timestamp": 1774585383,
       "kind": "ai_agent",
-      "author_id": "6b9e6092aa7893b0",
+      "conversation_id": "1e2a02c819901fe3",
+      "agent_type": "cursor",
+      "prompt_id": "4d44e9ae-c332-4476-b5ad-d4c0eb111d72",
       "model": "claude-4.6-sonnet-medium-thinking",
       "files": {
         "utils.py": {
           "added_lines": [
-            [
-              4,
-              4
-            ]
+            "4",
+            "10"
           ],
           "deleted_lines": [
-            [
-              4,
-              4
-            ]
+            "4",
+            "10"
           ]
         }
       },
       "line_stats": {
-        "additions": 1,
-        "deletions": 1,
-        "additions_sloc": 1,
-        "deletions_sloc": 1
+        "additions": 2,
+        "deletions": 2,
+        "additions_sloc": 2,
+        "deletions_sloc": 2
       }
     },
     {
-      "timestamp": 1774583103,
+      "timestamp": 1774585386,
       "kind": "ai_agent",
-      "author_id": "6b9e6092aa7893b0",
-      "prompt_id": "c731cd19-618c-4e83-b5af-6557fc1e4850",
+      "conversation_id": "1e2a02c819901fe3",
+      "agent_type": "cursor",
+      "prompt_id": "4d44e9ae-c332-4476-b5ad-d4c0eb111d72",
       "model": "claude-4.6-sonnet-medium-thinking",
       "files": {
         "arithmetic_ops.py": {
           "added_lines": [
-            [
-              4,
-              4
-            ],
-            [
-              6,
-              6
-            ],
-            [
-              8,
-              9
-            ],
-            [
-              11,
-              16
-            ]
+            "30",
+            "33-36",
+            "38"
           ],
           "deleted_lines": [
-            [
-              4,
-              4
-            ],
-            [
-              6,
-              6
-            ],
-            [
-              8,
-              10
-            ],
-            [
-              12,
-              14
-            ]
+            "30",
+            "34"
           ]
         }
       },
       "line_stats": {
-        "additions": 10,
-        "deletions": 8,
-        "additions_sloc": 10,
-        "deletions_sloc": 7
+        "additions": 6,
+        "deletions": 2,
+        "additions_sloc": 5,
+        "deletions_sloc": 2
       }
     }
   ]
 }
 --- END NOTE ---
-[1774583123115] Debug mode: moved checkpoint directory from 379372a1705656cc205320f837411fc7431dd7a0 to old-379372a1705656cc205320f837411fc7431dd7a0
-[1774583556845] CursorPreset: hook_event_name=preToolUse, conversation_id=1b10650f-b81e-48d4-b18a-bbd0dc00a15f, workspace_roots=["/Users/Andrew/School/ReSeSS_Research/tool_testing"]
-[1774583556846] CursorPreset: resolved repo_working_dir=/Users/Andrew/.cursor/skills/git-ai-search
-[1774583556875] CursorPreset: hook_event_name=postToolUse, conversation_id=1b10650f-b81e-48d4-b18a-bbd0dc00a15f, workspace_roots=["/Users/Andrew/School/ReSeSS_Research/tool_testing"]
-[1774583556875] CursorPreset: resolved repo_working_dir=/Users/Andrew/.cursor/skills/git-ai-search
-[1774583557208] CursorPreset: hook_event_name=preToolUse, conversation_id=1b10650f-b81e-48d4-b18a-bbd0dc00a15f, workspace_roots=["/Users/Andrew/School/ReSeSS_Research/tool_testing"]
-[1774583557209] CursorPreset: resolved repo_working_dir=/Users/Andrew/School/ReSeSS_Research/tool_testing/git-ai/ai-plans
-[1774583557609] CursorPreset: hook_event_name=postToolUse, conversation_id=1b10650f-b81e-48d4-b18a-bbd0dc00a15f, workspace_roots=["/Users/Andrew/School/ReSeSS_Research/tool_testing"]
-[1774583557609] CursorPreset: resolved repo_working_dir=/Users/Andrew/School/ReSeSS_Research/tool_testing/git-ai/ai-plans
-[1774583647731] CursorPreset: hook_event_name=preToolUse, conversation_id=1b10650f-b81e-48d4-b18a-bbd0dc00a15f, workspace_roots=["/Users/Andrew/School/ReSeSS_Research/tool_testing"]
-[1774583647732] CursorPreset: resolved repo_working_dir=/Users/Andrew/School/ReSeSS_Research/tool_testing/git-ai/src
-[1774583647947] CursorPreset: hook_event_name=postToolUse, conversation_id=1b10650f-b81e-48d4-b18a-bbd0dc00a15f, workspace_roots=["/Users/Andrew/School/ReSeSS_Research/tool_testing"]
-[1774583647947] CursorPreset: resolved repo_working_dir=/Users/Andrew/School/ReSeSS_Research/tool_testing/git-ai/src
-[1774583648343] CursorPreset: hook_event_name=preToolUse, conversation_id=1b10650f-b81e-48d4-b18a-bbd0dc00a15f, workspace_roots=["/Users/Andrew/School/ReSeSS_Research/tool_testing"]
-[1774583648343] CursorPreset: resolved repo_working_dir=/Users/Andrew/School/ReSeSS_Research/tool_testing/git-ai/src/commands
-[1774583648484] CursorPreset: hook_event_name=postToolUse, conversation_id=1b10650f-b81e-48d4-b18a-bbd0dc00a15f, workspace_roots=["/Users/Andrew/School/ReSeSS_Research/tool_testing"]
-[1774583648485] CursorPreset: resolved repo_working_dir=/Users/Andrew/School/ReSeSS_Research/tool_testing/git-ai/src/commands
+[1774585405121] Debug mode: moved checkpoint directory from 718da73cc46c67eea77b21d3080455b751836e87 to old-718da73cc46c67eea77b21d3080455b751836e87
