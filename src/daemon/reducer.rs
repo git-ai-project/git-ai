@@ -174,6 +174,7 @@ mod tests {
             worktrees: HashMap::new(),
             last_error: None,
             applied_seq: 0,
+            file_snapshot_watermarks: HashMap::new(),
         }
     }
 

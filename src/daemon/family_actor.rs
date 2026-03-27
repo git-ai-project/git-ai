@@ -78,6 +78,7 @@ pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
             worktrees: HashMap::new(),
             last_error: None,
             applied_seq: 0,
+            file_snapshot_watermarks: HashMap::new(),
         };
 
         while let Some(msg) = rx.recv().await {
