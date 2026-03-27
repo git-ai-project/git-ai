@@ -981,6 +981,85 @@ fn attempt_pre_hook_capture(
     }
 }
 
+/// Attempt to prepare a captured checkpoint during the post-hook.
+///
+/// Captures the current contents of changed files and prepares a captured
+/// checkpoint with `CheckpointKind::AiAgent` and `edited_filepaths`.
+///
+/// Returns `None` on any failure, allowing the caller to proceed without a
+/// captured checkpoint (the stat-diff paths are still returned for the
+/// live checkpoint path).
+fn attempt_post_hook_capture(
+    repo_root: &Path,
+    changed_paths: &[String],
+) -> Option<CapturedCheckpointInfo> {
+    let repo_working_dir = repo_root.to_string_lossy().to_string();
+
+    // 1. Convert changed paths to PathBuf for capture_file_contents.
+    let path_bufs: Vec<PathBuf> = changed_paths.iter().map(PathBuf::from).collect();
+
+    // 2. Capture file contents.
+    let contents = capture_file_contents(repo_root, &path_bufs);
+
+    // 3. Open the repository.
+    let repo = match find_repository_in_path(&repo_working_dir) {
+        Ok(r) => r,
+        Err(e) => {
+            debug_log(&format!("Post-hook capture: failed to open repo: {}", e));
+            return None;
+        }
+    };
+
+    // 4. Build a synthetic AgentRunResult for the captured checkpoint.
+    let agent_run_result = AgentRunResult {
+        agent_id: AgentId {
+            tool: "bash-tool".to_string(),
+            id: "post-hook".to_string(),
+            model: String::new(),
+        },
+        agent_metadata: None,
+        checkpoint_kind: CheckpointKind::AiAgent,
+        transcript: None,
+        repo_working_dir: Some(repo_working_dir.clone()),
+        edited_filepaths: Some(changed_paths.to_vec()),
+        will_edit_filepaths: None,
+        dirty_files: Some(contents),
+    };
+
+    // 5. Prepare the captured checkpoint.
+    match prepare_captured_checkpoint(
+        &repo,
+        "bash-tool", // author
+        CheckpointKind::AiAgent,
+        false, // reset
+        Some(&agent_run_result),
+        false, // is_pre_commit
+        None,  // base_commit_override
+    ) {
+        Ok(Some(capture)) => {
+            debug_log(&format!(
+                "Post-hook captured checkpoint prepared: {} ({} files)",
+                capture.capture_id, capture.file_count,
+            ));
+            Some(CapturedCheckpointInfo {
+                capture_id: capture.capture_id,
+                repo_working_dir: capture.repo_working_dir,
+            })
+        }
+        Ok(None) => {
+            debug_log("Post-hook capture: prepare_captured_checkpoint returned None");
+            None
+        }
+        Err(e) => {
+            debug_log(&format!(
+                "Post-hook capture: prepare_captured_checkpoint failed: {}",
+                e
+            ));
+            None
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // handle_bash_tool() — main orchestration
 // ---------------------------------------------------------------------------
@@ -1068,9 +1147,14 @@ pub fn handle_bash_tool(
                                     diff_result.modified.len(),
                                     diff_result.deleted.len(),
                                 ));
+
+                                // Attempt post-hook content capture for async checkpoint.
+                                let captured_checkpoint =
+                                    attempt_post_hook_capture(repo_root, &paths);
+
                                 Ok(BashToolResult {
                                     action: BashCheckpointAction::Checkpoint(paths),
-                                    captured_checkpoint: None,
+                                    captured_checkpoint,
                                 })
                             }
                         }
