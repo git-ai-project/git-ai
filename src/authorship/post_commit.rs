@@ -12,7 +12,7 @@ use crate::config::{Config, PromptStorageMode};
 use crate::error::GitAiError;
 use crate::git::refs::notes_add;
 use crate::git::repository::Repository;
-use crate::utils::{debug_log, research_log};
+use crate::utils::debug_log;
 use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 
@@ -142,12 +142,12 @@ pub fn post_commit_with_final_state(
         pathspecs.insert(file_path.clone());
     }
 
-    research_log(&repo.storage.ai_dir, &format!(
+    debug_log(&format!(
         "Post-commit checkpoint summary: {} checkpoints",
         parent_working_log.len()
     ));
     for (i, cp) in parent_working_log.iter().enumerate() {
-        research_log(&repo.storage.ai_dir, &format!(
+        debug_log(&format!(
             "  [{}] kind={}, agent={:?}, model={:?}, files=[{}]",
             i,
             cp.kind.to_str(),
@@ -297,11 +297,10 @@ pub fn post_commit_with_final_state(
 
     notes_add(repo, &commit_sha, &authorship_json)?;
 
-    research_log(&repo.storage.ai_dir, &format!(
-        "Git note written for commit {}. Note size: {} bytes\n--- GIT NOTE CONTENT START ---\n{}\n--- GIT NOTE CONTENT END ---",
+    debug_log(&format!(
+        "Git note written for commit {}. Note size: {} bytes",
         commit_sha,
         authorship_json.len(),
-        authorship_json,
     ));
 
     // Compute stats once (needed for both metrics and terminal output), unless preflight

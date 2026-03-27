@@ -60,35 +60,6 @@ pub fn debug_log(msg: &str) {
     }
 }
 
-/// Append a timestamped line to `<your_path>/research_logs/research.log`.
-/// Failures are silently ignored so research logging never breaks normal operation.
-/// TODO: Set `dir` below to your local research_logs directory before using
-/// TODO: other
-/// This function runs every time a commit is finalized.
-/// Consider batching log writes for high-frequ
-
-
-/// Hello, random comments. 
-
-
-pub fn research_log(_ai_dir: &Path, msg: &str) {
-    use std::fs::{OpenOptions, create_dir_all};
-    use std::io::Write;
-    use std::time::SystemTime;
-
-    let dir: &Path = Path::new("/Users/Andrew/School/ReSeSS_Research/tool_testing/");
-    let _ = create_dir_all(dir);
-    let path = dir.join("research.log");
-
-    let timestamp = SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-
-    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = writeln!(f, "[{}] {}", timestamp, msg);
-    }
-}
 
 /// Print a git diff in a readable format
 ///

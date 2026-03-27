@@ -24,7 +24,7 @@ use crate::git::repository::{CommitRange, Repository, group_files_by_repository}
 use crate::git::sync_authorship::{NotesExistence, fetch_authorship_notes, push_authorship_notes};
 use crate::observability::wrapper_performance_targets::log_performance_for_checkpoint;
 use crate::observability::{self, log_message};
-use crate::utils::{is_interactive_terminal, research_log};
+use crate::utils::{debug_log, is_interactive_terminal};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::io::IsTerminal;
@@ -352,10 +352,7 @@ fn print_help() {
 }
 
 fn handle_checkpoint(args: &[String]) {
-    research_log(
-        std::path::Path::new("."),
-        &format!("handle_checkpoint ENTRY2222 | args={:?} | cwd={:?}", args, std::env::current_dir().ok()),
-    );
+    debug_log(&format!("handle_checkpoint entry | args={:?} | cwd={:?}", args, std::env::current_dir().ok()));
 
     let mut repository_working_dir = std::env::current_dir()
         .unwrap()

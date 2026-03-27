@@ -16,7 +16,7 @@ use crate::error::GitAiError;
 use crate::git::repo_storage::PersistedWorkingLog;
 use crate::git::repository::Repository;
 use crate::git::status::{EntryKind, StatusCode};
-use crate::utils::{debug_log, normalize_to_posix, research_log};
+use crate::utils::{debug_log, normalize_to_posix};
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -730,7 +730,7 @@ fn execute_resolved_checkpoint(
             checkpoint_create_start.elapsed()
         ));
 
-        research_log(&repo.storage.ai_dir, &format!(
+        debug_log(&format!(
             "Checkpoint created: kind={}, agent_id={:?}, files=[{}], line_stats={{+{} -{}}}, diff_hash={}",
             checkpoint.kind.to_str(),
             checkpoint.agent_id.as_ref().map(|a| format!("{}:{}", a.tool, a.id)),
@@ -1640,16 +1640,14 @@ fn get_checkpoint_entry_for_file(
         file_path,
         file_start.elapsed()
     ));
-    if let Some(ai_dir) = working_log.dir.parent().and_then(|p| p.parent()) {
-        research_log(ai_dir, &format!(
-            "  File entry: {} | added_ranges={:?} | deleted_ranges={:?} | stats={{+{} -{}}}",
-            file_path,
-            entry.added_line_ranges,
-            entry.deleted_line_ranges,
-            stats.additions,
-            stats.deletions,
-        ));
-    }
+    debug_log(&format!(
+        "  File entry: {} | added_ranges={:?} | deleted_ranges={:?} | stats={{+{} -{}}}",
+        file_path,
+        entry.added_line_ranges,
+        entry.deleted_line_ranges,
+        stats.additions,
+        stats.deletions,
+    ));
     Ok(Some((entry, stats)))
 }
 

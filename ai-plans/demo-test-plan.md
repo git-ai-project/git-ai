@@ -1,10 +1,7 @@
 ---
 name: Demo test plan document
-overview: Informal demo test plan for verifying the research metrics extension. Describes prompts to give Cursor, manual edits to make, and what to look for in the logs and git notes.
+overview: Informal demo test plan for verifying the research metrics extension. Describes prompts to give Cursor, manual edits to make, and what to look for in the debug output and git notes.
 todos:
-  - id: add-research-logging
-    content: Add [RESEARCH] debug_log calls to checkpoint.rs, repo_storage.rs, and post_commit.rs (5 locations total)
-    status: pending
   - id: run-steel-thread
     content: Walk through the 5-step demo scenario by hand in a scratch repo
     status: pending
@@ -18,82 +15,13 @@ isProject: false
 
 ## What This Is
 
-An informal walkthrough to verify the research metrics extension works end-to-end. You do this by hand in a scratch project -- open it in Cursor, give prompts, make some manual edits, commit, and inspect the output. The `[RESEARCH]` debug logs tell you what happened at each step, and the final git note tells you whether it all landed correctly.
+An informal walkthrough to verify the research metrics extension works end-to-end. You do this by hand in a scratch project -- open it in Cursor, give prompts, make some manual edits, commit, and inspect the output. `debug_log` output (printed to stderr as `[git-ai] ...`) tells you what happened at each step, and the final git note tells you whether it all landed correctly.
+
+Run with `GIT_AI_DEBUG=1` (or use a debug build) to see `debug_log` output.
 
 ---
 
-## Part 1: Debug Logging to Add (Before Testing)
-
-Add these `debug_log()` calls so you can see what's happening. All use `[RESEARCH]` prefix for easy filtering in stderr. They show up automatically in debug builds or when `GIT_AI_DEBUG=1`.
-
-### 1a. After checkpoint is built -- [src/commands/checkpoint.rs](src/commands/checkpoint.rs) (~line 710-730)
-
-In `execute_resolved_checkpoint`, right after the `Checkpoint` struct is fully populated (including `prompt_id`):
-
-```rust
-debug_log(&format!(
-    "[RESEARCH] Checkpoint created: kind={}, prompt_id={:?}, files=[{}], line_stats={{+{} -{}}}, diff_hash={}",
-    checkpoint.kind,
-    checkpoint.prompt_id,
-    checkpoint.entries.iter().map(|e| e.file.as_str()).collect::<Vec<_>>().join(", "),
-    checkpoint.line_stats.additions,
-    checkpoint.line_stats.deletions,
-    checkpoint.diff,
-));
-```
-
-### 1b. After computing per-file line ranges -- [src/commands/checkpoint.rs](src/commands/checkpoint.rs) (end of `make_entry_for_file`)
-
-After the new `added_line_ranges` / `deleted_line_ranges` are computed:
-
-```rust
-debug_log(&format!(
-    "[RESEARCH]   File entry: {} | added_ranges={:?} | deleted_ranges={:?}",
-    file_path, added_line_ranges, deleted_line_ranges,
-));
-```
-
-### 1c. After working log write -- [src/git/repo_storage.rs](src/git/repo_storage.rs) (end of `write_all_checkpoints`)
-
-```rust
-debug_log(&format!(
-    "[RESEARCH] Working log written: {} checkpoints to {}",
-    checkpoints.len(),
-    checkpoints_file.display(),
-));
-```
-
-### 1d. After building change_history -- [src/authorship/post_commit.rs](src/authorship/post_commit.rs)
-
-In `post_commit_with_final_state`, after `change_history` is built and attached to metadata:
-
-```rust
-if let Some(ref history) = authorship_log.metadata.change_history {
-    debug_log(&format!("[RESEARCH] change_history built: {} entries", history.len()));
-    for (i, entry) in history.iter().enumerate() {
-        debug_log(&format!(
-            "[RESEARCH]   [{}] kind={}, prompt_id={:?}, author_id={:?}, model={:?}, files=[{}]",
-            i, entry.kind, entry.prompt_id, entry.author_id, entry.model,
-            entry.files.keys().cloned().collect::<Vec<_>>().join(", "),
-        ));
-    }
-}
-```
-
-### 1e. After git note is written -- [src/authorship/post_commit.rs](src/authorship/post_commit.rs)
-
-Right after `notes_add(repo, &commit_sha, &authorship_json)?;`:
-
-```rust
-debug_log(&format!(
-    "[RESEARCH] Git note written for commit {}. Note size: {} bytes",
-    commit_sha, authorship_json.len(),
-));
-```
-
----
-
-## Part 2: Setup
+## Part 1: Setup
 
 1. Build the project: `cargo build` (in `nix develop` shell)
 2. Create a new scratch project folder somewhere outside git-ai
@@ -120,7 +48,7 @@ def format_number(n):
 
 ---
 
-## Part 3: The Walkthrough
+## Part 2: The Walkthrough
 
 ### Step A: First AI prompt -- multi-file edit
 
@@ -130,7 +58,7 @@ Open Cursor in the scratch project. Give it this prompt:
 
 Let it edit both files. After Cursor finishes, a checkpoint fires automatically.
 
-**What to look for in stderr `[RESEARCH]` logs:**
+**What to look for in `[git-ai]` debug output:**
 
 - `Checkpoint created: kind=AiAgent, prompt_id=Some("...")` -- should have a prompt_id (the bubble_id of your user message)
 - Two file entries: `math.py` with added_ranges for the new lines, `utils.py` with added_ranges
@@ -202,7 +130,7 @@ git add -A
 git commit -m "Add math operations and currency formatter"
 ```
 
-**What to look for in `[RESEARCH]` logs during commit:**
+**What to look for in `[git-ai]` debug output during commit:**
 
 - `change_history built: 3 entries` (one per checkpoint from steps A, B, C)
 - Entry 0: kind=AiAgent, prompt_id from Step A, files=[math.py, utils.py]
@@ -226,7 +154,7 @@ git-og notes --ref=ai show HEAD | sed -n '/^---$/,$ p' | tail -n +2 | python3 -m
 
 ---
 
-## Part 4: What the Git Note Should Look Like
+## Part 3: What the Git Note Should Look Like
 
 Eyeball the JSON metadata section for these things:
 
@@ -256,7 +184,7 @@ Lines like `math.py <hash> 7-10,12-16` showing which line ranges are AI-attribut
 
 ---
 
-## Part 5: Also Check These
+## Part 4: Also Check These
 
 - `**git-ai blame math.py`** -- should show AI attribution markers on the AI-written lines, human markers on the validation lines you added manually
 - `**git-ai diff HEAD~1..HEAD --json`** -- JSON output should include annotations mapping line ranges to session hashes
@@ -264,7 +192,7 @@ Lines like `math.py <hash> 7-10,12-16` showing which line ranges are AI-attribut
 
 ---
 
-## Part 6: Future -- Plan Conversation Tracking
+## Part 5: Future -- Plan Conversation Tracking
 
 Step D above is a placeholder for future work. When implemented:
 
