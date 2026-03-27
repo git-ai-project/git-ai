@@ -3315,6 +3315,8 @@ struct ActorDaemonCoordinator {
     wrapper_state_notify: Notify,
     shutting_down: AtomicBool,
     shutdown_notify: Notify,
+    shutdown_condvar: std::sync::Condvar,
+    shutdown_condvar_mutex: Mutex<()>,
 }
 
 struct WrapperStateEntry {
@@ -3374,6 +3376,8 @@ impl ActorDaemonCoordinator {
             wrapper_state_notify: Notify::new(),
             shutting_down: AtomicBool::new(false),
             shutdown_notify: Notify::new(),
+            shutdown_condvar: std::sync::Condvar::new(),
+            shutdown_condvar_mutex: Mutex::new(()),
         }
     }
 
@@ -3387,13 +3391,19 @@ impl ActorDaemonCoordinator {
             let _ = tx.take();
         }
         self.shutdown_notify.notify_waiters();
+        self.shutdown_condvar.notify_all();
     }
 
     async fn wait_for_shutdown(&self) {
+        // Register the Notified future BEFORE checking the flag so that a
+        // request_shutdown() racing between the check and the await cannot
+        // slip through without waking us (notify_waiters only wakes futures
+        // that are already registered).
+        let notified = self.shutdown_notify.notified();
         if self.is_shutting_down() {
             return;
         }
-        self.shutdown_notify.notified().await;
+        notified.await;
     }
 
     fn begin_family_effect(&self, family: &str) -> Result<(), GitAiError> {
@@ -6529,11 +6539,17 @@ fn control_listener_loop_actor(
             };
             let coord = coordinator.clone();
             let handle = runtime_handle.clone();
-            std::thread::spawn(move || {
-                if let Err(e) = handle_control_connection_actor(stream, coord, handle) {
-                    debug_log(&format!("daemon control connection error: {}", e));
-                }
-            });
+            if std::thread::Builder::new()
+                .spawn(move || {
+                    if let Err(e) = handle_control_connection_actor(stream, coord, handle) {
+                        debug_log(&format!("daemon control connection error: {}", e));
+                    }
+                })
+                .is_err()
+            {
+                debug_log("daemon control listener: failed to spawn handler thread");
+                break;
+            }
         }
         Ok(())
     }
@@ -6718,11 +6734,17 @@ fn trace_listener_loop_actor(
                 continue;
             };
             let coord = coordinator.clone();
-            std::thread::spawn(move || {
-                if let Err(e) = handle_trace_connection_actor(stream, coord) {
-                    debug_log(&format!("daemon trace connection error: {}", e));
-                }
-            });
+            if std::thread::Builder::new()
+                .spawn(move || {
+                    if let Err(e) = handle_trace_connection_actor(stream, coord) {
+                        debug_log(&format!("daemon trace connection error: {}", e));
+                    }
+                })
+                .is_err()
+            {
+                debug_log("daemon trace listener: failed to spawn handler thread");
+                break;
+            }
         }
         Ok(())
     }
@@ -6887,9 +6909,6 @@ fn disable_trace2_for_daemon_process() {
 /// How often the daemon wakes up to evaluate whether an update check is due.
 const DAEMON_UPDATE_CHECK_INTERVAL_SECS: u64 = 3600;
 
-/// Granularity of the sleep loop so the thread notices shutdown promptly.
-const DAEMON_UPDATE_SLEEP_TICK_SECS: u64 = 5;
-
 /// Maximum daemon uptime before a proactive restart (24.5 hours).
 /// Deliberately offset from the 24h update-check cadence so the uptime restart
 /// never races with an update-triggered shutdown.
@@ -6921,16 +6940,17 @@ fn daemon_update_check_loop(coordinator: Arc<ActorDaemonCoordinator>, started_at
     use crate::commands::upgrade::{DaemonUpdateCheckResult, check_for_update_available};
 
     let interval = daemon_update_check_interval().max(1);
-    let tick = DAEMON_UPDATE_SLEEP_TICK_SECS.min(interval);
 
     loop {
-        let mut elapsed = 0u64;
-        while elapsed < interval {
-            if coordinator.is_shutting_down() {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_secs(tick));
-            elapsed += tick;
+        {
+            let guard = coordinator
+                .shutdown_condvar_mutex
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let _ = coordinator.shutdown_condvar.wait_timeout(
+                guard,
+                std::time::Duration::from_secs(interval),
+            );
         }
 
         if coordinator.is_shutting_down() {
@@ -7017,22 +7037,39 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
     let control_shutdown_coord = coordinator.clone();
     let control_handle = rt_handle.clone();
     let control_thread = std::thread::spawn(move || {
-        if let Err(e) =
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             control_listener_loop_actor(control_socket_path, control_coord, control_handle)
-        {
-            debug_log(&format!("daemon control listener exited with error: {}", e));
-            // Ensure the daemon exits instead of waiting forever if listener bind/loop fails.
-            control_shutdown_coord.request_shutdown();
+        }));
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                debug_log(&format!("daemon control listener exited with error: {}", e));
+            }
+            Err(_) => {
+                debug_log("daemon control listener panicked");
+            }
         }
+        // Always request shutdown so the daemon doesn't stay half-alive.
+        control_shutdown_coord.request_shutdown();
     });
 
     let trace_coord = coordinator.clone();
     let trace_shutdown_coord = coordinator.clone();
     let trace_thread = std::thread::spawn(move || {
-        if let Err(e) = trace_listener_loop_actor(trace_socket_path, trace_coord) {
-            debug_log(&format!("daemon trace listener exited with error: {}", e));
-            trace_shutdown_coord.request_shutdown();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            trace_listener_loop_actor(trace_socket_path, trace_coord)
+        }));
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                debug_log(&format!("daemon trace listener exited with error: {}", e));
+            }
+            Err(_) => {
+                debug_log("daemon trace listener panicked");
+            }
         }
+        // Always request shutdown so the daemon doesn't stay half-alive.
+        trace_shutdown_coord.request_shutdown();
     });
 
     let started_at_ns = now_unix_nanos();
