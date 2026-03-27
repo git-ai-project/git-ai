@@ -3,6 +3,8 @@
 //! Detects file changes made by bash/shell tool calls by comparing filesystem
 //! metadata snapshots taken before and after tool execution.
 
+use crate::daemon::control_api::ControlRequest;
+use crate::daemon::{DaemonConfig, send_control_request_with_timeout};
 use crate::error::GitAiError;
 use crate::utils::debug_log;
 use ignore::WalkBuilder;
@@ -802,6 +804,79 @@ fn capture_file_contents(repo_root: &Path, file_paths: &[PathBuf]) -> HashMap<St
         }
     }
     contents
+}
+
+// ---------------------------------------------------------------------------
+// Daemon watermark query + stale file detection
+// ---------------------------------------------------------------------------
+
+/// Query the daemon for per-file mtime watermarks for a given repository.
+///
+/// Returns `None` on any failure (daemon not running, socket error, parse
+/// error, etc.) for graceful degradation — the caller simply skips the
+/// captured-checkpoint path when watermarks are unavailable.
+#[allow(dead_code)]
+fn query_daemon_watermarks(repo_working_dir: &str) -> Option<HashMap<String, u128>> {
+    let config = DaemonConfig::from_env_or_default_paths().ok()?;
+    let request = ControlRequest::SnapshotWatermarks {
+        repo_working_dir: repo_working_dir.to_string(),
+    };
+    let response = send_control_request_with_timeout(
+        &config.control_socket_path,
+        &request,
+        Duration::from_millis(500),
+    )
+    .ok()?;
+
+    if !response.ok {
+        debug_log(&format!(
+            "Daemon watermark query returned error: {}",
+            response.error.as_deref().unwrap_or("unknown")
+        ));
+        return None;
+    }
+
+    // The daemon returns `{ "watermarks": { "<path>": <u128>, ... } }`.
+    let data = response.data?;
+    let watermarks_value = data.get("watermarks")?;
+    let map: HashMap<String, u128> = serde_json::from_value(watermarks_value.clone()).ok()?;
+    Some(map)
+}
+
+/// Compare snapshot entries against daemon watermarks to find stale files.
+///
+/// A file is "stale" (modified since last checkpoint) when its `mtime`
+/// exceeds the watermark for that path by more than `MTIME_GRACE_WINDOW_NS`.
+/// Files not present in the watermark map are considered stale if they exist
+/// in the snapshot.
+#[allow(dead_code)]
+fn find_stale_files(snapshot: &StatSnapshot, watermarks: &HashMap<String, u128>) -> Vec<PathBuf> {
+    let mut stale = Vec::new();
+    for (rel_path, entry) in &snapshot.entries {
+        if !entry.exists {
+            continue;
+        }
+        let Some(mtime) = entry.mtime else {
+            continue;
+        };
+        let mtime_ns = system_time_to_nanos(mtime);
+        let posix_key = crate::utils::normalize_to_posix(&rel_path.to_string_lossy());
+
+        match watermarks.get(&posix_key) {
+            Some(&watermark_ns) => {
+                if mtime_ns > watermark_ns + MTIME_GRACE_WINDOW_NS {
+                    stale.push(rel_path.clone());
+                }
+            }
+            None => {
+                // No watermark means this file has never been checkpointed —
+                // treat as stale so the pre-hook captures it.
+                stale.push(rel_path.clone());
+            }
+        }
+    }
+    stale.sort();
+    stale
 }
 
 // ---------------------------------------------------------------------------
