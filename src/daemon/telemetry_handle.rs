@@ -244,30 +244,32 @@ pub fn submit_cas(records: Vec<CasSyncPayload>) {
     let _ = send_via_daemon(&request);
 }
 
-/// Send wrapper pre-command state to the daemon. Fire-and-forget.
+/// Send wrapper pre-command state to the daemon.
+/// Returns an error if the send fails (caller decides whether to log/ignore).
 pub fn send_wrapper_pre_state(
     invocation_id: &str,
     repo_working_dir: &str,
     repo_context: RepoContext,
-) {
+) -> Result<(), String> {
     let request = ControlRequest::WrapperPreState {
         invocation_id: invocation_id.to_string(),
         repo_working_dir: repo_working_dir.to_string(),
         repo_context,
     };
-    let _ = send_via_daemon(&request);
+    send_via_daemon(&request).map(|_| ())
 }
 
-/// Send wrapper post-command state to the daemon. Fire-and-forget.
+/// Send wrapper post-command state to the daemon.
+/// Returns an error if the send fails (caller decides whether to log/ignore).
 pub fn send_wrapper_post_state(
     invocation_id: &str,
     repo_working_dir: &str,
     repo_context: RepoContext,
-) {
+) -> Result<(), String> {
     let request = ControlRequest::WrapperPostState {
         invocation_id: invocation_id.to_string(),
         repo_working_dir: repo_working_dir.to_string(),
         repo_context,
     };
-    let _ = send_via_daemon(&request);
+    send_via_daemon(&request).map(|_| ())
 }
