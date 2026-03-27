@@ -188,6 +188,9 @@ pub fn handle_git_ai(args: &[String]) {
         "flush-metrics-db" => {
             commands::flush_metrics_db::handle_flush_metrics_db(&args[1..]);
         }
+        "line-history" => {
+            commands::line_history::handle_line_history(&args[1..]);
+        }
         "login" => {
             commands::login::handle_login(&args[1..]);
         }
