@@ -278,7 +278,7 @@ fn find_checkpoints_that_touched_line(
         match map_new_to_old(current_line, &added, &deleted) {
             None => {
                 let prompt_text = entry
-                    .prompt_id
+                    .conversation_id
                     .as_ref()
                     .and_then(|id| prompts.get(id))
                     .and_then(|record| extract_user_prompt_text(&record.messages));
