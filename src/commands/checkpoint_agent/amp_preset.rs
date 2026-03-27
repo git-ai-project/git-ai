@@ -171,6 +171,7 @@ impl AgentCheckpointPreset for AmpPreset {
                 edited_filepaths: None,
                 will_edit_filepaths: file_paths,
                 dirty_files: None,
+                captured_checkpoint_id: None,
             });
         }
 
@@ -250,6 +251,7 @@ impl AgentCheckpointPreset for AmpPreset {
             edited_filepaths,
             will_edit_filepaths: None,
             dirty_files: None,
+            captured_checkpoint_id: None,
         })
     }
 }

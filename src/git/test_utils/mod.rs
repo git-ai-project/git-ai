@@ -361,6 +361,7 @@ impl TmpRepo {
             edited_filepaths: None,
             will_edit_filepaths: Some(will_edit_filepaths),
             dirty_files: None,
+            captured_checkpoint_id: None,
         }))
     }
 
@@ -552,6 +553,7 @@ impl TmpRepo {
             edited_filepaths: self.current_checkpoint_scope_paths()?,
             will_edit_filepaths: None,
             dirty_files: None,
+            captured_checkpoint_id: None,
         };
 
         checkpoint(
@@ -1612,6 +1614,7 @@ mod tests {
                     .collect::<Vec<_>>()
             }),
             dirty_files: None,
+            captured_checkpoint_id: None,
         }
     }
 

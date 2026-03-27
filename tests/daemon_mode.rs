@@ -604,6 +604,7 @@ fn ai_agent_run_result(
         edited_filepaths: Some(edited_filepaths),
         will_edit_filepaths: None,
         dirty_files,
+        captured_checkpoint_id: None,
     }
 }
 
