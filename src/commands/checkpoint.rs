@@ -2189,6 +2189,7 @@ mod tests {
                     .map(|(path, content)| (path.to_string(), content.to_string()))
                     .collect()
             }),
+            captured_checkpoint_id: None,
         }
     }
 
@@ -2429,6 +2430,7 @@ mod tests {
             edited_filepaths: Some(vec![filename]),
             will_edit_filepaths: None,
             dirty_files: Some(dirty_files),
+            captured_checkpoint_id: None,
         };
 
         let (entries_len, files_len, _) = run_with_base_commit_override_with_policy(
@@ -2486,6 +2488,7 @@ mod tests {
             edited_filepaths: Some(vec![filename.clone()]),
             will_edit_filepaths: None,
             dirty_files: None,
+            captured_checkpoint_id: None,
         };
 
         let error = run_with_base_commit_override_with_policy(
@@ -2542,6 +2545,7 @@ mod tests {
             edited_filepaths: Some(vec![filename]),
             will_edit_filepaths: None,
             dirty_files: None,
+            captured_checkpoint_id: None,
         };
 
         let (entries_len, files_len, _) = run_with_base_commit_override(
@@ -2637,6 +2641,7 @@ mod tests {
             ]),
             will_edit_filepaths: None,
             dirty_files: None,
+            captured_checkpoint_id: None,
         };
 
         // Run checkpoint - should not crash even with paths outside repo

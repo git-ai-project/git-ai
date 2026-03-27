@@ -945,6 +945,7 @@ fn attempt_pre_hook_capture(
         edited_filepaths: None,
         will_edit_filepaths: Some(stale_paths),
         dirty_files: Some(contents),
+        captured_checkpoint_id: None,
     };
 
     // 7. Prepare the captured checkpoint.
@@ -1024,6 +1025,7 @@ fn attempt_post_hook_capture(
         edited_filepaths: Some(changed_paths.to_vec()),
         will_edit_filepaths: None,
         dirty_files: Some(contents),
+        captured_checkpoint_id: None,
     };
 
     // 5. Prepare the captured checkpoint.
