@@ -1,12 +1,9 @@
-use crate::authorship::authorship_log::PromptRecord;
 use crate::authorship::authorship_log_serialization::ChangeHistoryEntry;
-use crate::authorship::transcript::Message;
 use crate::error::GitAiError;
 use crate::git::find_repository_in_path;
 use crate::git::refs::get_reference_as_authorship_log_v3;
 use crate::git::repository::{Repository, exec_git};
 use serde::Serialize;
-use std::collections::BTreeMap;
 
 #[derive(Serialize)]
 pub struct LineHistoryOutput {
@@ -206,7 +203,6 @@ fn build_commit_entry(
             if let Some(change_history) = log.metadata.change_history {
                 find_checkpoints_that_touched_line(
                     &change_history,
-                    &log.metadata.prompts,
                     file,
                     commit.target_line_in_commit,
                 )
@@ -223,21 +219,6 @@ fn build_commit_entry(
         commit_message: commit.subject.clone(),
         checkpoints,
     })
-}
-
-fn extract_user_prompt_text(messages: &[Message]) -> Option<String> {
-    let user_texts: Vec<&str> = messages
-        .iter()
-        .filter_map(|m| match m {
-            Message::User { text, .. } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect();
-    if user_texts.is_empty() {
-        None
-    } else {
-        Some(user_texts.join("\n"))
-    }
 }
 
 // --- Line mapping algorithm (ported from tests/line_mapping_tests.rs) ---
@@ -258,7 +239,6 @@ fn parse_line_ranges(ranges: &[String]) -> Vec<(u32, u32)> {
 
 fn find_checkpoints_that_touched_line(
     change_history: &[ChangeHistoryEntry],
-    prompts: &BTreeMap<String, PromptRecord>,
     file: &str,
     target_line: u32,
 ) -> Vec<MatchedCheckpoint> {
@@ -289,7 +269,7 @@ fn find_checkpoints_that_touched_line(
                     agent_type: entry.agent_type.clone(),
                     model: entry.model.clone(),
                     prompt_id: entry.prompt_id.clone(),
-                    prompt_text,
+                    prompt_text: entry.prompt_text.clone(),
                     additions: entry.line_stats.additions,
                     deletions: entry.line_stats.deletions,
                 });

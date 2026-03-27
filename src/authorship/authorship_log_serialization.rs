@@ -52,6 +52,8 @@ pub struct ChangeHistoryEntry {
     pub prompt_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_text: Option<String>,
     pub files: BTreeMap<String, FileChangeDetail>,
     pub line_stats: CheckpointLineStats,
 }

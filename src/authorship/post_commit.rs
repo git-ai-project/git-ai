@@ -210,6 +210,10 @@ pub fn post_commit_with_final_state(
                     );
                 }
 
+                let prompt_text = cp.transcript.as_ref().and_then(|t| {
+                    extract_prompt_text_for_checkpoint(&t.messages, cp.prompt_id.as_deref(), cp.timestamp)
+                });
+
                 ChangeHistoryEntry {
                     timestamp: cp.timestamp,
                     kind: cp.kind.to_str(),
@@ -217,6 +221,7 @@ pub fn post_commit_with_final_state(
                     agent_type,
                     prompt_id: cp.prompt_id.clone(),
                     model,
+                    prompt_text,
                     files,
                     line_stats: cp.line_stats.clone(),
                 }
@@ -531,6 +536,37 @@ fn count_line_ranges(lines: &[u32]) -> usize {
         prev = line;
     }
     ranges
+}
+
+/// Extract the user prompt text for a checkpoint from its conversation transcript.
+/// If `prompt_id` (bubble_id) is set, looks for the matching user message by id.
+/// Falls back to the last user message at or before the checkpoint timestamp.
+fn extract_prompt_text_for_checkpoint(
+    messages: &[crate::authorship::transcript::Message],
+    prompt_id: Option<&str>,
+    checkpoint_ts: u64,
+) -> Option<String> {
+    use crate::authorship::transcript::Message;
+
+    if let Some(pid) = prompt_id {
+        if let Some(msg) = messages.iter().find(|m| {
+            matches!(m, Message::User { id, .. } if id.as_deref() == Some(pid))
+        }) {
+            return msg.text().cloned();
+        }
+    }
+
+    messages
+        .iter()
+        .filter(|m| matches!(m, Message::User { .. }))
+        .filter(|m| {
+            m.timestamp()
+                .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+                .map(|dt| dt.timestamp() as u64 <= checkpoint_ts)
+                .unwrap_or(true)
+        })
+        .last()
+        .and_then(|m| m.text().cloned())
 }
 
 /// Update prompts/transcripts in working log checkpoints to their latest versions.
