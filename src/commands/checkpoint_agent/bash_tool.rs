@@ -818,7 +818,7 @@ pub fn handle_bash_tool(
     repo_root: &Path,
     session_id: &str,
     tool_use_id: &str,
-) -> Result<BashCheckpointAction, GitAiError> {
+) -> Result<BashToolResult, GitAiError> {
     let invocation_key = format!("{}:{}", session_id, tool_use_id);
 
     match hook_event {
@@ -834,7 +834,10 @@ pub fn handle_bash_tool(
                         "Pre-snapshot stored for invocation {}",
                         invocation_key
                     ));
-                    Ok(BashCheckpointAction::TakePreSnapshot)
+                    Ok(BashToolResult {
+                        action: BashCheckpointAction::TakePreSnapshot,
+                        captured_checkpoint: None,
+                    })
                 }
                 Err(e) => {
                     debug_log(&format!(
@@ -842,7 +845,10 @@ pub fn handle_bash_tool(
                         e
                     ));
                     // Don't fail the tool call; post-hook will use git status fallback
-                    Ok(BashCheckpointAction::TakePreSnapshot)
+                    Ok(BashToolResult {
+                        action: BashCheckpointAction::TakePreSnapshot,
+                        captured_checkpoint: None,
+                    })
                 }
             }
         }
@@ -867,7 +873,10 @@ pub fn handle_bash_tool(
                                     "Bash tool {}: no changes detected",
                                     invocation_key
                                 ));
-                                Ok(BashCheckpointAction::NoChanges)
+                                Ok(BashToolResult {
+                                    action: BashCheckpointAction::NoChanges,
+                                    captured_checkpoint: None,
+                                })
                             } else {
                                 let paths = diff_result.all_changed_paths();
                                 debug_log(&format!(
@@ -878,7 +887,10 @@ pub fn handle_bash_tool(
                                     diff_result.modified.len(),
                                     diff_result.deleted.len(),
                                 ));
-                                Ok(BashCheckpointAction::Checkpoint(paths))
+                                Ok(BashToolResult {
+                                    action: BashCheckpointAction::Checkpoint(paths),
+                                    captured_checkpoint: None,
+                                })
                             }
                         }
                         Err(e) => {
@@ -888,11 +900,18 @@ pub fn handle_bash_tool(
                             ));
                             // Fall back to git status
                             match git_status_fallback(repo_root) {
-                                Ok(paths) if paths.is_empty() => {
-                                    Ok(BashCheckpointAction::NoChanges)
-                                }
-                                Ok(paths) => Ok(BashCheckpointAction::Checkpoint(paths)),
-                                Err(_) => Ok(BashCheckpointAction::Fallback),
+                                Ok(paths) if paths.is_empty() => Ok(BashToolResult {
+                                    action: BashCheckpointAction::NoChanges,
+                                    captured_checkpoint: None,
+                                }),
+                                Ok(paths) => Ok(BashToolResult {
+                                    action: BashCheckpointAction::Checkpoint(paths),
+                                    captured_checkpoint: None,
+                                }),
+                                Err(_) => Ok(BashToolResult {
+                                    action: BashCheckpointAction::Fallback,
+                                    captured_checkpoint: None,
+                                }),
                             }
                         }
                     }
@@ -904,9 +923,18 @@ pub fn handle_bash_tool(
                         invocation_key
                     ));
                     match git_status_fallback(repo_root) {
-                        Ok(paths) if paths.is_empty() => Ok(BashCheckpointAction::NoChanges),
-                        Ok(paths) => Ok(BashCheckpointAction::Checkpoint(paths)),
-                        Err(_) => Ok(BashCheckpointAction::Fallback),
+                        Ok(paths) if paths.is_empty() => Ok(BashToolResult {
+                            action: BashCheckpointAction::NoChanges,
+                            captured_checkpoint: None,
+                        }),
+                        Ok(paths) => Ok(BashToolResult {
+                            action: BashCheckpointAction::Checkpoint(paths),
+                            captured_checkpoint: None,
+                        }),
+                        Err(_) => Ok(BashToolResult {
+                            action: BashCheckpointAction::Fallback,
+                            captured_checkpoint: None,
+                        }),
                     }
                 }
             }
