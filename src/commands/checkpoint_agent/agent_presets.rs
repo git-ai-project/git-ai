@@ -1422,7 +1422,8 @@ impl AgentCheckpointPreset for CursorPreset {
         }
 
         let file_path = hook_data
-            .get("file_path")
+            .get("tool_input")
+            .and_then(|ti| ti.get("file_path"))
             .and_then(|v| v.as_str())
             .map(Self::normalize_cursor_path)
             .unwrap_or_default();
@@ -1451,6 +1452,12 @@ impl AgentCheckpointPreset for CursorPreset {
         };
 
         if hook_event_name == "preToolUse" {
+            let will_edit = if !file_path.is_empty() {
+                Some(vec![file_path.clone()])
+            } else {
+                None
+            };
+
             // early return, we're just adding a human checkpoint.
             return Ok(AgentRunResult {
                 agent_id: AgentId {
@@ -1463,7 +1470,7 @@ impl AgentCheckpointPreset for CursorPreset {
                 transcript: None,
                 repo_working_dir: Some(repo_working_dir),
                 edited_filepaths: None,
-                will_edit_filepaths: None,
+                will_edit_filepaths: will_edit,
                 dirty_files: None,
             });
         }
