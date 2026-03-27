@@ -303,6 +303,7 @@ impl AttributionTracker {
         &self,
         old_content: &str,
         new_content: &str,
+        is_ai_checkpoint: bool,
     ) -> Result<DiffComputation, GitAiError> {
         let compute_start = Instant::now();
         let line_metadata_start = Instant::now();
@@ -345,6 +346,7 @@ impl AttributionTracker {
                         old_content,
                         new_content,
                         &mut computation,
+                        is_ai_checkpoint,
                     )?;
                     pending_changed.clear();
                 }
@@ -363,6 +365,7 @@ impl AttributionTracker {
                 old_content,
                 new_content,
                 &mut computation,
+                is_ai_checkpoint,
             )?;
         }
 
@@ -407,6 +410,7 @@ impl AttributionTracker {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn process_changed_hunk(
         &self,
         ops: &[DiffOp],
@@ -415,6 +419,7 @@ impl AttributionTracker {
         old_content: &str,
         new_content: &str,
         computation: &mut DiffComputation,
+        is_ai_checkpoint: bool,
     ) -> Result<(), GitAiError> {
         if ops.is_empty() {
             return Ok(());
@@ -427,6 +432,28 @@ impl AttributionTracker {
             line_range_to_byte_range(old_lines, old_start_line, old_end_line, old_content.len());
         let (new_start, new_end) =
             line_range_to_byte_range(new_lines, new_start_line, new_end_line, new_content.len());
+
+        // For AI checkpoints, skip token-aligned sub-hunk diffing when the old and
+        // new content have the same number of lines (a line-for-line replacement).
+        // This ensures byte-identical lines within a replaced region are attributed
+        // to AI. We don't force_split when line counts differ (e.g., inserting new
+        // lines) to avoid misattributing unchanged lines that are only in the hunk
+        // due to newline boundary changes.
+        if is_ai_checkpoint {
+            let old_line_count = old_end_line - old_start_line;
+            let new_line_count = new_end_line - new_start_line;
+            if old_line_count == new_line_count && old_line_count > 1 {
+                append_range_diffs(
+                    &mut computation.diffs,
+                    old_content,
+                    new_content,
+                    (old_start, old_end),
+                    (new_start, new_end),
+                    true,
+                );
+                return Ok(());
+            }
+        }
 
         if should_use_line_aligned_hunk_diff(
             ops,
@@ -555,7 +582,7 @@ impl AttributionTracker {
         let old_attributions = sorted_old_storage.as_deref().unwrap_or(old_attributions);
 
         // Phase 1: Compute diff
-        let diff_result = self.compute_diffs(old_content, new_content)?;
+        let diff_result = self.compute_diffs(old_content, new_content, is_ai_checkpoint)?;
 
         // Phase 2: Build deletion and insertion catalogs
         let (deletions, insertions) = self.build_diff_catalog(&diff_result.diffs);
@@ -2592,7 +2619,7 @@ mod tests {
 
         let human_attrs = vec![Attribution::new(0, old.len(), "human".into(), TEST_TS)];
         let diff_ops: Vec<_> = tracker
-            .compute_diffs(old, new)
+            .compute_diffs(old, new, false)
             .unwrap()
             .diffs
             .iter()

@@ -1036,7 +1036,6 @@ fn overlay_ai_authorship(
     let mut simulated_authorship_logs: HashMap<String, AuthorshipLog> = HashMap::new();
     // Cache for foreign prompts to avoid repeated grepping
     let mut foreign_prompts_cache: HashMap<String, Option<PromptRecord>> = HashMap::new();
-
     for hunk in blame_hunks {
         // Check if we've already looked up this commit's authorship
         let authorship_log = if let Some(cached) = commit_authorship_cache.get(&hunk.commit_sha) {
@@ -1078,6 +1077,7 @@ fn overlay_ai_authorship(
                             line_authors
                                 .insert(current_line_num, prompt_record.agent_id.tool.clone());
                         }
+
                         prompt_records.insert(prompt_hash, prompt_record.clone());
                     } else {
                         // Has authorship log but line not AI = human-authored
