@@ -6777,6 +6777,15 @@ impl ActorDaemonCoordinator {
         Ok(ControlResponse::ok(None, None))
     }
 
+    async fn watermarks_for_family(
+        &self,
+        repo_working_dir: String,
+    ) -> Result<HashMap<String, u128>, GitAiError> {
+        self.coordinator
+            .watermarks_family(Path::new(&repo_working_dir))
+            .await
+    }
+
     async fn status_for_family(
         &self,
         repo_working_dir: String,
@@ -6808,6 +6817,14 @@ impl ActorDaemonCoordinator {
                 .await
                 .and_then(|status| {
                     serde_json::to_value(status)
+                        .map(|v| ControlResponse::ok(None, Some(v)))
+                        .map_err(GitAiError::from)
+                }),
+            ControlRequest::SnapshotWatermarks { repo_working_dir } => self
+                .watermarks_for_family(repo_working_dir)
+                .await
+                .and_then(|watermarks| {
+                    serde_json::to_value(json!({ "watermarks": watermarks }))
                         .map(|v| ControlResponse::ok(None, Some(v)))
                         .map_err(GitAiError::from)
                 }),
@@ -7599,6 +7616,7 @@ fn checkpoint_control_response_timeout(
             DAEMON_CHECKPOINT_RESPONSE_TIMEOUT
         }
         ControlRequest::CheckpointRun { .. } => DAEMON_CONTROL_RESPONSE_TIMEOUT,
+        ControlRequest::SnapshotWatermarks { .. } => Duration::from_millis(500),
         _ => DAEMON_CONTROL_RESPONSE_TIMEOUT,
     }
 }
