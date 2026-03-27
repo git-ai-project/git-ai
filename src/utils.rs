@@ -63,7 +63,10 @@ pub fn debug_log(msg: &str) {
 /// Append a timestamped line to `<your_path>/research_logs/research.log`.
 /// Failures are silently ignored so research logging never breaks normal operation.
 /// TODO: Set `dir` below to your local research_logs directory before using
+/// TODO: other
 /// TODO: other stuff
+
+// TODO s
 
 
 pub fn research_log(_ai_dir: &Path, msg: &str) {
@@ -71,7 +74,8 @@ pub fn research_log(_ai_dir: &Path, msg: &str) {
     use std::io::Write;
     use std::time::SystemTime;
 
-    let dir: &Path = Path::new("/Users/Andrew/School/ReSeSS Research/tool_testing/");
+    let dir: &Path = Path::new("/Users/Andrew/School/ReSeSS_Research/tool_testing/");
+    let _ = create_dir_all(dir);
     let path = dir.join("research.log");
 
     let timestamp = SystemTime::now()

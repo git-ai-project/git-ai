@@ -354,7 +354,7 @@ fn print_help() {
 fn handle_checkpoint(args: &[String]) {
     research_log(
         std::path::Path::new("."),
-        &format!("handle_checkpoint ENTRY | args={:?} | cwd={:?}", args, std::env::current_dir().ok()),
+        &format!("handle_checkpoint ENTRY2222 | args={:?} | cwd={:?}", args, std::env::current_dir().ok()),
     );
 
     let mut repository_working_dir = std::env::current_dir()
