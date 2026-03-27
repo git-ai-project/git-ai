@@ -24,9 +24,14 @@ fn disabled_hooks_config() -> &'static str {
 }
 
 fn sharded_notes_enabled() -> bool {
-    crate::config::Config::get()
-        .get_feature_flags()
-        .sharded_notes
+    if crate::daemon::daemon_process_active() {
+        let config = crate::config::Config::fresh();
+        config.get_feature_flags().sharded_notes
+    } else {
+        crate::config::Config::get()
+            .get_feature_flags()
+            .sharded_notes
+    }
 }
 
 /// Tracking ref prefix for sharded notes from a specific remote.

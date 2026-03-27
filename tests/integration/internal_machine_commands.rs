@@ -5,6 +5,20 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+fn enable_sharded_notes(repo: &mut TestRepo) {
+    repo.patch_git_ai_config(|patch| {
+        let mut flags = match patch.feature_flags.take() {
+            Some(existing) if existing.is_object() => existing,
+            _ => json!({}),
+        };
+        let flags_obj = flags
+            .as_object_mut()
+            .expect("feature_flags value should be an object");
+        flags_obj.insert("sharded_notes".to_string(), json!(true));
+        patch.feature_flags = Some(flags);
+    });
+}
+
 #[test]
 fn test_effective_ignore_patterns_internal_command_json() {
     let repo = TestRepo::new();
@@ -446,14 +460,12 @@ fn test_sharded_notes_dual_write_on_push() {
 
     fs::write(mirror.path().join("shard_test.txt"), "sharded notes test\n")
         .expect("should write file");
-    // Commit WITH sharding enabled so the note gets dual-written
     let commit = mirror
         .stage_all_and_commit("add shard test file")
         .expect("commit should succeed");
 
     let request = json!({ "remote_name": "origin" }).to_string();
 
-    // Push with sharded_notes enabled
     let push_output = mirror
         .git_ai(&["push-authorship-notes", "--json", &request])
         .expect("push should succeed with sharded notes");

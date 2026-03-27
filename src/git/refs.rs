@@ -44,9 +44,14 @@ fn sharded_refname_for_commit(commit_sha: &str) -> String {
 }
 
 fn sharded_notes_enabled() -> bool {
-    crate::config::Config::get()
-        .get_feature_flags()
-        .sharded_notes
+    if crate::daemon::daemon_process_active() {
+        let config = crate::config::Config::fresh();
+        config.get_feature_flags().sharded_notes
+    } else {
+        crate::config::Config::get()
+            .get_feature_flags()
+            .sharded_notes
+    }
 }
 
 pub fn notes_add(
