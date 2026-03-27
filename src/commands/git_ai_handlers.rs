@@ -54,6 +54,7 @@ pub fn handle_git_ai(args: &[String]) {
                 | "--version"
                 | "-v"
                 | "config"
+                | "bg"
                 | "d"
                 | "daemon"
                 | "debug"
@@ -110,7 +111,7 @@ pub fn handle_git_ai(args: &[String]) {
         "debug" => {
             commands::debug::handle_debug(&args[1..]);
         }
-        "d" | "daemon" => {
+        "bg" | "d" | "daemon" => {
             commands::daemon::handle_daemon(&args[1..]);
         }
         "stats" => {
@@ -295,7 +296,7 @@ fn print_help() {
     eprintln!("    --add <key> <value>   Add to array or upsert into object");
     eprintln!("    unset <key>           Remove config value (reverts to default)");
     eprintln!("  debug              Print support/debug diagnostics");
-    eprintln!("  d                  Run and control git-ai background service");
+    eprintln!("  bg                 Run and control git-ai background service");
     eprintln!("  install-hooks      Install git hooks for AI authorship tracking");
     eprintln!("  uninstall-hooks    Remove git-ai hooks from all detected tools");
     eprintln!("  git-hooks ensure   Ensure repo-local git-ai hooks are installed/healed");

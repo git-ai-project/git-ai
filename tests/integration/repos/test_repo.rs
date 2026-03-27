@@ -127,7 +127,7 @@ impl DaemonProcess {
 
         let mut command = Command::new(get_binary_path());
         command
-            .arg("d")
+            .arg("bg")
             .arg("run")
             .current_dir(test_home)
             .env("GIT_AI_TEST_DB_PATH", test_db_path)

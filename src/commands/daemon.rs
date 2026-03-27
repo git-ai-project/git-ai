@@ -51,7 +51,7 @@ pub fn handle_daemon(args: &[String]) {
         }
         "tail" => {
             if let Err(e) = handle_tail(&args[1..]) {
-                eprintln!("Failed to tail daemon log: {}", e);
+                eprintln!("Failed to tail log: {}", e);
                 std::process::exit(1);
             }
         }
@@ -272,7 +272,7 @@ fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
     #[cfg(windows)]
     {
         let script = format!(
-            "Start-Process -FilePath {} -ArgumentList @('d','run') -WorkingDirectory {} -WindowStyle Hidden",
+            "Start-Process -FilePath {} -ArgumentList @('bg','run') -WorkingDirectory {} -WindowStyle Hidden",
             powershell_single_quote_literal(exe.as_os_str()),
             powershell_single_quote_literal(Path::new(&runtime_dir).as_os_str())
         );
@@ -313,7 +313,7 @@ fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
     {
         let mut child = Command::new(exe);
         child
-            .arg("d")
+            .arg("bg")
             .arg("run")
             .current_dir(&runtime_dir)
             .stdin(Stdio::null())
@@ -331,7 +331,7 @@ fn spawn_daemon_run_with_piped_stderr(
     let runtime_dir = daemon_runtime_dir(config)?;
     let mut child = Command::new(exe);
     child
-        .arg("d")
+        .arg("bg")
         .arg("run")
         .current_dir(&runtime_dir)
         .stdin(Stdio::null())
@@ -382,13 +382,13 @@ fn handle_status(repo_working_dir: String) -> Result<(), String> {
 fn handle_tail(args: &[String]) -> Result<(), String> {
     let config = daemon_config_from_env_or_default_paths()?;
     if !daemon_is_up(&config) {
-        return Err("daemon is not running".to_string());
+        return Err("background service is not running".to_string());
     }
 
     let log_path =
-        daemon_log_file_path(&config).map_err(|e| format!("cannot locate daemon log: {}", e))?;
+        daemon_log_file_path(&config).map_err(|e| format!("cannot locate log: {}", e))?;
     if !log_path.exists() {
-        return Err(format!("daemon log file not found: {}", log_path.display()));
+        return Err(format!("log file not found: {}", log_path.display()));
     }
 
     let full = has_flag(args, "--full") || has_flag(args, "-f");
@@ -508,12 +508,12 @@ fn is_help(value: &str) -> bool {
 }
 
 fn print_help() {
-    eprintln!("git-ai d - run and control git-ai background service");
+    eprintln!("git-ai bg - run and control git-ai background service");
     eprintln!();
     eprintln!("Usage:");
-    eprintln!("  git-ai d start");
-    eprintln!("  git-ai d run");
-    eprintln!("  git-ai d status [--repo <path>]");
-    eprintln!("  git-ai d shutdown");
-    eprintln!("  git-ai d tail [-n <lines>] [--full]");
+    eprintln!("  git-ai bg start");
+    eprintln!("  git-ai bg run");
+    eprintln!("  git-ai bg status [--repo <path>]");
+    eprintln!("  git-ai bg shutdown");
+    eprintln!("  git-ai bg tail [-n <lines>] [--full]");
 }

@@ -174,7 +174,7 @@ fn daemon_status_response(home_repo: &TestRepo, target_repo: &TestRepo) -> Value
     let output = daemon_command_output(
         home_repo,
         &[
-            "d",
+            "bg",
             "status",
             "--repo",
             target_repo.canonical_path().to_string_lossy().as_ref(),
@@ -200,7 +200,7 @@ fn assert_daemon_status_ok_after_launch_repo_removed(home_repo: &TestRepo, targe
 }
 
 fn shutdown_daemon(home_repo: &TestRepo) {
-    let output = daemon_command_output(home_repo, &["d", "shutdown"], home_repo.test_home_path());
+    let output = daemon_command_output(home_repo, &["bg", "shutdown"], home_repo.test_home_path());
     assert!(
         output.status.success(),
         "daemon shutdown command should succeed: stdout={} stderr={}",
@@ -291,7 +291,7 @@ fn install_hooks_async_mode_trace2_target_routes_real_git_trace_to_daemon() {
     git_ai_with_async_daemon_env(&repo, &["install-hooks", "--dry-run=false"])
         .expect("install-hooks should succeed in async mode");
 
-    let start_output = daemon_command_output(&repo, &["d", "start"], repo.path());
+    let start_output = daemon_command_output(&repo, &["bg", "start"], repo.path());
     assert!(
         start_output.status.success(),
         "daemon start should succeed: stdout={} stderr={}",
@@ -385,7 +385,7 @@ fn daemon_status_does_not_self_emit_trace2_events() {
 
     let mut daemon_cmd = Command::new(repos::test_repo::get_binary_path());
     daemon_cmd
-        .arg("d")
+        .arg("bg")
         .arg("run")
         .current_dir(repo.path())
         .stdout(Stdio::null())
@@ -436,7 +436,7 @@ fn daemon_run_survives_deleted_launch_repo_cwd() {
 
     let mut daemon_cmd = Command::new(get_binary_path());
     daemon_cmd
-        .arg("d")
+        .arg("bg")
         .arg("run")
         .current_dir(launch_repo.path())
         .stdout(Stdio::null())
@@ -459,7 +459,7 @@ fn daemon_start_survives_deleted_launch_repo_cwd() {
     let launch_repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let target_repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
 
-    let output = daemon_command_output(&launch_repo, &["d", "start"], launch_repo.path());
+    let output = daemon_command_output(&launch_repo, &["bg", "start"], launch_repo.path());
     assert!(
         output.status.success(),
         "daemon start should succeed: stdout={} stderr={}",
@@ -507,7 +507,7 @@ fn daemon_telemetry_and_cas_over_persistent_connection() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
 
     // Start the daemon
-    let start_output = daemon_command_output(&repo, &["d", "start"], repo.path());
+    let start_output = daemon_command_output(&repo, &["bg", "start"], repo.path());
     assert!(
         start_output.status.success(),
         "daemon start should succeed: stdout={} stderr={}",
