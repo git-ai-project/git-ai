@@ -32,6 +32,8 @@ pub struct AgentRunResult {
     pub edited_filepaths: Option<Vec<String>>,
     pub will_edit_filepaths: Option<Vec<String>>,
     pub dirty_files: Option<HashMap<String, String>>,
+    /// Pre-prepared captured checkpoint ID from bash tool (bypasses normal capture flow).
+    pub captured_checkpoint_id: Option<String>,
 }
 
 pub trait AgentCheckpointPreset {
@@ -176,6 +178,7 @@ impl AgentCheckpointPreset for ClaudePreset {
                 edited_filepaths: None,
                 will_edit_filepaths: file_path_as_vec,
                 dirty_files: None,
+                captured_checkpoint_id: None,
             });
         }
 
@@ -219,6 +222,7 @@ impl AgentCheckpointPreset for ClaudePreset {
             edited_filepaths,
             will_edit_filepaths: None,
             dirty_files: None,
+            captured_checkpoint_id: None,
         })
     }
 }
@@ -567,6 +571,7 @@ impl AgentCheckpointPreset for GeminiPreset {
                 edited_filepaths: None,
                 will_edit_filepaths: file_path_as_vec,
                 dirty_files: None,
+                captured_checkpoint_id: None,
             });
         }
 
@@ -610,6 +615,7 @@ impl AgentCheckpointPreset for GeminiPreset {
             edited_filepaths,
             will_edit_filepaths: None,
             dirty_files: None,
+            captured_checkpoint_id: None,
         })
     }
 }
@@ -797,6 +803,7 @@ impl AgentCheckpointPreset for WindsurfPreset {
                 edited_filepaths: None,
                 will_edit_filepaths: file_path_as_vec,
                 dirty_files: None,
+                captured_checkpoint_id: None,
             });
         }
 
@@ -810,6 +817,7 @@ impl AgentCheckpointPreset for WindsurfPreset {
             edited_filepaths: file_path_as_vec,
             will_edit_filepaths: None,
             dirty_files: None,
+            captured_checkpoint_id: None,
         })
     }
 }
@@ -1041,6 +1049,7 @@ impl AgentCheckpointPreset for ContinueCliPreset {
                 edited_filepaths: None,
                 will_edit_filepaths: file_path_as_vec,
                 dirty_files: None,
+                captured_checkpoint_id: None,
             });
         }
 
@@ -1084,6 +1093,7 @@ impl AgentCheckpointPreset for ContinueCliPreset {
             edited_filepaths,
             will_edit_filepaths: None,
             dirty_files: None,
+            captured_checkpoint_id: None,
         })
     }
 }
@@ -1279,6 +1289,7 @@ impl AgentCheckpointPreset for CodexPreset {
             edited_filepaths: None,
             will_edit_filepaths: None,
             dirty_files: None,
+            captured_checkpoint_id: None,
         })
     }
 }
@@ -1653,6 +1664,7 @@ impl AgentCheckpointPreset for CursorPreset {
                 edited_filepaths: None,
                 will_edit_filepaths: will_edit,
                 dirty_files: None,
+                captured_checkpoint_id: None,
             });
         }
 
@@ -1729,6 +1741,7 @@ impl AgentCheckpointPreset for CursorPreset {
             edited_filepaths,
             will_edit_filepaths: None,
             dirty_files: None,
+            captured_checkpoint_id: None,
         })
     }
 }
@@ -2126,6 +2139,7 @@ impl GithubCopilotPreset {
                 edited_filepaths: None,
                 will_edit_filepaths: Some(will_edit_filepaths),
                 dirty_files,
+                captured_checkpoint_id: None,
             });
         }
 
@@ -2199,6 +2213,7 @@ impl GithubCopilotPreset {
             edited_filepaths: edited_filepaths.or(detected_edited_filepaths),
             will_edit_filepaths: None,
             dirty_files,
+            captured_checkpoint_id: None,
         })
     }
 
@@ -2357,6 +2372,7 @@ impl GithubCopilotPreset {
                 edited_filepaths: None,
                 will_edit_filepaths: Some(extracted_paths),
                 dirty_files,
+                captured_checkpoint_id: None,
             });
         }
 
@@ -2393,6 +2409,7 @@ impl GithubCopilotPreset {
             edited_filepaths: Some(extracted_paths),
             will_edit_filepaths: None,
             dirty_files,
+            captured_checkpoint_id: None,
         })
     }
 
@@ -3046,6 +3063,7 @@ impl AgentCheckpointPreset for DroidPreset {
                 edited_filepaths: None,
                 will_edit_filepaths: file_path_as_vec,
                 dirty_files: None,
+                captured_checkpoint_id: None,
             });
         }
 
@@ -3089,6 +3107,7 @@ impl AgentCheckpointPreset for DroidPreset {
             edited_filepaths,
             will_edit_filepaths: None,
             dirty_files: None,
+            captured_checkpoint_id: None,
         })
     }
 }
@@ -3849,6 +3868,7 @@ impl AgentCheckpointPreset for AiTabPreset {
                 edited_filepaths: None,
                 will_edit_filepaths,
                 dirty_files,
+                captured_checkpoint_id: None,
             });
         }
 
@@ -3861,6 +3881,7 @@ impl AgentCheckpointPreset for AiTabPreset {
             edited_filepaths,
             will_edit_filepaths: None,
             dirty_files,
+            captured_checkpoint_id: None,
         })
     }
 }
