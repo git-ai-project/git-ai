@@ -36,3 +36,6 @@ tasks/
 # Fuzz testing
 fuzz/artifacts/
 fuzz/corpus/
+
+# Worktrees
+.worktrees/
