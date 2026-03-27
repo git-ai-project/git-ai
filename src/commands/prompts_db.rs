@@ -272,7 +272,9 @@ fn handle_populate(args: &[String]) {
 
     // Report actual row count, not seen_ids (which includes prompts skipped for missing messages)
     let db_count = conn
-        .query_row("SELECT COUNT(*) FROM prompts", [], |row| row.get::<_, i64>(0))
+        .query_row("SELECT COUNT(*) FROM prompts", [], |row| {
+            row.get::<_, i64>(0)
+        })
         .unwrap_or(0);
     eprintln!("Done. {} prompts in {}", db_count, db_path);
 }
@@ -794,7 +796,11 @@ fn fetch_from_internal_db(
     }
 
     if workdir.is_none() && !workdir_counts.is_empty() {
-        eprintln!("    +{} (across {} repositories)", new_count, workdir_counts.len());
+        eprintln!(
+            "    +{} (across {} repositories)",
+            new_count,
+            workdir_counts.len()
+        );
     }
 
     Ok((new_count, workdir_counts.into_keys().collect()))
@@ -925,7 +931,6 @@ fn fetch_from_git_notes(
                 }
             }
         }
-
     }
 
     Ok((new_count, deferred))
@@ -948,10 +953,7 @@ fn resolve_cas_messages(conn: &Connection, deferred: &[DeferredPrompt]) {
     for (i, dp) in deferred.iter().enumerate() {
         // Extract hash from URL (last path segment): .../cas/{hash}
         if let Some(hash) = dp.messages_url.rsplit('/').next().filter(|h| !h.is_empty()) {
-            hash_to_indices
-                .entry(hash.to_string())
-                .or_default()
-                .push(i);
+            hash_to_indices.entry(hash.to_string()).or_default().push(i);
         }
     }
 
@@ -1020,9 +1022,7 @@ fn resolve_cas_messages(conn: &Connection, deferred: &[DeferredPrompt]) {
                                     let json_str =
                                         serde_json::to_string(content).unwrap_or_default();
                                     if let Ok(cas_obj) =
-                                        serde_json::from_value::<CasMessagesObject>(
-                                            content.clone(),
-                                        )
+                                        serde_json::from_value::<CasMessagesObject>(content.clone())
                                     {
                                         if let Ok(messages_json) =
                                             serde_json::to_string(&cas_obj.messages)
@@ -1034,8 +1034,7 @@ fn resolve_cas_messages(conn: &Connection, deferred: &[DeferredPrompt]) {
                                         if let Ok(db_mutex) = InternalDatabase::global()
                                             && let Ok(mut db_guard) = db_mutex.lock()
                                         {
-                                            let _ =
-                                                db_guard.set_cas_cache(&result.hash, &json_str);
+                                            let _ = db_guard.set_cas_cache(&result.hash, &json_str);
                                         }
                                     }
                                 }
