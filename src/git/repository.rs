@@ -2502,6 +2502,16 @@ pub fn find_repository(global_args: &[String]) -> Result<Repository, GitAiError>
 fn try_find_repository_no_git_exec(
     global_args: &[String],
 ) -> Result<Option<Repository>, GitAiError> {
+    // When GIT_DIR, GIT_WORK_TREE, or GIT_CEILING_DIRECTORIES are set, the
+    // filesystem walk may disagree with git's own discovery logic. Fall back
+    // to the git-exec path so those env vars are honoured.
+    if std::env::var_os("GIT_DIR").is_some()
+        || std::env::var_os("GIT_WORK_TREE").is_some()
+        || std::env::var_os("GIT_CEILING_DIRECTORIES").is_some()
+    {
+        return Ok(None);
+    }
+
     let Some(base_dir) = resolve_fast_discovery_base_dir(global_args)? else {
         return Ok(None);
     };
@@ -3986,6 +3996,29 @@ index 0000000..abc1234 100644
         let args = vec!["--git-dir".to_string(), ".git".to_string()];
         let resolved = resolve_fast_discovery_base_dir(&args).expect("resolve fast discovery dir");
         assert_eq!(resolved, None);
+    }
+
+    #[test]
+    #[serial]
+    fn fast_discovery_skipped_when_git_dir_env_set() {
+        struct EnvGuard(&'static str, Option<std::ffi::OsString>);
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    match &self.1 {
+                        Some(val) => std::env::set_var(self.0, val),
+                        None => std::env::remove_var(self.0),
+                    }
+                }
+            }
+        }
+
+        let prev = std::env::var_os("GIT_DIR");
+        let _guard = EnvGuard("GIT_DIR", prev);
+        unsafe { std::env::set_var("GIT_DIR", "/tmp/other-repo/.git") };
+
+        let result = try_find_repository_no_git_exec(&[]).expect("should not error");
+        assert!(result.is_none(), "fast path must be skipped when GIT_DIR is set");
     }
 
     #[test]
