@@ -3,37 +3,59 @@ use crate::git::cli_parser::ParsedGitInvocation;
 /// Returns true if the given git subcommand is guaranteed to never mutate
 /// repository state (refs, objects, config, worktree). Used to skip expensive
 /// trace2 ingestion work and suppress trace2 emission for read-only commands.
+///
+/// This list covers both porcelain and plumbing commands that IDEs (VS Code,
+/// JetBrains), git clients (GitLens, Graphite CLI), and other tools call at
+/// high frequency. Only commands that are unconditionally read-only regardless
+/// of arguments belong here; commands with mixed read/write modes (symbolic-ref,
+/// reflog, notes, etc.) are handled by `is_read_only_invocation` instead.
 pub fn is_definitely_read_only_command(command: &str) -> bool {
     matches!(
         command,
+        // Porcelain read-only
         "blame"
-            | "cat-file"
-            | "check-attr"
-            | "check-ignore"
-            | "check-mailmap"
-            | "count-objects"
+            | "cherry"
             | "describe"
             | "diff"
+            | "grep"
+            | "help"
+            | "log"
+            | "shortlog"
+            | "show"
+            | "show-branch"
+            | "status"
+            | "version"
+            | "whatchanged"
+            // Plumbing — object/ref inspection
+            | "cat-file"
             | "diff-files"
             | "diff-index"
             | "diff-tree"
             | "for-each-ref"
-            | "grep"
-            | "help"
-            | "log"
             | "ls-files"
+            | "ls-remote"
             | "ls-tree"
             | "merge-base"
             | "name-rev"
             | "rev-list"
             | "rev-parse"
-            | "shortlog"
-            | "show"
-            | "status"
+            | "show-ref"
             | "var"
             | "verify-commit"
+            | "verify-pack"
             | "verify-tag"
-            | "version"
+            // Plumbing — query/validation helpers
+            | "check-attr"
+            | "check-ignore"
+            | "check-mailmap"
+            | "check-ref-format"
+            | "column"
+            | "count-objects"
+            | "fmt-merge-msg"
+            | "fsck"
+            | "get-tar-commit-id"
+            | "patch-id"
+            | "stripspace"
     )
 }
 
@@ -58,6 +80,9 @@ pub fn is_read_only_invocation(parsed: &ParsedGitInvocation) -> bool {
         Some("config") => is_read_only_config_invocation(parsed),
         Some("worktree") => is_read_only_worktree_invocation(parsed),
         Some("submodule") => is_read_only_submodule_invocation(parsed),
+        Some("symbolic-ref") => is_read_only_symbolic_ref_invocation(parsed),
+        Some("reflog") => is_read_only_reflog_invocation(parsed),
+        Some("notes") => is_read_only_notes_invocation(parsed),
         _ => false,
     }
 }
@@ -240,6 +265,39 @@ fn is_read_only_submodule_invocation(parsed: &ParsedGitInvocation) -> bool {
     )
 }
 
+/// `git symbolic-ref HEAD` reads; `git symbolic-ref HEAD refs/heads/main` writes.
+/// -d/--delete and -m (reason) with a target are also mutating.
+fn is_read_only_symbolic_ref_invocation(parsed: &ParsedGitInvocation) -> bool {
+    if command_args_contain_any(&parsed.command_args, &["-d", "--delete"]) {
+        return false;
+    }
+    // Read mode: exactly one positional (the ref name to read).
+    // Write mode: two positionals (ref name + target).
+    parsed.pos_command(1).is_none()
+}
+
+/// Only `git reflog expire` and `git reflog delete` are mutating.
+/// Everything else — bare `git reflog`, `git reflog show`, `git reflog HEAD`,
+/// `git reflog --all`, `git reflog exists` — is read-only (bare reflog and
+/// unrecognized first args are interpreted by git as `reflog show`).
+fn is_read_only_reflog_invocation(parsed: &ParsedGitInvocation) -> bool {
+    !matches!(
+        parsed.command_args.first().map(String::as_str),
+        Some("expire" | "delete")
+    )
+}
+
+/// `git notes list`, `git notes show` are read-only.
+/// `git notes add/append/copy/edit/merge/prune/remove` are mutating.
+/// Bare `git notes` defaults to `list`.
+fn is_read_only_notes_invocation(parsed: &ParsedGitInvocation) -> bool {
+    match parsed.command_args.first().map(String::as_str) {
+        None => true,
+        Some("list" | "show" | "get-ref") => true,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,6 +312,16 @@ mod tests {
         assert!(is_definitely_read_only_command("log"));
         assert!(is_definitely_read_only_command("cat-file"));
         assert!(is_definitely_read_only_command("ls-files"));
+        // High-volume plumbing used by IDEs and git clients
+        assert!(is_definitely_read_only_command("ls-remote"));
+        assert!(is_definitely_read_only_command("show-ref"));
+        assert!(is_definitely_read_only_command("cherry"));
+        assert!(is_definitely_read_only_command("show-branch"));
+        assert!(is_definitely_read_only_command("for-each-ref"));
+        assert!(is_definitely_read_only_command("verify-pack"));
+        assert!(is_definitely_read_only_command("check-ref-format"));
+        assert!(is_definitely_read_only_command("fsck"));
+        assert!(is_definitely_read_only_command("whatchanged"));
     }
 
     #[test]
@@ -392,6 +460,168 @@ mod tests {
             "--type=bool".to_string(),
             "--get".to_string(),
             "demo.enabled".to_string(),
+        ]);
+        assert!(is_read_only_invocation(&parsed));
+    }
+
+    // symbolic-ref classifier
+    #[test]
+    fn read_only_invocation_detects_symbolic_ref_read() {
+        let parsed = parse_git_cli_args(&["symbolic-ref".to_string(), "HEAD".to_string()]);
+        assert!(is_read_only_invocation(&parsed));
+    }
+
+    #[test]
+    fn read_only_invocation_detects_symbolic_ref_read_with_short() {
+        let parsed = parse_git_cli_args(&[
+            "symbolic-ref".to_string(),
+            "--short".to_string(),
+            "HEAD".to_string(),
+        ]);
+        assert!(is_read_only_invocation(&parsed));
+    }
+
+    #[test]
+    fn read_only_invocation_rejects_symbolic_ref_write() {
+        let parsed = parse_git_cli_args(&[
+            "symbolic-ref".to_string(),
+            "HEAD".to_string(),
+            "refs/heads/main".to_string(),
+        ]);
+        assert!(!is_read_only_invocation(&parsed));
+    }
+
+    #[test]
+    fn read_only_invocation_rejects_symbolic_ref_delete() {
+        let parsed = parse_git_cli_args(&[
+            "symbolic-ref".to_string(),
+            "--delete".to_string(),
+            "HEAD".to_string(),
+        ]);
+        assert!(!is_read_only_invocation(&parsed));
+    }
+
+    // reflog classifier
+    #[test]
+    fn read_only_invocation_detects_bare_reflog() {
+        let parsed = parse_git_cli_args(&["reflog".to_string()]);
+        assert!(is_read_only_invocation(&parsed));
+    }
+
+    #[test]
+    fn read_only_invocation_detects_reflog_show() {
+        let parsed = parse_git_cli_args(&[
+            "reflog".to_string(),
+            "show".to_string(),
+            "HEAD".to_string(),
+        ]);
+        assert!(is_read_only_invocation(&parsed));
+    }
+
+    #[test]
+    fn read_only_invocation_detects_reflog_implicit_show_with_ref() {
+        // `git reflog HEAD` is `git reflog show HEAD`
+        let parsed = parse_git_cli_args(&["reflog".to_string(), "HEAD".to_string()]);
+        assert!(is_read_only_invocation(&parsed));
+    }
+
+    #[test]
+    fn read_only_invocation_detects_reflog_implicit_show_with_flags() {
+        // `git reflog --all` is `git reflog show --all`
+        let parsed = parse_git_cli_args(&["reflog".to_string(), "--all".to_string()]);
+        assert!(is_read_only_invocation(&parsed));
+    }
+
+    #[test]
+    fn read_only_invocation_detects_reflog_exists() {
+        let parsed = parse_git_cli_args(&[
+            "reflog".to_string(),
+            "exists".to_string(),
+            "HEAD".to_string(),
+        ]);
+        assert!(is_read_only_invocation(&parsed));
+    }
+
+    #[test]
+    fn read_only_invocation_rejects_reflog_expire() {
+        let parsed = parse_git_cli_args(&[
+            "reflog".to_string(),
+            "expire".to_string(),
+            "--all".to_string(),
+        ]);
+        assert!(!is_read_only_invocation(&parsed));
+    }
+
+    #[test]
+    fn read_only_invocation_rejects_reflog_delete() {
+        let parsed = parse_git_cli_args(&[
+            "reflog".to_string(),
+            "delete".to_string(),
+            "HEAD@{0}".to_string(),
+        ]);
+        assert!(!is_read_only_invocation(&parsed));
+    }
+
+    // notes classifier
+    #[test]
+    fn read_only_invocation_detects_bare_notes() {
+        let parsed = parse_git_cli_args(&["notes".to_string()]);
+        assert!(is_read_only_invocation(&parsed));
+    }
+
+    #[test]
+    fn read_only_invocation_detects_notes_list() {
+        let parsed = parse_git_cli_args(&["notes".to_string(), "list".to_string()]);
+        assert!(is_read_only_invocation(&parsed));
+    }
+
+    #[test]
+    fn read_only_invocation_detects_notes_show() {
+        let parsed = parse_git_cli_args(&[
+            "notes".to_string(),
+            "show".to_string(),
+            "HEAD".to_string(),
+        ]);
+        assert!(is_read_only_invocation(&parsed));
+    }
+
+    #[test]
+    fn read_only_invocation_rejects_notes_add() {
+        let parsed = parse_git_cli_args(&[
+            "notes".to_string(),
+            "add".to_string(),
+            "-m".to_string(),
+            "note".to_string(),
+        ]);
+        assert!(!is_read_only_invocation(&parsed));
+    }
+
+    #[test]
+    fn read_only_invocation_rejects_notes_remove() {
+        let parsed = parse_git_cli_args(&[
+            "notes".to_string(),
+            "remove".to_string(),
+            "HEAD".to_string(),
+        ]);
+        assert!(!is_read_only_invocation(&parsed));
+    }
+
+    // ls-remote and show-ref as invocations
+    #[test]
+    fn read_only_invocation_detects_ls_remote() {
+        let parsed = parse_git_cli_args(&[
+            "ls-remote".to_string(),
+            "--heads".to_string(),
+            "origin".to_string(),
+        ]);
+        assert!(is_read_only_invocation(&parsed));
+    }
+
+    #[test]
+    fn read_only_invocation_detects_show_ref() {
+        let parsed = parse_git_cli_args(&[
+            "show-ref".to_string(),
+            "--heads".to_string(),
         ]);
         assert!(is_read_only_invocation(&parsed));
     }
