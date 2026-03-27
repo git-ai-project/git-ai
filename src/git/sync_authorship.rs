@@ -202,14 +202,13 @@ fn merge_shard_tracking_refs(repository: &Repository, remote_name: &str) {
             debug_log(&format!("batch shard copy failed: {}", e));
             // Fall back to individual copies
             for (local_ref, _tracking_oid) in &copies {
-                // Find the matching pair to get the tracking ref name
-                if let Some(pair) = pairs.iter().find(|p| p.local_shard_ref == **local_ref) {
-                    if let Err(e) = copy_ref(repository, &pair.tracking_ref, local_ref) {
-                        debug_log(&format!(
-                            "shard copy failed for {} <- {}: {}",
-                            local_ref, pair.tracking_ref, e
-                        ));
-                    }
+                if let Some(pair) = pairs.iter().find(|p| p.local_shard_ref == **local_ref)
+                    && let Err(e) = copy_ref(repository, &pair.tracking_ref, local_ref)
+                {
+                    debug_log(&format!(
+                        "shard copy failed for {} <- {}: {}",
+                        local_ref, pair.tracking_ref, e
+                    ));
                 }
             }
         }
