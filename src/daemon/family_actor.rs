@@ -184,4 +184,12 @@ mod tests {
         assert_eq!(status.applied_seq, 1);
         actor.shutdown().await.unwrap();
     }
+
+    #[tokio::test]
+    async fn test_watermarks_initially_empty() {
+        let handle = spawn_family_actor(FamilyKey::new("test-family"));
+        let watermarks = handle.watermarks().await.unwrap();
+        assert!(watermarks.is_empty());
+        handle.shutdown().await.unwrap();
+    }
 }
