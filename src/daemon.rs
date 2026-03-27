@@ -2629,6 +2629,17 @@ fn processed_rebase_new_heads(repository: &Repository) -> Result<HashSet<String>
     Ok(out)
 }
 
+/// Check whether `ancestor` is an ancestor of `descendant` using
+/// `git merge-base --is-ancestor`.
+fn is_ancestor_commit(repository: &Repository, ancestor: &str, descendant: &str) -> bool {
+    let mut args = repository.global_args_for_exec();
+    args.push("merge-base".to_string());
+    args.push("--is-ancestor".to_string());
+    args.push(ancestor.to_string());
+    args.push(descendant.to_string());
+    crate::git::repository::exec_git(&args).is_ok()
+}
+
 /// Resolve the first parent of a commit, returning `None` on any error
 /// (e.g. root commits with no parents).  Used to provide an `onto_head`
 /// hint that constrains commit walks in `build_rebase_commit_mappings`.
@@ -5618,6 +5629,7 @@ impl ActorDaemonCoordinator {
                         && !is_zero_oid(new_head)
                     {
                         if let Ok(repository) = repository_for_rewrite_context(cmd, "reset_rewrite")
+                            && !is_ancestor_commit(&repository, new_head, old_head)
                         {
                             let onto_hint = first_parent_oid(&repository, new_head);
                             if let Some((original_commits, new_commits)) =
