@@ -1945,8 +1945,8 @@ fn compute_line_change_ranges(
     current_content: &str,
 ) -> (Vec<(u32, u32)>, Vec<(u32, u32)>) {
     let changes = compute_line_changes(previous_content, current_content);
-    let mut added = Vec::new();
-    let mut deleted = Vec::new();
+    let mut added: Vec<(u32, u32)> = Vec::new();
+    let mut deleted: Vec<(u32, u32)> = Vec::new();
     let mut old_line = 1u32;
     let mut new_line = 1u32;
 
