@@ -410,6 +410,7 @@ impl AttributionTracker {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn process_changed_hunk(
         &self,
         ops: &[DiffOp],
