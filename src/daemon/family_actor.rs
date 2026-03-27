@@ -15,6 +15,7 @@ pub enum FamilyMsg {
     ApplyCheckpoint(oneshot::Sender<Result<ApplyAck, GitAiError>>),
     Status(oneshot::Sender<Result<FamilyStatus, GitAiError>>),
     GetWatermarks(oneshot::Sender<Result<HashMap<String, u128>, GitAiError>>),
+    UpdateWatermarks(HashMap<String, u128>),
     Shutdown,
 }
 
@@ -67,6 +68,18 @@ impl FamilyActorHandle {
         })?
     }
 
+    pub async fn update_watermarks(
+        &self,
+        watermarks: HashMap<String, u128>,
+    ) -> Result<(), GitAiError> {
+        self.tx
+            .send(FamilyMsg::UpdateWatermarks(watermarks))
+            .await
+            .map_err(|_| {
+                GitAiError::Generic("family actor update_watermarks send failed".to_string())
+            })
+    }
+
     pub async fn shutdown(&self) -> Result<(), GitAiError> {
         self.tx
             .send(FamilyMsg::Shutdown)
@@ -116,6 +129,14 @@ pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
                 }
                 FamilyMsg::GetWatermarks(respond_to) => {
                     let _ = respond_to.send(Ok(state.file_snapshot_watermarks.clone()));
+                }
+                FamilyMsg::UpdateWatermarks(new_watermarks) => {
+                    for (path, mtime_ns) in new_watermarks {
+                        let entry = state.file_snapshot_watermarks.entry(path).or_insert(0);
+                        if mtime_ns > *entry {
+                            *entry = mtime_ns;
+                        }
+                    }
                 }
                 FamilyMsg::Shutdown => break,
             }
@@ -190,6 +211,31 @@ mod tests {
         let handle = spawn_family_actor(FamilyKey::new("test-family"));
         let watermarks = handle.watermarks().await.unwrap();
         assert!(watermarks.is_empty());
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_watermarks_update_and_retrieve() {
+        let handle = spawn_family_actor(FamilyKey::new("test-family"));
+
+        let mut wm = HashMap::new();
+        wm.insert("src/main.rs".to_string(), 1000_u128);
+        wm.insert("src/lib.rs".to_string(), 2000_u128);
+        handle.update_watermarks(wm).await.unwrap();
+
+        let watermarks = handle.watermarks().await.unwrap();
+        assert_eq!(watermarks.get("src/main.rs"), Some(&1000));
+        assert_eq!(watermarks.get("src/lib.rs"), Some(&2000));
+
+        // Higher mtime overwrites
+        let mut wm2 = HashMap::new();
+        wm2.insert("src/main.rs".to_string(), 3000_u128);
+        handle.update_watermarks(wm2).await.unwrap();
+
+        let watermarks = handle.watermarks().await.unwrap();
+        assert_eq!(watermarks.get("src/main.rs"), Some(&3000));
+        assert_eq!(watermarks.get("src/lib.rs"), Some(&2000));
+
         handle.shutdown().await.unwrap();
     }
 }
