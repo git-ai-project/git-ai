@@ -1341,10 +1341,10 @@ pub fn rewrite_authorship_after_rebase_v2(
                 // for files with no previous content tracked.
                 for (file_path, new_content) in &new_content_for_changed_files {
                     if new_content.is_empty() {
-                        // File deleted - remove from cache
+                        // File deleted - remove from serialization cache but keep
+                        // attributions and contents so a later reappearance can
+                        // inherit them via diff-based positional transfer.
                         cached_file_attestation_text.remove(file_path);
-                        current_attributions.remove(file_path);
-                        current_file_contents.remove(file_path);
                         continue;
                     }
                     let line_attrs = compute_line_attrs_for_changed_file(
@@ -1381,8 +1381,17 @@ pub fn rewrite_authorship_after_rebase_v2(
                         );
                     }
                     if new_content.is_empty() {
-                        current_attributions.remove(file_path);
-                        current_file_contents.remove(file_path);
+                        // File deleted - keep attributions and file contents so a later
+                        // reappearance in the rebase sequence can inherit via diff-based
+                        // positional transfer from the pre-deletion state. Re-add the
+                        // subtracted metrics to preserve balance (the file won't appear
+                        // in the serialized note since existing_files excludes it).
+                        if let Some(ref prev_la) = previous_line_attrs {
+                            add_prompt_line_metrics_for_line_attributions(
+                                &mut prompt_line_metrics,
+                                prev_la,
+                            );
+                        }
                         continue;
                     }
                     let line_attrs = compute_line_attrs_for_changed_file(
