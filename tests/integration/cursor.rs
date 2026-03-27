@@ -186,21 +186,25 @@ fn test_cursor_preset_multi_root_workspace_detection() {
                 .map(|s| format!("\"{}\"", s))
                 .collect();
 
-            let file_path_json = if file_path.is_empty() {
+            let tool_input_json = if file_path.is_empty() {
                 String::new()
             } else {
-                format!(",\n        \"file_path\": \"{}\"", file_path)
+                format!(
+                    ",\n        \"tool_input\": {{ \"file_path\": \"{}\" }}",
+                    file_path
+                )
             };
 
             let hook_input = format!(
                 r##"{{
         "conversation_id": "test-conversation-id",
         "workspace_roots": [{}],
-        "hook_event_name": "preToolUse"{},
+        "hook_event_name": "preToolUse",
+        "tool_name": "Write"{},
         "model": "model-name-from-hook-test"
     }}"##,
                 workspace_roots_json.join(", "),
-                file_path_json
+                tool_input_json
             );
 
             let flags = AgentCheckpointFlags {
@@ -298,7 +302,8 @@ fn test_cursor_preset_human_checkpoint_no_filepath() {
         "conversation_id": "test-conversation-id",
         "workspace_roots": ["/Users/test/workspace"],
         "hook_event_name": "preToolUse",
-        "file_path": "/Users/test/workspace/src/main.rs",
+        "tool_name": "Write",
+        "tool_input": { "file_path": "/Users/test/workspace/src/main.rs" },
         "model": "model-name-from-hook-test"
     }"##;
 
@@ -329,6 +334,7 @@ fn test_cursor_checkpoint_stdin_with_utf8_bom() {
             "conversation_id": "test-conversation-id",
             "workspace_roots": [repo.canonical_path().to_string_lossy().to_string()],
             "hook_event_name": "preToolUse",
+            "tool_name": "Write",
             "model": "model-name-from-hook-test"
         })
     );
@@ -376,7 +382,8 @@ fn test_cursor_e2e_with_attribution() {
         "conversation_id": TEST_CONVERSATION_ID,
         "workspace_roots": [repo.canonical_path().to_string_lossy().to_string()],
         "hook_event_name": "postToolUse",
-        "file_path": file_path.to_string_lossy().to_string(),
+        "tool_name": "Write",
+        "tool_input": { "file_path": file_path.to_string_lossy().to_string() },
         "model": "model-name-from-hook-test"
     })
     .to_string();
@@ -482,7 +489,8 @@ fn test_cursor_e2e_with_resync() {
         "conversation_id": TEST_CONVERSATION_ID,
         "workspace_roots": [repo.canonical_path().to_string_lossy().to_string()],
         "hook_event_name": "postToolUse",
-        "file_path": file_path.to_string_lossy().to_string(),
+        "tool_name": "Write",
+        "tool_input": { "file_path": file_path.to_string_lossy().to_string() },
         "model": "model-name-from-hook-test"
     })
     .to_string();

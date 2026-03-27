@@ -1409,8 +1409,21 @@ impl AgentCheckpointPreset for CursorPreset {
             )));
         }
 
+        // Only checkpoint on file-mutating tools (Write, Delete, StrReplace)
+        let tool_name = hook_data
+            .get("tool_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !matches!(tool_name, "Write" | "Delete" | "StrReplace") {
+            return Err(GitAiError::PresetError(format!(
+                "Skipping Cursor hook for non-edit tool_name '{}'.",
+                tool_name
+            )));
+        }
+
         let file_path = hook_data
-            .get("file_path")
+            .get("tool_input")
+            .and_then(|ti| ti.get("file_path"))
             .and_then(|v| v.as_str())
             .map(Self::normalize_cursor_path)
             .unwrap_or_default();
@@ -1439,6 +1452,12 @@ impl AgentCheckpointPreset for CursorPreset {
         };
 
         if hook_event_name == "preToolUse" {
+            let will_edit = if !file_path.is_empty() {
+                Some(vec![file_path.clone()])
+            } else {
+                None
+            };
+
             // early return, we're just adding a human checkpoint.
             return Ok(AgentRunResult {
                 agent_id: AgentId {
@@ -1451,7 +1470,7 @@ impl AgentCheckpointPreset for CursorPreset {
                 transcript: None,
                 repo_working_dir: Some(repo_working_dir),
                 edited_filepaths: None,
-                will_edit_filepaths: None,
+                will_edit_filepaths: will_edit,
                 dirty_files: None,
             });
         }
