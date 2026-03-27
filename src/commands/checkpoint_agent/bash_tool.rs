@@ -194,7 +194,6 @@ pub enum HookEvent {
 }
 
 /// Result from `handle_bash_tool` combining the action with optional captured checkpoint info.
-#[allow(dead_code)]
 pub struct BashToolResult {
     /// The checkpoint action (unchanged from previous API).
     pub action: BashCheckpointAction,
@@ -203,7 +202,6 @@ pub struct BashToolResult {
 }
 
 /// Info about a captured checkpoint prepared by the bash tool.
-#[allow(dead_code)]
 pub struct CapturedCheckpointInfo {
     pub capture_id: String,
     pub repo_working_dir: String,

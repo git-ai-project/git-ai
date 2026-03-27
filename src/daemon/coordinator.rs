@@ -53,6 +53,16 @@ impl<B: GitBackend> Coordinator<B> {
         actor.watermarks().await
     }
 
+    pub async fn update_watermarks_family(
+        &self,
+        repo_working_dir: &Path,
+        watermarks: HashMap<String, u128>,
+    ) -> Result<(), GitAiError> {
+        let family = self.backend.resolve_family(repo_working_dir)?;
+        let actor = self.get_or_create_family_actor(family).await;
+        actor.update_watermarks(watermarks).await
+    }
+
     pub async fn status_family(&self, repo_working_dir: &Path) -> Result<FamilyStatus, GitAiError> {
         let family = self.backend.resolve_family(repo_working_dir)?;
         let actor = self.get_or_create_family_actor(family).await;
