@@ -7,6 +7,14 @@ on:
     types: [labeled]
   push:
     branches: [main]
+    paths:
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'install.sh'
+      - 'install.ps1'
+      - 'scripts/**'
+      - '.github/workflows/install-scripts-local.yml'
   merge_group:
     branches: [main]
   workflow_dispatch:

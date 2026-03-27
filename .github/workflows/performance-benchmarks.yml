@@ -3,6 +3,16 @@ name: Performance Benchmarks
 on:
   pull_request:
     branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'Taskfile.yml'
+      - 'scripts/benchmarks/**'
+      - 'flake.nix'
+      - 'flake.lock'
+      - '.github/workflows/performance-benchmarks.yml'
   schedule:
     - cron: "0 7 * * *"
   workflow_dispatch:
