@@ -113,9 +113,15 @@ pub fn handle_git(args: &[String]) {
     let mut parsed_args = parse_git_cli_args(args);
 
     let mut repository_option = find_repository(&parsed_args.global_args).ok();
-    parsed_args = resolve_wrapper_invocation(&parsed_args, repository_option.as_ref());
 
-    if should_passthrough_read_only_command(&parsed_args) {
+    // Resolve aliases early so the read-only check sees the real command.
+    if let Some(repo) = repository_option.as_ref()
+        && let Some(resolved) = resolve_alias_invocation(&parsed_args, repo)
+    {
+        parsed_args = resolved;
+    }
+
+    if crate::git::command_classification::is_read_only_invocation(&parsed_args) {
         let exit_status = proxy_to_git(&parsed_args.to_invocation_vec(), false, None, None);
         exit_with_status(exit_status);
     }
@@ -270,18 +276,6 @@ pub fn handle_git(args: &[String]) {
     exit_with_status(exit_status);
 }
 
-fn should_passthrough_read_only_command(parsed_args: &ParsedGitInvocation) -> bool {
-    crate::git::command_classification::is_read_only_invocation(parsed_args)
-}
-
-fn resolve_wrapper_invocation(
-    parsed_args: &ParsedGitInvocation,
-    repository: Option<&Repository>,
-) -> ParsedGitInvocation {
-    repository
-        .and_then(|repo| resolve_alias_invocation(parsed_args, repo))
-        .unwrap_or_else(|| parsed_args.clone())
-}
 
 /// Handle alias invocations
 #[cfg(feature = "test-support")]
@@ -1002,10 +996,8 @@ fn in_shell_completion_context() -> bool {
 #[cfg(test)]
 mod tests {
     use super::parse_alias_tokens;
-    use super::{
-        parse_git_cli_args, resolve_child_git_hooks_path_override, resolve_wrapper_invocation,
-        should_passthrough_read_only_command,
-    };
+    use super::{parse_git_cli_args, resolve_alias_invocation, resolve_child_git_hooks_path_override};
+    use crate::git::command_classification::is_read_only_invocation;
     use crate::git::find_repository_in_path;
     use std::process::Command;
     use tempfile::tempdir;
@@ -1135,32 +1127,32 @@ mod tests {
     #[test]
     fn passthrough_read_only_command_for_status() {
         let parsed = parse_git_cli_args(&["status".to_string(), "--short".to_string()]);
-        assert!(should_passthrough_read_only_command(&parsed));
+        assert!(is_read_only_invocation(&parsed));
     }
 
     #[test]
     fn passthrough_read_only_command_for_branch_show_current() {
         let parsed = parse_git_cli_args(&["branch".to_string(), "--show-current".to_string()]);
-        assert!(should_passthrough_read_only_command(&parsed));
+        assert!(is_read_only_invocation(&parsed));
     }
 
     #[test]
     fn passthrough_read_only_command_rejects_mutating_commands() {
         let parsed =
             parse_git_cli_args(&["commit".to_string(), "-m".to_string(), "msg".to_string()]);
-        assert!(!should_passthrough_read_only_command(&parsed));
+        assert!(!is_read_only_invocation(&parsed));
     }
 
     #[test]
     fn passthrough_read_only_command_accepts_help_invocations() {
         let parsed = parse_git_cli_args(&["status".to_string(), "--help".to_string()]);
-        assert!(should_passthrough_read_only_command(&parsed));
+        assert!(is_read_only_invocation(&parsed));
     }
 
     #[test]
     fn passthrough_read_only_command_accepts_top_level_version() {
         let parsed = parse_git_cli_args(&["--version".to_string()]);
-        assert!(should_passthrough_read_only_command(&parsed));
+        assert!(is_read_only_invocation(&parsed));
     }
 
     #[test]
@@ -1191,11 +1183,11 @@ mod tests {
         let repo = find_repository_in_path(&temp.path().to_string_lossy())
             .expect("repository should be discovered");
         let parsed = parse_git_cli_args(&["st".to_string()]);
-        let resolved = resolve_wrapper_invocation(&parsed, Some(&repo));
+        let resolved = resolve_alias_invocation(&parsed, &repo).unwrap_or_else(|| parsed.clone());
 
         assert_eq!(resolved.command.as_deref(), Some("status"));
         assert!(resolved.command_args.iter().any(|arg| arg == "--short"));
-        assert!(should_passthrough_read_only_command(&resolved));
+        assert!(is_read_only_invocation(&resolved));
     }
 
     #[test]
@@ -1226,10 +1218,10 @@ mod tests {
         let repo = find_repository_in_path(&temp.path().to_string_lossy())
             .expect("repository should be discovered");
         let parsed = parse_git_cli_args(&["ci".to_string(), "-m".to_string(), "msg".to_string()]);
-        let resolved = resolve_wrapper_invocation(&parsed, Some(&repo));
+        let resolved = resolve_alias_invocation(&parsed, &repo).unwrap_or_else(|| parsed.clone());
 
         assert_eq!(resolved.command.as_deref(), Some("commit"));
-        assert!(!should_passthrough_read_only_command(&resolved));
+        assert!(!is_read_only_invocation(&resolved));
     }
 
     #[test]
@@ -1261,10 +1253,10 @@ mod tests {
             .expect("repository should be discovered");
         let parsed = parse_git_cli_args(&["status".to_string()]);
 
-        let resolved = resolve_wrapper_invocation(&parsed, Some(&repo));
+        let resolved = resolve_alias_invocation(&parsed, &repo).unwrap_or_else(|| parsed.clone());
         assert_eq!(resolved.command.as_deref(), Some("branch"));
         assert!(resolved.command_args.iter().any(|arg| arg == "aliased"));
-        assert!(!should_passthrough_read_only_command(&resolved));
+        assert!(!is_read_only_invocation(&resolved));
     }
 
     #[cfg(unix)]

@@ -2606,25 +2606,31 @@ fn is_fast_discovery_safe_global_flag(arg: &str) -> bool {
     )
 }
 
+/// Replace any `-C` arguments with a single `-C <command_root>`, keeping other
+/// global flags intact. When the args contain flags that aren't safe to rebase
+/// (e.g. relative `--git-dir`/`--work-tree`), the original args are returned
+/// unchanged so their meaning is preserved.
 fn normalize_global_args_for_repo_root(global_args: &[String], command_root: &str) -> Vec<String> {
-    if !global_args_are_safe_to_rebase(global_args) {
-        return global_args.to_vec();
-    }
-
     let mut normalized = vec!["-C".to_string(), command_root.to_string()];
     let mut idx = 0usize;
 
     while idx < global_args.len() {
         let arg = &global_args[idx];
 
+        // Strip existing -C args (we prepended the canonical root above).
         if arg == "-C" {
             idx += 2;
             continue;
         }
-
         if arg.starts_with("-C") && arg.len() > 2 {
             idx += 1;
             continue;
+        }
+
+        // If the arg isn't a harmless global flag, we can't safely rebase.
+        // Return the original args unchanged.
+        if !is_fast_discovery_safe_global_flag(arg) {
+            return global_args.to_vec();
         }
 
         normalized.push(arg.clone());
@@ -2632,33 +2638,6 @@ fn normalize_global_args_for_repo_root(global_args: &[String], command_root: &st
     }
 
     normalized
-}
-
-fn global_args_are_safe_to_rebase(global_args: &[String]) -> bool {
-    let mut idx = 0usize;
-
-    while idx < global_args.len() {
-        let arg = &global_args[idx];
-
-        if arg == "-C" {
-            idx += 2;
-            continue;
-        }
-
-        if arg.starts_with("-C") && arg.len() > 2 {
-            idx += 1;
-            continue;
-        }
-
-        if is_fast_discovery_safe_global_flag(arg) {
-            idx += 1;
-            continue;
-        }
-
-        return false;
-    }
-
-    true
 }
 
 fn resolve_command_base_dir(global_args: &[String]) -> Result<PathBuf, GitAiError> {
@@ -2670,17 +2649,7 @@ fn resolve_command_base_dir(global_args: &[String]) -> Result<PathBuf, GitAiErro
             let path_arg = global_args.get(idx + 1).ok_or_else(|| {
                 GitAiError::Generic("Missing path after -C in global git args".to_string())
             })?;
-
-            let next_base = PathBuf::from(path_arg);
-            base = Some(if next_base.is_absolute() {
-                next_base
-            } else {
-                let current = match &base {
-                    Some(existing) => existing.clone(),
-                    None => std::env::current_dir().map_err(GitAiError::IoError)?,
-                };
-                current.join(next_base)
-            });
+            base = Some(apply_global_c_arg(base.as_ref(), path_arg)?);
             idx += 2;
             continue;
         }
