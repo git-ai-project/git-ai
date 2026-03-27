@@ -291,6 +291,48 @@ struct TestCompletionLogEntry {
     error: Option<String>,
 }
 
+/// Attempt to kill a stale daemon whose lock is held but whose sockets are
+/// unreachable.  Returns `true` if the process was signalled (or already
+/// dead) and the caller should retry acquiring the lock.
+#[cfg(unix)]
+pub(crate) fn try_kill_stale_daemon(config: &DaemonConfig) -> bool {
+    let meta_path = pid_metadata_path(config);
+    let contents = match fs::read_to_string(&meta_path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let meta: DaemonPidMeta = match serde_json::from_str(&contents) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    let pid = meta.pid as libc::pid_t;
+    // Send SIGTERM so the daemon can clean up.  If it's already dead, the
+    // flock should have been released automatically — but we still return
+    // true so the caller retries the lock.
+    if unsafe { libc::kill(pid, 0) } != 0 {
+        // Process is already gone — lock file is stale.
+        return true;
+    }
+    unsafe { libc::kill(pid, libc::SIGTERM) };
+    // Give the daemon a moment to release the lock.
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        if LockFile::try_acquire(&config.lock_path).is_some() {
+            // Lock is free — daemon exited.
+            return true;
+        }
+    }
+    // Last resort: SIGKILL.
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    true
+}
+
+#[cfg(windows)]
+pub(crate) fn try_kill_stale_daemon(_config: &DaemonConfig) -> bool {
+    false
+}
+
 pub struct DaemonLock {
     _lock: LockFile,
 }

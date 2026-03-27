@@ -107,10 +107,15 @@ fn ensure_daemon_running_attached(timeout: Duration) -> Result<DaemonConfig, Str
     }
 
     if daemon_startup_is_blocked(&config) {
-        return Err(format!(
-            "daemon startup blocked: lock held at {}",
-            config.lock_path.display()
-        ));
+        // Daemon holds the lock but its sockets are unreachable — it is stale.
+        // Try to kill it so we can start a fresh one.
+        if !crate::daemon::try_kill_stale_daemon(&config) {
+            return Err(format!(
+                "daemon startup blocked: lock held at {}",
+                config.lock_path.display()
+            ));
+        }
+        // Lock may now be free — fall through to spawn below.
     }
 
     let mut child = spawn_daemon_run_with_piped_stderr(&config)?;
@@ -192,10 +197,15 @@ pub(crate) fn ensure_daemon_running(timeout: Duration) -> Result<DaemonConfig, S
     }
 
     if daemon_startup_is_blocked(&config) {
-        return Err(format!(
-            "daemon startup blocked: lock held at {}",
-            config.lock_path.display()
-        ));
+        // Daemon holds the lock but its sockets are unreachable — it is stale.
+        // Try to kill it so we can start a fresh one.
+        if !crate::daemon::try_kill_stale_daemon(&config) {
+            return Err(format!(
+                "daemon startup blocked: lock held at {}",
+                config.lock_path.display()
+            ));
+        }
+        // Lock may now be free — fall through to spawn below.
     }
 
     spawn_daemon_run_detached(&config)?;
