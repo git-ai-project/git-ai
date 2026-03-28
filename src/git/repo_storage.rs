@@ -333,18 +333,8 @@ impl PersistedWorkingLog {
         }
     }
 
-    /* append checkpoint */
-    pub fn append_checkpoint(&self, checkpoint: &Checkpoint) -> Result<(), GitAiError> {
-        // Read existing checkpoints
-        let mut checkpoints = self.read_all_checkpoints().unwrap_or_default();
-
-        // Create a copy, potentially without transcript to reduce storage size.
-        // Transcripts are refetched in update_prompts_to_latest() before post-commit
-        // using tool-specific sources (transcript_path for Claude, cursor_db_path for Cursor, etc.)
-        //
-        // Tools that DON'T support refetch (transcript must be kept):
-        // - "mock_ai" - test preset, transcript not stored externally
-        // - Any other agent-v1 custom tools (detected by lack of tool-specific metadata)
+    /// Strip transcript from checkpoint if the tool supports refetching.
+    fn strip_transcript_if_refetchable(checkpoint: &Checkpoint) -> Checkpoint {
         let mut storage_checkpoint = checkpoint.clone();
         let tool = checkpoint
             .agent_id
@@ -353,45 +343,103 @@ impl PersistedWorkingLog {
             .unwrap_or("");
         let metadata = &checkpoint.agent_metadata;
 
-        // Blacklist: tools that cannot refetch transcripts
         let cannot_refetch = match tool {
             "mock_ai" => true,
-            // human checkpoints have no transcript anyway
             "human" => false,
-            // For other tools, check if they have the necessary metadata for refetching
-            // cursor can always refetch from its database
             "cursor" => false,
-            // claude, codex, gemini, continue-cli, amp, windsurf, droid need transcript_path
             "claude" | "codex" | "gemini" | "continue-cli" | "amp" | "windsurf" | "droid" => {
                 metadata
                     .as_ref()
                     .and_then(|m| m.get("transcript_path"))
                     .is_none()
             }
-            // opencode can always refetch from its session storage
             "opencode" => false,
-            // github-copilot needs chat_session_path
             "github-copilot" => metadata
                 .as_ref()
                 .and_then(|m| m.get("chat_session_path"))
                 .is_none(),
-            // Unknown tools (like custom agent-v1 tools) can't refetch
             _ => true,
         };
 
         if !cannot_refetch {
             storage_checkpoint.transcript = None;
         }
+        storage_checkpoint
+    }
 
-        // Add the new checkpoint
+    /* append checkpoint */
+    pub fn append_checkpoint(&self, checkpoint: &Checkpoint) -> Result<(), GitAiError> {
+        let storage_checkpoint = Self::strip_transcript_if_refetchable(checkpoint);
+
+        // Read existing checkpoints, add the new one, prune, and write all back
+        let mut checkpoints = self.read_all_checkpoints().unwrap_or_default();
         checkpoints.push(storage_checkpoint);
-
-        // Prune char-level attributions from older checkpoints for the same files
-        // Only the most recent checkpoint per file needs char-level precision
         self.prune_old_char_attributions(&mut checkpoints);
-
-        // Write all checkpoints back
         self.write_all_checkpoints(&checkpoints)
+    }
+
+    /// Efficient append when the caller already has the full checkpoint list in memory.
+    /// Avoids re-reading checkpoints from disk. The last element of `checkpoints` is
+    /// assumed to be the newly appended checkpoint (transcript stripping is applied to it).
+    ///
+    /// Uses an incremental strategy: only the new checkpoint is serialized and appended
+    /// to the file when earlier checkpoints are already pruned. Falls back to a full
+    /// rewrite when pruning modifies earlier entries.
+    pub fn append_checkpoint_with_existing(
+        &self,
+        checkpoints: &mut [Checkpoint],
+    ) -> Result<(), GitAiError> {
+        // Strip transcript from the last (new) checkpoint
+        if let Some(last) = checkpoints.last() {
+            let stripped = Self::strip_transcript_if_refetchable(last);
+            if let Some(last_mut) = checkpoints.last_mut() {
+                *last_mut = stripped;
+            }
+        }
+
+        // Check if pruning would change any existing (non-last) checkpoints.
+        // If the file was written by a previous append_checkpoint_with_existing or
+        // write_all_checkpoints call, older entries are already pruned. In that case,
+        // only the second-to-last checkpoint could need pruning (it was the "latest"
+        // before this append). If nothing changes, we can do a fast file-append.
+        let len = checkpoints.len();
+        if len >= 2 {
+            // Collect new file names into owned strings to avoid borrow conflict
+            let new_files: HashSet<String> = checkpoints[len - 1]
+                .entries
+                .iter()
+                .map(|e| e.file.clone())
+                .collect();
+            let prev = &mut checkpoints[len - 2];
+            let mut any_pruned = false;
+            for entry in &mut prev.entries {
+                if new_files.contains(&entry.file) && !entry.attributions.is_empty() {
+                    entry.attributions.clear();
+                    any_pruned = true;
+                }
+            }
+            if !any_pruned {
+                // Fast path: just append the new checkpoint to the file
+                return self.append_single_checkpoint(checkpoints.last().unwrap());
+            }
+            // Pruning changed the second-to-last checkpoint, fall through to full rewrite
+        }
+
+        self.prune_old_char_attributions(checkpoints);
+        self.write_all_checkpoints(checkpoints)
+    }
+
+    /// Append a single checkpoint line to the JSONL file without rewriting.
+    fn append_single_checkpoint(&self, checkpoint: &Checkpoint) -> Result<(), GitAiError> {
+        use std::io::Write;
+        let checkpoints_file = self.dir.join("checkpoints.jsonl");
+        let json_line = serde_json::to_string(checkpoint)?;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&checkpoints_file)?;
+        writeln!(file, "{}", json_line)?;
+        Ok(())
     }
 
     pub fn read_all_checkpoints(&self) -> Result<Vec<Checkpoint>, GitAiError> {
@@ -424,7 +472,22 @@ impl PersistedWorkingLog {
             checkpoints.push(checkpoint);
         }
 
-        // Migrate 7-char prompt hashes to 16-char hashes
+        // Migrate 7-char prompt hashes to 16-char hashes.
+        // Fast path: skip migration entirely if no entries have 7-char author_ids.
+        let needs_migration = checkpoints.iter().any(|checkpoint| {
+            checkpoint.entries.iter().any(|entry| {
+                entry.attributions.iter().any(|a| a.author_id.len() == 7)
+                    || entry
+                        .line_attributions
+                        .iter()
+                        .any(|la| la.author_id.len() == 7)
+            })
+        });
+
+        if !needs_migration {
+            return Ok(checkpoints);
+        }
+
         // Step 1: Build mapping from old 7-char hash to new 16-char hash
         let mut old_to_new_hash: HashMap<String, String> = HashMap::new();
 
@@ -437,8 +500,7 @@ impl PersistedWorkingLog {
         }
 
         // Step 2: Replace 7-char author_ids in all checkpoints' attributions and line_attributions
-        let mut migrated_checkpoints = Vec::new();
-        for mut checkpoint in checkpoints {
+        for checkpoint in &mut checkpoints {
             for entry in &mut checkpoint.entries {
                 // Replace author_ids in attributions
                 for attr in &mut entry.attributions {
@@ -465,10 +527,9 @@ impl PersistedWorkingLog {
                     }
                 }
             }
-            migrated_checkpoints.push(checkpoint);
         }
 
-        Ok(migrated_checkpoints)
+        Ok(checkpoints)
     }
 
     /// Remove char-level attributions from all but the most recent checkpoint per file.
@@ -504,22 +565,22 @@ impl PersistedWorkingLog {
     /// by post-commit after transcripts have been refetched and need to be preserved
     /// for from_just_working_log() to read them.
     pub fn write_all_checkpoints(&self, checkpoints: &[Checkpoint]) -> Result<(), GitAiError> {
+        use std::io::Write;
         let checkpoints_file = self.dir.join("checkpoints.jsonl");
 
-        // Serialize all checkpoints to JSONL
-        let mut lines = Vec::new();
-        for checkpoint in checkpoints {
-            let json_line = serde_json::to_string(checkpoint)?;
-            lines.push(json_line);
+        if checkpoints.is_empty() {
+            fs::write(&checkpoints_file, "")?;
+            return Ok(());
         }
 
-        // Write all lines to file
-        let content = lines.join("\n");
-        if !content.is_empty() {
-            fs::write(&checkpoints_file, format!("{}\n", content))?;
-        } else {
-            fs::write(&checkpoints_file, "")?;
+        // Serialize directly into a buffered writer to avoid intermediate String allocations
+        let file = fs::File::create(&checkpoints_file)?;
+        let mut writer = std::io::BufWriter::with_capacity(64 * 1024, file);
+        for checkpoint in checkpoints {
+            serde_json::to_writer(&mut writer, checkpoint)?;
+            writeln!(writer)?;
         }
+        writer.flush()?;
 
         Ok(())
     }
@@ -530,6 +591,8 @@ impl PersistedWorkingLog {
     {
         let mut checkpoints = self.read_all_checkpoints()?;
         mutator(&mut checkpoints)?;
+        // Prune char-level attributions from older checkpoints when doing a full rewrite
+        self.prune_old_char_attributions(&mut checkpoints);
         self.write_all_checkpoints(&checkpoints)?;
         Ok(checkpoints)
     }

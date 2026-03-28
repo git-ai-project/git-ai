@@ -17,6 +17,7 @@ mod blame_flags;
 mod blame_subdirectory;
 mod checkout_hooks_comprehensive;
 mod checkout_switch;
+mod checkpoint_perf_benchmark;
 mod checkpoint_size;
 mod cherry_pick;
 mod cherry_pick_hooks_comprehensive;

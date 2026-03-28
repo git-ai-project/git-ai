@@ -98,6 +98,8 @@ struct ResolvedCheckpointExecution {
     ts: u128,
     files: Vec<String>,
     dirty_files: HashMap<String, String>,
+    /// Cached checkpoints read during resolution, passed through to avoid re-reading
+    cached_checkpoints: Vec<Checkpoint>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -481,6 +483,7 @@ fn resolve_base_override_dirty_file_execution(
             ts,
             files,
             dirty_files: resolved_dirty_files,
+            cached_checkpoints: Vec::new(), // base-override path reads checkpoints in execute
         }))
     }
 }
@@ -516,11 +519,16 @@ fn resolve_live_checkpoint_execution(
         storage_start.elapsed()
     ));
 
+    // Read checkpoints once and cache for use throughout this function
+    let cached_checkpoints = working_log.read_all_checkpoints().unwrap_or_default();
+
     if is_pre_commit && base_commit_override.is_none() {
-        let has_no_ai_edits = working_log
-            .all_ai_touched_files()
-            .map(|files| files.is_empty())
-            .unwrap_or(true);
+        let has_no_ai_edits = !cached_checkpoints.iter().any(|checkpoint| {
+            matches!(
+                checkpoint.kind,
+                CheckpointKind::AiAgent | CheckpointKind::AiTab
+            ) && !checkpoint.entries.is_empty()
+        });
         let has_initial_attributions = !working_log.read_initial_attributions().files.is_empty();
 
         if has_no_ai_edits
@@ -607,6 +615,7 @@ fn resolve_live_checkpoint_execution(
         is_pre_commit,
         is_pre_commit && filtered_pathspec.is_some(),
         &ignore_matcher,
+        &cached_checkpoints,
     )?;
     debug_log(&format!(
         "[BENCHMARK] get_all_tracked_files found {} files, took {:?}",
@@ -630,6 +639,7 @@ fn resolve_live_checkpoint_execution(
         ts,
         files,
         dirty_files,
+        cached_checkpoints,
     }))
 }
 
@@ -653,16 +663,21 @@ fn execute_resolved_checkpoint(
     }
 
     let read_checkpoints_start = Instant::now();
+    let had_cached = !resolved.cached_checkpoints.is_empty();
     let mut checkpoints = if reset {
         working_log.reset_working_log()?;
         Vec::new()
+    } else if had_cached {
+        // Move cached checkpoints from resolve phase (no clone needed)
+        resolved.cached_checkpoints
     } else {
         working_log.read_all_checkpoints()?
     };
     debug_log(&format!(
-        "[BENCHMARK] Reading {} checkpoints took {:?}",
+        "[BENCHMARK] Reading {} checkpoints took {:?} (cached={})",
         checkpoints.len(),
-        read_checkpoints_start.elapsed()
+        read_checkpoints_start.elapsed(),
+        had_cached,
     ));
 
     let save_states_start = Instant::now();
@@ -707,16 +722,17 @@ fn execute_resolved_checkpoint(
         entries_start.elapsed()
     ));
 
+    let entries_count = entries.len();
     if !entries.is_empty() {
         let checkpoint_create_start = Instant::now();
-        let mut checkpoint = Checkpoint::new(
-            kind,
-            combined_hash.clone(),
-            author.to_string(),
-            entries.clone(),
-        );
-        checkpoint.timestamp = (resolved.ts / 1000) as u64;
-        checkpoint.line_stats = compute_line_stats(&file_stats)?;
+        let checkpoint_ts = (resolved.ts / 1000) as u64;
+        let line_stats_agg = compute_line_stats(&file_stats)?;
+
+        // Move entries into the checkpoint to avoid cloning
+        let mut checkpoint =
+            Checkpoint::new(kind, combined_hash.clone(), author.to_string(), entries);
+        checkpoint.timestamp = checkpoint_ts;
+        checkpoint.line_stats = line_stats_agg;
 
         if kind != CheckpointKind::Human
             && let Some(agent_run) = &agent_run_result
@@ -752,35 +768,41 @@ fn execute_resolved_checkpoint(
             );
         }
 
+        // Save fields for metrics before moving checkpoint into the list
+        let cp_agent_id = checkpoint.agent_id.clone();
+        let cp_author = checkpoint.author.clone();
+
         let append_start = Instant::now();
-        working_log.append_checkpoint(&checkpoint)?;
+        // Move checkpoint into the list (no clone) for efficient append+prune.
+        checkpoints.push(checkpoint);
+        working_log.append_checkpoint_with_existing(&mut checkpoints)?;
         debug_log(&format!(
             "[BENCHMARK] Appending checkpoint to working log took {:?}",
             append_start.elapsed()
         ));
-        checkpoints.push(checkpoint.clone());
 
-        let attrs =
-            build_checkpoint_attrs(repo, &resolved.base_commit, checkpoint.agent_id.as_ref());
+        let attrs = build_checkpoint_attrs(repo, &resolved.base_commit, cp_agent_id.as_ref());
 
         if kind != CheckpointKind::Human
-            && let Some(agent_id) = checkpoint.agent_id.as_ref()
+            && let Some(agent_id) = cp_agent_id.as_ref()
             && should_emit_agent_usage(agent_id)
         {
             let values = crate::metrics::AgentUsageValues::new();
             crate::metrics::record(values, attrs.clone());
         }
 
-        for (entry, file_stat) in entries.iter().zip(file_stats.iter()) {
+        // Use entries from the last checkpoint (which we just pushed)
+        let last_cp = checkpoints.last().unwrap();
+        for (entry, file_stat) in last_cp.entries.iter().zip(file_stats.iter()) {
             let values = crate::metrics::CheckpointValues::new()
-                .checkpoint_ts(checkpoint.timestamp)
-                .kind(checkpoint.kind.to_str().to_string())
+                .checkpoint_ts(checkpoint_ts)
+                .kind(kind.to_str().to_string())
                 .file_path(entry.file.clone())
                 .lines_added(file_stat.additions)
                 .lines_deleted(file_stat.deletions)
                 .lines_added_sloc(file_stat.additions_sloc)
                 .lines_deleted_sloc(file_stat.deletions_sloc);
-            let file_attrs = attrs.clone().author(&checkpoint.author);
+            let file_attrs = attrs.clone().author(&cp_author);
             crate::metrics::record(values, file_attrs);
         }
     }
@@ -797,7 +819,7 @@ fn execute_resolved_checkpoint(
         debug_log("Working log reset. Starting fresh checkpoint.");
     }
 
-    let label = if entries.len() > 1 {
+    let label = if entries_count > 1 {
         "checkpoint"
     } else {
         "commit"
@@ -805,7 +827,7 @@ fn execute_resolved_checkpoint(
 
     if !quiet {
         let log_author = agent_tool.unwrap_or(author);
-        let files_with_entries = entries.len();
+        let files_with_entries = entries_count;
         let total_uncommitted_files = resolved.files.len();
 
         if files_with_entries == total_uncommitted_files {
@@ -833,7 +855,7 @@ fn execute_resolved_checkpoint(
         "[BENCHMARK] Total checkpoint run took {:?}",
         checkpoint_start.elapsed()
     ));
-    Ok((entries.len(), resolved.files.len(), checkpoints.len()))
+    Ok((entries_count, resolved.files.len(), checkpoints.len()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1022,6 +1044,7 @@ pub fn execute_captured_checkpoint(
             .map(|file| file.path.clone())
             .collect(),
         dirty_files,
+        cached_checkpoints: Vec::new(), // captured checkpoint path reads in execute
     };
 
     execute_resolved_checkpoint(
@@ -1104,6 +1127,7 @@ fn get_status_of_files(
 
 /// Get all files that should be tracked, including those from previous checkpoints and INITIAL attributions
 ///
+#[allow(clippy::too_many_arguments)]
 fn get_all_tracked_files(
     repo: &Repository,
     _base_commit: &str,
@@ -1112,6 +1136,7 @@ fn get_all_tracked_files(
     is_pre_commit: bool,
     preserve_explicit_pre_commit_paths: bool,
     ignore_matcher: &IgnoreMatcher,
+    cached_checkpoints: &[Checkpoint],
 ) -> Result<Vec<String>, GitAiError> {
     let explicit_pre_commit_paths: HashSet<String> = edited_filepaths
         .map(|paths| {
@@ -1166,46 +1191,51 @@ fn get_all_tracked_files(
     ));
 
     let checkpoints_read_start = Instant::now();
-    if let Ok(working_log_data) = working_log.read_all_checkpoints() {
-        for checkpoint in &working_log_data {
-            for entry in &checkpoint.entries {
-                // Normalize path separators to forward slashes
-                let normalized_path = normalize_to_posix(&entry.file);
-                // Filter out paths outside the repository to prevent git command failures
-                if !is_path_in_repo(&normalized_path) {
-                    debug_log(&format!(
-                        "Skipping checkpoint file outside repository: {}",
-                        normalized_path
-                    ));
-                    continue;
-                }
-                if should_ignore_file_with_matcher(&normalized_path, ignore_matcher) {
-                    continue;
-                }
-                if !files.contains(&normalized_path) {
-                    // Check if it's a text file before adding
-                    if is_text_file(working_log, &normalized_path) {
-                        files.insert(normalized_path);
-                    }
+    for checkpoint in cached_checkpoints {
+        for entry in &checkpoint.entries {
+            // Normalize path separators to forward slashes
+            let normalized_path = normalize_to_posix(&entry.file);
+            // Filter out paths outside the repository to prevent git command failures
+            if !is_path_in_repo(&normalized_path) {
+                debug_log(&format!(
+                    "Skipping checkpoint file outside repository: {}",
+                    normalized_path
+                ));
+                continue;
+            }
+            if should_ignore_file_with_matcher(&normalized_path, ignore_matcher) {
+                continue;
+            }
+            if !files.contains(&normalized_path) {
+                // Check if it's a text file before adding
+                if is_text_file(working_log, &normalized_path) {
+                    files.insert(normalized_path);
                 }
             }
         }
     }
     debug_log(&format!(
-        "[BENCHMARK]   Reading checkpoints in get_all_tracked_files took {:?}",
+        "[BENCHMARK]   Processing cached checkpoints in get_all_tracked_files took {:?}",
         checkpoints_read_start.elapsed()
     ));
 
-    let has_ai_checkpoints = if let Ok(working_log_data) = working_log.read_all_checkpoints() {
-        working_log_data.iter().any(|checkpoint| {
-            checkpoint.kind == CheckpointKind::AiAgent || checkpoint.kind == CheckpointKind::AiTab
-        })
-    } else {
-        false
-    };
+    let has_ai_checkpoints = cached_checkpoints.iter().any(|checkpoint| {
+        checkpoint.kind == CheckpointKind::AiAgent || checkpoint.kind == CheckpointKind::AiTab
+    });
 
     let status_files_start = Instant::now();
-    let mut results_for_tracked_files = if is_pre_commit && !has_ai_checkpoints {
+    // Fast path: when we have dirty_files, all explicit paths are known-changed.
+    // Skip the expensive git status call if every file in our set is covered by dirty_files.
+    let mut results_for_tracked_files = if let Some(ref dirty_files) = working_log.dirty_files {
+        if !dirty_files.is_empty() && files.iter().all(|f| dirty_files.contains_key(f)) {
+            debug_log("[BENCHMARK]   Skipping git status (all files covered by dirty_files)");
+            files.into_iter().collect()
+        } else if is_pre_commit && !has_ai_checkpoints {
+            get_status_of_files(repo, working_log, files, true, ignore_matcher)?
+        } else {
+            get_status_of_files(repo, working_log, files, false, ignore_matcher)?
+        }
+    } else if is_pre_commit && !has_ai_checkpoints {
         get_status_of_files(repo, working_log, files, true, ignore_matcher)?
     } else {
         get_status_of_files(repo, working_log, files, false, ignore_matcher)?
@@ -1269,12 +1299,56 @@ fn save_current_file_states(
 ) -> Result<HashMap<String, String>, GitAiError> {
     let _read_start = Instant::now();
 
-    // Extract only the data we need (no cloning the entire working_log)
     let blobs_dir = working_log.dir.join("blobs");
-    let repo_workdir = working_log.repo_workdir.clone();
-    let dirty_files = working_log.dirty_files.clone();
+    let repo_workdir = &working_log.repo_workdir;
+    let dirty_files = &working_log.dirty_files;
 
-    // Process files concurrently with a semaphore limiting to 8 at a time
+    // Ensure blobs directory exists once up front, not per-file
+    std::fs::create_dir_all(&blobs_dir)?;
+
+    // Helper: hash and save a single file, returning (path, sha)
+    let process_file = |file_path: &str| -> Result<(String, String), GitAiError> {
+        let content = if let Some(ref dirty_map) = *dirty_files {
+            dirty_map.get(file_path).cloned()
+        } else {
+            None
+        }
+        .unwrap_or_else(|| {
+            let abs_path = if std::path::Path::new(file_path).is_absolute() {
+                file_path.to_string()
+            } else {
+                repo_workdir.join(file_path).to_string_lossy().to_string()
+            };
+            std::fs::read_to_string(&abs_path).unwrap_or_default()
+        });
+
+        let mut hasher = Sha256::new();
+        hasher.update(content.as_bytes());
+        let sha = format!("{:x}", hasher.finalize());
+
+        // Skip writing if blob already exists (content-addressed dedup)
+        let blob_path = blobs_dir.join(&sha);
+        if !blob_path.exists() {
+            std::fs::write(&blob_path, content)?;
+        }
+
+        Ok((file_path.to_string(), sha))
+    };
+
+    // Fast path for small file counts: avoid async machinery overhead.
+    // Matches the SYNC_THRESHOLD used in get_checkpoint_entries.
+    if files.len() <= 30 {
+        let mut file_content_hashes = HashMap::with_capacity(files.len());
+        for file_path in files {
+            let (path, sha) = process_file(file_path)?;
+            file_content_hashes.insert(path, sha);
+        }
+        return Ok(file_content_hashes);
+    }
+
+    // Async path for many files
+    let dirty_files = working_log.dirty_files.clone();
+    let repo_workdir = working_log.repo_workdir.clone();
     let file_content_hashes = smol::block_on(async {
         let semaphore = Arc::new(smol::lock::Semaphore::new(8));
         let blobs_dir = Arc::new(blobs_dir);
@@ -1289,47 +1363,38 @@ fn save_current_file_states(
             let semaphore = Arc::clone(&semaphore);
 
             async move {
-                // Acquire semaphore permit
                 let _permit = semaphore.acquire().await;
 
-                // Read file content - check dirty_files first, then filesystem
                 let content = if let Some(ref dirty_map) = *dirty_files {
                     dirty_map.get(&file_path).cloned()
                 } else {
                     None
                 }
                 .unwrap_or_else(|| {
-                    // Construct absolute path
                     let abs_path = if std::path::Path::new(&file_path).is_absolute() {
                         file_path.clone()
                     } else {
                         repo_workdir.join(&file_path).to_string_lossy().to_string()
                     };
-                    // Read from filesystem
                     std::fs::read_to_string(&abs_path).unwrap_or_default()
                 });
 
-                // Create SHA256 hash of the content
                 let mut hasher = Sha256::new();
                 hasher.update(content.as_bytes());
                 let sha = format!("{:x}", hasher.finalize());
 
-                // Ensure blobs directory exists
-                std::fs::create_dir_all(&*blobs_dir)?;
-
-                // Write content to blob file
                 let blob_path = blobs_dir.join(&sha);
-                std::fs::write(blob_path, content)?;
+                if !blob_path.exists() {
+                    std::fs::write(&blob_path, content)?;
+                }
 
                 Ok::<(String, String), GitAiError>((file_path, sha))
             }
         });
 
-        // Collect results from all concurrent operations
         let results: Vec<Result<(String, String), GitAiError>> =
             stream::iter(futures).buffer_unordered(8).collect().await;
 
-        // Convert results into HashMap
         let mut file_content_hashes = HashMap::new();
         for result in results {
             let (file_path, content_hash) = result?;
@@ -1707,12 +1772,12 @@ async fn get_checkpoint_entries(
         .and_then(|c| c.tree().ok())
         .map(|t| t.id().to_string());
 
-    const MAX_CONCURRENT: usize = 30;
+    // Fast path for small file counts: skip async task spawning overhead.
+    // The overhead of Arc wrapping, semaphore creation, and smol::unblock per
+    // file exceeds the benefit of parallelism until we have many files.
+    // Benchmarks show async overhead regresses performance up to ~20 files.
+    const SYNC_THRESHOLD: usize = 30;
 
-    // Create a semaphore to limit concurrent tasks
-    let semaphore = Arc::new(smol::lock::Semaphore::new(MAX_CONCURRENT));
-
-    // Move other repeated allocations outside the loop
     let previous_file_state_by_file = Arc::new(previous_file_state_by_file);
     let ai_touched_files = Arc::new(ai_touched_files);
     let author_id = Arc::new(author_id);
@@ -1721,90 +1786,129 @@ async fn get_checkpoint_entries(
     let initial_attributions = Arc::new(initial_attributions);
     let initial_snapshot_contents = Arc::new(initial_snapshot_contents);
 
-    // Spawn tasks for each file
     let spawn_start = Instant::now();
-    let mut tasks = Vec::new();
-
-    for file_path in files {
-        let file_path = file_path.clone();
-        let repo = repo.clone();
-        let working_log = working_log.clone();
-        let previous_file_state_by_file = Arc::clone(&previous_file_state_by_file);
-        let ai_touched_files = Arc::clone(&ai_touched_files);
-        let author_id = Arc::clone(&author_id);
-        let head_commit_sha = Arc::clone(&head_commit_sha);
-        let head_tree_id = Arc::clone(&head_tree_id);
-        let blob_sha = file_content_hashes
-            .get(&file_path)
-            .cloned()
-            .unwrap_or_default();
-        let initial_attributions = Arc::clone(&initial_attributions);
-        let initial_snapshot_contents = Arc::clone(&initial_snapshot_contents);
-        let semaphore = Arc::clone(&semaphore);
-
-        let task = smol::spawn(async move {
-            // Acquire semaphore permit to limit concurrency
-            let _permit = semaphore.acquire().await;
-
-            // Wrap all the blocking git operations in smol::unblock
-            smol::unblock(move || {
-                get_checkpoint_entry_for_file(
-                    file_path,
-                    kind,
-                    is_pre_commit,
-                    repo,
-                    working_log,
-                    previous_file_state_by_file,
-                    ai_touched_files,
-                    blob_sha,
-                    author_id.clone(),
-                    head_commit_sha.clone(),
-                    head_tree_id.clone(),
-                    initial_attributions.clone(),
-                    initial_snapshot_contents.clone(),
-                    ts,
-                )
-            })
-            .await
-        });
-
-        tasks.push(task);
-    }
-    debug_log(&format!(
-        "[BENCHMARK] Spawning {} tasks took {:?}",
-        tasks.len(),
-        spawn_start.elapsed()
-    ));
-
-    // Await all tasks concurrently
-    let await_start = Instant::now();
-    let results = futures::future::join_all(tasks).await;
-    debug_log(&format!(
-        "[BENCHMARK] Awaiting {} tasks took {:?}",
-        results.len(),
-        await_start.elapsed()
-    ));
-
-    // Process results
-    let process_start = Instant::now();
-    let results_count = results.len();
     let mut entries = Vec::new();
     let mut file_stats = Vec::new();
-    for result in results {
-        match result {
-            Ok(Some((entry, stats))) => {
+
+    if files.len() <= SYNC_THRESHOLD {
+        // Synchronous fast path
+        for file_path in files {
+            let blob_sha = file_content_hashes
+                .get(file_path)
+                .cloned()
+                .unwrap_or_default();
+            let result = get_checkpoint_entry_for_file(
+                file_path.clone(),
+                kind,
+                is_pre_commit,
+                repo.clone(),
+                working_log.clone(),
+                Arc::clone(&previous_file_state_by_file),
+                Arc::clone(&ai_touched_files),
+                blob_sha,
+                Arc::clone(&author_id),
+                Arc::clone(&head_commit_sha),
+                Arc::clone(&head_tree_id),
+                Arc::clone(&initial_attributions),
+                Arc::clone(&initial_snapshot_contents),
+                ts,
+            )?;
+            if let Some((entry, stats)) = result {
                 entries.push(entry);
                 file_stats.push(stats);
             }
-            Ok(None) => {} // File had no changes
-            Err(e) => return Err(e),
         }
+        debug_log(&format!(
+            "[BENCHMARK] Synchronous processing of {} files took {:?}",
+            files.len(),
+            spawn_start.elapsed()
+        ));
+    } else {
+        // Async path for many files
+        const MAX_CONCURRENT: usize = 30;
+        let semaphore = Arc::new(smol::lock::Semaphore::new(MAX_CONCURRENT));
+
+        let mut tasks = Vec::new();
+
+        for file_path in files {
+            let file_path = file_path.clone();
+            let repo = repo.clone();
+            let working_log = working_log.clone();
+            let previous_file_state_by_file = Arc::clone(&previous_file_state_by_file);
+            let ai_touched_files = Arc::clone(&ai_touched_files);
+            let author_id = Arc::clone(&author_id);
+            let head_commit_sha = Arc::clone(&head_commit_sha);
+            let head_tree_id = Arc::clone(&head_tree_id);
+            let blob_sha = file_content_hashes
+                .get(&file_path)
+                .cloned()
+                .unwrap_or_default();
+            let initial_attributions = Arc::clone(&initial_attributions);
+            let initial_snapshot_contents = Arc::clone(&initial_snapshot_contents);
+            let semaphore = Arc::clone(&semaphore);
+
+            let task = smol::spawn(async move {
+                // Acquire semaphore permit to limit concurrency
+                let _permit = semaphore.acquire().await;
+
+                // Wrap all the blocking git operations in smol::unblock
+                smol::unblock(move || {
+                    get_checkpoint_entry_for_file(
+                        file_path,
+                        kind,
+                        is_pre_commit,
+                        repo,
+                        working_log,
+                        previous_file_state_by_file,
+                        ai_touched_files,
+                        blob_sha,
+                        author_id.clone(),
+                        head_commit_sha.clone(),
+                        head_tree_id.clone(),
+                        initial_attributions.clone(),
+                        initial_snapshot_contents.clone(),
+                        ts,
+                    )
+                })
+                .await
+            });
+
+            tasks.push(task);
+        }
+        debug_log(&format!(
+            "[BENCHMARK] Spawning {} tasks took {:?}",
+            tasks.len(),
+            spawn_start.elapsed()
+        ));
+
+        // Await all tasks concurrently
+        let await_start = Instant::now();
+        let results = futures::future::join_all(tasks).await;
+        debug_log(&format!(
+            "[BENCHMARK] Awaiting {} tasks took {:?}",
+            results.len(),
+            await_start.elapsed()
+        ));
+
+        // Process results
+        let process_start = Instant::now();
+        let results_count = results.len();
+        for result in results {
+            match result {
+                Ok(Some((entry, stats))) => {
+                    entries.push(entry);
+                    file_stats.push(stats);
+                }
+                Ok(None) => {} // File had no changes
+                Err(e) => return Err(e),
+            }
+        }
+        debug_log(&format!(
+            "[BENCHMARK] Processing {} results took {:?}",
+            results_count,
+            process_start.elapsed()
+        ));
     }
-    debug_log(&format!(
-        "[BENCHMARK] Processing {} results took {:?}",
-        results_count,
-        process_start.elapsed()
-    ));
     debug_log(&format!(
         "[BENCHMARK] get_checkpoint_entries function total took {:?}",
         entries_fn_start.elapsed()
@@ -1854,16 +1958,19 @@ fn make_entry_for_file(
     ));
 
     let update_start = Instant::now();
-    let new_attributions = tracker.update_attributions_for_checkpoint(
-        previous_content,
-        content,
-        &filled_in_prev_attributions,
-        author_id,
-        ts,
-        is_ai_checkpoint,
-    )?;
+    // Use the _with_stats variant to get line stats from the same diff computation,
+    // avoiding a redundant second diff pass in compute_file_line_stats.
+    let (new_attributions, diff_line_stats) = tracker
+        .update_attributions_for_checkpoint_with_stats(
+            previous_content,
+            content,
+            &filled_in_prev_attributions,
+            author_id,
+            ts,
+            is_ai_checkpoint,
+        )?;
     debug_log(&format!(
-        "[BENCHMARK]   update_attributions for {} took {:?}",
+        "[BENCHMARK]   update_attributions_with_stats for {} took {:?}",
         file_path,
         update_start.elapsed()
     ));
@@ -1884,14 +1991,12 @@ fn make_entry_for_file(
         line_attr_start.elapsed()
     ));
 
-    // Compute line stats while we already have both contents in memory
-    let stats_start = Instant::now();
-    let line_stats = compute_file_line_stats(previous_content, content);
-    debug_log(&format!(
-        "[BENCHMARK]   compute_file_line_stats for {} took {:?}",
-        file_path,
-        stats_start.elapsed()
-    ));
+    let line_stats = FileLineStats {
+        additions: diff_line_stats.additions,
+        deletions: diff_line_stats.deletions,
+        additions_sloc: diff_line_stats.additions_sloc,
+        deletions_sloc: diff_line_stats.deletions_sloc,
+    };
 
     let entry = WorkingLogEntry::new(
         file_path.to_string(),

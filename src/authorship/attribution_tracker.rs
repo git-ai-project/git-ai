@@ -261,10 +261,21 @@ impl Ord for Token {
     }
 }
 
+/// Line-level statistics derived from the diff computation.
+/// Returned alongside attribution results so callers don't need a second diff pass.
+#[derive(Debug, Clone, Default)]
+pub struct DiffLineStats {
+    pub additions: u32,
+    pub deletions: u32,
+    pub additions_sloc: u32,
+    pub deletions_sloc: u32,
+}
+
 #[derive(Default)]
 struct DiffComputation {
     diffs: Vec<ByteDiff>,
     substantive_new_ranges: Vec<(usize, usize)>,
+    line_stats: DiffLineStats,
 }
 
 /// Configuration for the attribution tracker
@@ -353,6 +364,57 @@ impl AttributionTracker {
 
                 self.push_equal_lines(op, &old_lines, old_content, &mut computation.diffs)?;
             } else {
+                // Accumulate line stats from non-equal ops
+                match &op {
+                    DiffOp::Delete {
+                        old_index, old_len, ..
+                    } => {
+                        computation.line_stats.deletions += *old_len as u32;
+                        for i in *old_index..(*old_index + *old_len) {
+                            if let Some(line) = old_lines.get(i)
+                                && !line.text.trim().is_empty()
+                            {
+                                computation.line_stats.deletions_sloc += 1;
+                            }
+                        }
+                    }
+                    DiffOp::Insert {
+                        new_index, new_len, ..
+                    } => {
+                        computation.line_stats.additions += *new_len as u32;
+                        for i in *new_index..(*new_index + *new_len) {
+                            if let Some(line) = new_lines.get(i)
+                                && !line.text.trim().is_empty()
+                            {
+                                computation.line_stats.additions_sloc += 1;
+                            }
+                        }
+                    }
+                    DiffOp::Replace {
+                        old_index,
+                        old_len,
+                        new_index,
+                        new_len,
+                    } => {
+                        computation.line_stats.deletions += *old_len as u32;
+                        computation.line_stats.additions += *new_len as u32;
+                        for i in *old_index..(*old_index + *old_len) {
+                            if let Some(line) = old_lines.get(i)
+                                && !line.text.trim().is_empty()
+                            {
+                                computation.line_stats.deletions_sloc += 1;
+                            }
+                        }
+                        for i in *new_index..(*new_index + *new_len) {
+                            if let Some(line) = new_lines.get(i)
+                                && !line.text.trim().is_empty()
+                            {
+                                computation.line_stats.additions_sloc += 1;
+                            }
+                        }
+                    }
+                    DiffOp::Equal { .. } => unreachable!(),
+                }
                 pending_changed.push(op);
             }
         }
@@ -497,7 +559,10 @@ impl AttributionTracker {
         Ok(())
     }
 
-    /// Attribute all unattributed ranges to the given author
+    /// Attribute all unattributed ranges to the given author.
+    ///
+    /// Uses a merged-intervals sweep for O(n + m) where n = content chars,
+    /// m = number of attributions (instead of the previous O(n * m)).
     pub fn attribute_unattributed_ranges(
         &self,
         content: &str,
@@ -505,37 +570,51 @@ impl AttributionTracker {
         author: &str,
         ts: u128,
     ) -> Vec<Attribution> {
-        let mut attributions = prev_attributions.to_vec();
-        let mut range_start: Option<usize> = None;
+        if content.is_empty() {
+            return prev_attributions.to_vec();
+        }
 
-        // Find all unattributed character ranges on UTF-8 boundaries.
-        for (idx, ch) in content.char_indices() {
-            let end = idx + ch.len_utf8();
-            let covered = attributions.iter().any(|a| a.overlaps(idx, end));
+        // Build sorted, merged coverage intervals from existing attributions.
+        // This lets us sweep through the content with a single cursor.
+        let mut intervals: Vec<(usize, usize)> = prev_attributions
+            .iter()
+            .filter(|a| a.start < a.end)
+            .map(|a| (a.start, a.end))
+            .collect();
+        intervals.sort_unstable_by_key(|&(s, _)| s);
 
-            if covered {
-                if let Some(start) = range_start.take()
-                    && start < idx
-                {
-                    attributions.push(Attribution::new(start, idx, author.to_string(), ts));
-                }
-            } else if range_start.is_none() {
-                range_start = Some(idx);
+        // Merge overlapping intervals
+        let mut merged: Vec<(usize, usize)> = Vec::with_capacity(intervals.len());
+        for (s, e) in intervals {
+            if let Some(last) = merged.last_mut()
+                && s <= last.1
+            {
+                last.1 = last.1.max(e);
+                continue;
             }
+            merged.push((s, e));
         }
 
-        if let Some(start) = range_start.take()
-            && start < content.len()
-        {
-            attributions.push(Attribution::new(
-                start,
-                content.len(),
-                author.to_string(),
-                ts,
-            ));
+        // Sweep: find gaps between merged intervals within [0, content.len())
+        let mut new_attributions = Vec::new();
+        let content_len = content.len();
+        let mut pos = 0;
+        for &(start, end) in &merged {
+            if pos < start && pos < content_len {
+                // Gap before this interval — attribute it
+                let gap_end = start.min(content_len);
+                new_attributions.push(Attribution::new(pos, gap_end, author.to_string(), ts));
+            }
+            pos = end;
+        }
+        // Gap after the last interval
+        if pos < content_len {
+            new_attributions.push(Attribution::new(pos, content_len, author.to_string(), ts));
         }
 
-        attributions
+        let mut result = prev_attributions.to_vec();
+        result.extend(new_attributions);
+        result
     }
 
     /// Update attributions from old content to new content
@@ -575,14 +654,38 @@ impl AttributionTracker {
         ts: u128,
         is_ai_checkpoint: bool,
     ) -> Result<Vec<Attribution>, GitAiError> {
+        let (attrs, _) = self.update_attributions_for_checkpoint_with_stats(
+            old_content,
+            new_content,
+            old_attributions,
+            current_author,
+            ts,
+            is_ai_checkpoint,
+        )?;
+        Ok(attrs)
+    }
+
+    /// Like `update_attributions_for_checkpoint`, but also returns line-level diff
+    /// statistics derived from the same diff computation. This avoids a redundant
+    /// second diff pass when the caller needs both attributions and line stats.
+    pub fn update_attributions_for_checkpoint_with_stats(
+        &self,
+        old_content: &str,
+        new_content: &str,
+        old_attributions: &[Attribution],
+        current_author: &str,
+        ts: u128,
+        is_ai_checkpoint: bool,
+    ) -> Result<(Vec<Attribution>, DiffLineStats), GitAiError> {
         // Cursor-based scans in transform_attributions assume sorted ranges.
         // Normalize once at the boundary so callers can pass ranges in any order.
         let sorted_old_storage = (!is_attribution_list_sorted(old_attributions))
             .then(|| sort_attributions_for_transform(old_attributions));
         let old_attributions = sorted_old_storage.as_deref().unwrap_or(old_attributions);
 
-        // Phase 1: Compute diff
+        // Phase 1: Compute diff (also accumulates line stats)
         let diff_result = self.compute_diffs(old_content, new_content, is_ai_checkpoint)?;
+        let line_stats = diff_result.line_stats.clone();
 
         // Phase 2: Build deletion and insertion catalogs
         let (deletions, insertions) = self.build_diff_catalog(&diff_result.diffs);
@@ -612,7 +715,7 @@ impl AttributionTracker {
         );
 
         // Phase 5: Merge and clean up
-        Ok(self.merge_attributions(new_attributions))
+        Ok((self.merge_attributions(new_attributions), line_stats))
     }
 
     fn should_skip_move_detection(

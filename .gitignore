@@ -36,3 +36,4 @@ tasks/
 # Fuzz testing
 fuzz/artifacts/
 fuzz/corpus/
+src/authorship/snapshots/*.snap.new
