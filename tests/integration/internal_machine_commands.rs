@@ -2,7 +2,39 @@ use crate::repos::test_repo::{TestRepo, real_git_executable};
 use serde_json::json;
 use std::fs;
 use std::io::Write;
+use std::path::Path;
 use std::process::{Command, Stdio};
+
+fn set_sharded_notes(repo: &mut TestRepo, enabled: bool) {
+    repo.patch_git_ai_config(|patch| {
+        let mut flags = match patch.feature_flags.take() {
+            Some(existing) if existing.is_object() => existing,
+            _ => json!({}),
+        };
+        let flags_obj = flags
+            .as_object_mut()
+            .expect("feature_flags value should be an object");
+        flags_obj.insert("sharded_notes".to_string(), json!(enabled));
+        patch.feature_flags = Some(flags);
+    });
+}
+
+fn enable_sharded_notes(repo: &mut TestRepo) {
+    set_sharded_notes(repo, true);
+}
+
+fn disable_sharded_notes(repo: &mut TestRepo) {
+    set_sharded_notes(repo, false);
+}
+
+fn git_ref_exists(repo_path: &Path, ref_name: &str) -> bool {
+    Command::new("git")
+        .args(["-C", repo_path.to_str().unwrap()])
+        .args(["show-ref", "--verify", "--quiet", ref_name])
+        .status()
+        .expect("git should run")
+        .success()
+}
 
 #[test]
 fn test_effective_ignore_patterns_internal_command_json() {
@@ -407,4 +439,310 @@ fn test_push_authorship_notes_retries_on_concurrent_push() {
         notes_list.contains(&other_sha),
         "upstream should have note from concurrent pusher"
     );
+}
+
+/// With sharded_notes enabled, push-authorship-notes writes both legacy refs/notes/ai
+/// AND shard refs (refs/notes/ai-s/XX) to the upstream.
+#[test]
+fn test_sharded_notes_dual_write_on_push() {
+    let (mut mirror, upstream) = TestRepo::new_with_remote();
+    enable_sharded_notes(&mut mirror);
+
+    fs::write(mirror.path().join("shard_test.txt"), "sharded notes test\n")
+        .expect("should write file");
+    let commit = mirror
+        .stage_all_and_commit("add shard test file")
+        .expect("commit should succeed");
+
+    let request = json!({ "remote_name": "origin" }).to_string();
+
+    let push_output = mirror
+        .git_ai(&["push-authorship-notes", "--json", &request])
+        .expect("push should succeed with sharded notes");
+    let push_json: serde_json::Value =
+        serde_json::from_str(push_output.trim()).expect("valid JSON");
+    assert_eq!(push_json["ok"], true);
+
+    // Verify legacy ref exists on upstream
+    let legacy_note = git_plumbing(
+        upstream.path(),
+        &["notes", "--ref=ai", "show", &commit.commit_sha],
+        None,
+    );
+    assert!(
+        !legacy_note.trim().is_empty(),
+        "legacy notes ref should have the note on upstream"
+    );
+
+    // Verify shard ref exists on upstream
+    let shard_suffix = &commit.commit_sha[..2];
+    let shard_ref = format!("ai-s/{}", shard_suffix);
+    let shard_note = git_plumbing(
+        upstream.path(),
+        &[
+            "notes",
+            &format!("--ref={}", shard_ref),
+            "show",
+            &commit.commit_sha,
+        ],
+        None,
+    );
+    assert!(
+        !shard_note.trim().is_empty(),
+        "shard ref {} should have the note on upstream",
+        shard_ref
+    );
+
+    // Both should have identical content
+    assert_eq!(legacy_note.trim(), shard_note.trim());
+}
+
+/// A non-sharded client writes notes. A sharded client can read them via union-read
+/// (falls back to legacy ref when shard ref doesn't exist).
+#[test]
+fn test_sharded_notes_union_read_legacy_fallback() {
+    let (mut mirror, _upstream) = TestRepo::new_with_remote();
+
+    fs::write(mirror.path().join("legacy.txt"), "legacy only write\n").expect("should write file");
+    let commit = mirror
+        .stage_all_and_commit("legacy commit")
+        .expect("commit should succeed");
+
+    // Push WITHOUT sharded notes (legacy-only write)
+    let request = json!({ "remote_name": "origin" }).to_string();
+    mirror
+        .git_ai(&["push-authorship-notes", "--json", &request])
+        .expect("legacy push should succeed");
+
+    // Verify legacy note exists locally
+    let legacy_note = git_plumbing(
+        mirror.path(),
+        &["notes", "--ref=ai", "show", &commit.commit_sha],
+        None,
+    );
+    assert!(!legacy_note.trim().is_empty(), "legacy note should exist");
+
+    // Verify NO shard ref exists
+    let shard_suffix = &commit.commit_sha[..2];
+    let shard_ref_full = format!("refs/notes/ai-s/{}", shard_suffix);
+    assert!(
+        !git_ref_exists(mirror.path(), &shard_ref_full),
+        "shard ref should NOT exist after legacy-only write"
+    );
+
+    // Now do a blame-analysis with sharded notes enabled — it should still find the note
+    // via legacy fallback
+    let blame_request = json!({
+        "file_path": "legacy.txt",
+        "options": {
+            "line_ranges": [[1, 1]],
+            "return_human_authors_as_human": true,
+            "split_hunks_by_ai_author": false
+        }
+    })
+    .to_string();
+
+    enable_sharded_notes(&mut mirror);
+    let blame_output = mirror
+        .git_ai(&["blame-analysis", "--json", &blame_request])
+        .expect("blame with sharded notes should succeed");
+    let blame_json: serde_json::Value =
+        serde_json::from_str(blame_output.trim()).expect("valid blame JSON");
+
+    // The blame should find the note (via legacy fallback) and report line authors
+    let line_authors = blame_json["line_authors"]
+        .as_object()
+        .expect("line_authors should be present");
+    assert!(
+        !line_authors.is_empty(),
+        "blame should find authorship via legacy fallback"
+    );
+}
+
+/// Mixed-team scenario: one clone pushes with sharding, another without.
+/// Both should be able to read each other's notes after fetch.
+#[test]
+fn test_sharded_notes_mixed_team_interop() {
+    let (mut mirror, upstream) = TestRepo::new_with_remote();
+    enable_sharded_notes(&mut mirror);
+
+    // Create a second clone of the same upstream
+    let base = std::env::temp_dir();
+    let clone2_path = base.join(format!("sharded-clone2-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&clone2_path);
+    let clone_output = Command::new("git")
+        .args([
+            "clone",
+            upstream.path().to_str().unwrap(),
+            clone2_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("clone should succeed");
+    assert!(clone_output.status.success(), "clone2 should succeed");
+
+    // Mirror (sharded client) creates a commit and pushes notes
+    fs::write(
+        mirror.path().join("from_sharded.txt"),
+        "from sharded client\n",
+    )
+    .expect("write file");
+    let sharded_commit = mirror
+        .stage_all_and_commit("sharded client commit")
+        .expect("commit should succeed");
+    mirror
+        .git_og(&["push", "origin", "HEAD"])
+        .expect("push code should succeed");
+
+    let request = json!({ "remote_name": "origin" }).to_string();
+    mirror
+        .git_ai(&["push-authorship-notes", "--json", &request])
+        .expect("sharded push should succeed");
+
+    // Clone2 (non-sharded client) fetches and reads the note via legacy ref
+    let _ = Command::new("git")
+        .args([
+            "-C",
+            clone2_path.to_str().unwrap(),
+            "pull",
+            "origin",
+            "main",
+        ])
+        .output();
+    let _ = git_plumbing(
+        &clone2_path,
+        &["fetch", "origin", "+refs/notes/ai:refs/notes/ai"],
+        None,
+    );
+    let note_content = git_plumbing(
+        &clone2_path,
+        &["notes", "--ref=ai", "show", &sharded_commit.commit_sha],
+        None,
+    );
+    assert!(
+        !note_content.trim().is_empty(),
+        "non-sharded client should read notes via legacy ref"
+    );
+
+    // Clean up
+    let _ = fs::remove_dir_all(&clone2_path);
+}
+
+#[test]
+fn test_non_sharded_push_does_not_push_existing_shard_refs() {
+    let (mut mirror, upstream) = TestRepo::new_with_remote();
+    enable_sharded_notes(&mut mirror);
+
+    fs::write(
+        mirror.path().join("local-shard-only.txt"),
+        "local shard should stay local when flag is off\n",
+    )
+    .expect("should write file");
+    let commit = mirror
+        .stage_all_and_commit("create local shard ref")
+        .expect("commit should succeed");
+    mirror
+        .git_og(&["push", "origin", "HEAD"])
+        .expect("push code should succeed");
+
+    let shard_ref_full = format!("refs/notes/ai-s/{}", &commit.commit_sha[..2]);
+    assert!(
+        git_ref_exists(mirror.path(), &shard_ref_full),
+        "local shard ref should exist before disabling the flag"
+    );
+    assert!(
+        !git_ref_exists(upstream.path(), &shard_ref_full),
+        "upstream should not have the shard ref before notes are pushed"
+    );
+
+    disable_sharded_notes(&mut mirror);
+
+    let request = json!({ "remote_name": "origin" }).to_string();
+    let push_output = mirror
+        .git_ai(&["push-authorship-notes", "--json", &request])
+        .expect("legacy-only push should succeed");
+    let push_json: serde_json::Value =
+        serde_json::from_str(push_output.trim()).expect("valid JSON");
+    assert_eq!(push_json["ok"], true);
+
+    let legacy_note = git_plumbing(
+        upstream.path(),
+        &["notes", "--ref=ai", "show", &commit.commit_sha],
+        None,
+    );
+    assert!(
+        !legacy_note.trim().is_empty(),
+        "legacy note should still be pushed with the flag disabled"
+    );
+    assert!(
+        !git_ref_exists(upstream.path(), &shard_ref_full),
+        "default-off push should not propagate shard refs that already exist locally"
+    );
+}
+
+#[test]
+fn test_non_sharded_fetch_does_not_fetch_shards_from_upstream() {
+    let (mut mirror, upstream) = TestRepo::new_with_remote();
+    enable_sharded_notes(&mut mirror);
+
+    fs::write(
+        mirror.path().join("remote-shard.txt"),
+        "remote shard should stay remote when flag is off\n",
+    )
+    .expect("should write file");
+    let commit = mirror
+        .stage_all_and_commit("create upstream shard ref")
+        .expect("commit should succeed");
+    mirror
+        .git_og(&["push", "origin", "HEAD"])
+        .expect("push code should succeed");
+
+    let request = json!({ "remote_name": "origin" }).to_string();
+    mirror
+        .git_ai(&["push-authorship-notes", "--json", &request])
+        .expect("sharded push should succeed");
+
+    let shard_ref_full = format!("refs/notes/ai-s/{}", &commit.commit_sha[..2]);
+    assert!(
+        git_ref_exists(upstream.path(), &shard_ref_full),
+        "upstream should have the shard ref before the non-sharded fetch"
+    );
+
+    let base = std::env::temp_dir();
+    let clone2_path = base.join(format!("non-sharded-fetch-clone-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&clone2_path);
+
+    let clone_output = Command::new("git")
+        .args([
+            "clone",
+            upstream.path().to_str().unwrap(),
+            clone2_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("clone should succeed");
+    assert!(clone_output.status.success(), "clone2 should succeed");
+
+    let clone2 = TestRepo::new_at_path_with_mode(&clone2_path, mirror.mode());
+    let fetch_output = clone2
+        .git_ai(&["fetch-authorship-notes", "--json", &request])
+        .expect("legacy-only fetch should succeed");
+    let fetch_json: serde_json::Value =
+        serde_json::from_str(fetch_output.trim()).expect("valid JSON");
+    assert_eq!(fetch_json["notes_existence"], "found");
+
+    let legacy_note = git_plumbing(
+        clone2.path(),
+        &["notes", "--ref=ai", "show", &commit.commit_sha],
+        None,
+    );
+    assert!(
+        !legacy_note.trim().is_empty(),
+        "legacy note should still be fetched with the flag disabled"
+    );
+    assert!(
+        !git_ref_exists(clone2.path(), &shard_ref_full),
+        "default-off fetch should not materialize shard refs locally"
+    );
+
+    drop(clone2);
+    let _ = fs::remove_dir_all(&clone2_path);
 }

@@ -23,6 +23,7 @@ fn setup() {
         async_mode: false,
         git_hooks_enabled: false,
         git_hooks_externally_managed: false,
+        sharded_notes: false,
     };
 
     git_ai::config::Config::set_test_feature_flags(test_flags.clone());

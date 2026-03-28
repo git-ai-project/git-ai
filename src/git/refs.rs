@@ -10,22 +10,83 @@ use std::collections::{HashMap, HashSet};
 pub const AI_AUTHORSHIP_REFNAME: &str = "ai";
 pub const AI_AUTHORSHIP_PUSH_REFSPEC: &str = "refs/notes/ai:refs/notes/ai";
 
+// Sharded notes: 256 independent refs keyed by first 2 hex chars of the annotated
+// commit SHA. This dramatically reduces push contention on busy monorepos.
+// Uses "ai-s" prefix (not "ai/" which conflicts with "ai" as a loose ref file).
+pub const AI_SHARDED_NOTES_PREFIX: &str = "refs/notes/ai-s/";
+
+/// Return the shard suffix (first 2 hex chars) for a given commit SHA.
+/// Panics if commit_sha is shorter than 2 characters (should never happen with real SHAs).
+pub fn shard_for_commit(commit_sha: &str) -> &str {
+    debug_assert!(
+        commit_sha.len() >= 2,
+        "shard_for_commit called with SHA shorter than 2 chars: {:?}",
+        commit_sha
+    );
+    if commit_sha.len() < 2 {
+        return "00";
+    }
+    &commit_sha[..2]
+}
+
+/// Return the full sharded ref (e.g. "refs/notes/ai-s/ab") for a commit.
+fn sharded_ref_for_commit(commit_sha: &str) -> String {
+    format!(
+        "{}{}",
+        AI_SHARDED_NOTES_PREFIX,
+        shard_for_commit(commit_sha)
+    )
+}
+
+/// Return the --ref= argument value for the shard of a commit (e.g. "ai-s/ab").
+fn sharded_refname_for_commit(commit_sha: &str) -> String {
+    format!("ai-s/{}", shard_for_commit(commit_sha))
+}
+
+fn sharded_notes_enabled() -> bool {
+    if crate::daemon::daemon_process_active() {
+        let config = crate::config::Config::fresh();
+        config.get_feature_flags().sharded_notes
+    } else {
+        crate::config::Config::get()
+            .get_feature_flags()
+            .sharded_notes
+    }
+}
+
 pub fn notes_add(
     repo: &Repository,
     commit_sha: &str,
     note_content: &str,
 ) -> Result<(), GitAiError> {
+    // Always write to the legacy ref (backward compat for old clients)
     let mut args = repo.global_args_for_exec();
     args.push("notes".to_string());
     args.push("--ref=ai".to_string());
     args.push("add".to_string());
-    args.push("-f".to_string()); // Always force overwrite
+    args.push("-f".to_string());
     args.push("-F".to_string());
-    args.push("-".to_string()); // Read note content from stdin
+    args.push("-".to_string());
     args.push(commit_sha.to_string());
-
-    // Use stdin to provide the note content to avoid command line length limits
     exec_git_stdin(&args, note_content.as_bytes())?;
+
+    // Dual-write to shard ref when sharded notes are enabled
+    if sharded_notes_enabled() {
+        let shard_ref = sharded_refname_for_commit(commit_sha);
+        let mut args = repo.global_args_for_exec();
+        args.push("notes".to_string());
+        args.push(format!("--ref={}", shard_ref));
+        args.push("add".to_string());
+        args.push("-f".to_string());
+        args.push("-F".to_string());
+        args.push("-".to_string());
+        args.push(commit_sha.to_string());
+        // Best-effort: shard write failure should not block the operation
+        if let Err(e) = exec_git_stdin(&args, note_content.as_bytes()) {
+            debug_log(&format!("shard notes_add failed for {}: {}", shard_ref, e));
+        }
+    }
+
     crate::authorship::git_ai_hooks::post_notes_updated_single(repo, commit_sha, note_content);
     Ok(())
 }
@@ -44,6 +105,18 @@ fn flat_note_pathspec_for_commit(commit_sha: &str) -> String {
 
 fn fanout_note_pathspec_for_commit(commit_sha: &str) -> String {
     format!("refs/notes/ai:{}", notes_path_for_object(commit_sha))
+}
+
+fn sharded_flat_note_pathspec_for_commit(commit_sha: &str) -> String {
+    format!("{}:{}", sharded_ref_for_commit(commit_sha), commit_sha)
+}
+
+fn sharded_fanout_note_pathspec_for_commit(commit_sha: &str) -> String {
+    format!(
+        "{}:{}",
+        sharded_ref_for_commit(commit_sha),
+        notes_path_for_object(commit_sha)
+    )
 }
 
 fn parse_batch_check_blob_oid(line: &str) -> Option<String> {
@@ -135,6 +208,7 @@ fn batch_read_blob_contents(
 /// Resolve authorship note blob OIDs for a set of commits using one batched cat-file call.
 ///
 /// Returns a map of commit SHA -> note blob SHA for commits that currently have notes.
+/// When sharded notes are enabled, checks shard refs first and falls back to the legacy ref.
 pub fn note_blob_oids_for_commits(
     repo: &Repository,
     commit_shas: &[String],
@@ -143,14 +217,22 @@ pub fn note_blob_oids_for_commits(
         return Ok(HashMap::new());
     }
 
+    let sharded = sharded_notes_enabled();
+
     let mut args = repo.global_args_for_exec();
     args.push("cat-file".to_string());
     args.push("--batch-check".to_string());
 
+    // When sharded: 4 lines per commit (shard flat, shard fanout, legacy flat, legacy fanout)
+    // When not sharded: 2 lines per commit (legacy flat, legacy fanout)
     let mut stdin_data = String::new();
     for commit_sha in commit_shas {
-        // Notes can be stored with either flat paths (<sha>) or fanout paths (<aa>/<bb...>).
-        // Query both forms so this works regardless of repository note fanout state.
+        if sharded {
+            stdin_data.push_str(&sharded_flat_note_pathspec_for_commit(commit_sha));
+            stdin_data.push('\n');
+            stdin_data.push_str(&sharded_fanout_note_pathspec_for_commit(commit_sha));
+            stdin_data.push('\n');
+        }
         stdin_data.push_str(&flat_note_pathspec_for_commit(commit_sha));
         stdin_data.push('\n');
         stdin_data.push_str(&fanout_note_pathspec_for_commit(commit_sha));
@@ -163,6 +245,20 @@ pub fn note_blob_oids_for_commits(
     let mut result = HashMap::new();
 
     for commit_sha in commit_shas {
+        if sharded {
+            let shard_flat = lines.next().unwrap_or_default();
+            let shard_fanout = lines.next().unwrap_or_default();
+            if let Some(oid) = parse_batch_check_blob_oid(shard_flat)
+                .or_else(|| parse_batch_check_blob_oid(shard_fanout))
+            {
+                // Consume legacy lines but don't use them
+                let _ = lines.next();
+                let _ = lines.next();
+                result.insert(commit_sha.clone(), oid);
+                continue;
+            }
+        }
+
         let Some(flat_line) = lines.next() else {
             break;
         };
@@ -178,23 +274,56 @@ pub fn note_blob_oids_for_commits(
     Ok(result)
 }
 
+/// Resolve the current tip of a notes ref, returning None if the ref doesn't exist.
+fn resolve_notes_tip(repo: &Repository, notes_ref: &str) -> Result<Option<String>, GitAiError> {
+    let mut args = repo.global_args_for_exec();
+    args.push("rev-parse".to_string());
+    args.push("--verify".to_string());
+    args.push(notes_ref.to_string());
+    match exec_git(&args) {
+        Ok(output) => Ok(Some(String::from_utf8(output.stdout)?.trim().to_string())),
+        Err(GitAiError::GitCliError {
+            code: Some(128), ..
+        })
+        | Err(GitAiError::GitCliError { code: Some(1), .. }) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Append a fast-import commit block for a notes ref to `script`.
+/// `entries` are (mark_index, commit_sha) pairs — marks must already be defined as blobs.
+fn append_notes_commit_block(
+    script: &mut Vec<u8>,
+    notes_ref: &str,
+    existing_tip: Option<&str>,
+    entries: &[(usize, &str)],
+    now: u64,
+) {
+    script.extend_from_slice(format!("commit {}\n", notes_ref).as_bytes());
+    script.extend_from_slice(format!("committer git-ai <git-ai@local> {} +0000\n", now).as_bytes());
+    script.extend_from_slice(b"data 0\n");
+    if let Some(tip) = existing_tip {
+        script.extend_from_slice(format!("from {}\n", tip).as_bytes());
+    }
+
+    for (mark_idx, commit_sha) in entries {
+        let fanout_path = notes_path_for_object(commit_sha);
+        let flat_path = *commit_sha;
+        if flat_path != fanout_path {
+            script.extend_from_slice(format!("D {}\n", flat_path).as_bytes());
+        }
+        script.extend_from_slice(format!("D {}\n", fanout_path).as_bytes());
+        script.extend_from_slice(format!("M 100644 :{} {}\n", mark_idx, fanout_path).as_bytes());
+    }
+    script.extend_from_slice(b"\n");
+}
+
 pub fn notes_add_batch(repo: &Repository, entries: &[(String, String)]) -> Result<(), GitAiError> {
     if entries.is_empty() {
         return Ok(());
     }
 
-    let mut args = repo.global_args_for_exec();
-    args.push("rev-parse".to_string());
-    args.push("--verify".to_string());
-    args.push("refs/notes/ai".to_string());
-    let existing_notes_tip = match exec_git(&args) {
-        Ok(output) => Some(String::from_utf8(output.stdout)?.trim().to_string()),
-        Err(GitAiError::GitCliError {
-            code: Some(128), ..
-        })
-        | Err(GitAiError::GitCliError { code: Some(1), .. }) => None,
-        Err(e) => return Err(e),
-    };
+    let existing_notes_tip = resolve_notes_tip(repo, "refs/notes/ai")?;
 
     let mut deduped_entries: Vec<(String, String)> = Vec::new();
     let mut seen = HashSet::new();
@@ -210,8 +339,25 @@ pub fn notes_add_batch(repo: &Repository, entries: &[(String, String)]) -> Resul
         .map_err(|e| GitAiError::Generic(format!("System clock before epoch: {}", e)))?
         .as_secs();
 
+    let sharded = sharded_notes_enabled();
+
+    // Resolve shard tips upfront if sharding is enabled
+    let shard_tips: HashMap<String, Option<String>> = if sharded {
+        let mut tips = HashMap::new();
+        for (commit_sha, _) in &deduped_entries {
+            let shard_ref = sharded_ref_for_commit(commit_sha);
+            if !tips.contains_key(&shard_ref) {
+                tips.insert(shard_ref.clone(), resolve_notes_tip(repo, &shard_ref)?);
+            }
+        }
+        tips
+    } else {
+        HashMap::new()
+    };
+
     let mut script = Vec::<u8>::new();
 
+    // Emit blob definitions with marks
     for (idx, (_commit_sha, note_content)) in deduped_entries.iter().enumerate() {
         script.extend_from_slice(b"blob\n");
         script.extend_from_slice(format!("mark :{}\n", idx + 1).as_bytes());
@@ -220,23 +366,42 @@ pub fn notes_add_batch(repo: &Repository, entries: &[(String, String)]) -> Resul
         script.extend_from_slice(b"\n");
     }
 
-    script.extend_from_slice(b"commit refs/notes/ai\n");
-    script.extend_from_slice(format!("committer git-ai <git-ai@local> {} +0000\n", now).as_bytes());
-    script.extend_from_slice(b"data 0\n");
-    if let Some(existing_tip) = existing_notes_tip {
-        script.extend_from_slice(format!("from {}\n", existing_tip).as_bytes());
-    }
+    // Legacy commit block (always written)
+    let legacy_entries: Vec<(usize, &str)> = deduped_entries
+        .iter()
+        .enumerate()
+        .map(|(idx, (sha, _))| (idx + 1, sha.as_str()))
+        .collect();
+    append_notes_commit_block(
+        &mut script,
+        "refs/notes/ai",
+        existing_notes_tip.as_deref(),
+        &legacy_entries,
+        now,
+    );
 
-    for (idx, (commit_sha, _note_content)) in deduped_entries.iter().enumerate() {
-        let fanout_path = notes_path_for_object(commit_sha);
-        let flat_path = commit_sha.clone();
-        if flat_path != fanout_path {
-            script.extend_from_slice(format!("D {}\n", flat_path).as_bytes());
+    // Shard commit blocks (one per unique shard, when enabled)
+    if sharded {
+        // Group entries by shard
+        let mut shard_entries: HashMap<String, Vec<(usize, &str)>> = HashMap::new();
+        for (idx, (commit_sha, _)) in deduped_entries.iter().enumerate() {
+            let shard_ref = sharded_ref_for_commit(commit_sha);
+            shard_entries
+                .entry(shard_ref)
+                .or_default()
+                .push((idx + 1, commit_sha.as_str()));
         }
-        script.extend_from_slice(format!("D {}\n", fanout_path).as_bytes());
-        script.extend_from_slice(format!("M 100644 :{} {}\n", idx + 1, fanout_path).as_bytes());
+
+        // Sort shard keys for deterministic output
+        let mut shard_keys: Vec<&String> = shard_entries.keys().collect();
+        shard_keys.sort();
+
+        for shard_ref in shard_keys {
+            let entries = &shard_entries[shard_ref];
+            let tip = shard_tips.get(shard_ref).and_then(|t| t.as_deref());
+            append_notes_commit_block(&mut script, shard_ref, tip, entries, now);
+        }
     }
-    script.extend_from_slice(b"\n");
 
     let mut fast_import_args = repo.global_args_for_exec();
     fast_import_args.push("fast-import".to_string());
@@ -245,6 +410,32 @@ pub fn notes_add_batch(repo: &Repository, entries: &[(String, String)]) -> Resul
     crate::authorship::git_ai_hooks::post_notes_updated(repo, &deduped_entries);
 
     Ok(())
+}
+
+/// Append a fast-import commit block that references existing blob OIDs (no marks needed).
+fn append_notes_blob_commit_block(
+    script: &mut Vec<u8>,
+    notes_ref: &str,
+    existing_tip: Option<&str>,
+    entries: &[(&str, &str)], // (commit_sha, blob_oid)
+    now: u64,
+) {
+    script.extend_from_slice(format!("commit {}\n", notes_ref).as_bytes());
+    script.extend_from_slice(format!("committer git-ai <git-ai@local> {} +0000\n", now).as_bytes());
+    script.extend_from_slice(b"data 0\n");
+    if let Some(tip) = existing_tip {
+        script.extend_from_slice(format!("from {}\n", tip).as_bytes());
+    }
+
+    for (commit_sha, blob_oid) in entries {
+        let fanout_path = notes_path_for_object(commit_sha);
+        if *commit_sha != fanout_path {
+            script.extend_from_slice(format!("D {}\n", commit_sha).as_bytes());
+        }
+        script.extend_from_slice(format!("D {}\n", fanout_path).as_bytes());
+        script.extend_from_slice(format!("M 100644 {} {}\n", blob_oid, fanout_path).as_bytes());
+    }
+    script.extend_from_slice(b"\n");
 }
 
 /// Batch-attach existing note blobs to commits without rewriting blob contents.
@@ -259,18 +450,7 @@ pub fn notes_add_blob_batch(
         return Ok(());
     }
 
-    let mut args = repo.global_args_for_exec();
-    args.push("rev-parse".to_string());
-    args.push("--verify".to_string());
-    args.push("refs/notes/ai".to_string());
-    let existing_notes_tip = match exec_git(&args) {
-        Ok(output) => Some(String::from_utf8(output.stdout)?.trim().to_string()),
-        Err(GitAiError::GitCliError {
-            code: Some(128), ..
-        })
-        | Err(GitAiError::GitCliError { code: Some(1), .. }) => None,
-        Err(e) => return Err(e),
-    };
+    let existing_notes_tip = resolve_notes_tip(repo, "refs/notes/ai")?;
 
     let mut deduped_entries: Vec<(String, String)> = Vec::new();
     let mut seen = HashSet::new();
@@ -286,24 +466,57 @@ pub fn notes_add_blob_batch(
         .map_err(|e| GitAiError::Generic(format!("System clock before epoch: {}", e)))?
         .as_secs();
 
-    let mut script = Vec::<u8>::new();
-    script.extend_from_slice(b"commit refs/notes/ai\n");
-    script.extend_from_slice(format!("committer git-ai <git-ai@local> {} +0000\n", now).as_bytes());
-    script.extend_from_slice(b"data 0\n");
-    if let Some(existing_tip) = existing_notes_tip {
-        script.extend_from_slice(format!("from {}\n", existing_tip).as_bytes());
-    }
+    let sharded = sharded_notes_enabled();
 
-    for (commit_sha, blob_oid) in &deduped_entries {
-        let fanout_path = notes_path_for_object(commit_sha);
-        let flat_path = commit_sha.clone();
-        if flat_path != fanout_path {
-            script.extend_from_slice(format!("D {}\n", flat_path).as_bytes());
+    // Resolve shard tips upfront
+    let shard_tips: HashMap<String, Option<String>> = if sharded {
+        let mut tips = HashMap::new();
+        for (commit_sha, _) in &deduped_entries {
+            let shard_ref = sharded_ref_for_commit(commit_sha);
+            if !tips.contains_key(&shard_ref) {
+                tips.insert(shard_ref.clone(), resolve_notes_tip(repo, &shard_ref)?);
+            }
         }
-        script.extend_from_slice(format!("D {}\n", fanout_path).as_bytes());
-        script.extend_from_slice(format!("M 100644 {} {}\n", blob_oid, fanout_path).as_bytes());
+        tips
+    } else {
+        HashMap::new()
+    };
+
+    let mut script = Vec::<u8>::new();
+
+    // Legacy commit block
+    let legacy_entries: Vec<(&str, &str)> = deduped_entries
+        .iter()
+        .map(|(sha, oid)| (sha.as_str(), oid.as_str()))
+        .collect();
+    append_notes_blob_commit_block(
+        &mut script,
+        "refs/notes/ai",
+        existing_notes_tip.as_deref(),
+        &legacy_entries,
+        now,
+    );
+
+    // Shard commit blocks
+    if sharded {
+        let mut shard_entries: HashMap<String, Vec<(&str, &str)>> = HashMap::new();
+        for (commit_sha, blob_oid) in &deduped_entries {
+            let shard_ref = sharded_ref_for_commit(commit_sha);
+            shard_entries
+                .entry(shard_ref)
+                .or_default()
+                .push((commit_sha.as_str(), blob_oid.as_str()));
+        }
+
+        let mut shard_keys: Vec<&String> = shard_entries.keys().collect();
+        shard_keys.sort();
+
+        for shard_ref in shard_keys {
+            let entries = &shard_entries[shard_ref];
+            let tip = shard_tips.get(shard_ref).and_then(|t| t.as_deref());
+            append_notes_blob_commit_block(&mut script, shard_ref, tip, entries, now);
+        }
     }
-    script.extend_from_slice(b"\n");
 
     let mut fast_import_args = repo.global_args_for_exec();
     fast_import_args.push("fast-import".to_string());
@@ -436,7 +649,28 @@ pub fn get_commits_with_notes_from_list(
 }
 
 // Show an authorship note and return its JSON content if found, or None if it doesn't exist.
+// When sharded notes are enabled, checks the shard ref first, then falls back to legacy.
 pub fn show_authorship_note(repo: &Repository, commit_sha: &str) -> Option<String> {
+    if sharded_notes_enabled() {
+        let shard_ref = sharded_refname_for_commit(commit_sha);
+        let mut args = repo.global_args_for_exec();
+        args.push("notes".to_string());
+        args.push(format!("--ref={}", shard_ref));
+        args.push("show".to_string());
+        args.push(commit_sha.to_string());
+
+        if let Ok(output) = exec_git(&args) {
+            let result = String::from_utf8(output.stdout)
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            if result.is_some() {
+                return result;
+            }
+        }
+    }
+
+    // Fall back to legacy ref
     let mut args = repo.global_args_for_exec();
     args.push("notes".to_string());
     args.push("--ref=ai".to_string());
@@ -737,7 +971,55 @@ pub fn grep_ai_notes(repo: &Repository, pattern: &str) -> Result<Vec<String>, Gi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::feature_flags::FeatureFlags;
     use crate::git::test_utils::TmpRepo;
+    use serial_test::serial;
+
+    struct TestFeatureFlagsGuard;
+
+    impl TestFeatureFlagsGuard {
+        fn new() -> Self {
+            crate::config::Config::clear_test_feature_flags();
+            Self
+        }
+    }
+
+    impl Drop for TestFeatureFlagsGuard {
+        fn drop(&mut self) {
+            crate::config::Config::clear_test_feature_flags();
+        }
+    }
+
+    fn set_test_sharded_notes(enabled: bool) {
+        let flags = FeatureFlags {
+            sharded_notes: enabled,
+            ..FeatureFlags::default()
+        };
+        crate::config::Config::set_test_feature_flags(flags);
+    }
+
+    fn create_commit_without_authorship_note(
+        tmp_repo: &TmpRepo,
+        filename: &str,
+        contents: &str,
+        message: &str,
+    ) -> String {
+        tmp_repo
+            .write_file(filename, contents, true)
+            .expect("write file for manual commit");
+
+        let mut args = tmp_repo.gitai_repo().global_args_for_exec();
+        args.extend_from_slice(&["add".to_string(), ".".to_string()]);
+        exec_git(&args).expect("stage files");
+
+        let mut args = tmp_repo.gitai_repo().global_args_for_exec();
+        args.extend_from_slice(&["commit".to_string(), "-m".to_string(), message.to_string()]);
+        exec_git(&args).expect("create manual commit");
+
+        tmp_repo
+            .get_head_commit_sha()
+            .expect("get manual commit sha")
+    }
 
     #[test]
     fn test_parse_batch_check_blob_oid_accepts_sha1_and_sha256() {
@@ -791,6 +1073,118 @@ mod tests {
             "0000000000000000000000000000000000000000",
         );
         assert!(non_existent_content.is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn test_notes_add_respects_sharded_notes_flag_for_writes() {
+        let _guard = TestFeatureFlagsGuard::new();
+        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
+        set_test_sharded_notes(false);
+
+        tmp_repo
+            .commit_with_message("Initial commit")
+            .expect("Failed to create initial commit");
+        let commit_a = tmp_repo
+            .get_head_commit_sha()
+            .expect("Failed to get first commit SHA");
+
+        set_test_sharded_notes(false);
+        notes_add(
+            tmp_repo.gitai_repo(),
+            &commit_a,
+            "{\"mode\":\"legacy-only\"}",
+        )
+        .expect("add non-sharded note");
+
+        let shard_ref_a = format!("refs/notes/ai-s/{}", &commit_a[..2]);
+        assert!(
+            !ref_exists(tmp_repo.gitai_repo(), &shard_ref_a),
+            "default-off write should not create shard refs"
+        );
+
+        tmp_repo
+            .write_file("second.txt", "second\n", true)
+            .expect("write second file");
+        tmp_repo
+            .commit_with_message("Second commit")
+            .expect("create second commit");
+        let commit_b = tmp_repo
+            .get_head_commit_sha()
+            .expect("Failed to get second commit SHA");
+
+        set_test_sharded_notes(true);
+        notes_add(tmp_repo.gitai_repo(), &commit_b, "{\"mode\":\"sharded\"}")
+            .expect("add sharded note");
+
+        let shard_ref_b = format!("refs/notes/ai-s/{}", &commit_b[..2]);
+        assert!(
+            ref_exists(tmp_repo.gitai_repo(), &shard_ref_b),
+            "enabling the flag should create the shard ref"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_shard_reads_are_ignored_when_flag_is_disabled() {
+        let _guard = TestFeatureFlagsGuard::new();
+        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
+        set_test_sharded_notes(false);
+        let commit_sha = create_commit_without_authorship_note(
+            &tmp_repo,
+            "shard-only.txt",
+            "shard only\n",
+            "Manual commit without authorship note",
+        );
+        let shard_ref = format!("ai-s/{}", &commit_sha[..2]);
+
+        let mut args = tmp_repo.gitai_repo().global_args_for_exec();
+        args.extend_from_slice(&[
+            "notes".to_string(),
+            format!("--ref={}", shard_ref),
+            "add".to_string(),
+            "-f".to_string(),
+            "-m".to_string(),
+            "{\"note\":\"shard-only\"}".to_string(),
+            commit_sha.clone(),
+        ]);
+        exec_git(&args).expect("add shard-only note");
+
+        set_test_sharded_notes(false);
+        assert!(
+            show_authorship_note(tmp_repo.gitai_repo(), &commit_sha).is_none(),
+            "default-off reads should ignore shard-only notes"
+        );
+        assert!(
+            note_blob_oids_for_commits(tmp_repo.gitai_repo(), std::slice::from_ref(&commit_sha))
+                .expect("resolve note blob oids")
+                .is_empty(),
+            "default-off blob lookup should ignore shard-only notes"
+        );
+        assert!(
+            commits_with_authorship_notes(tmp_repo.gitai_repo(), std::slice::from_ref(&commit_sha))
+                .expect("resolve commit note presence")
+                .is_empty(),
+            "default-off note existence checks should ignore shard-only notes"
+        );
+
+        set_test_sharded_notes(true);
+        assert_eq!(
+            show_authorship_note(tmp_repo.gitai_repo(), &commit_sha).as_deref(),
+            Some("{\"note\":\"shard-only\"}")
+        );
+        assert!(
+            note_blob_oids_for_commits(tmp_repo.gitai_repo(), std::slice::from_ref(&commit_sha))
+                .expect("resolve note blob oids with sharding")
+                .contains_key(&commit_sha),
+            "enabled shard reads should discover shard-only notes"
+        );
+        assert!(
+            commits_with_authorship_notes(tmp_repo.gitai_repo(), std::slice::from_ref(&commit_sha))
+                .expect("resolve commit note presence with sharding")
+                .contains(&commit_sha),
+            "enabled note existence checks should discover shard-only notes"
+        );
     }
 
     #[test]

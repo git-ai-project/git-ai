@@ -58,6 +58,7 @@ define_feature_flags!(
     async_mode: async_mode, debug = false, release = false,
     git_hooks_enabled: git_hooks_enabled, debug = false, release = false,
     git_hooks_externally_managed: git_hooks_externally_managed, debug = false, release = false,
+    sharded_notes: sharded_notes, debug = false, release = false, // gated behind config
 );
 
 impl FeatureFlags {
@@ -127,6 +128,7 @@ mod tests {
             assert!(!flags.async_mode);
             assert!(!flags.git_hooks_enabled);
             assert!(!flags.git_hooks_externally_managed);
+            assert!(!flags.sharded_notes);
         }
         #[cfg(not(debug_assertions))]
         {
@@ -136,6 +138,7 @@ mod tests {
             assert!(!flags.async_mode);
             assert!(!flags.git_hooks_enabled);
             assert!(!flags.git_hooks_externally_managed);
+            assert!(!flags.sharded_notes);
         }
     }
 
@@ -245,6 +248,7 @@ mod tests {
             async_mode: true,
             git_hooks_enabled: false,
             git_hooks_externally_managed: false,
+            sharded_notes: false,
         };
 
         let serialized = serde_json::to_string(&flags).unwrap();
@@ -254,6 +258,7 @@ mod tests {
         assert!(serialized.contains("async_mode"));
         assert!(serialized.contains("git_hooks_enabled"));
         assert!(serialized.contains("git_hooks_externally_managed"));
+        assert!(serialized.contains("sharded_notes"));
     }
 
     #[test]
@@ -265,6 +270,7 @@ mod tests {
             async_mode: true,
             git_hooks_enabled: true,
             git_hooks_externally_managed: false,
+            sharded_notes: true,
         };
         let cloned = flags.clone();
         assert_eq!(cloned.rewrite_stash, flags.rewrite_stash);
@@ -276,6 +282,7 @@ mod tests {
             cloned.git_hooks_externally_managed,
             flags.git_hooks_externally_managed
         );
+        assert_eq!(cloned.sharded_notes, flags.sharded_notes);
     }
 
     #[test]
