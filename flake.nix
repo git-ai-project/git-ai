@@ -378,9 +378,18 @@ GITOGEOF
             disable_auto_updates = cfg.settings.disableAutoUpdates;
             update_channel = cfg.settings.updateChannel;
             feature_flags =
-              if cfg.settings.featureFlags != { }
-              then cfg.settings.featureFlags
-              else null;
+              let
+                knownFlags = filterAttrs (n: v: v != null) {
+                  async_mode = cfg.settings.featureFlags.asyncMode;
+                  rewrite_stash = cfg.settings.featureFlags.rewriteStash;
+                  checkpoint_inter_commit_move = cfg.settings.featureFlags.interCommitMove;
+                  auth_keyring = cfg.settings.featureFlags.authKeyring;
+                  git_hooks_enabled = cfg.settings.featureFlags.gitHooksEnabled;
+                  git_hooks_externally_managed = cfg.settings.featureFlags.gitHooksExternallyManaged;
+                };
+                merged = cfg.settings.featureFlags.extraFlags // knownFlags;
+              in
+              if merged != { } then merged else null;
           };
 
           # Generate the config file in the Nix store
@@ -533,21 +542,81 @@ GITOGEOF
               };
 
               updateChannel = mkOption {
-                type = types.nullOr (types.enum [ "latest" "next" ]);
+                type = types.nullOr (types.enum [
+                  "latest" "next" "enterprise-latest" "enterprise-next"
+                ]);
                 default = null;
                 description = ''
-                  Update channel: "latest" for stable releases, "next" for pre-releases.
+                  Update channel: "latest" for stable releases, "next" for
+                  pre-releases, "enterprise-latest" and "enterprise-next" for
+                  enterprise deployments.
                 '';
               };
 
-              featureFlags = mkOption {
-                type = jsonFormat.type;
-                default = { };
-                example = { rewrite_stash = true; };
-                description = ''
-                  Feature flags as a JSON-compatible attribute set.
-                  See git-ai documentation for available flags.
-                '';
+              featureFlags = {
+                asyncMode = mkOption {
+                  type = types.nullOr types.bool;
+                  default = null;
+                  description = ''
+                    Enable async daemon mode for background processing.
+                    When enabled, git operations are processed asynchronously
+                    through a background daemon, improving performance for IDE
+                    and agent workflows.
+                    Equivalent to: git ai config set feature_flags.async_mode true
+                  '';
+                };
+
+                rewriteStash = mkOption {
+                  type = types.nullOr types.bool;
+                  default = null;
+                  description = ''
+                    Enable stash rewriting for improved AI tracking of stash
+                    operations.
+                  '';
+                };
+
+                interCommitMove = mkOption {
+                  type = types.nullOr types.bool;
+                  default = null;
+                  description = ''
+                    Enable checkpoint inter-commit move tracking.
+                  '';
+                };
+
+                authKeyring = mkOption {
+                  type = types.nullOr types.bool;
+                  default = null;
+                  description = ''
+                    Enable system keyring integration for authentication.
+                  '';
+                };
+
+                gitHooksEnabled = mkOption {
+                  type = types.nullOr types.bool;
+                  default = null;
+                  description = ''
+                    Enable git hooks integration for git-ai tracking.
+                  '';
+                };
+
+                gitHooksExternallyManaged = mkOption {
+                  type = types.nullOr types.bool;
+                  default = null;
+                  description = ''
+                    Indicate that git hooks are managed externally
+                    (e.g., by lefthook or husky). When enabled, git-ai will not
+                    attempt to install or manage git hooks itself.
+                  '';
+                };
+
+                extraFlags = mkOption {
+                  type = types.attrsOf types.bool;
+                  default = { };
+                  description = ''
+                    Additional feature flags not explicitly defined above.
+                    Keys should use snake_case to match the config.json format.
+                  '';
+                };
               };
             };
           };
@@ -617,9 +686,18 @@ GITOGEOF
             disable_auto_updates = cfg.settings.disableAutoUpdates;
             update_channel = cfg.settings.updateChannel;
             feature_flags =
-              if cfg.settings.featureFlags != { }
-              then cfg.settings.featureFlags
-              else null;
+              let
+                knownFlags = filterAttrs (n: v: v != null) {
+                  async_mode = cfg.settings.featureFlags.asyncMode;
+                  rewrite_stash = cfg.settings.featureFlags.rewriteStash;
+                  checkpoint_inter_commit_move = cfg.settings.featureFlags.interCommitMove;
+                  auth_keyring = cfg.settings.featureFlags.authKeyring;
+                  git_hooks_enabled = cfg.settings.featureFlags.gitHooksEnabled;
+                  git_hooks_externally_managed = cfg.settings.featureFlags.gitHooksExternallyManaged;
+                };
+                merged = cfg.settings.featureFlags.extraFlags // knownFlags;
+              in
+              if merged != { } then merged else null;
           };
         in
         {
@@ -759,21 +837,81 @@ GITOGEOF
               };
 
               updateChannel = mkOption {
-                type = types.nullOr (types.enum [ "latest" "next" ]);
+                type = types.nullOr (types.enum [
+                  "latest" "next" "enterprise-latest" "enterprise-next"
+                ]);
                 default = null;
                 description = ''
-                  Update channel: "latest" for stable releases, "next" for pre-releases.
+                  Update channel: "latest" for stable releases, "next" for
+                  pre-releases, "enterprise-latest" and "enterprise-next" for
+                  enterprise deployments.
                 '';
               };
 
-              featureFlags = mkOption {
-                type = jsonFormat.type;
-                default = { };
-                example = { rewrite_stash = true; };
-                description = ''
-                  Feature flags as a JSON-compatible attribute set.
-                  See git-ai documentation for available flags.
-                '';
+              featureFlags = {
+                asyncMode = mkOption {
+                  type = types.nullOr types.bool;
+                  default = null;
+                  description = ''
+                    Enable async daemon mode for background processing.
+                    When enabled, git operations are processed asynchronously
+                    through a background daemon, improving performance for IDE
+                    and agent workflows.
+                    Equivalent to: git ai config set feature_flags.async_mode true
+                  '';
+                };
+
+                rewriteStash = mkOption {
+                  type = types.nullOr types.bool;
+                  default = null;
+                  description = ''
+                    Enable stash rewriting for improved AI tracking of stash
+                    operations.
+                  '';
+                };
+
+                interCommitMove = mkOption {
+                  type = types.nullOr types.bool;
+                  default = null;
+                  description = ''
+                    Enable checkpoint inter-commit move tracking.
+                  '';
+                };
+
+                authKeyring = mkOption {
+                  type = types.nullOr types.bool;
+                  default = null;
+                  description = ''
+                    Enable system keyring integration for authentication.
+                  '';
+                };
+
+                gitHooksEnabled = mkOption {
+                  type = types.nullOr types.bool;
+                  default = null;
+                  description = ''
+                    Enable git hooks integration for git-ai tracking.
+                  '';
+                };
+
+                gitHooksExternallyManaged = mkOption {
+                  type = types.nullOr types.bool;
+                  default = null;
+                  description = ''
+                    Indicate that git hooks are managed externally
+                    (e.g., by lefthook or husky). When enabled, git-ai will not
+                    attempt to install or manage git hooks itself.
+                  '';
+                };
+
+                extraFlags = mkOption {
+                  type = types.attrsOf types.bool;
+                  default = { };
+                  description = ''
+                    Additional feature flags not explicitly defined above.
+                    Keys should use snake_case to match the config.json format.
+                  '';
+                };
               };
             };
           };
