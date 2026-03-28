@@ -110,39 +110,45 @@ pub fn handle_git(args: &[String]) {
         return;
     }
 
-    // Async mode: wrapper should behave as a pure passthrough to git,
-    // but capture and send authoritative pre/post state to the daemon.
-    if config::Config::get().feature_flags().async_mode {
-        let parsed = parse_git_cli_args(args);
+    let mut parsed_args = parse_git_cli_args(args);
 
-        // Read-only commands don't need wrapper state (the daemon fast-paths
-        // their trace events and never processes them through the normalizer).
-        // Skip the invocation_id so we can also suppress trace2 for them,
-        // avoiding unnecessary daemon work and wrapper_states memory leaks.
-        let is_read_only = parsed
+    let mut repository_option = find_repository(&parsed_args.global_args).ok();
+
+    // Resolve aliases early so the read-only check sees the real command.
+    if let Some(repo) = repository_option.as_ref()
+        && let Some(resolved) = resolve_alias_invocation(&parsed_args, repo)
+    {
+        parsed_args = resolved;
+    }
+
+    // Fast-path: commands that are unconditionally read-only (status, log, diff,
+    // etc.) or help/version invocations can skip all hooks and daemon state.
+    let is_read_only = parsed_args.is_help
+        || parsed_args.command.is_none()
+        || parsed_args
             .command
             .as_deref()
             .is_some_and(crate::git::command_classification::is_definitely_read_only_command);
 
-        if is_read_only {
-            let exit_status = proxy_to_git(args, false, None, None);
-            exit_with_status(exit_status);
-        }
+    if is_read_only {
+        let exit_status = proxy_to_git(&parsed_args.to_invocation_vec(), false, None, None);
+        exit_with_status(exit_status);
+    }
 
-        // Repo-creating commands (clone, init) have no meaningful pre/post
-        // repo state — the target repo doesn't exist yet. The wrapper would
-        // either capture nothing (clone from outside a repo) or the wrong
-        // repo (clone from inside a different repo). Skip the invocation_id
-        // so the daemon doesn't wait for wrapper state that never arrives or
-        // is misleading; trace2 events still flow normally (trace2 suppression
-        // requires *both* no invocation_id and a read-only command).
-        let is_repo_creating = parsed
-            .command
-            .as_deref()
-            .is_some_and(|cmd| matches!(cmd, "clone" | "init"));
+    // `init` has no post-hooks, so it can always passthrough early.
+    if parsed_args.command.as_deref() == Some("init") && !parsed_args.is_help {
+        let exit_status = proxy_to_git(&parsed_args.to_invocation_vec(), false, None, None);
+        exit_with_status(exit_status);
+    }
 
-        if is_repo_creating {
-            let exit_status = proxy_to_git(args, false, None, None);
+    // Async mode: wrapper should behave as a pure passthrough to git,
+    // but capture and send authoritative pre/post state to the daemon.
+    if config::Config::get().feature_flags().async_mode {
+        // Clone in async mode has no meaningful pre/post repo state — the
+        // target repo doesn't exist yet. Skip daemon telemetry so the daemon
+        // doesn't wait for wrapper state that never arrives or is misleading.
+        if parsed_args.command.as_deref() == Some("clone") && !parsed_args.is_help {
+            let exit_status = proxy_to_git(&parsed_args.to_invocation_vec(), false, None, None);
             exit_with_status(exit_status);
         }
 
@@ -153,8 +159,7 @@ pub fn handle_git(args: &[String]) {
             debug_log(&format!("wrapper: daemon telemetry init failed: {}", e));
         }
 
-        let repository = find_repository(&parsed.global_args).ok();
-        let worktree = repository.as_ref().and_then(|r| r.workdir().ok());
+        let worktree = repository_option.as_ref().and_then(|r| r.workdir().ok());
 
         let pre_state = worktree
             .as_deref()
@@ -165,7 +170,12 @@ pub fn handle_git(args: &[String]) {
         // processes the atexit trace event and starts the wrapper state timeout.
         send_wrapper_pre_state_to_daemon(&invocation_id, worktree.as_deref(), &pre_state);
 
-        let exit_status = proxy_to_git(args, false, None, Some(&invocation_id));
+        let exit_status = proxy_to_git(
+            &parsed_args.to_invocation_vec(),
+            false,
+            None,
+            Some(&invocation_id),
+        );
 
         let post_state = worktree
             .as_deref()
@@ -176,18 +186,14 @@ pub fn handle_git(args: &[String]) {
         // After a successful commit, wait briefly for the daemon to produce an
         // authorship note so we can show stats inline (same UX as plain wrapper mode).
         if exit_status.success()
-            && parsed.command.as_deref() == Some("commit")
-            && let Some(repo) = repository.as_ref()
+            && parsed_args.command.as_deref() == Some("commit")
+            && let Some(repo) = repository_option.as_ref()
         {
-            maybe_show_async_post_commit_stats(&parsed, repo);
+            maybe_show_async_post_commit_stats(&parsed_args, repo);
         }
 
         exit_with_status(exit_status);
     }
-
-    let mut parsed_args = parse_git_cli_args(args);
-
-    let mut repository_option = find_repository(&parsed_args.global_args).ok();
 
     let has_repo = repository_option.is_some();
 
@@ -226,10 +232,6 @@ pub fn handle_git(args: &[String]) {
         };
 
         let repository = repository_option.as_mut().unwrap();
-
-        if let Some(resolved) = resolve_alias_invocation(&parsed_args, repository) {
-            parsed_args = resolved;
-        }
 
         let pre_command_start = Instant::now();
         run_pre_command_hooks(&mut command_hooks_context, &mut parsed_args, repository);
@@ -812,10 +814,12 @@ fn proxy_to_git(
     // trace2 events for the daemon to match wrapper state entries.
     let suppress_trace2 = wrapper_invocation_id.is_none() && {
         let parsed = parse_git_cli_args(args);
-        parsed
-            .command
-            .as_deref()
-            .is_some_and(crate::git::command_classification::is_definitely_read_only_command)
+        parsed.is_help
+            || parsed.command.is_none()
+            || parsed
+                .command
+                .as_deref()
+                .is_some_and(crate::git::command_classification::is_definitely_read_only_command)
     };
 
     // Use spawn for interactive commands
@@ -1002,7 +1006,10 @@ fn in_shell_completion_context() -> bool {
 #[cfg(test)]
 mod tests {
     use super::parse_alias_tokens;
-    use super::{parse_git_cli_args, resolve_child_git_hooks_path_override};
+    use super::{
+        parse_git_cli_args, resolve_alias_invocation, resolve_child_git_hooks_path_override,
+    };
+    use crate::git::command_classification::is_definitely_read_only_command;
     use crate::git::find_repository_in_path;
     use std::process::Command;
     use tempfile::tempdir;
@@ -1127,6 +1134,146 @@ mod tests {
             resolve_child_git_hooks_path_override(&parsed, Some(&repo)),
             None
         );
+    }
+
+    #[test]
+    fn passthrough_read_only_command_for_status() {
+        assert!(is_definitely_read_only_command("status"));
+    }
+
+    #[test]
+    fn passthrough_read_only_command_rejects_mutating_commands() {
+        assert!(!is_definitely_read_only_command("commit"));
+    }
+
+    #[test]
+    fn passthrough_read_only_command_accepts_help_invocations() {
+        let parsed = parse_git_cli_args(&["status".to_string(), "--help".to_string()]);
+        assert!(parsed.is_help);
+    }
+
+    #[test]
+    fn passthrough_read_only_command_accepts_top_level_version() {
+        // `git --version` is rewritten to `git version` by the parser.
+        let parsed = parse_git_cli_args(&["--version".to_string()]);
+        assert!(
+            parsed.is_help
+                || parsed.command.is_none()
+                || parsed
+                    .command
+                    .as_deref()
+                    .is_some_and(is_definitely_read_only_command)
+        );
+    }
+
+    #[test]
+    fn wrapper_resolves_read_only_alias_before_passthrough() {
+        let temp = tempdir().expect("tempdir should create");
+        let output = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(temp.path())
+            .output()
+            .expect("git init should run");
+        assert!(
+            output.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let alias_output = Command::new("git")
+            .args(["config", "alias.st", "status --short"])
+            .current_dir(temp.path())
+            .output()
+            .expect("git config alias should run");
+        assert!(
+            alias_output.status.success(),
+            "git config alias failed: {}",
+            String::from_utf8_lossy(&alias_output.stderr)
+        );
+
+        let repo = find_repository_in_path(&temp.path().to_string_lossy())
+            .expect("repository should be discovered");
+        let parsed = parse_git_cli_args(&["st".to_string()]);
+        let resolved = resolve_alias_invocation(&parsed, &repo).unwrap_or_else(|| parsed.clone());
+
+        assert_eq!(resolved.command.as_deref(), Some("status"));
+        assert!(resolved.command_args.iter().any(|arg| arg == "--short"));
+        assert!(is_definitely_read_only_command(
+            resolved.command.as_deref().unwrap()
+        ));
+    }
+
+    #[test]
+    fn wrapper_resolves_mutating_alias_before_passthrough() {
+        let temp = tempdir().expect("tempdir should create");
+        let output = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(temp.path())
+            .output()
+            .expect("git init should run");
+        assert!(
+            output.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let alias_output = Command::new("git")
+            .args(["config", "alias.ci", "commit"])
+            .current_dir(temp.path())
+            .output()
+            .expect("git config alias should run");
+        assert!(
+            alias_output.status.success(),
+            "git config alias failed: {}",
+            String::from_utf8_lossy(&alias_output.stderr)
+        );
+
+        let repo = find_repository_in_path(&temp.path().to_string_lossy())
+            .expect("repository should be discovered");
+        let parsed = parse_git_cli_args(&["ci".to_string(), "-m".to_string(), "msg".to_string()]);
+        let resolved = resolve_alias_invocation(&parsed, &repo).unwrap_or_else(|| parsed.clone());
+
+        assert_eq!(resolved.command.as_deref(), Some("commit"));
+        assert!(!is_definitely_read_only_command(
+            resolved.command.as_deref().unwrap()
+        ));
+    }
+
+    #[test]
+    fn wrapper_does_not_passthrough_builtin_name_shadowed_by_mutating_alias() {
+        let temp = tempdir().expect("tempdir should create");
+        let output = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(temp.path())
+            .output()
+            .expect("git init should run");
+        assert!(
+            output.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let alias_output = Command::new("git")
+            .args(["config", "alias.status", "branch aliased HEAD"])
+            .current_dir(temp.path())
+            .output()
+            .expect("git config alias should run");
+        assert!(
+            alias_output.status.success(),
+            "git config alias failed: {}",
+            String::from_utf8_lossy(&alias_output.stderr)
+        );
+
+        let repo = find_repository_in_path(&temp.path().to_string_lossy())
+            .expect("repository should be discovered");
+        let parsed = parse_git_cli_args(&["status".to_string()]);
+
+        let resolved = resolve_alias_invocation(&parsed, &repo).unwrap_or_else(|| parsed.clone());
+        assert_eq!(resolved.command.as_deref(), Some("branch"));
+        assert!(resolved.command_args.iter().any(|arg| arg == "aliased"));
+        assert!(!is_definitely_read_only_command(
+            resolved.command.as_deref().unwrap()
+        ));
     }
 
     #[cfg(unix)]
