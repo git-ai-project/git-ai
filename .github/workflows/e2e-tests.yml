@@ -8,9 +8,9 @@ on:
   workflow_dispatch:
 
 env:
-  # Force wrapper mode (not async/daemon) so post-commit hooks fire
-  # synchronously and attribution notes are written in-process.
-  GIT_AI_ASYNC_MODE: "false"
+  # Async mode is now fully supported by the e2e tests: a per-test daemon
+  # is started in setup() and the wrapper polls for authorship notes.
+  GIT_AI_ASYNC_MODE: "true"
 
 jobs:
   e2e-tests:
