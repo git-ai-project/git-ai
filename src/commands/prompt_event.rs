@@ -374,8 +374,9 @@ fn build_prompt_event_attrs(prompt_id: &str, session_id: &str) -> EventAttribute
         .external_prompt_id(session_id)
 }
 
-/// Process prompt events for an OpenCode session.
-fn process_opencode_prompt_events(hook_input: &str) -> Result<(), GitAiError> {
+/// Process prompt events for any agent without transcript access (OpenCode, Cursor, etc.).
+/// Emits individual events from hook data with estimated parent IDs.
+fn process_generic_prompt_events(agent: &str, hook_input: &str) -> Result<(), GitAiError> {
     let hook_data: serde_json::Value = serde_json::from_str(hook_input)
         .map_err(|e| GitAiError::Generic(format!("Invalid hook JSON: {}", e)))?;
 
@@ -383,23 +384,40 @@ fn process_opencode_prompt_events(hook_input: &str) -> Result<(), GitAiError> {
         .as_str()
         .ok_or_else(|| GitAiError::Generic("Missing session_id".to_string()))?;
 
-    let prompt_id = generate_short_hash(session_id, "opencode");
+    let prompt_id = generate_short_hash(session_id, agent);
 
     let hook_event_name = hook_data["hook_event_name"].as_str().unwrap_or("unknown");
 
+    // Determine event kind from hook data
+    let tool_name = hook_data["tool_input"]
+        .get("toolName")
+        .or_else(|| hook_data.get("tool_name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+
     let kind = match hook_event_name {
-        "PreToolUse" => prompt_event_kind::HUMAN_MESSAGE,
-        "PostToolUse" => {
-            let tool_name = hook_data["tool_input"]
-                .get("toolName")
-                .or_else(|| hook_data.get("tool_name"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            match tool_name {
-                "edit" | "write" | "patch" | "multiedit" => prompt_event_kind::FILE_WRITE,
-                _ => prompt_event_kind::TOOL_CALL,
+        "PreToolUse" | "UserPromptSubmit" => prompt_event_kind::HUMAN_MESSAGE,
+        "PostToolUse" | "AfterTool" => {
+            // Check tool name case-insensitively for file-editing tools
+            let tool_lower = tool_name.to_lowercase();
+            if matches!(
+                tool_lower.as_str(),
+                "edit"
+                    | "write"
+                    | "patch"
+                    | "multiedit"
+                    | "multi_edit"
+                    | "create"
+                    | "applypatch"
+                    | "write_file"
+                    | "replace"
+            ) {
+                prompt_event_kind::FILE_WRITE
+            } else {
+                prompt_event_kind::TOOL_CALL
             }
         }
+        "Stop" => prompt_event_kind::AI_MESSAGE,
         _ => prompt_event_kind::TOOL_CALL,
     };
 
@@ -416,10 +434,9 @@ fn process_opencode_prompt_events(hook_input: &str) -> Result<(), GitAiError> {
 
     let event_id = compute_event_id(&prompt_id, kind, &content_hash_input, 0);
 
-    // Get parent from state
+    // Get parent from state (always estimated since we have no transcript)
     let state = PromptEventState::load(session_id);
     let (parent_id, parent_estimated) = if let Some(last) = state.emitted_event_ids.last() {
-        // For OpenCode we don't have transcript access, so parent is always estimated
         (Some(last.clone()), true)
     } else {
         (None, false)
@@ -437,7 +454,7 @@ fn process_opencode_prompt_events(hook_input: &str) -> Result<(), GitAiError> {
     values = values.parent_id_estimated(parent_estimated);
 
     let attrs = EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
-        .tool("opencode")
+        .tool(agent)
         .prompt_id(&prompt_id)
         .external_prompt_id(session_id);
 
@@ -502,11 +519,8 @@ pub fn handle_prompt_event(args: &[String]) {
 
     let result = match agent.as_str() {
         "claude" => process_claude_prompt_events(&hook_input),
-        "opencode" => process_opencode_prompt_events(&hook_input),
-        other => {
-            debug_log(&format!("prompt-event: unsupported agent: {}", other));
-            return;
-        }
+        // All other agents use the generic hook-based path (no transcript)
+        _ => process_generic_prompt_events(agent, &hook_input),
     };
 
     if let Err(e) = result {

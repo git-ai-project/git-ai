@@ -4,9 +4,9 @@ use crate::mdm::hook_installer::{
 };
 use crate::mdm::utils::{
     MIN_CURSOR_VERSION, generate_diff, get_editor_version, home_dir, install_vsc_editor_extension,
-    is_vsc_editor_extension_installed, parse_version, resolve_editor_cli,
-    settings_paths_for_products, should_process_settings_target, version_meets_requirement,
-    write_atomic,
+    is_git_ai_prompt_event_command, is_vsc_editor_extension_installed, parse_version,
+    resolve_editor_cli, settings_paths_for_products, should_process_settings_target,
+    version_meets_requirement, write_atomic,
 };
 use crate::utils::debug_log;
 use serde_json::{Value, json};
@@ -16,6 +16,7 @@ use std::path::PathBuf;
 // Command patterns for hooks
 const CURSOR_PRE_TOOL_USE_CMD: &str = "checkpoint cursor --hook-input stdin";
 const CURSOR_POST_TOOL_USE_CMD: &str = "checkpoint cursor --hook-input stdin";
+const CURSOR_PROMPT_EVENT_CMD: &str = "prompt-event cursor --hook-input stdin";
 
 pub struct CursorInstaller;
 
@@ -142,6 +143,11 @@ impl HookInstaller for CursorInstaller {
             params.binary_path.display(),
             CURSOR_POST_TOOL_USE_CMD
         );
+        let prompt_event_cmd = format!(
+            "{} {}",
+            params.binary_path.display(),
+            CURSOR_PROMPT_EVENT_CMD
+        );
 
         // Desired hooks payload for Cursor
         let desired: Value = json!({
@@ -155,6 +161,9 @@ impl HookInstaller for CursorInstaller {
                 "postToolUse": [
                     {
                         "command": post_tool_use_cmd
+                    },
+                    {
+                        "command": prompt_event_cmd
                     }
                 ]
             }
@@ -189,7 +198,7 @@ impl HookInstaller for CursorInstaller {
                 .cloned()
                 .unwrap_or_default();
 
-            // Update outdated git-ai checkpoint commands (or add if missing)
+            // Update outdated git-ai commands (or add if missing)
             for desired_hook in desired_hooks {
                 let desired_cmd = desired_hook.get("command").and_then(|c| c.as_str());
                 if desired_cmd.is_none() {
@@ -197,14 +206,21 @@ impl HookInstaller for CursorInstaller {
                 }
                 let desired_cmd = desired_cmd.unwrap();
 
-                // Look for existing git-ai checkpoint cursor commands
+                // Choose detection function based on whether this is a prompt-event or checkpoint
+                let is_same_kind: fn(&str) -> bool = if is_git_ai_prompt_event_command(desired_cmd)
+                {
+                    is_git_ai_prompt_event_command
+                } else {
+                    Self::is_cursor_checkpoint_command
+                };
+
                 let mut found_idx = None;
                 let mut needs_update = false;
 
                 for (idx, existing_hook) in existing_hooks.iter().enumerate() {
                     if let Some(existing_cmd) =
                         existing_hook.get("command").and_then(|c| c.as_str())
-                        && Self::is_cursor_checkpoint_command(existing_cmd)
+                        && is_same_kind(existing_cmd)
                     {
                         found_idx = Some(idx);
                         if existing_cmd != desired_cmd {
@@ -279,7 +295,7 @@ impl HookInstaller for CursorInstaller {
 
         let mut changed = false;
 
-        // Remove git-ai checkpoint cursor commands from both hook types
+        // Remove git-ai checkpoint and prompt-event commands from both hook types
         for hook_name in &["preToolUse", "postToolUse"] {
             if let Some(hooks_array) = hooks_obj.get_mut(*hook_name).and_then(|v| v.as_array_mut())
             {
@@ -287,6 +303,7 @@ impl HookInstaller for CursorInstaller {
                 hooks_array.retain(|hook| {
                     if let Some(cmd) = hook.get("command").and_then(|c| c.as_str()) {
                         !Self::is_cursor_checkpoint_command(cmd)
+                            && !is_git_ai_prompt_event_command(cmd)
                     } else {
                         true
                     }

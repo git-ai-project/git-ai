@@ -236,6 +236,19 @@ export default function ampGitAiPlugin(amp: PluginAPI) {
 		return { action: 'allow' as const }
 	})
 
+	const runPromptEvent = async (ctx: { logger: PluginAPI['logger'] }, payload: Record<string, unknown>) => {
+		try {
+			const hookInput = JSON.stringify(payload)
+			await runProcess(
+				GIT_AI_BIN,
+				['prompt-event', 'amp', '--hook-input', 'stdin'],
+				{ stdin: hookInput },
+			)
+		} catch {
+			// Best-effort, don't log for prompt events
+		}
+	}
+
 	amp.on('tool.result', async (event, ctx) => {
 		const pending = pendingCalls.get(event.toolUseID)
 		if (!pending) {
@@ -258,6 +271,18 @@ export default function ampGitAiPlugin(amp: PluginAPI) {
 				...(pending.editedFilepaths.length > 0
 					? { edited_filepaths: pending.editedFilepaths }
 					: {}),
+			},
+		)
+
+		// Emit prompt event for tool usage tracking
+		await runPromptEvent(
+			{ logger: ctx.logger },
+			{
+				hook_event_name: 'PostToolUse',
+				session_id: event.toolUseID,
+				cwd: pending.cwd,
+				tool_name: pending.tool,
+				tool_input: pending.toolInput,
 			},
 		)
 	})
