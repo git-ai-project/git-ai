@@ -158,12 +158,15 @@ fn git_plumbing(repo_path: &std::path::Path, args: &[&str], stdin_data: Option<&
         .arg(repo_path)
         .arg("-c")
         .arg("core.hooksPath=/dev/null")
+        .arg("-c")
+        .arg("user.name=Test")
+        .arg("-c")
+        .arg("user.email=test@test.com")
         .args(args);
     if stdin_data.is_some() {
         cmd.stdin(Stdio::piped());
     }
-    cmd.stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let mut child = cmd.spawn().expect("failed to spawn git plumbing command");
 
@@ -281,17 +284,14 @@ fn test_push_authorship_notes_survives_corrupted_remote_notes_tree() {
     let push_json: serde_json::Value =
         serde_json::from_str(push_output.trim()).expect("push output should be JSON");
     assert_eq!(
-        push_json["ok"], true,
+        push_json["ok"],
+        true,
         "push should succeed via fallback merge, got: {}",
         push_output.trim()
     );
 
     // 6. Verify both notes are present on upstream after push
-    let notes_list = git_plumbing(
-        upstream.path(),
-        &["notes", "--ref=ai", "list"],
-        None,
-    );
+    let notes_list = git_plumbing(upstream.path(), &["notes", "--ref=ai", "list"], None);
     assert!(
         notes_list.contains(&commit_sha),
         "upstream should have note for first commit"
@@ -315,9 +315,7 @@ fn test_push_authorship_notes_retries_on_concurrent_push() {
     let commit1 = mirror
         .stage_all_and_commit("first commit")
         .expect("commit1");
-    mirror
-        .git(&["push", "origin", "main"])
-        .expect("push main");
+    mirror.git(&["push", "origin", "main"]).expect("push main");
 
     // 2. Push mirror's initial notes to upstream
     mirror
@@ -325,14 +323,15 @@ fn test_push_authorship_notes_retries_on_concurrent_push() {
         .expect("push initial notes");
 
     // 3. Create a second clone that simulates the concurrent pusher
-    let clone2_path = std::env::temp_dir().join(format!(
-        "concurrent-clone-{}",
-        std::process::id()
-    ));
+    let clone2_path = std::env::temp_dir().join(format!("concurrent-clone-{}", std::process::id()));
     let _ = fs::remove_dir_all(&clone2_path);
     git_plumbing(
         mirror.path(),
-        &["clone", upstream.path().to_str().unwrap(), clone2_path.to_str().unwrap()],
+        &[
+            "clone",
+            upstream.path().to_str().unwrap(),
+            clone2_path.to_str().unwrap(),
+        ],
         None,
     );
     // Configure clone2 and fetch notes
@@ -341,11 +340,7 @@ fn test_push_authorship_notes_retries_on_concurrent_push() {
         &["config", "user.email", "other@test.com"],
         None,
     );
-    git_plumbing(
-        &clone2_path,
-        &["config", "user.name", "Other"],
-        None,
-    );
+    git_plumbing(&clone2_path, &["config", "user.name", "Other"], None);
     git_plumbing(
         &clone2_path,
         &["fetch", "origin", "+refs/notes/ai:refs/notes/ai"],
@@ -396,17 +391,14 @@ fn test_push_authorship_notes_retries_on_concurrent_push() {
     let push_json: serde_json::Value =
         serde_json::from_str(push_output.trim()).expect("push output should be JSON");
     assert_eq!(
-        push_json["ok"], true,
+        push_json["ok"],
+        true,
         "push should eventually succeed, got: {}",
         push_output.trim()
     );
 
     // 7. Verify all notes are present on upstream
-    let notes_list = git_plumbing(
-        upstream.path(),
-        &["notes", "--ref=ai", "list"],
-        None,
-    );
+    let notes_list = git_plumbing(upstream.path(), &["notes", "--ref=ai", "list"], None);
     assert!(
         notes_list.contains(&commit1.commit_sha),
         "upstream should have note for mirror's first commit"

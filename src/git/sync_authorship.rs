@@ -178,10 +178,7 @@ fn is_missing_remote_notes_ref_error(error: &GitAiError) -> bool {
 const PUSH_NOTES_MAX_ATTEMPTS: usize = 3;
 
 // for use with post-push hook
-pub fn push_authorship_notes(
-    repository: &Repository,
-    remote_name: &str,
-) -> Result<(), GitAiError> {
+pub fn push_authorship_notes(repository: &Repository, remote_name: &str) -> Result<(), GitAiError> {
     let mut last_error = None;
 
     for attempt in 0..PUSH_NOTES_MAX_ATTEMPTS {
@@ -196,8 +193,7 @@ pub fn push_authorship_notes(
         fetch_and_merge_tracking_notes(repository, remote_name);
 
         // Push notes without force (requires fast-forward)
-        let push_args =
-            build_authorship_push_args(repository.global_args_for_exec(), remote_name);
+        let push_args = build_authorship_push_args(repository.global_args_for_exec(), remote_name);
 
         debug_log(&format!(
             "pushing authorship refs (no force): {:?}",
@@ -219,9 +215,8 @@ pub fn push_authorship_notes(
         }
     }
 
-    Err(last_error.unwrap_or_else(|| {
-        GitAiError::Generic("notes push exhausted retries".to_string())
-    }))
+    Err(last_error
+        .unwrap_or_else(|| GitAiError::Generic("notes push exhausted retries".to_string())))
 }
 
 /// Fetch remote notes into a tracking ref and merge into local refs/notes/ai.

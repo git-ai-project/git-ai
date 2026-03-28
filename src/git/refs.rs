@@ -586,10 +586,7 @@ pub fn merge_notes_from_ref(repo: &Repository, source_ref: &str) -> Result<(), G
 ///
 /// This is O(1) git process invocations regardless of note count, which matters on
 /// large monorepos with thousands of notes.
-pub fn fallback_merge_notes_ours(
-    repo: &Repository,
-    source_ref: &str,
-) -> Result<(), GitAiError> {
+pub fn fallback_merge_notes_ours(repo: &Repository, source_ref: &str) -> Result<(), GitAiError> {
     let local_ref = format!("refs/notes/{}", AI_AUTHORSHIP_REFNAME);
 
     // 1. List notes from both refs
@@ -639,9 +636,7 @@ fn list_all_notes(repo: &Repository, notes_ref: &str) -> Result<Vec<(String, Str
     // `git notes list` uses --ref to specify which notes ref.
     // The --ref option prepends "refs/notes/" automatically, so for full refs
     // like "refs/notes/ai-remote/origin" we need to strip the prefix.
-    let ref_arg = notes_ref
-        .strip_prefix("refs/notes/")
-        .unwrap_or(notes_ref);
+    let ref_arg = notes_ref.strip_prefix("refs/notes/").unwrap_or(notes_ref);
 
     let mut args = repo.global_args_for_exec();
     args.extend_from_slice(&[
