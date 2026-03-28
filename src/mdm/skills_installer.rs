@@ -1,6 +1,7 @@
 use crate::config::skills_dir_path;
 use crate::error::GitAiError;
 use crate::mdm::utils::write_atomic;
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -126,7 +127,11 @@ fn remove_skill_link(link_path: &PathBuf) -> Result<(), GitAiError> {
 /// Then links each skill to:
 /// - ~/.agents/skills/{skill-name} (symlink on Unix, copy on Windows)
 /// - ~/.claude/skills/{skill-name} (symlink on Unix, copy on Windows)
-pub fn install_skills(dry_run: bool, _verbose: bool) -> Result<SkillsInstallResult, GitAiError> {
+pub fn install_skills(
+    dry_run: bool,
+    _verbose: bool,
+    installed_tools: &HashSet<String>,
+) -> Result<SkillsInstallResult, GitAiError> {
     let skills_base = skills_dir_path().ok_or_else(|| {
         GitAiError::Generic("Could not determine skills directory path".to_string())
     })?;
@@ -166,7 +171,9 @@ pub fn install_skills(dry_run: bool, _verbose: bool) -> Result<SkillsInstallResu
         }
 
         // ~/.claude/skills/{skill-name} -> ~/.git-ai/skills/{skill-name}
-        if let Some(claude_dir) = claude_skills_dir() {
+        if installed_tools.contains("claude-code")
+            && let Some(claude_dir) = claude_skills_dir()
+        {
             let claude_link = claude_dir.join(skill.name);
             if let Err(e) = link_skill_dir(&skill_dir, &claude_link) {
                 eprintln!("Warning: Failed to link skill at {:?}: {}", claude_link, e);
@@ -174,7 +181,9 @@ pub fn install_skills(dry_run: bool, _verbose: bool) -> Result<SkillsInstallResu
         }
 
         // ~/.cursor/skills/{skill-name} -> ~/.git-ai/skills/{skill-name}
-        if let Some(cursor_dir) = cursor_skills_dir() {
+        if installed_tools.contains("cursor")
+            && let Some(cursor_dir) = cursor_skills_dir()
+        {
             let cursor_link = cursor_dir.join(skill.name);
             if let Err(e) = link_skill_dir(&skill_dir, &cursor_link) {
                 eprintln!("Warning: Failed to link skill at {:?}: {}", cursor_link, e);
@@ -439,14 +448,18 @@ mod tests {
         // and don't race with other tests that mutate HOME (e.g. codex tests).
         with_temp_home(|_home| {
             let skills_base = skills_dir_path().unwrap();
+            let all_tools: HashSet<String> = ["claude-code", "cursor"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
 
             // Dry run should not create anything
-            let dry_result = install_skills(true, false).unwrap();
+            let dry_result = install_skills(true, false, &all_tools).unwrap();
             assert!(dry_result.changed);
             assert_eq!(dry_result.installed_count, EMBEDDED_SKILLS.len());
 
             // Install creates skill files with correct content
-            let result = install_skills(false, false).unwrap();
+            let result = install_skills(false, false, &all_tools).unwrap();
             assert!(result.changed);
             assert_eq!(result.installed_count, EMBEDDED_SKILLS.len());
             assert!(skills_base.exists());
@@ -458,7 +471,7 @@ mod tests {
             }
 
             // Install again is idempotent
-            let result2 = install_skills(false, false).unwrap();
+            let result2 = install_skills(false, false, &all_tools).unwrap();
             assert!(result2.changed);
             for skill in EMBEDDED_SKILLS {
                 let skill_md = skills_base.join(skill.name).join("SKILL.md");
