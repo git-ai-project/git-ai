@@ -1248,7 +1248,6 @@ fn apply_checkpoint_side_effect(request: CheckpointRunRequest) -> Result<(), Git
     match request {
         CheckpointRunRequest::Live(request) => {
             let repo = find_repository_in_path(&request.repo_working_dir)?;
-            crate::commands::git_hook_handlers::ensure_repo_level_hooks_for_checkpoint(&repo);
 
             let kind = request
                 .kind
@@ -1273,7 +1272,6 @@ fn apply_checkpoint_side_effect(request: CheckpointRunRequest) -> Result<(), Git
         }
         CheckpointRunRequest::Captured(request) => {
             let repo = find_repository_in_path(&request.repo_working_dir)?;
-            crate::commands::git_hook_handlers::ensure_repo_level_hooks_for_checkpoint(&repo);
             let _ = crate::commands::checkpoint::execute_captured_checkpoint(
                 &repo,
                 &request.capture_id,

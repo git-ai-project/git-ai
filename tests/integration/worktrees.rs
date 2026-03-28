@@ -160,33 +160,6 @@ crate::worktree_test_wrappers! {
 }
 
 crate::worktree_test_wrappers! {
-    fn hooks_config_resolves_to_common_dir() {
-        let repo = TestRepo::new();
-        repo.git_ai(&["git-hooks", "ensure"])
-            .expect("git-hooks ensure should succeed in linked worktree");
-
-        let hooks_path = repo
-            .git(&["config", "--local", "--get", "core.hooksPath"])
-            .expect("core.hooksPath should be set")
-            .trim()
-            .to_string();
-        let hooks_path = PathBuf::from(hooks_path);
-        let common_dir = PathBuf::from(
-            repo.git(&["rev-parse", "--git-common-dir"])
-                .expect("resolve common dir")
-                .trim(),
-        );
-        let expected_hooks = common_dir.join("ai").join("hooks");
-
-        assert_eq!(
-            hooks_path.canonicalize().unwrap(),
-            expected_hooks.canonicalize().unwrap(),
-            "managed hooks path should be stable across worktrees"
-        );
-    }
-}
-
-crate::worktree_test_wrappers! {
     fn checkpoint_and_blame_support_absolute_paths_in_worktree() {
         let repo = TestRepo::new();
         let mut file = repo.filename("src/lib.rs");

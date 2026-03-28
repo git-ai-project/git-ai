@@ -58,8 +58,9 @@ impl GitTestMode {
 
     pub fn from_mode_name(mode: &str) -> Self {
         match mode.to_lowercase().as_str() {
-            "hooks" => Self::Hooks,
-            "both" | "wrapper+hooks" | "hooks+wrapper" => Self::Both,
+            // Git core hooks have been sunset — "hooks" and "both" now
+            // fall through to Wrapper mode.
+            "hooks" | "both" | "wrapper+hooks" | "hooks+wrapper" => Self::Wrapper,
             "daemon" | "trace-daemon" | "pure-daemon" => Self::Daemon,
             "wrapper-daemon" => Self::WrapperDaemon,
             _ => Self::Wrapper,
@@ -71,7 +72,8 @@ impl GitTestMode {
     }
 
     pub fn uses_hooks(self) -> bool {
-        matches!(self, Self::Hooks | Self::Both)
+        // Git core hooks have been sunset.
+        false
     }
 
     pub fn uses_daemon(self) -> bool {

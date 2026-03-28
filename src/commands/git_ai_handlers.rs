@@ -299,8 +299,6 @@ fn print_help() {
     eprintln!("  bg                 Run and control git-ai background service");
     eprintln!("  install-hooks      Install git hooks for AI authorship tracking");
     eprintln!("  uninstall-hooks    Remove git-ai hooks from all detected tools");
-    eprintln!("  git-hooks ensure   Ensure repo-local git-ai hooks are installed/healed");
-    eprintln!("  git-hooks remove   Remove repo-local git-ai hooks and restore local hooksPath");
     eprintln!("  ci                 Continuous integration utilities");
     eprintln!("    github                 GitHub CI helpers");
     eprintln!("  squash-authorship  Generate authorship log for squashed commits");
@@ -774,7 +772,6 @@ fn handle_checkpoint(args: &[String]) {
                     modified
                 });
 
-                commands::git_hook_handlers::ensure_repo_level_hooks_for_checkpoint(&repo);
                 let checkpoint_result = run_checkpoint_via_daemon_or_local(
                     &repo,
                     &default_user_name,
@@ -952,7 +949,6 @@ fn handle_checkpoint(args: &[String]) {
         None
     };
 
-    commands::git_hook_handlers::ensure_repo_level_hooks_for_checkpoint(&repo);
     let checkpoint_result = run_checkpoint_via_daemon_or_local(
         &repo,
         &default_user_name,
@@ -1016,7 +1012,6 @@ fn handle_checkpoint(args: &[String]) {
                 modified.will_edit_filepaths = None;
             }
 
-            commands::git_hook_handlers::ensure_repo_level_hooks_for_checkpoint(&ext_repo);
             match run_checkpoint_via_daemon_or_local(
                 &ext_repo,
                 &ext_user_name,
@@ -1785,35 +1780,6 @@ fn handle_stats(args: &[String]) {
 
 fn handle_git_hooks(args: &[String]) {
     match args.first().map(String::as_str) {
-        Some("ensure") => {
-            let repo = match find_repository(&Vec::<String>::new()) {
-                Ok(repo) => repo,
-                Err(e) => {
-                    eprintln!("Failed to find repository: {}", e);
-                    std::process::exit(1);
-                }
-            };
-
-            match commands::git_hook_handlers::ensure_repo_hooks_installed(&repo, false) {
-                Ok(report) => {
-                    if let Err(e) = commands::git_hook_handlers::mark_repo_hooks_enabled(&repo) {
-                        eprintln!("Failed to persist repo hook opt-in: {}", e);
-                        std::process::exit(1);
-                    }
-                    let status = if report.changed { "updated" } else { "ok" };
-                    println!(
-                        "repo hooks {}: {}",
-                        status,
-                        report.managed_hooks_path.to_string_lossy()
-                    );
-                    std::process::exit(0);
-                }
-                Err(e) => {
-                    eprintln!("Failed to ensure repo hooks: {}", e);
-                    std::process::exit(1);
-                }
-            }
-        }
         Some("remove") | Some("uninstall") => {
             let repo = match find_repository(&Vec::<String>::new()) {
                 Ok(repo) => repo,
@@ -1840,7 +1806,8 @@ fn handle_git_hooks(args: &[String]) {
             }
         }
         _ => {
-            eprintln!("Usage: git-ai git-hooks <ensure|remove>");
+            eprintln!("The git core hooks feature has been sunset.");
+            eprintln!("Usage: git-ai git-hooks remove");
             std::process::exit(1);
         }
     }

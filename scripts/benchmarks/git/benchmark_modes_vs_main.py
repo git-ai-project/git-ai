@@ -5,9 +5,7 @@ Benchmark git-ai execution modes against main-branch wrapper mode.
 Compares:
 1) main(wrapper)
 2) current(wrapper)
-3) current(hooks)
-4) current(wrapper+hooks)
-5) current(daemon)
+3) current(daemon)
 
 The harness builds binaries for both branches, runs a scenario matrix that
 covers basic and complex Git operations, and emits:
@@ -34,18 +32,6 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-MANAGED_HOOK_NAMES = [
-    "pre-commit",
-    "prepare-commit-msg",
-    "post-commit",
-    "pre-rebase",
-    "post-checkout",
-    "post-merge",
-    "pre-push",
-    "post-rewrite",
-    "reference-transaction",
-]
-
 
 class BenchmarkError(RuntimeError):
     pass
@@ -56,7 +42,7 @@ class Variant:
     key: str
     label: str
     binary: Path
-    mode: str  # wrapper | hooks | both | daemon
+    mode: str  # wrapper | daemon
 
 
 @dataclasses.dataclass(frozen=True)
@@ -246,7 +232,7 @@ class VariantRunner:
         self.home_dir.mkdir(parents=True, exist_ok=True)
         self.bin_dir.mkdir(parents=True, exist_ok=True)
 
-        if self.variant.mode in ("wrapper", "both"):
+        if self.variant.mode == "wrapper":
             create_link_or_copy(self.variant.binary, self.git_wrapper)
 
         self.base_env = dict(os.environ)
@@ -419,47 +405,8 @@ class VariantRunner:
             f"Daemon did not settle for repo {repo} (latest_seq={last_latest_seq})"
         )
 
-    def assert_repo_local_hooks(self, repo_dir: Path) -> None:
-        expected_hooks_dir = (repo_dir / ".git" / "ai" / "hooks").resolve()
-        hooks_path = (
-            self.run_git(["config", "--local", "--get", "core.hooksPath"], cwd=repo_dir)
-            .stdout.strip()
-        )
-        if not hooks_path:
-            raise BenchmarkError("Expected local core.hooksPath to be configured, found empty")
-        resolved_hooks_path = Path(hooks_path)
-        if not resolved_hooks_path.is_absolute():
-            resolved_hooks_path = (repo_dir / resolved_hooks_path).resolve()
-        else:
-            resolved_hooks_path = resolved_hooks_path.resolve()
-        if resolved_hooks_path != expected_hooks_dir:
-            raise BenchmarkError(
-                "Expected repo-local hooks path\n"
-                f"expected={expected_hooks_dir}\n"
-                f"actual={resolved_hooks_path}\n"
-            )
-
-        if not expected_hooks_dir.exists():
-            raise BenchmarkError(f"Managed hooks dir missing: {expected_hooks_dir}")
-
-        installed_hooks = {
-            entry.name
-            for entry in expected_hooks_dir.iterdir()
-            if not entry.name.startswith(".")
-        }
-        expected_set = set(MANAGED_HOOK_NAMES)
-        missing = sorted(expected_set.difference(installed_hooks))
-        extras = sorted(installed_hooks.difference(expected_set))
-        if missing or extras:
-            raise BenchmarkError(
-                "Unexpected managed hook surface in repo-local hooks dir\n"
-                f"missing={missing}\n"
-                f"extras={extras}\n"
-                f"path={expected_hooks_dir}\n"
-            )
-
     def run_git(self, args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
-        if self.variant.mode in ("wrapper", "both"):
+        if self.variant.mode == "wrapper":
             cmd = [str(self.git_wrapper), *args]
         else:
             cmd = [str(self.real_git), *args]
@@ -490,9 +437,6 @@ class VariantRunner:
         self.run_git(["config", "user.name", "Benchmark Bot"], cwd=repo_dir)
         self.run_git(["config", "user.email", "benchmark@git-ai.local"], cwd=repo_dir)
 
-        if self.variant.mode in ("hooks", "both"):
-            self.run_git_ai(["git-hooks", "ensure"], cwd=repo_dir)
-            self.assert_repo_local_hooks(repo_dir)
 
     def checkpoint_mock_ai(self, repo_dir: Path, files: list[str]) -> None:
         if not files:
@@ -974,48 +918,41 @@ def render_report(
     lines.append("## Exact Timings (ms)")
     lines.append("")
     lines.append(
-        "| Scenario | main(wrapper) runs | current(wrapper) runs | current(hooks) runs | current(wrapper+hooks) runs | current(daemon) runs |"
+        "| Scenario | main(wrapper) runs | current(wrapper) runs | current(daemon) runs |"
     )
-    lines.append("|---|---:|---:|---:|---:|---:|")
+    lines.append("|---|---:|---:|---:|")
     for scenario in scenarios:
         row = [scenario.key]
         for key in [
             "main_wrapper",
             "current_wrapper",
-            "current_hooks",
-            "current_both",
             "current_daemon",
         ]:
             runs = summary[scenario.key][key]["runs_ms"]  # type: ignore[index]
             row.append(", ".join(f"{float(v):.3f}" for v in runs))  # type: ignore[arg-type]
         lines.append(
-            f"| {row[0]} | {row[1]} | {row[2]} | {row[3]} | {row[4]} | {row[5]} |"
+            f"| {row[0]} | {row[1]} | {row[2]} | {row[3]} |"
         )
     lines.append("")
     lines.append("## Median Summary (ms) and Slowdown vs main(wrapper)")
     lines.append("")
     lines.append(
-        "| Scenario | main(wrapper) | current(wrapper) | current(hooks) | current(wrapper+hooks) | current(daemon) | wrapper Δ% | hooks Δ% | both Δ% | daemon Δ% |"
+        "| Scenario | main(wrapper) | current(wrapper) | current(daemon) | wrapper Δ% | daemon Δ% |"
     )
-    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    lines.append("|---|---:|---:|---:|---:|---:|")
     for scenario in scenarios:
         data = summary[scenario.key]
         base = float(data["main_wrapper"]["median_ms"])  # type: ignore[index]
         cw = float(data["current_wrapper"]["median_ms"])  # type: ignore[index]
-        ch = float(data["current_hooks"]["median_ms"])  # type: ignore[index]
-        cb = float(data["current_both"]["median_ms"])  # type: ignore[index]
         cd = float(data["current_daemon"]["median_ms"])  # type: ignore[index]
         s = slowdowns.get(scenario.key, {})
         lines.append(
-            f"| {scenario.key} | {base:.3f} | {cw:.3f} | {ch:.3f} | {cb:.3f} | {cd:.3f} | "
-            f"{s.get('current_wrapper', 0.0):.3f}% | {s.get('current_hooks', 0.0):.3f}% | "
-            f"{s.get('current_both', 0.0):.3f}% | {s.get('current_daemon', 0.0):.3f}% |"
+            f"| {scenario.key} | {base:.3f} | {cw:.3f} | {cd:.3f} | "
+            f"{s.get('current_wrapper', 0.0):.3f}% | {s.get('current_daemon', 0.0):.3f}% |"
         )
 
     ratios: dict[str, list[float]] = {
         "current_wrapper": [],
-        "current_hooks": [],
-        "current_both": [],
         "current_daemon": [],
     }
     for scenario in scenarios:
@@ -1090,7 +1027,7 @@ def write_raw_csv(path: Path, results: list[RunResult]) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Benchmark main(wrapper) against current wrapper/hooks/wrapper+hooks/daemon "
+            "Benchmark main(wrapper) against current wrapper/daemon "
             "across basic and complex git workflows."
         )
     )
@@ -1143,7 +1080,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--enforce-margin",
         action="store_true",
-        help="Exit non-zero when any current_hooks/current_both/current_daemon margin check fails.",
+        help="Exit non-zero when any current_wrapper/current_daemon margin check fails.",
     )
     parser.add_argument(
         "--margin-baseline",
@@ -1205,8 +1142,6 @@ def main() -> int:
         variants = [
             Variant("main_wrapper", "main(wrapper)", main_bin, "wrapper"),
             Variant("current_wrapper", "current(wrapper)", current_bin, "wrapper"),
-            Variant("current_hooks", "current(hooks)", current_bin, "hooks"),
-            Variant("current_both", "current(wrapper+hooks)", current_bin, "both"),
             Variant("current_daemon", "current(daemon)", current_bin, "daemon"),
         ]
 
@@ -1251,10 +1186,6 @@ def main() -> int:
                             run_repo,
                             ignore=ignore_transient_git_lockfiles,
                         )
-                        if variant.mode in ("hooks", "both"):
-                            runner.run_git_ai(["git-hooks", "ensure"], cwd=run_repo)
-                            runner.assert_repo_local_hooks(run_repo)
-
                         t0 = time.perf_counter()
                         scenario.measure(runner, run_repo, run_index)
                         duration_ms = (time.perf_counter() - t0) * 1000.0
@@ -1284,7 +1215,7 @@ def main() -> int:
             summary,
             baseline_key=args.margin_baseline,
             margin_pct=args.margin_pct,
-            variants=["current_hooks", "current_both", "current_daemon"],
+            variants=["current_wrapper", "current_daemon"],
         )
 
         metadata: dict[str, str | int | dict[str, str]] = {

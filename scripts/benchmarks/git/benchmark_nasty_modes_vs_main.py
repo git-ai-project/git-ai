@@ -28,7 +28,7 @@ class Variant:
     key: str
     label: str
     binary: Path
-    mode: str  # wrapper | hooks | both | daemon
+    mode: str  # wrapper | daemon
 
 
 @dataclasses.dataclass
@@ -198,7 +198,7 @@ def setup_variant_runtime(
     home_dir.mkdir(parents=True, exist_ok=True)
     bin_dir.mkdir(parents=True, exist_ok=True)
 
-    if variant.mode in ("wrapper", "both"):
+    if variant.mode == "wrapper":
         create_link_or_copy(variant.binary, wrapper_git)
 
     env = dict(os.environ)
@@ -246,7 +246,7 @@ def setup_variant_runtime(
         env["GIT_AI_DAEMON_CHECKPOINT_DELEGATE"] = "true"
         env["GIT_AI_DAEMON_CONTROL_SOCKET"] = str(control_socket)
 
-    git_bin = wrapper_git if variant.mode in ("wrapper", "both") else real_git
+    git_bin = wrapper_git if variant.mode == "wrapper" else real_git
     return env, git_bin, daemon_proc, home_dir
 
 
@@ -405,8 +405,6 @@ def render_report(
     variants = [
         "main_wrapper",
         "current_wrapper",
-        "current_hooks",
-        "current_both",
         "current_daemon",
     ]
     margin_baseline_key = str(metadata["margin_baseline"])
@@ -437,22 +435,19 @@ def render_report(
     lines.append("## Median Duration (s) and Slowdown vs main(wrapper)")
     lines.append("")
     lines.append(
-        "| Scenario | main(wrapper) | current(wrapper) | current(hooks) | current(wrapper+hooks) | current(daemon) | wrapper Δ% | hooks Δ% | both Δ% | daemon Δ% |"
+        "| Scenario | main(wrapper) | current(wrapper) | current(daemon) | wrapper Δ% | daemon Δ% |"
     )
-    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    lines.append("|---|---:|---:|---:|---:|---:|")
 
     for scenario in scenarios:
         row = summary.get(scenario, {})
         base = float(row.get("main_wrapper", {}).get("median_s", 0.0))
         cw = float(row.get("current_wrapper", {}).get("median_s", 0.0))
-        ch = float(row.get("current_hooks", {}).get("median_s", 0.0))
-        cb = float(row.get("current_both", {}).get("median_s", 0.0))
         cd = float(row.get("current_daemon", {}).get("median_s", 0.0))
         s = slowdowns.get(scenario, {})
         lines.append(
-            f"| {scenario} | {base:.3f} | {cw:.3f} | {ch:.3f} | {cb:.3f} | {cd:.3f} | "
-            f"{s.get('current_wrapper', 0.0):.3f}% | {s.get('current_hooks', 0.0):.3f}% | "
-            f"{s.get('current_both', 0.0):.3f}% | {s.get('current_daemon', 0.0):.3f}% |"
+            f"| {scenario} | {base:.3f} | {cw:.3f} | {cd:.3f} | "
+            f"{s.get('current_wrapper', 0.0):.3f}% | {s.get('current_daemon', 0.0):.3f}% |"
         )
 
     lines.append("")
@@ -461,7 +456,7 @@ def render_report(
     lines.append("| Variant | Geometric Mean Ratio vs main(wrapper) | Geometric Mean Slowdown |")
     lines.append("|---|---:|---:|")
 
-    for key in ["current_wrapper", "current_hooks", "current_both", "current_daemon"]:
+    for key in ["current_wrapper", "current_daemon"]:
         ratios: list[float] = []
         for scenario in scenarios:
             row = summary.get(scenario, {})
@@ -538,7 +533,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--enforce-margin",
         action="store_true",
-        help="Exit non-zero when any current_hooks/current_both/current_daemon margin check fails.",
+        help="Exit non-zero when any current_wrapper/current_daemon margin check fails.",
     )
     parser.add_argument(
         "--margin-baseline",
@@ -610,8 +605,6 @@ def main() -> int:
         variants = [
             Variant("main_wrapper", "main(wrapper)", main_bin, "wrapper"),
             Variant("current_wrapper", "current(wrapper)", current_bin, "wrapper"),
-            Variant("current_hooks", "current(hooks)", current_bin, "hooks"),
-            Variant("current_both", "current(wrapper+hooks)", current_bin, "both"),
             Variant("current_daemon", "current(daemon)", current_bin, "daemon"),
         ]
 
@@ -694,7 +687,7 @@ def main() -> int:
             summary,
             baseline_key=args.margin_baseline,
             margin_pct=args.margin_pct,
-            variants=["current_hooks", "current_both", "current_daemon"],
+            variants=["current_wrapper", "current_daemon"],
         )
 
         timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())

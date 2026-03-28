@@ -107,6 +107,12 @@ impl FeatureFlags {
             envy::prefixed("GIT_AI_").from_env().unwrap_or_default();
         result = Self::merge_with(result, env_flags);
 
+        // Git core hooks have been sunset — users who had hooks enabled are
+        // migrated to async (daemon) mode automatically.
+        if result.git_hooks_enabled {
+            result.async_mode = true;
+        }
+
         result
     }
 }
