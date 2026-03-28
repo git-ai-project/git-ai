@@ -391,6 +391,9 @@ $gitOgShimContent = "@echo off$([Environment]::NewLine)`"$stdGitPath`" %*$([Envi
 Set-Content -Path $gitOgShim -Value $gitOgShimContent -Encoding ASCII -Force
 try { Unblock-File -Path $gitOgShim -ErrorAction SilentlyContinue } catch { }
 
+# Detect first-time install (before exchange-nonce/install-hooks create config.json)
+$firstInstall = -not (Test-Path -LiteralPath (Join-Path $HOME '.git-ai\config.json'))
+
 # Login user with install token if provided
 $needLogin = $false
 if ($env:INSTALL_NONCE -and $env:API_BASE) {
@@ -411,6 +414,13 @@ try {
     Write-Success 'Successfully set up IDE/agent hooks'
 } catch {
     Write-Warning "Warning: Failed to set up IDE/agent hooks. Please try running 'git-ai install-hooks' manually."
+}
+
+# Enable async mode on first-time installs
+if ($firstInstall) {
+    try {
+        & $finalExe config --add feature_flags.async_mode true 2>$null | Out-Null
+    } catch { }
 }
 
 # Update PATH so our shim takes precedence over any Git entries
@@ -498,26 +508,6 @@ if ($gitBashConfigured) {
     Write-Success "Successfully configured Git Bash ($targetBashConfig)"
 } elseif ($gitBashAlreadyConfigured) {
     Write-Success "Git Bash already configured ($targetBashConfig)"
-}
-
-# Write JSON config at %USERPROFILE%\.git-ai\config.json (only if it doesn't exist)
-try {
-    $configDir = Join-Path $HOME '.git-ai'
-    $configJsonPath = Join-Path $configDir 'config.json'
-    New-Item -ItemType Directory -Force -Path $configDir | Out-Null
-
-    if (-not (Test-Path -LiteralPath $configJsonPath)) {
-        $cfg = @{
-            git_path = $stdGitPath
-            feature_flags = @{
-                async_mode = $true
-            }
-        } | ConvertTo-Json -Depth 3 -Compress
-        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-        [System.IO.File]::WriteAllText($configJsonPath, $cfg, $utf8NoBom)
-    }
-} catch {
-    Write-Host "Warning: Failed to write config.json: $($_.Exception.Message)" -ForegroundColor Yellow
 }
 
 Write-Host 'Close and reopen your terminal and IDE sessions to use git-ai.' -ForegroundColor Yellow

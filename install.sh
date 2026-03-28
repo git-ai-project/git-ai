@@ -334,6 +334,12 @@ success "You can now run 'git-ai' from your terminal"
 INSTALLED_VERSION=$(${INSTALL_DIR}/git-ai --version 2>&1 || echo "unknown")
 echo "Installed git-ai ${INSTALLED_VERSION}"
 
+# Detect first-time install (before exchange-nonce/install-hooks create config.json)
+FIRST_INSTALL=false
+if [ ! -f "$HOME/.git-ai/config.json" ]; then
+    FIRST_INSTALL=true
+fi
+
 # Login user with install token if provided
 NEED_LOGIN=false
 if [ -n "${INSTALL_NONCE:-}" ] && [ -n "${API_BASE:-}" ]; then
@@ -349,22 +355,9 @@ else
     success "Successfully set up IDE/agent hooks"
 fi
 
-# Write JSON config at ~/.git-ai/config.json (only if it doesn't exist)
-CONFIG_DIR="$HOME/.git-ai"
-CONFIG_JSON_PATH="$CONFIG_DIR/config.json"
-mkdir -p "$CONFIG_DIR"
-
-if [ ! -f "$CONFIG_JSON_PATH" ]; then
-    TMP_CFG="$CONFIG_JSON_PATH.tmp.$$"
-    cat >"$TMP_CFG" <<EOF
-{
-  "git_path": "${STD_GIT_PATH}",
-  "feature_flags": {
-    "async_mode": true
-  }
-}
-EOF
-    mv -f "$TMP_CFG" "$CONFIG_JSON_PATH"
+# Enable async mode on first-time installs
+if [ "$FIRST_INSTALL" = true ]; then
+    ${INSTALL_DIR}/git-ai config --add feature_flags.async_mode true 2>/dev/null || true
 fi
 
 # Add to PATH in all detected shell configurations
