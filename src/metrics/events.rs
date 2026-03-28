@@ -3,8 +3,7 @@
 use super::pos_encoded::{
     PosEncoded, PosField, bool_to_json, sparse_get_bool, sparse_get_string, sparse_get_u32,
     sparse_get_u64, sparse_get_vec_string, sparse_get_vec_u32, sparse_get_vec_u64, sparse_set,
-    string_to_json, u32_to_json, u64_to_json, vec_string_to_json, vec_u32_to_json,
-    vec_u64_to_json,
+    string_to_json, u32_to_json, u64_to_json, vec_string_to_json, vec_u32_to_json, vec_u64_to_json,
 };
 use super::types::{EventValues, MetricEventId, SparseArray};
 
@@ -748,11 +747,7 @@ impl PosEncoded for PromptEventValues {
     fn to_sparse(&self) -> SparseArray {
         let mut map = SparseArray::new();
 
-        sparse_set(
-            &mut map,
-            prompt_event_pos::KIND,
-            string_to_json(&self.kind),
-        );
+        sparse_set(&mut map, prompt_event_pos::KIND, string_to_json(&self.kind));
         sparse_set(
             &mut map,
             prompt_event_pos::EVENT_ID,
@@ -1196,14 +1191,8 @@ mod tests {
             sparse.get("0"),
             Some(&Value::String("ToolCall".to_string()))
         );
-        assert_eq!(
-            sparse.get("1"),
-            Some(&Value::String("p1:xyz".to_string()))
-        );
-        assert_eq!(
-            sparse.get("2"),
-            Some(&Value::String("p1:prev".to_string()))
-        );
+        assert_eq!(sparse.get("1"), Some(&Value::String("p1:xyz".to_string())));
+        assert_eq!(sparse.get("2"), Some(&Value::String("p1:prev".to_string())));
         assert_eq!(sparse.get("3"), Some(&Value::Bool(true)));
     }
 
@@ -1250,10 +1239,7 @@ mod tests {
             <PromptEventValues as EventValues>::event_id(),
             MetricEventId::PromptEvent
         );
-        assert_eq!(
-            <PromptEventValues as EventValues>::event_id() as u16,
-            5
-        );
+        assert_eq!(<PromptEventValues as EventValues>::event_id() as u16, 5);
     }
 
     #[test]

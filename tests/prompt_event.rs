@@ -11,9 +11,7 @@
 #[path = "integration/repos/mod.rs"]
 mod repos;
 
-use git_ai::daemon::{
-    ControlRequest, local_socket_connects_with_timeout, send_control_request,
-};
+use git_ai::daemon::{ControlRequest, local_socket_connects_with_timeout, send_control_request};
 use repos::test_repo::{GitTestMode, TestRepo, get_binary_path, real_git_executable};
 use std::fs;
 use std::path::Path;
@@ -92,7 +90,9 @@ fn run_prompt_event(repo: &TestRepo, agent: &str, hook_input: &str) -> (bool, St
             .expect("failed to write hook input");
     }
 
-    let output = child.wait_with_output().expect("failed to wait for prompt-event");
+    let output = child
+        .wait_with_output()
+        .expect("failed to wait for prompt-event");
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     (output.status.success(), stdout, stderr)
@@ -113,11 +113,7 @@ fn read_prompt_event_state(repo: &TestRepo, session_id: &str) -> Option<serde_js
     }
 }
 
-fn daemon_command_output(
-    repo: &TestRepo,
-    args: &[&str],
-    cwd: &Path,
-) -> std::process::Output {
+fn daemon_command_output(repo: &TestRepo, args: &[&str], cwd: &Path) -> std::process::Output {
     let mut command = Command::new(get_binary_path());
     command.args(args).current_dir(cwd);
     configure_test_home_env(&mut command, repo);
@@ -177,7 +173,11 @@ fn prompt_event_skips_without_async_mode() {
     });
 
     let (success, _stdout, stderr) = run_prompt_event(&repo, "claude", &hook_input.to_string());
-    assert!(success, "prompt-event should exit 0 when async_mode is off: {}", stderr);
+    assert!(
+        success,
+        "prompt-event should exit 0 when async_mode is off: {}",
+        stderr
+    );
 }
 
 #[test]
@@ -195,7 +195,11 @@ fn prompt_event_processes_claude_transcript_with_daemon() {
     wait_for_daemon_sockets(&repo);
 
     // Create transcript
-    let transcript_dir = repo.test_home_path().join(".claude").join("projects").join("test");
+    let transcript_dir = repo
+        .test_home_path()
+        .join(".claude")
+        .join("projects")
+        .join("test");
     let transcript_path = transcript_dir.join("test-session-abc.jsonl");
     write_transcript(
         &transcript_path,
@@ -220,7 +224,10 @@ fn prompt_event_processes_claude_transcript_with_daemon() {
 
     // Check state file was created
     let state = read_prompt_event_state(&repo, "test-session-abc");
-    assert!(state.is_some(), "state file should exist after prompt-event");
+    assert!(
+        state.is_some(),
+        "state file should exist after prompt-event"
+    );
 
     let state = state.unwrap();
     let emitted = state["emitted_event_ids"].as_array().unwrap();

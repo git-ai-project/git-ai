@@ -139,12 +139,37 @@ impl HookInstaller for ClaudeCodeInstaller {
         #[allow(clippy::type_complexity)]
         let hook_entries: Vec<(&str, Option<&str>, &str, fn(&str) -> bool)> = vec![
             // Checkpoint hooks
-            ("PreToolUse", Some("Write|Edit|MultiEdit"), &pre_tool_cmd, is_git_ai_checkpoint_command),
-            ("PostToolUse", Some("Write|Edit|MultiEdit"), &post_tool_cmd, is_git_ai_checkpoint_command),
+            (
+                "PreToolUse",
+                Some("Write|Edit|MultiEdit"),
+                &pre_tool_cmd,
+                is_git_ai_checkpoint_command,
+            ),
+            (
+                "PostToolUse",
+                Some("Write|Edit|MultiEdit"),
+                &post_tool_cmd,
+                is_git_ai_checkpoint_command,
+            ),
             // Prompt event hooks
-            ("PostToolUse", None, &prompt_event_cmd, is_git_ai_prompt_event_command),
-            ("UserPromptSubmit", None, &prompt_event_cmd, is_git_ai_prompt_event_command),
-            ("Stop", None, &prompt_event_cmd, is_git_ai_prompt_event_command),
+            (
+                "PostToolUse",
+                None,
+                &prompt_event_cmd,
+                is_git_ai_prompt_event_command,
+            ),
+            (
+                "UserPromptSubmit",
+                None,
+                &prompt_event_cmd,
+                is_git_ai_prompt_event_command,
+            ),
+            (
+                "Stop",
+                None,
+                &prompt_event_cmd,
+                is_git_ai_prompt_event_command,
+            ),
         ];
 
         // Merge desired into existing
@@ -182,14 +207,18 @@ impl HookInstaller for ClaudeCodeInstaller {
                 // No matcher - look for a catch-all block (no "matcher" key) or create one
                 let found = hook_type_array.iter().position(|item| {
                     item.get("matcher").is_none()
-                        || item.get("hooks").and_then(|h| h.as_array()).map(|hooks| {
-                            hooks.iter().any(|hook| {
-                                hook.get("command")
-                                    .and_then(|c| c.as_str())
-                                    .map(is_cmd_fn)
-                                    .unwrap_or(false)
+                        || item
+                            .get("hooks")
+                            .and_then(|h| h.as_array())
+                            .map(|hooks| {
+                                hooks.iter().any(|hook| {
+                                    hook.get("command")
+                                        .and_then(|c| c.as_str())
+                                        .map(is_cmd_fn)
+                                        .unwrap_or(false)
+                                })
                             })
-                        }).unwrap_or(false)
+                            .unwrap_or(false)
                 });
                 match found {
                     Some(idx) => idx,
@@ -312,12 +341,7 @@ impl HookInstaller for ClaudeCodeInstaller {
         let mut changed = false;
 
         // Remove git-ai checkpoint and prompt-event commands from all hook types
-        for hook_type in &[
-            "PreToolUse",
-            "PostToolUse",
-            "UserPromptSubmit",
-            "Stop",
-        ] {
+        for hook_type in &["PreToolUse", "PostToolUse", "UserPromptSubmit", "Stop"] {
             if let Some(hook_type_array) =
                 hooks_obj.get_mut(*hook_type).and_then(|v| v.as_array_mut())
             {

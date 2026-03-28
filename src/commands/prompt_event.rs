@@ -153,12 +153,9 @@ fn parse_claude_transcript(transcript_path: &str) -> Result<Vec<TranscriptEvent>
                             Some("tool_use") => {
                                 let tool_name =
                                     item["name"].as_str().unwrap_or("unknown").to_string();
-                                let tool_id =
-                                    item["id"].as_str().unwrap_or("").to_string();
-                                let is_file_write = matches!(
-                                    tool_name.as_str(),
-                                    "Write" | "Edit" | "MultiEdit"
-                                );
+                                let tool_id = item["id"].as_str().unwrap_or("").to_string();
+                                let is_file_write =
+                                    matches!(tool_name.as_str(), "Write" | "Edit" | "MultiEdit");
                                 events.push(TranscriptEvent {
                                     kind: if is_file_write {
                                         prompt_event_kind::FILE_WRITE.to_string()
@@ -217,10 +214,7 @@ fn process_claude_prompt_events(hook_input: &str) -> Result<(), GitAiError> {
     let all_events = match parse_claude_transcript(transcript_path) {
         Ok(events) => events,
         Err(e) => {
-            debug_log(&format!(
-                "prompt-event: failed to parse transcript: {}",
-                e
-            ));
+            debug_log(&format!("prompt-event: failed to parse transcript: {}", e));
             // Still try to emit a single event for the current hook trigger
             emit_single_event_from_hook(&hook_data, &prompt_id, &session_id)?;
             return Ok(());
@@ -274,9 +268,7 @@ fn process_claude_prompt_events(hook_input: &str) -> Result<(), GitAiError> {
 
     for (i, eid, parent_id, parent_estimated) in &new_events {
         let evt = &all_events[*i];
-        let mut values = PromptEventValues::new()
-            .kind(&evt.kind)
-            .event_id(eid);
+        let mut values = PromptEventValues::new().kind(&evt.kind).event_id(eid);
 
         match parent_id {
             Some(pid) => {
@@ -332,10 +324,7 @@ fn emit_single_event_from_hook(
 
     // Build a content hash from whatever we have
     let content_hash_input = match hook_event_name {
-        "UserPromptSubmit" => hook_data["prompt"]
-            .as_str()
-            .unwrap_or("")
-            .to_string(),
+        "UserPromptSubmit" => hook_data["prompt"].as_str().unwrap_or("").to_string(),
         "PostToolUse" => {
             let tool_name = hook_data["tool_name"].as_str().unwrap_or("unknown");
             let tool_id = hook_data["tool_use_id"].as_str().unwrap_or("");
@@ -354,9 +343,7 @@ fn emit_single_event_from_hook(
         (None, false)
     };
 
-    let mut values = PromptEventValues::new()
-        .kind(kind)
-        .event_id(&event_id);
+    let mut values = PromptEventValues::new().kind(kind).event_id(&event_id);
     match parent_id {
         Some(pid) => {
             values = values.parent_id(pid);
@@ -438,9 +425,7 @@ fn process_opencode_prompt_events(hook_input: &str) -> Result<(), GitAiError> {
         (None, false)
     };
 
-    let mut values = PromptEventValues::new()
-        .kind(kind)
-        .event_id(&event_id);
+    let mut values = PromptEventValues::new().kind(kind).event_id(&event_id);
     match parent_id {
         Some(pid) => {
             values = values.parent_id(pid);
@@ -697,9 +682,6 @@ mod tests {
             <PromptEventValues as EventValues>::event_id(),
             MetricEventId::PromptEvent
         );
-        assert_eq!(
-            <PromptEventValues as EventValues>::event_id() as u16,
-            5
-        );
+        assert_eq!(<PromptEventValues as EventValues>::event_id() as u16, 5);
     }
 }
