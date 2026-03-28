@@ -19,7 +19,7 @@ Options:
   --burst-every <n>            Every Nth feature commit rewrites all generated files (default: 25)
   --git-bin <path>             Git binary to use (default: wrapper next to git-ai, else PATH git)
   --git-ai-bin <path>          git-ai binary (default: PATH git-ai)
-  --hook-mode <mode>           wrapper | hooks | both | daemon (default: wrapper)
+  --hook-mode <mode>           wrapper | daemon (default: wrapper)
   --skip-clone                 Reuse existing clone in <work-root>/repo
   -h, --help                   Show help
 
@@ -83,8 +83,8 @@ if [[ -z "$WORK_ROOT" ]]; then
   WORK_ROOT="${TMPDIR:-/tmp}/git-ai-nasty-rebase-$(date +%Y%m%d-%H%M%S)"
 fi
 
-if [[ "$HOOK_MODE" != "wrapper" && "$HOOK_MODE" != "hooks" && "$HOOK_MODE" != "both" && "$HOOK_MODE" != "daemon" ]]; then
-  echo "error: --hook-mode must be one of wrapper|hooks|both|daemon" >&2
+if [[ "$HOOK_MODE" != "wrapper" && "$HOOK_MODE" != "daemon" ]]; then
+  echo "error: --hook-mode must be one of wrapper|daemon" >&2
   exit 1
 fi
 
@@ -312,62 +312,6 @@ g config user.name "git-ai bench"
 g config user.email "bench@git-ai.local"
 g config commit.gpgsign false
 g config gc.auto 0
-
-if [[ "$HOOK_MODE" == "hooks" || "$HOOK_MODE" == "both" ]]; then
-  echo "Ensuring repo-local git-ai hooks..."
-  (
-    cd "$REPO_DIR"
-    GIT_AI_DEBUG=0 GIT_AI_DEBUG_PERFORMANCE=0 "$GIT_AI_BIN" git-hooks ensure >/dev/null
-  )
-
-  HOOKS_PATH="$(g config --local --get core.hooksPath || true)"
-  EXPECTED_HOOKS_PATH="$REPO_DIR/.git/ai/hooks"
-  python3 - "$HOOKS_PATH" "$EXPECTED_HOOKS_PATH" "$REPO_DIR" <<'PY'
-import os
-import pathlib
-import sys
-
-hooks_path = sys.argv[1].strip()
-expected = pathlib.Path(sys.argv[2]).resolve()
-repo_dir = pathlib.Path(sys.argv[3]).resolve()
-if not hooks_path:
-    print("error: expected local core.hooksPath after git-hooks ensure", file=sys.stderr)
-    sys.exit(1)
-
-actual = pathlib.Path(hooks_path)
-if not actual.is_absolute():
-    actual = repo_dir / actual
-actual = actual.resolve()
-if actual != expected:
-    print(
-        f"error: expected repo-local hooks path {expected}, got {actual}",
-        file=sys.stderr,
-    )
-    sys.exit(1)
-
-expected_hooks = {
-    "pre-commit",
-    "prepare-commit-msg",
-    "post-commit",
-    "pre-rebase",
-    "post-checkout",
-    "post-merge",
-    "pre-push",
-    "post-rewrite",
-    "reference-transaction",
-}
-installed = {p.name for p in actual.iterdir() if not p.name.startswith(".")}
-missing = sorted(expected_hooks - installed)
-extras = sorted(installed - expected_hooks)
-if missing or extras:
-    print(
-        "error: unexpected repo-local hook surface "
-        f"(missing={missing}, extras={extras})",
-        file=sys.stderr,
-    )
-    sys.exit(1)
-PY
-fi
 
 g checkout -B bench-main "origin/$DEFAULT_BRANCH" >/dev/null
 
