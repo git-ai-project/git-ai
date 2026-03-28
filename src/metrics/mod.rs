@@ -1,7 +1,7 @@
 //! Metrics tracking module.
 //!
 //! This module provides functionality for recording metric events.
-//! Events are written directly to the observability log file.
+//! Events are routed through the daemon telemetry worker.
 //!
 //! All public types are re-exported for external use (e.g., ingestion server).
 
@@ -19,9 +19,8 @@ pub use types::{EventValues, METRICS_API_VERSION, MetricEvent, MetricsBatch};
 
 /// Record an event with values and attributes.
 ///
-/// Events are written immediately to the observability log file.
-/// The `flush-logs` command will then upload metrics envelopes to the API
-/// or store them in SQLite for later upload.
+/// Events are sent to the daemon telemetry worker which batches
+/// and uploads them to the API.
 ///
 /// # Example
 ///

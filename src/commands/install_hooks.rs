@@ -1,4 +1,3 @@
-use crate::commands::flush_metrics_db::spawn_background_metrics_db_flush;
 use crate::config;
 use crate::daemon::DaemonConfig;
 use crate::error::GitAiError;
@@ -292,9 +291,11 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
     // Run async operations with smol and convert result
     let statuses = smol::block_on(async_run_install(&params, dry_run, verbose))?;
 
-    // Spawn background processes to flush metrics
-    crate::observability::spawn_background_flush();
-    spawn_background_metrics_db_flush();
+    // Clean up legacy envelope logs directory and related artifacts.
+    // These are no longer used — all telemetry now routes through the daemon.
+    if !dry_run {
+        cleanup_legacy_envelope_logs();
+    }
 
     Ok(to_hashmap(statuses))
 }
@@ -836,6 +837,29 @@ async fn async_run_uninstall(
     }
 
     Ok(statuses)
+}
+
+/// Remove the legacy envelope logs directory and related lock/marker files.
+///
+/// All telemetry now flows through the daemon control socket, so the per-PID
+/// log file system under `~/.git-ai/internal/logs/` is no longer needed.
+fn cleanup_legacy_envelope_logs() {
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    let internal = home.join(".git-ai").join("internal");
+
+    // Remove the entire logs directory
+    let logs_dir = internal.join("logs");
+    if logs_dir.is_dir() {
+        let _ = fs::remove_dir_all(&logs_dir);
+    }
+
+    // Remove the flush-logs lock file
+    let _ = fs::remove_file(internal.join("flush-logs.lock"));
+
+    // Remove the debounce marker file
+    let _ = fs::remove_file(internal.join("last_flush_trigger_ts"));
 }
 
 #[cfg(test)]

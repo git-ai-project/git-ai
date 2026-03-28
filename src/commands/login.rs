@@ -1,6 +1,4 @@
 use crate::auth::{CredentialStore, OAuthClient};
-use crate::commands::flush_metrics_db::spawn_background_metrics_db_flush;
-use crate::metrics::db::MetricsDatabase;
 
 /// Handle the `git-ai login` command
 pub fn handle_login(_args: &[String]) {
@@ -64,18 +62,6 @@ pub fn handle_login(_args: &[String]) {
             }
 
             eprintln!("\nSuccessfully logged in!");
-
-            // Check if there's queued metrics data to sync
-            if let Ok(db) = MetricsDatabase::global()
-                && let Ok(db_lock) = db.lock()
-                && let Ok(count) = db_lock.count()
-                && count > 0
-            {
-                // Spawn background metrics flush now that we're logged in
-                spawn_background_metrics_db_flush();
-                // Inform the user
-                eprintln!("Syncing your Git AI dashboard in the background...");
-            }
         }
         Err(e) => {
             eprintln!("\nAuthorization failed: {}", e);

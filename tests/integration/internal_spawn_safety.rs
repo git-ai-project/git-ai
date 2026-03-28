@@ -25,8 +25,6 @@ fn internal_background_subcommands_must_use_spawn_helper() {
 
     let disallowed_patterns = [
         Regex::new(r#"Command::new\([^\)]*\)(?s:.*?)\.arg\("flush-cas"\)"#).unwrap(),
-        Regex::new(r#"Command::new\([^\)]*\)(?s:.*?)\.arg\("flush-logs"\)"#).unwrap(),
-        Regex::new(r#"Command::new\([^\)]*\)(?s:.*?)\.arg\("flush-metrics-db"\)"#).unwrap(),
         Regex::new(
             r#"Command::new\([^\)]*\)(?s:.*?)\.arg\("upgrade"\)(?s:.*?)\.arg\("--background"\)"#,
         )
@@ -55,12 +53,7 @@ fn internal_background_subcommands_must_use_spawn_helper() {
 #[test]
 fn critical_background_spawners_call_spawn_helper() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let files = [
-        root.join("src/commands/flush_cas.rs"),
-        root.join("src/observability/mod.rs"),
-        root.join("src/commands/flush_metrics_db.rs"),
-        root.join("src/commands/upgrade.rs"),
-    ];
+    let files = [root.join("src/commands/upgrade.rs")];
 
     for file in files {
         let content = fs::read_to_string(&file).unwrap();

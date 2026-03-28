@@ -25,13 +25,6 @@ pub fn push_pre_command_hook(
         // Clone what we need for the background thread
         let global_args = repository.global_args_for_exec();
 
-        crate::observability::spawn_background_flush();
-
-        // Spawn CAS flush if prompt_storage is "default" (CAS upload mode)
-        if crate::config::Config::get().prompt_storage() == "default" {
-            crate::commands::flush_cas::spawn_background_cas_flush();
-        }
-
         // Spawn background thread to push authorship notes in parallel with main push
         Some(std::thread::spawn(move || {
             // Recreate repository in the background thread
@@ -66,13 +59,6 @@ pub fn run_pre_push_hook_managed(parsed_args: &ParsedGitInvocation, repository: 
         "started pushing authorship notes to remote: {}",
         remote
     ));
-
-    crate::observability::spawn_background_flush();
-
-    // Spawn CAS flush if prompt_storage is "default" (CAS upload mode)
-    if crate::config::Config::get().prompt_storage() == "default" {
-        crate::commands::flush_cas::spawn_background_cas_flush();
-    }
 
     if let Err(e) = push_authorship_notes(repository, &remote) {
         debug_log(&format!("authorship push failed: {}", e));

@@ -7078,8 +7078,9 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
 
     let mut coordinator_inner = ActorDaemonCoordinator::new();
     // Spawn the telemetry worker inside the daemon's tokio runtime.
-    coordinator_inner.telemetry_worker =
-        Some(crate::daemon::telemetry_worker::spawn_telemetry_worker());
+    let telemetry_handle = crate::daemon::telemetry_worker::spawn_telemetry_worker();
+    crate::daemon::telemetry_worker::set_daemon_internal_telemetry(telemetry_handle.clone());
+    coordinator_inner.telemetry_worker = Some(telemetry_handle);
     let coordinator = Arc::new(coordinator_inner);
     coordinator.start_trace_ingest_worker()?;
     let rt_handle = tokio::runtime::Handle::current();
