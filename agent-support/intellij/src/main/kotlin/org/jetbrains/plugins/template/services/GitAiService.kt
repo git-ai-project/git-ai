@@ -33,6 +33,9 @@ class GitAiService {
     @Volatile
     private var resolvedGitAiPath: String? = null
 
+    /** Public accessor for the resolved binary path, used by BlameService. */
+    val resolvedPath: String? get() = resolvedGitAiPath
+
     // Track which locations were searched (for error reporting)
     private var lastSearchedPaths: List<String> = emptyList()
 
