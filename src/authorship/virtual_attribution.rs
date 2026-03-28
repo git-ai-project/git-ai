@@ -423,6 +423,10 @@ impl VirtualAttributions {
                 };
 
                 if line_attrs.is_empty() {
+                    // The entry had attribution data but no AI lines remain after
+                    // filtering (e.g. human rewrote the entire file).  Clear any
+                    // stale AI attributions from earlier checkpoints for this file.
+                    attributions.remove(&entry.file);
                     continue;
                 }
 
@@ -551,6 +555,10 @@ impl VirtualAttributions {
                 };
 
                 if line_attrs.is_empty() {
+                    // The entry had attribution data but no AI lines remain after
+                    // filtering (e.g. human rewrote the entire file).  Clear any
+                    // stale AI attributions from earlier checkpoints for this file.
+                    attributions.remove(&entry.file);
                     continue;
                 }
 
@@ -686,6 +694,10 @@ impl VirtualAttributions {
                 };
 
                 if line_attrs.is_empty() {
+                    // The entry had attribution data but no AI lines remain after
+                    // filtering (e.g. human rewrote the entire file).  Clear any
+                    // stale AI attributions from earlier checkpoints for this file.
+                    attributions.remove(&entry.file);
                     continue;
                 }
 
