@@ -510,6 +510,24 @@ if ($gitBashConfigured) {
     Write-Success "Git Bash already configured ($targetBashConfig)"
 }
 
+# Write JSON config at %USERPROFILE%\.git-ai\config.json (only if it doesn't exist)
+# This is a fallback for when install-hooks fails to create config.json.
+try {
+    $configDir = Join-Path $HOME '.git-ai'
+    $configJsonPath = Join-Path $configDir 'config.json'
+    New-Item -ItemType Directory -Force -Path $configDir | Out-Null
+
+    if (-not (Test-Path -LiteralPath $configJsonPath)) {
+        $cfg = @{
+            git_path = $stdGitPath
+        } | ConvertTo-Json -Compress
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($configJsonPath, $cfg, $utf8NoBom)
+    }
+} catch {
+    Write-Host "Warning: Failed to write config.json: $($_.Exception.Message)" -ForegroundColor Yellow
+}
+
 Write-Host 'Close and reopen your terminal and IDE sessions to use git-ai.' -ForegroundColor Yellow
 
 # If nonce exchange failed, run interactive login
