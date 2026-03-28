@@ -121,7 +121,16 @@ pub fn handle_git(args: &[String]) {
         parsed_args = resolved;
     }
 
-    if crate::git::command_classification::is_read_only_invocation(&parsed_args) {
+    // Fast-path: commands that are unconditionally read-only (status, log, diff,
+    // etc.) or help/version invocations can skip all hooks and daemon state.
+    let is_read_only = parsed_args.is_help
+        || parsed_args.command.is_none()
+        || parsed_args
+            .command
+            .as_deref()
+            .is_some_and(crate::git::command_classification::is_definitely_read_only_command);
+
+    if is_read_only {
         let exit_status = proxy_to_git(&parsed_args.to_invocation_vec(), false, None, None);
         exit_with_status(exit_status);
     }
@@ -805,7 +814,12 @@ fn proxy_to_git(
     // trace2 events for the daemon to match wrapper state entries.
     let suppress_trace2 = wrapper_invocation_id.is_none() && {
         let parsed = parse_git_cli_args(args);
-        crate::git::command_classification::is_read_only_invocation(&parsed)
+        parsed.is_help
+            || parsed.command.is_none()
+            || parsed
+                .command
+                .as_deref()
+                .is_some_and(crate::git::command_classification::is_definitely_read_only_command)
     };
 
     // Use spawn for interactive commands
@@ -995,7 +1009,7 @@ mod tests {
     use super::{
         parse_git_cli_args, resolve_alias_invocation, resolve_child_git_hooks_path_override,
     };
-    use crate::git::command_classification::is_read_only_invocation;
+    use crate::git::command_classification::is_definitely_read_only_command;
     use crate::git::find_repository_in_path;
     use std::process::Command;
     use tempfile::tempdir;
@@ -1124,33 +1138,32 @@ mod tests {
 
     #[test]
     fn passthrough_read_only_command_for_status() {
-        let parsed = parse_git_cli_args(&["status".to_string(), "--short".to_string()]);
-        assert!(is_read_only_invocation(&parsed));
-    }
-
-    #[test]
-    fn passthrough_read_only_command_for_branch_show_current() {
-        let parsed = parse_git_cli_args(&["branch".to_string(), "--show-current".to_string()]);
-        assert!(is_read_only_invocation(&parsed));
+        assert!(is_definitely_read_only_command("status"));
     }
 
     #[test]
     fn passthrough_read_only_command_rejects_mutating_commands() {
-        let parsed =
-            parse_git_cli_args(&["commit".to_string(), "-m".to_string(), "msg".to_string()]);
-        assert!(!is_read_only_invocation(&parsed));
+        assert!(!is_definitely_read_only_command("commit"));
     }
 
     #[test]
     fn passthrough_read_only_command_accepts_help_invocations() {
         let parsed = parse_git_cli_args(&["status".to_string(), "--help".to_string()]);
-        assert!(is_read_only_invocation(&parsed));
+        assert!(parsed.is_help);
     }
 
     #[test]
     fn passthrough_read_only_command_accepts_top_level_version() {
+        // `git --version` is rewritten to `git version` by the parser.
         let parsed = parse_git_cli_args(&["--version".to_string()]);
-        assert!(is_read_only_invocation(&parsed));
+        assert!(
+            parsed.is_help
+                || parsed.command.is_none()
+                || parsed
+                    .command
+                    .as_deref()
+                    .is_some_and(is_definitely_read_only_command)
+        );
     }
 
     #[test]
@@ -1185,7 +1198,9 @@ mod tests {
 
         assert_eq!(resolved.command.as_deref(), Some("status"));
         assert!(resolved.command_args.iter().any(|arg| arg == "--short"));
-        assert!(is_read_only_invocation(&resolved));
+        assert!(is_definitely_read_only_command(
+            resolved.command.as_deref().unwrap()
+        ));
     }
 
     #[test]
@@ -1219,7 +1234,9 @@ mod tests {
         let resolved = resolve_alias_invocation(&parsed, &repo).unwrap_or_else(|| parsed.clone());
 
         assert_eq!(resolved.command.as_deref(), Some("commit"));
-        assert!(!is_read_only_invocation(&resolved));
+        assert!(!is_definitely_read_only_command(
+            resolved.command.as_deref().unwrap()
+        ));
     }
 
     #[test]
@@ -1254,7 +1271,9 @@ mod tests {
         let resolved = resolve_alias_invocation(&parsed, &repo).unwrap_or_else(|| parsed.clone());
         assert_eq!(resolved.command.as_deref(), Some("branch"));
         assert!(resolved.command_args.iter().any(|arg| arg == "aliased"));
-        assert!(!is_read_only_invocation(&resolved));
+        assert!(!is_definitely_read_only_command(
+            resolved.command.as_deref().unwrap()
+        ));
     }
 
     #[cfg(unix)]
