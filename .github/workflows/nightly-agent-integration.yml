@@ -290,7 +290,7 @@ jobs:
           git-ai install
 
       - name: Run live agent test (with retry)
-        uses: nick-fields/retry@v2
+        uses: nick-fields/retry@v4
         with:
           timeout_minutes: 20
           max_attempts: 2
