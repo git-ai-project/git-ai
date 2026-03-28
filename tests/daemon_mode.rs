@@ -642,9 +642,9 @@ fn checkpoint_delegate_autostarts_daemon_when_unavailable() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
 
     fs::write(repo.path().join("delegate-fallback.txt"), "base\n").expect("failed to write base");
-    repo.git(&["add", "delegate-fallback.txt"])
+    repo.git_og(&["add", "delegate-fallback.txt"])
         .expect("add should succeed");
-    repo.stage_all_and_commit("base commit")
+    repo.git_og(&["commit", "-m", "base commit"])
         .expect("base commit should succeed");
 
     fs::write(
@@ -694,9 +694,9 @@ fn checkpoint_delegate_falls_back_when_daemon_startup_is_blocked() {
 
     fs::write(repo.path().join("delegate-fallback-blocked.txt"), "base\n")
         .expect("failed to write base");
-    repo.git(&["add", "delegate-fallback-blocked.txt"])
+    repo.git_og(&["add", "delegate-fallback-blocked.txt"])
         .expect("add should succeed");
-    repo.stage_all_and_commit("base commit")
+    repo.git_og(&["commit", "-m", "base commit"])
         .expect("base commit should succeed");
 
     fs::write(
@@ -753,9 +753,9 @@ fn daemon_write_mode_applies_delegated_checkpoint_and_updates_state() {
     let completion_baseline = repo.daemon_total_completion_count();
 
     fs::write(repo.path().join("delegate-write.txt"), "base\n").expect("failed to write base");
-    repo.git(&["add", "delegate-write.txt"])
+    repo.git_og(&["add", "delegate-write.txt"])
         .expect("add should succeed");
-    repo.stage_all_and_commit("base commit")
+    repo.git_og(&["commit", "-m", "base commit"])
         .expect("base commit should succeed");
 
     fs::write(
