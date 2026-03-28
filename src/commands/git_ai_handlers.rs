@@ -13,6 +13,7 @@ use crate::commands::checkpoint_agent::agent_presets::{
 use crate::commands::checkpoint_agent::agent_v1_preset::AgentV1Preset;
 use crate::commands::checkpoint_agent::amp_preset::AmpPreset;
 use crate::commands::checkpoint_agent::opencode_preset::OpenCodePreset;
+use crate::commands::checkpoint_agent::zed_preset::ZedPreset;
 use crate::config;
 use crate::git::find_repository;
 use crate::git::find_repository_in_path;
@@ -120,6 +121,9 @@ pub fn handle_git_ai(args: &[String]) {
         "git-hooks" => {
             handle_git_hooks(&args[1..]);
         }
+        "acp-proxy" => {
+            commands::acp_proxy::handle_acp_proxy(&args[1..]);
+        }
         "squash-authorship" => {
             commands::squash_authorship::handle_squash_authorship(&args[1..]);
         }
@@ -202,7 +206,7 @@ fn print_help() {
     eprintln!("Commands:");
     eprintln!("  checkpoint         Checkpoint working changes and attribute author");
     eprintln!(
-        "    Presets: claude, codex, continue-cli, cursor, gemini, github-copilot, amp, windsurf, opencode, ai_tab, mock_ai"
+        "    Presets: claude, codex, continue-cli, cursor, gemini, github-copilot, amp, windsurf, opencode, zed, ai_tab, mock_ai"
     );
     eprintln!(
         "    --hook-input <json|stdin>   JSON payload required by presets, or 'stdin' to read from stdin"
@@ -248,6 +252,10 @@ fn print_help() {
     eprintln!("  debug              Print support/debug diagnostics");
     eprintln!("  install-hooks      Install git hooks for AI authorship tracking");
     eprintln!("  uninstall-hooks    Remove git-ai hooks from all detected tools");
+    eprintln!("  acp-proxy          ACP proxy for Zed agent support");
+    eprintln!(
+        "    [--cwd <dir>] -- <agent-command> [args...]   Wrap an agent for automatic checkpoints"
+    );
     eprintln!("  git-hooks ensure   Ensure repo-local git-ai hooks are installed/healed");
     eprintln!("  git-hooks remove   Remove repo-local git-ai hooks and restore local hooksPath");
     eprintln!("  ci                 Continuous integration utilities");
@@ -542,6 +550,22 @@ fn handle_checkpoint(args: &[String]) {
                     }
                     Err(e) => {
                         eprintln!("OpenCode preset error: {}", e);
+                        std::process::exit(0);
+                    }
+                }
+            }
+            "zed" => {
+                match ZedPreset.run(AgentCheckpointFlags {
+                    hook_input: hook_input.clone(),
+                }) {
+                    Ok(agent_run) => {
+                        if agent_run.repo_working_dir.is_some() {
+                            repository_working_dir = agent_run.repo_working_dir.clone().unwrap();
+                        }
+                        agent_run_result = Some(agent_run);
+                    }
+                    Err(e) => {
+                        eprintln!("Zed preset error: {}", e);
                         std::process::exit(0);
                     }
                 }

@@ -9,6 +9,7 @@ mod jetbrains;
 mod opencode;
 mod vscode;
 mod windsurf;
+mod zed;
 
 pub use amp::AmpInstaller;
 pub use claude_code::ClaudeCodeInstaller;
@@ -21,6 +22,7 @@ pub use jetbrains::JetBrainsInstaller;
 pub use opencode::OpenCodeInstaller;
 pub use vscode::VSCodeInstaller;
 pub use windsurf::WindsurfInstaller;
+pub use zed::ZedInstaller;
 
 use super::hook_installer::HookInstaller;
 
@@ -38,5 +40,6 @@ pub fn get_all_installers() -> Vec<Box<dyn HookInstaller>> {
         Box::new(DroidInstaller),
         Box::new(JetBrainsInstaller),
         Box::new(WindsurfInstaller),
+        Box::new(ZedInstaller),
     ]
 }
