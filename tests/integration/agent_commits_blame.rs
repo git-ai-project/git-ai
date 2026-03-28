@@ -476,8 +476,8 @@ fn test_agent_blame_json_output() {
     let prompt_entry = prompts.values().next().unwrap();
     assert_eq!(
         prompt_entry["agent_id"]["tool"].as_str().unwrap(),
-        "cursor",
-        "Prompt should have tool=cursor"
+        "cursor-agent",
+        "Prompt should have tool=cursor-agent"
     );
     assert_eq!(
         prompt_entry["agent_id"]["model"].as_str().unwrap(),
@@ -549,12 +549,12 @@ fn test_agent_blame_json_mixed_human_agent() {
         prompts.keys().collect::<Vec<_>>()
     );
 
-    // The prompt should have tool=cursor
+    // The prompt should have tool=cursor-agent
     let prompt = &prompts[&line2_hash];
     assert_eq!(
         prompt["agent_id"]["tool"].as_str().unwrap(),
-        "cursor",
-        "Prompt should have tool=cursor"
+        "cursor-agent",
+        "Prompt should have tool=cursor-agent"
     );
 }
 
