@@ -184,6 +184,10 @@ fn handle_run(args: &[String]) -> Result<(), String> {
         .block_on(async move { crate::daemon::run_daemon(config).await })
         .map_err(|e| e.to_string())?;
 
+    // Give in-flight spawn_blocking handlers a bounded window to finish,
+    // then force-terminate so the process doesn't hang on slow connections.
+    runtime.shutdown_timeout(std::time::Duration::from_secs(5));
+
     // Daemon is fully dead (lock released, sockets removed, threads joined).
     // Now safe to self-update — install.sh can start a fresh daemon.
     crate::daemon::daemon_run_pending_self_update();
