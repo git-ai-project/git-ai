@@ -685,11 +685,12 @@ pub fn extract_clone_target_directory(args: &[String]) -> Option<String> {
 /// Derive the target directory name from a repository URL.
 /// Mimics git's behavior of using the last path component, stripping .git suffix.
 fn derive_directory_from_url(url: &str) -> Option<String> {
-    // Remove trailing slashes
-    let url = url.trim_end_matches('/');
+    // Remove trailing slashes (both forward and backslash for Windows paths)
+    let url = url.trim_end_matches('/').trim_end_matches('\\');
 
-    // Extract the last path component
-    let last_component = if let Some(pos) = url.rfind('/') {
+    // Extract the last path component.
+    // Check both '/' and '\\' to handle Windows local paths (e.g. C:\path\to\repo.git).
+    let last_component = if let Some(pos) = url.rfind(['/', '\\']) {
         &url[pos + 1..]
     } else if let Some(pos) = url.rfind(':') {
         // Handle SCP-like syntax: user@host:path
@@ -806,6 +807,20 @@ mod tests {
         );
         assert_eq!(
             derive_directory_from_url("/local/path/repo.git"),
+            Some("repo".to_string())
+        );
+        // Windows-style local paths with backslashes
+        assert_eq!(
+            derive_directory_from_url("C:\\Users\\user\\repos\\repo.git"),
+            Some("repo".to_string())
+        );
+        assert_eq!(
+            derive_directory_from_url("C:\\Users\\user\\repos\\my-project"),
+            Some("my-project".to_string())
+        );
+        // Trailing backslash
+        assert_eq!(
+            derive_directory_from_url("C:\\Users\\user\\repos\\repo.git\\"),
             Some("repo".to_string())
         );
     }
