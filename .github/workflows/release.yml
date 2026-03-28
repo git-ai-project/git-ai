@@ -161,7 +161,7 @@ jobs:
 
       - name: Upload artifact (Windows)
         if: contains(matrix.os, 'windows')
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: ${{ matrix.artifact_name }}
           path: release/${{ matrix.artifact_name }}.exe
@@ -169,7 +169,7 @@ jobs:
 
       - name: Upload artifact (non-Windows)
         if: ${{ !contains(matrix.os, 'windows') }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: ${{ matrix.artifact_name }}
           path: release/${{ matrix.artifact_name }}
@@ -235,7 +235,7 @@ jobs:
           cp target/x86_64-apple-darwin/release/git-ai release/git-ai-macos-x64
 
       - name: Upload artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: git-ai-macos-x64
           path: release/git-ai-macos-x64
