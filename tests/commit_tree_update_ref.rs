@@ -127,7 +127,7 @@ fn graphite_style_restack_child_branch(
 
 #[test]
 fn test_commit_tree_update_ref_preserves_authorship_notes_on_reparent() {
-    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let repo = TestRepo::new_with_mode(GitTestMode::WrapperDaemon);
     setup_initial_commit(&repo);
 
     repo.git(&["checkout", "-b", "feature"])
@@ -176,7 +176,7 @@ fn test_commit_tree_update_ref_preserves_authorship_notes_on_reparent() {
 
 #[test]
 fn test_commit_tree_update_ref_moves_working_log_to_rewritten_head() {
-    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let repo = TestRepo::new_with_mode(GitTestMode::WrapperDaemon);
     setup_initial_commit(&repo);
 
     repo.git(&["checkout", "-b", "feature"])
@@ -244,7 +244,7 @@ fn test_commit_tree_update_ref_moves_working_log_to_rewritten_head() {
 
 #[test]
 fn test_reset_keep_rewrite_preserves_authorship_notes_on_current_branch() {
-    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let repo = TestRepo::new_with_mode(GitTestMode::WrapperDaemon);
     setup_initial_commit(&repo);
 
     repo.git(&["checkout", "-b", "feature"])
@@ -293,7 +293,7 @@ fn test_reset_keep_rewrite_preserves_authorship_notes_on_current_branch() {
 
 #[test]
 fn test_update_ref_restack_after_parent_amend_preserves_child_attribution() {
-    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let repo = TestRepo::new_with_mode(GitTestMode::WrapperDaemon);
     setup_initial_commit(&repo);
 
     repo.git(&["checkout", "-b", "parent"])

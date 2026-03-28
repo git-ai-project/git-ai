@@ -4,7 +4,7 @@ use git_ai::git::refs::get_reference_as_authorship_log_v3;
 use git_ai::git::repository as GitAiRepository;
 
 fn direct_test_repo() -> TestRepo {
-    TestRepo::new_with_mode(GitTestMode::Wrapper)
+    TestRepo::new_with_mode(GitTestMode::WrapperDaemon)
 }
 
 /// Test basic squash merge via CI - AI code from feature branch squashed into main
