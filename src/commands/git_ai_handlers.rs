@@ -238,6 +238,10 @@ pub fn handle_git_ai(args: &[String]) {
         "show-transcript" => {
             handle_show_transcript(&args[1..]);
         }
+        #[cfg(debug_assertions)]
+        "simulate-authorship" => {
+            commands::simulate_authorship::handle_simulate_authorship(&args[1..]);
+        }
         _ => {
             println!("Unknown git-ai command: {}", args[0]);
             std::process::exit(1);
