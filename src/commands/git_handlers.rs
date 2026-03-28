@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 static CHILD_PGID: AtomicI32 = AtomicI32::new(0);
 
 // Windows NTSTATUS for Ctrl+C interruption (STATUS_CONTROL_C_EXIT, 0xC000013A) from Windows API docs.
-#[cfg(windows)]
+#[cfg(all(test, windows))]
 const NTSTATUS_CONTROL_C_EXIT: u32 = 0xC000013A;
 
 #[cfg(unix)]
