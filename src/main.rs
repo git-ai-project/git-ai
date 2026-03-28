@@ -25,7 +25,7 @@ fn main() {
         .unwrap_or("git-ai".to_string());
 
     if commands::git_hook_handlers::is_git_hook_binary_name(&binary_name) {
-        println!(
+        eprintln!(
             "git-ai: the git core hooks feature has been sunset.\n\
              To remove the deprecated git-ai hook symlinks from this repository, run:\n\
              \n\
