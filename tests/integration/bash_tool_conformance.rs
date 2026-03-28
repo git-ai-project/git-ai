@@ -379,7 +379,7 @@ fn test_bash_tool_pre_hook_returns_take_pre_snapshot() {
         .expect("handle_bash_tool PreToolUse should succeed");
 
     assert!(
-        matches!(action, BashCheckpointAction::TakePreSnapshot),
+        matches!(action.action, BashCheckpointAction::TakePreSnapshot),
         "PreToolUse should return TakePreSnapshot"
     );
 }
@@ -394,15 +394,18 @@ fn test_bash_tool_post_hook_no_changes() {
     // Pre-hook stores the snapshot
     let pre_action = handle_bash_tool(HookEvent::PreToolUse, &root, "sess", "tool1")
         .expect("PreToolUse should succeed");
-    assert!(matches!(pre_action, BashCheckpointAction::TakePreSnapshot));
+    assert!(matches!(
+        pre_action.action,
+        BashCheckpointAction::TakePreSnapshot
+    ));
 
     // Post-hook with no changes
     let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "sess", "tool1")
         .expect("PostToolUse should succeed");
     assert!(
-        matches!(post_action, BashCheckpointAction::NoChanges),
+        matches!(post_action.action, BashCheckpointAction::NoChanges),
         "PostToolUse with no changes should return NoChanges; got {:?}",
-        match &post_action {
+        match &post_action.action {
             BashCheckpointAction::TakePreSnapshot => "TakePreSnapshot",
             BashCheckpointAction::Checkpoint(_) => "Checkpoint",
             BashCheckpointAction::NoChanges => "NoChanges",
@@ -421,7 +424,10 @@ fn test_bash_tool_post_hook_detects_changes() {
     // Pre-hook
     let pre_action = handle_bash_tool(HookEvent::PreToolUse, &root, "sess", "tool2")
         .expect("PreToolUse should succeed");
-    assert!(matches!(pre_action, BashCheckpointAction::TakePreSnapshot));
+    assert!(matches!(
+        pre_action.action,
+        BashCheckpointAction::TakePreSnapshot
+    ));
 
     // Mutate between pre and post
     thread::sleep(Duration::from_millis(50));
@@ -430,7 +436,7 @@ fn test_bash_tool_post_hook_detects_changes() {
     // Post-hook
     let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "sess", "tool2")
         .expect("PostToolUse should succeed");
-    match post_action {
+    match &post_action.action {
         BashCheckpointAction::Checkpoint(paths) => {
             assert!(
                 paths.iter().any(|p| p.contains("target.txt")),
@@ -464,7 +470,7 @@ fn test_bash_tool_post_hook_without_pre_uses_fallback() {
         .expect("PostToolUse without pre should succeed via fallback");
 
     // Should be Checkpoint (from git status) or NoChanges, but not panic
-    match post_action {
+    match &post_action.action {
         BashCheckpointAction::Checkpoint(paths) => {
             assert!(
                 paths.iter().any(|p| p.contains("changed.txt")),
@@ -507,7 +513,7 @@ fn test_bash_tool_orchestration_create_file() {
     let action = handle_bash_tool(HookEvent::PostToolUse, &root, "orch-sess", "orch-tool")
         .expect("PostToolUse should succeed");
 
-    match action {
+    match &action.action {
         BashCheckpointAction::Checkpoint(paths) => {
             assert!(
                 paths.iter().any(|p| p.contains("generated.rs")),
@@ -540,7 +546,7 @@ fn test_bash_tool_orchestration_delete_file() {
     let action = handle_bash_tool(HookEvent::PostToolUse, &root, "del-sess", "del-tool")
         .expect("PostToolUse should succeed");
 
-    match action {
+    match &action.action {
         BashCheckpointAction::Checkpoint(paths) => {
             assert!(
                 paths.iter().any(|p| p.contains("doomed.txt")),
@@ -569,7 +575,7 @@ fn test_bash_tool_orchestration_multiple_tool_uses() {
     let action1 = handle_bash_tool(HookEvent::PostToolUse, &root, "multi-sess", "use1")
         .expect("PostToolUse 1 should succeed");
     assert!(
-        matches!(action1, BashCheckpointAction::Checkpoint(_)),
+        matches!(action1.action, BashCheckpointAction::Checkpoint(_)),
         "First tool use should produce Checkpoint"
     );
 
@@ -581,7 +587,7 @@ fn test_bash_tool_orchestration_multiple_tool_uses() {
     let action2 = handle_bash_tool(HookEvent::PostToolUse, &root, "multi-sess", "use2")
         .expect("PostToolUse 2 should succeed");
     assert!(
-        matches!(action2, BashCheckpointAction::Checkpoint(_)),
+        matches!(action2.action, BashCheckpointAction::Checkpoint(_)),
         "Second tool use should produce Checkpoint"
     );
 }
@@ -1229,7 +1235,7 @@ fn test_gitignore_filtering_through_save_load_round_trip() {
     let action = handle_bash_tool(HookEvent::PostToolUse, &root, "gi-rt", "gi-t1")
         .expect("PostToolUse should succeed");
 
-    match action {
+    match &action.action {
         BashCheckpointAction::Checkpoint(paths) => {
             assert!(
                 paths.iter().any(|p| p.contains("result.txt")),
@@ -1666,7 +1672,7 @@ fn test_post_hook_without_pre_clean_repo_returns_no_changes() {
 
     assert!(
         matches!(
-            action,
+            action.action,
             BashCheckpointAction::NoChanges | BashCheckpointAction::Fallback
         ),
         "Clean repo without pre-snapshot should return NoChanges or Fallback"
@@ -1741,7 +1747,7 @@ fn test_handle_bash_tool_detects_rename() {
     let action = handle_bash_tool(HookEvent::PostToolUse, &root, "rename-sess", "rename-t1")
         .expect("PostToolUse should succeed");
 
-    match action {
+    match &action.action {
         BashCheckpointAction::Checkpoint(paths) => {
             assert!(
                 paths.iter().any(|p| p.contains("original.txt")),

@@ -251,6 +251,8 @@ pub struct FamilyState {
     pub worktrees: HashMap<PathBuf, WorktreeState>,
     pub last_error: Option<String>,
     pub applied_seq: u64,
+    #[serde(default)]
+    pub file_snapshot_watermarks: HashMap<String, u128>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

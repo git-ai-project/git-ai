@@ -229,14 +229,17 @@ impl AgentCheckpointPreset for OpenCodePreset {
         // Check if this is a PreToolUse event (human checkpoint)
         if hook_event_name == "PreToolUse" {
             // For bash tools, take a pre-snapshot before the tool executes
+            let mut pre_hook_captured_id = None;
             if is_bash_tool {
                 let repo_root = Path::new(&cwd);
-                let _ = bash_tool::handle_bash_tool(
+                pre_hook_captured_id = bash_tool::handle_bash_tool(
                     HookEvent::PreToolUse,
                     repo_root,
                     &agent_id.id,
                     tool_use_id,
-                );
+                )
+                .ok()
+                .and_then(|r| r.captured_checkpoint.map(|info| info.capture_id));
             }
             return Ok(AgentRunResult {
                 agent_id,
@@ -247,19 +250,25 @@ impl AgentCheckpointPreset for OpenCodePreset {
                 edited_filepaths: None,
                 will_edit_filepaths: file_path_as_vec,
                 dirty_files: None,
+                captured_checkpoint_id: pre_hook_captured_id,
             });
         }
 
         // PostToolUse: for bash tools, diff snapshots to detect changed files
-        let edited_filepaths = if is_bash_tool {
+        let bash_result = if is_bash_tool {
             let repo_root = Path::new(&cwd);
-            match bash_tool::handle_bash_tool(
+            Some(bash_tool::handle_bash_tool(
                 HookEvent::PostToolUse,
                 repo_root,
                 &agent_id.id,
                 tool_use_id,
-            ) {
-                Ok(BashCheckpointAction::Checkpoint(paths)) => Some(paths),
+            ))
+        } else {
+            None
+        };
+        let edited_filepaths = if is_bash_tool {
+            match bash_result.as_ref().unwrap().as_ref().map(|r| &r.action) {
+                Ok(BashCheckpointAction::Checkpoint(paths)) => Some(paths.clone()),
                 Ok(BashCheckpointAction::NoChanges) => None,
                 Ok(BashCheckpointAction::Fallback) => {
                     // git_status_fallback already failed inside handle_bash_tool
@@ -275,6 +284,12 @@ impl AgentCheckpointPreset for OpenCodePreset {
             file_path_as_vec
         };
 
+        let bash_captured_checkpoint_id = bash_result
+            .as_ref()
+            .and_then(|r| r.as_ref().ok())
+            .and_then(|r| r.captured_checkpoint.as_ref())
+            .map(|info| info.capture_id.clone());
+
         // PostToolUse event - AI checkpoint
         Ok(AgentRunResult {
             agent_id,
@@ -285,6 +300,7 @@ impl AgentCheckpointPreset for OpenCodePreset {
             edited_filepaths,
             will_edit_filepaths: None,
             dirty_files: None,
+            captured_checkpoint_id: bash_captured_checkpoint_id,
         })
     }
 }

@@ -153,14 +153,17 @@ impl AgentCheckpointPreset for AmpPreset {
 
         if is_pre_tool_use {
             // For bash tools, take a pre-snapshot before the tool executes
+            let mut pre_hook_captured_id = None;
             if is_bash_tool && let Some(ref cwd) = hook_input.cwd {
                 let repo_root = Path::new(cwd.as_str());
-                let _ = bash_tool::handle_bash_tool(
+                pre_hook_captured_id = bash_tool::handle_bash_tool(
                     HookEvent::PreToolUse,
                     repo_root,
                     &agent_id.id,
                     hook_input.tool_use_id.as_deref().unwrap_or("bash"),
-                );
+                )
+                .ok()
+                .and_then(|r| r.captured_checkpoint.map(|info| info.capture_id));
             }
             return Ok(AgentRunResult {
                 agent_id,
@@ -171,19 +174,29 @@ impl AgentCheckpointPreset for AmpPreset {
                 edited_filepaths: None,
                 will_edit_filepaths: file_paths,
                 dirty_files: None,
+                captured_checkpoint_id: pre_hook_captured_id,
             });
         }
 
         // PostToolUse: for bash tools, diff snapshots to detect changed files
-        let edited_filepaths = if is_bash_tool {
+        let bash_result = if is_bash_tool {
             if let Some(ref cwd) = hook_input.cwd {
-                match bash_tool::handle_bash_tool(
+                Some(bash_tool::handle_bash_tool(
                     HookEvent::PostToolUse,
                     Path::new(cwd.as_str()),
                     &agent_id.id,
                     hook_input.tool_use_id.as_deref().unwrap_or("bash"),
-                ) {
-                    Ok(BashCheckpointAction::Checkpoint(paths)) => Some(paths),
+                ))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let edited_filepaths = if is_bash_tool {
+            if let Some(ref bash_res) = bash_result {
+                match bash_res.as_ref().map(|r| &r.action) {
+                    Ok(BashCheckpointAction::Checkpoint(paths)) => Some(paths.clone()),
                     Ok(BashCheckpointAction::NoChanges) => None,
                     Ok(BashCheckpointAction::Fallback) => {
                         // git_status_fallback already failed inside handle_bash_tool
@@ -192,7 +205,8 @@ impl AgentCheckpointPreset for AmpPreset {
                     Ok(BashCheckpointAction::TakePreSnapshot) => None,
                     Err(e) => {
                         crate::utils::debug_log(&format!("Bash tool post-hook error: {}", e));
-                        bash_tool::git_status_fallback(Path::new(cwd.as_str())).ok()
+                        let cwd = hook_input.cwd.as_deref().unwrap_or("");
+                        bash_tool::git_status_fallback(Path::new(cwd)).ok()
                     }
                 }
             } else {
@@ -227,6 +241,12 @@ impl AgentCheckpointPreset for AmpPreset {
             agent_metadata.insert("thread_id".to_string(), thread_id);
         }
 
+        let bash_captured_checkpoint_id = bash_result
+            .as_ref()
+            .and_then(|r| r.as_ref().ok())
+            .and_then(|r| r.captured_checkpoint.as_ref())
+            .map(|info| info.capture_id.clone());
+
         Ok(AgentRunResult {
             agent_id,
             agent_metadata: if agent_metadata.is_empty() {
@@ -240,6 +260,7 @@ impl AgentCheckpointPreset for AmpPreset {
             edited_filepaths,
             will_edit_filepaths: None,
             dirty_files: None,
+            captured_checkpoint_id: bash_captured_checkpoint_id,
         })
     }
 }
