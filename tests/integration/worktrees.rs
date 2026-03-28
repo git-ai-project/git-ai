@@ -56,7 +56,6 @@ fn normalize_blame_for_format_parity(blame_output: &str) -> String {
         .join("\n")
 }
 
-
 fn unique_worktree_path() -> PathBuf {
     let mut rng = rand::thread_rng();
     let n: u64 = rng.gen_range(0..10_000_000_000);

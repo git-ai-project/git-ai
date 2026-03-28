@@ -1042,7 +1042,6 @@ impl TestRepo {
         repo.apply_default_config_patch();
         repo.setup_daemon_mode();
 
-
         repo
     }
 
@@ -1825,7 +1824,6 @@ impl TestRepo {
         if self.git_mode.uses_daemon() {
             command.env("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true");
         }
-
     }
 
     /// Patch the git-ai config for this test repo

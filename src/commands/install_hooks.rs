@@ -177,8 +177,7 @@ fn maybe_migrate_git_hooks_to_async_mode(dry_run: bool) -> Result<(), GitAiError
         return Ok(());
     }
 
-    let mut file_config =
-        crate::config::load_file_config_public().map_err(GitAiError::Generic)?;
+    let mut file_config = crate::config::load_file_config_public().map_err(GitAiError::Generic)?;
     let flags_value = file_config
         .feature_flags
         .get_or_insert_with(|| serde_json::json!({}));

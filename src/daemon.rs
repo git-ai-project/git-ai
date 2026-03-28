@@ -2224,7 +2224,11 @@ fn recover_recent_replay_prerequisites_for_commit_replay(
                 if target_head != base_commit || stash_sha.is_empty() {
                     continue;
                 }
-                daemon_authorship_helpers::restore_stash_attributions(repo, base_commit, &stash_sha)?;
+                daemon_authorship_helpers::restore_stash_attributions(
+                    repo,
+                    base_commit,
+                    &stash_sha,
+                )?;
             }
         }
 

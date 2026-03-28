@@ -128,12 +128,11 @@ pub fn handle_git(args: &[String]) {
     send_wrapper_post_state_to_daemon(&invocation_id, worktree.as_deref(), &post_state);
 
     // Auto-remove leftover repo-level git hooks on pull.
-    if parsed.command.as_deref() == Some("pull") {
-        if let Some(repo) = repository.as_ref() {
-            if git_hook_handlers::is_repo_hooks_enabled(repo) {
-                let _ = git_hook_handlers::remove_repo_hooks(repo, false);
-            }
-        }
+    if parsed.command.as_deref() == Some("pull")
+        && let Some(repo) = repository.as_ref()
+        && git_hook_handlers::is_repo_hooks_enabled(repo)
+    {
+        let _ = git_hook_handlers::remove_repo_hooks(repo, false);
     }
 
     // After a successful commit, wait briefly for the daemon to produce an

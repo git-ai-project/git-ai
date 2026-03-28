@@ -161,8 +161,7 @@ pub(crate) fn current_git_ai_exe() -> Result<PathBuf, GitAiError> {
 
 fn internal_git_ai_command_with_exe(exe: PathBuf, subcommand: &str) -> Command {
     let mut cmd = Command::new(exe);
-    cmd.arg(subcommand)
-        .env("GIT_AI_SKIP_ALL_HOOKS", "1");
+    cmd.arg(subcommand).env("GIT_AI_SKIP_ALL_HOOKS", "1");
     cmd
 }
 
