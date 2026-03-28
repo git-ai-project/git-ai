@@ -140,7 +140,7 @@ export class AIEditManager {
       this.stableFileContent.set(doc.uri.fsPath, doc.getText());
     }
 
-    if (doc.uri.scheme === "chat-editing-snapshot-text-model" || doc.uri.scheme === "chat-editing-text-model") {
+    if (doc.uri.scheme === "chat-editing-snapshot-text-model" || doc.uri.scheme === "chat-editing-text-model" || doc.uri.scheme === "tongyi-lingma-snapshot" || doc.uri.scheme === "continue-snapshot" || doc.uri.scheme === "trae-snapshot") {
       const filePath = doc.uri.fsPath;
       const now = Date.now();
 
@@ -174,7 +174,7 @@ export class AIEditManager {
       }
     }
 
-    if (doc.uri.scheme === "chat-editing-snapshot-text-model" || doc.uri.scheme === "chat-editing-text-model") {
+    if (doc.uri.scheme === "chat-editing-snapshot-text-model" || doc.uri.scheme === "chat-editing-text-model" || doc.uri.scheme === "tongyi-lingma-snapshot" || doc.uri.scheme === "continue-snapshot" || doc.uri.scheme === "trae-snapshot") {
       console.log('[git-ai] AIEditManager: Snapshot close event detected for', doc);
       // console.log('[git-ai] AIEditManager: Snapshot close event detected, triggering human checkpoint');
       // const filePath = doc.uri.fsPath;
@@ -204,7 +204,7 @@ export class AIEditManager {
     // Check if we have 1+ valid snapshot open events within the debounce window
     let checkpointTriggered = false;
 
-    if (snapshotInfo && snapshotInfo.count >= 1 && snapshotInfo.uri?.query) {
+    if (snapshotInfo && snapshotInfo.count >= 1) {
       // Check if the snapshot is fresh to avoid triggering AI checkpoints on stale snapshots
       const snapshotAge = Date.now() - snapshotInfo.timestamp;
 
@@ -216,63 +216,138 @@ export class AIEditManager {
           console.warn('[git-ai] AIEditManager: Missing workspace storage path, skipping AI checkpoint for', filePath);
         } else {
           try {
-            const params = JSON.parse(snapshotInfo.uri.query);
-            let sessionId = params.chatSessionId || params.sessionId;
+            let sessionId: string | undefined;
+            let chatSessionPath: string | undefined;
+            let agentType: string = "github-copilot";
 
-            console.log("[git-ai] AIEditManager: Parsed snapshot params:", params);
-
-            // "{"kind":"doc","documentId":"modified-file-entry::1","chatSessionResource":{"$mid":1,"external":"vscode-chat-session://local/MDFmNjJlNmItOTgxMi00OTY0LWI5YTYtYzRmZDBjZTE1ZmEy","path":"/MDFmNjJlNmItOTgxMi00OTY0LWI5YTYtYzRmZDBjZTE1ZmEy","scheme":"vscode-chat-session","authority":"local"}}"
-            if (!sessionId && params.chatSessionResource) {
-              // VS Code update includes the chatSessionResource object with the sessionId encoded in the path
-              console.log("[git-ai] AIEditManager: Detected chatSessionResource, attempting to parse sessionId");
-              sessionId = params.chatSessionResource.path ? Buffer.from(params.chatSessionResource.path.slice(1), 'base64').toString('utf-8') : undefined;
-              console.log("[git-ai] AIEditManager: Parsed sessionId from chatSessionResource:", sessionId);
-            }
-
-            if (!sessionId && params.session && params.session.path && params.session.path.startsWith && params.session.path.startsWith('/')) {
-              // VS Code update includes the sessionId encoded as Base64 
-              console.log("[git-ai] AIEditManager: Detected session as object, decoding sessionId");
-              sessionId = Buffer.from(params.session.path.slice(1), 'base64').toString('utf-8');
-              console.log("[git-ai] AIEditManager: Parsed sessionId from Base64:", sessionId);
-            }
-
-            if (!sessionId) {
-              console.warn('[git-ai] AIEditManager: Snapshot URI missing session id, skipping AI checkpoint for', filePath);
+            // Handle different snapshot schemes
+            if (snapshotInfo.uri.scheme === "tongyi-lingma-snapshot") {
+              // Handle Tongyi Lingma snapshots
+              agentType = "tongyi-lingma";
+              // Extract sessionId from Tongyi Lingma snapshot URI
+              if (snapshotInfo.uri.query) {
+                const params = JSON.parse(snapshotInfo.uri.query);
+                sessionId = params.sessionId || params.chatSessionId;
+              }
+              // Use a placeholder sessionId if not found
+              if (!sessionId) {
+                sessionId = `tongyi-lingma-${Date.now()}`;
+              }
+              // Tongyi Lingma chat sessions directory
+              const tongyiSessionsDir = path.join(storagePath, 'tongyi-sessions');
+              if (!fs.existsSync(tongyiSessionsDir)) {
+                fs.mkdirSync(tongyiSessionsDir, { recursive: true });
+              }
+              chatSessionPath = path.join(tongyiSessionsDir, `${sessionId}.json`);
+            } else if (snapshotInfo.uri.scheme === "continue-snapshot") {
+              // Handle Continue snapshots
+              agentType = "continue-cli";
+              // Extract sessionId from Continue snapshot URI
+              if (snapshotInfo.uri.query) {
+                const params = JSON.parse(snapshotInfo.uri.query);
+                sessionId = params.sessionId || params.chatSessionId;
+              }
+              // Use a placeholder sessionId if not found
+              if (!sessionId) {
+                sessionId = `continue-${Date.now()}`;
+              }
+              // Continue chat sessions directory
+              const continueSessionsDir = path.join(storagePath, 'continue-sessions');
+              if (!fs.existsSync(continueSessionsDir)) {
+                fs.mkdirSync(continueSessionsDir, { recursive: true });
+              }
+              chatSessionPath = path.join(continueSessionsDir, `${sessionId}.json`);
+            } else if (snapshotInfo.uri.scheme === "trae-snapshot") {
+              // Handle Trae snapshots
+              agentType = "trae";
+              // Extract sessionId from Trae snapshot URI
+              if (snapshotInfo.uri.query) {
+                const params = JSON.parse(snapshotInfo.uri.query);
+                sessionId = params.sessionId || params.chatSessionId;
+              }
+              // Use a placeholder sessionId if not found
+              if (!sessionId) {
+                sessionId = `trae-${Date.now()}`;
+              }
+              // Trae chat sessions directory
+              const traeSessionsDir = path.join(storagePath, 'trae-sessions');
+              if (!fs.existsSync(traeSessionsDir)) {
+                fs.mkdirSync(traeSessionsDir, { recursive: true });
+              }
+              chatSessionPath = path.join(traeSessionsDir, `${sessionId}.json`);
             } else {
-              const workspaceFolder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(filePath));
-              if (!workspaceFolder) {
-                console.warn('[git-ai] AIEditManager: No workspace folder found for', filePath, '- skipping AI checkpoint');
-              } else {
+              // Handle VS Code native snapshots
+              if (!snapshotInfo.uri.query) {
+                console.warn('[git-ai] AIEditManager: Snapshot URI missing query, skipping AI checkpoint for', filePath);
+                return;
+              }
+              const params = JSON.parse(snapshotInfo.uri.query);
+              sessionId = params.chatSessionId || params.sessionId;
+
+              console.log("[git-ai] AIEditManager: Parsed snapshot params:", params);
+
+              // "{"kind":"doc","documentId":"modified-file-entry::1","chatSessionResource":{"$mid":1,"external":"vscode-chat-session://local/MDFmNjJlNmItOTgxMi00OTY0LWI5YTYtYzRmZDBjZTE1ZmEy","path":"/MDFmNjJlNmItOTgxMi00OTY0LWI5YTYtYzRmZDBjZTE1ZmEy","scheme":"vscode-chat-session","authority":"local"}}"
+              if (!sessionId && params.chatSessionResource) {
+                // VS Code update includes the chatSessionResource object with the sessionId encoded in the path
+                console.log("[git-ai] AIEditManager: Detected chatSessionResource, attempting to parse sessionId");
+                sessionId = params.chatSessionResource.path ? Buffer.from(params.chatSessionResource.path.slice(1), 'base64').toString('utf-8') : undefined;
+                console.log("[git-ai] AIEditManager: Parsed sessionId from chatSessionResource:", sessionId);
+              }
+
+              if (!sessionId && params.session && params.session.path && params.session.path.startsWith && params.session.path.startsWith('/')) {
+                // VS Code update includes the sessionId encoded as Base64 
+                console.log("[git-ai] AIEditManager: Detected session as object, decoding sessionId");
+                sessionId = Buffer.from(params.session.path.slice(1), 'base64').toString('utf-8');
+                console.log("[git-ai] AIEditManager: Parsed sessionId from Base64:", sessionId);
+              }
+
+              if (!sessionId) {
+                console.warn('[git-ai] AIEditManager: Snapshot URI missing session id, skipping AI checkpoint for', filePath);
+                return;
+              }
+
               const chatSessionsDir = path.join(storagePath, 'chatSessions');
               const jsonlPath = path.join(chatSessionsDir, `${sessionId}.jsonl`);
               const jsonPath = path.join(chatSessionsDir, `${sessionId}.json`);
-              const chatSessionPath = fs.existsSync(jsonlPath) ? jsonlPath : jsonPath;
-              console.log('[git-ai] AIEditManager: AI edit detected for', filePath, '- triggering AI checkpoint (sessionId:', sessionId, ', chatSessionPath:', chatSessionPath, ', workspaceFolder:', workspaceFolder.uri.fsPath, ')');
-              
-              // Get dirty files and ensure the saved file is included with its content from VS Code
-              const dirtyFiles = this.getDirtyFiles();
-              console.log('[git-ai] AIEditManager: Dirty files:', dirtyFiles);
-              
-              // Get the content of the saved file from VS Code (not from FS) to handle codespaces lag
-              const savedFileDoc = vscode.workspace.textDocuments.find(doc => 
-                doc.uri.fsPath === filePath && doc.uri.scheme === "file"
-              );
-              if (savedFileDoc) {
-                dirtyFiles[filePath] = savedFileDoc.getText();
-              }
-              
-              console.log('[git-ai] AIEditManager: Dirty files with saved file content:', dirtyFiles);
-              this.checkpoint("ai", JSON.stringify({
-                hook_event_name: "after_edit",
-                chat_session_path: chatSessionPath,
-                session_id: sessionId,
-                edited_filepaths: [filePath],
-                workspace_folder: workspaceFolder.uri.fsPath,
-                dirty_files: dirtyFiles,
-              }));
-              checkpointTriggered = true;
-              }
+              chatSessionPath = fs.existsSync(jsonlPath) ? jsonlPath : jsonPath;
             }
+
+            if (!sessionId || !chatSessionPath) {
+              console.warn('[git-ai] AIEditManager: Missing sessionId or chatSessionPath, skipping AI checkpoint for', filePath);
+              return;
+            }
+
+            const workspaceFolder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(filePath));
+            if (!workspaceFolder) {
+              console.warn('[git-ai] AIEditManager: No workspace folder found for', filePath, '- skipping AI checkpoint');
+              return;
+            }
+
+            console.log('[git-ai] AIEditManager: AI edit detected for', filePath, '- triggering AI checkpoint (sessionId:', sessionId, ', chatSessionPath:', chatSessionPath, ', workspaceFolder:', workspaceFolder.uri.fsPath, ', agentType:', agentType, ')');
+            
+            // Get dirty files and ensure the saved file is included with its content from VS Code
+            const dirtyFiles = this.getDirtyFiles();
+            console.log('[git-ai] AIEditManager: Dirty files:', dirtyFiles);
+            
+            // Get the content of the saved file from VS Code (not from FS) to handle codespaces lag
+            const savedFileDoc = vscode.workspace.textDocuments.find(doc => 
+              doc.uri.fsPath === filePath && doc.uri.scheme === "file"
+            );
+            if (savedFileDoc) {
+              dirtyFiles[filePath] = savedFileDoc.getText();
+            }
+            
+            console.log('[git-ai] AIEditManager: Dirty files with saved file content:', dirtyFiles);
+            this.checkpoint("ai", JSON.stringify({
+              hook_event_name: "after_edit",
+              chat_session_path: chatSessionPath,
+              session_id: sessionId,
+              edited_filepaths: [filePath],
+              workspace_folder: workspaceFolder.uri.fsPath,
+              dirty_files: dirtyFiles,
+              agent_type: agentType,
+            }));
+            checkpointTriggered = true;
           } catch (e) {
             console.error('[git-ai] AIEditManager: Unable to trigger AI checkpoint for', filePath, e);
           }
@@ -407,6 +482,12 @@ export class AIEditManager {
       const args = ["checkpoint"];
       if (author === "ai_tab") {
         args.push("ai_tab");
+      } else if (activeEditor && (activeEditor.document.uri.scheme === "tongyi-lingma-snapshot")) {
+        args.push("tongyi-lingma");
+      } else if (activeEditor && (activeEditor.document.uri.scheme === "continue-snapshot")) {
+        args.push("continue-cli");
+      } else if (activeEditor && (activeEditor.document.uri.scheme === "trae-snapshot")) {
+        args.push("trae");
       } else {
         args.push("github-copilot");
       }
