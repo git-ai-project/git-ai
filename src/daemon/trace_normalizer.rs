@@ -585,6 +585,23 @@ impl<B: GitBackend> TraceNormalizer<B> {
             .and_then(|pending| argv_primary_command(&pending.raw_argv))
             .is_some_and(|command| matches!(command.as_str(), "clone" | "init"));
 
+        // For clone/init the root process's def_repo carries the newly created
+        // repo path.  Child processes (remote-https, index-pack, rev-list, …)
+        // inherit the parent CWD and their def_repo reports that CWD — not the
+        // clone destination.  Once we've captured the root def_repo (first
+        // arrival), skip subsequent child def_repo events entirely to prevent
+        // overwriting the correct worktree, family, and sid lookup maps.
+        if prefer_def_repo_target {
+            let already_saw_def_repo = self
+                .state
+                .pending
+                .get(root_sid)
+                .is_some_and(|pending| pending.saw_def_repo);
+            if already_saw_def_repo {
+                return Ok(None);
+            }
+        }
+
         // Trace2 `def_repo.repo` may point at a common-dir `.git` path for worktrees.
         // For normal in-repo commands we keep the start/cwd-derived worktree when available.
         // For clone/init the `def_repo` target is the repo we actually created and must win.
@@ -921,10 +938,13 @@ impl<B: GitBackend> TraceNormalizer<B> {
             };
 
             let mut candidates = Vec::new();
-            if let Some(target) = target_from_argv.as_ref() {
+            // Prefer the def_repo target — it comes from git's own trace2
+            // event and is always an absolute path.  The argv-derived target
+            // may be relative and resolve against an unrelated ancestor repo.
+            if let Some(target) = target_from_def_repo.as_ref() {
                 candidates.push(target.clone());
             }
-            if let Some(target) = target_from_def_repo.as_ref() {
+            if let Some(target) = target_from_argv.as_ref() {
                 let duplicate = candidates.iter().any(|existing| existing == target);
                 if !duplicate {
                     candidates.push(target.clone());
@@ -960,7 +980,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
 
             if !resolved {
                 // Keep the best available worktree hint even when family resolution fails.
-                if let Some(target) = target_from_argv.or(target_from_def_repo) {
+                if let Some(target) = target_from_def_repo.or(target_from_argv) {
                     pending.worktree = Some(target);
                 }
                 if let Some((target, error)) = last_error {
@@ -2119,6 +2139,69 @@ mod tests {
         assert_eq!(
             cmd.family_key.as_ref().map(|family| family.0.as_str()),
             Some(expected_family.to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn clone_child_def_repo_does_not_overwrite_root_worktree() {
+        // Real git trace2 output shows child processes (remote-https, index-pack)
+        // emit def_repo with the CWD as worktree, not the clone destination.
+        // The root process's def_repo has the correct newly-created repo path.
+        // Verify that child def_repo events don't clobber the root's worktree.
+        let backend = Arc::new(MockBackend::default());
+        let mut normalizer = TraceNormalizer::new(backend);
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let cwd = temp.path().join("projects"); // non-repo CWD
+        let clone_dest = cwd.join("testing-git"); // the clone destination
+        fs::create_dir_all(clone_dest.join(".git")).expect("create clone git dir");
+
+        let root_sid = "20260327T000000.000000Z-Hdeadbeef-P00010000";
+        let child_sid = format!("{}/20260327T000000.000001Z-Hdeadbeef-P00010001", root_sid);
+
+        let start = serde_json::json!({
+            "event": "start",
+            "sid": root_sid,
+            "ts": 1,
+            "argv": ["git", "clone", "https://github.com/svarlamov/testing-git"]
+            // No worktree or cwd — matches real trace2 start from non-repo dir
+        });
+        // Root def_repo: correct clone destination
+        let root_def_repo = serde_json::json!({
+            "event": "def_repo",
+            "sid": root_sid,
+            "ts": 2,
+            "worktree": clone_dest
+        });
+        // Child def_repo from remote-https: reports CWD (parent), not destination
+        let child_def_repo = serde_json::json!({
+            "event": "def_repo",
+            "sid": child_sid,
+            "ts": 3,
+            "worktree": cwd
+        });
+        let exit = serde_json::json!({
+            "event": "exit",
+            "sid": root_sid,
+            "ts": 4,
+            "code": 0
+        });
+
+        assert!(normalizer.ingest_payload(&start).unwrap().is_none());
+        assert!(normalizer.ingest_payload(&root_def_repo).unwrap().is_none());
+        // Child def_repo must NOT overwrite the root worktree
+        assert!(
+            normalizer
+                .ingest_payload(&child_def_repo)
+                .unwrap()
+                .is_none()
+        );
+
+        let cmd = normalizer.ingest_payload(&exit).unwrap().unwrap();
+        assert_eq!(cmd.primary_command.as_deref(), Some("clone"));
+        assert_eq!(
+            cmd.worktree.as_ref(),
+            Some(&clone_dest),
+            "clone worktree should be the destination, not the parent CWD"
         );
     }
 

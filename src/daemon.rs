@@ -4088,6 +4088,14 @@ impl ActorDaemonCoordinator {
             return Ok(None);
         };
 
+        // Repo-creating commands (clone, init) have no meaningful carryover
+        // state — the target repo doesn't exist before the command runs, and the
+        // worktree hint may point to the CWD (a non-repo directory) rather than
+        // the newly created repo.
+        if matches!(command, "clone" | "init") {
+            return Ok(None);
+        }
+
         let repo = discover_repository_in_path_no_git_exec(input.worktree)?;
         let stable_heads = stable_carryover_heads_for_command(&repo, &input, &parsed)?;
 
