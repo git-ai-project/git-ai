@@ -293,7 +293,9 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
 
     // Clean up legacy envelope logs directory and related artifacts.
     // These are no longer used — all telemetry now routes through the daemon.
-    cleanup_legacy_envelope_logs();
+    if !dry_run {
+        cleanup_legacy_envelope_logs();
+    }
 
     Ok(to_hashmap(statuses))
 }

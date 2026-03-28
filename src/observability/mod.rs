@@ -8,17 +8,26 @@ pub mod wrapper_performance_targets;
 /// Maximum events per metrics envelope
 pub const MAX_METRICS_PER_ENVELOPE: usize = 250;
 
+/// Submit telemetry envelopes via the best available path:
+/// 1. External daemon control socket (wrapper processes)
+/// 2. In-process daemon telemetry worker (daemon process itself)
+/// 3. Silently drop if neither is available
+fn submit_telemetry_envelope(envelopes: Vec<crate::daemon::TelemetryEnvelope>) {
+    if crate::daemon::telemetry_handle::daemon_telemetry_available() {
+        crate::daemon::telemetry_handle::submit_telemetry(envelopes);
+    } else if crate::daemon::daemon_process_active() {
+        crate::daemon::telemetry_worker::submit_daemon_internal_telemetry(envelopes);
+    }
+}
+
 /// Log an error to Sentry (via daemon telemetry worker)
 pub fn log_error(error: &dyn std::error::Error, context: Option<serde_json::Value>) {
-    if !crate::daemon::telemetry_handle::daemon_telemetry_available() {
-        return;
-    }
     let envelope = crate::daemon::TelemetryEnvelope::Error {
         timestamp: chrono::Utc::now().to_rfc3339(),
         message: error.to_string(),
         context,
     };
-    crate::daemon::telemetry_handle::submit_telemetry(vec![envelope]);
+    submit_telemetry_envelope(vec![envelope]);
 }
 
 /// Log a performance metric to Sentry (via daemon telemetry worker)
@@ -28,9 +37,6 @@ pub fn log_performance(
     context: Option<serde_json::Value>,
     tags: Option<HashMap<String, String>>,
 ) {
-    if !crate::daemon::telemetry_handle::daemon_telemetry_available() {
-        return;
-    }
     let envelope = crate::daemon::TelemetryEnvelope::Performance {
         timestamp: chrono::Utc::now().to_rfc3339(),
         operation: operation.to_string(),
@@ -38,22 +44,19 @@ pub fn log_performance(
         context,
         tags,
     };
-    crate::daemon::telemetry_handle::submit_telemetry(vec![envelope]);
+    submit_telemetry_envelope(vec![envelope]);
 }
 
 /// Log a message to Sentry (info, warning, etc.) (via daemon telemetry worker)
 #[allow(dead_code)]
 pub fn log_message(message: &str, level: &str, context: Option<serde_json::Value>) {
-    if !crate::daemon::telemetry_handle::daemon_telemetry_available() {
-        return;
-    }
     let envelope = crate::daemon::TelemetryEnvelope::Message {
         timestamp: chrono::Utc::now().to_rfc3339(),
         message: message.to_string(),
         level: level.to_string(),
         context,
     };
-    crate::daemon::telemetry_handle::submit_telemetry(vec![envelope]);
+    submit_telemetry_envelope(vec![envelope]);
 }
 
 /// Log a batch of metric events (via daemon telemetry worker).
@@ -71,16 +74,12 @@ pub fn log_metrics(
             return;
         }
 
-        if !crate::daemon::telemetry_handle::daemon_telemetry_available() {
-            return;
-        }
-
         // Split into chunks of MAX_METRICS_PER_ENVELOPE
         for chunk in events.chunks(MAX_METRICS_PER_ENVELOPE) {
             let envelope = crate::daemon::TelemetryEnvelope::Metrics {
                 events: chunk.to_vec(),
             };
-            crate::daemon::telemetry_handle::submit_telemetry(vec![envelope]);
+            submit_telemetry_envelope(vec![envelope]);
         }
     }
 }
