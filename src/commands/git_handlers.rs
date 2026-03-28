@@ -1,27 +1,9 @@
-use crate::authorship::virtual_attribution::VirtualAttributions;
-use crate::commands::git_hook_handlers::{
-    ENV_SKIP_MANAGED_HOOKS, has_repo_hook_state, resolve_previous_non_managed_hooks_path,
-};
-use crate::commands::hooks::checkout_hooks;
-use crate::commands::hooks::cherry_pick_hooks;
-use crate::commands::hooks::clone_hooks;
-use crate::commands::hooks::commit_hooks;
-use crate::commands::hooks::fetch_hooks;
-use crate::commands::hooks::merge_hooks;
-use crate::commands::hooks::push_hooks;
-use crate::commands::hooks::rebase_hooks;
-use crate::commands::hooks::reset_hooks;
-use crate::commands::hooks::stash_hooks;
-use crate::commands::hooks::switch_hooks;
-use crate::commands::hooks::update_ref_hooks;
+use crate::commands::git_hook_handlers;
 use crate::config;
 use crate::git::cli_parser::{ParsedGitInvocation, parse_git_cli_args};
 use crate::git::find_repository;
-use crate::git::repository::{Repository, disable_internal_git_hooks};
-use crate::observability;
-use std::collections::HashSet;
+use crate::git::repository::Repository;
 
-use crate::observability::wrapper_performance_targets::log_performance_target_if_violated;
 #[cfg(windows)]
 use crate::utils::CREATE_NO_WINDOW;
 use crate::utils::debug_log;
@@ -36,7 +18,6 @@ use std::os::windows::process::CommandExt;
 use std::process::Command;
 #[cfg(unix)]
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::time::Instant;
 
 #[cfg(unix)]
 static CHILD_PGID: AtomicI32 = AtomicI32::new(0);
@@ -44,18 +25,6 @@ static CHILD_PGID: AtomicI32 = AtomicI32::new(0);
 // Windows NTSTATUS for Ctrl+C interruption (STATUS_CONTROL_C_EXIT, 0xC000013A) from Windows API docs.
 #[cfg(windows)]
 const NTSTATUS_CONTROL_C_EXIT: u32 = 0xC000013A;
-
-/// Error type for hook panics
-#[derive(Debug)]
-struct HookPanicError(String);
-
-impl std::fmt::Display for HookPanicError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::error::Error for HookPanicError {}
 
 #[cfg(unix)]
 extern "C" fn forward_signal_handler(sig: libc::c_int) {
@@ -89,194 +58,93 @@ fn uninstall_forwarding_handlers() {
     }
 }
 
-pub struct CommandHooksContext {
-    pub pre_commit_hook_result: Option<bool>,
-    pub rebase_original_head: Option<String>,
-    pub rebase_onto: Option<String>,
-    pub fetch_authorship_handle: Option<std::thread::JoinHandle<()>>,
-    pub stash_sha: Option<String>,
-    pub push_authorship_handle: Option<std::thread::JoinHandle<()>>,
-    /// VirtualAttributions captured before a pull --rebase --autostash operation.
-    /// Used to preserve uncommitted AI attributions that git's internal stash would lose.
-    pub stashed_va: Option<VirtualAttributions>,
-}
-
 pub fn handle_git(args: &[String]) {
     // If we're being invoked from a shell completion context, bypass git-ai logic
     // and delegate directly to the real git so existing completion scripts work.
     if in_shell_completion_context() {
         let orig_args: Vec<String> = std::env::args().skip(1).collect();
-        proxy_to_git(&orig_args, true, None, None);
+        proxy_to_git(&orig_args, true, None);
         return;
     }
 
-    // Async mode: wrapper should behave as a pure passthrough to git,
-    // but capture and send authoritative pre/post state to the daemon.
-    if config::Config::get().feature_flags().async_mode {
-        let parsed = parse_git_cli_args(args);
+    let parsed = parse_git_cli_args(args);
 
-        // Read-only commands don't need wrapper state (the daemon fast-paths
-        // their trace events and never processes them through the normalizer).
-        // Skip the invocation_id so we can also suppress trace2 for them,
-        // avoiding unnecessary daemon work and wrapper_states memory leaks.
-        let is_read_only = parsed
-            .command
-            .as_deref()
-            .is_some_and(crate::git::command_classification::is_definitely_read_only_command);
+    // Read-only commands don't need wrapper state (the daemon fast-paths
+    // their trace events and never processes them through the normalizer).
+    // Skip the invocation_id so we can also suppress trace2 for them,
+    // avoiding unnecessary daemon work and wrapper_states memory leaks.
+    let is_read_only = parsed
+        .command
+        .as_deref()
+        .is_some_and(crate::git::command_classification::is_definitely_read_only_command);
 
-        if is_read_only {
-            let exit_status = proxy_to_git(args, false, None, None);
-            exit_with_status(exit_status);
-        }
-
-        // Repo-creating commands (clone, init) have no meaningful pre/post
-        // repo state — the target repo doesn't exist yet. The wrapper would
-        // either capture nothing (clone from outside a repo) or the wrong
-        // repo (clone from inside a different repo). Skip the invocation_id
-        // so the daemon doesn't wait for wrapper state that never arrives or
-        // is misleading; trace2 events still flow normally (trace2 suppression
-        // requires *both* no invocation_id and a read-only command).
-        let is_repo_creating = parsed
-            .command
-            .as_deref()
-            .is_some_and(|cmd| matches!(cmd, "clone" | "init"));
-
-        if is_repo_creating {
-            let exit_status = proxy_to_git(args, false, None, None);
-            exit_with_status(exit_status);
-        }
-
-        // Initialize the daemon telemetry handle so we can send wrapper state
-        if let crate::daemon::telemetry_handle::DaemonTelemetryInitResult::Failed(e) =
-            crate::daemon::telemetry_handle::init_daemon_telemetry_handle()
-        {
-            debug_log(&format!("wrapper: daemon telemetry init failed: {}", e));
-        }
-
-        let repository = find_repository(&parsed.global_args).ok();
-        let worktree = repository.as_ref().and_then(|r| r.workdir().ok());
-
-        let pre_state = worktree
-            .as_deref()
-            .and_then(crate::git::repo_state::read_head_state_for_worktree);
-        let invocation_id = uuid::Uuid::new_v4().to_string();
-
-        // Send pre-state BEFORE running git so it's available when the daemon
-        // processes the atexit trace event and starts the wrapper state timeout.
-        send_wrapper_pre_state_to_daemon(&invocation_id, worktree.as_deref(), &pre_state);
-
-        let exit_status = proxy_to_git(args, false, None, Some(&invocation_id));
-
-        let post_state = worktree
-            .as_deref()
-            .and_then(crate::git::repo_state::read_head_state_for_worktree);
-
-        send_wrapper_post_state_to_daemon(&invocation_id, worktree.as_deref(), &post_state);
-
-        // After a successful commit, wait briefly for the daemon to produce an
-        // authorship note so we can show stats inline (same UX as plain wrapper mode).
-        if exit_status.success()
-            && parsed.command.as_deref() == Some("commit")
-            && let Some(repo) = repository.as_ref()
-        {
-            maybe_show_async_post_commit_stats(&parsed, repo);
-        }
-
+    if is_read_only {
+        let exit_status = proxy_to_git(args, false, None);
         exit_with_status(exit_status);
     }
 
-    let mut parsed_args = parse_git_cli_args(args);
+    // Repo-creating commands (clone, init) have no meaningful pre/post
+    // repo state — the target repo doesn't exist yet. The wrapper would
+    // either capture nothing (clone from outside a repo) or the wrong
+    // repo (clone from inside a different repo). Skip the invocation_id
+    // so the daemon doesn't wait for wrapper state that never arrives or
+    // is misleading; trace2 events still flow normally (trace2 suppression
+    // requires *both* no invocation_id and a read-only command).
+    let is_repo_creating = parsed
+        .command
+        .as_deref()
+        .is_some_and(|cmd| matches!(cmd, "clone" | "init"));
 
-    let mut repository_option = find_repository(&parsed_args.global_args).ok();
-
-    let has_repo = repository_option.is_some();
-
-    let config = config::Config::get();
-
-    let skip_hooks = !config.is_allowed_repository(&repository_option);
-
-    if skip_hooks {
-        debug_log(
-            "Skipping git-ai hooks because repository is excluded or not in allow_repositories list",
-        );
-    }
-
-    // Handle clone separately since repo doesn't exist before the command.
-    // Note: clone aliases (e.g., alias.cl = clone) won't trigger clone hooks because
-    // alias resolution requires a Repository object, which doesn't exist yet for clone.
-    if parsed_args.command.as_deref() == Some("clone") && !parsed_args.is_help && !skip_hooks {
-        let exit_status = proxy_to_git(&parsed_args.to_invocation_vec(), false, None, None);
-        if exit_status_was_interrupted(&exit_status) {
-            exit_with_status(exit_status);
-        }
-        clone_hooks::post_clone_hook(&parsed_args, exit_status);
+    if is_repo_creating {
+        let exit_status = proxy_to_git(args, false, None);
         exit_with_status(exit_status);
     }
 
-    // run with hooks
-    let exit_status = if !parsed_args.is_help && has_repo && !skip_hooks {
-        let mut command_hooks_context = CommandHooksContext {
-            pre_commit_hook_result: None,
-            rebase_original_head: None,
-            rebase_onto: None,
-            fetch_authorship_handle: None,
-            stash_sha: None,
-            push_authorship_handle: None,
-            stashed_va: None,
-        };
+    // Initialize the daemon telemetry handle so we can send wrapper state
+    if let crate::daemon::telemetry_handle::DaemonTelemetryInitResult::Failed(e) =
+        crate::daemon::telemetry_handle::init_daemon_telemetry_handle()
+    {
+        debug_log(&format!("wrapper: daemon telemetry init failed: {}", e));
+    }
 
-        let repository = repository_option.as_mut().unwrap();
+    let repository = find_repository(&parsed.global_args).ok();
+    let worktree = repository.as_ref().and_then(|r| r.workdir().ok());
 
-        if let Some(resolved) = resolve_alias_invocation(&parsed_args, repository) {
-            parsed_args = resolved;
+    let pre_state = worktree
+        .as_deref()
+        .and_then(crate::git::repo_state::read_head_state_for_worktree);
+    let invocation_id = uuid::Uuid::new_v4().to_string();
+
+    // Send pre-state BEFORE running git so it's available when the daemon
+    // processes the atexit trace event and starts the wrapper state timeout.
+    send_wrapper_pre_state_to_daemon(&invocation_id, worktree.as_deref(), &pre_state);
+
+    let exit_status = proxy_to_git(args, false, Some(&invocation_id));
+
+    let post_state = worktree
+        .as_deref()
+        .and_then(crate::git::repo_state::read_head_state_for_worktree);
+
+    send_wrapper_post_state_to_daemon(&invocation_id, worktree.as_deref(), &post_state);
+
+    // Auto-remove leftover repo-level git hooks on pull.
+    if parsed.command.as_deref() == Some("pull") {
+        if let Some(repo) = repository.as_ref() {
+            if git_hook_handlers::is_repo_hooks_enabled(repo) {
+                let _ = git_hook_handlers::remove_repo_hooks(repo, false);
+            }
         }
+    }
 
-        let pre_command_start = Instant::now();
-        run_pre_command_hooks(&mut command_hooks_context, &mut parsed_args, repository);
-        let pre_command_duration = pre_command_start.elapsed();
+    // After a successful commit, wait briefly for the daemon to produce an
+    // authorship note so we can show stats inline (same UX as plain wrapper mode).
+    if exit_status.success()
+        && parsed.command.as_deref() == Some("commit")
+        && let Some(repo) = repository.as_ref()
+    {
+        maybe_show_async_post_commit_stats(&parsed, repo);
+    }
 
-        let child_hooks_path_override =
-            resolve_child_git_hooks_path_override(&parsed_args, Some(repository));
-        let git_start = Instant::now();
-        let exit_status = proxy_to_git(
-            &parsed_args.to_invocation_vec(),
-            false,
-            child_hooks_path_override.as_deref(),
-            None,
-        );
-        if exit_status_was_interrupted(&exit_status) {
-            exit_with_status(exit_status);
-        }
-        let git_duration = git_start.elapsed();
-
-        let post_command_start = Instant::now();
-        run_post_command_hooks(
-            &mut command_hooks_context,
-            &parsed_args,
-            exit_status,
-            repository,
-        );
-        let post_command_duration = post_command_start.elapsed();
-
-        log_performance_target_if_violated(
-            parsed_args.command.as_deref().unwrap_or("unknown"),
-            pre_command_duration,
-            git_duration,
-            post_command_duration,
-        );
-
-        exit_status
-    } else {
-        // run without hooks
-        let child_hooks_path_override =
-            resolve_child_git_hooks_path_override(&parsed_args, repository_option.as_ref());
-        proxy_to_git(
-            &parsed_args.to_invocation_vec(),
-            false,
-            child_hooks_path_override.as_deref(),
-            None,
-        )
-    };
     exit_with_status(exit_status);
 }
 
@@ -290,19 +158,21 @@ pub fn resolve_alias_invocation(
 }
 
 #[cfg(not(feature = "test-support"))]
+#[allow(dead_code)]
 fn resolve_alias_invocation(
-    parsed_args: &ParsedGitInvocation,
-    repository: &Repository,
+    _parsed_args: &ParsedGitInvocation,
+    _repository: &Repository,
 ) -> Option<ParsedGitInvocation> {
-    resolve_alias_impl(parsed_args, repository)
+    None
 }
 
+#[cfg(feature = "test-support")]
 fn resolve_alias_impl(
     parsed_args: &ParsedGitInvocation,
     repository: &Repository,
 ) -> Option<ParsedGitInvocation> {
     let mut current = parsed_args.clone();
-    let mut seen: HashSet<String> = HashSet::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     loop {
         let command = match current.command.as_deref() {
@@ -334,6 +204,7 @@ fn resolve_alias_impl(
 }
 
 /// Parse alias value into tokens, respecting quotes and escapes
+#[cfg(feature = "test-support")]
 fn parse_alias_tokens(value: &str) -> Option<Vec<String>> {
     let trimmed = value.trim_start();
 
@@ -405,246 +276,6 @@ fn parse_alias_tokens(value: &str) -> Option<Vec<String>> {
     Some(tokens)
 }
 
-fn run_pre_command_hooks(
-    command_hooks_context: &mut CommandHooksContext,
-    parsed_args: &mut ParsedGitInvocation,
-    repository: &mut Repository,
-) {
-    let _disable_hooks_guard = disable_internal_git_hooks();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // Pre-command hooks
-        match parsed_args.command.as_deref() {
-            Some("commit") => {
-                command_hooks_context.pre_commit_hook_result = Some(
-                    commit_hooks::commit_pre_command_hook(parsed_args, repository),
-                );
-            }
-            Some("rebase") => {
-                rebase_hooks::pre_rebase_hook(parsed_args, repository, command_hooks_context);
-            }
-            Some("reset") => {
-                reset_hooks::pre_reset_hook(parsed_args, repository);
-            }
-            Some("cherry-pick") => {
-                cherry_pick_hooks::pre_cherry_pick_hook(
-                    parsed_args,
-                    repository,
-                    command_hooks_context,
-                );
-            }
-            Some("push") => {
-                command_hooks_context.push_authorship_handle =
-                    push_hooks::push_pre_command_hook(parsed_args, repository);
-            }
-            Some("pull") => {
-                fetch_hooks::pull_pre_command_hook(parsed_args, repository, command_hooks_context);
-            }
-            Some("stash") => {
-                let config = config::Config::get();
-
-                if config.feature_flags().rewrite_stash {
-                    stash_hooks::pre_stash_hook(parsed_args, repository, command_hooks_context);
-                }
-            }
-            Some("checkout") => {
-                checkout_hooks::pre_checkout_hook(parsed_args, repository, command_hooks_context);
-            }
-            Some("switch") => {
-                switch_hooks::pre_switch_hook(parsed_args, repository, command_hooks_context);
-            }
-            Some("update-ref") => {
-                update_ref_hooks::pre_update_ref_hook(
-                    parsed_args,
-                    repository,
-                    command_hooks_context,
-                );
-            }
-            _ => {}
-        }
-    }));
-
-    if let Err(panic_payload) = result {
-        let error_message = if let Some(message) = panic_payload.downcast_ref::<&str>() {
-            format!("Panic in run_pre_command_hooks: {}", message)
-        } else if let Some(message) = panic_payload.downcast_ref::<String>() {
-            format!("Panic in run_pre_command_hooks: {}", message)
-        } else {
-            "Panic in run_pre_command_hooks: unknown panic".to_string()
-        };
-
-        let command_name = parsed_args.command.as_deref().unwrap_or("unknown");
-        let context = serde_json::json!({
-            "function": "run_pre_command_hooks",
-            "command": command_name,
-            "args": parsed_args.to_invocation_vec(),
-        });
-
-        debug_log(&error_message);
-        observability::log_error(&HookPanicError(error_message.clone()), Some(context));
-    }
-}
-
-fn run_post_command_hooks(
-    command_hooks_context: &mut CommandHooksContext,
-    parsed_args: &ParsedGitInvocation,
-    exit_status: std::process::ExitStatus,
-    repository: &mut Repository,
-) {
-    let _disable_hooks_guard = disable_internal_git_hooks();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // Post-command hooks
-        match parsed_args.command.as_deref() {
-            Some("commit") => commit_hooks::commit_post_command_hook(
-                parsed_args,
-                exit_status,
-                repository,
-                command_hooks_context,
-            ),
-            Some("pull") => fetch_hooks::pull_post_command_hook(
-                repository,
-                parsed_args,
-                exit_status,
-                command_hooks_context,
-            ),
-            Some("push") => push_hooks::push_post_command_hook(
-                repository,
-                parsed_args,
-                exit_status,
-                command_hooks_context,
-            ),
-            Some("reset") => reset_hooks::post_reset_hook(parsed_args, repository, exit_status),
-            Some("merge") => merge_hooks::post_merge_hook(parsed_args, exit_status, repository),
-            Some("rebase") => rebase_hooks::handle_rebase_post_command(
-                command_hooks_context,
-                parsed_args,
-                exit_status,
-                repository,
-            ),
-            Some("cherry-pick") => cherry_pick_hooks::post_cherry_pick_hook(
-                command_hooks_context,
-                parsed_args,
-                exit_status,
-                repository,
-            ),
-            Some("stash") => {
-                let config = config::Config::get();
-
-                if config.feature_flags().rewrite_stash {
-                    stash_hooks::post_stash_hook(
-                        command_hooks_context,
-                        parsed_args,
-                        repository,
-                        exit_status,
-                    );
-                }
-            }
-            Some("checkout") => {
-                checkout_hooks::post_checkout_hook(
-                    parsed_args,
-                    repository,
-                    exit_status,
-                    command_hooks_context,
-                );
-            }
-            Some("switch") => {
-                switch_hooks::post_switch_hook(
-                    parsed_args,
-                    repository,
-                    exit_status,
-                    command_hooks_context,
-                );
-            }
-            Some("update-ref") => {
-                update_ref_hooks::post_update_ref_hook(
-                    parsed_args,
-                    repository,
-                    exit_status,
-                    command_hooks_context,
-                );
-            }
-            _ => {}
-        }
-    }));
-
-    if let Err(panic_payload) = result {
-        let error_message = if let Some(message) = panic_payload.downcast_ref::<&str>() {
-            format!("Panic in run_post_command_hooks: {}", message)
-        } else if let Some(message) = panic_payload.downcast_ref::<String>() {
-            format!("Panic in run_post_command_hooks: {}", message)
-        } else {
-            "Panic in run_post_command_hooks: unknown panic".to_string()
-        };
-
-        let command_name = parsed_args.command.as_deref().unwrap_or("unknown");
-        let exit_code = exit_status.code().unwrap_or(-1);
-        let context = serde_json::json!({
-            "function": "run_post_command_hooks",
-            "command": command_name,
-            "exit_code": exit_code,
-            "args": parsed_args.to_invocation_vec(),
-        });
-
-        debug_log(&error_message);
-        observability::log_error(&HookPanicError(error_message.clone()), Some(context));
-    }
-}
-
-#[cfg(windows)]
-fn platform_null_hooks_path() -> &'static str {
-    "NUL"
-}
-
-#[cfg(not(windows))]
-fn platform_null_hooks_path() -> &'static str {
-    "/dev/null"
-}
-
-fn command_uses_managed_hooks(command: Option<&str>) -> bool {
-    matches!(
-        command,
-        Some(
-            "commit"
-                | "rebase"
-                | "cherry-pick"
-                | "reset"
-                | "stash"
-                | "merge"
-                | "checkout"
-                | "switch"
-                | "pull"
-                | "fetch"
-                | "push"
-                | "update-ref"
-        )
-    )
-}
-
-fn has_explicit_hooks_path_override(args: &[String]) -> bool {
-    args.windows(2)
-        .any(|pair| pair[0] == "-c" && pair[1].starts_with("core.hooksPath="))
-        || args.iter().any(|arg| {
-            arg.starts_with("-ccore.hooksPath=") || arg.starts_with("--config=core.hooksPath=")
-        })
-}
-
-fn resolve_child_git_hooks_path_override(
-    parsed_args: &ParsedGitInvocation,
-    repository: Option<&Repository>,
-) -> Option<String> {
-    if !command_uses_managed_hooks(parsed_args.command.as_deref()) {
-        return None;
-    }
-    if !has_repo_hook_state(repository) {
-        return None;
-    }
-
-    let hooks_path = resolve_previous_non_managed_hooks_path(repository)
-        .map(|path| path.to_string_lossy().to_string())
-        .unwrap_or_else(|| platform_null_hooks_path().to_string());
-
-    Some(hooks_path)
-}
-
 /// In async (wrapper-to-daemon) mode, after a successful `git commit`, poll for
 /// the daemon-produced authorship note and display stats inline when available.
 /// Mirrors the same skip/display rules as plain wrapper mode in post_commit.rs.
@@ -679,22 +310,16 @@ fn maybe_show_async_post_commit_stats(parsed: &ParsedGitInvocation, repo: &Repos
         None => return,
     };
 
-    // Use a longer timeout under test to avoid flakiness on saturated CI machines.
-    // GIT_AI_POST_COMMIT_TIMEOUT_MS allows tests to override the timeout.
-    let timeout = if let Some(ms) = std::env::var("GIT_AI_POST_COMMIT_TIMEOUT_MS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-    {
-        std::time::Duration::from_millis(ms)
-    } else if std::env::var_os("GIT_AI_TEST_DB_PATH").is_some() {
-        std::time::Duration::from_secs(20)
-    } else {
-        std::time::Duration::from_millis(500)
-    };
-
-    // Poll for the authorship note the daemon should be producing.
-    let poll_interval = std::time::Duration::from_millis(25);
+    // Brief polling window for the daemon to produce the authorship note.
+    let timeout = std::time::Duration::from_millis(
+        std::env::var("GIT_AI_ASYNC_STATS_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3000),
+    );
+    let poll_interval = std::time::Duration::from_millis(30);
     let start = std::time::Instant::now();
+
     let note_found = loop {
         if show_authorship_note(repo, &commit_sha).is_some() {
             break true;
@@ -802,7 +427,6 @@ fn send_wrapper_post_state_to_daemon(
 fn proxy_to_git(
     args: &[String],
     exit_on_completion: bool,
-    child_hooks_path_override: Option<&str>,
     wrapper_invocation_id: Option<&str>,
 ) -> std::process::ExitStatus {
     // Suppress trace2 for read-only commands to avoid hitting the daemon with
@@ -829,13 +453,7 @@ fn proxy_to_git(
             let should_setpgid = !is_interactive;
 
             let mut cmd = Command::new(config::Config::get().git_cmd());
-            if let Some(hooks_path) = child_hooks_path_override
-                && !has_explicit_hooks_path_override(args)
-            {
-                cmd.arg("-c").arg(format!("core.hooksPath={}", hooks_path));
-            }
             cmd.args(args);
-            cmd.env(ENV_SKIP_MANAGED_HOOKS, "1");
             if suppress_trace2 {
                 cmd.env("GIT_TRACE2_EVENT", "0");
             }
@@ -862,13 +480,7 @@ fn proxy_to_git(
         #[cfg(not(unix))]
         {
             let mut cmd = Command::new(config::Config::get().git_cmd());
-            if let Some(hooks_path) = child_hooks_path_override
-                && !has_explicit_hooks_path_override(args)
-            {
-                cmd.arg("-c").arg(format!("core.hooksPath={}", hooks_path));
-            }
             cmd.args(args);
-            cmd.env(ENV_SKIP_MANAGED_HOOKS, "1");
             if suppress_trace2 {
                 cmd.env("GIT_TRACE2_EVENT", "0");
             }
@@ -974,18 +586,17 @@ fn exit_with_status(status: std::process::ExitStatus) -> ! {
     std::process::exit(status.code().unwrap_or(1));
 }
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 fn exit_status_was_interrupted(status: &std::process::ExitStatus) -> bool {
     matches!(status.signal(), Some(libc::SIGINT))
 }
 
-#[cfg(windows)]
+#[cfg(all(test, windows))]
 fn exit_status_was_interrupted(status: &std::process::ExitStatus) -> bool {
-    // Reinterpret the signed exit code as u32 to compare against the NTSTATUS value.
     status.code().map(|code| code as u32) == Some(NTSTATUS_CONTROL_C_EXIT)
 }
 
-#[cfg(not(any(unix, windows)))]
+#[cfg(all(test, not(any(unix, windows))))]
 fn exit_status_was_interrupted(_status: &std::process::ExitStatus) -> bool {
     false
 }
@@ -1002,10 +613,6 @@ fn in_shell_completion_context() -> bool {
 #[cfg(test)]
 mod tests {
     use super::parse_alias_tokens;
-    use super::{parse_git_cli_args, resolve_child_git_hooks_path_override};
-    use crate::git::find_repository_in_path;
-    use std::process::Command;
-    use tempfile::tempdir;
 
     #[test]
     fn parse_alias_tokens_empty_string() {
@@ -1102,30 +709,6 @@ mod tests {
                 "--oneline".to_string(),
                 "-5".to_string()
             ])
-        );
-    }
-
-    #[test]
-    fn resolve_child_hooks_path_override_no_state_file_returns_none() {
-        let temp = tempdir().expect("tempdir should create");
-        let output = Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(temp.path())
-            .output()
-            .expect("git init should run");
-        assert!(
-            output.status.success(),
-            "git init failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-
-        let repo = find_repository_in_path(&temp.path().to_string_lossy())
-            .expect("repository should be discovered");
-        let parsed = parse_git_cli_args(&["commit".to_string()]);
-
-        assert_eq!(
-            resolve_child_git_hooks_path_override(&parsed, Some(&repo)),
-            None
         );
     }
 

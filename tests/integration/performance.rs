@@ -22,7 +22,6 @@ fn setup() {
         auth_keyring: false,
         async_mode: false,
         git_hooks_enabled: false,
-        git_hooks_externally_managed: false,
     };
 
     git_ai::config::Config::set_test_feature_flags(test_flags.clone());

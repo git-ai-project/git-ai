@@ -1404,14 +1404,6 @@ impl TmpRepo {
             )));
         }
 
-        // Call post-reset hook directly
-        let parsed_args = crate::git::cli_parser::parse_git_cli_args(&args);
-        crate::commands::hooks::reset_hooks::post_reset_hook(
-            &parsed_args,
-            &mut repo_mut,
-            exit_status,
-        );
-
         Ok(())
     }
 }

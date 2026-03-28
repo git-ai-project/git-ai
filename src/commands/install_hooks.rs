@@ -164,6 +164,32 @@ fn remove_global_git_config_section(git_cmd: &str, section: &str) -> Result<(), 
     }
 }
 
+/// If the user has `git_hooks_enabled: true` in their config, migrate them to
+/// `async_mode: true` so the daemon-based flow takes over. This is a one-time
+/// migration for the git hooks → async mode cutover.
+fn maybe_migrate_git_hooks_to_async_mode(dry_run: bool) -> Result<(), GitAiError> {
+    let runtime_config = config::Config::fresh();
+    if !runtime_config.feature_flags().git_hooks_enabled {
+        return Ok(());
+    }
+
+    if dry_run {
+        return Ok(());
+    }
+
+    let mut file_config =
+        crate::config::load_file_config_public().map_err(GitAiError::Generic)?;
+    let flags_value = file_config
+        .feature_flags
+        .get_or_insert_with(|| serde_json::json!({}));
+    if let Some(obj) = flags_value.as_object_mut() {
+        obj.insert("async_mode".to_string(), serde_json::json!(true));
+    }
+    crate::config::save_file_config(&file_config).map_err(GitAiError::Generic)?;
+    // Config::fresh() calls downstream will now see async_mode: true
+    Ok(())
+}
+
 fn maybe_configure_async_mode_daemon_trace2(dry_run: bool) -> Result<(), GitAiError> {
     let runtime_config = config::Config::fresh();
 
@@ -271,6 +297,11 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
             verbose = true;
         }
     }
+
+    // Migrate users who had git_hooks_enabled to async_mode.
+    // This must happen before daemon setup so the downstream Config::fresh() calls
+    // see async_mode: true and correctly configure trace2 + start the daemon.
+    maybe_migrate_git_hooks_to_async_mode(dry_run)?;
 
     // In async mode, daemon trace2 config must be in place before any install work starts.
     // If async mode was disabled, tear down any leftover daemon and trace2 config.

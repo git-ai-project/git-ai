@@ -162,7 +162,7 @@ pub(crate) fn current_git_ai_exe() -> Result<PathBuf, GitAiError> {
 fn internal_git_ai_command_with_exe(exe: PathBuf, subcommand: &str) -> Command {
     let mut cmd = Command::new(exe);
     cmd.arg(subcommand)
-        .env(crate::commands::git_hook_handlers::ENV_SKIP_ALL_HOOKS, "1");
+        .env("GIT_AI_SKIP_ALL_HOOKS", "1");
     cmd
 }
 
@@ -504,7 +504,7 @@ mod tests {
         );
         assert!(
             cmd.get_envs().any(|(k, v)| {
-                k == std::ffi::OsStr::new(crate::commands::git_hook_handlers::ENV_SKIP_ALL_HOOKS)
+                k == std::ffi::OsStr::new("GIT_AI_SKIP_ALL_HOOKS")
                     && v == Some(std::ffi::OsStr::new("1"))
             }),
             "internal command must always set GIT_AI_SKIP_ALL_HOOKS=1"

@@ -42,8 +42,6 @@ const DAEMON_TEST_TRACE_READY_TIMEOUT: Duration = Duration::from_secs(15);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GitTestMode {
     Wrapper,
-    Hooks,
-    Both,
     Daemon,
     WrapperDaemon,
 }
@@ -58,8 +56,6 @@ impl GitTestMode {
 
     pub fn from_mode_name(mode: &str) -> Self {
         match mode.to_lowercase().as_str() {
-            "hooks" => Self::Hooks,
-            "both" | "wrapper+hooks" | "hooks+wrapper" => Self::Both,
             "daemon" | "trace-daemon" | "pure-daemon" => Self::Daemon,
             "wrapper-daemon" => Self::WrapperDaemon,
             _ => Self::Wrapper,
@@ -67,11 +63,7 @@ impl GitTestMode {
     }
 
     pub fn uses_wrapper(self) -> bool {
-        matches!(self, Self::Wrapper | Self::Both | Self::WrapperDaemon)
-    }
-
-    pub fn uses_hooks(self) -> bool {
-        matches!(self, Self::Hooks | Self::Both)
+        matches!(self, Self::Wrapper | Self::WrapperDaemon)
     }
 
     pub fn uses_daemon(self) -> bool {
@@ -511,14 +503,10 @@ fn create_file_symlink(target: &PathBuf, link: &PathBuf) -> std::io::Result<()> 
 fn resolve_test_db_path(
     base: &std::path::Path,
     id: u64,
-    test_home: &std::path::Path,
-    git_mode: GitTestMode,
+    _test_home: &std::path::Path,
+    _git_mode: GitTestMode,
 ) -> PathBuf {
-    if git_mode.uses_hooks() {
-        test_home.join(".git-ai").join("internal").join("db")
-    } else {
-        base.join(format!("{}-db", id))
-    }
+    base.join(format!("{}-db", id))
 }
 
 #[derive(Debug, Default)]
@@ -851,8 +839,8 @@ impl TestRepo {
         fs::write(&config_path, serialized).expect("failed to write test HOME config");
     }
 
-    fn sync_test_home_config_for_hooks(&self) {
-        if !self.git_mode.uses_hooks() && !self.git_mode.uses_daemon() {
+    fn sync_test_home_config(&self) {
+        if !self.git_mode.uses_daemon() {
             return;
         }
         self.write_test_config_to_home(&self.test_home);
@@ -1015,7 +1003,7 @@ impl TestRepo {
         };
 
         repo.apply_default_config_patch();
-        repo.setup_git_hooks_mode();
+
         repo
     }
 
@@ -1053,7 +1041,7 @@ impl TestRepo {
 
         repo.apply_default_config_patch();
         repo.setup_daemon_mode();
-        repo.setup_git_hooks_mode();
+
 
         repo
     }
@@ -1135,7 +1123,7 @@ impl TestRepo {
 
         repo.apply_default_config_patch();
         repo.setup_daemon_mode();
-        repo.setup_git_hooks_mode();
+
         repo
     }
 
@@ -1179,7 +1167,7 @@ impl TestRepo {
 
         let mut repo = repo;
         repo.setup_daemon_mode();
-        repo.setup_git_hooks_mode();
+
         repo
     }
 
@@ -1287,8 +1275,6 @@ impl TestRepo {
         // The upstream side of new_with_remote() is a bare remote fixture. It is not the repo
         // under test for daemon mode, and bootstrapping the shared daemon against a bare repo
         // breaks the readiness handshake for this test process.
-        upstream.setup_git_hooks_mode();
-        mirror.setup_git_hooks_mode();
 
         (mirror, upstream)
     }
@@ -1336,7 +1322,7 @@ impl TestRepo {
 
         repo.apply_default_config_patch();
         repo.setup_daemon_mode();
-        repo.setup_git_hooks_mode();
+
         repo
     }
 
@@ -1392,7 +1378,7 @@ impl TestRepo {
         };
         self.test_db_path = daemon.test_db_path.clone();
         self.daemon_process = Some(daemon);
-        self.sync_test_home_config_for_hooks();
+        self.sync_test_home_config();
     }
 
     fn daemon_completion_log_path_for_family(&self, family_key: &str) -> PathBuf {
@@ -1792,34 +1778,6 @@ impl TestRepo {
         registry.advance_last_synced_completion_count(family_key, observed_count);
     }
 
-    fn setup_git_hooks_mode(&self) {
-        if !self.git_mode.uses_hooks() {
-            return;
-        }
-
-        self.sync_test_home_config_for_hooks();
-
-        let binary_path = get_binary_path();
-        let mut command = Command::new(binary_path);
-        command
-            .current_dir(&self.path)
-            .args(["git-hooks", "ensure"]);
-        self.configure_git_ai_env(&mut command);
-        command.env("GIT_AI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
-        command.env("GITAI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
-
-        let output = command
-            .output()
-            .expect("failed to run git-ai git-hooks ensure in test setup");
-        if !output.status.success() {
-            panic!(
-                "git-ai git-hooks ensure failed during test setup:\nstdout: {}\nstderr: {}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr),
-            );
-        }
-    }
-
     fn configure_command_env(&self, command: &mut Command) {
         // Isolate all git + git-ai config reads from developer machine settings.
         configure_test_home_env(command, &self.test_home);
@@ -1830,10 +1788,6 @@ impl TestRepo {
                 DaemonConfig::trace2_event_target_for_path(&self.daemon_trace_socket_path()),
             );
             command.env("GIT_TRACE2_EVENT_NESTING", Self::trace2_nesting_value());
-        }
-
-        if self.git_mode.uses_hooks() {
-            command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
         }
 
         if self.git_mode.uses_wrapper() {
@@ -1872,9 +1826,6 @@ impl TestRepo {
             command.env("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true");
         }
 
-        if self.git_mode.uses_hooks() {
-            command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
-        }
     }
 
     /// Patch the git-ai config for this test repo
@@ -1896,7 +1847,7 @@ impl TestRepo {
         let mut patch = self.config_patch.take().unwrap_or_default();
         f(&mut patch);
         self.config_patch = Some(patch);
-        self.sync_test_home_config_for_hooks();
+        self.sync_test_home_config();
     }
 
     pub fn path(&self) -> &PathBuf {

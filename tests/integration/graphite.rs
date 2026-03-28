@@ -325,10 +325,6 @@ fn gt(repo: &TestRepo, args: &[&str]) -> Result<String, String> {
         );
     }
 
-    // Only set hook-mode env in hook-based test modes.
-    if repo.mode().uses_hooks() {
-        command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
-    }
     command.env("GIT_AI_TEST_DB_PATH", repo.test_db_path().to_str().unwrap());
     command.env("GITAI_TEST_DB_PATH", repo.test_db_path().to_str().unwrap());
 
@@ -384,48 +380,9 @@ fn gt(repo: &TestRepo, args: &[&str]) -> Result<String, String> {
     }
 }
 
-/// Install git-ai hooks in a test repo so that `gt` rebase operations
-/// trigger git-ai's post-rewrite hook for attribution note copying.
-/// The wrapper handles commit-time attribution, while hooks handle
-/// the old-SHA → new-SHA note remapping during rebases.
-fn install_hooks(repo: &TestRepo) {
-    if !repo.mode().uses_hooks() {
-        return;
-    }
-
-    let binary_path = get_binary_path();
-    let mut command = Command::new(binary_path);
-    command
-        .current_dir(repo.path())
-        .args(["git-hooks", "ensure"]);
-    command.env("HOME", repo.test_home_path());
-    command.env(
-        "GIT_CONFIG_GLOBAL",
-        repo.test_home_path().join(".gitconfig"),
-    );
-    command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
-    command.env("GIT_AI_TEST_DB_PATH", repo.test_db_path().to_str().unwrap());
-
-    let output = command
-        .output()
-        .expect("failed to run git-ai git-hooks ensure");
-    if !output.status.success() {
-        panic!(
-            "git-ai git-hooks ensure failed:\nstdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-        );
-    }
-}
-
 /// Initialize Graphite in a TestRepo (sets trunk to "main").
-/// Also installs git-ai hooks so that rebase-based gt operations
-/// (restack, move, delete) properly copy attribution notes.
 fn gt_init(repo: &TestRepo) {
-    install_hooks(repo);
     gt(repo, &["init", "--trunk", "main"]).expect("gt init should succeed");
-    // Re-install hooks after gt init, in case gt init modified core.hooksPath
-    install_hooks(repo);
 }
 
 /// Create an initial commit so the repo is not empty (required for most gt operations).

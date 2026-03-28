@@ -92,9 +92,7 @@ macro_rules! subdir_test_variants {
                         if mode.uses_wrapper() {
                             command.env("GIT_AI", "git");
                         }
-                        if mode.uses_hooks() {
-                            command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
-                        }
+
                         if mode.uses_daemon() {
                             let trace_socket = self.inner.daemon_trace_socket_path();
                             let nesting = std::env::var("GIT_AI_TEST_TRACE2_NESTING")
@@ -209,9 +207,6 @@ macro_rules! subdir_test_variants {
                             );
                             if mode.uses_wrapper() {
                                 command.env("GIT_AI", "git");
-                            }
-                            if mode.uses_hooks() {
-                                command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
                             }
                             if mode.uses_daemon() {
                                 let trace_socket = self.inner.daemon_trace_socket_path();
@@ -333,92 +328,6 @@ macro_rules! worktree_test_wrappers {
 
                     fn git_mode() -> $crate::repos::test_repo::GitTestMode {
                         $crate::repos::test_repo::GitTestMode::Wrapper
-                    }
-                }
-
-                impl std::ops::Deref for WorktreeTestRepo {
-                    type Target = $crate::repos::test_repo::TestRepo;
-                    fn deref(&self) -> &Self::Target {
-                        &self.inner
-                    }
-                }
-
-                type TestRepo = WorktreeTestRepo;
-                $body
-            }
-
-            #[test]
-            fn [<test_ $test_name _in_worktree_hooks_mode>]() {
-                struct WorktreeTestRepo {
-                    inner: $crate::repos::test_repo::TestRepo,
-                }
-
-                #[allow(dead_code)]
-                impl WorktreeTestRepo {
-                    fn new() -> Self {
-                        Self {
-                            inner: $crate::repos::test_repo::TestRepo::new_worktree_with_mode(
-                                $crate::repos::test_repo::GitTestMode::Hooks,
-                            ),
-                        }
-                    }
-
-                    fn new_with_remote() -> (Self, Self) {
-                        let (local, upstream) =
-                            $crate::repos::test_repo::TestRepo::new_with_remote_with_mode(
-                                $crate::repos::test_repo::GitTestMode::Hooks,
-                            );
-                        (
-                            Self { inner: local },
-                            Self { inner: upstream },
-                        )
-                    }
-
-                    fn git_mode() -> $crate::repos::test_repo::GitTestMode {
-                        $crate::repos::test_repo::GitTestMode::Hooks
-                    }
-                }
-
-                impl std::ops::Deref for WorktreeTestRepo {
-                    type Target = $crate::repos::test_repo::TestRepo;
-                    fn deref(&self) -> &Self::Target {
-                        &self.inner
-                    }
-                }
-
-                type TestRepo = WorktreeTestRepo;
-                $body
-            }
-
-            #[test]
-            fn [<test_ $test_name _in_worktree_both_mode>]() {
-                struct WorktreeTestRepo {
-                    inner: $crate::repos::test_repo::TestRepo,
-                }
-
-                #[allow(dead_code)]
-                impl WorktreeTestRepo {
-                    fn new() -> Self {
-                        Self {
-                            inner: $crate::repos::test_repo::TestRepo::new_worktree_with_mode(
-                                $crate::repos::test_repo::GitTestMode::Both,
-                            ),
-                        }
-                    }
-
-                    fn new_with_remote() -> (Self, Self) {
-                        let (local, upstream) =
-                            $crate::repos::test_repo::TestRepo::new_with_remote_with_mode(
-                                $crate::repos::test_repo::GitTestMode::Both,
-                            );
-                        (
-                            Self { inner: local },
-                            Self { inner: upstream },
-                        )
-                    }
-
-                    fn git_mode() -> $crate::repos::test_repo::GitTestMode {
-                        $crate::repos::test_repo::GitTestMode::Both
                     }
                 }
 

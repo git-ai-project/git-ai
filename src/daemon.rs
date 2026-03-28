@@ -33,7 +33,7 @@ use crate::{
     },
     authorship::working_log::CheckpointKind,
     commands::checkpoint_agent::agent_presets::AgentRunResult,
-    commands::hooks::{push_hooks, stash_hooks},
+    commands::daemon_authorship_helpers,
 };
 #[cfg(not(windows))]
 use interprocess::local_socket::ConnectOptions;
@@ -1248,7 +1248,6 @@ fn apply_checkpoint_side_effect(request: CheckpointRunRequest) -> Result<(), Git
     match request {
         CheckpointRunRequest::Live(request) => {
             let repo = find_repository_in_path(&request.repo_working_dir)?;
-            crate::commands::git_hook_handlers::ensure_repo_level_hooks_for_checkpoint(&repo);
 
             let kind = request
                 .kind
@@ -1273,7 +1272,6 @@ fn apply_checkpoint_side_effect(request: CheckpointRunRequest) -> Result<(), Git
         }
         CheckpointRunRequest::Captured(request) => {
             let repo = find_repository_in_path(&request.repo_working_dir)?;
-            crate::commands::git_hook_handlers::ensure_repo_level_hooks_for_checkpoint(&repo);
             let _ = crate::commands::checkpoint::execute_captured_checkpoint(
                 &repo,
                 &request.capture_id,
@@ -1335,7 +1333,7 @@ fn apply_push_side_effect(
 ) -> Result<(), GitAiError> {
     let repo = find_repository_in_path(worktree)?;
     let parsed = parsed_invocation_for_side_effect(command, args);
-    push_hooks::run_pre_push_hook_managed(&parsed, &repo);
+    daemon_authorship_helpers::run_pre_push_authorship(&parsed, &repo);
     Ok(())
 }
 
@@ -2226,7 +2224,7 @@ fn recover_recent_replay_prerequisites_for_commit_replay(
                 if target_head != base_commit || stash_sha.is_empty() {
                     continue;
                 }
-                stash_hooks::restore_stash_attributions(repo, base_commit, &stash_sha)?;
+                daemon_authorship_helpers::restore_stash_attributions(repo, base_commit, &stash_sha)?;
             }
         }
 
@@ -2578,7 +2576,7 @@ fn apply_stash_rewrite_side_effect(
                 debug_log("Skipping stash create replay without created stash oid");
                 return Ok(());
             };
-            stash_hooks::save_stash_authorship_log(
+            daemon_authorship_helpers::save_stash_authorship_log(
                 repo,
                 head_sha,
                 stash_sha,
@@ -2596,7 +2594,7 @@ fn apply_stash_rewrite_side_effect(
                     "stash apply/pop missing stash oid".to_string(),
                 ));
             };
-            stash_hooks::restore_stash_attributions(repo, head_sha, stash_sha)?;
+            daemon_authorship_helpers::restore_stash_attributions(repo, head_sha, stash_sha)?;
         }
         StashOperation::Drop | StashOperation::List => {}
     }
@@ -2648,7 +2646,7 @@ fn maybe_rebase_mappings_from_repository(
     context: &str,
 ) -> Result<Option<RebaseCommitMappings>, GitAiError> {
     let (original_commits, new_commits) =
-        crate::commands::hooks::rebase_hooks::build_rebase_commit_mappings(
+        crate::commands::daemon_authorship_helpers::build_rebase_commit_mappings(
             repository, old_head, new_head, onto_head,
         )?;
     if original_commits.is_empty() {
@@ -5437,7 +5435,7 @@ impl ActorDaemonCoordinator {
         if parsed.command.as_deref() != Some("stash") {
             return Vec::new();
         }
-        stash_hooks::extract_stash_pathspecs(&parsed)
+        daemon_authorship_helpers::extract_stash_pathspecs(&parsed)
     }
 
     fn merge_squash_source_ref_from_command(

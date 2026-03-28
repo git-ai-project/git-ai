@@ -126,11 +126,6 @@ fn graphite_style_restack_child_branch(
 }
 
 fn should_skip_for_hooks_mode() -> bool {
-    let mode = std::env::var("GIT_AI_TEST_GIT_MODE").unwrap_or_else(|_| "wrapper".to_string());
-    if matches!(GitTestMode::from_mode_name(&mode), GitTestMode::Hooks) {
-        eprintln!("SKIP: commit-tree/update-ref regression only runs in wrapper mode");
-        return true;
-    }
     false
 }
 
