@@ -58,7 +58,7 @@ define_feature_flags!(
     async_mode: async_mode, debug = false, release = false,
     git_hooks_enabled: git_hooks_enabled, debug = false, release = false,
     git_hooks_externally_managed: git_hooks_externally_managed, debug = false, release = false,
-    sharded_notes: sharded_notes, debug = false, release = false,
+    sharded_notes: sharded_notes, debug = false, release = false, // gated behind config
 );
 
 impl FeatureFlags {
