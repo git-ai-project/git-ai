@@ -100,12 +100,13 @@ pub fn handle_git(args: &[String]) {
         exit_with_status(exit_status);
     }
 
-    // Initialize the daemon telemetry handle so we can send wrapper state
-    if let crate::daemon::telemetry_handle::DaemonTelemetryInitResult::Failed(e) =
-        crate::daemon::telemetry_handle::init_daemon_telemetry_handle()
-    {
-        debug_log(&format!("wrapper: daemon telemetry init failed: {}", e));
-    }
+    // Initialize the daemon telemetry handle so we can send wrapper state.
+    // Only send pre/post state when the handle connected successfully;
+    // otherwise the wrapper is running without a daemon (pure wrapper mode).
+    let daemon_connected = matches!(
+        crate::daemon::telemetry_handle::init_daemon_telemetry_handle(),
+        crate::daemon::telemetry_handle::DaemonTelemetryInitResult::Connected
+    );
 
     let repository = find_repository(&parsed.global_args).ok();
     let worktree = repository.as_ref().and_then(|r| r.workdir().ok());
@@ -117,7 +118,9 @@ pub fn handle_git(args: &[String]) {
 
     // Send pre-state BEFORE running git so it's available when the daemon
     // processes the atexit trace event and starts the wrapper state timeout.
-    send_wrapper_pre_state_to_daemon(&invocation_id, worktree.as_deref(), &pre_state);
+    if daemon_connected {
+        send_wrapper_pre_state_to_daemon(&invocation_id, worktree.as_deref(), &pre_state);
+    }
 
     let exit_status = proxy_to_git(args, false, Some(&invocation_id));
 
@@ -125,7 +128,9 @@ pub fn handle_git(args: &[String]) {
         .as_deref()
         .and_then(crate::git::repo_state::read_head_state_for_worktree);
 
-    send_wrapper_post_state_to_daemon(&invocation_id, worktree.as_deref(), &post_state);
+    if daemon_connected {
+        send_wrapper_post_state_to_daemon(&invocation_id, worktree.as_deref(), &post_state);
+    }
 
     // Auto-remove leftover repo-level git hooks on pull.
     if parsed.command.as_deref() == Some("pull")
