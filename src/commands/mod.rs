@@ -19,6 +19,7 @@ pub mod install_hooks;
 pub mod login;
 pub mod logout;
 pub mod personal_dashboard;
+pub mod prompt_event;
 pub mod prompt_picker;
 pub mod prompts_db;
 pub mod search;

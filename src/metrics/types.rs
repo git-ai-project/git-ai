@@ -20,6 +20,7 @@ pub enum MetricEventId {
     AgentUsage = 2,
     InstallHooks = 3,
     Checkpoint = 4,
+    PromptEvent = 5,
 }
 
 /// Trait for event-specific values.
@@ -158,6 +159,7 @@ mod tests {
         assert_eq!(MetricEventId::AgentUsage as u16, 2);
         assert_eq!(MetricEventId::InstallHooks as u16, 3);
         assert_eq!(MetricEventId::Checkpoint as u16, 4);
+        assert_eq!(MetricEventId::PromptEvent as u16, 5);
     }
 
     #[test]
