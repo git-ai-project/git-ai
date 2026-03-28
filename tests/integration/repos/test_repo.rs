@@ -2089,7 +2089,7 @@ impl TestRepo {
         Self::parse_benchmark_result(&output)
     }
 
-    fn parse_benchmark_result(output: &str) -> Result<BenchmarkResult, String> {
+    pub fn parse_benchmark_result(output: &str) -> Result<BenchmarkResult, String> {
         // Find the JSON performance line
         for line in output.lines() {
             if line.contains("[git-ai (perf-json)]") {

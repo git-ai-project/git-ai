@@ -1018,3 +1018,448 @@ fn benchmark_large_scale_mixed() {
         }
     }
 }
+
+/// Brutal stress-test benchmark: hundreds of commits, dozens of files per commit,
+/// hundreds to thousands of lines per file, 100% AI-attributed, varied edit patterns.
+///
+/// Each commit does a mix of:
+/// - Multi-line insertions (5-20 lines) at random positions
+/// - Line replacements (modify existing AI lines)
+/// - Block deletions + re-additions
+/// - New function/struct additions
+///
+/// Main branch also modifies AI-tracked files to force the diff-based path.
+///
+/// Run with: cargo test --test integration benchmark_brutal -- --ignored --nocapture
+#[test]
+#[ignore]
+fn benchmark_brutal() {
+    use crate::repos::test_repo::TestRepo;
+
+    let num_files: usize = std::env::var("BRUTAL_FILES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60);
+    let num_feature_commits: usize = std::env::var("BRUTAL_COMMITS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(200);
+    let num_main_commits: usize = std::env::var("BRUTAL_MAIN_COMMITS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(15);
+    let files_per_commit: usize = std::env::var("BRUTAL_FILES_PER_COMMIT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30);
+
+    // File sizes: 20 files × 2000 lines, 25 files × 500 lines, 15 files × 5000 lines
+    let file_sizes: Vec<usize> = (0..num_files)
+        .map(|i| {
+            if i < 20 {
+                2000
+            } else if i < 45 {
+                500
+            } else {
+                5000
+            }
+        })
+        .collect();
+    let total_initial_lines: usize = file_sizes.iter().sum();
+
+    println!("\n╔══════════════════════════════════════════════════════════╗");
+    println!("║              BRUTAL REBASE BENCHMARK                    ║");
+    println!("╠══════════════════════════════════════════════════════════╣");
+    println!("║  Files: {} (20×2000L + 25×500L + 15×5000L)", num_files);
+    println!("║  Total initial lines: {}", total_initial_lines);
+    println!("║  Feature commits: {}", num_feature_commits);
+    println!("║  Files modified per commit: {}", files_per_commit);
+    println!("║  Main commits: {}", num_main_commits);
+    println!("║  All files 100% AI-attributed");
+    println!("║  Varied edit patterns: insert, replace, delete, add");
+    println!("╚══════════════════════════════════════════════════════════╝\n");
+
+    let repo = TestRepo::new();
+    let setup_start = Instant::now();
+
+    // Create initial commit: all files fully AI-attributed
+    {
+        for (file_idx, &line_count) in file_sizes.iter().enumerate() {
+            let dir = match file_idx % 5 {
+                0 => "src/api",
+                1 => "src/models",
+                2 => "src/services",
+                3 => "src/utils",
+                _ => "src/handlers",
+            };
+            let filename = format!("{}/module_{}.rs", dir, file_idx);
+            let mut file = repo.filename(&filename);
+            let mut lines: Vec<crate::repos::test_file::ExpectedLine> = Vec::new();
+
+            // Realistic file structure
+            lines.push(format!("// Module {} - auto-generated", file_idx).ai());
+            lines.push("use std::collections::HashMap;".to_string().ai());
+            lines.push("use serde::{{Serialize, Deserialize}};".to_string().ai());
+            lines.push("// MAIN_MARKER".to_string().into());
+            lines.push(format!("pub struct Module{} {{", file_idx).ai());
+
+            for field_idx in 0..(line_count / 20).max(5) {
+                lines.push(format!("    pub field_{}: String,", field_idx).ai());
+            }
+            lines.push("}".to_string().ai());
+            lines.push(String::new().ai());
+
+            // Fill rest with AI-authored functions
+            let remaining = line_count.saturating_sub(lines.len());
+            let funcs = remaining / 8;
+            for func_idx in 0..funcs {
+                lines.push(
+                    format!(
+                        "pub fn func_{}_{}(input: &str) -> String {{",
+                        file_idx, func_idx
+                    )
+                    .ai(),
+                );
+                lines.push("    let result = input.to_uppercase();".to_string().ai());
+                lines.push(
+                    format!(
+                        "    let processed = result.replace(\"old_{}\", \"new_{}\");",
+                        func_idx, func_idx
+                    )
+                    .ai(),
+                );
+                lines.push(
+                    format!(
+                        "    // AI-generated logic for module {} func {}",
+                        file_idx, func_idx
+                    )
+                    .ai(),
+                );
+                lines.push(
+                    format!(
+                        "    let output = format!(\"{{}}_{{}}\", processed, {});",
+                        func_idx
+                    )
+                    .ai(),
+                );
+                lines.push(
+                    format!(
+                        "    log::debug!(\"func_{}_{}: {{}}\", &output);",
+                        file_idx, func_idx
+                    )
+                    .ai(),
+                );
+                lines.push("    output".to_string().ai());
+                lines.push("}".to_string().ai());
+            }
+
+            while lines.len() < line_count {
+                lines.push(format!("// padding line {}", lines.len()).ai());
+            }
+
+            file.set_contents(lines);
+        }
+        repo.stage_all_and_commit("Initial: all AI-attributed files")
+            .unwrap();
+    }
+    println!(
+        "Initial commit: {:.1}s",
+        setup_start.elapsed().as_secs_f64()
+    );
+
+    let default_branch = repo.current_branch();
+
+    // Create feature branch with varied AI edits
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    let feature_start = Instant::now();
+
+    for commit_idx in 0..num_feature_commits {
+        let stride = 3 + (commit_idx % 5);
+        let start = (commit_idx * stride) % num_files;
+
+        for i in 0..files_per_commit {
+            let file_idx = (start + i * 2) % num_files;
+            let dir = match file_idx % 5 {
+                0 => "src/api",
+                1 => "src/models",
+                2 => "src/services",
+                3 => "src/utils",
+                _ => "src/handlers",
+            };
+            let filename = format!("{}/module_{}.rs", dir, file_idx);
+            let path = repo.path().join(&filename);
+            let current = fs::read_to_string(&path).unwrap_or_default();
+            let mut file_lines: Vec<&str> = current.lines().collect();
+
+            let edit_type = (commit_idx * 7 + file_idx * 3) % 4;
+            match edit_type {
+                0 => {
+                    // Multi-line insertion at varied position
+                    let insert_pos = (file_lines.len() / 3)
+                        + (commit_idx * 17 + file_idx * 11) % (file_lines.len() / 3).max(1);
+                    let insert_pos = insert_pos.min(file_lines.len());
+                    let num_insert = 5 + (commit_idx + file_idx) % 16;
+                    let mut new_lines: Vec<String> = Vec::new();
+                    for l in 0..num_insert {
+                        new_lines.push(format!(
+                            "    // AI insert c{} f{} line{}: processing batch {}",
+                            commit_idx,
+                            file_idx,
+                            l,
+                            commit_idx * 100 + l
+                        ));
+                    }
+                    let new_refs: Vec<&str> = new_lines.iter().map(|s| s.as_str()).collect();
+                    file_lines.splice(insert_pos..insert_pos, new_refs);
+                    let joined = file_lines.join("\n");
+                    fs::write(&path, &joined).unwrap();
+                }
+                1 => {
+                    // Replace existing lines in middle third
+                    let start_replace =
+                        file_lines.len() / 4 + (commit_idx * 13) % (file_lines.len() / 4).max(1);
+                    let num_replace = (3 + (commit_idx + file_idx) % 8)
+                        .min(file_lines.len().saturating_sub(start_replace));
+                    let mut new_lines: Vec<String> = Vec::new();
+                    for l in 0..num_replace {
+                        new_lines.push(format!(
+                            "    let v{}_c{} = transform(input, {});",
+                            l,
+                            commit_idx,
+                            commit_idx * 1000 + l
+                        ));
+                    }
+                    let new_refs: Vec<&str> = new_lines.iter().map(|s| s.as_str()).collect();
+                    let end = (start_replace + num_replace).min(file_lines.len());
+                    file_lines.splice(start_replace..end, new_refs);
+                    let joined = file_lines.join("\n");
+                    fs::write(&path, &joined).unwrap();
+                }
+                2 => {
+                    // Delete block + add new function at end
+                    let del_start =
+                        file_lines.len() / 2 + (commit_idx * 11) % (file_lines.len() / 6).max(1);
+                    let del_count =
+                        (2 + commit_idx % 5).min(file_lines.len().saturating_sub(del_start));
+                    let end = (del_start + del_count).min(file_lines.len());
+                    file_lines.drain(del_start..end);
+                    let new_func = format!(
+                        "\npub fn generated_{}_{}(x: i32) -> i32 {{\n    let a = x * {};\n    let b = a + {};\n    // AI logic c{} f{}\n    b\n}}",
+                        commit_idx,
+                        file_idx,
+                        commit_idx + 1,
+                        file_idx,
+                        commit_idx,
+                        file_idx
+                    );
+                    let joined = file_lines.join("\n") + &new_func;
+                    fs::write(&path, &joined).unwrap();
+                }
+                _ => {
+                    // Append struct + impl block
+                    let block = format!(
+                        "\n#[derive(Debug)]\nstruct Batch{}_{} {{\n    data: Vec<u8>,\n    count: usize,\n    tag: String,\n}}\n\nimpl Batch{}_{} {{\n    fn new() -> Self {{\n        Self {{ data: vec![], count: {}, tag: \"{}\".into() }}\n    }}\n    fn process(&self) -> usize {{ self.data.len() + self.count }}\n}}",
+                        commit_idx, file_idx, commit_idx, file_idx, commit_idx, file_idx
+                    );
+                    let joined = file_lines.join("\n") + &block;
+                    fs::write(&path, &joined).unwrap();
+                }
+            }
+
+            repo.git_ai(&["checkpoint", "mock_ai", &filename]).unwrap();
+        }
+        repo.git(&["add", "-A"]).unwrap();
+        repo.stage_all_and_commit(&format!("Feature {}", commit_idx))
+            .unwrap();
+
+        if (commit_idx + 1) % 50 == 0 {
+            println!(
+                "  Feature commit {}/{} ({:.1}s)",
+                commit_idx + 1,
+                num_feature_commits,
+                feature_start.elapsed().as_secs_f64()
+            );
+        }
+    }
+    println!(
+        "Feature branch: {:.1}s ({} commits × {} files/commit)",
+        feature_start.elapsed().as_secs_f64(),
+        num_feature_commits,
+        files_per_commit
+    );
+
+    // Advance main: modify AI-tracked files to force diff-based path
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let main_start = Instant::now();
+    for main_idx in 0..num_main_commits {
+        let files_per_main = 40.min(num_files);
+        let start_file = (main_idx * 11) % num_files;
+        for i in 0..files_per_main {
+            let file_idx = (start_file + i) % num_files;
+            let dir = match file_idx % 5 {
+                0 => "src/api",
+                1 => "src/models",
+                2 => "src/services",
+                3 => "src/utils",
+                _ => "src/handlers",
+            };
+            let filename = format!("{}/module_{}.rs", dir, file_idx);
+            let path = repo.path().join(&filename);
+            let current = fs::read_to_string(&path).unwrap_or_default();
+            let new_content = current.replacen(
+                "// MAIN_MARKER",
+                &format!(
+                    "use crate::main_dep_{}::*;\n// Main integration {} for module {}\n// MAIN_MARKER",
+                    main_idx, main_idx, file_idx
+                ),
+                1,
+            );
+            fs::write(&path, &new_content).unwrap();
+        }
+        repo.git(&["add", "-A"]).unwrap();
+        repo.stage_all_and_commit(&format!("Main {}", main_idx))
+            .unwrap();
+    }
+    for i in 0..5 {
+        let mut f = repo.filename(&format!("main_only/f_{}.txt", i));
+        f.set_contents(crate::lines![format!("main only {}", i)]);
+        repo.stage_all_and_commit(&format!("Main unrelated {}", i))
+            .unwrap();
+    }
+    println!(
+        "Main branch: {:.1}s ({} commits × {} files + 5 unrelated)",
+        main_start.elapsed().as_secs_f64(),
+        num_main_commits,
+        40.min(num_files)
+    );
+    println!("Total setup: {:.1}s\n", setup_start.elapsed().as_secs_f64());
+
+    // Rebase
+    repo.git(&["checkout", "feature"]).unwrap();
+
+    let timing_file = repo.path().join("..").join("brutal_timing.txt");
+    let timing_path = timing_file.to_str().unwrap().to_string();
+
+    println!(
+        "--- Starting brutal rebase ({} commits onto {}) ---",
+        num_feature_commits, &default_branch
+    );
+    let wall_start = Instant::now();
+    let output = repo.git_with_env(
+        &["rebase", &default_branch],
+        &[
+            ("GIT_AI_DEBUG_PERFORMANCE", "2"),
+            ("GIT_AI_REBASE_TIMING_FILE", &timing_path),
+        ],
+        None,
+    );
+    let wall_duration = wall_start.elapsed();
+
+    let timing_data = fs::read_to_string(&timing_file).unwrap_or_default();
+
+    match &output {
+        Ok(out) => {
+            // Parse perf-json from output
+            let bench = TestRepo::parse_benchmark_result(out);
+            match bench {
+                Ok(bench) => {
+                    let git_ms = bench.git_duration.as_millis();
+                    let total_ms = bench.total_duration.as_millis();
+                    let pre_ms = bench.pre_command_duration.as_millis();
+                    let post_ms = bench.post_command_duration.as_millis();
+                    let overhead_ms = total_ms.saturating_sub(git_ms);
+                    let overhead_pct = if git_ms > 0 {
+                        overhead_ms as f64 / git_ms as f64 * 100.0
+                    } else {
+                        0.0
+                    };
+
+                    println!("\n╔══════════════════════════════════════════════════════════════╗");
+                    println!("║              BRUTAL BENCHMARK RESULTS                        ║");
+                    println!("╠══════════════════════════════════════════════════════════════╣");
+                    println!("║  Scale:");
+                    println!("║    {} files (20×2000L + 25×500L + 15×5000L)", num_files);
+                    println!(
+                        "║    {} initial lines of AI-attributed code",
+                        total_initial_lines
+                    );
+                    println!(
+                        "║    {} feature commits × {} files/commit",
+                        num_feature_commits, files_per_commit
+                    );
+                    println!(
+                        "║    {} main commits (forces diff-based path)",
+                        num_main_commits
+                    );
+                    println!("╠══════════════════════════════════════════════════════════════╣");
+                    println!("║  TIMING:");
+                    println!(
+                        "║    Wall clock:           {:.2}s",
+                        wall_duration.as_secs_f64()
+                    );
+                    println!(
+                        "║    git rebase (alone):   {}ms ({:.2}s)",
+                        git_ms,
+                        git_ms as f64 / 1000.0
+                    );
+                    println!(
+                        "║    git-ai total:         {}ms ({:.2}s)",
+                        total_ms,
+                        total_ms as f64 / 1000.0
+                    );
+                    println!("║    ├─ pre-command:       {}ms", pre_ms);
+                    println!(
+                        "║    └─ post-command:      {}ms ({:.2}s)",
+                        post_ms,
+                        post_ms as f64 / 1000.0
+                    );
+                    println!("║");
+                    println!("║  OVERHEAD:");
+                    println!(
+                        "║    git-ai overhead:      {}ms ({:.2}s)",
+                        overhead_ms,
+                        overhead_ms as f64 / 1000.0
+                    );
+                    println!("║    overhead / git time:  {:.1}%", overhead_pct);
+                    println!(
+                        "║    per-commit total:     {:.1}ms",
+                        total_ms as f64 / num_feature_commits as f64
+                    );
+                    println!(
+                        "║    per-commit git:       {:.1}ms",
+                        git_ms as f64 / num_feature_commits as f64
+                    );
+                    println!(
+                        "║    per-commit overhead:  {:.1}ms",
+                        overhead_ms as f64 / num_feature_commits as f64
+                    );
+                    println!("╚══════════════════════════════════════════════════════════════╝");
+                }
+                Err(e) => {
+                    println!(
+                        "\nWall time: {:.2}s ({}ms) — perf-json parse failed: {}",
+                        wall_duration.as_secs_f64(),
+                        wall_duration.as_millis(),
+                        e
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            println!(
+                "\nRebase FAILED after {:.2}s: {}",
+                wall_duration.as_secs_f64(),
+                e
+            );
+        }
+    }
+    output.unwrap();
+
+    if !timing_data.is_empty() {
+        println!("\n--- Internal phase timing ---");
+        print!("{}", timing_data);
+        println!("-----------------------------");
+    }
+
+    println!("\nDone.");
+}

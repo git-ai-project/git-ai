@@ -5,6 +5,7 @@ use crate::git::repository::{Repository, exec_git, exec_git_stdin};
 use crate::utils::debug_log;
 use serde_json;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 // Modern refspecs without force to enable proper merging
 pub const AI_AUTHORSHIP_REFNAME: &str = "ai";
@@ -178,11 +179,48 @@ pub fn note_blob_oids_for_commits(
     Ok(result)
 }
 
+const PARALLEL_BLOB_THRESHOLD: usize = 50;
+const MAX_PARALLEL_BLOB_CREATES: usize = 4;
+
 pub fn notes_add_batch(repo: &Repository, entries: &[(String, String)]) -> Result<(), GitAiError> {
     if entries.is_empty() {
         return Ok(());
     }
 
+    let mut deduped_entries: Vec<(String, String)> = Vec::new();
+    let mut seen = HashSet::new();
+    for (commit_sha, note_content) in entries.iter().rev() {
+        if seen.insert(commit_sha.as_str()) {
+            deduped_entries.push((commit_sha.clone(), note_content.clone()));
+        }
+    }
+    deduped_entries.reverse();
+
+    if deduped_entries.len() <= PARALLEL_BLOB_THRESHOLD {
+        return notes_add_batch_single_pass(repo, &deduped_entries);
+    }
+
+    // Phase A: Create blobs in parallel
+    let blob_pairs = notes_create_blobs_parallel(repo, &deduped_entries)?;
+
+    // Phase C: Tree-only commit using pre-existing blob OIDs
+    notes_add_blob_batch(repo, &blob_pairs)?;
+
+    // The hook is called inside notes_add_blob_batch, but it resolves blob contents
+    // only when post_notes_updated hooks are configured. For the parallel path we
+    // already have the note contents, so fire the hook directly here to avoid the
+    // extra blob-read round-trip. notes_add_blob_batch already handles this, so
+    // we're done.
+
+    Ok(())
+}
+
+/// Single-pass fast-import that creates inline blobs + tree commit in one script.
+/// Used for small batches (<= PARALLEL_BLOB_THRESHOLD entries).
+fn notes_add_batch_single_pass(
+    repo: &Repository,
+    deduped_entries: &[(String, String)],
+) -> Result<(), GitAiError> {
     let mut args = repo.global_args_for_exec();
     args.push("rev-parse".to_string());
     args.push("--verify".to_string());
@@ -195,15 +233,6 @@ pub fn notes_add_batch(repo: &Repository, entries: &[(String, String)]) -> Resul
         | Err(GitAiError::GitCliError { code: Some(1), .. }) => None,
         Err(e) => return Err(e),
     };
-
-    let mut deduped_entries: Vec<(String, String)> = Vec::new();
-    let mut seen = HashSet::new();
-    for (commit_sha, note_content) in entries.iter().rev() {
-        if seen.insert(commit_sha.as_str()) {
-            deduped_entries.push((commit_sha.clone(), note_content.clone()));
-        }
-    }
-    deduped_entries.reverse();
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -242,15 +271,118 @@ pub fn notes_add_batch(repo: &Repository, entries: &[(String, String)]) -> Resul
     fast_import_args.push("fast-import".to_string());
     fast_import_args.push("--quiet".to_string());
     exec_git_stdin(&fast_import_args, &script)?;
-    crate::authorship::git_ai_hooks::post_notes_updated(repo, &deduped_entries);
+    crate::authorship::git_ai_hooks::post_notes_updated(repo, deduped_entries);
 
     Ok(())
+}
+
+/// Create blobs in parallel using multiple `git fast-import` processes, each
+/// writing an export-marks file. Returns `(commit_sha, blob_oid)` pairs.
+fn notes_create_blobs_parallel(
+    repo: &Repository,
+    deduped_entries: &[(String, String)],
+) -> Result<Vec<(String, String)>, GitAiError> {
+    let num_chunks = MAX_PARALLEL_BLOB_CREATES;
+    let chunk_size = deduped_entries.len().div_ceil(num_chunks);
+    let chunks: Vec<Vec<(String, String)>> = deduped_entries
+        .chunks(chunk_size)
+        .map(|c| c.to_vec())
+        .collect();
+
+    let global_args = repo.global_args_for_exec();
+    let tmp_dir = std::env::temp_dir();
+
+    let results = smol::block_on(async {
+        let semaphore = Arc::new(smol::lock::Semaphore::new(MAX_PARALLEL_BLOB_CREATES));
+        let mut tasks = Vec::new();
+
+        for (chunk_idx, chunk) in chunks.into_iter().enumerate() {
+            let sem = Arc::clone(&semaphore);
+            let args = global_args.clone();
+            let marks_path = tmp_dir.join(format!(
+                "git-ai-marks-{}-{}-{}",
+                std::process::id(),
+                chunk_idx,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ));
+
+            let task = smol::spawn(async move {
+                let _permit = sem.acquire().await;
+                smol::unblock(move || {
+                    // Phase A: build blob-only fast-import script
+                    let mut script = Vec::<u8>::new();
+                    for (mark_idx, (_commit_sha, note_content)) in chunk.iter().enumerate() {
+                        script.extend_from_slice(b"blob\n");
+                        script.extend_from_slice(format!("mark :{}\n", mark_idx + 1).as_bytes());
+                        script
+                            .extend_from_slice(format!("data {}\n", note_content.len()).as_bytes());
+                        script.extend_from_slice(note_content.as_bytes());
+                        script.extend_from_slice(b"\n");
+                    }
+
+                    let mut fast_import_args = args;
+                    fast_import_args.push("fast-import".to_string());
+                    fast_import_args.push("--quiet".to_string());
+                    fast_import_args.push(format!("--export-marks={}", marks_path.display()));
+                    exec_git_stdin(&fast_import_args, &script)?;
+
+                    // Phase B: parse export-marks file
+                    let marks_content = std::fs::read_to_string(&marks_path).map_err(|e| {
+                        GitAiError::Generic(format!(
+                            "Failed to read export-marks file {}: {}",
+                            marks_path.display(),
+                            e
+                        ))
+                    })?;
+                    let _ = std::fs::remove_file(&marks_path);
+
+                    let mut mark_to_oid: HashMap<usize, String> = HashMap::new();
+                    for line in marks_content.lines() {
+                        // Format: ":1 abc123def..."
+                        if let Some((mark_str, oid)) = line.split_once(' ')
+                            && let Some(mark_num) = mark_str.strip_prefix(':')
+                            && let Ok(num) = mark_num.parse::<usize>()
+                        {
+                            mark_to_oid.insert(num, oid.to_string());
+                        }
+                    }
+
+                    let mut pairs: Vec<(String, String)> = Vec::with_capacity(chunk.len());
+                    for (mark_idx, (commit_sha, _note_content)) in chunk.iter().enumerate() {
+                        let oid = mark_to_oid.get(&(mark_idx + 1)).ok_or_else(|| {
+                            GitAiError::Generic(format!(
+                                "Missing blob OID for mark :{} (commit {})",
+                                mark_idx + 1,
+                                commit_sha
+                            ))
+                        })?;
+                        pairs.push((commit_sha.clone(), oid.clone()));
+                    }
+
+                    Ok::<Vec<(String, String)>, GitAiError>(pairs)
+                })
+                .await
+            });
+
+            tasks.push(task);
+        }
+
+        futures::future::join_all(tasks).await
+    });
+
+    let mut all_pairs: Vec<(String, String)> = Vec::with_capacity(deduped_entries.len());
+    for result in results {
+        all_pairs.extend(result?);
+    }
+    Ok(all_pairs)
 }
 
 /// Batch-attach existing note blobs to commits without rewriting blob contents.
 ///
 /// Each entry is (commit_sha, existing_note_blob_oid).
-#[allow(dead_code)]
 pub fn notes_add_blob_batch(
     repo: &Repository,
     entries: &[(String, String)],
