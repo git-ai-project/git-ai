@@ -576,6 +576,102 @@ pub fn merge_notes_from_ref(repo: &Repository, source_ref: &str) -> Result<(), G
     Ok(())
 }
 
+/// Fallback merge when `git notes merge -s ours` fails (e.g., due to git assertion
+/// failures on corrupted/mixed-fanout notes trees). Implements the "ours" strategy
+/// using a single `git fast-import` invocation that:
+///   1. Creates a merge commit with both local and source as parents
+///   2. Emits all notes via `N <blob> <object>` commands (source first, then local —
+///      last writer wins, so local takes precedence on conflicts = "ours" strategy)
+///   3. Produces a clean notes tree with correct fanout regardless of input tree format
+///
+/// This is O(1) git process invocations regardless of note count, which matters on
+/// large monorepos with thousands of notes.
+pub fn fallback_merge_notes_ours(repo: &Repository, source_ref: &str) -> Result<(), GitAiError> {
+    let local_ref = format!("refs/notes/{}", AI_AUTHORSHIP_REFNAME);
+
+    // 1. List notes from both refs
+    let source_notes = list_all_notes(repo, source_ref)?;
+    let local_notes = list_all_notes(repo, &local_ref)?;
+
+    // 2. Resolve parent commit SHAs for the merge commit
+    let local_commit = rev_parse(repo, &local_ref)?;
+    let source_commit = rev_parse(repo, source_ref)?;
+
+    // 3. Build the fast-import stream.
+    //    Emit source (remote) notes first, then local notes. fast-import uses
+    //    last-writer-wins for duplicate annotated objects, so local notes take
+    //    precedence — this implements the "ours" merge strategy.
+    let mut stream = String::new();
+    stream.push_str(&format!("commit {}\n", local_ref));
+    stream.push_str("committer git-ai <git-ai@noreply> 0 +0000\n");
+    stream.push_str("data 23\nMerge notes (fallback)\n");
+    stream.push_str(&format!("from {}\n", local_commit));
+    stream.push_str(&format!("merge {}\n", source_commit));
+
+    // Source notes first (will be overwritten by local on conflict)
+    for (blob, object) in &source_notes {
+        stream.push_str(&format!("N {} {}\n", blob, object));
+    }
+    // Local notes second (wins on conflict)
+    for (blob, object) in &local_notes {
+        stream.push_str(&format!("N {} {}\n", blob, object));
+    }
+    stream.push_str("done\n");
+
+    // 4. Run fast-import
+    let mut args = repo.global_args_for_exec();
+    args.extend_from_slice(&[
+        "fast-import".to_string(),
+        "--quiet".to_string(),
+        "--done".to_string(),
+    ]);
+    exec_git_stdin(&args, stream.as_bytes())?;
+
+    debug_log("fallback merge via fast-import completed successfully");
+    Ok(())
+}
+
+/// List all notes on a given ref. Returns Vec<(note_blob_sha, annotated_object_sha)>.
+fn list_all_notes(repo: &Repository, notes_ref: &str) -> Result<Vec<(String, String)>, GitAiError> {
+    // `git notes list` uses --ref to specify which notes ref.
+    // The --ref option prepends "refs/notes/" automatically, so for full refs
+    // like "refs/notes/ai-remote/origin" we need to strip the prefix.
+    let ref_arg = notes_ref.strip_prefix("refs/notes/").unwrap_or(notes_ref);
+
+    let mut args = repo.global_args_for_exec();
+    args.extend_from_slice(&[
+        "notes".to_string(),
+        format!("--ref={}", ref_arg),
+        "list".to_string(),
+    ]);
+
+    let output = exec_git(&args)?;
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|_| GitAiError::Generic("Failed to parse notes list output".to_string()))?;
+
+    Ok(stdout
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() == 2 {
+                Some((parts[0].to_string(), parts[1].to_string()))
+            } else {
+                None
+            }
+        })
+        .collect())
+}
+
+/// Parse a revision to its SHA
+fn rev_parse(repo: &Repository, rev: &str) -> Result<String, GitAiError> {
+    let mut args = repo.global_args_for_exec();
+    args.extend_from_slice(&["rev-parse".to_string(), rev.to_string()]);
+    let output = exec_git(&args)?;
+    String::from_utf8(output.stdout)
+        .map_err(|_| GitAiError::Generic("Failed to parse rev-parse output".to_string()))
+        .map(|s| s.trim().to_string())
+}
+
 /// Copy a ref to another location (used for initial setup of local notes from tracking ref)
 pub fn copy_ref(repo: &Repository, source_ref: &str, dest_ref: &str) -> Result<(), GitAiError> {
     let mut args = repo.global_args_for_exec();
