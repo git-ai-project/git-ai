@@ -1563,19 +1563,19 @@ pub fn rewrite_authorship_after_rebase_v2(
         loop_hunk_ms / 1000,
     ));
     timing_phases.push((
-        format!("    transform:attestation_serialize"),
+        "    transform:attestation_serialize".to_string(),
         loop_attestation_ms / 1000,
     ));
     timing_phases.push((
-        format!("    transform:content_clone"),
+        "    transform:content_clone".to_string(),
         loop_content_clone_ms / 1000,
     ));
     timing_phases.push((
-        format!("    transform:metrics_subtract"),
+        "    transform:metrics_subtract".to_string(),
         loop_metrics_subtract_ms / 1000,
     ));
     timing_phases.push((
-        format!("    transform:metrics_add"),
+        "    transform:metrics_add".to_string(),
         loop_metrics_add_ms / 1000,
     ));
     timing_phases.push(("  loop:serialize".to_string(), loop_serialize_ms));
@@ -2386,15 +2386,15 @@ fn run_diff_tree_with_hunks(
 
         // Hunk header: @@ -old_start[,old_count] +new_start[,new_count] @@
         if line.starts_with("@@ ") {
-            if let (Some(commit), Some(file)) = (&current_commit, &current_diff_file) {
-                if let Some(hunk) = parse_hunk_header(line) {
-                    hunks_by_commit
-                        .entry(commit.clone())
-                        .or_default()
-                        .entry(file.clone())
-                        .or_default()
-                        .push(hunk);
-                }
+            if let (Some(commit), Some(file)) = (&current_commit, &current_diff_file)
+                && let Some(hunk) = parse_hunk_header(line)
+            {
+                hunks_by_commit
+                    .entry(commit.clone())
+                    .or_default()
+                    .entry(file.clone())
+                    .or_default()
+                    .push(hunk);
             }
             continue;
         }
