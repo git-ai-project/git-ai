@@ -25,6 +25,7 @@ mod ci_handlers_comprehensive;
 mod ci_local_skip_fetch;
 mod ci_squash_rebase;
 mod claude_code;
+mod cloud_attribution;
 mod codex;
 mod commit_hooks_comprehensive;
 mod commit_post_stats_benchmark;

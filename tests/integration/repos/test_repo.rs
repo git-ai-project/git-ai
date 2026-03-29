@@ -1341,7 +1341,80 @@ impl TestRepo {
     }
 
     pub fn set_feature_flags(&mut self, feature_flags: FeatureFlags) {
-        self.feature_flags = feature_flags;
+        self.feature_flags = feature_flags.clone();
+
+        // Also write feature flags to the config file so the daemon process
+        // (which reads config from disk, not from per-command env vars) picks
+        // them up.
+        let defaults = FeatureFlags::default();
+        let mut flags_json = serde_json::Map::new();
+        if feature_flags.cloud_default_ai_attribution != defaults.cloud_default_ai_attribution {
+            flags_json.insert(
+                "cloud_default_ai_attribution".to_string(),
+                serde_json::Value::Bool(feature_flags.cloud_default_ai_attribution),
+            );
+        }
+        if feature_flags.rewrite_stash != defaults.rewrite_stash {
+            flags_json.insert(
+                "rewrite_stash".to_string(),
+                serde_json::Value::Bool(feature_flags.rewrite_stash),
+            );
+        }
+        if feature_flags.inter_commit_move != defaults.inter_commit_move {
+            flags_json.insert(
+                "checkpoint_inter_commit_move".to_string(),
+                serde_json::Value::Bool(feature_flags.inter_commit_move),
+            );
+        }
+        if feature_flags.auth_keyring != defaults.auth_keyring {
+            flags_json.insert(
+                "auth_keyring".to_string(),
+                serde_json::Value::Bool(feature_flags.auth_keyring),
+            );
+        }
+        if feature_flags.git_hooks_enabled != defaults.git_hooks_enabled {
+            flags_json.insert(
+                "git_hooks_enabled".to_string(),
+                serde_json::Value::Bool(feature_flags.git_hooks_enabled),
+            );
+        }
+        if feature_flags.git_hooks_externally_managed != defaults.git_hooks_externally_managed {
+            flags_json.insert(
+                "git_hooks_externally_managed".to_string(),
+                serde_json::Value::Bool(feature_flags.git_hooks_externally_managed),
+            );
+        }
+        if feature_flags.async_mode != defaults.async_mode {
+            flags_json.insert(
+                "async_mode".to_string(),
+                serde_json::Value::Bool(feature_flags.async_mode),
+            );
+        }
+        if !flags_json.is_empty() {
+            self.patch_git_ai_config(|patch| {
+                let existing = patch
+                    .feature_flags
+                    .as_ref()
+                    .and_then(|v| v.as_object().cloned())
+                    .unwrap_or_default();
+                let mut merged = existing;
+                merged.extend(flags_json);
+                patch.feature_flags = Some(serde_json::Value::Object(merged));
+            });
+        }
+
+        // The daemon process reads config via a OnceLock singleton that is frozen
+        // at startup.  For dedicated daemons we can shut down the old instance and
+        // start a fresh one so it picks up the config file we just wrote.
+        // Shared daemons cannot be restarted (they are owned by the pool), so
+        // callers that need daemon-visible feature flags must use a dedicated
+        // daemon (TestRepo::new_dedicated_daemon()).
+        if self.daemon_scope == DaemonTestScope::Dedicated {
+            if let Some(daemon) = self.daemon_process.take() {
+                daemon.shutdown();
+            }
+            self.setup_daemon_mode();
+        }
     }
 
     pub(crate) fn daemon_control_socket_path(&self) -> PathBuf {
@@ -1853,6 +1926,8 @@ impl TestRepo {
                 self.daemon_trace_socket_path(),
             );
         }
+
+        self.inject_feature_flag_env(command);
     }
 
     fn configure_git_ai_env(&self, command: &mut Command) {
@@ -1874,6 +1949,52 @@ impl TestRepo {
 
         if self.git_mode.uses_hooks() {
             command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
+        }
+
+        self.inject_feature_flag_env(command);
+    }
+
+    /// Inject feature flag values as GIT_AI_* environment variables into the
+    /// spawned command so that per-TestRepo flag overrides are propagated to
+    /// the child git-ai process without polluting the global environment.
+    fn inject_feature_flag_env(&self, command: &mut Command) {
+        let flags = &self.feature_flags;
+        let defaults = FeatureFlags::default();
+
+        // Always inject cloud_default_ai_attribution because config.rs has
+        // auto-detection that would override the default (false) when running
+        // in a cloud env. We must always set the env var so the spawned
+        // process respects the test's explicit choice.
+        command.env(
+            "GIT_AI_CLOUD_DEFAULT_AI_ATTRIBUTION",
+            flags.cloud_default_ai_attribution.to_string(),
+        );
+        if flags.rewrite_stash != defaults.rewrite_stash {
+            command.env("GIT_AI_REWRITE_STASH", flags.rewrite_stash.to_string());
+        }
+        if flags.inter_commit_move != defaults.inter_commit_move {
+            command.env(
+                "GIT_AI_CHECKPOINT_INTER_COMMIT_MOVE",
+                flags.inter_commit_move.to_string(),
+            );
+        }
+        if flags.auth_keyring != defaults.auth_keyring {
+            command.env("GIT_AI_AUTH_KEYRING", flags.auth_keyring.to_string());
+        }
+        if flags.git_hooks_enabled != defaults.git_hooks_enabled {
+            command.env(
+                "GIT_AI_GIT_HOOKS_ENABLED",
+                flags.git_hooks_enabled.to_string(),
+            );
+        }
+        if flags.git_hooks_externally_managed != defaults.git_hooks_externally_managed {
+            command.env(
+                "GIT_AI_GIT_HOOKS_EXTERNALLY_MANAGED",
+                flags.git_hooks_externally_managed.to_string(),
+            );
+        }
+        if flags.async_mode != defaults.async_mode {
+            command.env("GIT_AI_ASYNC_MODE", flags.async_mode.to_string());
         }
     }
 

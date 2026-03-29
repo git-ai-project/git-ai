@@ -988,6 +988,7 @@ fn daemon_captured_checkpoint_replay_uses_blob_snapshot_after_worktree_changes()
                 vec!["captured-race.txt".to_string()],
                 None,
             )),
+            captured_cloud_env_tool: None,
         },
         &[("captured-race-blob", "snapshot from capture\n")],
     );
@@ -1082,6 +1083,7 @@ fn daemon_captured_checkpoint_replay_supports_mixed_dirty_and_blob_sources() {
                     },
                 },
             ],
+            captured_cloud_env_tool: None,
             agent_run_result: Some(ai_agent_run_result(
                 &repo,
                 vec![
@@ -1167,6 +1169,7 @@ fn daemon_captured_checkpoint_failure_cleans_up_capture_dir() {
                 vec!["broken-capture.txt".to_string()],
                 None,
             )),
+            captured_cloud_env_tool: None,
         },
         &[],
     );
@@ -1232,6 +1235,7 @@ fn daemon_captured_checkpoint_rejects_manifest_for_different_repo() {
                 vec!["wrong-repo-capture.txt".to_string()],
                 None,
             )),
+            captured_cloud_env_tool: None,
         },
         &[("wrong-repo-blob", "captured content\n")],
     );

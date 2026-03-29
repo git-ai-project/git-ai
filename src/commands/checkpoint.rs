@@ -8,7 +8,7 @@ use crate::authorship::ignore::{
 };
 use crate::authorship::imara_diff_utils::{LineChangeTag, compute_line_changes};
 use crate::authorship::working_log::CheckpointKind;
-use crate::authorship::working_log::{Checkpoint, WorkingLogEntry};
+use crate::authorship::working_log::{AgentId, Checkpoint, WorkingLogEntry};
 use crate::commands::blame::{GitAiBlameOptions, OLDEST_AI_BLAME_DATE};
 use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
 use crate::config::Config;
@@ -41,8 +41,6 @@ struct PreviousFileState {
     blob_sha: String,
     attributions: Vec<Attribution>,
 }
-
-use crate::authorship::working_log::AgentId;
 
 /// Emit at most one `agent_usage` metric per prompt every 2.5 minutes.
 /// This is half of the server-side bucketing window.
@@ -83,6 +81,11 @@ pub struct PreparedCheckpointManifest {
     pub files: Vec<PreparedCheckpointFile>,
     #[serde(default)]
     pub agent_run_result: Option<AgentRunResult>,
+    /// Cloud env tool detected at capture time (in the wrapper process).
+    /// Propagated to the daemon so it doesn't need to re-detect from env vars
+    /// that only exist in the wrapper's environment.
+    #[serde(default)]
+    pub captured_cloud_env_tool: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -327,6 +330,53 @@ pub fn run(
     )
 }
 
+/// Like `run`, but accepts a pre-detected cloud env tool name from the caller.
+/// Used by the daemon to propagate the cloud tool detected in the wrapper process,
+/// since the daemon's own environment doesn't have the cloud agent env vars.
+#[allow(clippy::too_many_arguments)]
+pub fn run_with_captured_cloud_env_tool(
+    repo: &Repository,
+    author: &str,
+    kind: CheckpointKind,
+    reset: bool,
+    quiet: bool,
+    agent_run_result: Option<AgentRunResult>,
+    is_pre_commit: bool,
+    captured_cloud_env_tool: Option<String>,
+) -> Result<(usize, usize, usize), GitAiError> {
+    let checkpoint_start = Instant::now();
+    debug_log("[BENCHMARK] Starting checkpoint run");
+    let resolved = resolve_live_checkpoint_execution(
+        repo,
+        kind,
+        agent_run_result.as_ref(),
+        is_pre_commit,
+        None,
+        BaseOverrideResolutionPolicy::AllowFallback,
+        captured_cloud_env_tool.as_deref(),
+    )?;
+    let Some(resolved) = resolved else {
+        debug_log(&format!(
+            "[BENCHMARK] Total checkpoint run took {:?}",
+            checkpoint_start.elapsed()
+        ));
+        return Ok((0, 0, 0));
+    };
+
+    execute_resolved_checkpoint(
+        repo,
+        author,
+        kind,
+        reset,
+        quiet,
+        agent_run_result,
+        is_pre_commit,
+        resolved,
+        checkpoint_start,
+        captured_cloud_env_tool,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run_with_base_commit_override(
     repo: &Repository,
@@ -372,6 +422,7 @@ pub(crate) fn run_with_base_commit_override_with_policy(
         is_pre_commit,
         base_commit_override,
         base_override_resolution_policy,
+        None,
     )?;
     let Some(resolved) = resolved else {
         debug_log(&format!(
@@ -391,6 +442,7 @@ pub(crate) fn run_with_base_commit_override_with_policy(
         is_pre_commit,
         resolved,
         checkpoint_start,
+        None, // live mode: env vars are available in this process
     )
 }
 
@@ -493,6 +545,7 @@ fn resolve_live_checkpoint_execution(
     is_pre_commit: bool,
     base_commit_override: Option<&str>,
     base_override_resolution_policy: BaseOverrideResolutionPolicy,
+    captured_cloud_env_tool: Option<&str>,
 ) -> Result<Option<ResolvedCheckpointExecution>, GitAiError> {
     let base_commit = resolve_base_commit(repo, base_commit_override);
 
@@ -526,6 +579,10 @@ fn resolve_live_checkpoint_execution(
         if has_no_ai_edits
             && !has_initial_attributions
             && !Config::get().get_feature_flags().inter_commit_move
+            && !Config::get()
+                .get_feature_flags()
+                .cloud_default_ai_attribution
+            && captured_cloud_env_tool.is_none()
         {
             debug_log("No AI edits in pre-commit checkpoint, skipping");
             return Ok(None);
@@ -644,6 +701,7 @@ fn execute_resolved_checkpoint(
     is_pre_commit: bool,
     resolved: ResolvedCheckpointExecution,
     checkpoint_start: Instant,
+    captured_cloud_env_tool: Option<String>,
 ) -> Result<(usize, usize, usize), GitAiError> {
     let mut working_log = repo
         .storage
@@ -689,18 +747,20 @@ fn execute_resolved_checkpoint(
     ));
 
     let entries_start = Instant::now();
-    let (entries, file_stats) = smol::block_on(get_checkpoint_entries(
-        kind,
-        repo,
-        &working_log,
-        &resolved.files,
-        &file_content_hashes,
-        &checkpoints,
-        agent_run_result.as_ref(),
-        resolved.ts,
-        is_pre_commit,
-        Some(resolved.base_commit.as_str()),
-    ))?;
+    let (entries, file_stats, effective_kind, cloud_agent_id) =
+        smol::block_on(get_checkpoint_entries(
+            kind,
+            repo,
+            &working_log,
+            &resolved.files,
+            &file_content_hashes,
+            &checkpoints,
+            agent_run_result.as_ref(),
+            resolved.ts,
+            is_pre_commit,
+            Some(resolved.base_commit.as_str()),
+            captured_cloud_env_tool.as_deref(),
+        ))?;
     debug_log(&format!(
         "[BENCHMARK] get_checkpoint_entries generated {} entries, took {:?}",
         entries.len(),
@@ -710,7 +770,7 @@ fn execute_resolved_checkpoint(
     if !entries.is_empty() {
         let checkpoint_create_start = Instant::now();
         let mut checkpoint = Checkpoint::new(
-            kind,
+            effective_kind,
             combined_hash.clone(),
             author.to_string(),
             entries.clone(),
@@ -718,7 +778,10 @@ fn execute_resolved_checkpoint(
         checkpoint.timestamp = (resolved.ts / 1000) as u64;
         checkpoint.line_stats = compute_line_stats(&file_stats)?;
 
-        if kind != CheckpointKind::Human
+        if let Some(cloud_aid) = &cloud_agent_id {
+            // Cloud-attributed checkpoint: set the resolved agent_id.
+            checkpoint.agent_id = Some(cloud_aid.clone());
+        } else if effective_kind != CheckpointKind::Human
             && let Some(agent_run) = &agent_run_result
         {
             checkpoint.transcript = Some(agent_run.transcript.clone().unwrap_or_default());
@@ -730,7 +793,7 @@ fn execute_resolved_checkpoint(
             checkpoint_create_start.elapsed()
         ));
 
-        if kind != CheckpointKind::Human
+        if effective_kind != CheckpointKind::Human
             && checkpoint.agent_id.is_some()
             && checkpoint.transcript.is_some()
             && let Err(e) = upsert_checkpoint_prompt_to_db(
@@ -763,7 +826,7 @@ fn execute_resolved_checkpoint(
         let attrs =
             build_checkpoint_attrs(repo, &resolved.base_commit, checkpoint.agent_id.as_ref());
 
-        if kind != CheckpointKind::Human
+        if effective_kind != CheckpointKind::Human
             && let Some(agent_id) = checkpoint.agent_id.as_ref()
             && should_emit_agent_usage(agent_id)
         {
@@ -785,10 +848,12 @@ fn execute_resolved_checkpoint(
         }
     }
 
-    let agent_tool = if kind != CheckpointKind::Human
-        && let Some(agent_run_result) = &agent_run_result
-    {
-        Some(agent_run_result.agent_id.tool.as_str())
+    let agent_tool = if effective_kind != CheckpointKind::Human {
+        if let Some(agent_run_result) = &agent_run_result {
+            Some(agent_run_result.agent_id.tool.clone())
+        } else {
+            cloud_agent_id.as_ref().map(|aid| aid.tool.clone())
+        }
     } else {
         None
     };
@@ -804,14 +869,14 @@ fn execute_resolved_checkpoint(
     };
 
     if !quiet {
-        let log_author = agent_tool.unwrap_or(author);
+        let log_author = agent_tool.as_deref().unwrap_or(author);
         let files_with_entries = entries.len();
         let total_uncommitted_files = resolved.files.len();
 
         if files_with_entries == total_uncommitted_files {
             eprintln!(
                 "{} {} changed {} file(s) that have changed since the last {}",
-                kind.to_str(),
+                effective_kind.to_str(),
                 log_author,
                 files_with_entries,
                 label
@@ -819,7 +884,7 @@ fn execute_resolved_checkpoint(
         } else {
             eprintln!(
                 "{} {} changed {} of the {} file(s) that have changed since the last {} ({} already checkpointed)",
-                kind.to_str(),
+                effective_kind.to_str(),
                 log_author,
                 files_with_entries,
                 total_uncommitted_files,
@@ -861,6 +926,7 @@ pub fn prepare_captured_checkpoint(
         is_pre_commit,
         base_commit_override,
         BaseOverrideResolutionPolicy::AllowFallback,
+        None, // captured-async: cloud env tool is resolved later in the manifest
     )?
     else {
         return Ok(None);
@@ -909,6 +975,22 @@ pub fn prepare_captured_checkpoint(
             agent_run_result.dirty_files = None;
         }
 
+        // Capture the cloud env tool now (in the wrapper process which has the
+        // caller's env vars).  The daemon process won't have these env vars, so
+        // we propagate the detected value through the manifest.
+        let captured_cloud_env_tool = if kind == CheckpointKind::Human
+            && Config::get()
+                .get_feature_flags()
+                .cloud_default_ai_attribution
+        {
+            Some(
+                crate::utils::detect_background_agent_tool()
+                    .unwrap_or_else(|| "unknown".to_string()),
+            )
+        } else {
+            None
+        };
+
         let manifest = PreparedCheckpointManifest {
             repo_working_dir: repo
                 .workdir()
@@ -924,6 +1006,7 @@ pub fn prepare_captured_checkpoint(
             explicit_paths,
             files,
             agent_run_result: stored_agent_run_result,
+            captured_cloud_env_tool,
         };
         fs::write(
             async_checkpoint_manifest_path(&capture_id)?,
@@ -1034,6 +1117,7 @@ pub fn execute_captured_checkpoint(
         manifest.is_pre_commit,
         resolved,
         checkpoint_start,
+        manifest.captured_cloud_env_tool,
     )
 }
 
@@ -1633,6 +1717,41 @@ fn get_checkpoint_entry_for_file(
     Ok(Some((entry, stats)))
 }
 
+/// When cloud_default_ai_attribution is enabled, resolve the effective agent_id
+/// and author_id for a human checkpoint by looking at previous AI checkpoints
+/// or falling back to cloud env detection.
+fn resolve_cloud_attribution_for_human(
+    previous_checkpoints: &[Checkpoint],
+    pre_detected_cloud_env_tool: Option<&str>,
+) -> (AgentId, String) {
+    // Find the most recent AI checkpoint (iterate in reverse)
+    let most_recent_ai = previous_checkpoints
+        .iter()
+        .rev()
+        .find(|cp| cp.kind != CheckpointKind::Human && cp.agent_id.is_some());
+
+    if let Some(ai_checkpoint) = most_recent_ai {
+        let agent_id = ai_checkpoint.agent_id.clone().unwrap();
+        let author_id = generate_short_hash(&agent_id.id, &agent_id.tool);
+        return (agent_id, author_id);
+    }
+
+    // No previous AI checkpoint - use pre-detected tool if available (from
+    // the wrapper process in daemon mode), otherwise detect from current env.
+    let tool = pre_detected_cloud_env_tool
+        .map(|t| t.to_string())
+        .unwrap_or_else(|| {
+            crate::utils::detect_background_agent_tool().unwrap_or_else(|| "unknown".to_string())
+        });
+    let agent_id = AgentId {
+        tool,
+        id: "cloud-default".to_string(),
+        model: "unknown".to_string(),
+    };
+    let author_id = generate_short_hash(&agent_id.id, &agent_id.tool);
+    (agent_id, author_id)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn get_checkpoint_entries(
     kind: CheckpointKind,
@@ -1645,7 +1764,16 @@ async fn get_checkpoint_entries(
     ts: u128,
     is_pre_commit: bool,
     head_commit_override: Option<&str>,
-) -> Result<(Vec<WorkingLogEntry>, Vec<FileLineStats>), GitAiError> {
+    pre_detected_cloud_env_tool: Option<&str>,
+) -> Result<
+    (
+        Vec<WorkingLogEntry>,
+        Vec<FileLineStats>,
+        CheckpointKind,
+        Option<AgentId>,
+    ),
+    GitAiError,
+> {
     let entries_fn_start = Instant::now();
 
     // Read INITIAL attributions from working log (empty if file doesn't exist)
@@ -1674,8 +1802,33 @@ async fn get_checkpoint_entries(
         precompute_start.elapsed()
     ));
 
-    // Determine author_id based on checkpoint kind and agent_id
-    let author_id = if kind != CheckpointKind::Human {
+    // When cloud_default_ai_attribution is enabled and this is a human checkpoint,
+    // promote it to AiAgent so the working log and all downstream processing
+    // treat it as an AI checkpoint attributed to the resolved cloud agent.
+    // In the daemon path, the wrapper only sends pre_detected_cloud_env_tool when
+    // the flag was on in the wrapper's Config, so we also accept that as a signal.
+    let cloud_attribution = if kind == CheckpointKind::Human
+        && (Config::get()
+            .get_feature_flags()
+            .cloud_default_ai_attribution
+            || pre_detected_cloud_env_tool.is_some())
+    {
+        Some(resolve_cloud_attribution_for_human(
+            previous_checkpoints,
+            pre_detected_cloud_env_tool,
+        ))
+    } else {
+        None
+    };
+    let effective_kind = if cloud_attribution.is_some() {
+        CheckpointKind::AiAgent
+    } else {
+        kind
+    };
+
+    let author_id = if let Some((_, ref cloud_author_id)) = cloud_attribution {
+        cloud_author_id.clone()
+    } else if kind != CheckpointKind::Human {
         // For AI checkpoints, use session hash
         agent_run_result
             .map(|result| {
@@ -1686,7 +1839,7 @@ async fn get_checkpoint_entries(
             })
             .unwrap_or_else(|| kind.to_str())
     } else {
-        // For human checkpoints, use checkpoint kind string
+        // For human checkpoints without cloud attribution, use checkpoint kind string
         kind.to_str()
     };
 
@@ -1750,7 +1903,7 @@ async fn get_checkpoint_entries(
             smol::unblock(move || {
                 get_checkpoint_entry_for_file(
                     file_path,
-                    kind,
+                    effective_kind,
                     is_pre_commit,
                     repo,
                     working_log,
@@ -1810,7 +1963,8 @@ async fn get_checkpoint_entries(
         entries_fn_start.elapsed()
     ));
 
-    Ok((entries, file_stats))
+    let resolved_agent_id = cloud_attribution.map(|(agent_id, _)| agent_id);
+    Ok((entries, file_stats, effective_kind, resolved_agent_id))
 }
 
 struct FileEntryInput<'a> {
