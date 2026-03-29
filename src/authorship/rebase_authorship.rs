@@ -691,7 +691,7 @@ fn try_reconstruct_attributions_from_notes_cached(
     original_head: &str,
     original_commits: &[String],
     pathspecs: &[String],
-    is_squash_rebase: bool,
+    _is_squash_rebase: bool,
     note_cache: &RebaseNoteCache,
 ) -> Option<(
     HashMap<
@@ -707,16 +707,21 @@ fn try_reconstruct_attributions_from_notes_cached(
     use crate::authorship::attribution_tracker::LineAttribution;
     use crate::authorship::authorship_log_serialization::AuthorshipLog;
 
-    // Get file contents at original_head for all pathspecs in one batch call.
-    // We need all pathspec contents to build line-to-author maps from note attestations.
-    let file_contents = batch_read_file_contents_at_commit(repo, original_head, pathspecs).ok()?;
-
     let pathspec_set: HashSet<&str> = pathspecs.iter().map(String::as_str).collect();
-    let mut file_line_authors: HashMap<String, HashMap<String, String>> = HashMap::new();
     let mut prompts: BTreeMap<
         String,
         BTreeMap<String, crate::authorship::authorship_log::PromptRecord>,
     > = BTreeMap::new();
+
+    // Read file contents at HEAD — needed for content-based line matching.
+    let file_contents =
+        batch_read_file_contents_at_commit(repo, original_head, pathspecs).ok()?;
+
+    // Content-based matching: map line_content → author_id per file.
+    // Each commit's note only covers lines changed in THAT commit, so we must
+    // scan all commits' notes and match by content to track attribution across
+    // position changes (insertions/deletions shift line numbers).
+    let mut file_line_authors: HashMap<String, HashMap<String, String>> = HashMap::new();
 
     // Use cached note content for original_head
     let head_log = note_cache
@@ -725,12 +730,13 @@ fn try_reconstruct_attributions_from_notes_cached(
         .and_then(|content| AuthorshipLog::deserialize_from_string(content).ok());
 
     if let Some(ref head_log) = head_log {
+        let head_contents = &file_contents;
         for file_attestation in &head_log.attestations {
             let file_path = &file_attestation.file_path;
             if !pathspec_set.contains(file_path.as_str()) {
                 continue;
             }
-            let head_content = file_contents.get(file_path).cloned().unwrap_or_default();
+            let head_content = head_contents.get(file_path).cloned().unwrap_or_default();
             let lines: Vec<&str> = head_content.lines().collect();
             let line_map = file_line_authors.entry(file_path.clone()).or_default();
             for entry in &file_attestation.entries {
@@ -740,7 +746,9 @@ fn try_reconstruct_attributions_from_notes_cached(
                         crate::authorship::authorship_log::LineRange::Range(s, e) => (*s, *e),
                     };
                     for line_num in start..=end {
-                        if let Some(line_content) = lines.get(line_num.saturating_sub(1) as usize) {
+                        if let Some(line_content) =
+                            lines.get(line_num.saturating_sub(1) as usize)
+                        {
                             line_map.insert(line_content.to_string(), entry.hash.clone());
                         }
                     }
@@ -755,140 +763,130 @@ fn try_reconstruct_attributions_from_notes_cached(
         }
     }
 
-    let head_covered_files: HashSet<&str> = file_line_authors.keys().map(String::as_str).collect();
-    let need_full_scan = head_log.is_none()
-        || is_squash_rebase
-        || pathspecs.iter().any(|p| {
-            let has_content = file_contents.get(p).map(|c| !c.is_empty()).unwrap_or(false);
-            has_content && !head_covered_files.contains(p.as_str())
-        });
+    let mut has_any_note = head_log.is_some();
+    let mut parsed_logs: Vec<(String, AuthorshipLog)> = Vec::new();
 
-    if need_full_scan {
-        // Use cached note contents instead of loading again
-        let mut has_any_note = head_log.is_some();
-        let mut commits_with_notes: Vec<String> = Vec::new();
-        let mut parsed_logs: Vec<(String, AuthorshipLog)> = Vec::new();
-
-        for commit in original_commits {
-            if commit == original_head {
-                continue;
+    for commit in original_commits {
+        if commit == original_head {
+            continue;
+        }
+        if let Some(content) = note_cache.original_note_contents.get(commit) {
+            has_any_note = true;
+            if let Ok(log) = AuthorshipLog::deserialize_from_string(content) {
+                parsed_logs.push((commit.clone(), log));
             }
-            if let Some(content) = note_cache.original_note_contents.get(commit) {
-                has_any_note = true;
-                if let Ok(log) = AuthorshipLog::deserialize_from_string(content) {
-                    commits_with_notes.push(commit.clone());
-                    parsed_logs.push((commit.clone(), log));
+        }
+    }
+
+    if !has_any_note {
+        return None;
+    }
+
+    if !parsed_logs.is_empty() {
+        // Optimization: only read file contents for files actually referenced
+        // in each commit's attestation, not all pathspecs × all commits.
+        let mut all_refs: Vec<(String, String)> = Vec::new();
+        for (commit, authorship_log) in &parsed_logs {
+            for file_attestation in &authorship_log.attestations {
+                if pathspec_set.contains(file_attestation.file_path.as_str()) {
+                    all_refs.push((commit.clone(), file_attestation.file_path.clone()));
                 }
             }
         }
 
-        if !has_any_note {
-            return None;
-        }
-
-        if !parsed_logs.is_empty() {
-            // Batch read file contents for commits with notes
-            let mut all_refs: Vec<(String, String)> = Vec::new();
-            for commit in &commits_with_notes {
-                for path in pathspecs {
-                    all_refs.push((commit.clone(), path.clone()));
-                }
-            }
-
-            let mut commit_file_contents: HashMap<String, HashMap<String, String>> = HashMap::new();
-            if !all_refs.is_empty() {
-                let mut args = repo.global_args_for_exec();
-                args.push("cat-file".to_string());
-                args.push("--batch".to_string());
-                let stdin_data: String = all_refs
-                    .iter()
-                    .map(|(commit, path)| format!("{}:{}", commit, path))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-                    + "\n";
-                if let Ok(output) = exec_git_stdin(&args, stdin_data.as_bytes()) {
-                    let data = &output.stdout;
-                    let mut pos = 0usize;
-                    let mut ref_idx = 0usize;
-                    while pos < data.len() && ref_idx < all_refs.len() {
-                        let header_end = match data[pos..].iter().position(|&b| b == b'\n') {
-                            Some(idx) => pos + idx,
-                            None => break,
-                        };
-                        let header = std::str::from_utf8(&data[pos..header_end]).unwrap_or("");
-                        let parts: Vec<&str> = header.split_whitespace().collect();
-                        let (commit, path) = &all_refs[ref_idx];
-                        if parts.len() >= 2 && parts[1] == "missing" {
-                            commit_file_contents
-                                .entry(commit.clone())
-                                .or_default()
-                                .insert(path.clone(), String::new());
-                            pos = header_end + 1;
-                            ref_idx += 1;
-                            continue;
-                        }
-                        if parts.len() < 3 {
-                            pos = header_end + 1;
-                            ref_idx += 1;
-                            continue;
-                        }
-                        let size: usize = parts[2].parse().unwrap_or(0);
-                        let content_start = header_end + 1;
-                        let content_end = content_start + size;
-                        if content_end <= data.len() {
-                            let content =
-                                String::from_utf8_lossy(&data[content_start..content_end])
-                                    .to_string();
-                            commit_file_contents
-                                .entry(commit.clone())
-                                .or_default()
-                                .insert(path.clone(), content);
-                        }
-                        pos = content_end;
-                        if pos < data.len() && data[pos] == b'\n' {
-                            pos += 1;
-                        }
+        let mut commit_file_contents: HashMap<String, HashMap<String, String>> = HashMap::new();
+        if !all_refs.is_empty() {
+            let mut args = repo.global_args_for_exec();
+            args.push("cat-file".to_string());
+            args.push("--batch".to_string());
+            let stdin_data: String = all_refs
+                .iter()
+                .map(|(commit, path)| format!("{}:{}", commit, path))
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n";
+            if let Ok(output) = exec_git_stdin(&args, stdin_data.as_bytes()) {
+                let data = &output.stdout;
+                let mut pos = 0usize;
+                let mut ref_idx = 0usize;
+                while pos < data.len() && ref_idx < all_refs.len() {
+                    let header_end = match data[pos..].iter().position(|&b| b == b'\n') {
+                        Some(idx) => pos + idx,
+                        None => break,
+                    };
+                    let header = std::str::from_utf8(&data[pos..header_end]).unwrap_or("");
+                    let parts: Vec<&str> = header.split_whitespace().collect();
+                    let (commit, path) = &all_refs[ref_idx];
+                    if parts.len() >= 2 && parts[1] == "missing" {
+                        commit_file_contents
+                            .entry(commit.clone())
+                            .or_default()
+                            .insert(path.clone(), String::new());
+                        pos = header_end + 1;
                         ref_idx += 1;
-                    }
-                }
-            }
-
-            for (commit, authorship_log) in &parsed_logs {
-                let empty_contents = HashMap::new();
-                let commit_contents = commit_file_contents.get(commit).unwrap_or(&empty_contents);
-                for file_attestation in &authorship_log.attestations {
-                    let file_path = &file_attestation.file_path;
-                    if !pathspec_set.contains(file_path.as_str()) {
                         continue;
                     }
-                    let commit_content =
-                        commit_contents.get(file_path).cloned().unwrap_or_default();
-                    let lines: Vec<&str> = commit_content.lines().collect();
-                    let line_map = file_line_authors.entry(file_path.clone()).or_default();
-                    for entry in &file_attestation.entries {
-                        for range in &entry.line_ranges {
-                            let (start, end) = match range {
-                                crate::authorship::authorship_log::LineRange::Single(l) => (*l, *l),
-                                crate::authorship::authorship_log::LineRange::Range(s, e) => {
-                                    (*s, *e)
-                                }
-                            };
-                            for line_num in start..=end {
-                                if let Some(line_content) =
-                                    lines.get(line_num.saturating_sub(1) as usize)
-                                {
-                                    line_map.insert(line_content.to_string(), entry.hash.clone());
-                                }
+                    if parts.len() < 3 {
+                        pos = header_end + 1;
+                        ref_idx += 1;
+                        continue;
+                    }
+                    let size: usize = parts[2].parse().unwrap_or(0);
+                    let content_start = header_end + 1;
+                    let content_end = content_start + size;
+                    if content_end <= data.len() {
+                        let content =
+                            String::from_utf8_lossy(&data[content_start..content_end])
+                                .to_string();
+                        commit_file_contents
+                            .entry(commit.clone())
+                            .or_default()
+                            .insert(path.clone(), content);
+                    }
+                    pos = content_end;
+                    if pos < data.len() && data[pos] == b'\n' {
+                        pos += 1;
+                    }
+                    ref_idx += 1;
+                }
+            }
+        }
+
+        for (commit, authorship_log) in &parsed_logs {
+            let empty_contents = HashMap::new();
+            let commit_contents = commit_file_contents.get(commit).unwrap_or(&empty_contents);
+            for file_attestation in &authorship_log.attestations {
+                let file_path = &file_attestation.file_path;
+                if !pathspec_set.contains(file_path.as_str()) {
+                    continue;
+                }
+                let commit_content =
+                    commit_contents.get(file_path).cloned().unwrap_or_default();
+                let lines: Vec<&str> = commit_content.lines().collect();
+                let line_map = file_line_authors.entry(file_path.clone()).or_default();
+                for entry in &file_attestation.entries {
+                    for range in &entry.line_ranges {
+                        let (start, end) = match range {
+                            crate::authorship::authorship_log::LineRange::Single(l) => (*l, *l),
+                            crate::authorship::authorship_log::LineRange::Range(s, e) => {
+                                (*s, *e)
+                            }
+                        };
+                        for line_num in start..=end {
+                            if let Some(line_content) =
+                                lines.get(line_num.saturating_sub(1) as usize)
+                            {
+                                line_map.insert(line_content.to_string(), entry.hash.clone());
                             }
                         }
                     }
                 }
-                for (prompt_id, prompt_record) in &authorship_log.metadata.prompts {
-                    prompts
-                        .entry(prompt_id.clone())
-                        .or_default()
-                        .insert(commit.clone(), prompt_record.clone());
-                }
+            }
+            for (prompt_id, prompt_record) in &authorship_log.metadata.prompts {
+                prompts
+                    .entry(prompt_id.clone())
+                    .or_default()
+                    .insert(commit.clone(), prompt_record.clone());
             }
         }
     }
@@ -897,7 +895,7 @@ fn try_reconstruct_attributions_from_notes_cached(
         return None;
     }
 
-    // Build attributions at original_head using the line content -> author map
+    // Build attributions from content-based line→author map
     let mut attributions = HashMap::new();
     for file_path in pathspecs {
         let line_map = match file_line_authors.get(file_path) {
@@ -922,7 +920,6 @@ fn try_reconstruct_attributions_from_notes_cached(
 
         if !line_attrs.is_empty() {
             line_attrs.sort_by_key(|a| a.start_line);
-            // Skip char-level attribution computation — only line_attrs are used for rebase
             attributions.insert(file_path.clone(), (Vec::new(), line_attrs));
         }
     }
@@ -1387,44 +1384,38 @@ pub fn rewrite_authorship_after_rebase_v2(
 
             let t0 = std::time::Instant::now();
             for file_path in &changed_files_in_commit {
-                // Subtract old metrics before modifying attributions
-                let tsub = std::time::Instant::now();
-                let previous_line_attrs = current_attributions
-                    .get(file_path)
-                    .map(|(_, la)| la.clone());
-                if let Some(ref prev_la) = previous_line_attrs {
-                    subtract_prompt_line_metrics_for_line_attributions(
-                        &mut prompt_line_metrics,
-                        prev_la,
-                    );
-                }
-                loop_metrics_subtract_ms += tsub.elapsed().as_micros();
-
                 // Check if blob content is available and non-empty (file not deleted)
                 let new_content = new_content_for_changed_files.get(file_path);
                 let is_file_deleted = new_content.map(|c| c.is_empty()).unwrap_or(false);
 
                 if is_file_deleted {
-                    // File deleted
-                    if let Some(ref prev_la) = previous_line_attrs {
-                        add_prompt_line_metrics_for_line_attributions(
-                            &mut prompt_line_metrics,
-                            prev_la,
-                        );
-                    }
+                    // File deleted — metrics stay unchanged (no subtract/add cycle)
                     cached_file_attestation_text.remove(file_path);
                     existing_files.remove(file_path);
                     continue;
                 }
 
                 // Decide: use hunk-based transfer or content-diff?
-                // Hunk-based: valid when our accumulated state matches the commit's parent.
-                // Content-diff: required for first appearance of each file (state not yet synced).
                 let has_hunks = commit_hunks
                     .and_then(|ch| ch.get(file_path.as_str()))
                     .is_some();
                 let use_hunk_based =
                     files_with_synced_state.contains(file_path.as_str()) && has_hunks;
+
+                // Skip early if no data available (avoids wasted subtract+add cycle)
+                if !use_hunk_based && new_content.is_none() {
+                    continue;
+                }
+
+                // Subtract old metrics before modifying attributions (borrow, no clone)
+                let tsub = std::time::Instant::now();
+                if let Some((_, prev_la)) = current_attributions.get(file_path) {
+                    subtract_prompt_line_metrics_for_line_attributions(
+                        &mut prompt_line_metrics,
+                        prev_la,
+                    );
+                }
+                loop_metrics_subtract_ms += tsub.elapsed().as_micros();
 
                 let line_attrs = if use_hunk_based {
                     // FAST PATH: Hunk-based attribution transfer
@@ -1438,8 +1429,9 @@ pub fn rewrite_authorship_after_rebase_v2(
                     total_files_hunk_transferred += 1;
                     loop_hunk_ms += thunk.elapsed().as_micros();
                     result
-                } else if let Some(new_content) = new_content {
+                } else {
                     // SLOW PATH: Content-diff based attribution transfer
+                    let new_content = new_content.unwrap();
                     let tdiff = std::time::Instant::now();
                     total_files_diffed += 1;
                     let new_line_count = new_content.lines().count();
@@ -1455,16 +1447,6 @@ pub fn rewrite_authorship_after_rebase_v2(
                     loop_diff_ms += tdiff.elapsed().as_micros();
                     files_with_synced_state.insert(file_path.clone());
                     result
-                } else {
-                    // No blob content and no hunk data — skip this file
-                    // (shouldn't happen in normal flow, but be defensive)
-                    if let Some(ref prev_la) = previous_line_attrs {
-                        add_prompt_line_metrics_for_line_attributions(
-                            &mut prompt_line_metrics,
-                            prev_la,
-                        );
-                    }
-                    continue;
                 };
 
                 let tadd = std::time::Instant::now();
@@ -3779,18 +3761,38 @@ fn add_prompt_line_metrics_for_line_attributions(
     metrics: &mut HashMap<String, PromptLineMetrics>,
     line_attrs: &[crate::authorship::attribution_tracker::LineAttribution],
 ) {
+    let human_id = crate::authorship::working_log::CheckpointKind::Human.to_str();
     for line_attr in line_attrs {
         let line_count = line_attr
             .end_line
             .saturating_sub(line_attr.start_line)
             .saturating_add(1);
-        if line_attr.author_id != crate::authorship::working_log::CheckpointKind::Human.to_str() {
-            let entry = metrics.entry(line_attr.author_id.clone()).or_default();
-            entry.accepted_lines = entry.accepted_lines.saturating_add(line_count);
+        if line_attr.author_id != human_id {
+            // Use get_mut to avoid cloning author_id when the key already exists
+            if let Some(entry) = metrics.get_mut(&line_attr.author_id) {
+                entry.accepted_lines = entry.accepted_lines.saturating_add(line_count);
+            } else {
+                metrics.insert(
+                    line_attr.author_id.clone(),
+                    PromptLineMetrics {
+                        accepted_lines: line_count,
+                        overridden_lines: 0,
+                    },
+                );
+            }
         }
         if let Some(overrode_id) = &line_attr.overrode {
-            let entry = metrics.entry(overrode_id.clone()).or_default();
-            entry.overridden_lines = entry.overridden_lines.saturating_add(line_count);
+            if let Some(entry) = metrics.get_mut(overrode_id) {
+                entry.overridden_lines = entry.overridden_lines.saturating_add(line_count);
+            } else {
+                metrics.insert(
+                    overrode_id.clone(),
+                    PromptLineMetrics {
+                        accepted_lines: 0,
+                        overridden_lines: line_count,
+                    },
+                );
+            }
         }
     }
 }
@@ -3799,12 +3801,13 @@ fn subtract_prompt_line_metrics_for_line_attributions(
     metrics: &mut HashMap<String, PromptLineMetrics>,
     line_attrs: &[crate::authorship::attribution_tracker::LineAttribution],
 ) {
+    let human_id = crate::authorship::working_log::CheckpointKind::Human.to_str();
     for line_attr in line_attrs {
         let line_count = line_attr
             .end_line
             .saturating_sub(line_attr.start_line)
             .saturating_add(1);
-        if line_attr.author_id != crate::authorship::working_log::CheckpointKind::Human.to_str()
+        if line_attr.author_id != human_id
             && let Some(entry) = metrics.get_mut(&line_attr.author_id)
         {
             entry.accepted_lines = entry.accepted_lines.saturating_sub(line_count);
