@@ -1,6 +1,7 @@
 // @i-know-the-amp-plugin-api-is-wip-and-very-experimental-right-now
 // Required by Amp: this exact marker must remain the first line in the plugin file.
 import type { PluginAPI, ToolCallEvent } from '@ampcode/plugin'
+import { randomUUID } from 'crypto'
 import { spawn } from 'child_process'
 import { dirname, isAbsolute, resolve } from 'path'
 import { fileURLToPath } from 'url'
@@ -78,6 +79,7 @@ function filesFromToolCall(amp: PluginAPI, event: ToolCallEvent): string[] {
 
 export default function ampGitAiPlugin(amp: PluginAPI) {
 	const pendingCalls = new Map<string, PendingToolCall>()
+	const pluginSessionId = randomUUID()
 	let gitAiInstalledPromise: Promise<boolean> | null = null
 
 	const runProcess = (
@@ -279,7 +281,7 @@ export default function ampGitAiPlugin(amp: PluginAPI) {
 			{ logger: ctx.logger },
 			{
 				hook_event_name: 'PostToolUse',
-				session_id: event.toolUseID,
+				session_id: pluginSessionId,
 				cwd: pending.cwd,
 				tool_name: pending.tool,
 				tool_input: pending.toolInput,

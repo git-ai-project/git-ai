@@ -22,6 +22,19 @@ pub mod prompt_event_kind {
     pub const FILE_WRITE: &str = "FileWrite";
 }
 
+/// Apply parent_id and parent_id_estimated to a PromptEventValues builder.
+fn apply_parent_id(
+    values: PromptEventValues,
+    parent_id: Option<String>,
+    parent_estimated: bool,
+) -> PromptEventValues {
+    let values = match parent_id {
+        Some(pid) => values.parent_id(pid),
+        None => values.parent_id_null(),
+    };
+    values.parent_id_estimated(parent_estimated)
+}
+
 /// A flattened event extracted from a transcript for PromptEvent emission.
 #[derive(Debug, Clone)]
 struct TranscriptEvent {
@@ -268,17 +281,8 @@ fn process_claude_prompt_events(hook_input: &str) -> Result<(), GitAiError> {
 
     for (i, eid, parent_id, parent_estimated) in &new_events {
         let evt = &all_events[*i];
-        let mut values = PromptEventValues::new().kind(&evt.kind).event_id(eid);
-
-        match parent_id {
-            Some(pid) => {
-                values = values.parent_id(pid);
-            }
-            None => {
-                values = values.parent_id_null();
-            }
-        }
-        values = values.parent_id_estimated(*parent_estimated);
+        let values = PromptEventValues::new().kind(&evt.kind).event_id(eid);
+        let values = apply_parent_id(values, parent_id.clone(), *parent_estimated);
 
         let event = MetricEvent::new(&values, attrs.to_sparse());
         metric_events.push(event);
@@ -343,16 +347,8 @@ fn emit_single_event_from_hook(
         (None, false)
     };
 
-    let mut values = PromptEventValues::new().kind(kind).event_id(&event_id);
-    match parent_id {
-        Some(pid) => {
-            values = values.parent_id(pid);
-        }
-        None => {
-            values = values.parent_id_null();
-        }
-    }
-    values = values.parent_id_estimated(parent_estimated);
+    let values = PromptEventValues::new().kind(kind).event_id(&event_id);
+    let values = apply_parent_id(values, parent_id, parent_estimated);
 
     let attrs = build_prompt_event_attrs(prompt_id, session_id);
     let metric_event = MetricEvent::new(&values, attrs.to_sparse());
@@ -396,8 +392,8 @@ fn process_generic_prompt_events(agent: &str, hook_input: &str) -> Result<(), Gi
         .unwrap_or("unknown");
 
     let kind = match hook_event_name {
-        "PreToolUse" | "UserPromptSubmit" => prompt_event_kind::HUMAN_MESSAGE,
-        "PostToolUse" | "AfterTool" => {
+        "UserPromptSubmit" => prompt_event_kind::HUMAN_MESSAGE,
+        "PreToolUse" | "PostToolUse" | "AfterTool" => {
             // Check tool name case-insensitively for file-editing tools
             let tool_lower = tool_name.to_lowercase();
             if matches!(
@@ -421,15 +417,10 @@ fn process_generic_prompt_events(agent: &str, hook_input: &str) -> Result<(), Gi
         _ => prompt_event_kind::TOOL_CALL,
     };
 
-    // Build content hash from hook data
+    // Build content hash from hook data (deterministic - no timestamps)
     let content_hash_input = format!(
         "{}:{}:{}",
-        hook_event_name,
-        hook_data["tool_input"],
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
+        hook_event_name, tool_name, hook_data["tool_input"]
     );
 
     let event_id = compute_event_id(&prompt_id, kind, &content_hash_input, 0);
@@ -442,16 +433,8 @@ fn process_generic_prompt_events(agent: &str, hook_input: &str) -> Result<(), Gi
         (None, false)
     };
 
-    let mut values = PromptEventValues::new().kind(kind).event_id(&event_id);
-    match parent_id {
-        Some(pid) => {
-            values = values.parent_id(pid);
-        }
-        None => {
-            values = values.parent_id_null();
-        }
-    }
-    values = values.parent_id_estimated(parent_estimated);
+    let values = PromptEventValues::new().kind(kind).event_id(&event_id);
+    let values = apply_parent_id(values, parent_id, parent_estimated);
 
     let attrs = EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
         .tool(agent)
