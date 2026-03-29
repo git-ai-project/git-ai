@@ -683,7 +683,7 @@ def main() -> int:
                     if not args.keep_artifacts:
                         bench_repo = rep_root / "benchmark" / "repo"
                         if bench_repo.exists():
-                            shutil.rmtree(bench_repo)
+                            shutil.rmtree(bench_repo, ignore_errors=True)
                 finally:
                     shutdown_daemon(variant, runtime_root, env, daemon_proc)
                     shutil.rmtree(home_dir, ignore_errors=True)
