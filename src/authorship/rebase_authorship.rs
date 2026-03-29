@@ -1127,15 +1127,16 @@ pub fn rewrite_authorship_after_rebase_v2(
         return Ok(());
     }
 
-    // Step 2a: Run diff-tree to discover which files actually change during the rebase.
-    // This is fast (single subprocess) and tells us which files we need to load.
+    // Step 2a: Run diff-tree to discover which files actually change during the rebase,
+    // AND extract hunk information for hunk-based attribution transfer.
+    // Uses a single `git diff-tree --stdin --raw -p -U0` call for both.
     let diff_tree_start = std::time::Instant::now();
-    let diff_tree_result =
-        run_diff_tree_for_commits(repo, &commits_to_process, &pathspecs_lookup, &pathspecs)?;
+    let (diff_tree_result, hunks_by_commit) =
+        run_diff_tree_with_hunks(repo, &commits_to_process, &pathspecs_lookup, &pathspecs)?;
     let actually_changed_files = diff_tree_result.all_changed_files();
     timing_phases.push((
         format!(
-            "diff_tree ({} commits, {} changed files, {} blobs)",
+            "diff_tree_with_hunks ({} commits, {} changed files, {} blobs)",
             commits_to_process.len(),
             actually_changed_files.len(),
             diff_tree_result.all_blob_oids.len(),
@@ -1213,16 +1214,35 @@ pub fn rewrite_authorship_after_rebase_v2(
         va_phase_start.elapsed().as_millis(),
     ));
 
-    // Step 2c: Read blob contents in parallel (multiple git cat-file --batch processes).
+    // Step 2c: Read blob contents — only for the FIRST commit that touches each file.
+    // Subsequent commits use hunk-based transfer which doesn't need blob content.
     let blob_phase_start = std::time::Instant::now();
-    let blob_contents = batch_read_blob_contents_parallel(repo, &diff_tree_result.all_blob_oids)?;
+    let first_appearance_blobs = {
+        let mut seen_files: HashSet<String> = HashSet::new();
+        let mut needed_oids: HashSet<String> = HashSet::new();
+        for (_, delta) in &diff_tree_result.commit_deltas {
+            for (file_path, maybe_oid) in &delta.file_to_blob_oid {
+                if seen_files.insert(file_path.clone()) {
+                    // First time seeing this file — need its blob for content-diff
+                    if let Some(oid) = maybe_oid {
+                        needed_oids.insert(oid.clone());
+                    }
+                }
+            }
+        }
+        let mut oid_list: Vec<String> = needed_oids.into_iter().collect();
+        oid_list.sort();
+        oid_list
+    };
+    let blob_contents = batch_read_blob_contents_parallel(repo, &first_appearance_blobs)?;
     let mut changed_contents_by_commit =
         assemble_changed_contents(diff_tree_result.commit_deltas, &blob_contents);
-    drop(blob_contents); // free memory early
+    drop(blob_contents);
     timing_phases.push((
         format!(
-            "blob_read_parallel ({} blobs)",
-            diff_tree_result.all_blob_oids.len()
+            "blob_read ({} first-appearance blobs of {} total)",
+            first_appearance_blobs.len(),
+            diff_tree_result.all_blob_oids.len(),
         ),
         blob_phase_start.elapsed().as_millis(),
     ));
@@ -1321,6 +1341,20 @@ pub fn rewrite_authorship_after_rebase_v2(
     let mut loop_transform_ms = 0u128;
     let mut loop_serialize_ms = 0u128;
     let mut loop_metrics_ms = 0u128;
+    let mut loop_diff_ms = 0u128;
+    let mut loop_hunk_ms = 0u128;
+    let mut loop_attestation_ms = 0u128;
+    let mut loop_content_clone_ms = 0u128;
+    let mut loop_metrics_subtract_ms = 0u128;
+    let mut loop_metrics_add_ms = 0u128;
+    let mut total_files_diffed = 0usize;
+    let mut total_lines_diffed = 0usize;
+    let mut total_files_hunk_transferred = 0usize;
+    // Track files that have been processed via content-diff at least once.
+    // After the first content-diff, our accumulated attribution state matches the
+    // commit chain, so we can use hunk-based transfer for subsequent appearances.
+    let mut files_with_synced_state: HashSet<String> = HashSet::new();
+
     for (idx, new_commit) in commits_to_process.iter().enumerate() {
         debug_log(&format!(
             "Processing commit {}/{}: {}",
@@ -1333,23 +1367,28 @@ pub fn rewrite_authorship_after_rebase_v2(
             .remove(new_commit)
             .unwrap_or_else(|| (HashSet::new(), HashMap::new()));
 
+        // Get hunk data for this commit (from the pre-computed diff-tree -p -U0 output)
+        let commit_hunks = hunks_by_commit.get(new_commit);
+
         // Only transform attributions for files that actually changed.
         if !changed_files_in_commit.is_empty() {
-            // Update file existence from this commit's deltas before transformation.
-            for (file_path, content) in &new_content_for_changed_files {
-                if content.is_empty() {
-                    existing_files.remove(file_path);
-                } else {
-                    existing_files.insert(file_path.clone());
+            // Update file existence: use blob content when available, hunk data otherwise.
+            for file_path in &changed_files_in_commit {
+                if let Some(content) = new_content_for_changed_files.get(file_path) {
+                    if content.is_empty() {
+                        existing_files.remove(file_path);
+                    } else {
+                        existing_files.insert(file_path.clone());
+                    }
                 }
+                // If no blob content available (hunk-based path), file still exists
+                // (deletions would have zero OID which yields empty content in the map)
             }
 
-            // Diff-based line attribution transfer: for each changed file, diff
-            // old content → new content and carry attributions forward positionally.
-            // Falls back to content-matching for files with no previous content.
             let t0 = std::time::Instant::now();
-            for (file_path, new_content) in &new_content_for_changed_files {
+            for file_path in &changed_files_in_commit {
                 // Subtract old metrics before modifying attributions
+                let tsub = std::time::Instant::now();
                 let previous_line_attrs = current_attributions
                     .get(file_path)
                     .map(|(_, la)| la.clone());
@@ -1359,12 +1398,14 @@ pub fn rewrite_authorship_after_rebase_v2(
                         prev_la,
                     );
                 }
-                if new_content.is_empty() {
-                    // File deleted - keep attributions and file contents so a later
-                    // reappearance in the rebase sequence can inherit via diff-based
-                    // positional transfer from the pre-deletion state. Re-add the
-                    // subtracted metrics to preserve balance (the file won't appear
-                    // in the serialized note since existing_files excludes it).
+                loop_metrics_subtract_ms += tsub.elapsed().as_micros() as u128;
+
+                // Check if blob content is available and non-empty (file not deleted)
+                let new_content = new_content_for_changed_files.get(file_path);
+                let is_file_deleted = new_content.map(|c| c.is_empty()).unwrap_or(false);
+
+                if is_file_deleted {
+                    // File deleted
                     if let Some(ref prev_la) = previous_line_attrs {
                         add_prompt_line_metrics_for_line_attributions(
                             &mut prompt_line_metrics,
@@ -1372,28 +1413,81 @@ pub fn rewrite_authorship_after_rebase_v2(
                         );
                     }
                     cached_file_attestation_text.remove(file_path);
+                    existing_files.remove(file_path);
                     continue;
                 }
-                let line_attrs = compute_line_attrs_for_changed_file(
-                    new_content,
-                    current_file_contents.get(file_path),
-                    current_attributions
+
+                // Decide: use hunk-based transfer or content-diff?
+                // Hunk-based: valid when our accumulated state matches the commit's parent.
+                // Content-diff: required for first appearance of each file (state not yet synced).
+                let has_hunks = commit_hunks
+                    .and_then(|ch| ch.get(file_path.as_str()))
+                    .is_some();
+                let use_hunk_based =
+                    files_with_synced_state.contains(file_path.as_str()) && has_hunks;
+
+                let line_attrs = if use_hunk_based {
+                    // FAST PATH: Hunk-based attribution transfer
+                    let thunk = std::time::Instant::now();
+                    let hunks = commit_hunks.unwrap().get(file_path.as_str()).unwrap();
+                    let old_attrs = current_attributions
                         .get(file_path)
-                        .map(|(_, la)| la.as_slice()),
-                    original_head_line_to_author.get(file_path),
-                );
+                        .map(|(_, la)| la.as_slice())
+                        .unwrap_or(&[]);
+                    let result = apply_hunks_to_line_attributions(old_attrs, hunks);
+                    total_files_hunk_transferred += 1;
+                    loop_hunk_ms += thunk.elapsed().as_micros() as u128;
+                    result
+                } else if let Some(new_content) = new_content {
+                    // SLOW PATH: Content-diff based attribution transfer
+                    let tdiff = std::time::Instant::now();
+                    total_files_diffed += 1;
+                    let new_line_count = new_content.lines().count();
+                    total_lines_diffed += new_line_count;
+                    let result = compute_line_attrs_for_changed_file(
+                        new_content,
+                        current_file_contents.get(file_path),
+                        current_attributions
+                            .get(file_path)
+                            .map(|(_, la)| la.as_slice()),
+                        original_head_line_to_author.get(file_path),
+                    );
+                    loop_diff_ms += tdiff.elapsed().as_micros() as u128;
+                    files_with_synced_state.insert(file_path.clone());
+                    result
+                } else {
+                    // No blob content and no hunk data — skip this file
+                    // (shouldn't happen in normal flow, but be defensive)
+                    if let Some(ref prev_la) = previous_line_attrs {
+                        add_prompt_line_metrics_for_line_attributions(
+                            &mut prompt_line_metrics,
+                            prev_la,
+                        );
+                    }
+                    continue;
+                };
+
+                let tadd = std::time::Instant::now();
                 add_prompt_line_metrics_for_line_attributions(
                     &mut prompt_line_metrics,
                     &line_attrs,
                 );
-                // Update fast serialization cache for this file
+                loop_metrics_add_ms += tadd.elapsed().as_micros() as u128;
+                let tatt = std::time::Instant::now();
                 if let Some(text) = serialize_attestation_from_line_attrs(file_path, &line_attrs) {
                     cached_file_attestation_text.insert(file_path.clone(), text);
                 } else {
                     cached_file_attestation_text.remove(file_path);
                 }
+                loop_attestation_ms += tatt.elapsed().as_micros() as u128;
+                let tclone = std::time::Instant::now();
                 current_attributions.insert(file_path.clone(), (Vec::new(), line_attrs));
-                current_file_contents.insert(file_path.clone(), new_content.clone());
+                if !use_hunk_based {
+                    if let Some(content) = new_content {
+                        current_file_contents.insert(file_path.clone(), content.clone());
+                    }
+                }
+                loop_content_clone_ms += tclone.elapsed().as_micros() as u128;
             }
             loop_transform_ms += t0.elapsed().as_millis();
 
@@ -1454,6 +1548,12 @@ pub fn rewrite_authorship_after_rebase_v2(
         loop_start.elapsed().as_millis(),
     ));
     timing_phases.push(("  loop:transform".to_string(), loop_transform_ms));
+    timing_phases.push((format!("    transform:diff ({} files, {} lines)", total_files_diffed, total_lines_diffed), loop_diff_ms / 1000));
+    timing_phases.push((format!("    transform:hunk_transfer ({} files)", total_files_hunk_transferred), loop_hunk_ms / 1000));
+    timing_phases.push((format!("    transform:attestation_serialize"), loop_attestation_ms / 1000));
+    timing_phases.push((format!("    transform:content_clone"), loop_content_clone_ms / 1000));
+    timing_phases.push((format!("    transform:metrics_subtract"), loop_metrics_subtract_ms / 1000));
+    timing_phases.push((format!("    transform:metrics_add"), loop_metrics_add_ms / 1000));
     timing_phases.push(("  loop:serialize".to_string(), loop_serialize_ms));
     timing_phases.push(("  loop:metrics".to_string(), loop_metrics_ms));
 
@@ -2022,26 +2122,164 @@ impl DiffTreeResult {
     }
 }
 
-/// Run `git diff-tree --stdin` to discover which files changed in each commit and collect blob OIDs.
-/// This is the fast metadata-only phase — no blob contents are read.
-fn run_diff_tree_for_commits(
+/// A unified diff hunk header parsed from `git diff-tree -p -U0` output.
+/// Represents a contiguous change region in a file.
+#[derive(Debug, Clone)]
+struct DiffHunk {
+    old_start: u32,
+    old_count: u32,
+    #[allow(dead_code)]
+    new_start: u32,
+    new_count: u32,
+}
+
+/// Per-commit, per-file hunk information extracted from `git diff-tree -p -U0`.
+/// Maps commit_sha → file_path → Vec<DiffHunk>.
+type HunksByCommitAndFile = HashMap<String, HashMap<String, Vec<DiffHunk>>>;
+
+/// Parse a unified diff hunk header line like `@@ -10,5 +12,6 @@ context`
+/// Returns None if parsing fails.
+fn parse_hunk_header(line: &str) -> Option<DiffHunk> {
+    // Format: @@ -old_start[,old_count] +new_start[,new_count] @@
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    if parts.len() < 4 || parts[0] != "@@" {
+        return None;
+    }
+
+    let old_part = parts[1].trim_start_matches('-');
+    let new_part = parts[2].trim_start_matches('+');
+
+    let (old_start, old_count) = parse_range_spec(old_part)?;
+    let (new_start, new_count) = parse_range_spec(new_part)?;
+
+    Some(DiffHunk {
+        old_start,
+        old_count,
+        new_start,
+        new_count,
+    })
+}
+
+/// Parse a range spec like "10,5" or "10" (count defaults to 1, but "10,0" means 0).
+fn parse_range_spec(spec: &str) -> Option<(u32, u32)> {
+    if let Some((start_str, count_str)) = spec.split_once(',') {
+        let start = start_str.parse().ok()?;
+        let count = count_str.parse().ok()?;
+        Some((start, count))
+    } else {
+        let start = spec.parse().ok()?;
+        Some((start, 1))
+    }
+}
+
+/// Apply hunk-based line offset adjustments to existing line attributions.
+///
+/// Instead of re-diffing file contents, this uses pre-computed hunk information from
+/// `git diff-tree -p -U0` to adjust attribution line numbers. For each hunk:
+/// - Lines before the hunk: keep at same position (with accumulated offset)
+/// - Lines in a deletion region: dropped (those lines were removed)
+/// - Lines after the hunk: shifted by the net offset (new_count - old_count)
+///
+/// This is O(attrs + hunks) instead of O(file_length) for the full diff approach.
+fn apply_hunks_to_line_attributions(
+    old_attrs: &[crate::authorship::attribution_tracker::LineAttribution],
+    hunks: &[DiffHunk],
+) -> Vec<crate::authorship::attribution_tracker::LineAttribution> {
+    if hunks.is_empty() {
+        return old_attrs.to_vec();
+    }
+
+    // Build preserved segments: ranges of old line numbers that survive and their offset.
+    // Between hunks, lines are preserved with an accumulated offset.
+    let mut segments: Vec<(u32, u32, i64)> = Vec::with_capacity(hunks.len() + 1);
+    let mut offset: i64 = 0;
+    let mut prev_old_end: u32 = 1; // 1-indexed
+
+    for hunk in hunks {
+        // Preserved segment before this hunk
+        if prev_old_end < hunk.old_start + 1 {
+            // Lines from prev_old_end to hunk.old_start are preserved
+            // For pure insertions (old_count=0), old_start points to the line AFTER which
+            // insertion happens, so lines up to and including old_start are preserved
+            let seg_end = if hunk.old_count == 0 {
+                hunk.old_start // inclusive
+            } else {
+                hunk.old_start.saturating_sub(1) // up to but not including the hunk
+            };
+            if prev_old_end <= seg_end {
+                segments.push((prev_old_end, seg_end, offset));
+            }
+        }
+
+        // The hunk itself: old lines old_start..old_start+old_count-1 are deleted/replaced.
+        // No segment for these lines (they're removed).
+        // For pure insertion (old_count=0): no lines are removed, but offset changes.
+
+        offset += hunk.new_count as i64 - hunk.old_count as i64;
+
+        if hunk.old_count == 0 {
+            prev_old_end = hunk.old_start + 1; // after the insertion point
+        } else {
+            prev_old_end = hunk.old_start + hunk.old_count; // after the deleted range
+        }
+    }
+
+    // Final segment after last hunk (up to a very large line number)
+    segments.push((prev_old_end, u32::MAX, offset));
+
+    // Apply the mapping to each attribution
+    let mut new_attrs: Vec<crate::authorship::attribution_tracker::LineAttribution> =
+        Vec::with_capacity(old_attrs.len());
+
+    for attr in old_attrs {
+        // For each attribution range, find the preserved segments that overlap
+        for &(seg_start, seg_end, seg_offset) in &segments {
+            let range_start = attr.start_line.max(seg_start);
+            let range_end = attr.end_line.min(seg_end);
+
+            if range_start <= range_end {
+                let new_start = (range_start as i64 + seg_offset).max(1) as u32;
+                let new_end = (range_end as i64 + seg_offset).max(1) as u32;
+                new_attrs.push(crate::authorship::attribution_tracker::LineAttribution {
+                    start_line: new_start,
+                    end_line: new_end,
+                    author_id: attr.author_id.clone(),
+                    overrode: attr.overrode.clone(),
+                });
+            }
+        }
+    }
+
+    new_attrs
+}
+
+/// Combined diff-tree call that extracts BOTH raw file metadata (changed files, blob OIDs)
+/// AND hunk information from unified diff patches, using a single `git diff-tree --stdin --raw -p -U0` call.
+/// This replaces two separate subprocess calls with one.
+fn run_diff_tree_with_hunks(
     repo: &Repository,
     commit_shas: &[String],
     pathspecs_lookup: &HashSet<&str>,
     pathspecs: &[String],
-) -> Result<DiffTreeResult, GitAiError> {
+) -> Result<(DiffTreeResult, HunksByCommitAndFile), GitAiError> {
     if commit_shas.is_empty() {
-        return Ok(DiffTreeResult {
-            commit_deltas: Vec::new(),
-            all_blob_oids: Vec::new(),
-        });
+        return Ok((
+            DiffTreeResult {
+                commit_deltas: Vec::new(),
+                all_blob_oids: Vec::new(),
+            },
+            HashMap::new(),
+        ));
     }
 
+    // Use --raw for file metadata and -p -U0 for minimal patch hunks, in one call.
     let mut args = repo.global_args_for_exec();
     args.push("diff-tree".to_string());
     args.push("--stdin".to_string());
     args.push("--raw".to_string());
-    args.push("-z".to_string());
+    args.push("-p".to_string());
+    args.push("-U0".to_string());
+    args.push("--no-color".to_string());
     args.push("--no-abbrev".to_string());
     args.push("-r".to_string());
     if !pathspecs.is_empty() {
@@ -2049,89 +2287,120 @@ fn run_diff_tree_for_commits(
         args.extend(pathspecs.iter().cloned());
     }
 
-    // Feed commit SHAs directly — diff-tree will compare each commit against its first parent
     let stdin_data = commit_shas.join("\n") + "\n";
     let output = exec_git_stdin(&args, stdin_data.as_bytes())?;
-    let data = output.stdout;
+    let text = String::from_utf8_lossy(&output.stdout);
 
+    // Parse the combined output: raw metadata lines (starting with ':') + unified diff patches
+    let commit_set: HashSet<&str> = commit_shas.iter().map(String::as_str).collect();
     let mut commit_deltas: Vec<(String, CommitTrackedDelta)> =
         Vec::with_capacity(commit_shas.len());
     let mut all_blob_oids = HashSet::new();
-    let mut pos = 0usize;
+    let mut hunks_by_commit: HunksByCommitAndFile = HashMap::new();
 
-    for commit_sha in commit_shas {
-        // When feeding commit SHAs to diff-tree --stdin with -z, the output format is:
-        // "<commit_sha>\0" followed by diff entries (all null-terminated).
-        // Without -z, the commit SHA is newline-terminated.
-        let header_end = match data[pos..].iter().position(|&b| b == 0) {
-            Some(idx) => pos + idx,
-            None => {
-                // Commit may have no parent (root commit) — diff-tree may omit it.
-                // Push empty delta and continue.
-                commit_deltas.push((commit_sha.clone(), CommitTrackedDelta::default()));
-                continue;
+    let mut current_commit: Option<String> = None;
+    let mut current_delta = CommitTrackedDelta::default();
+    let mut current_diff_file: Option<String> = None;
+
+    for line in text.lines() {
+        // Commit header line (hex SHA)
+        if line.len() >= 40
+            && commit_set.contains(&line[..40])
+            && line[..40].chars().all(|c| c.is_ascii_hexdigit())
+        {
+            // Save previous commit's delta
+            if let Some(ref prev_commit) = current_commit {
+                commit_deltas.push((prev_commit.clone(), std::mem::take(&mut current_delta)));
             }
-        };
-        pos = header_end + 1;
-
-        let mut delta = CommitTrackedDelta::default();
-
-        while pos < data.len() && data[pos] == b':' {
-            let meta_end = match data[pos..].iter().position(|&b| b == 0) {
-                Some(idx) => pos + idx,
-                None => break,
-            };
-            let metadata = std::str::from_utf8(&data[pos + 1..meta_end])?;
-            let mut fields = metadata.split_whitespace();
-            let _old_mode = fields.next().unwrap_or_default();
-            let new_mode = fields.next().unwrap_or_default();
-            let _old_oid = fields.next().unwrap_or_default();
-            let new_oid = fields.next().unwrap_or_default();
-            let status = fields.next().unwrap_or_default();
-            let status_char = status.chars().next().unwrap_or('M');
-            pos = meta_end + 1;
-
-            let path_end = match data[pos..].iter().position(|&b| b == 0) {
-                Some(idx) => pos + idx,
-                None => break,
-            };
-            let file_path = std::str::from_utf8(&data[pos..path_end])?.to_string();
-            pos = path_end + 1;
-
-            if matches!(status_char, 'R' | 'C') {
-                let old_path_end = match data[pos..].iter().position(|&b| b == 0) {
-                    Some(idx) => pos + idx,
-                    None => break,
-                };
-                pos = old_path_end + 1;
-            }
-
-            if !pathspecs_lookup.contains(file_path.as_str()) {
-                continue;
-            }
-
-            delta.changed_files.insert(file_path.clone());
-            let new_blob_oid = if is_zero_oid(new_oid) || !is_blob_mode(new_mode) {
-                None
-            } else {
-                Some(new_oid.to_string())
-            };
-            if let Some(oid) = &new_blob_oid {
-                all_blob_oids.insert(oid.clone());
-            }
-            delta.file_to_blob_oid.insert(file_path, new_blob_oid);
+            current_commit = Some(line[..40].to_string());
+            current_diff_file = None;
+            continue;
         }
 
-        commit_deltas.push((commit_sha.clone(), delta));
+        // Raw metadata line: :old_mode new_mode old_oid new_oid status\tpath
+        if line.starts_with(':') {
+            if let Some(ref _commit) = current_commit {
+                // Parse raw metadata
+                let tab_pos = line.find('\t');
+                if let Some(tp) = tab_pos {
+                    let metadata = &line[1..tp];
+                    let file_path = line[tp + 1..].to_string();
+                    let mut fields = metadata.split_whitespace();
+                    let _old_mode = fields.next().unwrap_or_default();
+                    let new_mode = fields.next().unwrap_or_default();
+                    let _old_oid = fields.next().unwrap_or_default();
+                    let new_oid = fields.next().unwrap_or_default();
+                    let status = fields.next().unwrap_or_default();
+                    let _status_char = status.chars().next().unwrap_or('M');
+
+                    if pathspecs_lookup.contains(file_path.as_str()) {
+                        current_delta.changed_files.insert(file_path.clone());
+                        let new_blob_oid = if is_zero_oid(new_oid) || !is_blob_mode(new_mode) {
+                            None
+                        } else {
+                            Some(new_oid.to_string())
+                        };
+                        if let Some(oid) = &new_blob_oid {
+                            all_blob_oids.insert(oid.clone());
+                        }
+                        current_delta
+                            .file_to_blob_oid
+                            .insert(file_path, new_blob_oid);
+                    }
+                }
+            }
+            continue;
+        }
+
+        // diff --git a/path b/path
+        if line.starts_with("diff --git ") {
+            if let Some(b_path) = line.split(" b/").last() {
+                current_diff_file = Some(b_path.to_string());
+            }
+            continue;
+        }
+
+        // Hunk header: @@ -old_start[,old_count] +new_start[,new_count] @@
+        if line.starts_with("@@ ") {
+            if let (Some(commit), Some(file)) = (&current_commit, &current_diff_file) {
+                if let Some(hunk) = parse_hunk_header(line) {
+                    hunks_by_commit
+                        .entry(commit.clone())
+                        .or_default()
+                        .entry(file.clone())
+                        .or_default()
+                        .push(hunk);
+                }
+            }
+            continue;
+        }
+
+        // Skip other lines (index, ---, +++, content lines)
+    }
+
+    // Save last commit's delta
+    if let Some(ref commit) = current_commit {
+        commit_deltas.push((commit.clone(), std::mem::take(&mut current_delta)));
+    }
+
+    // Ensure all commits have deltas (some may have no changes)
+    let delta_commits: HashSet<String> = commit_deltas.iter().map(|(c, _)| c.clone()).collect();
+    for commit_sha in commit_shas {
+        if !delta_commits.contains(commit_sha) {
+            commit_deltas.push((commit_sha.clone(), CommitTrackedDelta::default()));
+        }
     }
 
     let mut blob_oid_list: Vec<String> = all_blob_oids.into_iter().collect();
     blob_oid_list.sort();
 
-    Ok(DiffTreeResult {
-        commit_deltas,
-        all_blob_oids: blob_oid_list,
-    })
+    Ok((
+        DiffTreeResult {
+            commit_deltas,
+            all_blob_oids: blob_oid_list,
+        },
+        hunks_by_commit,
+    ))
 }
 
 /// Assemble per-commit changed file contents from diff-tree deltas and blob contents.
@@ -2143,11 +2412,21 @@ fn assemble_changed_contents(
     for (commit_sha, delta) in commit_deltas {
         let mut contents = HashMap::new();
         for (file_path, maybe_blob_oid) in delta.file_to_blob_oid {
-            let content = maybe_blob_oid
-                .as_ref()
-                .and_then(|oid| blob_contents.get(oid).cloned())
-                .unwrap_or_default();
-            contents.insert(file_path, content);
+            match maybe_blob_oid {
+                None => {
+                    // No blob OID = file was deleted (zero OID in diff-tree)
+                    contents.insert(file_path, String::new());
+                }
+                Some(ref oid) => {
+                    // Only include if we actually read this blob's content.
+                    // Non-first-appearance blobs are skipped during reading
+                    // and will use hunk-based transfer instead.
+                    if let Some(content) = blob_contents.get(oid) {
+                        contents.insert(file_path, content.clone());
+                    }
+                    // else: blob not read — file will use hunk-based path
+                }
+            }
         }
         result.insert(commit_sha, (delta.changed_files, contents));
     }
