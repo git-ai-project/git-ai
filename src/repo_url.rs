@@ -11,7 +11,8 @@ pub fn normalize_repo_url(url_str: &str) -> Result<String, String> {
         && let Some((user_host, path)) = url_str.split_once(':')
         && let Some((_, host)) = user_host.rsplit_once('@')
     {
-        return normalize_ssh_url(host, path);
+        let resolved = crate::ssh_config::resolve_ssh_hostname_default(host);
+        return normalize_ssh_url(resolved.as_deref().unwrap_or(host), path);
     }
 
     // Parse as URL
@@ -23,8 +24,14 @@ pub fn normalize_repo_url(url_str: &str) -> Result<String, String> {
         return Err(format!("Unsupported URL scheme: {}", scheme));
     }
 
-    // Extract host
-    let host = url.host_str().ok_or("URL must have a host")?;
+    // Extract host, resolving SSH aliases if applicable
+    let raw_host = url.host_str().ok_or("URL must have a host")?;
+    let resolved_host = if scheme == "ssh" {
+        crate::ssh_config::resolve_ssh_hostname_default(raw_host)
+    } else {
+        None
+    };
+    let host = resolved_host.as_deref().unwrap_or(raw_host);
 
     // Normalize path: remove .git suffix and trailing slash
     let path = url.path().trim_end_matches('/').trim_end_matches(".git");
