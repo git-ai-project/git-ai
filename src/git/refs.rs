@@ -1,7 +1,7 @@
 use crate::authorship::authorship_log_serialization::{AUTHORSHIP_LOG_VERSION, AuthorshipLog};
 use crate::authorship::working_log::Checkpoint;
 use crate::error::GitAiError;
-use crate::git::repository::{Repository, exec_git, exec_git_stdin};
+use crate::git::repository::{Repository, exec_git, exec_git_stdin, spawn_git_with_piped_stdin};
 use crate::utils::debug_log;
 use serde_json;
 use std::collections::{HashMap, HashSet};
@@ -245,6 +245,172 @@ pub fn notes_add_batch(repo: &Repository, entries: &[(String, String)]) -> Resul
     crate::authorship::git_ai_hooks::post_notes_updated(repo, &deduped_entries);
 
     Ok(())
+}
+
+/// A streaming writer for git notes via fast-import.
+///
+/// Starts the fast-import subprocess early (resolving the existing notes tip in parallel
+/// with other work), then accepts note entries incrementally. Blob data is written to
+/// fast-import's stdin as entries arrive, overlapping fast-import's blob ingestion with
+/// the caller's computation. The commit entry is written and the process is finalized
+/// when `finish()` is called.
+pub struct StreamingNotesWriter {
+    child: std::process::Child,
+    stdin: Option<std::process::ChildStdin>,
+    existing_notes_tip: Option<String>,
+    entry_count: usize,
+    /// (commit_sha, note_content) pairs for post_notes_updated hook and commit entry
+    entries: Vec<(String, String)>,
+    seen: HashSet<String>,
+}
+
+impl StreamingNotesWriter {
+    /// Start the fast-import process and resolve the existing notes tip.
+    /// Call this early to overlap process startup with other work.
+    pub fn start(repo: &Repository) -> Result<Self, GitAiError> {
+        // Resolve existing notes tip (needed for the commit entry's "from" directive)
+        let mut rev_parse_args = repo.global_args_for_exec();
+        rev_parse_args.push("rev-parse".to_string());
+        rev_parse_args.push("--verify".to_string());
+        rev_parse_args.push("refs/notes/ai".to_string());
+        let existing_notes_tip = match exec_git(&rev_parse_args) {
+            Ok(output) => Some(String::from_utf8(output.stdout)?.trim().to_string()),
+            Err(GitAiError::GitCliError {
+                code: Some(128), ..
+            })
+            | Err(GitAiError::GitCliError { code: Some(1), .. }) => None,
+            Err(e) => return Err(e),
+        };
+
+        // Start fast-import process
+        let mut fast_import_args = repo.global_args_for_exec();
+        fast_import_args.push("fast-import".to_string());
+        fast_import_args.push("--quiet".to_string());
+        let mut child = spawn_git_with_piped_stdin(&fast_import_args)?;
+        let stdin = child.stdin.take();
+
+        Ok(StreamingNotesWriter {
+            child,
+            stdin,
+            existing_notes_tip,
+            entry_count: 0,
+            entries: Vec::new(),
+            seen: HashSet::new(),
+        })
+    }
+
+    /// Returns the number of entries added so far.
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Add a note entry. Writes the blob data to fast-import immediately.
+    pub fn add_entry(&mut self, commit_sha: String, note_content: String) -> Result<(), GitAiError> {
+        if !self.seen.insert(commit_sha.clone()) {
+            // Duplicate — update the entry in-place (last write wins)
+            if let Some(entry) = self.entries.iter_mut().find(|(sha, _)| *sha == commit_sha) {
+                entry.1 = note_content.clone();
+            }
+            // Re-write the blob for the updated content
+            // Note: fast-import marks are sequential, we'll use a new mark and reference it later
+        }
+
+        self.entry_count += 1;
+        let mark = self.entry_count;
+
+        if let Some(ref mut stdin) = self.stdin {
+            use std::io::Write;
+            let mut buf = Vec::new();
+            buf.extend_from_slice(b"blob\n");
+            buf.extend_from_slice(format!("mark :{}\n", mark).as_bytes());
+            buf.extend_from_slice(format!("data {}\n", note_content.len()).as_bytes());
+            buf.extend_from_slice(note_content.as_bytes());
+            buf.extend_from_slice(b"\n");
+            stdin.write_all(&buf).map_err(GitAiError::IoError)?;
+        }
+
+        self.entries.push((commit_sha, note_content));
+        Ok(())
+    }
+
+    /// Write the commit entry and wait for fast-import to finish.
+    pub fn finish(mut self, repo: &Repository) -> Result<(), GitAiError> {
+        if self.entries.is_empty() {
+            // Nothing to write — kill the process
+            drop(self.stdin.take());
+            let _ = self.child.wait();
+            return Ok(());
+        }
+
+        // Deduplicate: for duplicates, keep the LAST entry (most recent content)
+        let mut final_entries: Vec<(String, String)> = Vec::new();
+        let mut seen_final = HashSet::new();
+        for (commit_sha, note_content) in self.entries.iter().rev() {
+            if seen_final.insert(commit_sha.clone()) {
+                final_entries.push((commit_sha.clone(), note_content.clone()));
+            }
+        }
+        final_entries.reverse();
+
+        // Build mark mapping: for each final entry, find its latest mark
+        // (entries are 1-indexed, and duplicates get new marks)
+        let mut commit_to_mark: HashMap<&str, usize> = HashMap::new();
+        for (idx, (commit_sha, _)) in self.entries.iter().enumerate() {
+            commit_to_mark.insert(commit_sha.as_str(), idx + 1);
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| GitAiError::Generic(format!("System clock before epoch: {}", e)))?
+            .as_secs();
+
+        if let Some(ref mut stdin) = self.stdin {
+            use std::io::Write;
+            let mut buf = Vec::new();
+
+            buf.extend_from_slice(b"commit refs/notes/ai\n");
+            buf.extend_from_slice(
+                format!("committer git-ai <git-ai@local> {} +0000\n", now).as_bytes(),
+            );
+            buf.extend_from_slice(b"data 0\n");
+            if let Some(ref existing_tip) = self.existing_notes_tip {
+                buf.extend_from_slice(format!("from {}\n", existing_tip).as_bytes());
+            }
+
+            for (commit_sha, _) in &final_entries {
+                let mark = commit_to_mark[commit_sha.as_str()];
+                let fanout_path = notes_path_for_object(commit_sha);
+                let flat_path = commit_sha.as_str();
+                if flat_path != fanout_path {
+                    buf.extend_from_slice(format!("D {}\n", flat_path).as_bytes());
+                }
+                buf.extend_from_slice(format!("D {}\n", fanout_path).as_bytes());
+                buf.extend_from_slice(
+                    format!("M 100644 :{} {}\n", mark, fanout_path).as_bytes(),
+                );
+            }
+            buf.extend_from_slice(b"\n");
+
+            stdin.write_all(&buf).map_err(GitAiError::IoError)?;
+        }
+
+        // Close stdin to signal EOF to fast-import
+        drop(self.stdin.take());
+
+        // Wait for fast-import to finish
+        let output = self.child.wait_with_output().map_err(GitAiError::IoError)?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            return Err(GitAiError::GitCliError {
+                code: output.status.code(),
+                stderr,
+                args: vec!["fast-import".to_string()],
+            });
+        }
+
+        crate::authorship::git_ai_hooks::post_notes_updated(repo, &final_entries);
+        Ok(())
+    }
 }
 
 /// Batch-attach existing note blobs to commits without rewriting blob contents.

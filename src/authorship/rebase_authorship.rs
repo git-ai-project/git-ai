@@ -1071,6 +1071,10 @@ pub fn rewrite_authorship_after_rebase_v2(
         return Ok(());
     }
 
+    // Start the streaming notes writer early so fast-import process startup
+    // overlaps with the diff-tree subprocess call below.
+    let mut streaming_writer = crate::git::refs::StreamingNotesWriter::start(repo)?;
+
     // Step 2a: Run a SINGLE diff-tree call for both new and original commits.
     // This avoids the ~500ms overhead of spawning a second git subprocess.
     // We concatenate both commit lists, get all results at once, then partition them.
@@ -1318,8 +1322,6 @@ pub fn rewrite_authorship_after_rebase_v2(
             })
     };
 
-    let mut pending_note_entries: Vec<(String, String)> =
-        Vec::with_capacity(commits_to_process.len());
     let mut pending_note_debug: Vec<(String, usize)> = Vec::with_capacity(commits_to_process.len());
     let mut original_note_content_by_new_commit: HashMap<String, String> = HashMap::new();
     let mut original_note_content_loaded = false;
@@ -1496,7 +1498,9 @@ pub fn rewrite_authorship_after_rebase_v2(
                 .values()
                 .filter(|v| !v.is_empty())
                 .count();
-            pending_note_entries.push((new_commit.clone(), authorship_json));
+            // Stream the blob entry to fast-import immediately — fast-import ingests
+            // it concurrently while we process the next commit.
+            streaming_writer.add_entry(new_commit.clone(), authorship_json)?;
             pending_note_debug.push((new_commit.clone(), file_count));
         }
     }
@@ -1543,11 +1547,10 @@ pub fn rewrite_authorship_after_rebase_v2(
     timing_phases.push(("  loop:metrics".to_string(), loop_metrics_us / 1000));
 
     let phase_start = std::time::Instant::now();
-    if !pending_note_entries.is_empty() {
-        crate::git::refs::notes_add_batch(repo, &pending_note_entries)?;
-    }
+    let note_count = streaming_writer.entry_count();
+    streaming_writer.finish(repo)?;
     timing_phases.push((
-        format!("notes_add_batch ({} entries)", pending_note_entries.len()),
+        format!("notes_finish ({} entries)", note_count),
         phase_start.elapsed().as_millis(),
     ));
 

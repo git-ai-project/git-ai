@@ -3068,6 +3068,29 @@ pub fn exec_git_stdin(args: &[String], stdin_data: &[u8]) -> Result<Output, GitA
     exec_git_stdin_with_profile(args, stdin_data, InternalGitProfile::General)
 }
 
+/// Spawn a git command with piped stdin/stdout/stderr, returning the Child process.
+/// The caller is responsible for writing to stdin and waiting for the process.
+pub fn spawn_git_with_piped_stdin(args: &[String]) -> Result<std::process::Child, GitAiError> {
+    let effective_args =
+        args_with_internal_git_profile(&args_with_disabled_hooks_if_needed(args), InternalGitProfile::General);
+    let mut cmd = Command::new(config::Config::get().git_cmd());
+    cmd.args(&effective_args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    cmd.env_remove("GIT_EXTERNAL_DIFF");
+    cmd.env_remove("GIT_DIFF_OPTS");
+
+    #[cfg(windows)]
+    {
+        if !is_interactive_terminal() {
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+    }
+
+    cmd.spawn().map_err(GitAiError::IoError)
+}
+
 /// Helper to execute a git command with data provided on stdin and an explicit profile.
 pub fn exec_git_stdin_with_profile(
     args: &[String],
