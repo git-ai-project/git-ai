@@ -1212,11 +1212,13 @@ pub fn rewrite_authorship_after_rebase_v2(
         let mut needed_oids: HashSet<String> = HashSet::new();
         for (_, delta) in &diff_tree_result.commit_deltas {
             for (file_path, maybe_oid) in &delta.file_to_blob_oid {
-                if seen_files.insert(file_path.clone()) {
-                    // First time seeing this file — need its blob for content-diff
-                    if let Some(oid) = maybe_oid {
-                        needed_oids.insert(oid.clone());
-                    }
+                // Only mark as "seen" when the file has content (non-deletion).
+                // Deletions (None OID) shouldn't prevent later re-creations
+                // from having their blob read.
+                if let Some(oid) = maybe_oid
+                    && seen_files.insert(file_path.clone())
+                {
+                    needed_oids.insert(oid.clone());
                 }
             }
         }
@@ -2321,14 +2323,26 @@ fn run_diff_tree_with_hunks(
                 let tab_pos = line.find('\t');
                 if let Some(tp) = tab_pos {
                     let metadata = &line[1..tp];
-                    let file_path = line[tp + 1..].to_string();
+                    let raw_path = &line[tp + 1..];
                     let mut fields = metadata.split_whitespace();
                     let _old_mode = fields.next().unwrap_or_default();
                     let new_mode = fields.next().unwrap_or_default();
                     let _old_oid = fields.next().unwrap_or_default();
                     let new_oid = fields.next().unwrap_or_default();
                     let status = fields.next().unwrap_or_default();
-                    let _status_char = status.chars().next().unwrap_or('M');
+                    let status_char = status.chars().next().unwrap_or('M');
+
+                    // For renames/copies, raw format has "old_path\tnew_path";
+                    // use the new (destination) path.
+                    let file_path = if matches!(status_char, 'R' | 'C') {
+                        raw_path
+                            .rsplit_once('\t')
+                            .map(|(_, new)| new)
+                            .unwrap_or(raw_path)
+                            .to_string()
+                    } else {
+                        raw_path.to_string()
+                    };
 
                     if pathspecs_lookup.contains(file_path.as_str()) {
                         current_delta.changed_files.insert(file_path.clone());
