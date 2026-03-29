@@ -1303,20 +1303,9 @@ pub fn rewrite_authorship_after_rebase_v2(
         );
     }
     // Pre-split metadata JSON template at a placeholder so we only swap the commit SHA per commit.
-    let metadata_json_template_parts: Option<(String, String)> = {
-        let mut template_meta = current_authorship_log.metadata.clone();
-        template_meta.base_commit_sha = "BASE_COMMIT_SHA_PLACEHOLDER".to_string();
-        template_meta.prompts = flatten_prompts_for_metadata(&current_prompts);
-        serde_json::to_string_pretty(&template_meta)
-            .ok()
-            .map(|template| {
-                let parts: Vec<&str> = template.splitn(2, "BASE_COMMIT_SHA_PLACEHOLDER").collect();
-                (
-                    parts[0].to_string(),
-                    parts.get(1).unwrap_or(&"").to_string(),
-                )
-            })
-    };
+    // This is rebuilt per-commit when metrics change (attributions updated by hunk/diff transfer).
+    let mut metadata_json_template_parts: Option<(String, String)> =
+        build_metadata_template_parts(&current_authorship_log.metadata, &current_prompts);
 
     let mut pending_note_entries: Vec<(String, String)> =
         Vec::with_capacity(commits_to_process.len());
@@ -1328,13 +1317,11 @@ pub fn rewrite_authorship_after_rebase_v2(
     let loop_start = std::time::Instant::now();
     let mut loop_transform_ms = 0u128;
     let mut loop_serialize_us = 0u128;
-    let loop_metrics_us = 0u128;
     let mut loop_diff_ms = 0u128;
     let mut loop_hunk_ms = 0u128;
     let mut loop_attestation_ms = 0u128;
     let mut loop_content_clone_ms = 0u128;
-    let loop_metrics_subtract_ms = 0u128;
-    let loop_metrics_add_ms = 0u128;
+    let mut loop_metrics_ms = 0u128;
     let mut total_files_diffed = 0usize;
     let mut total_lines_diffed = 0usize;
     let mut total_files_hunk_transferred = 0usize;
@@ -1399,8 +1386,7 @@ pub fn rewrite_authorship_after_rebase_v2(
                     continue;
                 }
 
-                // Note: metrics subtract/add cycle removed — the metadata template
-                // is frozen before the loop, so per-commit metric updates are unused.
+                // Metrics are updated after all files in this commit are processed (below).
 
                 let line_attrs = if use_hunk_based {
                     // FAST PATH: Hunk-based attribution transfer
@@ -1434,7 +1420,6 @@ pub fn rewrite_authorship_after_rebase_v2(
                     result
                 };
 
-                // (metrics add also removed — see note above)
                 let tatt = std::time::Instant::now();
                 if let Some(text) = serialize_attestation_from_line_attrs(file_path, &line_attrs) {
                     cached_file_attestation_text.insert(file_path.clone(), text);
@@ -1451,10 +1436,15 @@ pub fn rewrite_authorship_after_rebase_v2(
             }
             loop_transform_ms += t0.elapsed().as_millis();
 
-            // Note: prompt_line_metrics are tracked incrementally but the metadata
-            // template was frozen before the loop. Per-commit metric application is
-            // skipped since it doesn't affect the output — the template already
-            // includes the initial metrics and only the commit SHA is swapped per commit.
+            // Recompute prompt_line_metrics from current attributions and rebuild
+            // the metadata template so each commit's note reflects accurate line counts.
+            let tmetrics = std::time::Instant::now();
+            let prompt_line_metrics =
+                build_prompt_line_metrics_from_attributions(&current_attributions);
+            apply_prompt_line_metrics_to_prompts(&mut current_prompts, &prompt_line_metrics);
+            metadata_json_template_parts =
+                build_metadata_template_parts(&current_authorship_log.metadata, &current_prompts);
+            loop_metrics_ms += tmetrics.elapsed().as_micros();
         }
 
         // Serialize note for this commit using fast cached assembly.
@@ -1532,15 +1522,11 @@ pub fn rewrite_authorship_after_rebase_v2(
         loop_content_clone_ms / 1000,
     ));
     timing_phases.push((
-        "    transform:metrics_subtract".to_string(),
-        loop_metrics_subtract_ms / 1000,
-    ));
-    timing_phases.push((
-        "    transform:metrics_add".to_string(),
-        loop_metrics_add_ms / 1000,
+        "    transform:metrics_rebuild".to_string(),
+        loop_metrics_ms / 1000,
     ));
     timing_phases.push(("  loop:serialize".to_string(), loop_serialize_us / 1000));
-    timing_phases.push(("  loop:metrics".to_string(), loop_metrics_us / 1000));
+    timing_phases.push(("  loop:metrics".to_string(), loop_metrics_ms / 1000));
 
     let phase_start = std::time::Instant::now();
     if !pending_note_entries.is_empty() {
@@ -3401,6 +3387,24 @@ pub fn filter_pathspecs_to_ai_touched_files(
         .filter(|p| touched_files.contains(p.as_str()))
         .cloned()
         .collect())
+}
+
+fn build_metadata_template_parts(
+    metadata: &crate::authorship::authorship_log_serialization::AuthorshipMetadata,
+    prompts: &BTreeMap<String, BTreeMap<String, crate::authorship::authorship_log::PromptRecord>>,
+) -> Option<(String, String)> {
+    let mut template_meta = metadata.clone();
+    template_meta.base_commit_sha = "BASE_COMMIT_SHA_PLACEHOLDER".to_string();
+    template_meta.prompts = flatten_prompts_for_metadata(prompts);
+    serde_json::to_string_pretty(&template_meta)
+        .ok()
+        .map(|template| {
+            let parts: Vec<&str> = template.splitn(2, "BASE_COMMIT_SHA_PLACEHOLDER").collect();
+            (
+                parts[0].to_string(),
+                parts.get(1).unwrap_or(&"").to_string(),
+            )
+        })
 }
 
 fn flatten_prompts_for_metadata(
