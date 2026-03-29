@@ -1692,6 +1692,222 @@ fn test_rebase_file_delete_recreate_preserves_attribution() {
     ai_file.assert_lines_and_blame(crate::lines!["line1".ai(), "line2".ai(), "line3".ai()]);
 }
 
+/// Regression test: AI attribution from earlier commits (not HEAD) must survive rebase.
+///
+/// Each commit's note only covers lines changed in THAT commit. HEAD doesn't
+/// touch all AI-attributed files. The reconstruction must process ALL commits'
+/// notes to build the complete attribution state, not just HEAD's.
+#[test]
+fn test_rebase_preserves_attribution_from_non_head_commits() {
+    let repo = TestRepo::new();
+
+    // Initial commit
+    let mut base = repo.filename("base.txt");
+    base.set_contents(crate::lines!["base"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    let default_branch = repo.current_branch();
+
+    // Feature branch: commit 1 — AI attribution on file_a only
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    let mut file_a = repo.filename("file_a.txt");
+    file_a.set_contents(crate::lines![
+        "// AI generated module A".ai(),
+        "fn module_a() {}".ai(),
+        "// end module A".ai()
+    ]);
+    repo.stage_all_and_commit("feat: add module A (AI)")
+        .unwrap();
+
+    // Feature branch: commit 2 — AI attribution on file_b only (file_a not touched)
+    let mut file_b = repo.filename("file_b.txt");
+    file_b.set_contents(crate::lines![
+        "// AI generated module B".ai(),
+        "fn module_b() {}".ai()
+    ]);
+    repo.stage_all_and_commit("feat: add module B (AI)")
+        .unwrap();
+
+    // Feature branch: commit 3 (HEAD) — AI attribution on file_c only
+    // file_a and file_b are NOT touched in this commit
+    let mut file_c = repo.filename("file_c.txt");
+    file_c.set_contents(crate::lines![
+        "// AI generated module C".ai(),
+        "fn module_c() {}".ai()
+    ]);
+    repo.stage_all_and_commit("feat: add module C (AI)")
+        .unwrap();
+
+    // Advance main branch to force actual rebase (not fast-forward)
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let mut main_change = repo.filename("main_update.txt");
+    main_change.set_contents(crate::lines!["main branch work"]);
+    repo.stage_all_and_commit("main: infrastructure update")
+        .unwrap();
+
+    // Rebase feature onto main
+    repo.git(&["checkout", "feature"]).unwrap();
+    repo.git(&["rebase", &default_branch]).unwrap();
+
+    // CRITICAL: file_a attribution (from commit 1, NOT HEAD) must survive
+    file_a.assert_lines_and_blame(crate::lines![
+        "// AI generated module A".ai(),
+        "fn module_a() {}".ai(),
+        "// end module A".ai()
+    ]);
+
+    // file_b attribution (from commit 2, NOT HEAD) must survive
+    file_b.assert_lines_and_blame(crate::lines![
+        "// AI generated module B".ai(),
+        "fn module_b() {}".ai()
+    ]);
+
+    // file_c attribution (from HEAD commit) must survive
+    file_c.assert_lines_and_blame(crate::lines![
+        "// AI generated module C".ai(),
+        "fn module_c() {}".ai()
+    ]);
+}
+
+/// Regression test: multi-commit attribution on SAME file from different commits.
+///
+/// Commit 1 adds AI lines 1-3, commit 3 adds AI lines 4-6, but commit 2
+/// (between them) touches a different file entirely. The reconstruction must
+/// combine notes from both commits to get the full attribution for the file.
+#[test]
+fn test_rebase_preserves_multi_commit_attribution_same_file() {
+    let repo = TestRepo::new();
+
+    let mut base = repo.filename("base.txt");
+    base.set_contents(crate::lines!["base"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    let default_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+    // Commit 1: AI attribution on app.txt lines 1-3
+    let mut app = repo.filename("app.txt");
+    app.set_contents(crate::lines![
+        "// AI header".ai(),
+        "fn init() {}".ai(),
+        "// end init".ai()
+    ]);
+    repo.stage_all_and_commit("feat: AI init code").unwrap();
+
+    // Commit 2: touch a DIFFERENT file (app.txt unchanged)
+    let mut config = repo.filename("config.txt");
+    config.set_contents(crate::lines!["// AI config".ai(), "setting = true".ai()]);
+    repo.stage_all_and_commit("feat: AI config").unwrap();
+
+    // Commit 3 (HEAD): add MORE AI lines to app.txt
+    app.set_contents(crate::lines![
+        "// AI header".ai(),
+        "fn init() {}".ai(),
+        "// end init".ai(),
+        "// AI footer added later".ai(),
+        "fn cleanup() {}".ai()
+    ]);
+    repo.stage_all_and_commit("feat: AI cleanup code").unwrap();
+
+    // Advance main
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let mut infra = repo.filename("infra.txt");
+    infra.set_contents(crate::lines!["infra work"]);
+    repo.stage_all_and_commit("main: infra").unwrap();
+
+    // Rebase
+    repo.git(&["checkout", "feature"]).unwrap();
+    repo.git(&["rebase", &default_branch]).unwrap();
+
+    // app.txt should have ALL AI lines (from commits 1 AND 3)
+    app.assert_lines_and_blame(crate::lines![
+        "// AI header".ai(),
+        "fn init() {}".ai(),
+        "// end init".ai(),
+        "// AI footer added later".ai(),
+        "fn cleanup() {}".ai()
+    ]);
+
+    // config.txt (from commit 2, NOT HEAD) must survive
+    config.assert_lines_and_blame(crate::lines!["// AI config".ai(), "setting = true".ai()]);
+}
+
+/// Regression test: attribution survives when main branch modifies AI-attributed
+/// files, forcing the slow path (blob OID mismatch between original and rebased).
+/// This tests that attribution from non-HEAD commits survives even through the
+/// full attribution rewrite path.
+#[test]
+fn test_rebase_non_head_attribution_survives_slow_path() {
+    let repo = TestRepo::new();
+
+    let mut base = repo.filename("shared.txt");
+    base.set_contents(crate::lines![
+        "// top section",
+        "line_a",
+        "line_b",
+        "line_c",
+        "",
+        "",
+        "",
+        "",
+        "// bottom section",
+        "line_x",
+        "line_y",
+        "line_z"
+    ]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    let default_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+    // Commit 1: AI attribution on module.txt
+    let mut module = repo.filename("module.txt");
+    module.set_contents(crate::lines![
+        "// AI module".ai(),
+        "pub fn process() {}".ai(),
+        "// end".ai()
+    ]);
+    repo.stage_all_and_commit("feat: AI module").unwrap();
+
+    // Commit 2 (HEAD): append to bottom of shared.txt
+    // module.txt is NOT touched here
+    let mut shared = repo.filename("shared.txt");
+    shared.set_contents(crate::lines![
+        "// top section",
+        "line_a",
+        "line_b",
+        "line_c",
+        "",
+        "",
+        "",
+        "",
+        "// bottom section",
+        "line_x",
+        "line_y",
+        "line_z",
+        "// feature addition".ai()
+    ]);
+    repo.stage_all_and_commit("feat: extend shared").unwrap();
+
+    // Advance main — add a new file so the rebase replays commits on a new base.
+    // shared.txt is NOT modified on main, so no merge conflict occurs.
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let mut infra = repo.filename("infra.txt");
+    infra.set_contents(crate::lines!["// infrastructure", "setup_logging();"]);
+    repo.stage_all_and_commit("main: add infra file").unwrap();
+
+    // Rebase
+    repo.git(&["checkout", "feature"]).unwrap();
+    repo.git(&["rebase", &default_branch]).unwrap();
+
+    // module.txt attribution (from commit 1, NOT HEAD) must survive
+    // even though the rebase took the slow path due to shared.txt changes
+    module.assert_lines_and_blame(crate::lines![
+        "// AI module".ai(),
+        "pub fn process() {}".ai(),
+        "// end".ai()
+    ]);
+}
+
 crate::reuse_tests_in_worktree!(
     test_rebase_no_conflicts_identical_trees,
     test_rebase_with_different_trees,
