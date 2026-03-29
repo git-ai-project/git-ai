@@ -26,6 +26,7 @@ dirs = "5.0"
 minreq = { version = "2.12", features = ["https-rustls-probe"] }
 url = "2.5"
 glob = "0.3"
+ignore = "0.4"
 uuid = { version = "1.22", features = ["v4"] }
 ratatui = "0.28"
 zip = { version = "8.3", default-features = false, features = ["deflate"] }

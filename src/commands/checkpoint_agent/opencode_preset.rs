@@ -3,8 +3,9 @@ use crate::{
         transcript::{AiTranscript, Message},
         working_log::{AgentId, CheckpointKind},
     },
-    commands::checkpoint_agent::agent_presets::{
-        AgentCheckpointFlags, AgentCheckpointPreset, AgentRunResult,
+    commands::checkpoint_agent::{
+        agent_presets::{AgentCheckpointFlags, AgentCheckpointPreset, AgentRunResult},
+        bash_tool::{self, Agent, BashCheckpointAction, HookEvent, ToolClass},
     },
     error::GitAiError,
     observability::log_error,
@@ -24,6 +25,10 @@ struct OpenCodeHookInput {
     session_id: String,
     cwd: String,
     tool_input: Option<ToolInput>,
+    #[serde(default)]
+    tool_name: Option<String>,
+    #[serde(default, alias = "toolUseId")]
+    tool_use_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -160,11 +165,20 @@ impl AgentCheckpointPreset for OpenCodePreset {
         let hook_input: OpenCodeHookInput = serde_json::from_str(&hook_input_json)
             .map_err(|e| GitAiError::PresetError(format!("Invalid JSON in hook_input: {}", e)))?;
 
+        // Determine if this is a bash tool invocation (before destructuring)
+        let is_bash_tool = hook_input
+            .tool_name
+            .as_deref()
+            .map(|name| bash_tool::classify_tool(Agent::OpenCode, name) == ToolClass::Bash)
+            .unwrap_or(false);
+
         let OpenCodeHookInput {
             hook_event_name,
             session_id,
             cwd,
             tool_input,
+            tool_name: _,
+            tool_use_id,
         } = hook_input;
 
         // Extract file_path from tool_input if present
@@ -210,8 +224,20 @@ impl AgentCheckpointPreset for OpenCodePreset {
             agent_metadata.insert("__test_storage_path".to_string(), test_path);
         }
 
+        let tool_use_id = tool_use_id.as_deref().unwrap_or("bash");
+
         // Check if this is a PreToolUse event (human checkpoint)
         if hook_event_name == "PreToolUse" {
+            // For bash tools, take a pre-snapshot before the tool executes
+            if is_bash_tool {
+                let repo_root = Path::new(&cwd);
+                let _ = bash_tool::handle_bash_tool(
+                    HookEvent::PreToolUse,
+                    repo_root,
+                    &agent_id.id,
+                    tool_use_id,
+                );
+            }
             return Ok(AgentRunResult {
                 agent_id,
                 agent_metadata: None,
@@ -224,6 +250,31 @@ impl AgentCheckpointPreset for OpenCodePreset {
             });
         }
 
+        // PostToolUse: for bash tools, diff snapshots to detect changed files
+        let edited_filepaths = if is_bash_tool {
+            let repo_root = Path::new(&cwd);
+            match bash_tool::handle_bash_tool(
+                HookEvent::PostToolUse,
+                repo_root,
+                &agent_id.id,
+                tool_use_id,
+            ) {
+                Ok(BashCheckpointAction::Checkpoint(paths)) => Some(paths),
+                Ok(BashCheckpointAction::NoChanges) => None,
+                Ok(BashCheckpointAction::Fallback) => {
+                    // git_status_fallback already failed inside handle_bash_tool
+                    None
+                }
+                Ok(BashCheckpointAction::TakePreSnapshot) => None,
+                Err(e) => {
+                    crate::utils::debug_log(&format!("Bash tool post-hook error: {}", e));
+                    bash_tool::git_status_fallback(Path::new(&cwd)).ok()
+                }
+            }
+        } else {
+            file_path_as_vec
+        };
+
         // PostToolUse event - AI checkpoint
         Ok(AgentRunResult {
             agent_id,
@@ -231,7 +282,7 @@ impl AgentCheckpointPreset for OpenCodePreset {
             checkpoint_kind: CheckpointKind::AiAgent,
             transcript: Some(transcript),
             repo_working_dir: Some(cwd),
-            edited_filepaths: file_path_as_vec,
+            edited_filepaths,
             will_edit_filepaths: None,
             dirty_files: None,
         })
