@@ -36,10 +36,10 @@ fn read_message(reader: &mut impl BufRead) -> io::Result<Option<String>> {
         }
         // Content-Length header is case-insensitive per LSP/JSON-RPC spec
         let lower = trimmed.to_ascii_lowercase();
-        if let Some(len_str) = lower.strip_prefix("content-length:") {
-            if let Ok(len) = len_str.trim().parse::<usize>() {
-                content_length = Some(len);
-            }
+        if let Some(len_str) = lower.strip_prefix("content-length:")
+            && let Ok(len) = len_str.trim().parse::<usize>()
+        {
+            content_length = Some(len);
         }
     }
 
