@@ -714,8 +714,7 @@ fn try_reconstruct_attributions_from_notes_cached(
     > = BTreeMap::new();
 
     // Read file contents at HEAD — needed for content-based line matching.
-    let file_contents =
-        batch_read_file_contents_at_commit(repo, original_head, pathspecs).ok()?;
+    let file_contents = batch_read_file_contents_at_commit(repo, original_head, pathspecs).ok()?;
 
     // Content-based matching: map line_content → author_id per file.
     // Each commit's note only covers lines changed in THAT commit, so we must
@@ -746,9 +745,7 @@ fn try_reconstruct_attributions_from_notes_cached(
                         crate::authorship::authorship_log::LineRange::Range(s, e) => (*s, *e),
                     };
                     for line_num in start..=end {
-                        if let Some(line_content) =
-                            lines.get(line_num.saturating_sub(1) as usize)
-                        {
+                        if let Some(line_content) = lines.get(line_num.saturating_sub(1) as usize) {
                             line_map.insert(line_content.to_string(), entry.hash.clone());
                         }
                     }
@@ -836,8 +833,7 @@ fn try_reconstruct_attributions_from_notes_cached(
                     let content_end = content_start + size;
                     if content_end <= data.len() {
                         let content =
-                            String::from_utf8_lossy(&data[content_start..content_end])
-                                .to_string();
+                            String::from_utf8_lossy(&data[content_start..content_end]).to_string();
                         commit_file_contents
                             .entry(commit.clone())
                             .or_default()
@@ -860,17 +856,14 @@ fn try_reconstruct_attributions_from_notes_cached(
                 if !pathspec_set.contains(file_path.as_str()) {
                     continue;
                 }
-                let commit_content =
-                    commit_contents.get(file_path).cloned().unwrap_or_default();
+                let commit_content = commit_contents.get(file_path).cloned().unwrap_or_default();
                 let lines: Vec<&str> = commit_content.lines().collect();
                 let line_map = file_line_authors.entry(file_path.clone()).or_default();
                 for entry in &file_attestation.entries {
                     for range in &entry.line_ranges {
                         let (start, end) = match range {
                             crate::authorship::authorship_log::LineRange::Single(l) => (*l, *l),
-                            crate::authorship::authorship_log::LineRange::Range(s, e) => {
-                                (*s, *e)
-                            }
+                            crate::authorship::authorship_log::LineRange::Range(s, e) => (*s, *e),
                         };
                         for line_num in start..=end {
                             if let Some(line_content) =

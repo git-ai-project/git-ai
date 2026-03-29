@@ -1715,7 +1715,8 @@ fn test_rebase_preserves_attribution_from_non_head_commits() {
         "fn module_a() {}".ai(),
         "// end module A".ai()
     ]);
-    repo.stage_all_and_commit("feat: add module A (AI)").unwrap();
+    repo.stage_all_and_commit("feat: add module A (AI)")
+        .unwrap();
 
     // Feature branch: commit 2 — AI attribution on file_b only (file_a not touched)
     let mut file_b = repo.filename("file_b.txt");
@@ -1723,7 +1724,8 @@ fn test_rebase_preserves_attribution_from_non_head_commits() {
         "// AI generated module B".ai(),
         "fn module_b() {}".ai()
     ]);
-    repo.stage_all_and_commit("feat: add module B (AI)").unwrap();
+    repo.stage_all_and_commit("feat: add module B (AI)")
+        .unwrap();
 
     // Feature branch: commit 3 (HEAD) — AI attribution on file_c only
     // file_a and file_b are NOT touched in this commit
@@ -1732,13 +1734,15 @@ fn test_rebase_preserves_attribution_from_non_head_commits() {
         "// AI generated module C".ai(),
         "fn module_c() {}".ai()
     ]);
-    repo.stage_all_and_commit("feat: add module C (AI)").unwrap();
+    repo.stage_all_and_commit("feat: add module C (AI)")
+        .unwrap();
 
     // Advance main branch to force actual rebase (not fast-forward)
     repo.git(&["checkout", &default_branch]).unwrap();
     let mut main_change = repo.filename("main_update.txt");
     main_change.set_contents(crate::lines!["main branch work"]);
-    repo.stage_all_and_commit("main: infrastructure update").unwrap();
+    repo.stage_all_and_commit("main: infrastructure update")
+        .unwrap();
 
     // Rebase feature onto main
     repo.git(&["checkout", "feature"]).unwrap();
@@ -1791,10 +1795,7 @@ fn test_rebase_preserves_multi_commit_attribution_same_file() {
 
     // Commit 2: touch a DIFFERENT file (app.txt unchanged)
     let mut config = repo.filename("config.txt");
-    config.set_contents(crate::lines![
-        "// AI config".ai(),
-        "setting = true".ai()
-    ]);
+    config.set_contents(crate::lines!["// AI config".ai(), "setting = true".ai()]);
     repo.stage_all_and_commit("feat: AI config").unwrap();
 
     // Commit 3 (HEAD): add MORE AI lines to app.txt
@@ -1827,10 +1828,7 @@ fn test_rebase_preserves_multi_commit_attribution_same_file() {
     ]);
 
     // config.txt (from commit 2, NOT HEAD) must survive
-    config.assert_lines_and_blame(crate::lines![
-        "// AI config".ai(),
-        "setting = true".ai()
-    ]);
+    config.assert_lines_and_blame(crate::lines!["// AI config".ai(), "setting = true".ai()]);
 }
 
 /// Regression test: attribution survives when main branch modifies AI-attributed
@@ -1894,10 +1892,7 @@ fn test_rebase_non_head_attribution_survives_slow_path() {
     // shared.txt is NOT modified on main, so no merge conflict occurs.
     repo.git(&["checkout", &default_branch]).unwrap();
     let mut infra = repo.filename("infra.txt");
-    infra.set_contents(crate::lines![
-        "// infrastructure",
-        "setup_logging();"
-    ]);
+    infra.set_contents(crate::lines!["// infrastructure", "setup_logging();"]);
     repo.stage_all_and_commit("main: add infra file").unwrap();
 
     // Rebase
