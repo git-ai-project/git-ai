@@ -129,6 +129,9 @@ pub fn handle_git_ai(args: &[String]) {
         "checkpoint" => {
             handle_checkpoint(&args[1..]);
         }
+        "prompt-event" => {
+            commands::prompt_event::handle_prompt_event(&args[1..]);
+        }
         "blame" => {
             handle_ai_blame(&args[1..]);
             if is_interactive_terminal() {

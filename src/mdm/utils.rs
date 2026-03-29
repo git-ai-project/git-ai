@@ -405,6 +405,11 @@ pub fn is_git_ai_checkpoint_command(cmd: &str) -> bool {
     cmd.contains("git-ai") && cmd.contains("checkpoint")
 }
 
+/// Check if a command is a git-ai prompt-event command
+pub fn is_git_ai_prompt_event_command(cmd: &str) -> bool {
+    cmd.contains("git-ai") && cmd.contains("prompt-event")
+}
+
 /// Generate a diff between old and new content
 pub fn generate_diff(path: &Path, old_content: &str, new_content: &str) -> String {
     let changes = compute_line_changes(old_content, new_content);

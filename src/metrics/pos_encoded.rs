@@ -50,6 +50,26 @@ pub fn u64_to_json(field: &PosField<u64>) -> Option<Value> {
     }
 }
 
+/// Convert a `PosField<bool>` to JSON Value for sparse array.
+pub fn bool_to_json(field: &PosField<bool>) -> Option<Value> {
+    match field {
+        None => None,
+        Some(None) => Some(Value::Null),
+        Some(Some(b)) => Some(Value::Bool(*b)),
+    }
+}
+
+/// Get a bool field from a sparse array at a position.
+#[allow(dead_code)]
+pub fn sparse_get_bool(arr: &SparseArray, pos: usize) -> PosField<bool> {
+    match arr.get(&pos.to_string()) {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(Value::Bool(b)) => Some(Some(*b)),
+        Some(_) => None,
+    }
+}
+
 /// Get a string field from a sparse array at a position.
 #[allow(dead_code)]
 pub fn sparse_get_string(arr: &SparseArray, pos: usize) -> PosField<String> {
@@ -340,6 +360,19 @@ macro_rules! impl_builder {
             }
         }
     };
+    ($field:ident, bool) => {
+        pub fn $field(mut self, value: bool) -> Self {
+            self.$field = Some(Some(value));
+            self
+        }
+
+        paste::paste! {
+            pub fn [<$field _null>](mut self) -> Self {
+                self.$field = Some(None);
+                self
+            }
+        }
+    };
 }
 
 /// Helper macro to convert field to JSON based on type.
@@ -354,6 +387,9 @@ macro_rules! to_json_typed {
     ($field:expr, u64) => {
         $crate::metrics::pos_encoded::u64_to_json($field)
     };
+    ($field:expr, bool) => {
+        $crate::metrics::pos_encoded::bool_to_json($field)
+    };
 }
 
 /// Helper macro to get field from sparse array based on type.
@@ -367,6 +403,9 @@ macro_rules! from_sparse_typed {
     };
     ($arr:expr, $pos:expr, u64) => {
         $crate::metrics::pos_encoded::sparse_get_u64($arr, $pos)
+    };
+    ($arr:expr, $pos:expr, bool) => {
+        $crate::metrics::pos_encoded::sparse_get_bool($arr, $pos)
     };
 }
 

@@ -1,7 +1,8 @@
 use crate::error::GitAiError;
 use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerParams};
 use crate::mdm::utils::{
-    binary_exists, generate_diff, home_dir, is_git_ai_checkpoint_command, write_atomic,
+    binary_exists, generate_diff, home_dir, is_git_ai_checkpoint_command,
+    is_git_ai_prompt_event_command, write_atomic,
 };
 use serde_json::{Value, json};
 use std::fs;
@@ -10,6 +11,7 @@ use std::path::PathBuf;
 // Command patterns for hooks
 const GEMINI_BEFORE_TOOL_CMD: &str = "checkpoint gemini --hook-input stdin";
 const GEMINI_AFTER_TOOL_CMD: &str = "checkpoint gemini --hook-input stdin";
+const GEMINI_PROMPT_EVENT_CMD: &str = "prompt-event gemini --hook-input stdin";
 
 pub struct GeminiInstaller;
 
@@ -241,6 +243,72 @@ impl HookInstaller for GeminiInstaller {
             }
         }
 
+        // Install prompt-event hook on AfterTool (catch-all, no matcher)
+        {
+            let prompt_event_cmd = format!(
+                "{} {}",
+                params.binary_path.display(),
+                GEMINI_PROMPT_EVENT_CMD
+            );
+            let mut after_array = hooks_obj
+                .get("AfterTool")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+
+            // Look for catch-all block (no matcher) with prompt-event command
+            let mut found_catchall_idx: Option<usize> = None;
+            for (idx, item) in after_array.iter().enumerate() {
+                if item.get("matcher").is_none()
+                    && let Some(hooks_arr) = item.get("hooks").and_then(|h| h.as_array())
+                    && hooks_arr.iter().any(|hook| {
+                        hook.get("command")
+                            .and_then(|c| c.as_str())
+                            .map(is_git_ai_prompt_event_command)
+                            .unwrap_or(false)
+                    })
+                {
+                    found_catchall_idx = Some(idx);
+                }
+            }
+
+            match found_catchall_idx {
+                Some(idx) => {
+                    if let Some(hooks_arr) = after_array[idx]
+                        .get_mut("hooks")
+                        .and_then(|h| h.as_array_mut())
+                    {
+                        for hook in hooks_arr.iter_mut() {
+                            if let Some(cmd) = hook.get("command").and_then(|c| c.as_str())
+                                && is_git_ai_prompt_event_command(cmd)
+                                && cmd != prompt_event_cmd
+                            {
+                                *hook = json!({
+                                    "type": "command",
+                                    "command": prompt_event_cmd
+                                });
+                                break;
+                            }
+                        }
+                    }
+                }
+                None => {
+                    after_array.push(json!({
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": prompt_event_cmd
+                            }
+                        ]
+                    }));
+                }
+            }
+
+            if let Some(obj) = hooks_obj.as_object_mut() {
+                obj.insert("AfterTool".to_string(), Value::Array(after_array));
+            }
+        }
+
         // Write back hooks to merged
         if let Some(root) = merged.as_object_mut() {
             root.insert("hooks".to_string(), hooks_obj);
@@ -287,7 +355,7 @@ impl HookInstaller for GeminiInstaller {
 
         let mut changed = false;
 
-        // Remove git-ai checkpoint commands from both BeforeTool and AfterTool
+        // Remove git-ai checkpoint and prompt-event commands from both BeforeTool and AfterTool
         for hook_type in &["BeforeTool", "AfterTool"] {
             if let Some(hook_type_array) =
                 hooks_obj.get_mut(*hook_type).and_then(|v| v.as_array_mut())
@@ -301,6 +369,7 @@ impl HookInstaller for GeminiInstaller {
                         hooks_array.retain(|hook| {
                             if let Some(cmd) = hook.get("command").and_then(|c| c.as_str()) {
                                 !is_git_ai_checkpoint_command(cmd)
+                                    && !is_git_ai_prompt_event_command(cmd)
                             } else {
                                 true
                             }
@@ -309,6 +378,19 @@ impl HookInstaller for GeminiInstaller {
                             changed = true;
                         }
                     }
+                }
+
+                // Remove catch-all blocks that are now empty
+                let original_len = hook_type_array.len();
+                hook_type_array.retain(|block| {
+                    if let Some(hooks_arr) = block.get("hooks").and_then(|h| h.as_array()) {
+                        !hooks_arr.is_empty()
+                    } else {
+                        true
+                    }
+                });
+                if hook_type_array.len() != original_len {
+                    changed = true;
                 }
             }
         }

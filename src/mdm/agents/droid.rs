@@ -1,12 +1,16 @@
 use crate::error::GitAiError;
 use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerParams};
-use crate::mdm::utils::{generate_diff, home_dir, is_git_ai_checkpoint_command, write_atomic};
+use crate::mdm::utils::{
+    generate_diff, home_dir, is_git_ai_checkpoint_command, is_git_ai_prompt_event_command,
+    write_atomic,
+};
 use serde_json::{Value, json};
 use std::fs;
 use std::path::PathBuf;
 
 const DROID_PRE_TOOL_CMD: &str = "checkpoint droid --hook-input stdin";
 const DROID_POST_TOOL_CMD: &str = "checkpoint droid --hook-input stdin";
+const DROID_PROMPT_EVENT_CMD: &str = "prompt-event droid --hook-input stdin";
 
 pub struct DroidInstaller;
 
@@ -210,6 +214,70 @@ impl HookInstaller for DroidInstaller {
             }
         }
 
+        // Install prompt-event hook on PostToolUse (catch-all, no matcher)
+        {
+            let prompt_event_cmd = format!("{} {}", binary_path, DROID_PROMPT_EVENT_CMD);
+            let mut post_array = hooks_obj
+                .get("PostToolUse")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+
+            // Look for a catch-all block (no matcher) with prompt-event command
+            let mut found_catchall_idx: Option<usize> = None;
+            for (idx, item) in post_array.iter().enumerate() {
+                if item.get("matcher").is_none()
+                    && let Some(hooks_arr) = item.get("hooks").and_then(|h| h.as_array())
+                    && hooks_arr.iter().any(|hook| {
+                        hook.get("command")
+                            .and_then(|c| c.as_str())
+                            .map(is_git_ai_prompt_event_command)
+                            .unwrap_or(false)
+                    })
+                {
+                    found_catchall_idx = Some(idx);
+                }
+            }
+
+            match found_catchall_idx {
+                Some(idx) => {
+                    // Update existing prompt-event command
+                    if let Some(hooks_arr) = post_array[idx]
+                        .get_mut("hooks")
+                        .and_then(|h| h.as_array_mut())
+                    {
+                        for hook in hooks_arr.iter_mut() {
+                            if let Some(cmd) = hook.get("command").and_then(|c| c.as_str())
+                                && is_git_ai_prompt_event_command(cmd)
+                                && cmd != prompt_event_cmd
+                            {
+                                *hook = json!({
+                                    "type": "command",
+                                    "command": prompt_event_cmd
+                                });
+                                break;
+                            }
+                        }
+                    }
+                }
+                None => {
+                    // Add new catch-all block with prompt-event
+                    post_array.push(json!({
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": prompt_event_cmd
+                            }
+                        ]
+                    }));
+                }
+            }
+
+            if let Some(obj) = hooks_obj.as_object_mut() {
+                obj.insert("PostToolUse".to_string(), Value::Array(post_array));
+            }
+        }
+
         if let Some(root) = merged.as_object_mut() {
             root.insert("hooks".to_string(), hooks_obj);
         }
@@ -270,6 +338,7 @@ impl HookInstaller for DroidInstaller {
                         hooks_array.retain(|hook| {
                             if let Some(cmd) = hook.get("command").and_then(|c| c.as_str()) {
                                 !is_git_ai_checkpoint_command(cmd)
+                                    && !is_git_ai_prompt_event_command(cmd)
                             } else {
                                 true
                             }
@@ -278,6 +347,19 @@ impl HookInstaller for DroidInstaller {
                             changed = true;
                         }
                     }
+                }
+
+                // Also remove catch-all blocks that only have prompt-event commands
+                let original_len = hook_type_array.len();
+                hook_type_array.retain(|block| {
+                    if let Some(hooks_arr) = block.get("hooks").and_then(|h| h.as_array()) {
+                        !hooks_arr.is_empty()
+                    } else {
+                        true
+                    }
+                });
+                if hook_type_array.len() != original_len {
+                    changed = true;
                 }
             }
         }

@@ -1,20 +1,26 @@
 use crate::error::GitAiError;
 use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerParams};
 use crate::mdm::utils::{
-    binary_exists, generate_diff, home_dir, is_git_ai_checkpoint_command, write_atomic,
+    binary_exists, generate_diff, home_dir, is_git_ai_checkpoint_command,
+    is_git_ai_prompt_event_command, write_atomic,
 };
 use serde_json::{Value, json};
 use std::fs;
 use std::path::PathBuf;
 
 const WINDSURF_CHECKPOINT_CMD: &str = "checkpoint windsurf --hook-input stdin";
+const WINDSURF_PROMPT_EVENT_CMD: &str = "prompt-event windsurf --hook-input stdin";
 
-/// The three Windsurf Cascade hook events we install into.
+/// The three Windsurf Cascade hook events we install into for checkpoints.
 const HOOK_EVENTS: &[&str] = &[
     "pre_write_code",
     "post_write_code",
     "post_cascade_response_with_transcript",
 ];
+
+/// Additional hook events for prompt-event tracking.
+const PROMPT_EVENT_HOOK_EVENTS: &[&str] =
+    &["post_write_code", "post_cascade_response_with_transcript"];
 
 pub struct WindsurfInstaller;
 
@@ -35,6 +41,7 @@ impl WindsurfInstaller {
     fn install_hooks_at(
         hooks_path: &PathBuf,
         desired_cmd: &str,
+        prompt_event_cmd: Option<&str>,
         dry_run: bool,
     ) -> Result<Option<String>, GitAiError> {
         if let Some(dir) = hooks_path.parent() {
@@ -117,6 +124,69 @@ impl WindsurfInstaller {
             }
         }
 
+        // Install prompt-event hooks on relevant events
+        if let Some(pe_cmd) = prompt_event_cmd {
+            for event in PROMPT_EVENT_HOOK_EVENTS {
+                let mut event_array = hooks_obj
+                    .get(*event)
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+
+                let mut found_idx: Option<usize> = None;
+                let mut needs_update = false;
+
+                for (idx, item) in event_array.iter().enumerate() {
+                    if let Some(cmd) = item.get("command").and_then(|c| c.as_str())
+                        && is_git_ai_prompt_event_command(cmd)
+                        && found_idx.is_none()
+                    {
+                        found_idx = Some(idx);
+                        if cmd != pe_cmd {
+                            needs_update = true;
+                        }
+                    }
+                }
+
+                match found_idx {
+                    Some(idx) => {
+                        if needs_update {
+                            event_array[idx] = json!({
+                                "command": pe_cmd,
+                                "show_output": false
+                            });
+                        }
+                        // Remove duplicates
+                        let keep_idx = idx;
+                        let mut current_idx = 0;
+                        event_array.retain(|item| {
+                            if current_idx == keep_idx {
+                                current_idx += 1;
+                                true
+                            } else if let Some(cmd) = item.get("command").and_then(|c| c.as_str()) {
+                                let is_dup = is_git_ai_prompt_event_command(cmd);
+                                current_idx += 1;
+                                !is_dup
+                            } else {
+                                current_idx += 1;
+                                true
+                            }
+                        });
+                    }
+                    None => {
+                        event_array.push(json!({
+                            "command": pe_cmd,
+                            "show_output": false
+                        }));
+                    }
+                }
+
+                if let Some(obj) = hooks_obj.as_object_mut() {
+                    obj.insert(event.to_string(), Value::Array(event_array));
+                }
+            }
+        }
+
         if let Some(root) = merged.as_object_mut() {
             root.insert("hooks".to_string(), hooks_obj);
         }
@@ -155,12 +225,18 @@ impl WindsurfInstaller {
 
         let mut changed = false;
 
-        for event in HOOK_EVENTS {
+        // Collect all unique events from both checkpoint and prompt-event hooks
+        let all_events: std::collections::HashSet<&&str> = HOOK_EVENTS
+            .iter()
+            .chain(PROMPT_EVENT_HOOK_EVENTS.iter())
+            .collect();
+
+        for event in all_events {
             if let Some(event_array) = hooks_obj.get_mut(*event).and_then(|v| v.as_array_mut()) {
                 let original_len = event_array.len();
                 event_array.retain(|item| {
                     if let Some(cmd) = item.get("command").and_then(|c| c.as_str()) {
-                        !is_git_ai_checkpoint_command(cmd)
+                        !is_git_ai_checkpoint_command(cmd) && !is_git_ai_prompt_event_command(cmd)
                     } else {
                         true
                     }
@@ -223,7 +299,7 @@ impl HookInstaller for WindsurfInstaller {
             let content = fs::read_to_string(&hooks_path)?;
             let existing: Value = serde_json::from_str(&content).unwrap_or_else(|_| json!({}));
 
-            let has_hooks = HOOK_EVENTS.iter().all(|event| {
+            let has_checkpoint_hooks = HOOK_EVENTS.iter().all(|event| {
                 existing
                     .get("hooks")
                     .and_then(|h| h.get(*event))
@@ -239,9 +315,26 @@ impl HookInstaller for WindsurfInstaller {
                     .unwrap_or(false)
             });
 
-            if has_hooks {
+            let has_prompt_event_hooks = PROMPT_EVENT_HOOK_EVENTS.iter().all(|event| {
+                existing
+                    .get("hooks")
+                    .and_then(|h| h.get(*event))
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter().any(|item| {
+                            item.get("command")
+                                .and_then(|c| c.as_str())
+                                .map(is_git_ai_prompt_event_command)
+                                .unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false)
+            });
+
+            if has_checkpoint_hooks {
                 any_installed = true;
-            } else {
+            }
+            if !has_checkpoint_hooks || !has_prompt_event_hooks {
                 all_installed = false;
             }
         }
@@ -263,11 +356,18 @@ impl HookInstaller for WindsurfInstaller {
             params.binary_path.display(),
             WINDSURF_CHECKPOINT_CMD
         );
+        let prompt_event_cmd = format!(
+            "{} {}",
+            params.binary_path.display(),
+            WINDSURF_PROMPT_EVENT_CMD
+        );
 
         let mut all_diffs = Vec::new();
 
         for hooks_path in Self::hooks_paths() {
-            if let Some(diff) = Self::install_hooks_at(&hooks_path, &desired_cmd, dry_run)? {
+            if let Some(diff) =
+                Self::install_hooks_at(&hooks_path, &desired_cmd, Some(&prompt_event_cmd), dry_run)?
+            {
                 all_diffs.push(diff);
             }
         }
