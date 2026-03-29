@@ -1272,8 +1272,7 @@ pub fn rewrite_authorship_after_rebase_v2(
     // No need to build VirtualAttributions wrapper — diff-based transfer replaces
     // transform_changed_files_to_final_state entirely, eliminating the need for VA in the loop.
     let mut current_prompts = initial_prompts.clone();
-    let prompt_line_metrics =
-        build_prompt_line_metrics_from_attributions(&current_attributions);
+    let prompt_line_metrics = build_prompt_line_metrics_from_attributions(&current_attributions);
     apply_prompt_line_metrics_to_prompts(&mut current_prompts, &prompt_line_metrics);
 
     // Track which files actually exist in each rebased commit.
