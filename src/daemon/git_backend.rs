@@ -627,9 +627,16 @@ fn takes_value(arg: &str) -> bool {
 }
 
 fn default_clone_target_from_source(source: &str) -> Option<PathBuf> {
-    let source = source.trim_end_matches('/');
+    let source = source.trim_end_matches(&['/', '\\'] as &[char]);
     let source = source.strip_suffix(".git").unwrap_or(source);
-    let name = source.rsplit('/').next()?.rsplit(':').next()?.to_string();
+    // Split on both / and \ to handle Windows paths
+    let after_last_sep = source.rsplit(&['/', '\\'] as &[char]).next()?;
+    // Handle SCP-like syntax (user@host:path), but skip Windows drive letters (C:)
+    let name = if after_last_sep.contains(':') && after_last_sep.len() > 2 {
+        after_last_sep.rsplit(':').next()?
+    } else {
+        after_last_sep
+    };
     if name.is_empty() {
         return None;
     }
@@ -711,7 +718,7 @@ fn parse_alias_tokens(value: &str) -> Option<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{GitBackend, SystemGitBackend};
+    use super::{GitBackend, SystemGitBackend, default_clone_target_from_source};
     use std::path::PathBuf;
 
     #[test]
@@ -725,6 +732,38 @@ mod tests {
             .expect("builtin commands should not require repository discovery");
 
         assert_eq!(resolved.as_deref(), Some("commit"));
+    }
+
+    #[test]
+    fn default_clone_target_from_url() {
+        assert_eq!(
+            default_clone_target_from_source("https://github.com/user/repo.git"),
+            Some(PathBuf::from("repo"))
+        );
+        assert_eq!(
+            default_clone_target_from_source("git@github.com:user/repo.git"),
+            Some(PathBuf::from("repo"))
+        );
+        assert_eq!(
+            default_clone_target_from_source("/local/path/repo"),
+            Some(PathBuf::from("repo"))
+        );
+    }
+
+    #[test]
+    fn default_clone_target_from_windows_path() {
+        assert_eq!(
+            default_clone_target_from_source(r"C:\Users\runner\Temp\repo"),
+            Some(PathBuf::from("repo"))
+        );
+        assert_eq!(
+            default_clone_target_from_source(r"C:\Users\runner\Temp\repo.git"),
+            Some(PathBuf::from("repo"))
+        );
+        assert_eq!(
+            default_clone_target_from_source(r"\\?\C:\Temp\bare-repo"),
+            Some(PathBuf::from("bare-repo"))
+        );
     }
 
     #[test]
