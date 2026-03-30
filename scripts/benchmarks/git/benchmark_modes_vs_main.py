@@ -257,6 +257,10 @@ class VariantRunner:
         self.base_env["GIT_AI_DEBUG_PERFORMANCE"] = "0"
         self.base_env["PATH"] = f"{self.bin_dir}{os.pathsep}{self.base_env.get('PATH', '')}"
 
+        # Disable async mode for wrapper/hooks/both modes (only daemon mode needs it)
+        if self.variant.mode != "daemon":
+            self.base_env["GIT_AI_ASYNC_MODE"] = "false"
+
         self.daemon_process: subprocess.Popen[str] | None = None
         self.daemon_started = False
         self.daemon_socket_dir = self.home_dir / ".git-ai" / "internal" / "daemon"

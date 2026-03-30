@@ -209,6 +209,10 @@ def setup_variant_runtime(
     env["GIT_AI_DEBUG_PERFORMANCE"] = "0"
     env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
 
+    # Disable async mode for wrapper/hooks/both modes (only daemon mode needs it)
+    if variant.mode != "daemon":
+        env["GIT_AI_ASYNC_MODE"] = "false"
+
     daemon_proc: subprocess.Popen[str] | None = None
     if variant.mode == "daemon":
         daemon_dir = home_dir / ".git-ai" / "internal" / "daemon"
