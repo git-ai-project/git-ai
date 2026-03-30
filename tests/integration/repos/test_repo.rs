@@ -872,20 +872,21 @@ impl TestRepo {
             // Configure async_mode based on test mode.
             // With async_mode=true as the new default, we need to explicitly control it
             // per test mode to match the expected behavior for each mode.
+            //
+            // async_mode controls whether the WRAPPER automatically uses async/daemon mode.
+            // Only WrapperDaemon should have async_mode=true.
             match git_mode {
                 GitTestMode::WrapperDaemon => {
-                    // WrapperDaemon mode: use async mode (wrapper + daemon together)
+                    // WrapperDaemon mode: wrapper + daemon together
+                    // The wrapper automatically uses async mode to communicate with daemon
                     patch.feature_flags = Some(serde_json::json!({
                         "async_mode": true
                     }));
                 }
-                GitTestMode::Daemon => {
-                    // Pure daemon mode: async is implicit (daemon handles everything)
-                    // Let the default (true) apply
-                }
                 _ => {
-                    // Wrapper, Hooks, Both modes: disable async mode
-                    // These modes use synchronous wrapper or hooks, not async/daemon
+                    // All other modes (Wrapper, Hooks, Both, Daemon): disable async mode
+                    // - Wrapper/Hooks/Both: use synchronous wrapper or hooks
+                    // - Daemon: tests manually manage daemon via trace2, not via wrapper async mode
                     patch.feature_flags = Some(serde_json::json!({
                         "async_mode": false
                     }));
