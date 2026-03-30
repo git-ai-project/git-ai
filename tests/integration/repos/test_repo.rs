@@ -1821,6 +1821,14 @@ impl TestRepo {
             .current_dir(&self.path)
             .args(["git-hooks", "ensure"]);
         self.configure_git_ai_env(&mut command);
+
+        // Add config patch so hooks setup sees the same config as the test
+        if let Some(patch) = &self.config_patch
+            && let Ok(patch_json) = serde_json::to_string(patch)
+        {
+            command.env("GIT_AI_TEST_CONFIG_PATCH", patch_json);
+        }
+
         command.env("GIT_AI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
         command.env("GITAI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
 
