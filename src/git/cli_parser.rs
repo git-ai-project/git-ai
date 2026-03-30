@@ -327,9 +327,13 @@ pub fn parse_git_cli_args(args: &[String]) -> ParsedGitInvocation {
             | "--no-advice"
             | "--bare"
             | "--literal-pathspecs"
+            | "--no-literal-pathspecs"
             | "--glob-pathspecs"
+            | "--no-glob-pathspecs"
             | "--noglob-pathspecs"
-            | "--icase-pathspecs" => return GlobalNoValue,
+            | "--no-noglob-pathspecs"
+            | "--icase-pathspecs"
+            | "--no-icase-pathspecs" => return GlobalNoValue,
             _ => {}
         }
 

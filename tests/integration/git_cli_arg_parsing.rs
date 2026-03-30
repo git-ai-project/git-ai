@@ -202,6 +202,60 @@ fn pathspec_toggles_as_globals() {
 }
 
 #[test]
+fn negated_pathspec_toggles_as_globals() {
+    let args = s(&[
+        "--no-literal-pathspecs",
+        "--no-glob-pathspecs",
+        "--no-noglob-pathspecs",
+        "--no-icase-pathspecs",
+        "ls-files",
+        "-z",
+    ]);
+    let got = parse_git_cli_args(&args);
+    assert_eq!(
+        got.global_args,
+        s(&[
+            "--no-literal-pathspecs",
+            "--no-glob-pathspecs",
+            "--no-noglob-pathspecs",
+            "--no-icase-pathspecs"
+        ])
+    );
+    assert_eq!(got.command, Some("ls-files".into()));
+    assert_eq!(got.command_args, s(&["-z"]));
+}
+
+#[test]
+fn fugitive_commit_with_no_literal_pathspecs() {
+    // vim-fugitive passes --no-literal-pathspecs between -c flags when committing
+    let args = s(&[
+        "-c",
+        "color.advice=false",
+        "-c",
+        "color.ui=false",
+        "--no-literal-pathspecs",
+        "-c",
+        "advice.waitingForEditor=false",
+        "commit",
+    ]);
+    let got = parse_git_cli_args(&args);
+    assert_eq!(
+        got.global_args,
+        s(&[
+            "-c",
+            "color.advice=false",
+            "-c",
+            "color.ui=false",
+            "--no-literal-pathspecs",
+            "-c",
+            "advice.waitingForEditor=false"
+        ])
+    );
+    assert_eq!(got.command, Some("commit".into()));
+    assert!(got.command_args.is_empty());
+}
+
+#[test]
 fn paginate_and_no_pager_both_present_kept_as_globals() {
     let args = s(&["--paginate", "--no-pager", "log"]);
     let got = parse_git_cli_args(&args);
