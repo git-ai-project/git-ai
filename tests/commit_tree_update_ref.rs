@@ -133,7 +133,9 @@ fn should_skip_test() -> bool {
     let mode = std::env::var("GIT_AI_TEST_GIT_MODE").unwrap_or_else(|_| "wrapper".to_string());
     let git_mode = GitTestMode::from_mode_name(&mode);
     if !matches!(git_mode, GitTestMode::Wrapper) {
-        eprintln!("SKIP: commit-tree/update-ref tests require pure wrapper mode (no hooks, no daemon)");
+        eprintln!(
+            "SKIP: commit-tree/update-ref tests require pure wrapper mode (no hooks, no daemon)"
+        );
         return true;
     }
     false
