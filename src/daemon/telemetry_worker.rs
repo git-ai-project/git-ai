@@ -264,7 +264,10 @@ fn flush_metrics(events: &[MetricEvent]) {
     let client = ApiClient::new(context);
 
     let using_default_api = api_base_url == crate::config::DEFAULT_API_BASE_URL;
-    let should_upload = !using_default_api || client.is_logged_in() || client.has_api_key();
+    let should_upload = !using_default_api
+        || client.is_logged_in()
+        || client.has_api_key()
+        || cfg!(debug_assertions);
 
     for chunk in events.chunks(MAX_METRICS_PER_ENVELOPE) {
         let batch = MetricsBatch::new(chunk.to_vec());

@@ -17,8 +17,8 @@ pub fn handle_flush_metrics_db(_args: &[String]) {
     let client = ApiClient::new(context);
 
     let using_default_api = api_base_url == crate::config::DEFAULT_API_BASE_URL;
-    if using_default_api && !client.is_logged_in() && !client.has_api_key() {
-        eprintln!("flush-metrics-db: skipping (not logged in and using default API)");
+    if using_default_api && !client.is_logged_in() && !client.has_api_key() && !cfg!(debug_assertions) {
+        user_log!("flush-metrics-db: skipping (not logged in and using default API)");
         return;
     }
 
