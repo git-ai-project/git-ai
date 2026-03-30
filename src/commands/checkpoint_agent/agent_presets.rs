@@ -70,7 +70,7 @@ impl AgentCheckpointPreset for ClaudePreset {
                 GitAiError::PresetError("transcript_path not found in hook_input".to_string())
             })?;
 
-        let _cwd = hook_data
+        let cwd = hook_data
             .get("cwd")
             .and_then(|v| v.as_str())
             .ok_or_else(|| GitAiError::PresetError("cwd not found in hook_input".to_string()))?;
@@ -135,7 +135,7 @@ impl AgentCheckpointPreset for ClaudePreset {
                 agent_metadata: None,
                 checkpoint_kind: CheckpointKind::Human,
                 transcript: None,
-                repo_working_dir: None,
+                repo_working_dir: Some(cwd.to_string()),
                 edited_filepaths: None,
                 will_edit_filepaths: file_path_as_vec,
                 dirty_files: None,
@@ -147,8 +147,7 @@ impl AgentCheckpointPreset for ClaudePreset {
             agent_metadata: Some(agent_metadata),
             checkpoint_kind: CheckpointKind::AiAgent,
             transcript: Some(transcript),
-            // use default.
-            repo_working_dir: None,
+            repo_working_dir: Some(cwd.to_string()),
             edited_filepaths: file_path_as_vec,
             will_edit_filepaths: None,
             dirty_files: None,
@@ -416,7 +415,7 @@ impl AgentCheckpointPreset for GeminiPreset {
                 GitAiError::PresetError("transcript_path not found in hook_input".to_string())
             })?;
 
-        let _cwd = hook_data
+        let cwd = hook_data
             .get("cwd")
             .and_then(|v| v.as_str())
             .ok_or_else(|| GitAiError::PresetError("cwd not found in hook_input".to_string()))?;
@@ -469,7 +468,7 @@ impl AgentCheckpointPreset for GeminiPreset {
                 agent_metadata: None,
                 checkpoint_kind: CheckpointKind::Human,
                 transcript: None,
-                repo_working_dir: None,
+                repo_working_dir: Some(cwd.to_string()),
                 edited_filepaths: None,
                 will_edit_filepaths: file_path_as_vec,
                 dirty_files: None,
@@ -481,8 +480,7 @@ impl AgentCheckpointPreset for GeminiPreset {
             agent_metadata: Some(agent_metadata),
             checkpoint_kind: CheckpointKind::AiAgent,
             transcript: Some(transcript),
-            // use default.
-            repo_working_dir: None,
+            repo_working_dir: Some(cwd.to_string()),
             edited_filepaths: file_path_as_vec,
             will_edit_filepaths: None,
             dirty_files: None,
@@ -612,6 +610,12 @@ impl AgentCheckpointPreset for WindsurfPreset {
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
 
+        // Extract cwd if present (Windsurf may or may not provide it)
+        let cwd = hook_data
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
         // Determine transcript path: either directly from tool_info or derived from trajectory_id
         let transcript_path = hook_data
             .get("tool_info")
@@ -669,7 +673,7 @@ impl AgentCheckpointPreset for WindsurfPreset {
                 agent_metadata: None,
                 checkpoint_kind: CheckpointKind::Human,
                 transcript: None,
-                repo_working_dir: None,
+                repo_working_dir: cwd.clone(),
                 edited_filepaths: None,
                 will_edit_filepaths: file_path_as_vec,
                 dirty_files: None,
@@ -682,7 +686,7 @@ impl AgentCheckpointPreset for WindsurfPreset {
             agent_metadata: Some(agent_metadata),
             checkpoint_kind: CheckpointKind::AiAgent,
             transcript: Some(transcript),
-            repo_working_dir: None,
+            repo_working_dir: cwd,
             edited_filepaths: file_path_as_vec,
             will_edit_filepaths: None,
             dirty_files: None,
@@ -824,7 +828,7 @@ impl AgentCheckpointPreset for ContinueCliPreset {
                 GitAiError::PresetError("transcript_path not found in hook_input".to_string())
             })?;
 
-        let _cwd = hook_data
+        let cwd = hook_data
             .get("cwd")
             .and_then(|v| v.as_str())
             .ok_or_else(|| GitAiError::PresetError("cwd not found in hook_input".to_string()))?;
@@ -886,7 +890,7 @@ impl AgentCheckpointPreset for ContinueCliPreset {
                 agent_metadata: None,
                 checkpoint_kind: CheckpointKind::Human,
                 transcript: None,
-                repo_working_dir: None,
+                repo_working_dir: Some(cwd.to_string()),
                 edited_filepaths: None,
                 will_edit_filepaths: file_path_as_vec,
                 dirty_files: None,
@@ -898,8 +902,7 @@ impl AgentCheckpointPreset for ContinueCliPreset {
             agent_metadata: Some(agent_metadata),
             checkpoint_kind: CheckpointKind::AiAgent,
             transcript: Some(transcript),
-            // use default.
-            repo_working_dir: None,
+            repo_working_dir: Some(cwd.to_string()),
             edited_filepaths: file_path_as_vec,
             will_edit_filepaths: None,
             dirty_files: None,
