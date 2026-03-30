@@ -1692,6 +1692,300 @@ fn test_rebase_file_delete_recreate_preserves_attribution() {
     ai_file.assert_lines_and_blame(crate::lines!["line1".ai(), "line2".ai(), "line3".ai()]);
 }
 
+/// Regression test: file deleted then recreated with DIFFERENT content preserves attribution.
+///
+/// This tests a subtle bug where:
+/// 1. first_appearance_blobs: seen_files must be cleared on deletion so the
+///    new blob OID is read on recreation.
+/// 2. files_with_synced_state: must be cleared on deletion so recreation
+///    uses content-diff (not stale hunk-based transfer).
+#[test]
+fn test_rebase_file_delete_recreate_different_content_preserves_attribution() {
+    let repo = TestRepo::new();
+    let default_branch = repo.current_branch();
+
+    // Initial setup
+    let mut base_file = repo.filename("base.txt");
+    base_file.set_contents(crate::lines!["base content"]);
+    repo.stage_all_and_commit("Initial").unwrap();
+
+    // Create feature branch with AI file (original content)
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    let mut ai_file = repo.filename("feature.txt");
+    ai_file.set_contents(crate::lines!["old_line1".ai(), "old_line2".ai()]);
+    repo.stage_all_and_commit("Add AI file").unwrap();
+
+    // Delete the file
+    repo.git(&["rm", "feature.txt"]).unwrap();
+    repo.stage_all_and_commit("Delete AI file").unwrap();
+
+    // Recreate the file with DIFFERENT content
+    ai_file.set_contents(crate::lines![
+        "new_line1".ai(),
+        "new_line2".ai(),
+        "new_line3".ai()
+    ]);
+    let recreate_commit = repo
+        .stage_all_and_commit("Recreate AI file different")
+        .unwrap();
+
+    // Verify pre-rebase: recreated file has attributions
+    let pre_note = repo
+        .read_authorship_note(&recreate_commit.commit_sha)
+        .expect("recreated commit should have note");
+    let pre_log = AuthorshipLog::deserialize_from_string(&pre_note).expect("parse pre note");
+    assert!(
+        !pre_log.attestations.is_empty(),
+        "precondition: recreated file should have attestations"
+    );
+
+    // Advance default branch
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let mut other_file = repo.filename("other.txt");
+    other_file.set_contents(crate::lines!["other"]);
+    repo.stage_all_and_commit("Main advances").unwrap();
+
+    // Rebase feature
+    repo.git(&["checkout", "feature"]).unwrap();
+    repo.git(&["rebase", &default_branch]).unwrap();
+
+    // Check rebased tip (the recreate commit)
+    let rebased_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let rebased_note = repo
+        .read_authorship_note(&rebased_sha)
+        .expect("rebased recreate commit should have note");
+    let rebased_log =
+        AuthorshipLog::deserialize_from_string(&rebased_note).expect("parse rebased note");
+
+    assert!(
+        !rebased_log.attestations.is_empty(),
+        "regression: file recreated with different content should have attestations after rebase"
+    );
+
+    // Verify the new AI attribution (different content) survived
+    ai_file.assert_lines_and_blame(crate::lines![
+        "new_line1".ai(),
+        "new_line2".ai(),
+        "new_line3".ai()
+    ]);
+}
+
+/// Regression test: AI attribution from earlier commits (not HEAD) must survive rebase.
+///
+/// Each commit's note only covers lines changed in THAT commit. HEAD doesn't
+/// touch all AI-attributed files. The reconstruction must process ALL commits'
+/// notes to build the complete attribution state, not just HEAD's.
+#[test]
+fn test_rebase_preserves_attribution_from_non_head_commits() {
+    let repo = TestRepo::new();
+
+    // Initial commit
+    let mut base = repo.filename("base.txt");
+    base.set_contents(crate::lines!["base"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    let default_branch = repo.current_branch();
+
+    // Feature branch: commit 1 — AI attribution on file_a only
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    let mut file_a = repo.filename("file_a.txt");
+    file_a.set_contents(crate::lines![
+        "// AI generated module A".ai(),
+        "fn module_a() {}".ai(),
+        "// end module A".ai()
+    ]);
+    repo.stage_all_and_commit("feat: add module A (AI)")
+        .unwrap();
+
+    // Feature branch: commit 2 — AI attribution on file_b only (file_a not touched)
+    let mut file_b = repo.filename("file_b.txt");
+    file_b.set_contents(crate::lines![
+        "// AI generated module B".ai(),
+        "fn module_b() {}".ai()
+    ]);
+    repo.stage_all_and_commit("feat: add module B (AI)")
+        .unwrap();
+
+    // Feature branch: commit 3 (HEAD) — AI attribution on file_c only
+    // file_a and file_b are NOT touched in this commit
+    let mut file_c = repo.filename("file_c.txt");
+    file_c.set_contents(crate::lines![
+        "// AI generated module C".ai(),
+        "fn module_c() {}".ai()
+    ]);
+    repo.stage_all_and_commit("feat: add module C (AI)")
+        .unwrap();
+
+    // Advance main branch to force actual rebase (not fast-forward)
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let mut main_change = repo.filename("main_update.txt");
+    main_change.set_contents(crate::lines!["main branch work"]);
+    repo.stage_all_and_commit("main: infrastructure update")
+        .unwrap();
+
+    // Rebase feature onto main
+    repo.git(&["checkout", "feature"]).unwrap();
+    repo.git(&["rebase", &default_branch]).unwrap();
+
+    // CRITICAL: file_a attribution (from commit 1, NOT HEAD) must survive
+    file_a.assert_lines_and_blame(crate::lines![
+        "// AI generated module A".ai(),
+        "fn module_a() {}".ai(),
+        "// end module A".ai()
+    ]);
+
+    // file_b attribution (from commit 2, NOT HEAD) must survive
+    file_b.assert_lines_and_blame(crate::lines![
+        "// AI generated module B".ai(),
+        "fn module_b() {}".ai()
+    ]);
+
+    // file_c attribution (from HEAD commit) must survive
+    file_c.assert_lines_and_blame(crate::lines![
+        "// AI generated module C".ai(),
+        "fn module_c() {}".ai()
+    ]);
+}
+
+/// Regression test: multi-commit attribution on SAME file from different commits.
+///
+/// Commit 1 adds AI lines 1-3, commit 3 adds AI lines 4-6, but commit 2
+/// (between them) touches a different file entirely. The reconstruction must
+/// combine notes from both commits to get the full attribution for the file.
+#[test]
+fn test_rebase_preserves_multi_commit_attribution_same_file() {
+    let repo = TestRepo::new();
+
+    let mut base = repo.filename("base.txt");
+    base.set_contents(crate::lines!["base"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    let default_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+    // Commit 1: AI attribution on app.txt lines 1-3
+    let mut app = repo.filename("app.txt");
+    app.set_contents(crate::lines![
+        "// AI header".ai(),
+        "fn init() {}".ai(),
+        "// end init".ai()
+    ]);
+    repo.stage_all_and_commit("feat: AI init code").unwrap();
+
+    // Commit 2: touch a DIFFERENT file (app.txt unchanged)
+    let mut config = repo.filename("config.txt");
+    config.set_contents(crate::lines!["// AI config".ai(), "setting = true".ai()]);
+    repo.stage_all_and_commit("feat: AI config").unwrap();
+
+    // Commit 3 (HEAD): add MORE AI lines to app.txt
+    app.set_contents(crate::lines![
+        "// AI header".ai(),
+        "fn init() {}".ai(),
+        "// end init".ai(),
+        "// AI footer added later".ai(),
+        "fn cleanup() {}".ai()
+    ]);
+    repo.stage_all_and_commit("feat: AI cleanup code").unwrap();
+
+    // Advance main
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let mut infra = repo.filename("infra.txt");
+    infra.set_contents(crate::lines!["infra work"]);
+    repo.stage_all_and_commit("main: infra").unwrap();
+
+    // Rebase
+    repo.git(&["checkout", "feature"]).unwrap();
+    repo.git(&["rebase", &default_branch]).unwrap();
+
+    // app.txt should have ALL AI lines (from commits 1 AND 3)
+    app.assert_lines_and_blame(crate::lines![
+        "// AI header".ai(),
+        "fn init() {}".ai(),
+        "// end init".ai(),
+        "// AI footer added later".ai(),
+        "fn cleanup() {}".ai()
+    ]);
+
+    // config.txt (from commit 2, NOT HEAD) must survive
+    config.assert_lines_and_blame(crate::lines!["// AI config".ai(), "setting = true".ai()]);
+}
+
+/// Regression test: attribution survives when main branch modifies AI-attributed
+/// files, forcing the slow path (blob OID mismatch between original and rebased).
+/// This tests that attribution from non-HEAD commits survives even through the
+/// full attribution rewrite path.
+#[test]
+fn test_rebase_non_head_attribution_survives_slow_path() {
+    let repo = TestRepo::new();
+
+    let mut base = repo.filename("shared.txt");
+    base.set_contents(crate::lines![
+        "// top section",
+        "line_a",
+        "line_b",
+        "line_c",
+        "",
+        "",
+        "",
+        "",
+        "// bottom section",
+        "line_x",
+        "line_y",
+        "line_z"
+    ]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    let default_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+    // Commit 1: AI attribution on module.txt
+    let mut module = repo.filename("module.txt");
+    module.set_contents(crate::lines![
+        "// AI module".ai(),
+        "pub fn process() {}".ai(),
+        "// end".ai()
+    ]);
+    repo.stage_all_and_commit("feat: AI module").unwrap();
+
+    // Commit 2 (HEAD): append to bottom of shared.txt
+    // module.txt is NOT touched here
+    let mut shared = repo.filename("shared.txt");
+    shared.set_contents(crate::lines![
+        "// top section",
+        "line_a",
+        "line_b",
+        "line_c",
+        "",
+        "",
+        "",
+        "",
+        "// bottom section",
+        "line_x",
+        "line_y",
+        "line_z",
+        "// feature addition".ai()
+    ]);
+    repo.stage_all_and_commit("feat: extend shared").unwrap();
+
+    // Advance main — add a new file so the rebase replays commits on a new base.
+    // shared.txt is NOT modified on main, so no merge conflict occurs.
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let mut infra = repo.filename("infra.txt");
+    infra.set_contents(crate::lines!["// infrastructure", "setup_logging();"]);
+    repo.stage_all_and_commit("main: add infra file").unwrap();
+
+    // Rebase
+    repo.git(&["checkout", "feature"]).unwrap();
+    repo.git(&["rebase", &default_branch]).unwrap();
+
+    // module.txt attribution (from commit 1, NOT HEAD) must survive
+    // even though the rebase took the slow path due to shared.txt changes
+    module.assert_lines_and_blame(crate::lines![
+        "// AI module".ai(),
+        "pub fn process() {}".ai(),
+        "// end".ai()
+    ]);
+}
+
 crate::reuse_tests_in_worktree!(
     test_rebase_no_conflicts_identical_trees,
     test_rebase_with_different_trees,
@@ -1720,6 +2014,8 @@ crate::reuse_tests_in_worktree!(
     test_rebase_commit_splitting,
     test_rebase_prompt_metrics_update_per_commit,
     test_rebase_file_delete_recreate_preserves_attribution,
+    test_rebase_file_delete_recreate_different_content_preserves_attribution,
+    test_rebase_file_delete_recreate_after_hunk_modification,
 );
 
 crate::reuse_tests_in_worktree_with_attrs!(
@@ -1727,3 +2023,90 @@ crate::reuse_tests_in_worktree_with_attrs!(
     test_rebase_squash_preserves_all_authorship,
     test_rebase_reword_commit_with_children,
 );
+
+/// Regression test: file modified via hunk path, then deleted, then recreated.
+///
+/// This exercises a bug where `current_file_contents` becomes stale after hunk-based
+/// attribution transfer (which updates attributions but not the file content cache).
+/// When the file is later deleted and recreated, the slow content-diff path would use
+/// stale content with shifted line numbers, producing corrupt attributions.
+///
+/// Trigger sequence:
+/// 1. Commit 1: create file (slow path sets current_file_contents)
+/// 2. Commit 2: modify file (hunk path shifts attrs but leaves current_file_contents stale)
+/// 3. Commit 3: delete file
+/// 4. Commit 4: recreate file with new content
+///
+/// Main branch must also modify the same file to force the slow reconstruction path.
+#[test]
+fn test_rebase_file_delete_recreate_after_hunk_modification() {
+    let repo = TestRepo::new();
+    let default_branch = repo.current_branch();
+
+    let mut base_file = repo.filename("base.txt");
+    base_file.set_contents(crate::lines!["base content"]);
+    repo.stage_all_and_commit("Initial").unwrap();
+
+    // Feature branch: 4 commits exercising hunk→delete→recreate
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+    // Commit 1: create file
+    let mut ai_file = repo.filename("feature.txt");
+    ai_file.set_contents(crate::lines!["line1".ai(), "line2".ai(), "line3".ai()]);
+    repo.stage_all_and_commit("Create AI file").unwrap();
+
+    // Commit 2: modify file (will use hunk-based path on rebase)
+    ai_file.set_contents(crate::lines![
+        "line1".ai(),
+        "line2".ai(),
+        "inserted".ai(),
+        "line3".ai()
+    ]);
+    repo.stage_all_and_commit("Modify AI file").unwrap();
+
+    // Commit 3: delete the file
+    repo.git(&["rm", "feature.txt"]).unwrap();
+    repo.stage_all_and_commit("Delete AI file").unwrap();
+
+    // Commit 4: recreate with different content
+    ai_file.set_contents(crate::lines![
+        "recreated_a".ai(),
+        "recreated_b".ai(),
+        "recreated_c".ai(),
+        "recreated_d".ai()
+    ]);
+    repo.stage_all_and_commit("Recreate AI file").unwrap();
+
+    // Advance default branch — must touch the same file to force slow path
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let mut conflict_file = repo.filename("feature.txt");
+    conflict_file.set_contents(crate::lines!["main_content"]);
+    repo.stage_all_and_commit("Main touches same file").unwrap();
+    // Delete it so rebase doesn't conflict
+    repo.git(&["rm", "feature.txt"]).unwrap();
+    repo.stage_all_and_commit("Main deletes file").unwrap();
+
+    // Rebase
+    repo.git(&["checkout", "feature"]).unwrap();
+    repo.git(&["rebase", &default_branch]).unwrap();
+
+    // Check the final commit (recreate) has correct attributions
+    let rebased_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let rebased_note = repo
+        .read_authorship_note(&rebased_sha)
+        .expect("rebased recreate commit should have note");
+    let rebased_log =
+        AuthorshipLog::deserialize_from_string(&rebased_note).expect("parse rebased note");
+
+    assert!(
+        !rebased_log.attestations.is_empty(),
+        "regression: file recreated after hunk-modify+delete should have attestations"
+    );
+
+    ai_file.assert_lines_and_blame(crate::lines![
+        "recreated_a".ai(),
+        "recreated_b".ai(),
+        "recreated_c".ai(),
+        "recreated_d".ai()
+    ]);
+}

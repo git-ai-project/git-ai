@@ -378,3 +378,156 @@ fn test_update_ref_restack_after_parent_amend_preserves_child_attribution() {
     let mut rewritten_child_file = repo.filename("child.txt");
     rewritten_child_file.assert_lines_and_blame(lines!["child ai".ai(), "child human".human()]);
 }
+
+/// Test Graphite-style rebase: replay multiple feature commits via commit-tree,
+/// then move the branch with ONE update-ref from old tip to new tip.
+///
+/// This matches actual `gt sync` behavior where Graphite replays all commits
+/// using plumbing commands and issues a single atomic update-ref at the end.
+/// git-ai must detect the N-commit rewrite and remap all N authorship notes.
+#[test]
+fn test_graphite_style_multi_commit_single_update_ref() {
+    if should_skip_for_hooks_mode() {
+        return;
+    }
+
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    setup_initial_commit(&repo);
+    let default_branch = repo.current_branch();
+
+    // Create feature branch with 3 AI commits
+    repo.git(&["checkout", "-b", "feature"])
+        .expect("checkout feature");
+
+    let mut file_a = repo.filename("a.txt");
+    file_a.set_contents(lines!["a1 ai".ai(), "a2 human"]);
+    repo.stage_all_and_commit("feat: add file a")
+        .expect("feat 1");
+
+    let mut file_b = repo.filename("b.txt");
+    file_b.set_contents(lines!["b1 ai".ai(), "b2 ai".ai()]);
+    repo.stage_all_and_commit("feat: add file b")
+        .expect("feat 2");
+
+    file_a.set_contents(lines!["a1 ai".ai(), "a2 human", "a3 ai".ai()]);
+    repo.stage_all_and_commit("feat: extend file a")
+        .expect("feat 3");
+
+    // Collect feature commits (oldest to newest)
+    let feature_commits_str = repo
+        .git(&[
+            "rev-list",
+            "--reverse",
+            &format!("{}..HEAD", default_branch),
+        ])
+        .expect("rev-list");
+    let feature_commits: Vec<&str> = feature_commits_str
+        .trim()
+        .lines()
+        .filter(|l| !l.is_empty())
+        .collect();
+    assert_eq!(feature_commits.len(), 3, "expected 3 feature commits");
+
+    // Verify all 3 have authorship notes pre-rebase
+    let git_ai_repo = open_repo(&repo);
+    for &sha in &feature_commits {
+        assert!(
+            show_authorship_note(&git_ai_repo, sha).is_some(),
+            "pre-rebase: commit {} should have authorship note",
+            sha
+        );
+    }
+
+    // Advance main so rebase has new base
+    repo.git(&["checkout", &default_branch])
+        .expect("checkout main");
+    let mut trunk = repo.filename("trunk.txt");
+    trunk.set_contents(lines!["trunk line 1"]);
+    repo.stage_all_and_commit("main advance 1").expect("main 1");
+    trunk.set_contents(lines!["trunk line 1", "trunk line 2"]);
+    repo.stage_all_and_commit("main advance 2").expect("main 2");
+    let main_tip = head_sha(&repo);
+
+    // Switch back to feature for the replay
+    repo.git(&["checkout", "feature"])
+        .expect("checkout feature");
+    let old_tip = head_sha(&repo);
+
+    // Replay all commits via commit-tree (no update-ref yet)
+    let mut new_parent = main_tip.clone();
+    for &feature_sha in &feature_commits {
+        let old_parent = repo
+            .git(&["rev-parse", &format!("{}^", feature_sha)])
+            .expect("rev-parse parent")
+            .trim()
+            .to_string();
+
+        let merged_tree_output = repo
+            .git(&[
+                "merge-tree",
+                "--write-tree",
+                "--merge-base",
+                &old_parent,
+                &new_parent,
+                feature_sha,
+            ])
+            .expect("merge-tree");
+        let merged_tree = merged_tree_output
+            .trim()
+            .lines()
+            .next()
+            .unwrap()
+            .to_string();
+
+        let message = repo
+            .git(&["log", "-1", "--format=%s", feature_sha])
+            .expect("log message")
+            .trim()
+            .to_string();
+
+        let new_commit = repo
+            .git(&[
+                "commit-tree",
+                &merged_tree,
+                "-p",
+                &new_parent,
+                "-m",
+                &message,
+            ])
+            .expect("commit-tree")
+            .trim()
+            .to_string();
+
+        new_parent = new_commit;
+    }
+
+    // ONE atomic update-ref (matches Graphite's actual behavior)
+    let new_tip = new_parent;
+    repo.git(&["update-ref", "refs/heads/feature", &new_tip, &old_tip])
+        .expect("update-ref");
+    repo.git(&["reset", "--hard", &new_tip]).expect("reset");
+
+    // Verify all 3 rebased commits have authorship notes
+    let rebased_commits_str = repo
+        .git(&["rev-list", "--reverse", &format!("{}..HEAD", main_tip)])
+        .expect("rev-list rebased");
+    let rebased_commits: Vec<&str> = rebased_commits_str
+        .trim()
+        .lines()
+        .filter(|l| !l.is_empty())
+        .collect();
+    assert_eq!(rebased_commits.len(), 3, "expected 3 rebased commits");
+
+    let git_ai_repo = open_repo(&repo);
+    for (idx, &sha) in rebased_commits.iter().enumerate() {
+        assert!(
+            show_authorship_note(&git_ai_repo, sha).is_some(),
+            "post-rebase: rebased commit {} (index {}) should have authorship note",
+            sha,
+            idx
+        );
+    }
+
+    // Verify attribution on file_b (single-commit, straightforward)
+    file_b.assert_lines_and_blame(lines!["b1 ai".ai(), "b2 ai".ai()]);
+}
