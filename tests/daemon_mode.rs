@@ -32,6 +32,16 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DAEMON_TEST_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
 
+/// Disable async mode for daemon tests that manually manage daemons.
+/// With async_mode=true by default, the wrapper tries to use daemon mode
+/// automatically, which conflicts with tests that use GitTestMode::Wrapper
+/// and manually manage their own DaemonGuard.
+fn disable_async_mode_for_manual_daemon_tests() {
+    unsafe {
+        std::env::set_var("GIT_AI_ASYNC_MODE", "false");
+    }
+}
+
 fn repo_storage(repo: &TestRepo) -> git_ai::git::repository::Repository {
     find_repository_in_path(repo.path().to_str().expect("repo path should be utf-8"))
         .expect("failed to find repository for daemon test")
@@ -639,6 +649,7 @@ fn daemon_start_spawns_detached_run_process() {
 #[test]
 #[serial]
 fn checkpoint_delegate_autostarts_daemon_when_unavailable() {
+    disable_async_mode_for_manual_daemon_tests();
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
 
     fs::write(repo.path().join("delegate-fallback.txt"), "base\n").expect("failed to write base");
@@ -690,6 +701,7 @@ fn checkpoint_delegate_autostarts_daemon_when_unavailable() {
 #[test]
 #[serial]
 fn checkpoint_delegate_falls_back_when_daemon_startup_is_blocked() {
+    disable_async_mode_for_manual_daemon_tests();
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
 
     fs::write(repo.path().join("delegate-fallback-blocked.txt"), "base\n")
@@ -748,6 +760,7 @@ fn checkpoint_delegate_falls_back_when_daemon_startup_is_blocked() {
 #[test]
 #[serial]
 fn daemon_write_mode_applies_delegated_checkpoint_and_updates_state() {
+    disable_async_mode_for_manual_daemon_tests();
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
     let completion_baseline = repo.daemon_total_completion_count();
@@ -1663,6 +1676,7 @@ fn daemon_pure_trace_socket_write_mode_applies_amend_rewrite() {
 #[test]
 #[serial]
 fn daemon_pure_trace_socket_rebase_abort_emits_abort_event() {
+    disable_async_mode_for_manual_daemon_tests();
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
@@ -1786,6 +1800,7 @@ fn daemon_pure_trace_socket_rebase_abort_emits_abort_event() {
 #[test]
 #[serial]
 fn daemon_pure_trace_socket_cherry_pick_abort_emits_abort_event() {
+    disable_async_mode_for_manual_daemon_tests();
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
@@ -2377,6 +2392,7 @@ fn daemon_commit_replay_recovers_squash_prep_when_working_log_is_missing() {
 #[test]
 #[serial]
 fn daemon_pure_trace_socket_rebase_continue_emits_complete_event() {
+    disable_async_mode_for_manual_daemon_tests();
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
@@ -2490,6 +2506,7 @@ fn daemon_commit_replay_recovers_switch_migration_when_working_log_is_missing() 
 #[test]
 #[serial]
 fn daemon_pure_trace_socket_cherry_pick_continue_emits_complete_event() {
+    disable_async_mode_for_manual_daemon_tests();
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
@@ -2560,6 +2577,7 @@ fn daemon_pure_trace_socket_cherry_pick_continue_emits_complete_event() {
 #[test]
 #[serial]
 fn daemon_pure_trace_socket_rebase_with_short_sha_emits_complete_event() {
+    disable_async_mode_for_manual_daemon_tests();
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
@@ -2681,6 +2699,7 @@ fn daemon_pure_trace_socket_rebase_with_short_sha_emits_complete_event() {
 #[test]
 #[serial]
 fn daemon_pure_trace_socket_cherry_pick_with_short_sha_emits_complete_event() {
+    disable_async_mode_for_manual_daemon_tests();
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
@@ -2796,6 +2815,7 @@ fn daemon_pure_trace_socket_cherry_pick_with_short_sha_emits_complete_event() {
 #[test]
 #[serial]
 fn daemon_pure_trace_socket_switch_tracks_success_and_conflict_failure() {
+    disable_async_mode_for_manual_daemon_tests();
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
@@ -2849,6 +2869,7 @@ fn daemon_pure_trace_socket_switch_tracks_success_and_conflict_failure() {
 #[test]
 #[serial]
 fn daemon_pure_trace_socket_checkout_tracks_success_failure_and_new_branch() {
+    disable_async_mode_for_manual_daemon_tests();
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
@@ -2907,6 +2928,7 @@ fn daemon_pure_trace_socket_checkout_tracks_success_failure_and_new_branch() {
 #[test]
 #[serial]
 fn daemon_pure_trace_socket_pull_fast_forward_tracks_pull_command() {
+    disable_async_mode_for_manual_daemon_tests();
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
@@ -3019,6 +3041,7 @@ fn daemon_pure_trace_socket_pull_fast_forward_tracks_pull_command() {
 #[test]
 #[serial]
 fn daemon_pure_trace_socket_pull_rebase_tracks_pull_and_rebase_completion() {
+    disable_async_mode_for_manual_daemon_tests();
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
@@ -3140,6 +3163,7 @@ fn daemon_pure_trace_socket_pull_rebase_tracks_pull_and_rebase_completion() {
 #[test]
 #[serial]
 fn daemon_pure_trace_socket_pull_autostash_preserves_local_changes_and_tracks_command() {
+    disable_async_mode_for_manual_daemon_tests();
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
