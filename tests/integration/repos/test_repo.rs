@@ -32,11 +32,11 @@ const DAEMON_TEST_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(windows)]
 const DAEMON_TEST_SYNC_TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
 #[cfg(not(windows))]
-const DAEMON_TEST_SYNC_TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
+const DAEMON_TEST_SYNC_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(windows)]
 const DAEMON_TEST_SYNC_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 #[cfg(not(windows))]
-const DAEMON_TEST_SYNC_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const DAEMON_TEST_SYNC_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
 const DAEMON_TEST_TRACE_READY_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -3448,7 +3448,7 @@ struct WrapperStateEntry {
 enum TracePayloadApplyOutcome {
     None,
     Applied(Box<crate::daemon::domain::AppliedCommand>),
-    QueuedFamily(String),
+    QueuedFamily,
 }
 
 impl ActorDaemonCoordinator {
@@ -3728,6 +3728,8 @@ impl ActorDaemonCoordinator {
             return Ok(None);
         };
         let family = slot.family.clone();
+        let exec_lock = self.side_effect_exec_lock(&family)?;
+        let _guard = exec_lock.lock().await;
         {
             let mut sequencers = self.family_sequencers_by_family.lock().map_err(|_| {
                 GitAiError::Generic("family sequencer map lock poisoned".to_string())
@@ -3756,14 +3758,9 @@ impl ActorDaemonCoordinator {
                 }
             }
         }
+        self.drain_ready_family_sequencer_entries_locked(&family)
+            .await?;
         Ok(Some(family))
-    }
-
-    async fn drain_family_sequencer(&self, family: &str) -> Result<(), GitAiError> {
-        let exec_lock = self.side_effect_exec_lock(family)?;
-        let _guard = exec_lock.lock().await;
-        self.drain_ready_family_sequencer_entries_locked(family)
-            .await
     }
 
     fn record_side_effect_error(
@@ -6393,7 +6390,8 @@ impl ActorDaemonCoordinator {
                     .await?
             {
                 self.clear_trace_root_tracking(root_sid)?;
-                return Ok(TracePayloadApplyOutcome::QueuedFamily(family));
+                let _ = family;
+                return Ok(TracePayloadApplyOutcome::QueuedFamily);
             }
             return Ok(TracePayloadApplyOutcome::None);
         };
@@ -6406,7 +6404,8 @@ impl ActorDaemonCoordinator {
             )
             .await?
         {
-            TracePayloadApplyOutcome::QueuedFamily(family)
+            let _ = family;
+            TracePayloadApplyOutcome::QueuedFamily
         } else {
             match self.coordinator.route_command(command).await {
                 Ok(applied) => TracePayloadApplyOutcome::Applied(Box::new(applied)),
@@ -6426,50 +6425,32 @@ impl ActorDaemonCoordinator {
             return Ok(());
         }
         match self.apply_trace_payload_to_state(payload).await? {
-            TracePayloadApplyOutcome::None => {}
-            TracePayloadApplyOutcome::QueuedFamily(family) => {
-                let coord = self.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = coord.drain_family_sequencer(&family).await {
-                        debug_log(&format!(
-                            "daemon deferred sequencer drain failed for family {}: {}",
-                            family, error
-                        ));
-                    }
-                });
-            }
+            TracePayloadApplyOutcome::None | TracePayloadApplyOutcome::QueuedFamily => {}
             TracePayloadApplyOutcome::Applied(mut applied) => {
                 if let Some(family) = applied.command.family_key.as_ref().map(|key| key.0.clone()) {
                     self.begin_family_effect(&family)?;
                     if applied.command.wrapper_invocation_id.is_some() {
                         self.apply_wrapper_state_overlay(&mut applied.command).await;
                     }
-                    let coord = self.clone();
-                    tokio::spawn(async move {
-                        let result = coord
-                            .maybe_apply_side_effects_for_applied_command(Some(&family), &applied)
-                            .await;
-                        let _ = coord.end_family_effect(&family);
-                        if let Err(error) = &result {
-                            let _ = coord.record_side_effect_error(&family, applied.seq, error);
-                            debug_log(&format!(
-                                "daemon async side-effect error for family {} seq {}: {}",
-                                family, applied.seq, error
-                            ));
-                        }
-                        if let Err(error) = coord.append_command_completion_log(
-                            &family,
-                            &applied,
-                            &result,
-                            applied.seq,
-                        ) {
-                            let _ = coord.record_side_effect_error(&family, applied.seq, &error);
-                            debug_log(&format!(
-                                "daemon async completion log write failed for family {} seq {}: {}",
-                                family, applied.seq, error
-                            ));
-                        }
-                    });
+                    let result = self
+                        .maybe_apply_side_effects_for_applied_command(Some(&family), &applied)
+                        .await;
+                    let _ = self.end_family_effect(&family);
+                    if let Err(error) = result {
+                        let _ = self.record_side_effect_error(&family, applied.seq, &error);
+                        debug_log(&format!(
+                            "daemon async side-effect error for family {} seq {}: {}",
+                            family, applied.seq, error
+                        ));
+                    } else if let Err(error) =
+                        self.append_command_completion_log(&family, &applied, &Ok(()), applied.seq)
+                    {
+                        let _ = self.record_side_effect_error(&family, applied.seq, &error);
+                        debug_log(&format!(
+                            "daemon async completion log write failed for family {} seq {}: {}",
+                            family, applied.seq, error
+                        ));
+                    }
                 }
             }
         }
