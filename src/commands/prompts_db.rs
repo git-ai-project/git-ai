@@ -11,7 +11,7 @@ use crate::git::repository::{Repository, exec_git, exec_git_stdin};
 use chrono::{Local, TimeZone};
 use rusqlite::{Connection, params};
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -49,6 +49,24 @@ CREATE INDEX IF NOT EXISTS idx_prompts_tool ON prompts(tool);
 CREATE INDEX IF NOT EXISTS idx_prompts_human_author ON prompts(human_author);
 CREATE INDEX IF NOT EXISTS idx_prompts_start_time ON prompts(start_time);
 "#;
+
+/// Prompt whose messages need CAS resolution before writing to prompts.db
+struct DeferredPrompt {
+    id: String,
+    tool: String,
+    model: String,
+    external_thread_id: String,
+    human_author: Option<String>,
+    commit_sha: String,
+    workdir: String,
+    total_additions: u32,
+    total_deletions: u32,
+    accepted_lines: u32,
+    overridden_lines: u32,
+    messages_url: String,
+    created_at: i64,
+    updated_at: i64,
+}
 
 /// Output record for `prompts next` command (JSON format)
 #[derive(Debug, Serialize)]
@@ -227,7 +245,7 @@ fn handle_populate(args: &[String]) {
 
     // 2. Fetch from git notes (scans all repos found in internal DB when --all-repositories)
     eprintln!("  git notes:");
-    match fetch_from_git_notes(
+    let deferred_prompts = match fetch_from_git_notes(
         &conn,
         since_timestamp,
         author_filter.as_deref(),
@@ -235,15 +253,30 @@ fn handle_populate(args: &[String]) {
         &workdirs_from_db,
         &mut seen_ids,
     ) {
-        Ok(count) => {
+        Ok((count, deferred)) => {
             if workdir_filter.is_some() || workdirs_from_db.is_empty() {
                 eprintln!("    +{}", count);
             }
+            deferred
         }
-        Err(e) => eprintln!("    error - {}", e),
+        Err(e) => {
+            eprintln!("    error - {}", e);
+            Vec::new()
+        }
+    };
+
+    // 3. Fetch CAS messages, then write resolved prompts to DB
+    if !deferred_prompts.is_empty() {
+        resolve_cas_messages(&conn, &deferred_prompts);
     }
 
-    eprintln!("Done. {} unique prompts in {}", seen_ids.len(), db_path);
+    // Report actual row count, not seen_ids (which includes prompts skipped for missing messages)
+    let db_count = conn
+        .query_row("SELECT COUNT(*) FROM prompts", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap_or(0);
+    eprintln!("Done. {} prompts in {}", db_count, db_path);
 }
 
 /// Handle `exec` subcommand - execute arbitrary SQL
@@ -697,8 +730,6 @@ fn fetch_from_internal_db(
     workdir: Option<&str>,
     seen_ids: &mut HashSet<String>,
 ) -> Result<(usize, Vec<String>), GitAiError> {
-    use std::collections::HashMap;
-
     let internal_db = InternalDatabase::global()?;
     let db_lock = internal_db
         .lock()
@@ -708,18 +739,15 @@ fn fetch_from_internal_db(
     let prompts = db_lock.list_prompts(workdir, Some(since_timestamp), 100000, 0)?;
     let mut new_count = 0;
     let mut workdir_counts: HashMap<String, usize> = HashMap::new();
-    let mut filtered_by_author = 0usize;
 
     for record in prompts {
         // Filter by author in memory if specified
         if let Some(auth_filter) = author {
             if let Some(ref human_author) = record.human_author {
                 if !human_author.contains(auth_filter) {
-                    filtered_by_author += 1;
                     continue;
                 }
             } else {
-                filtered_by_author += 1;
                 continue;
             }
         }
@@ -737,13 +765,12 @@ fn fetch_from_internal_db(
             new_count += 1;
         }
 
-        // Don't overwrite existing messages with empty array — messages may have
-        // been cleared locally after being uploaded to CAS
-        let messages_json = if record.messages.messages.is_empty() {
-            None
-        } else {
-            serde_json::to_string(&record.messages).ok()
-        };
+        // Skip prompts with no messages — no point writing to analysis DB without content
+        if record.messages.messages.is_empty() {
+            continue;
+        }
+
+        let messages_json = serde_json::to_string(&record.messages).ok();
         let start_time = record.messages.first_message_timestamp_unix();
         let last_time = record.messages.last_message_timestamp_unix();
 
@@ -768,17 +795,12 @@ fn fetch_from_internal_db(
         )?;
     }
 
-    // Log workdir breakdown
     if workdir.is_none() && !workdir_counts.is_empty() {
-        let mut sorted_workdirs: Vec<_> = workdir_counts.iter().collect();
-        sorted_workdirs.sort_by(|a, b| b.1.cmp(a.1)); // Sort by count descending
-        for (wd, wd_count) in &sorted_workdirs {
-            eprintln!("    {} (+{})", wd, wd_count);
-        }
-        if filtered_by_author > 0 {
-            eprintln!("    ({} filtered by author)", filtered_by_author);
-        }
-        eprintln!("    total: +{}", new_count);
+        eprintln!(
+            "    +{} (across {} repositories)",
+            new_count,
+            workdir_counts.len()
+        );
     }
 
     Ok((new_count, workdir_counts.into_keys().collect()))
@@ -786,6 +808,8 @@ fn fetch_from_internal_db(
 
 /// Fetch prompts from git notes and upsert into prompts.db
 /// workdirs_from_db: list of workdirs discovered from internal DB (for all-repositories mode)
+/// Returns (new_count, deferred_prompts) where deferred_prompts are prompts whose messages
+/// need to be fetched from CAS before they can be written to prompts.db
 fn fetch_from_git_notes(
     conn: &Connection,
     since_timestamp: i64,
@@ -793,8 +817,9 @@ fn fetch_from_git_notes(
     workdir: Option<&str>,
     workdirs_from_db: &[String],
     seen_ids: &mut HashSet<String>,
-) -> Result<usize, GitAiError> {
+) -> Result<(usize, Vec<DeferredPrompt>), GitAiError> {
     let mut new_count = 0;
+    let mut deferred: Vec<DeferredPrompt> = Vec::new();
 
     // Determine which workdirs to scan
     let workdirs_to_scan: Vec<String> = if let Some(wd) = workdir {
@@ -805,7 +830,7 @@ fn fetch_from_git_notes(
     };
 
     if workdirs_to_scan.is_empty() {
-        return Ok(0);
+        return Ok((0, deferred));
     }
 
     let now = SystemTime::now()
@@ -813,30 +838,19 @@ fn fetch_from_git_notes(
         .unwrap()
         .as_secs() as i64;
 
-    let multiple_repos = workdirs_to_scan.len() > 1;
-
     for scan_workdir in &workdirs_to_scan {
         let path = Path::new(scan_workdir);
         if !path.exists() {
-            if multiple_repos {
-                eprintln!("    {} (not found)", scan_workdir);
-            }
             continue;
         }
 
         let repo = match find_repository_in_path(scan_workdir) {
             Ok(r) => r,
-            Err(_) => {
-                if multiple_repos {
-                    eprintln!("    {} (not a git repo)", scan_workdir);
-                }
-                continue;
-            }
+            Err(_) => continue,
         };
 
         // Get commits with notes since timestamp
         let commits_with_notes = get_commits_with_notes_since(&repo, since_timestamp);
-        let mut repo_new_count = 0usize;
 
         for (commit_sha, note_content) in commits_with_notes {
             // Parse the note content as AuthorshipLog
@@ -858,62 +872,233 @@ fn fetch_from_git_notes(
                     // Track if this is a new prompt
                     let is_new = seen_ids.insert(prompt_hash.clone());
 
-                    let transcript = AiTranscript {
-                        messages: prompt_record.messages.clone(),
-                    };
-                    let start_time = transcript.first_message_timestamp_unix();
-                    let last_time = transcript.last_message_timestamp_unix();
-                    let created_at = start_time.unwrap_or(now);
-                    let updated_at = last_time.unwrap_or(created_at);
-
-                    // Don't overwrite existing messages with empty array — messages may have
-                    // been cleared locally after being uploaded to CAS
-                    let messages_json = if prompt_record.messages.is_empty() {
-                        None
+                    if prompt_record.messages.is_empty() {
+                        // Messages cleared after CAS upload — defer for CAS resolution
+                        if let Some(ref url) = prompt_record.messages_url {
+                            deferred.push(DeferredPrompt {
+                                id: prompt_hash.clone(),
+                                tool: prompt_record.agent_id.tool.clone(),
+                                model: prompt_record.agent_id.model.clone(),
+                                external_thread_id: prompt_record.agent_id.id.clone(),
+                                human_author: prompt_record.human_author.clone(),
+                                commit_sha: commit_sha.clone(),
+                                workdir: scan_workdir.clone(),
+                                total_additions: prompt_record.total_additions,
+                                total_deletions: prompt_record.total_deletions,
+                                accepted_lines: prompt_record.accepted_lines,
+                                overridden_lines: prompt_record.overriden_lines,
+                                messages_url: url.clone(),
+                                created_at: now,
+                                updated_at: now,
+                            });
+                        }
+                        // No messages and no CAS URL — skip entirely
                     } else {
-                        serde_json::to_string(&prompt_record.messages).ok()
-                    };
+                        // Has messages locally — upsert immediately
+                        let transcript = AiTranscript {
+                            messages: prompt_record.messages.clone(),
+                        };
+                        let start_time = transcript.first_message_timestamp_unix();
+                        let last_time = transcript.last_message_timestamp_unix();
+                        let created_at = start_time.unwrap_or(now);
+                        let updated_at = last_time.unwrap_or(created_at);
+                        let messages_json = serde_json::to_string(&prompt_record.messages).ok();
 
-                    upsert_prompt(
-                        conn,
-                        prompt_hash,
-                        &prompt_record.agent_id.tool,
-                        &prompt_record.agent_id.model,
-                        Some(&prompt_record.agent_id.id),
-                        prompt_record.human_author.as_deref(),
-                        Some(&commit_sha),
-                        Some(scan_workdir),
-                        Some(prompt_record.total_additions),
-                        Some(prompt_record.total_deletions),
-                        Some(prompt_record.accepted_lines),
-                        Some(prompt_record.overriden_lines),
-                        messages_json.as_deref(),
-                        start_time,
-                        last_time,
-                        created_at,
-                        updated_at,
-                    )?;
+                        upsert_prompt(
+                            conn,
+                            prompt_hash,
+                            &prompt_record.agent_id.tool,
+                            &prompt_record.agent_id.model,
+                            Some(&prompt_record.agent_id.id),
+                            prompt_record.human_author.as_deref(),
+                            Some(&commit_sha),
+                            Some(scan_workdir),
+                            Some(prompt_record.total_additions),
+                            Some(prompt_record.total_deletions),
+                            Some(prompt_record.accepted_lines),
+                            Some(prompt_record.overriden_lines),
+                            messages_json.as_deref(),
+                            start_time,
+                            last_time,
+                            created_at,
+                            updated_at,
+                        )?;
+                    }
 
                     if is_new {
                         new_count += 1;
-                        repo_new_count += 1;
                     }
                 }
             }
         }
+    }
 
-        // Log per-repo count if scanning multiple
-        if multiple_repos {
-            eprintln!("    {} (+{})", scan_workdir, repo_new_count);
+    Ok((new_count, deferred))
+}
+
+/// Resolve CAS messages for deferred prompts, then upsert only the ones that succeed.
+/// Checks cas_cache first, then batch-fetches from CAS API (chunks of 100).
+/// Silently skips any prompts where resolution fails (auth, 404, network errors).
+/// Only makes API calls if the user is logged in; cache lookups work regardless.
+fn resolve_cas_messages(conn: &Connection, deferred: &[DeferredPrompt]) {
+    use crate::api::client::{ApiClient, ApiContext};
+    use crate::api::types::CasMessagesObject;
+    use crate::utils::debug_log;
+
+    // Build hash → deferred prompt indices
+    // CAS is content-addressed: same hash = same content regardless of which server
+    // wrote the URL, so always extract the hash and fetch from current server
+    let mut hash_to_indices: HashMap<String, Vec<usize>> = HashMap::new();
+
+    for (i, dp) in deferred.iter().enumerate() {
+        // Extract hash from URL (last path segment): .../cas/{hash}
+        if let Some(hash) = dp.messages_url.rsplit('/').next().filter(|h| !h.is_empty()) {
+            hash_to_indices.entry(hash.to_string()).or_default().push(i);
         }
     }
 
-    // Log total if multiple repos
-    if multiple_repos {
-        eprintln!("    total: +{}", new_count);
+    if hash_to_indices.is_empty() {
+        return;
     }
 
-    Ok(new_count)
+    let total_to_resolve = hash_to_indices.len();
+    eprintln!("  resolving {} transcripts:", total_to_resolve);
+
+    // Resolved messages keyed by hash
+    let mut resolved_messages: HashMap<String, String> = HashMap::new();
+
+    // Step 1: Check cas_cache for each hash
+    let mut hashes_needing_fetch: Vec<String> = Vec::new();
+
+    if let Ok(db_mutex) = InternalDatabase::global()
+        && let Ok(db_guard) = db_mutex.lock()
+    {
+        for hash in hash_to_indices.keys() {
+            if let Ok(Some(cached_json)) = db_guard.get_cas_cache(hash)
+                && let Ok(cas_obj) = serde_json::from_str::<CasMessagesObject>(&cached_json)
+                && let Ok(messages_json) = serde_json::to_string(&cas_obj.messages)
+            {
+                resolved_messages.insert(hash.clone(), messages_json);
+                continue;
+            }
+            hashes_needing_fetch.push(hash.clone());
+        }
+    } else {
+        hashes_needing_fetch = hash_to_indices.keys().cloned().collect();
+    }
+
+    let cached_count = resolved_messages.len();
+    if cached_count > 0 {
+        eprintln!("    {}/{} from cache", cached_count, total_to_resolve);
+    }
+
+    // Step 2: Batch fetch remaining from CAS API (requires auth)
+    if !hashes_needing_fetch.is_empty() {
+        let context = ApiContext::new(None);
+        if context.auth_token.is_none() {
+            debug_log("prompts: no auth token, skipping CAS API fetch");
+            eprintln!(
+                "    {}/{} remaining (skipped, not logged in)",
+                hashes_needing_fetch.len(),
+                total_to_resolve
+            );
+        } else {
+            let client = ApiClient::new(context);
+            let mut fetched_so_far = 0usize;
+            let fetch_total = hashes_needing_fetch.len();
+
+            for chunk in hashes_needing_fetch.chunks(100) {
+                fetched_so_far += chunk.len();
+                eprint!("\r    fetching {}/{}...", fetched_so_far, fetch_total);
+
+                let hash_refs: Vec<&str> = chunk.iter().map(|s| s.as_str()).collect();
+
+                match client.read_ca_prompt_store(&hash_refs) {
+                    Ok(response) => {
+                        for result in &response.results {
+                            if result.status == "ok"
+                                && let Some(content) = &result.content
+                            {
+                                let json_str = serde_json::to_string(content).unwrap_or_default();
+                                if let Ok(cas_obj) =
+                                    serde_json::from_value::<CasMessagesObject>(content.clone())
+                                {
+                                    if let Ok(messages_json) =
+                                        serde_json::to_string(&cas_obj.messages)
+                                    {
+                                        resolved_messages
+                                            .insert(result.hash.clone(), messages_json);
+                                    }
+                                    // Cache for future runs
+                                    if let Ok(db_mutex) = InternalDatabase::global()
+                                        && let Ok(mut db_guard) = db_mutex.lock()
+                                    {
+                                        let _ = db_guard.set_cas_cache(&result.hash, &json_str);
+                                    }
+                                }
+                            }
+                            // Silently skip errors — summary line reports skipped count
+                        }
+                    }
+                    Err(e) => {
+                        debug_log(&format!("prompts: CAS batch fetch error: {}", e));
+                    }
+                }
+            }
+            eprintln!(); // finish the \r line
+        }
+    }
+
+    // Step 3: Upsert deferred prompts that got messages
+    let mut written = 0usize;
+    for (hash, indices) in &hash_to_indices {
+        if let Some(messages_json) = resolved_messages.get(hash) {
+            for &idx in indices {
+                let dp = &deferred[idx];
+                if upsert_prompt(
+                    conn,
+                    &dp.id,
+                    &dp.tool,
+                    &dp.model,
+                    Some(&dp.external_thread_id),
+                    dp.human_author.as_deref(),
+                    Some(&dp.commit_sha),
+                    Some(&dp.workdir),
+                    Some(dp.total_additions),
+                    Some(dp.total_deletions),
+                    Some(dp.accepted_lines),
+                    Some(dp.overridden_lines),
+                    Some(messages_json),
+                    None, // start_time extracted from messages at query time
+                    None, // last_time
+                    dp.created_at,
+                    dp.updated_at,
+                )
+                .is_ok()
+                {
+                    written += 1;
+                }
+            }
+        }
+    }
+
+    let skipped = deferred.len() - written;
+    if skipped > 0 {
+        eprintln!(
+            "    +{} transcripts ({} cached, {} fetched, {} skipped)",
+            written,
+            cached_count,
+            written.saturating_sub(cached_count),
+            skipped
+        );
+    } else {
+        eprintln!(
+            "    +{} transcripts ({} cached, {} fetched)",
+            written,
+            cached_count,
+            written.saturating_sub(cached_count)
+        );
+    }
 }
 
 /// Get commits with their AI notes since a given time
