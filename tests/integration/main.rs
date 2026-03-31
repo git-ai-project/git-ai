@@ -56,7 +56,6 @@ mod jetbrains_ide_types;
 mod merge_rebase;
 mod multi_repo_workspace;
 mod non_utf8_files;
-mod observability_flush;
 mod opencode;
 mod performance;
 mod prompt_across_commit;

@@ -9,7 +9,6 @@ pub mod debug;
 pub mod diff;
 pub mod exchange_nonce;
 pub mod flush_cas;
-pub mod flush_logs;
 pub mod flush_metrics_db;
 pub mod git_ai_handlers;
 pub mod git_handlers;
