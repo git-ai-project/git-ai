@@ -558,9 +558,11 @@ async fn async_run_install(
                 // Install extras (extensions, git.path, etc.)
                 match installer.install_extras(params, dry_run) {
                     Ok(results) => {
+                        let mut extras_changed = false;
                         for result in results {
                             if result.changed {
                                 has_changes = true;
+                                extras_changed = true;
                             }
                             if result.changed && !dry_run {
                                 let extra_spinner = Spinner::new(&result.message);
@@ -595,6 +597,21 @@ async fn async_run_install(
                                     .find(|(tool_id, _)| tool_id == id)
                             {
                                 detail.warnings.push(result.message.clone());
+                            }
+                        }
+
+                        // Track restart detection for extras-only agents (e.g. JetBrains, VS Code)
+                        if extras_changed
+                            && !dry_run
+                            && !updated_agents.iter().any(|(n, _)| n == name)
+                        {
+                            let pnames: Vec<String> = installer
+                                .process_names()
+                                .iter()
+                                .map(|s| s.to_string())
+                                .collect();
+                            if !pnames.is_empty() {
+                                updated_agents.push((name.to_string(), pnames));
                             }
                         }
                     }
