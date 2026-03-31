@@ -157,7 +157,10 @@ fn current_timestamp() -> u64 {
 
 #[cfg(windows)]
 fn exit_if_invoked_via_git_extension() {
-    if upgrade_invoked_via_git_parent() {
+    if should_block_git_extension_upgrade(
+        parent_process_name().as_deref(),
+        std::env::var(ENV_BACKGROUND_UPGRADE_WORKER).as_deref() == Ok("1"),
+    ) {
         eprintln!(
             "error: `git ai upgrade` is not supported on Windows. Run `git-ai upgrade` instead."
         );
@@ -166,10 +169,11 @@ fn exit_if_invoked_via_git_extension() {
 }
 
 #[cfg(windows)]
-fn upgrade_invoked_via_git_parent() -> bool {
-    parent_process_name()
-        .as_deref()
-        .is_some_and(is_git_process_name)
+fn should_block_git_extension_upgrade(
+    parent_process_name: Option<&str>,
+    is_background_worker: bool,
+) -> bool {
+    !is_background_worker && parent_process_name.is_some_and(is_git_process_name)
 }
 
 #[cfg(windows)]
@@ -1045,6 +1049,22 @@ mod tests {
         assert!(is_git_process_name(r"C:\Program Files\Git\cmd\git.exe"));
         assert!(!is_git_process_name("git-ai.exe"));
         assert!(!is_git_process_name("powershell.exe"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_should_block_git_extension_upgrade() {
+        assert!(should_block_git_extension_upgrade(Some("git.exe"), false));
+        assert!(should_block_git_extension_upgrade(
+            Some(r"C:\Program Files\Git\cmd\git.exe"),
+            false
+        ));
+        assert!(!should_block_git_extension_upgrade(Some("git.exe"), true));
+        assert!(!should_block_git_extension_upgrade(
+            Some("powershell.exe"),
+            false
+        ));
+        assert!(!should_block_git_extension_upgrade(None, false));
     }
 
     #[test]
