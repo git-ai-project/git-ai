@@ -42,7 +42,7 @@ jobs:
           toolchain: "1.93.0"
           components: rustfmt
 
-      - uses: go-task/setup-task@v1
+      - uses: go-task/setup-task@v2
 
       - run: task format:check
 
@@ -71,7 +71,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-lint-
 
-      - uses: go-task/setup-task@v1
+      - uses: go-task/setup-task@v2
 
       - run: task lint
 
@@ -97,6 +97,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-doc-
 
-      - uses: go-task/setup-task@v1
+      - uses: go-task/setup-task@v2
 
       - run: task doc
