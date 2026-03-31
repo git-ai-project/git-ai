@@ -38,6 +38,10 @@ impl HookInstaller for AmpInstaller {
         "amp"
     }
 
+    fn process_names(&self) -> Vec<&str> {
+        vec!["amp"]
+    }
+
     fn check_hooks(&self, params: &HookInstallerParams) -> Result<HookCheckResult, GitAiError> {
         let has_binary = binary_exists("amp");
         let has_global_config = home_dir().join(".config").join("amp").exists();

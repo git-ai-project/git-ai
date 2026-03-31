@@ -134,6 +134,19 @@ impl HookInstaller for JetBrainsInstaller {
         "jetbrains"
     }
 
+    fn process_names(&self) -> Vec<&str> {
+        vec![
+            "idea",
+            "webstorm",
+            "pycharm",
+            "goland",
+            "rustrover",
+            "clion",
+            "phpstorm",
+            "rider",
+        ]
+    }
+
     fn uses_config_hooks(&self) -> bool {
         // JetBrains only uses install_extras for plugin installation, no config file hooks
         false

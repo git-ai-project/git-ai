@@ -83,6 +83,10 @@ impl HookInstaller for VSCodeInstaller {
         })
     }
 
+    fn process_names(&self) -> Vec<&str> {
+        vec!["Code", "code"]
+    }
+
     fn install_hooks(
         &self,
         _params: &HookInstallerParams,

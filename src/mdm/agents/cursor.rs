@@ -105,6 +105,10 @@ impl HookInstaller for CursorInstaller {
         })
     }
 
+    fn process_names(&self) -> Vec<&str> {
+        vec!["Cursor", "cursor"]
+    }
+
     fn install_hooks(
         &self,
         params: &HookInstallerParams,

@@ -38,6 +38,10 @@ impl HookInstaller for OpenCodeInstaller {
         "opencode"
     }
 
+    fn process_names(&self) -> Vec<&str> {
+        vec!["opencode"]
+    }
+
     fn check_hooks(&self, params: &HookInstallerParams) -> Result<HookCheckResult, GitAiError> {
         let has_binary = binary_exists("opencode");
         let has_global_config = home_dir().join(".config").join("opencode").exists();

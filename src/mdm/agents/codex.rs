@@ -124,6 +124,10 @@ impl HookInstaller for CodexInstaller {
         "codex"
     }
 
+    fn process_names(&self) -> Vec<&str> {
+        vec!["codex"]
+    }
+
     fn check_hooks(&self, params: &HookInstallerParams) -> Result<HookCheckResult, GitAiError> {
         let has_binary = binary_exists("codex");
         let has_dotfiles = home_dir().join(".codex").exists();

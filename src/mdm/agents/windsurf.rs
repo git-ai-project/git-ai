@@ -199,6 +199,10 @@ impl HookInstaller for WindsurfInstaller {
         "windsurf"
     }
 
+    fn process_names(&self) -> Vec<&str> {
+        vec!["Windsurf", "windsurf"]
+    }
+
     fn check_hooks(&self, _params: &HookInstallerParams) -> Result<HookCheckResult, GitAiError> {
         let has_binary = binary_exists("windsurf");
         let has_dotfiles = home_dir().join(".codeium").join("windsurf").exists();

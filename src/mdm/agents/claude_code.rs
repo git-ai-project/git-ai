@@ -96,6 +96,10 @@ impl HookInstaller for ClaudeCodeInstaller {
         })
     }
 
+    fn process_names(&self) -> Vec<&str> {
+        vec!["claude"]
+    }
+
     fn install_hooks(
         &self,
         params: &HookInstallerParams,

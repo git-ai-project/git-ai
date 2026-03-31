@@ -40,6 +40,10 @@ impl HookInstaller for GitHubCopilotInstaller {
         "github-copilot"
     }
 
+    fn process_names(&self) -> Vec<&str> {
+        vec!["Code", "code"]
+    }
+
     fn check_hooks(&self, params: &HookInstallerParams) -> Result<HookCheckResult, GitAiError> {
         let resolved_cli = resolve_editor_cli("code");
         let has_cli = resolved_cli.is_some();

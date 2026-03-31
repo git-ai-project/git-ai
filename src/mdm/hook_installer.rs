@@ -82,6 +82,13 @@ pub trait HookInstaller: Send + Sync {
         Ok(vec![])
     }
 
+    /// Process names to search for in the system process list.
+    /// Used after hook updates to detect running instances that need restarting.
+    /// Default implementation returns an empty list (no process detection).
+    fn process_names(&self) -> Vec<&str> {
+        vec![]
+    }
+
     /// Uninstall extras (e.g., VS Code extensions, git.path configuration)
     /// Default implementation does nothing
     fn uninstall_extras(

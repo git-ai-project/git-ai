@@ -25,6 +25,10 @@ impl HookInstaller for DroidInstaller {
         "droid"
     }
 
+    fn process_names(&self) -> Vec<&str> {
+        vec!["droid"]
+    }
+
     fn check_hooks(&self, _params: &HookInstallerParams) -> Result<HookCheckResult, GitAiError> {
         let has_dotfiles = home_dir().join(".factory").exists();
 

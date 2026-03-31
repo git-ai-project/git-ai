@@ -28,6 +28,10 @@ impl HookInstaller for GeminiInstaller {
         "gemini"
     }
 
+    fn process_names(&self) -> Vec<&str> {
+        vec!["gemini"]
+    }
+
     fn check_hooks(&self, _params: &HookInstallerParams) -> Result<HookCheckResult, GitAiError> {
         let has_binary = binary_exists("gemini");
         let has_dotfiles = home_dir().join(".gemini").exists();
