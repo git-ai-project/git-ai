@@ -55,7 +55,7 @@ define_feature_flags!(
     rewrite_stash: rewrite_stash, debug = true, release = false,
     inter_commit_move: checkpoint_inter_commit_move, debug = false, release = false,
     auth_keyring: auth_keyring, debug = false, release = false,
-    async_mode: async_mode, debug = false, release = false,
+    async_mode: async_mode, debug = false, release = true,
     git_hooks_enabled: git_hooks_enabled, debug = false, release = false,
     git_hooks_externally_managed: git_hooks_externally_managed, debug = false, release = false,
 );
@@ -139,7 +139,7 @@ mod tests {
             assert!(!flags.rewrite_stash);
             assert!(!flags.inter_commit_move);
             assert!(!flags.auth_keyring);
-            assert!(!flags.async_mode);
+            assert!(flags.async_mode);
             assert!(!flags.git_hooks_enabled);
             assert!(!flags.git_hooks_externally_managed);
         }
