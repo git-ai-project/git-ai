@@ -56,10 +56,15 @@ jobs:
         id: commits
         run: |
           MERGE_BASE=$(git merge-base HEAD upstream/main)
+
+          # Write log to a file — avoids GITHUB_OUTPUT size limits and shell quoting issues
+          git log --oneline --no-merges "$MERGE_BASE"..upstream/main \
+            | sed 's/^/- /' > /tmp/upstream-commits.md
+
+          # Also store in output for the job summary (plain text, no backticks)
           {
             echo 'log<<EOF'
-            git log --oneline --no-merges "$MERGE_BASE"..upstream/main \
-              | sed 's/^/- `/' | sed 's/ /` /'
+            cat /tmp/upstream-commits.md
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
@@ -96,6 +101,10 @@ jobs:
         id: escalation_pr
         env:
           GH_TOKEN: ${{ secrets.SYNC_PAT || secrets.GITHUB_TOKEN }}
+          COMMIT_COUNT: ${{ steps.check.outputs.commit_count }}
+          PATCH_COUNT: ${{ steps.check.outputs.patch_count }}
+          SECURITY_HITS: ${{ steps.commits.outputs.security_hits }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           BRANCH="auto/upstream-sync-$(date +%Y%m%d)"
           git checkout -b "$BRANCH" upstream/main
@@ -107,45 +116,46 @@ jobs:
           fi
           echo "branch_pushed=true" >> "$GITHUB_OUTPUT"
 
-          SECURITY_NOTE=""
-          if [ "${{ steps.commits.outputs.security_hits }}" != "0" ]; then
-            SECURITY_NOTE=$(printf '\n### Security-relevant changes detected\n\n**%s** commit(s) mention security keywords — review with priority.' "${{ steps.commits.outputs.security_hits }}")
-          fi
+          # Build PR body in a temp file to avoid shell expansion issues
+          {
+            echo "## Upstream sync failed — rebase conflict"
+            echo ""
+            echo "**${COMMIT_COUNT}** new upstream commits could not be rebased"
+            echo "under the **${PATCH_COUNT}** PageUp patches."
+            if [ "$SECURITY_HITS" != "0" ]; then
+              echo ""
+              echo "### Security-relevant changes detected"
+              echo ""
+              echo "**${SECURITY_HITS}** commit(s) mention security keywords — review with priority."
+            fi
+            echo ""
+            echo "### Upstream commits"
+            echo ""
+            cat /tmp/upstream-commits.md
+            echo ""
+            echo "### How to resolve"
+            echo ""
+            echo '```bash'
+            echo "git fetch upstream main"
+            echo "git checkout main"
+            echo "git rebase upstream/main"
+            echo "# resolve conflicts, then:"
+            echo "git rebase --continue"
+            echo "git push --force-with-lease origin main"
+            echo '```'
+            echo ""
+            echo "Then close this PR (do **not** merge it via GitHub UI)."
+            echo ""
+            echo "---"
+            echo "*Created by [sync-upstream](${RUN_URL})*"
+          } > /tmp/pr-body.md
 
           gh pr create \
             --base main \
             --head "$BRANCH" \
-            --assignee humblelistener \
             --label upstream-sync \
             --title "chore: upstream sync conflict — manual rebase required" \
-            --body "$(cat <<PREOF
-          ## Upstream sync failed — rebase conflict
-
-          **${{ steps.check.outputs.commit_count }}** new upstream commits could not be rebased
-          under the **${{ steps.check.outputs.patch_count }}** PageUp patches.
-          ${SECURITY_NOTE}
-
-          ### Upstream commits
-
-          ${{ steps.commits.outputs.log }}
-
-          ### How to resolve
-
-          \`\`\`bash
-          git fetch upstream main
-          git checkout main
-          git rebase upstream/main
-          # resolve conflicts, then:
-          git rebase --continue
-          git push --force-with-lease origin main
-          \`\`\`
-
-          Then close this PR (do **not** merge it via GitHub UI).
-
-          ---
-          *Created by [sync-upstream](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*
-          PREOF
-          )"
+            --body-file /tmp/pr-body.md || true
 
       - name: Create issue as fallback notification
         if: |
@@ -153,93 +163,100 @@ jobs:
           (steps.rebase.outputs.result == 'conflict' && steps.escalation_pr.outputs.branch_pushed == 'false')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REBASE_RESULT: ${{ steps.rebase.outputs.result }}
+          COMMIT_COUNT: ${{ steps.check.outputs.commit_count }}
+          PATCH_COUNT: ${{ steps.check.outputs.patch_count }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          if [ "${{ steps.rebase.outputs.result }}" = "success" ]; then
+          if [ "$REBASE_RESULT" = "success" ]; then
             TITLE="chore: upstream sync — rebase succeeded but push failed"
-            BODY="$(cat <<ISSEOF
-          ## Upstream sync rebase succeeded but could not push
-
-          The rebase of **${{ steps.check.outputs.patch_count }}** PageUp patches on
-          **${{ steps.check.outputs.commit_count }}** new upstream commits succeeded,
-          but the force-push to \`main\` failed.
-
-          **Most likely cause:** missing \`SYNC_PAT\` secret or branch-protection bypass.
-
-          ### Setup required
-
-          1. Create a PAT with \`repo\` + \`workflow\` scopes
-          2. Add it as repo secret \`SYNC_PAT\`
-          3. Add a branch-protection bypass for the PAT owner (Settings → Rules → Rulesets)
-
-          ### Manual sync
-
-          \`\`\`bash
-          git fetch upstream main
-          git checkout main
-          git rebase upstream/main
-          git push --force-with-lease origin main
-          \`\`\`
-
-          ### Upstream commits
-
-          ${{ steps.commits.outputs.log }}
-
-          ---
-          *Created by [sync-upstream](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*
-          ISSEOF
-          )"
+            {
+              echo "## Upstream sync rebase succeeded but could not push"
+              echo ""
+              echo "The rebase of **${PATCH_COUNT}** PageUp patches on"
+              echo "**${COMMIT_COUNT}** new upstream commits succeeded,"
+              echo "but the force-push to \`main\` failed."
+              echo ""
+              echo "**Most likely cause:** missing \`SYNC_PAT\` secret or branch-protection bypass."
+              echo ""
+              echo "### Setup required"
+              echo ""
+              echo "1. Create a PAT with \`repo\` + \`workflow\` scopes"
+              echo "2. Add it as repo secret \`SYNC_PAT\`"
+              echo "3. Add a branch-protection bypass for the PAT owner (Settings > Rules > Rulesets)"
+              echo ""
+              echo "### Manual sync"
+              echo ""
+              echo '```bash'
+              echo "git fetch upstream main"
+              echo "git checkout main"
+              echo "git rebase upstream/main"
+              echo "git push --force-with-lease origin main"
+              echo '```'
+              echo ""
+              echo "### Upstream commits"
+              echo ""
+              cat /tmp/upstream-commits.md
+              echo ""
+              echo "---"
+              echo "*Created by [sync-upstream](${RUN_URL})*"
+            } > /tmp/issue-body.md
           else
             TITLE="chore: upstream sync conflict — manual rebase required"
-            BODY="$(cat <<ISSEOF
-          ## Upstream sync failed — rebase conflict
-
-          **${{ steps.check.outputs.commit_count }}** new upstream commits could not be rebased
-          under the **${{ steps.check.outputs.patch_count }}** PageUp patches.
-
-          Could not create a PR because pushing the escalation branch failed
-          (missing \`SYNC_PAT\` secret — the \`GITHUB_TOKEN\` cannot push workflow file changes).
-
-          ### How to resolve
-
-          \`\`\`bash
-          git fetch upstream main
-          git checkout main
-          git rebase upstream/main
-          # resolve conflicts, then:
-          git rebase --continue
-          git push --force-with-lease origin main
-          \`\`\`
-
-          ### Upstream commits
-
-          ${{ steps.commits.outputs.log }}
-
-          ---
-          *Created by [sync-upstream](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*
-          ISSEOF
-          )"
+            {
+              echo "## Upstream sync failed — rebase conflict"
+              echo ""
+              echo "**${COMMIT_COUNT}** new upstream commits could not be rebased"
+              echo "under the **${PATCH_COUNT}** PageUp patches."
+              echo ""
+              echo "Could not create a PR because pushing the escalation branch failed"
+              echo "(missing \`SYNC_PAT\` secret — the \`GITHUB_TOKEN\` cannot push workflow file changes)."
+              echo ""
+              echo "### How to resolve"
+              echo ""
+              echo '```bash'
+              echo "git fetch upstream main"
+              echo "git checkout main"
+              echo "git rebase upstream/main"
+              echo "# resolve conflicts, then:"
+              echo "git rebase --continue"
+              echo "git push --force-with-lease origin main"
+              echo '```'
+              echo ""
+              echo "### Upstream commits"
+              echo ""
+              cat /tmp/upstream-commits.md
+              echo ""
+              echo "---"
+              echo "*Created by [sync-upstream](${RUN_URL})*"
+            } > /tmp/issue-body.md
           fi
 
           gh issue create \
-            --assignee humblelistener \
             --label upstream-sync \
             --title "$TITLE" \
-            --body "$BODY"
+            --body-file /tmp/issue-body.md
 
       - name: Job summary
         if: always() && steps.check.outputs.up_to_date == 'false'
+        env:
+          REBASE_RESULT: ${{ steps.rebase.outputs.result }}
+          PUSH_RESULT: ${{ steps.push.outputs.pushed }}
+          COMMIT_COUNT: ${{ steps.check.outputs.commit_count }}
+          PATCH_COUNT: ${{ steps.check.outputs.patch_count }}
+          SECURITY_HITS: ${{ steps.commits.outputs.security_hits }}
         run: |
-          R="${{ steps.rebase.outputs.result }}"
-          P="${{ steps.push.outputs.pushed }}"
-          if [ "$R" = "success" ] && [ "$P" = "true" ]; then
-            echo "### Rebased ${{ steps.check.outputs.patch_count }} PageUp patches on ${{ steps.check.outputs.commit_count }} new upstream commits" >> "$GITHUB_STEP_SUMMARY"
-          elif [ "$R" = "success" ] && [ "$P" = "false" ]; then
+          if [ "$REBASE_RESULT" = "success" ] && [ "$PUSH_RESULT" = "true" ]; then
+            echo "### Rebased ${PATCH_COUNT} PageUp patches on ${COMMIT_COUNT} new upstream commits" >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$REBASE_RESULT" = "success" ] && [ "$PUSH_RESULT" = "false" ]; then
             echo "### Rebase succeeded but push failed — issue created" >> "$GITHUB_STEP_SUMMARY"
-          elif [ "$R" = "conflict" ]; then
+          elif [ "$REBASE_RESULT" = "conflict" ]; then
             echo "### Rebase conflict — escalation PR/issue created" >> "$GITHUB_STEP_SUMMARY"
           fi
-          if [ "${{ steps.commits.outputs.security_hits }}" != "0" ]; then
-            echo "**${{ steps.commits.outputs.security_hits }} security-relevant commit(s)**" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$SECURITY_HITS" != "0" ] && [ -n "$SECURITY_HITS" ]; then
+            echo "**${SECURITY_HITS} security-relevant commit(s)**" >> "$GITHUB_STEP_SUMMARY"
           fi
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "${{ steps.commits.outputs.log }}" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f /tmp/upstream-commits.md ]; then
+            cat /tmp/upstream-commits.md >> "$GITHUB_STEP_SUMMARY"
+          fi
