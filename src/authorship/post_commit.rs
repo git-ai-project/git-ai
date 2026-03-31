@@ -596,7 +596,11 @@ fn enqueue_prompt_messages_to_cas(
     }
 
     // Get API base URL for constructing messages_url
-    let api_base_url = Config::get().api_base_url();
+    let api_base_url = if crate::daemon::daemon_process_active() {
+        Config::fresh().api_base_url().to_string()
+    } else {
+        Config::get().api_base_url().to_string()
+    };
 
     for (_key, prompt) in prompts.iter_mut() {
         if !prompt.messages.is_empty() {
@@ -610,19 +614,23 @@ fn enqueue_prompt_messages_to_cas(
             // Enqueue to CAS (returns hash)
             let hash = db_lock.enqueue_cas_object(&messages_json, Some(&metadata))?;
 
-            // In daemon mode, also submit CAS payload over the control socket
-            // so the daemon's telemetry worker can upload it immediately.
-            if crate::daemon::telemetry_handle::daemon_telemetry_available() {
-                let metadata_json = serde_json::to_string(&metadata).ok();
-                let canonical = serde_json_canonicalizer::to_string(&messages_json)
-                    .unwrap_or_else(|_| messages_json.to_string());
-                crate::daemon::telemetry_handle::submit_cas(vec![
-                    crate::daemon::control_api::CasSyncPayload {
-                        hash: hash.clone(),
-                        data: canonical,
-                        metadata: metadata_json,
-                    },
-                ]);
+            let metadata_json = serde_json::to_string(&metadata).ok();
+            let canonical = serde_json_canonicalizer::to_string(&messages_json)
+                .unwrap_or_else(|_| messages_json.to_string());
+            let cas_payload = crate::daemon::control_api::CasSyncPayload {
+                hash: hash.clone(),
+                data: canonical,
+                metadata: metadata_json,
+            };
+
+            // In daemon mode, submit directly to the in-process telemetry worker.
+            // In wrapper-daemon mode, forward over the control socket so the
+            // background daemon can upload it immediately.
+            if crate::daemon::daemon_process_active() {
+                let _ =
+                    crate::daemon::telemetry_worker::submit_daemon_internal_cas(vec![cas_payload]);
+            } else if crate::daemon::telemetry_handle::daemon_telemetry_available() {
+                crate::daemon::telemetry_handle::submit_cas(vec![cas_payload]);
             }
 
             // Set full URL and clear messages
