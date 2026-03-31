@@ -375,6 +375,20 @@ fn spawn_daemon_run_with_piped_stderr(
 }
 
 fn handle_status(repo_working_dir: String) -> Result<(), String> {
+    // Check if the path is inside a git repository before contacting the daemon.
+    // When run outside a git repo, return a successful response indicating so.
+    if crate::git::find_repository_in_path(&repo_working_dir).is_err() {
+        let response = serde_json::json!({
+            "ok": true,
+            "git_repo": false,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&response).map_err(|e| e.to_string())?
+        );
+        return Ok(());
+    }
+
     let config = daemon_config_from_env_or_default_paths()?;
     let request = ControlRequest::StatusFamily { repo_working_dir };
     let response =
