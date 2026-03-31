@@ -17,7 +17,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -62,6 +62,6 @@ jobs:
           if [ "${{ inputs.no-cleanup }}" = "true" ]; then
             export GIT_AI_TEST_NO_CLEANUP=1
           fi
-          cargo test --test github_integration -- --ignored --nocapture
+          cargo test --test integration github_integration -- --ignored --nocapture
         env:
           GH_INTEGRATION_TEST_TOKEN: ${{ secrets.GH_INTEGRATION_TEST_TOKEN }}

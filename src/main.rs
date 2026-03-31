@@ -25,10 +25,13 @@ fn main() {
         .unwrap_or("git-ai".to_string());
 
     if commands::git_hook_handlers::is_git_hook_binary_name(&binary_name) {
-        let hook_args: Vec<String> = std::env::args().skip(1).collect();
-        let exit_code =
-            commands::git_hook_handlers::handle_git_hook_invocation(&binary_name, &hook_args);
-        std::process::exit(exit_code);
+        eprintln!(
+            "git-ai: the git core hooks feature has been sunset.\n\
+             To remove the deprecated git-ai hook symlinks from this repository, run:\n\
+             \n\
+             \x20 git-ai git-hooks remove\n"
+        );
+        std::process::exit(0);
     }
 
     let cli = Cli::parse();

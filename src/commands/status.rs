@@ -58,7 +58,6 @@ fn run_status(json: bool) -> Result<(), GitAiError> {
         &default_user_name,
         CheckpointKind::Human,
         false,
-        false,
         true,
         None,
         false,
@@ -67,7 +66,7 @@ fn run_status(json: bool) -> Result<(), GitAiError> {
     let head = repo.head()?;
     let head_sha = head.target()?;
 
-    let working_log = repo.storage.working_log_for_base_commit(&head_sha);
+    let working_log = repo.storage.working_log_for_base_commit(&head_sha)?;
     let checkpoints = working_log.read_all_checkpoints()?;
 
     if checkpoints.is_empty() {
@@ -136,6 +135,7 @@ fn run_status(json: bool) -> Result<(), GitAiError> {
         &head_sha,
         &head_sha,
         Some(&pathspecs),
+        None,
     )?;
 
     // Get actual git diff stats between HEAD and working directory (like post_commit does)

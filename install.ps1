@@ -509,7 +509,10 @@ try {
     if (-not (Test-Path -LiteralPath $configJsonPath)) {
         $cfg = @{
             git_path = $stdGitPath
-        } | ConvertTo-Json -Compress
+            feature_flags = @{
+                async_mode = $true
+            }
+        } | ConvertTo-Json -Depth 3 -Compress
         $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
         [System.IO.File]::WriteAllText($configJsonPath, $cfg, $utf8NoBom)
     }

@@ -127,7 +127,7 @@ mod tests {
     #[test]
     fn test_handle_squash_authorship_parse_with_dry_run() {
         // Test that --dry-run flag is parsed correctly
-        let args = vec![
+        let args = [
             "main".to_string(),
             "--dry-run".to_string(),
             "abc123".to_string(),

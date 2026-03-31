@@ -3,8 +3,26 @@ name: Coverage
 on:
   pull_request:
     branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'Taskfile.yml'
+      - 'flake.nix'
+      - 'flake.lock'
+      - '.github/workflows/coverage.yml'
   push:
     branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'Taskfile.yml'
+      - 'flake.nix'
+      - 'flake.lock'
+      - '.github/workflows/coverage.yml'
   merge_group:
     branches: [main]
 
@@ -20,7 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 2
 
@@ -42,7 +60,7 @@ jobs:
             ${{ runner.os }}-cargo-coverage-
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '22'
 
@@ -71,7 +89,7 @@ jobs:
 
       - name: Upload HTML coverage report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-report
           path: target/coverage/
@@ -79,7 +97,7 @@ jobs:
 
       - name: Upload LCOV report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: lcov-report
           path: lcov.info

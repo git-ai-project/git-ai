@@ -82,6 +82,7 @@ pub struct Config {
     api_key: Option<String>,
     quiet: bool,
     custom_attributes: HashMap<String, String>,
+    git_ai_hooks: HashMap<String, Vec<String>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize)]
@@ -151,6 +152,8 @@ pub struct FileConfig {
     pub quiet: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_attributes: Option<HashMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_ai_hooks: Option<HashMap<String, Vec<String>>>,
 }
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
@@ -175,6 +178,8 @@ pub struct ConfigPatch {
     pub prompt_storage: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_attributes: Option<HashMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feature_flags: Option<serde_json::Value>,
 }
 
 impl Config {
@@ -188,6 +193,14 @@ impl Config {
     /// Access the global configuration. Lazily initializes if not already initialized.
     pub fn get() -> &'static Config {
         CONFIG.get_or_init(build_config)
+    }
+
+    /// Build a fresh config snapshot from disk/env without using the global cache.
+    ///
+    /// This is useful for long-lived daemon processes that must observe runtime
+    /// config updates (for example, prompt sharing/privacy toggles).
+    pub fn fresh() -> Self {
+        build_config()
     }
 
     /// Returns the command to invoke git.
@@ -396,6 +409,16 @@ impl Config {
     /// Returns the custom attributes map (from config file + env var override).
     pub fn custom_attributes(&self) -> &HashMap<String, String> {
         &self.custom_attributes
+    }
+
+    /// Returns all configured git-ai hook commands.
+    pub fn git_ai_hooks(&self) -> &HashMap<String, Vec<String>> {
+        &self.git_ai_hooks
+    }
+
+    /// Returns configured shell commands for a specific hook.
+    pub fn git_ai_hook_commands(&self, hook_name: &str) -> Option<&Vec<String>> {
+        self.git_ai_hooks.get(hook_name)
     }
 
     /// Serialize the effective runtime config into pretty JSON.
@@ -630,6 +653,30 @@ fn build_config() -> Config {
     // Build custom attributes: file config as base, env var overrides
     let custom_attributes = build_custom_attributes(&file_cfg);
 
+    let git_ai_hooks = file_cfg
+        .as_ref()
+        .and_then(|c| c.git_ai_hooks.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(hook_name, commands)| {
+            let hook_name = hook_name.trim().to_string();
+            if hook_name.is_empty() {
+                return None;
+            }
+
+            let commands: Vec<String> = commands
+                .into_iter()
+                .map(|command| command.trim().to_string())
+                .filter(|command| !command.is_empty())
+                .collect();
+            if commands.is_empty() {
+                return None;
+            }
+
+            Some((hook_name, commands))
+        })
+        .collect::<HashMap<String, Vec<String>>>();
+
     #[cfg(any(test, feature = "test-support"))]
     {
         let mut config = Config {
@@ -650,6 +697,7 @@ fn build_config() -> Config {
             api_key,
             quiet,
             custom_attributes: custom_attributes.clone(),
+            git_ai_hooks: git_ai_hooks.clone(),
         };
         apply_test_config_patch(&mut config);
         config
@@ -674,6 +722,7 @@ fn build_config() -> Config {
         api_key,
         quiet,
         custom_attributes,
+        git_ai_hooks,
     }
 }
 
@@ -741,7 +790,7 @@ fn resolve_git_path(file_cfg: &Option<FileConfig>) -> String {
         let trimmed = path.trim();
         if !trimmed.is_empty() {
             let p = Path::new(trimmed);
-            if is_executable(p) {
+            if is_executable(p) && !path_is_git_ai_binary(p) {
                 return trimmed.to_string();
             }
         }
@@ -909,6 +958,36 @@ fn is_executable(path: &Path) -> bool {
     true
 }
 
+/// Detect if a path is actually the git-ai binary (or a symlink to it).
+/// This prevents `git_cmd()` from returning the git-ai shim, which would
+/// cause infinite recursion: handle_git() → proxy_to_git() → shim → handle_git() → ...
+fn path_is_git_ai_binary(path: &Path) -> bool {
+    // Check if a sibling "git-ai" exists in the same directory — this is the
+    // telltale sign that `path` is the git shim installed next to git-ai.
+    if let Some(parent) = path.parent() {
+        let git_ai_name = if cfg!(windows) {
+            "git-ai.exe"
+        } else {
+            "git-ai"
+        };
+        if parent.join(git_ai_name).exists() {
+            return true;
+        }
+    }
+
+    // Also check canonical path — the symlink target may be git-ai itself.
+    if let Ok(canonical) = path.canonicalize()
+        && let Some(name) = canonical.file_name().and_then(|n| n.to_str())
+    {
+        let stem = name.strip_suffix(".exe").unwrap_or(name);
+        if stem == "git-ai" || stem.starts_with("git-ai-") || stem.starts_with("git_ai") {
+            return true;
+        }
+    }
+
+    false
+}
+
 /// Apply test config patch from environment variable (test-only)
 /// Reads GIT_AI_TEST_CONFIG_PATCH env var containing JSON and applies patches to config
 #[cfg(any(test, feature = "test-support"))]
@@ -954,6 +1033,16 @@ fn apply_test_config_patch(config: &mut Config) {
         if let Some(custom_attributes) = patch.custom_attributes {
             config.custom_attributes = custom_attributes;
         }
+        if let Some(feature_flags_value) = patch.feature_flags
+            && let Ok(deserialized) = serde_json::from_value::<
+                crate::feature_flags::DeserializableFeatureFlags,
+            >(feature_flags_value)
+        {
+            config.feature_flags = crate::feature_flags::FeatureFlags::merge_with(
+                config.feature_flags.clone(),
+                deserialized,
+            );
+        }
     }
 }
 
@@ -989,6 +1078,7 @@ mod tests {
             api_key: None,
             quiet: false,
             custom_attributes: HashMap::new(),
+            git_ai_hooks: HashMap::new(),
         }
     }
 
@@ -1097,6 +1187,7 @@ mod tests {
             api_key: None,
             quiet: false,
             custom_attributes: HashMap::new(),
+            git_ai_hooks: HashMap::new(),
         }
     }
 
@@ -1214,6 +1305,7 @@ mod tests {
             api_key: None,
             quiet: false,
             custom_attributes: HashMap::new(),
+            git_ai_hooks: HashMap::new(),
         }
     }
 

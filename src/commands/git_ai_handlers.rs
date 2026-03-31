@@ -15,6 +15,10 @@ use crate::commands::checkpoint_agent::agent_v1_preset::AgentV1Preset;
 use crate::commands::checkpoint_agent::amp_preset::AmpPreset;
 use crate::commands::checkpoint_agent::opencode_preset::OpenCodePreset;
 use crate::config;
+use crate::daemon::{
+    CapturedCheckpointRunRequest, CheckpointRunRequest, ControlRequest, LiveCheckpointRunRequest,
+    send_control_request,
+};
 use crate::git::find_repository;
 use crate::git::find_repository_in_path;
 use crate::git::repository::{CommitRange, Repository, group_files_by_repository};
@@ -27,12 +31,56 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::io::IsTerminal;
 use std::io::Read;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub fn handle_git_ai(args: &[String]) {
     if args.is_empty() {
         print_help();
         return;
+    }
+
+    // In async mode, initialize the global telemetry handle so that
+    // observability and CAS events are routed over the control socket instead
+    // of being written to per-PID log files.
+    //
+    // Skip for commands that must work without a running background service
+    // (help, version, config, d management, debug, upgrade) so users can
+    // always diagnose and recover from a broken state.
+    if config::Config::get().feature_flags().async_mode {
+        let needs_daemon = !matches!(
+            args[0].as_str(),
+            "help"
+                | "--help"
+                | "-h"
+                | "version"
+                | "--version"
+                | "-v"
+                | "config"
+                | "bg"
+                | "d"
+                | "daemon"
+                | "debug"
+                | "upgrade"
+                | "install-hooks"
+                | "install"
+                | "uninstall-hooks"
+        );
+        if needs_daemon {
+            use crate::daemon::telemetry_handle::{
+                DaemonTelemetryInitResult, init_daemon_telemetry_handle,
+            };
+            match init_daemon_telemetry_handle() {
+                DaemonTelemetryInitResult::Connected | DaemonTelemetryInitResult::Skipped => {}
+                DaemonTelemetryInitResult::Failed(err) => {
+                    // Hard error for git-ai commands: the background service must be reachable.
+                    eprintln!(
+                        "error: failed to connect to git-ai background service: {}",
+                        err
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
     }
 
     // Start DB warmup early for commands that need database access
@@ -69,6 +117,9 @@ pub fn handle_git_ai(args: &[String]) {
         }
         "debug" => {
             commands::debug::handle_debug(&args[1..]);
+        }
+        "bg" | "d" | "daemon" => {
+            commands::daemon::handle_daemon(&args[1..]);
         }
         "stats" => {
             if is_interactive_terminal() {
@@ -136,10 +187,6 @@ pub fn handle_git_ai(args: &[String]) {
         #[cfg(feature = "cloud")]
         "upgrade" => {
             commands::upgrade::run_with_args(&args[1..]);
-        }
-        #[cfg(feature = "cloud")]
-        "flush-logs" => {
-            commands::flush_logs::handle_flush_logs(&args[1..]);
         }
         #[cfg(feature = "cloud")]
         "flush-cas" => {
@@ -225,7 +272,6 @@ fn print_help() {
     eprintln!(
         "    --hook-input <json|stdin>   JSON payload required by presets, or 'stdin' to read from stdin"
     );
-    eprintln!("    --show-working-log          Display current working log");
     eprintln!("    --reset                     Reset working log");
     eprintln!("    mock_ai [pathspecs...]      Test preset accepting optional file pathspecs");
     eprintln!("  blame <file>       Git blame with AI authorship overlay");
@@ -269,10 +315,9 @@ fn print_help() {
     eprintln!("    --add <key> <value>   Add to array or upsert into object");
     eprintln!("    unset <key>           Remove config value (reverts to default)");
     eprintln!("  debug              Print support/debug diagnostics");
+    eprintln!("  bg                 Run and control git-ai background service");
     eprintln!("  install-hooks      Install git hooks for AI authorship tracking");
     eprintln!("  uninstall-hooks    Remove git-ai hooks from all detected tools");
-    eprintln!("  git-hooks ensure   Ensure repo-local git-ai hooks are installed/healed");
-    eprintln!("  git-hooks remove   Remove repo-local git-ai hooks and restore local hooksPath");
     eprintln!("  ci                 Continuous integration utilities");
     eprintln!("    github                 GitHub CI helpers");
     eprintln!("  squash-authorship  Generate authorship log for squashed commits");
@@ -337,17 +382,12 @@ fn handle_checkpoint(args: &[String]) {
         .to_string();
 
     // Parse checkpoint-specific arguments
-    let mut show_working_log = false;
     let mut reset = false;
     let mut hook_input = None;
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--show-working-log" => {
-                show_working_log = true;
-                i += 1;
-            }
             "--reset" => {
                 reset = true;
                 i += 1;
@@ -715,10 +755,13 @@ fn handle_checkpoint(args: &[String]) {
                 .as_ref()
                 .map(|r| r.checkpoint_kind)
                 .unwrap_or(CheckpointKind::Human);
+            let allow_captured_async =
+                checkpoint_request_has_explicit_capture_scope(args, agent_run_result.as_ref());
 
             let checkpoint_start = std::time::Instant::now();
             let mut total_files_edited = 0;
-            let mut repos_processed = 0;
+            let mut repos_processed: usize = 0;
+            let mut queued_repos: usize = 0;
             let total_repos = repo_files.len();
 
             // Process each repository separately
@@ -755,26 +798,34 @@ fn handle_checkpoint(args: &[String]) {
                     modified
                 });
 
-                commands::git_hook_handlers::ensure_repo_level_hooks_for_checkpoint(&repo);
-                let checkpoint_result = commands::checkpoint::run(
+                let checkpoint_result = run_checkpoint_via_daemon_or_local(
                     &repo,
                     &default_user_name,
                     checkpoint_kind,
-                    show_working_log,
                     reset,
                     false,
                     repo_agent_result,
+                    allow_captured_async,
                     false,
                 );
 
                 match checkpoint_result {
-                    Ok((_, files_edited, _)) => {
-                        total_files_edited += files_edited;
-                        eprintln!(
-                            "  Checkpoint for {} completed ({} files)",
-                            repo_workdir.display(),
-                            files_edited
-                        );
+                    Ok(outcome) => {
+                        total_files_edited += outcome.stats.1;
+                        if outcome.queued {
+                            queued_repos += 1;
+                            eprintln!(
+                                "  Checkpoint for {} queued ({} files)",
+                                repo_workdir.display(),
+                                outcome.stats.1
+                            );
+                        } else {
+                            eprintln!(
+                                "  Checkpoint for {} completed ({} files)",
+                                repo_workdir.display(),
+                                outcome.stats.1
+                            );
+                        }
                     }
                     Err(e) => {
                         eprintln!("  Checkpoint for {} failed: {}", repo_workdir.display(), e);
@@ -793,10 +844,27 @@ fn handle_checkpoint(args: &[String]) {
             #[cfg(feature = "cloud")]
             log_performance_for_checkpoint(total_files_edited, elapsed, checkpoint_kind);
             if is_multi_repo {
-                eprintln!(
-                    "Checkpoint completed in {:?} ({} repositories, {} total files)",
-                    elapsed, repos_processed, total_files_edited
-                );
+                if queued_repos == repos_processed && queued_repos > 0 {
+                    eprintln!(
+                        "Checkpoint queued in {:?} ({} repositories, {} total files)",
+                        elapsed, repos_processed, total_files_edited
+                    );
+                } else if queued_repos == 0 {
+                    eprintln!(
+                        "Checkpoint completed in {:?} ({} repositories, {} total files)",
+                        elapsed, repos_processed, total_files_edited
+                    );
+                } else {
+                    eprintln!(
+                        "Checkpoint dispatched in {:?} ({} queued, {} completed, {} total files)",
+                        elapsed,
+                        queued_repos,
+                        repos_processed.saturating_sub(queued_repos),
+                        total_files_edited
+                    );
+                }
+            } else if queued_repos > 0 {
+                eprintln!("Checkpoint queued in {:?}", elapsed);
             } else {
                 eprintln!("Checkpoint completed in {:?}", elapsed);
             }
@@ -825,6 +893,8 @@ fn handle_checkpoint(args: &[String]) {
         .as_ref()
         .map(|r| r.checkpoint_kind)
         .unwrap_or(CheckpointKind::Human);
+    let allow_captured_async =
+        checkpoint_request_has_explicit_capture_scope(args, agent_run_result.as_ref());
 
     if CheckpointKind::Human == checkpoint_kind && agent_run_result.is_none() {
         // Parse pathspecs after `--` for human checkpoints
@@ -907,24 +977,27 @@ fn handle_checkpoint(args: &[String]) {
         None
     };
 
-    commands::git_hook_handlers::ensure_repo_level_hooks_for_checkpoint(&repo);
-    let checkpoint_result = commands::checkpoint::run(
+    let checkpoint_result = run_checkpoint_via_daemon_or_local(
         &repo,
         &default_user_name,
         checkpoint_kind,
-        show_working_log,
         reset,
         false,
         agent_run_result,
+        allow_captured_async,
         false,
     );
     let local_checkpoint_failed = checkpoint_result.is_err();
     match checkpoint_result {
-        Ok((_, _files_edited, _)) => {
+        Ok(outcome) => {
             let elapsed = checkpoint_start.elapsed();
             #[cfg(feature = "cloud")]
-            log_performance_for_checkpoint(_files_edited, elapsed, checkpoint_kind);
-            eprintln!("Checkpoint completed in {:?}", elapsed);
+            log_performance_for_checkpoint(outcome.stats.1, elapsed, checkpoint_kind);
+            if outcome.queued {
+                eprintln!("Checkpoint queued in {:?}", elapsed);
+            } else {
+                eprintln!("Checkpoint completed in {:?}", elapsed);
+            }
         }
         Err(e) => {
             let elapsed = checkpoint_start.elapsed();
@@ -968,23 +1041,30 @@ fn handle_checkpoint(args: &[String]) {
                 modified.will_edit_filepaths = None;
             }
 
-            commands::git_hook_handlers::ensure_repo_level_hooks_for_checkpoint(&ext_repo);
-            match commands::checkpoint::run(
+            match run_checkpoint_via_daemon_or_local(
                 &ext_repo,
                 &ext_user_name,
                 checkpoint_kind,
                 false,
                 false,
-                false,
                 Some(modified),
+                allow_captured_async,
                 false,
             ) {
-                Ok((_, files_edited, _)) => {
-                    eprintln!(
-                        "Cross-repo checkpoint for {} completed ({} files)",
-                        repo_workdir.display(),
-                        files_edited
-                    );
+                Ok(outcome) => {
+                    if outcome.queued {
+                        eprintln!(
+                            "Cross-repo checkpoint for {} queued ({} files)",
+                            repo_workdir.display(),
+                            outcome.stats.1
+                        );
+                    } else {
+                        eprintln!(
+                            "Cross-repo checkpoint for {} completed ({} files)",
+                            repo_workdir.display(),
+                            outcome.stats.1
+                        );
+                    }
                 }
                 Err(e) => {
                     eprintln!(
@@ -1003,12 +1083,303 @@ fn handle_checkpoint(args: &[String]) {
         }
     }
 
-    if checkpoint_kind != CheckpointKind::Human {
-        spawn_background_flush();
-    }
-
     if local_checkpoint_failed {
         std::process::exit(0);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CheckpointDispatchOutcome {
+    stats: (usize, usize, usize),
+    queued: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_checkpoint_via_daemon_or_local(
+    repo: &Repository,
+    author: &str,
+    kind: CheckpointKind,
+    reset: bool,
+    quiet: bool,
+    agent_run_result: Option<AgentRunResult>,
+    allow_captured_async: bool,
+    is_pre_commit: bool,
+) -> Result<CheckpointDispatchOutcome, crate::error::GitAiError> {
+    if daemon_checkpoint_delegate_enabled() {
+        let repo_working_dir = repo.workdir().map(|p| p.to_string_lossy().to_string()).ok();
+        if let Some(repo_working_dir) = repo_working_dir {
+            let is_test = std::env::var_os("GIT_AI_TEST_DB_PATH").is_some()
+                || std::env::var_os("GITAI_TEST_DB_PATH").is_some();
+            let checkpoint_daemon_timeout = if cfg!(windows) || is_test {
+                Duration::from_secs(10)
+            } else {
+                Duration::from_secs(5)
+            };
+            match crate::commands::daemon::ensure_daemon_running(checkpoint_daemon_timeout) {
+                Ok(config) => {
+                    if allow_captured_async
+                        && crate::commands::checkpoint::explicit_capture_target_paths(
+                            kind,
+                            agent_run_result.as_ref(),
+                        )
+                        .is_some()
+                    {
+                        match crate::commands::checkpoint::prepare_captured_checkpoint(
+                            repo,
+                            author,
+                            kind,
+                            reset,
+                            agent_run_result.as_ref(),
+                            is_pre_commit,
+                            None,
+                        ) {
+                            Ok(Some(capture)) => {
+                                let request = ControlRequest::CheckpointRun {
+                                    request: Box::new(CheckpointRunRequest::Captured(
+                                        CapturedCheckpointRunRequest {
+                                            repo_working_dir: capture.repo_working_dir.clone(),
+                                            capture_id: capture.capture_id.clone(),
+                                        },
+                                    )),
+                                    wait: Some(false),
+                                };
+                                match send_control_request(&config.control_socket_path, &request) {
+                                    Ok(response) if response.ok => {
+                                        return Ok(CheckpointDispatchOutcome {
+                                            stats: (0, capture.file_count, 0),
+                                            queued: true,
+                                        });
+                                    }
+                                    Ok(response) => {
+                                        let message = response
+                                            .error
+                                            .unwrap_or_else(|| "unknown error".to_string());
+                                        let _ = cleanup_captured_checkpoint_after_delegate_failure(
+                                            &capture.capture_id,
+                                            &repo_working_dir,
+                                            kind,
+                                            "captured_request_cleanup_failed",
+                                        );
+                                        log_daemon_checkpoint_delegate_failure(
+                                            "captured_request_rejected",
+                                            &repo_working_dir,
+                                            kind,
+                                            &message,
+                                        );
+                                    }
+                                    Err(e) => {
+                                        let _ = cleanup_captured_checkpoint_after_delegate_failure(
+                                            &capture.capture_id,
+                                            &repo_working_dir,
+                                            kind,
+                                            "captured_connect_cleanup_failed",
+                                        );
+                                        log_daemon_checkpoint_delegate_failure(
+                                            "captured_connect_failed",
+                                            &repo_working_dir,
+                                            kind,
+                                            &e.to_string(),
+                                        );
+                                    }
+                                }
+                            }
+                            Ok(None) => {
+                                return Ok(CheckpointDispatchOutcome {
+                                    stats: (0, 0, 0),
+                                    queued: false,
+                                });
+                            }
+                            Err(e) => {
+                                log_daemon_checkpoint_delegate_failure(
+                                    "capture_prepare_failed",
+                                    &repo_working_dir,
+                                    kind,
+                                    &e.to_string(),
+                                );
+                            }
+                        }
+                    }
+
+                    let request = ControlRequest::CheckpointRun {
+                        request: Box::new(CheckpointRunRequest::Live(Box::new(
+                            LiveCheckpointRunRequest {
+                                repo_working_dir: repo_working_dir.clone(),
+                                kind: Some(checkpoint_kind_to_str(kind).to_string()),
+                                author: Some(author.to_string()),
+                                reset: Some(reset),
+                                quiet: Some(quiet),
+                                is_pre_commit: Some(is_pre_commit),
+                                agent_run_result: agent_run_result.clone(),
+                            },
+                        ))),
+                        wait: Some(true),
+                    };
+                    match send_control_request(&config.control_socket_path, &request) {
+                        Ok(response) if response.ok => {
+                            let estimated_files =
+                                estimate_checkpoint_file_count(kind, &agent_run_result);
+                            return Ok(CheckpointDispatchOutcome {
+                                stats: (0, estimated_files, 0),
+                                queued: false,
+                            });
+                        }
+                        Ok(response) => {
+                            let message = response
+                                .error
+                                .unwrap_or_else(|| "unknown error".to_string());
+                            log_daemon_checkpoint_delegate_failure(
+                                "request_rejected",
+                                &repo_working_dir,
+                                kind,
+                                &message,
+                            );
+                        }
+                        Err(e) => {
+                            log_daemon_checkpoint_delegate_failure(
+                                "connect_failed",
+                                &repo_working_dir,
+                                kind,
+                                &e.to_string(),
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    log_daemon_checkpoint_delegate_failure(
+                        "startup_failed",
+                        &repo_working_dir,
+                        kind,
+                        &e,
+                    );
+                }
+            }
+        }
+    }
+    let stats = commands::checkpoint::run(
+        repo,
+        author,
+        kind,
+        reset,
+        quiet,
+        agent_run_result,
+        is_pre_commit,
+    )?;
+    Ok(CheckpointDispatchOutcome {
+        stats,
+        queued: false,
+    })
+}
+
+fn checkpoint_request_has_explicit_capture_scope(
+    args: &[String],
+    agent_run_result: Option<&AgentRunResult>,
+) -> bool {
+    if args.first().map(String::as_str) == Some("mock_ai") {
+        return args.iter().skip(1).any(|arg| !arg.starts_with("--"));
+    }
+
+    if let Some(separator_pos) = args.iter().position(|arg| arg == "--") {
+        return args[separator_pos + 1..]
+            .iter()
+            .any(|arg| !arg.starts_with("--"));
+    }
+
+    agent_run_result
+        .and_then(|result| {
+            crate::commands::checkpoint::explicit_capture_target_paths(
+                result.checkpoint_kind,
+                Some(result),
+            )
+        })
+        .is_some()
+}
+
+fn cleanup_captured_checkpoint_after_delegate_failure(
+    capture_id: &str,
+    repo_working_dir: &str,
+    kind: CheckpointKind,
+    cleanup_phase: &str,
+) -> Result<(), crate::error::GitAiError> {
+    match crate::commands::checkpoint::delete_captured_checkpoint(capture_id) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            log_daemon_checkpoint_delegate_failure(
+                cleanup_phase,
+                repo_working_dir,
+                kind,
+                &format!(
+                    "failed cleaning up captured checkpoint {}: {}",
+                    capture_id, error
+                ),
+            );
+            Err(error)
+        }
+    }
+}
+
+fn log_daemon_checkpoint_delegate_failure(
+    phase: &str,
+    repo_working_dir: &str,
+    kind: CheckpointKind,
+    message: &str,
+) {
+    eprintln!(
+        "[git-ai] checkpoint delegate {}: {}; falling back to local checkpoint",
+        phase, message
+    );
+
+    let error = crate::error::GitAiError::Generic(format!(
+        "daemon checkpoint delegate {}: {}",
+        phase, message
+    ));
+    let context = serde_json::json!({
+        "function": "run_checkpoint_via_daemon_or_local",
+        "phase": phase,
+        "repo_working_dir": repo_working_dir,
+        "checkpoint_kind": checkpoint_kind_to_str(kind),
+    });
+    observability::log_error(&error, Some(context));
+}
+
+fn daemon_checkpoint_delegate_enabled() -> bool {
+    if config::Config::get().feature_flags().async_mode {
+        return true;
+    }
+
+    matches!(
+        std::env::var("GIT_AI_DAEMON_CHECKPOINT_DELEGATE")
+            .ok()
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    )
+}
+
+fn checkpoint_kind_to_str(kind: CheckpointKind) -> &'static str {
+    match kind {
+        CheckpointKind::Human => "human",
+        CheckpointKind::AiAgent => "ai_agent",
+        CheckpointKind::AiTab => "ai_tab",
+    }
+}
+
+fn estimate_checkpoint_file_count(
+    kind: CheckpointKind,
+    agent_run_result: &Option<AgentRunResult>,
+) -> usize {
+    match (kind, agent_run_result) {
+        (CheckpointKind::Human, Some(result)) => result
+            .will_edit_filepaths
+            .as_ref()
+            .map(|v| v.len())
+            .unwrap_or(0),
+        (_, Some(result)) => result
+            .edited_filepaths
+            .as_ref()
+            .map(|v| v.len())
+            .unwrap_or(0),
+        _ => 0,
     }
 }
 
@@ -1434,35 +1805,6 @@ fn handle_stats(args: &[String]) {
 
 fn handle_git_hooks(args: &[String]) {
     match args.first().map(String::as_str) {
-        Some("ensure") => {
-            let repo = match find_repository(&Vec::<String>::new()) {
-                Ok(repo) => repo,
-                Err(e) => {
-                    eprintln!("Failed to find repository: {}", e);
-                    std::process::exit(1);
-                }
-            };
-
-            match commands::git_hook_handlers::ensure_repo_hooks_installed(&repo, false) {
-                Ok(report) => {
-                    if let Err(e) = commands::git_hook_handlers::mark_repo_hooks_enabled(&repo) {
-                        eprintln!("Failed to persist repo hook opt-in: {}", e);
-                        std::process::exit(1);
-                    }
-                    let status = if report.changed { "updated" } else { "ok" };
-                    println!(
-                        "repo hooks {}: {}",
-                        status,
-                        report.managed_hooks_path.to_string_lossy()
-                    );
-                    std::process::exit(0);
-                }
-                Err(e) => {
-                    eprintln!("Failed to ensure repo hooks: {}", e);
-                    std::process::exit(1);
-                }
-            }
-        }
         Some("remove") | Some("uninstall") => {
             let repo = match find_repository(&Vec::<String>::new()) {
                 Ok(repo) => repo,
@@ -1489,7 +1831,8 @@ fn handle_git_hooks(args: &[String]) {
             }
         }
         _ => {
-            eprintln!("Usage: git-ai git-hooks <ensure|remove>");
+            eprintln!("The git core hooks feature has been sunset.");
+            eprintln!("Usage: git-ai git-hooks remove");
             std::process::exit(1);
         }
     }
@@ -1519,8 +1862,6 @@ fn emit_no_repo_agent_metrics(agent_run_result: Option<&AgentRunResult>) {
 
     let values = crate::metrics::AgentUsageValues::new();
     crate::metrics::record(values, attrs);
-
-    spawn_background_flush();
 }
 
 fn get_all_files_for_mock_ai(working_dir: &str) -> Vec<String> {

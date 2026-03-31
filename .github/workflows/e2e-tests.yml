@@ -1,20 +1,28 @@
 name: E2E Tests
 
 on:
+  schedule:
+    - cron: '0 2 * * *'  # 2 AM UTC nightly
   pull_request:
-    branches: [main]
-  push:
-    branches: [main]
-  merge_group:
-    branches: [main]
+    types: [labeled]
+  workflow_dispatch:
+
+env:
+  # Async mode is now fully supported by the e2e tests: a per-test daemon
+  # is started in setup() and the wrapper polls for authorship notes.
+  GIT_AI_ASYNC_MODE: "true"
 
 jobs:
   e2e-tests:
     runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && github.event.label.name == 'integration')
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 

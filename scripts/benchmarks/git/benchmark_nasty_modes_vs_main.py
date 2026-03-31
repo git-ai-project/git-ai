@@ -28,7 +28,7 @@ class Variant:
     key: str
     label: str
     binary: Path
-    mode: str  # wrapper | hooks | both
+    mode: str  # wrapper | daemon
 
 
 @dataclasses.dataclass
@@ -187,15 +187,18 @@ def setup_variant_runtime(
     variant: Variant,
     runtime_root: Path,
     real_git: Path,
-) -> tuple[dict[str, str], Path]:
-    home_dir = runtime_root / "home"
+) -> tuple[dict[str, str], Path, subprocess.Popen[str] | None, Path]:
+    tmp_root = Path("/tmp") if os.name != "nt" else Path(tempfile.gettempdir())
+    home_dir = Path(
+        tempfile.mkdtemp(prefix=f"gai-nasty-{variant.key}-", dir=str(tmp_root))
+    )
     bin_dir = runtime_root / "bin"
     wrapper_git = bin_dir / ("git.exe" if os.name == "nt" else "git")
 
     home_dir.mkdir(parents=True, exist_ok=True)
     bin_dir.mkdir(parents=True, exist_ok=True)
 
-    if variant.mode in ("wrapper", "both"):
+    if variant.mode == "wrapper":
         create_link_or_copy(variant.binary, wrapper_git)
 
     env = dict(os.environ)
@@ -206,8 +209,75 @@ def setup_variant_runtime(
     env["GIT_AI_DEBUG_PERFORMANCE"] = "0"
     env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
 
-    git_bin = wrapper_git if variant.mode in ("wrapper", "both") else real_git
-    return env, git_bin
+    daemon_proc: subprocess.Popen[str] | None = None
+    if variant.mode == "daemon":
+        daemon_dir = home_dir / ".git-ai" / "internal" / "daemon"
+        control_socket = daemon_dir / "control.sock"
+        trace_socket = daemon_dir / "trace2.sock"
+        daemon_dir.mkdir(parents=True, exist_ok=True)
+        daemon_proc = subprocess.Popen(
+            [str(variant.binary), "daemon", "run"],
+            cwd=str(runtime_root),
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        exit_code: int | None = None
+        for _ in range(300):
+            if control_socket.exists() and trace_socket.exists():
+                break
+            if exit_code is None:
+                exit_code = daemon_proc.poll()
+            time.sleep(0.01)
+        else:
+            raise BenchmarkError(
+                "timed out waiting for daemon sockets "
+                f"(control={control_socket}, trace={trace_socket})"
+            )
+        if daemon_proc.poll() is not None:
+            daemon_proc = None
+
+        env["GIT_TRACE2_EVENT"] = f"af_unix:stream:{trace_socket}"
+        env["GIT_TRACE2_EVENT_NESTING"] = os.environ.get(
+            "GIT_AI_TEST_TRACE2_NESTING",
+            "10",
+        )
+        env["GIT_AI_DAEMON_CHECKPOINT_DELEGATE"] = "true"
+        env["GIT_AI_DAEMON_CONTROL_SOCKET"] = str(control_socket)
+
+    git_bin = wrapper_git if variant.mode == "wrapper" else real_git
+    return env, git_bin, daemon_proc, home_dir
+
+
+def shutdown_daemon(
+    variant: Variant,
+    runtime_root: Path,
+    env: dict[str, str],
+    daemon_proc: subprocess.Popen[str] | None,
+) -> None:
+    if variant.mode != "daemon":
+        return
+    try:
+        run_cmd(
+            [str(variant.binary), "daemon", "shutdown"],
+            cwd=runtime_root,
+            env=env,
+            timeout_s=30,
+        )
+    except Exception:
+        pass
+
+    if daemon_proc is not None:
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            if daemon_proc.poll() is not None:
+                return
+            time.sleep(0.05)
+
+        if daemon_proc.poll() is None:
+            daemon_proc.kill()
+            daemon_proc.wait(timeout=5)
 
 
 def parse_results_tsv(path: Path) -> tuple[dict[str, float], dict[str, str], dict[str, int], dict[str, str]]:
@@ -332,7 +402,11 @@ def render_report(
     margin_checks: list[MarginCheckResult],
 ) -> None:
     scenarios = ["linear", "onto", "rebase_merges"]
-    variants = ["main_wrapper", "current_wrapper", "current_hooks", "current_both"]
+    variants = [
+        "main_wrapper",
+        "current_wrapper",
+        "current_daemon",
+    ]
     margin_baseline_key = str(metadata["margin_baseline"])
     margin_baseline_label = margin_baseline_key.replace("_", " ")
 
@@ -361,20 +435,19 @@ def render_report(
     lines.append("## Median Duration (s) and Slowdown vs main(wrapper)")
     lines.append("")
     lines.append(
-        "| Scenario | main(wrapper) | current(wrapper) | current(hooks) | current(wrapper+hooks) | wrapper Δ% | hooks Δ% | both Δ% |"
+        "| Scenario | main(wrapper) | current(wrapper) | current(daemon) | wrapper Δ% | daemon Δ% |"
     )
-    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|")
+    lines.append("|---|---:|---:|---:|---:|---:|")
 
     for scenario in scenarios:
         row = summary.get(scenario, {})
         base = float(row.get("main_wrapper", {}).get("median_s", 0.0))
         cw = float(row.get("current_wrapper", {}).get("median_s", 0.0))
-        ch = float(row.get("current_hooks", {}).get("median_s", 0.0))
-        cb = float(row.get("current_both", {}).get("median_s", 0.0))
+        cd = float(row.get("current_daemon", {}).get("median_s", 0.0))
         s = slowdowns.get(scenario, {})
         lines.append(
-            f"| {scenario} | {base:.3f} | {cw:.3f} | {ch:.3f} | {cb:.3f} | "
-            f"{s.get('current_wrapper', 0.0):.3f}% | {s.get('current_hooks', 0.0):.3f}% | {s.get('current_both', 0.0):.3f}% |"
+            f"| {scenario} | {base:.3f} | {cw:.3f} | {cd:.3f} | "
+            f"{s.get('current_wrapper', 0.0):.3f}% | {s.get('current_daemon', 0.0):.3f}% |"
         )
 
     lines.append("")
@@ -383,7 +456,7 @@ def render_report(
     lines.append("| Variant | Geometric Mean Ratio vs main(wrapper) | Geometric Mean Slowdown |")
     lines.append("|---|---:|---:|")
 
-    for key in ["current_wrapper", "current_hooks", "current_both"]:
+    for key in ["current_wrapper", "current_daemon"]:
         ratios: list[float] = []
         for scenario in scenarios:
             row = summary.get(scenario, {})
@@ -460,7 +533,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--enforce-margin",
         action="store_true",
-        help="Exit non-zero when any current_hooks/current_both margin check fails.",
+        help="Exit non-zero when any current_wrapper/current_daemon margin check fails.",
     )
     parser.add_argument(
         "--margin-baseline",
@@ -532,8 +605,7 @@ def main() -> int:
         variants = [
             Variant("main_wrapper", "main(wrapper)", main_bin, "wrapper"),
             Variant("current_wrapper", "current(wrapper)", current_bin, "wrapper"),
-            Variant("current_hooks", "current(hooks)", current_bin, "hooks"),
-            Variant("current_both", "current(wrapper+hooks)", current_bin, "both"),
+            Variant("current_daemon", "current(daemon)", current_bin, "daemon"),
         ]
 
         all_results: list[VariantRunResult] = []
@@ -546,63 +618,68 @@ def main() -> int:
                 rep_root.mkdir(parents=True, exist_ok=True)
 
                 runtime_root = rep_root / "runtime"
-                env, git_bin = setup_variant_runtime(variant, runtime_root, real_git)
-
-                cmd = [
-                    "bash",
-                    str(nasty_script),
-                    "--repo-url",
-                    str(seed_repo_path),
-                    "--work-root",
-                    str(rep_root / "benchmark"),
-                    "--feature-commits",
-                    str(args.feature_commits),
-                    "--main-commits",
-                    str(args.main_commits),
-                    "--side-commits",
-                    str(args.side_commits),
-                    "--files",
-                    str(args.files),
-                    "--lines-per-file",
-                    str(args.lines_per_file),
-                    "--burst-every",
-                    str(args.burst_every),
-                    "--git-bin",
-                    str(git_bin),
-                    "--git-ai-bin",
-                    str(variant.binary),
-                    "--hook-mode",
-                    variant.mode,
-                ]
-
-                print(
-                    f"[variant-run] variant={variant.key} repetition={repetition}/{args.repetitions}"
+                env, git_bin, daemon_proc, home_dir = setup_variant_runtime(
+                    variant, runtime_root, real_git
                 )
-                run_cmd(cmd, cwd=repo_root, env=env, timeout_s=14400)
+                try:
+                    cmd = [
+                        "bash",
+                        str(nasty_script),
+                        "--repo-url",
+                        str(seed_repo_path),
+                        "--work-root",
+                        str(rep_root / "benchmark"),
+                        "--feature-commits",
+                        str(args.feature_commits),
+                        "--main-commits",
+                        str(args.main_commits),
+                        "--side-commits",
+                        str(args.side_commits),
+                        "--files",
+                        str(args.files),
+                        "--lines-per-file",
+                        str(args.lines_per_file),
+                        "--burst-every",
+                        str(args.burst_every),
+                        "--git-bin",
+                        str(git_bin),
+                        "--git-ai-bin",
+                        str(variant.binary),
+                        "--hook-mode",
+                        variant.mode,
+                    ]
 
-                results_tsv = rep_root / "benchmark" / "results.tsv"
-                durations, statuses, saved_logs, head_note = parse_results_tsv(results_tsv)
-                all_results.append(
-                    VariantRunResult(
-                        variant=variant.key,
-                        repetition=repetition,
-                        durations_s=durations,
-                        statuses=statuses,
-                        saved_logs=saved_logs,
-                        head_has_note=head_note,
-                    )
-                )
-
-                for scenario in sorted(durations.keys()):
                     print(
-                        f"[variant-result] variant={variant.key} rep={repetition} "
-                        f"scenario={scenario} status={statuses.get(scenario)} duration_s={durations[scenario]:.3f}"
+                        f"[variant-run] variant={variant.key} repetition={repetition}/{args.repetitions}"
+                    )
+                    run_cmd(cmd, cwd=repo_root, env=env, timeout_s=14400)
+
+                    results_tsv = rep_root / "benchmark" / "results.tsv"
+                    durations, statuses, saved_logs, head_note = parse_results_tsv(results_tsv)
+                    all_results.append(
+                        VariantRunResult(
+                            variant=variant.key,
+                            repetition=repetition,
+                            durations_s=durations,
+                            statuses=statuses,
+                            saved_logs=saved_logs,
+                            head_has_note=head_note,
+                        )
                     )
 
-                if not args.keep_artifacts:
-                    bench_repo = rep_root / "benchmark" / "repo"
-                    if bench_repo.exists():
-                        shutil.rmtree(bench_repo)
+                    for scenario in sorted(durations.keys()):
+                        print(
+                            f"[variant-result] variant={variant.key} rep={repetition} "
+                            f"scenario={scenario} status={statuses.get(scenario)} duration_s={durations[scenario]:.3f}"
+                        )
+
+                    if not args.keep_artifacts:
+                        bench_repo = rep_root / "benchmark" / "repo"
+                        if bench_repo.exists():
+                            shutil.rmtree(bench_repo, ignore_errors=True)
+                finally:
+                    shutdown_daemon(variant, runtime_root, env, daemon_proc)
+                    shutil.rmtree(home_dir, ignore_errors=True)
 
         summary = summarize_variant_runs(all_results)
         slowdowns = compute_slowdowns(summary, baseline_key="main_wrapper")
@@ -610,7 +687,7 @@ def main() -> int:
             summary,
             baseline_key=args.margin_baseline,
             margin_pct=args.margin_pct,
-            variants=["current_hooks", "current_both"],
+            variants=["current_wrapper", "current_daemon"],
         )
 
         timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())

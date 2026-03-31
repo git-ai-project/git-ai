@@ -224,6 +224,7 @@ STD_GIT_PATH=$(detect_std_git)
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
 
+
 # Map architecture to binary name
 case $ARCH in
     "x86_64")
@@ -357,7 +358,10 @@ if [ ! -f "$CONFIG_JSON_PATH" ]; then
     TMP_CFG="$CONFIG_JSON_PATH.tmp.$$"
     cat >"$TMP_CFG" <<EOF
 {
-  "git_path": "${STD_GIT_PATH}"
+  "git_path": "${STD_GIT_PATH}",
+  "feature_flags": {
+    "async_mode": true
+  }
 }
 EOF
     mv -f "$TMP_CFG" "$CONFIG_JSON_PATH"

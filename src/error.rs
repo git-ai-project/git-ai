@@ -186,7 +186,7 @@ mod tests {
 
     #[test]
     fn test_error_display_sqlite_error() {
-        use rusqlite::{Connection, Error as SqlError};
+        use rusqlite::Connection;
         let conn = Connection::open_in_memory().unwrap();
         let sql_err = conn.execute("INVALID SQL", []).unwrap_err();
         let err = GitAiError::from(sql_err);

@@ -14,8 +14,8 @@ use std::fs;
 use std::path::PathBuf;
 
 // Command patterns for hooks
-const CURSOR_BEFORE_SUBMIT_CMD: &str = "checkpoint cursor --hook-input stdin";
-const CURSOR_AFTER_EDIT_CMD: &str = "checkpoint cursor --hook-input stdin";
+const CURSOR_PRE_TOOL_USE_CMD: &str = "checkpoint cursor --hook-input stdin";
+const CURSOR_POST_TOOL_USE_CMD: &str = "checkpoint cursor --hook-input stdin";
 
 pub struct CursorInstaller;
 
@@ -86,7 +86,7 @@ impl HookInstaller for CursorInstaller {
 
         let has_hooks = existing
             .get("hooks")
-            .and_then(|h| h.get("beforeSubmitPrompt"))
+            .and_then(|h| h.get("preToolUse"))
             .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter().any(|hook| {
@@ -132,25 +132,29 @@ impl HookInstaller for CursorInstaller {
         };
 
         // Build commands with absolute path
-        let before_submit_cmd = format!(
+        let pre_tool_use_cmd = format!(
             "{} {}",
             params.binary_path.display(),
-            CURSOR_BEFORE_SUBMIT_CMD
+            CURSOR_PRE_TOOL_USE_CMD
         );
-        let after_edit_cmd = format!("{} {}", params.binary_path.display(), CURSOR_AFTER_EDIT_CMD);
+        let post_tool_use_cmd = format!(
+            "{} {}",
+            params.binary_path.display(),
+            CURSOR_POST_TOOL_USE_CMD
+        );
 
         // Desired hooks payload for Cursor
         let desired: Value = json!({
             "version": 1,
             "hooks": {
-                "beforeSubmitPrompt": [
+                "preToolUse": [
                     {
-                        "command": before_submit_cmd
+                        "command": pre_tool_use_cmd
                     }
                 ],
-                "afterFileEdit": [
+                "postToolUse": [
                     {
-                        "command": after_edit_cmd
+                        "command": post_tool_use_cmd
                     }
                 ]
             }
@@ -170,7 +174,7 @@ impl HookInstaller for CursorInstaller {
         let mut hooks_obj = merged.get("hooks").cloned().unwrap_or_else(|| json!({}));
 
         // Process both hook types
-        for hook_name in &["beforeSubmitPrompt", "afterFileEdit"] {
+        for hook_name in &["preToolUse", "postToolUse"] {
             let desired_hooks = desired
                 .get("hooks")
                 .and_then(|h| h.get(*hook_name))
@@ -276,7 +280,7 @@ impl HookInstaller for CursorInstaller {
         let mut changed = false;
 
         // Remove git-ai checkpoint cursor commands from both hook types
-        for hook_name in &["beforeSubmitPrompt", "afterFileEdit"] {
+        for hook_name in &["preToolUse", "postToolUse"] {
             if let Some(hooks_array) = hooks_obj.get_mut(*hook_name).and_then(|v| v.as_array_mut())
             {
                 let original_len = hooks_array.len();
@@ -449,17 +453,17 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
 
-        let git_ai_cmd = format!("{} {}", binary_path.display(), CURSOR_BEFORE_SUBMIT_CMD);
+        let git_ai_cmd = format!("{} {}", binary_path.display(), CURSOR_PRE_TOOL_USE_CMD);
 
         let result = json!({
             "version": 1,
             "hooks": {
-                "beforeSubmitPrompt": [
+                "preToolUse": [
                     {
                         "command": git_ai_cmd.clone()
                     }
                 ],
-                "afterFileEdit": [
+                "postToolUse": [
                     {
                         "command": git_ai_cmd.clone()
                     }
@@ -477,13 +481,13 @@ mod tests {
         assert_eq!(content.get("version").unwrap(), &json!(1));
 
         let hooks = content.get("hooks").unwrap();
-        let before_submit = hooks.get("beforeSubmitPrompt").unwrap().as_array().unwrap();
-        let after_edit = hooks.get("afterFileEdit").unwrap().as_array().unwrap();
+        let pre_tool_use = hooks.get("preToolUse").unwrap().as_array().unwrap();
+        let post_tool_use = hooks.get("postToolUse").unwrap().as_array().unwrap();
 
-        assert_eq!(before_submit.len(), 1);
-        assert_eq!(after_edit.len(), 1);
+        assert_eq!(pre_tool_use.len(), 1);
+        assert_eq!(post_tool_use.len(), 1);
         assert!(
-            before_submit[0]
+            pre_tool_use[0]
                 .get("command")
                 .unwrap()
                 .as_str()
@@ -504,12 +508,12 @@ mod tests {
         let existing = json!({
             "version": 1,
             "hooks": {
-                "beforeSubmitPrompt": [
+                "preToolUse": [
                     {
                         "command": "echo 'before'"
                     }
                 ],
-                "afterFileEdit": [
+                "postToolUse": [
                     {
                         "command": "echo 'after'"
                     }
@@ -522,12 +526,12 @@ mod tests {
         )
         .unwrap();
 
-        let git_ai_cmd = format!("{} {}", binary_path.display(), CURSOR_BEFORE_SUBMIT_CMD);
+        let git_ai_cmd = format!("{} {}", binary_path.display(), CURSOR_PRE_TOOL_USE_CMD);
 
         let mut content: Value =
             serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
 
-        for hook_name in &["beforeSubmitPrompt", "afterFileEdit"] {
+        for hook_name in &["preToolUse", "postToolUse"] {
             let hooks_obj = content.get_mut("hooks").unwrap();
             let mut hooks_array = hooks_obj
                 .get(*hook_name)
@@ -548,18 +552,18 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
         let hooks = result.get("hooks").unwrap();
 
-        let before_submit = hooks.get("beforeSubmitPrompt").unwrap().as_array().unwrap();
-        let after_edit = hooks.get("afterFileEdit").unwrap().as_array().unwrap();
+        let pre_tool_use = hooks.get("preToolUse").unwrap().as_array().unwrap();
+        let post_tool_use = hooks.get("postToolUse").unwrap().as_array().unwrap();
 
-        assert_eq!(before_submit.len(), 2);
-        assert_eq!(after_edit.len(), 2);
+        assert_eq!(pre_tool_use.len(), 2);
+        assert_eq!(post_tool_use.len(), 2);
 
         assert_eq!(
-            before_submit[0].get("command").unwrap().as_str().unwrap(),
+            pre_tool_use[0].get("command").unwrap().as_str().unwrap(),
             "echo 'before'"
         );
         assert_eq!(
-            after_edit[0].get("command").unwrap().as_str().unwrap(),
+            post_tool_use[0].get("command").unwrap().as_str().unwrap(),
             "echo 'after'"
         );
     }
@@ -576,12 +580,12 @@ mod tests {
         let existing = json!({
             "version": 1,
             "hooks": {
-                "beforeSubmitPrompt": [
+                "preToolUse": [
                     {
                         "command": "git-ai checkpoint cursor 2>/dev/null || true"
                     }
                 ],
-                "afterFileEdit": [
+                "postToolUse": [
                     {
                         "command": "/old/path/git-ai checkpoint cursor"
                     }
@@ -594,12 +598,12 @@ mod tests {
         )
         .unwrap();
 
-        let git_ai_cmd = format!("{} {}", binary_path.display(), CURSOR_BEFORE_SUBMIT_CMD);
+        let git_ai_cmd = format!("{} {}", binary_path.display(), CURSOR_PRE_TOOL_USE_CMD);
 
         let mut content: Value =
             serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
 
-        for hook_name in &["beforeSubmitPrompt", "afterFileEdit"] {
+        for hook_name in &["preToolUse", "postToolUse"] {
             let hooks_obj = content.get_mut("hooks").unwrap();
             let mut hooks_array = hooks_obj
                 .get(*hook_name)
@@ -628,18 +632,18 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
         let hooks = result.get("hooks").unwrap();
 
-        let before_submit = hooks.get("beforeSubmitPrompt").unwrap().as_array().unwrap();
-        let after_edit = hooks.get("afterFileEdit").unwrap().as_array().unwrap();
+        let pre_tool_use = hooks.get("preToolUse").unwrap().as_array().unwrap();
+        let post_tool_use = hooks.get("postToolUse").unwrap().as_array().unwrap();
 
-        assert_eq!(before_submit.len(), 1);
-        assert_eq!(after_edit.len(), 1);
+        assert_eq!(pre_tool_use.len(), 1);
+        assert_eq!(post_tool_use.len(), 1);
 
         assert_eq!(
-            before_submit[0].get("command").unwrap().as_str().unwrap(),
+            pre_tool_use[0].get("command").unwrap().as_str().unwrap(),
             git_ai_cmd
         );
         assert_eq!(
-            after_edit[0].get("command").unwrap().as_str().unwrap(),
+            post_tool_use[0].get("command").unwrap().as_str().unwrap(),
             git_ai_cmd
         );
     }
@@ -649,21 +653,21 @@ mod tests {
         let raw_path = PathBuf::from(r"\\?\C:\Users\USERNAME\.git-ai\bin\git-ai.exe");
         let binary_path = clean_path(raw_path);
 
-        let before_submit_cmd = format!("{} {}", binary_path.display(), CURSOR_BEFORE_SUBMIT_CMD);
-        let after_edit_cmd = format!("{} {}", binary_path.display(), CURSOR_AFTER_EDIT_CMD);
+        let pre_tool_use_cmd = format!("{} {}", binary_path.display(), CURSOR_PRE_TOOL_USE_CMD);
+        let post_tool_use_cmd = format!("{} {}", binary_path.display(), CURSOR_POST_TOOL_USE_CMD);
 
         assert!(
-            !before_submit_cmd.contains(r"\\?\"),
-            "beforeSubmitPrompt command should not contain \\\\?\\ prefix, got: {}",
-            before_submit_cmd
+            !pre_tool_use_cmd.contains(r"\\?\"),
+            "preToolUse command should not contain \\\\?\\ prefix, got: {}",
+            pre_tool_use_cmd
         );
         assert!(
-            !after_edit_cmd.contains(r"\\?\"),
-            "afterFileEdit command should not contain \\\\?\\ prefix, got: {}",
-            after_edit_cmd
+            !post_tool_use_cmd.contains(r"\\?\"),
+            "postToolUse command should not contain \\\\?\\ prefix, got: {}",
+            post_tool_use_cmd
         );
         assert!(
-            before_submit_cmd.contains("checkpoint cursor"),
+            pre_tool_use_cmd.contains("checkpoint cursor"),
             "command should still contain checkpoint args"
         );
     }

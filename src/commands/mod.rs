@@ -4,14 +4,13 @@ pub mod checkpoint_agent;
 pub mod ci_handlers;
 pub mod config;
 pub mod continue_session;
+pub mod daemon;
 pub mod debug;
 pub mod diff;
 #[cfg(feature = "cloud")]
 pub mod exchange_nonce;
 #[cfg(feature = "cloud")]
 pub mod flush_cas;
-#[cfg(feature = "cloud")]
-pub mod flush_logs;
 #[cfg(feature = "cloud")]
 pub mod flush_metrics_db;
 pub mod git_ai_handlers;

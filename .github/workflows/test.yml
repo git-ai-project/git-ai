@@ -1,10 +1,29 @@
 name: Test
 
 on:
+  workflow_dispatch:
   pull_request:
     branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'Taskfile.yml'
+      - 'flake.nix'
+      - 'flake.lock'
+      - '.github/workflows/test.yml'
   push:
     branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'Taskfile.yml'
+      - 'flake.nix'
+      - 'flake.lock'
+      - '.github/workflows/test.yml'
   merge_group:
     branches: [main]
 
@@ -15,12 +34,47 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        test_mode: [wrapper, hooks, both]
+        include:
+          - os: ubuntu-latest
+            test_mode: wrapper
+            test_threads: 4
+            daemon_pool: 4
+          - os: ubuntu-latest
+            test_mode: daemon
+            test_threads: 4
+            daemon_pool: 4
+          - os: ubuntu-latest
+            test_mode: wrapper-daemon
+            test_threads: 4
+            daemon_pool: 4
+          - os: windows-latest
+            test_mode: wrapper
+            test_threads: 4
+            daemon_pool: 4
+          - os: windows-latest
+            test_mode: daemon
+            test_threads: 4
+            daemon_pool: 4
+          - os: windows-latest
+            test_mode: wrapper-daemon
+            test_threads: 4
+            daemon_pool: 4
+          - os: macos-latest
+            test_mode: wrapper
+            test_threads: 2
+            daemon_pool: 2
+          - os: macos-latest
+            test_mode: daemon
+            test_threads: 2
+            daemon_pool: 2
+          - os: macos-latest
+            test_mode: wrapper-daemon
+            test_threads: 2
+            daemon_pool: 2
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           # submodules: true
           fetch-depth: 0
@@ -43,18 +97,24 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '22'
 
       - name: Install Graphite CLI
         run: npm install -g @withgraphite/graphite-cli@stable
 
+      - name: Install mold linker (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y mold
+
       - name: Run tests
-        run: cargo test -- --test-threads=8
+        run: cargo test -- --test-threads=${{ matrix.test_threads }}
         env:
           CARGO_INCREMENTAL: 0
           GIT_AI_TEST_GIT_MODE: ${{ matrix.test_mode }}
+          GIT_AI_TEST_SHARED_DAEMON_POOL_SIZE: ${{ matrix.daemon_pool }}
+          RUSTFLAGS: ${{ runner.os == 'Linux' && '-C link-arg=-fuse-ld=mold' || '' }}
 
   test-ignored:
     name: Test SCM e2e tests on just Ubuntu
@@ -62,7 +122,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           # submodules: true
           fetch-depth: 0
@@ -85,6 +145,6 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Run ignored tests
-        run: cargo test --test github_integration -- --ignored
+        run: cargo test --test integration github_integration -- --ignored
         env:
           CARGO_INCREMENTAL: 0

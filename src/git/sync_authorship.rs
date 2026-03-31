@@ -1,5 +1,6 @@
 use crate::git::refs::{
-    AI_AUTHORSHIP_PUSH_REFSPEC, copy_ref, merge_notes_from_ref, ref_exists, tracking_ref_for_remote,
+    AI_AUTHORSHIP_PUSH_REFSPEC, copy_ref, fallback_merge_notes_ours, merge_notes_from_ref,
+    ref_exists, tracking_ref_for_remote,
 };
 use crate::{
     error::GitAiError,
@@ -83,47 +84,8 @@ pub fn fetch_authorship_notes(
         remote_name, tracking_ref
     ));
 
-    // First, check if the remote has refs/notes/ai using ls-remote
-    // This is important for bare repos where the refmap might not be configured
-    let mut ls_remote_args = repository.global_args_for_exec();
-    ls_remote_args.push("ls-remote".to_string());
-    ls_remote_args.push(remote_name.to_string());
-    ls_remote_args.push("refs/notes/ai".to_string());
-
-    debug_log(&format!("ls-remote command: {:?}", ls_remote_args));
-
-    match exec_git(&ls_remote_args) {
-        Ok(output) => {
-            let result = String::from_utf8_lossy(&output.stdout).to_string();
-            debug_log(&format!("ls-remote stdout: '{}'", result));
-            debug_log(&format!(
-                "ls-remote stderr: '{}'",
-                String::from_utf8_lossy(&output.stderr)
-            ));
-
-            if result.trim().is_empty() {
-                debug_log(&format!(
-                    "no authorship notes found on remote '{}', nothing to sync",
-                    remote_name
-                ));
-                return Ok(NotesExistence::NotFound);
-            }
-            debug_log(&format!(
-                "found authorship notes on remote '{}'",
-                remote_name
-            ));
-        }
-        Err(e) => {
-            debug_log(&format!(
-                "failed to check for authorship notes on remote '{}': {}",
-                remote_name, e
-            ));
-            // Return error instead of assuming no notes - we don't know the state
-            return Err(e);
-        }
-    }
-
-    // Now fetch the notes to the tracking ref with explicit refspec
+    // Fetch notes to tracking ref with explicit refspec.
+    // If the remote does not have refs/notes/ai yet, treat that as NotFound.
     let fetch_refspec = format!("+refs/notes/ai:{}", tracking_ref);
 
     // Build the internal authorship fetch with explicit flags and disabled hooks.
@@ -148,6 +110,13 @@ pub fn fetch_authorship_notes(
             ));
         }
         Err(e) => {
+            if is_missing_remote_notes_ref_error(&e) {
+                debug_log(&format!(
+                    "no authorship notes found on remote '{}', nothing to sync",
+                    remote_name
+                ));
+                return Ok(NotesExistence::NotFound);
+            }
             debug_log(&format!("authorship fetch failed: {}", e));
             return Err(e);
         }
@@ -165,7 +134,10 @@ pub fn fetch_authorship_notes(
             ));
             if let Err(e) = merge_notes_from_ref(repository, &tracking_ref) {
                 debug_log(&format!("notes merge failed: {}", e));
-                // Don't fail on merge errors, just log and continue
+                // Fallback: manually merge notes when git notes merge crashes
+                if let Err(e2) = fallback_merge_notes_ours(repository, &tracking_ref) {
+                    debug_log(&format!("fallback merge also failed: {}", e2));
+                }
             }
         } else {
             // Only tracking ref exists - copy it to local
@@ -187,67 +159,123 @@ pub fn fetch_authorship_notes(
 
     Ok(NotesExistence::Found)
 }
+
+fn is_missing_remote_notes_ref_error(error: &GitAiError) -> bool {
+    let GitAiError::GitCliError { stderr, .. } = error else {
+        return false;
+    };
+
+    let stderr_lower = stderr.to_ascii_lowercase();
+    stderr_lower.contains("refs/notes/ai")
+        && (stderr_lower.contains("couldn't find remote ref")
+            || stderr_lower.contains("could not find remote ref")
+            || stderr_lower.contains("remote ref does not exist")
+            || stderr_lower.contains("not our ref"))
+}
+/// Maximum number of fetch-merge-push attempts before giving up.
+/// On busy monorepos, concurrent pushers can cause non-fast-forward rejections
+/// even after a successful merge, so we retry the full cycle.
+const PUSH_NOTES_MAX_ATTEMPTS: usize = 3;
+
 // for use with post-push hook
 pub fn push_authorship_notes(repository: &Repository, remote_name: &str) -> Result<(), GitAiError> {
-    // STEP 1: Fetch remote notes into tracking ref and merge before pushing
-    // This ensures we don't lose notes from other branches/clones
+    let mut last_error = None;
+
+    for attempt in 0..PUSH_NOTES_MAX_ATTEMPTS {
+        if attempt > 0 {
+            debug_log(&format!(
+                "retrying notes push (attempt {}/{})",
+                attempt + 1,
+                PUSH_NOTES_MAX_ATTEMPTS
+            ));
+        }
+
+        fetch_and_merge_tracking_notes(repository, remote_name);
+
+        // Push notes without force (requires fast-forward)
+        let push_args = build_authorship_push_args(repository.global_args_for_exec(), remote_name);
+
+        debug_log(&format!(
+            "pushing authorship refs (no force): {:?}",
+            &push_args
+        ));
+
+        match exec_git(&push_args) {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                debug_log(&format!("authorship push failed: {}", e));
+                if is_non_fast_forward_error(&e) && attempt + 1 < PUSH_NOTES_MAX_ATTEMPTS {
+                    // Another pusher updated remote notes between our merge and push.
+                    // Retry the full fetch-merge-push cycle.
+                    last_error = Some(e);
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
+
+    Err(last_error
+        .unwrap_or_else(|| GitAiError::Generic("notes push exhausted retries".to_string())))
+}
+
+/// Fetch remote notes into a tracking ref and merge into local refs/notes/ai.
+fn fetch_and_merge_tracking_notes(repository: &Repository, remote_name: &str) {
     let tracking_ref = tracking_ref_for_remote(remote_name);
     let fetch_refspec = format!("+refs/notes/ai:{}", tracking_ref);
 
-    let fetch_before_push = build_authorship_fetch_args(
+    let fetch_args = build_authorship_fetch_args(
         repository.global_args_for_exec(),
         remote_name,
         &fetch_refspec,
     );
 
-    debug_log(&format!(
-        "pre-push authorship fetch: {:?}",
-        &fetch_before_push
-    ));
+    debug_log(&format!("pre-push authorship fetch: {:?}", &fetch_args));
 
     // Fetch is best-effort; if it fails (e.g., no remote notes yet), continue
-    if exec_git(&fetch_before_push).is_ok() {
-        // Merge fetched notes into local refs/notes/ai
-        let local_notes_ref = "refs/notes/ai";
+    if exec_git(&fetch_args).is_err() {
+        return;
+    }
 
-        if ref_exists(repository, &tracking_ref) {
-            if ref_exists(repository, local_notes_ref) {
-                // Both exist - merge them
-                debug_log(&format!(
-                    "pre-push: merging {} into {}",
-                    tracking_ref, local_notes_ref
-                ));
-                if let Err(e) = merge_notes_from_ref(repository, &tracking_ref) {
-                    debug_log(&format!("pre-push notes merge failed: {}", e));
-                }
-            } else {
-                // Only tracking ref exists - copy it to local
-                debug_log(&format!(
-                    "pre-push: initializing {} from {}",
-                    local_notes_ref, tracking_ref
-                ));
-                if let Err(e) = copy_ref(repository, &tracking_ref, local_notes_ref) {
-                    debug_log(&format!("pre-push notes copy failed: {}", e));
-                }
-            }
+    let local_notes_ref = "refs/notes/ai";
+
+    if !ref_exists(repository, &tracking_ref) {
+        return;
+    }
+
+    if !ref_exists(repository, local_notes_ref) {
+        // Only tracking ref exists - copy it to local
+        debug_log(&format!(
+            "pre-push: initializing {} from {}",
+            local_notes_ref, tracking_ref
+        ));
+        if let Err(e) = copy_ref(repository, &tracking_ref, local_notes_ref) {
+            debug_log(&format!("pre-push notes copy failed: {}", e));
+        }
+        return;
+    }
+
+    // Both exist - merge them
+    debug_log(&format!(
+        "pre-push: merging {} into {}",
+        tracking_ref, local_notes_ref
+    ));
+    if let Err(e) = merge_notes_from_ref(repository, &tracking_ref) {
+        debug_log(&format!("pre-push notes merge failed: {}", e));
+        // Fallback: manually merge notes when git notes merge crashes
+        // (e.g., due to corrupted/mixed-fanout notes trees, or git bugs
+        // with fanout-level mismatches on older git versions like macOS)
+        if let Err(e2) = fallback_merge_notes_ours(repository, &tracking_ref) {
+            debug_log(&format!("pre-push fallback merge also failed: {}", e2));
         }
     }
+}
 
-    // STEP 2: Push notes without force (requires fast-forward)
-    let push_authorship =
-        build_authorship_push_args(repository.global_args_for_exec(), remote_name);
-
-    debug_log(&format!(
-        "pushing authorship refs (no force): {:?}",
-        &push_authorship
-    ));
-    if let Err(e) = exec_git(&push_authorship) {
-        // Best-effort; don't fail user operation due to authorship sync issues
-        debug_log(&format!("authorship push skipped due to error: {}", e));
-        return Err(e);
-    }
-
-    Ok(())
+fn is_non_fast_forward_error(error: &GitAiError) -> bool {
+    let GitAiError::GitCliError { stderr, .. } = error else {
+        return false;
+    };
+    stderr.contains("non-fast-forward")
 }
 
 fn extract_remote_from_fetch_args(args: &[String]) -> Option<String> {
@@ -367,5 +395,26 @@ mod tests {
                 .any(|pair| pair[0] == "-c" && pair[1] == disabled_hooks)
         );
         assert!(args.contains(&"push".to_string()));
+    }
+
+    #[test]
+    fn missing_remote_notes_ref_error_is_detected() {
+        let err = GitAiError::GitCliError {
+            code: Some(128),
+            stderr: "fatal: couldn't find remote ref refs/notes/ai".to_string(),
+            args: vec!["fetch".to_string(), "origin".to_string()],
+        };
+        assert!(is_missing_remote_notes_ref_error(&err));
+    }
+
+    #[test]
+    fn missing_remote_notes_ref_error_ignores_unrelated_git_errors() {
+        let err = GitAiError::GitCliError {
+            code: Some(128),
+            stderr: "fatal: Authentication failed for 'https://github.com/org/repo.git/'"
+                .to_string(),
+            args: vec!["fetch".to_string(), "origin".to_string()],
+        };
+        assert!(!is_missing_remote_notes_ref_error(&err));
     }
 }

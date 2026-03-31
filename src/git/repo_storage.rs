@@ -18,6 +18,9 @@ pub struct InitialAttributions {
     pub files: HashMap<String, Vec<LineAttribution>>,
     /// Map of author_id (hash) to PromptRecord for prompt tracking
     pub prompts: HashMap<String, PromptRecord>,
+    /// Optional blob snapshot of the file content represented by INITIAL.
+    #[serde(default)]
+    pub file_blobs: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -30,15 +33,18 @@ pub struct RepoStorage {
 }
 
 impl RepoStorage {
-    pub fn for_repo_path(repo_path: &Path, repo_workdir: &Path) -> RepoStorage {
+    pub fn for_repo_path(repo_path: &Path, repo_workdir: &Path) -> Result<RepoStorage, GitAiError> {
         Self::for_ai_dir(&repo_path.join("ai"), repo_workdir)
     }
 
-    pub fn for_isolated_worktree_storage(ai_dir: &Path, repo_workdir: &Path) -> RepoStorage {
+    pub fn for_isolated_worktree_storage(
+        ai_dir: &Path,
+        repo_workdir: &Path,
+    ) -> Result<RepoStorage, GitAiError> {
         Self::for_ai_dir(ai_dir, repo_workdir)
     }
 
-    fn for_ai_dir(ai_dir: &Path, repo_workdir: &Path) -> RepoStorage {
+    fn for_ai_dir(ai_dir: &Path, repo_workdir: &Path) -> Result<RepoStorage, GitAiError> {
         let working_logs_dir = ai_dir.join("working_logs");
         let rewrite_log_file = ai_dir.join("rewrite_log");
         let logs_dir = ai_dir.join("logs");
@@ -51,8 +57,8 @@ impl RepoStorage {
             logs: logs_dir,
         };
 
-        config.ensure_config_directory().unwrap();
-        config
+        config.ensure_config_directory()?;
+        Ok(config)
     }
 
     fn ensure_config_directory(&self) -> Result<(), GitAiError> {
@@ -77,20 +83,23 @@ impl RepoStorage {
         self.working_logs.join(sha).exists()
     }
 
-    pub fn working_log_for_base_commit(&self, sha: &str) -> PersistedWorkingLog {
+    pub fn working_log_for_base_commit(
+        &self,
+        sha: &str,
+    ) -> Result<PersistedWorkingLog, GitAiError> {
         let working_log_dir = self.working_logs.join(sha);
-        fs::create_dir_all(&working_log_dir).unwrap();
+        fs::create_dir_all(&working_log_dir)?;
         let canonical_workdir = self
             .repo_workdir
             .canonicalize()
             .unwrap_or_else(|_| self.repo_workdir.clone());
-        PersistedWorkingLog::new(
+        Ok(PersistedWorkingLog::new(
             working_log_dir,
             sha,
             self.repo_workdir.clone(),
             canonical_workdir,
             None,
-        )
+        ))
     }
 
     pub fn delete_working_log_for_base_commit(&self, sha: &str) -> Result<(), GitAiError> {
@@ -515,6 +524,16 @@ impl PersistedWorkingLog {
         Ok(())
     }
 
+    pub fn mutate_all_checkpoints<F>(&self, mutator: F) -> Result<Vec<Checkpoint>, GitAiError>
+    where
+        F: FnOnce(&mut Vec<Checkpoint>) -> Result<(), GitAiError>,
+    {
+        let mut checkpoints = self.read_all_checkpoints()?;
+        mutator(&mut checkpoints)?;
+        self.write_all_checkpoints(&checkpoints)?;
+        Ok(checkpoints)
+    }
+
     pub fn all_touched_files(&self) -> Result<HashSet<String>, GitAiError> {
         let checkpoints = self.read_all_checkpoints()?;
         let mut touched_files = HashSet::new();
@@ -556,26 +575,112 @@ impl PersistedWorkingLog {
         attributions: HashMap<String, Vec<LineAttribution>>,
         prompts: HashMap<String, PromptRecord>,
     ) -> Result<(), GitAiError> {
-        // Filter out empty attributions
+        self.write_initial(InitialAttributions {
+            files: attributions,
+            prompts,
+            file_blobs: HashMap::new(),
+        })
+    }
+
+    /// Persist INITIAL attributions plus exact file snapshots for the target working log.
+    pub fn write_initial_attributions_with_contents(
+        &self,
+        attributions: HashMap<String, Vec<LineAttribution>>,
+        prompts: HashMap<String, PromptRecord>,
+        file_contents: HashMap<String, String>,
+    ) -> Result<(), GitAiError> {
         let filtered: HashMap<String, Vec<LineAttribution>> = attributions
             .into_iter()
             .filter(|(_, attrs)| !attrs.is_empty())
             .collect();
+        let mut file_blobs = HashMap::new();
+        for file_path in filtered.keys() {
+            if let Some(content) = file_contents.get(file_path) {
+                let blob_sha = self.persist_file_version(content)?;
+                file_blobs.insert(file_path.clone(), blob_sha);
+            }
+        }
 
-        if filtered.is_empty() {
-            // Don't create an INITIAL file if there are no attributions
+        self.write_initial(InitialAttributions {
+            files: filtered,
+            prompts,
+            file_blobs,
+        })
+    }
+
+    /// Write a fully-formed INITIAL state, preserving any persisted blob references.
+    pub fn write_initial(&self, initial: InitialAttributions) -> Result<(), GitAiError> {
+        let filtered_files: HashMap<String, Vec<LineAttribution>> = initial
+            .files
+            .into_iter()
+            .filter(|(_, attrs)| !attrs.is_empty())
+            .collect();
+
+        if filtered_files.is_empty() {
+            if self.initial_file.exists() {
+                fs::remove_file(&self.initial_file)?;
+            }
             return Ok(());
         }
 
+        let mut file_blobs = initial.file_blobs;
+        file_blobs.retain(|file_path, _| filtered_files.contains_key(file_path));
+
         let initial_data = InitialAttributions {
-            files: filtered,
-            prompts,
+            files: filtered_files,
+            prompts: initial.prompts,
+            file_blobs,
         };
 
         let json = serde_json::to_string_pretty(&initial_data)?;
         fs::write(&self.initial_file, json)?;
 
         Ok(())
+    }
+
+    pub fn initial_file_content_from(
+        &self,
+        initial: &InitialAttributions,
+        file_path: &str,
+    ) -> Option<String> {
+        if let Some(content) = self.stored_initial_file_content_from(initial, file_path) {
+            return Some(content);
+        }
+        if initial.files.contains_key(file_path) {
+            return self.read_current_file_content(file_path).ok();
+        }
+        None
+    }
+
+    pub fn stored_initial_file_content_from(
+        &self,
+        initial: &InitialAttributions,
+        file_path: &str,
+    ) -> Option<String> {
+        if let Some(blob_sha) = initial.file_blobs.get(file_path) {
+            return self.get_file_version(blob_sha).ok();
+        }
+        None
+    }
+
+    pub fn latest_checkpoint_file_content(&self, file_path: &str) -> Option<String> {
+        let checkpoints = self.read_all_checkpoints().ok()?;
+        let entry = checkpoints.iter().rev().find_map(|checkpoint| {
+            checkpoint
+                .entries
+                .iter()
+                .find(|entry| entry.file == file_path)
+        })?;
+        self.get_file_version(&entry.blob_sha).ok()
+    }
+
+    pub fn effective_tracked_file_content(
+        &self,
+        initial: &InitialAttributions,
+        file_path: &str,
+    ) -> Option<String> {
+        self.latest_checkpoint_file_content(file_path)
+            .or_else(|| self.initial_file_content_from(initial, file_path))
     }
 
     /// Read initial attributions from the INITIAL file.
@@ -622,7 +727,8 @@ mod tests {
 
         // Create RepoStorage
         let _repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap());
+            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
+                .unwrap();
 
         // Verify .git/ai directory exists
         let ai_dir = tmp_repo.repo().path().join("ai");
@@ -656,7 +762,8 @@ mod tests {
 
         // Create RepoStorage
         let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap());
+            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
+                .unwrap();
 
         // Add some content to rewrite_log
         let rewrite_log_file = tmp_repo.repo().path().join("ai").join("rewrite_log");
@@ -691,8 +798,11 @@ mod tests {
 
         // Create RepoStorage and PersistedWorkingLog
         let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap());
-        let working_log = repo_storage.working_log_for_base_commit("test-commit-sha");
+            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
+                .unwrap();
+        let working_log = repo_storage
+            .working_log_for_base_commit("test-commit-sha")
+            .unwrap();
 
         // Test persisting a file version
         let content = "Hello, World!\nThis is a test file.";
@@ -735,8 +845,11 @@ mod tests {
 
         // Create RepoStorage and PersistedWorkingLog
         let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap());
-        let working_log = repo_storage.working_log_for_base_commit("test-commit-sha");
+            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
+                .unwrap();
+        let working_log = repo_storage
+            .working_log_for_base_commit("test-commit-sha")
+            .unwrap();
 
         // Create a test checkpoint
         let checkpoint = Checkpoint::new(
@@ -792,8 +905,11 @@ mod tests {
 
         // Create RepoStorage and PersistedWorkingLog
         let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap());
-        let working_log = repo_storage.working_log_for_base_commit("test-commit-sha");
+            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
+                .unwrap();
+        let working_log = repo_storage
+            .working_log_for_base_commit("test-commit-sha")
+            .unwrap();
 
         // Build three checkpoints: missing version, wrong version, and correct version
         let base_checkpoint = Checkpoint::new(
@@ -845,8 +961,11 @@ mod tests {
 
         // Create RepoStorage and PersistedWorkingLog
         let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap());
-        let working_log = repo_storage.working_log_for_base_commit("test-commit-sha");
+            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
+                .unwrap();
+        let working_log = repo_storage
+            .working_log_for_base_commit("test-commit-sha")
+            .unwrap();
 
         // Add some blobs
         let content = "Test content";
@@ -914,11 +1033,14 @@ mod tests {
 
         // Create RepoStorage
         let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap());
+            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
+                .unwrap();
 
         // Create working log for a specific commit
         let commit_sha = "abc123def456";
-        let working_log = repo_storage.working_log_for_base_commit(commit_sha);
+        let working_log = repo_storage
+            .working_log_for_base_commit(commit_sha)
+            .unwrap();
 
         // Verify the directory was created
         assert!(
@@ -940,6 +1062,78 @@ mod tests {
         assert_eq!(
             working_log.dir, expected_path,
             "Working log directory should be in correct location"
+        );
+    }
+
+    #[test]
+    fn test_write_initial_with_contents_persists_snapshot_blob() {
+        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
+        let repo_storage =
+            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
+                .unwrap();
+        let working_log = repo_storage
+            .working_log_for_base_commit("test-commit-sha")
+            .unwrap();
+
+        let mut attributions = HashMap::new();
+        attributions.insert(
+            "src/test.rs".to_string(),
+            vec![LineAttribution {
+                start_line: 1,
+                end_line: 1,
+                author_id: "ai-1".to_string(),
+                overrode: None,
+            }],
+        );
+        let mut contents = HashMap::new();
+        contents.insert("src/test.rs".to_string(), "fn main() {}\n".to_string());
+
+        working_log
+            .write_initial_attributions_with_contents(attributions, HashMap::new(), contents)
+            .expect("write INITIAL with contents");
+
+        let initial = working_log.read_initial_attributions();
+        let blob_sha = initial
+            .file_blobs
+            .get("src/test.rs")
+            .expect("snapshot blob should exist");
+        let persisted = working_log
+            .get_file_version(blob_sha)
+            .expect("read snapshot blob");
+        assert_eq!(persisted, "fn main() {}\n");
+    }
+
+    #[test]
+    fn test_write_initial_empty_removes_existing_file() {
+        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
+        let repo_storage =
+            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
+                .unwrap();
+        let working_log = repo_storage
+            .working_log_for_base_commit("test-commit-sha")
+            .unwrap();
+
+        let mut attributions = HashMap::new();
+        attributions.insert(
+            "src/test.rs".to_string(),
+            vec![LineAttribution {
+                start_line: 1,
+                end_line: 1,
+                author_id: "ai-1".to_string(),
+                overrode: None,
+            }],
+        );
+        working_log
+            .write_initial_attributions(attributions, HashMap::new())
+            .expect("write INITIAL");
+        assert!(working_log.initial_file.exists(), "INITIAL should exist");
+
+        working_log
+            .write_initial(InitialAttributions::default())
+            .expect("clear INITIAL");
+        assert!(
+            !working_log.initial_file.exists(),
+            "INITIAL should be removed when empty"
         );
     }
 }

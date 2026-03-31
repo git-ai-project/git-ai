@@ -737,7 +737,13 @@ fn fetch_from_internal_db(
             new_count += 1;
         }
 
-        let messages_json = serde_json::to_string(&record.messages).ok();
+        // Don't overwrite existing messages with empty array — messages may have
+        // been cleared locally after being uploaded to CAS
+        let messages_json = if record.messages.messages.is_empty() {
+            None
+        } else {
+            serde_json::to_string(&record.messages).ok()
+        };
         let start_time = record.messages.first_message_timestamp_unix();
         let last_time = record.messages.last_message_timestamp_unix();
 
@@ -860,7 +866,13 @@ fn fetch_from_git_notes(
                     let created_at = start_time.unwrap_or(now);
                     let updated_at = last_time.unwrap_or(created_at);
 
-                    let messages_json = serde_json::to_string(&prompt_record.messages).ok();
+                    // Don't overwrite existing messages with empty array — messages may have
+                    // been cleared locally after being uploaded to CAS
+                    let messages_json = if prompt_record.messages.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&prompt_record.messages).ok()
+                    };
 
                     upsert_prompt(
                         conn,

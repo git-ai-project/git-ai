@@ -10,7 +10,7 @@ use chrono::{TimeZone, Utc};
 use dirs;
 use glob::glob;
 use rusqlite::{Connection, OpenFlags};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
 use std::path::{Component, Path, PathBuf};
@@ -19,7 +19,7 @@ pub struct AgentCheckpointFlags {
     pub hook_input: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentRunResult {
     pub agent_id: AgentId,
     pub agent_metadata: Option<HashMap<String, String>>,
@@ -1396,16 +1396,34 @@ impl AgentCheckpointPreset for CursorPreset {
             .map(|s| s.to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
+        // Legacy hooks no longer installed; exit silently for existing users who haven't reinstalled.
+        if hook_event_name == "beforeSubmitPrompt" || hook_event_name == "afterFileEdit" {
+            std::process::exit(0);
+        }
+
         // Validate hook_event_name
-        if hook_event_name != "beforeSubmitPrompt" && hook_event_name != "afterFileEdit" {
+        if hook_event_name != "preToolUse" && hook_event_name != "postToolUse" {
             return Err(GitAiError::PresetError(format!(
-                "Invalid hook_event_name: {}. Expected 'beforeSubmitPrompt' or 'afterFileEdit'",
+                "Invalid hook_event_name: {}. Expected 'preToolUse' or 'postToolUse'",
                 hook_event_name
             )));
         }
 
+        // Only checkpoint on file-mutating tools (Write, Delete, StrReplace)
+        let tool_name = hook_data
+            .get("tool_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !matches!(tool_name, "Write" | "Delete" | "StrReplace") {
+            return Err(GitAiError::PresetError(format!(
+                "Skipping Cursor hook for non-edit tool_name '{}'.",
+                tool_name
+            )));
+        }
+
         let file_path = hook_data
-            .get("file_path")
+            .get("tool_input")
+            .and_then(|ti| ti.get("file_path"))
             .and_then(|v| v.as_str())
             .map(Self::normalize_cursor_path)
             .unwrap_or_default();
@@ -1433,7 +1451,13 @@ impl AgentCheckpointPreset for CursorPreset {
             })?
         };
 
-        if hook_event_name == "beforeSubmitPrompt" {
+        if hook_event_name == "preToolUse" {
+            let will_edit = if !file_path.is_empty() {
+                Some(vec![file_path.clone()])
+            } else {
+                None
+            };
+
             // early return, we're just adding a human checkpoint.
             return Ok(AgentRunResult {
                 agent_id: AgentId {
@@ -1446,7 +1470,7 @@ impl AgentCheckpointPreset for CursorPreset {
                 transcript: None,
                 repo_working_dir: Some(repo_working_dir),
                 edited_filepaths: None,
-                will_edit_filepaths: None,
+                will_edit_filepaths: will_edit,
                 dirty_files: None,
             });
         }
@@ -2500,6 +2524,7 @@ impl GithubCopilotPreset {
             "edit",
             "multiedit",
             "applypatch",
+            "apply_patch",
             "copilot_insertedit",
             "copilot_replacestring",
             "vscode_editfile_internal",
@@ -2515,6 +2540,24 @@ impl GithubCopilotPreset {
         }
 
         lower.contains("edit") || lower.contains("write") || lower.contains("replace")
+    }
+
+    fn collect_apply_patch_paths_from_text(raw: &str, out: &mut Vec<String>) {
+        for line in raw.lines() {
+            let trimmed = line.trim();
+            let maybe_path = trimmed
+                .strip_prefix("*** Update File: ")
+                .or_else(|| trimmed.strip_prefix("*** Add File: "))
+                .or_else(|| trimmed.strip_prefix("*** Delete File: "))
+                .or_else(|| trimmed.strip_prefix("*** Move to: "));
+
+            if let Some(path) = maybe_path {
+                let path = path.trim();
+                if !path.is_empty() && !out.iter().any(|existing| existing == path) {
+                    out.push(path.to_string());
+                }
+            }
+        }
     }
 
     fn extract_filepaths_from_vscode_hook_payload(
@@ -2584,6 +2627,7 @@ impl GithubCopilotPreset {
                 if s.starts_with("file://") {
                     out.push(s.to_string());
                 }
+                Self::collect_apply_patch_paths_from_text(s, out);
             }
             _ => {}
         }
@@ -3443,6 +3487,9 @@ impl GithubCopilotPreset {
                 for item in arr {
                     Self::collect_copilot_filepaths(item, out);
                 }
+            }
+            serde_json::Value::String(s) => {
+                Self::collect_apply_patch_paths_from_text(s, out);
             }
             _ => {}
         }

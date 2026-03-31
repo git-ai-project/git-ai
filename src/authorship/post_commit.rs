@@ -57,26 +57,38 @@ pub fn post_commit(
     human_author: String,
     supress_output: bool,
 ) -> Result<(String, AuthorshipLog), GitAiError> {
+    post_commit_with_final_state(
+        repo,
+        base_commit,
+        commit_sha,
+        human_author,
+        supress_output,
+        None,
+    )
+}
+
+pub fn post_commit_with_final_state(
+    repo: &Repository,
+    base_commit: Option<String>,
+    commit_sha: String,
+    human_author: String,
+    supress_output: bool,
+    final_state_override: Option<&HashMap<String, String>>,
+) -> Result<(String, AuthorshipLog), GitAiError> {
     // Use base_commit parameter if provided, otherwise use "initial" for empty repos
     // This matches the convention in checkpoint.rs
     let parent_sha = base_commit.unwrap_or_else(|| "initial".to_string());
 
     // Initialize the new storage system
     let repo_storage = &repo.storage;
-    let working_log = repo_storage.working_log_for_base_commit(&parent_sha);
+    let working_log = repo_storage.working_log_for_base_commit(&parent_sha)?;
 
-    // Pull all working log entries from the parent commit
-
-    let mut parent_working_log = working_log.read_all_checkpoints()?;
-
-    // debug_log(&format!(
-    //     "edited files: {:?}",
-    //     parent_working_log.edited_files
-    // ));
-
-    // Update prompts/transcripts to their latest versions and persist to disk
-    // Do this BEFORE filtering so that all checkpoints (including untracked files) are updated
-    update_prompts_to_latest(&mut parent_working_log)?;
+    // Refresh prompts/transcripts under the same checkpoints lock used by append_checkpoint so
+    // concurrent checkpoint appends cannot be lost between a read and rewrite of the JSONL file.
+    let parent_working_log = working_log.mutate_all_checkpoints(|checkpoints| {
+        update_prompts_to_latest(checkpoints)?;
+        Ok(())
+    })?;
 
     // Batch upsert all prompts to database after refreshing (non-fatal if it fails)
     if let Err(e) = batch_upsert_prompts_to_db(&parent_working_log, &working_log, &commit_sha) {
@@ -93,16 +105,23 @@ pub fn post_commit(
         );
     }
 
-    working_log.write_all_checkpoints(&parent_working_log)?;
-
     // Create VirtualAttributions from working log (fast path - no blame)
     // We don't need to run blame because we only care about the working log data
     // that was accumulated since the parent commit
-    let working_va = VirtualAttributions::from_just_working_log(
-        repo.clone(),
-        parent_sha.clone(),
-        Some(human_author.clone()),
-    )?;
+    let working_va = if let Some(snapshot) = final_state_override {
+        VirtualAttributions::from_working_log_snapshot(
+            repo.clone(),
+            parent_sha.clone(),
+            Some(human_author.clone()),
+            snapshot,
+        )?
+    } else {
+        VirtualAttributions::from_just_working_log(
+            repo.clone(),
+            parent_sha.clone(),
+            Some(human_author.clone()),
+        )?
+    };
 
     // Build pathspecs from AI-relevant checkpoint entries only.
     // Human-only entries with no AI attribution do not affect authorship output and should not
@@ -124,28 +143,42 @@ pub fn post_commit(
         pathspecs.insert(file_path.clone());
     }
 
-    // Split VirtualAttributions into committed (authorship log) and uncommitted (INITIAL)
     let (mut authorship_log, initial_attributions) = working_va
         .to_authorship_log_and_initial_working_log(
             repo,
             &parent_sha,
             &commit_sha,
             Some(&pathspecs),
+            final_state_override,
         )?;
 
     authorship_log.metadata.base_commit_sha = commit_sha.clone();
 
-    // Inject custom attributes into all PromptRecords
-    let custom_attrs = Config::get().custom_attributes();
+    // Long-lived daemon processes should read a fresh config snapshot.
+    // Wrapper/hooks mode can use the process-global cached config.
+    let (effective_storage, using_custom_api, custom_attrs) =
+        if crate::daemon::daemon_process_active() {
+            let config = Config::fresh();
+            (
+                config.effective_prompt_storage(&Some(repo.clone())),
+                config.api_base_url() != crate::config::DEFAULT_API_BASE_URL,
+                config.custom_attributes().clone(),
+            )
+        } else {
+            let config = Config::get();
+            (
+                config.effective_prompt_storage(&Some(repo.clone())),
+                config.api_base_url() != crate::config::DEFAULT_API_BASE_URL,
+                config.custom_attributes().clone(),
+            )
+        };
+
+    // Inject custom attributes into all PromptRecords.
     if !custom_attrs.is_empty() {
         for pr in authorship_log.metadata.prompts.values_mut() {
             pr.custom_attributes = Some(custom_attrs.clone());
         }
     }
-
-    // Handle prompts based on effective prompt storage mode for this repository
-    // The effective mode considers include/exclude lists and fallback settings
-    let effective_storage = Config::get().effective_prompt_storage(&Some(repo.clone()));
 
     match effective_storage {
         PromptStorageMode::Local => {
@@ -167,8 +200,6 @@ pub fn post_commit(
                 // - user is logged in OR has API key OR using custom API URL
                 let context = ApiContext::new(None);
                 let client = ApiClient::new(context);
-                let using_custom_api =
-                    Config::get().api_base_url() != crate::config::DEFAULT_API_BASE_URL;
                 let should_enqueue_cas =
                     client.is_logged_in() || client.has_api_key() || using_custom_api;
 
@@ -276,9 +307,14 @@ pub fn post_commit(
 
     // Write INITIAL file for uncommitted AI attributions (if any)
     if !initial_attributions.files.is_empty() {
-        let new_working_log = repo_storage.working_log_for_base_commit(&commit_sha);
-        new_working_log
-            .write_initial_attributions(initial_attributions.files, initial_attributions.prompts)?;
+        let new_working_log = repo_storage.working_log_for_base_commit(&commit_sha)?;
+        let initial_file_contents =
+            working_va.snapshot_contents_for_files(initial_attributions.files.keys());
+        new_working_log.write_initial_attributions_with_contents(
+            initial_attributions.files,
+            initial_attributions.prompts,
+            initial_file_contents,
+        )?;
     }
 
     // // Clean up old working log
@@ -323,6 +359,41 @@ fn should_skip_expensive_post_commit_stats(estimate: &StatsCostEstimate) -> bool
     estimate.hunk_ranges >= STATS_SKIP_MAX_HUNKS
         || estimate.added_lines >= STATS_SKIP_MAX_ADDED_LINES
         || estimate.files_with_additions >= STATS_SKIP_MAX_FILES_WITH_ADDITIONS
+}
+
+/// Public result of the stats cost estimate for a commit, used by the async
+/// wrapper path to decide whether to skip expensive stats computation.
+pub struct StatsSkipEstimate {
+    should_skip: bool,
+}
+
+impl StatsSkipEstimate {
+    pub fn should_skip(&self) -> bool {
+        self.should_skip
+    }
+}
+
+/// Estimate whether stats computation for `commit_sha` would be too expensive.
+/// Resolves the parent commit automatically. Intended for callers outside the
+/// normal post-commit flow (e.g. the async wrapper path).
+pub fn estimate_stats_cost_for_head(
+    repo: &Repository,
+    commit_sha: &str,
+    ignore_patterns: &[String],
+) -> Result<StatsSkipEstimate, GitAiError> {
+    let commit = repo.find_commit(commit_sha.to_string())?;
+    let parent_sha = if commit.parent_count().unwrap_or(0) > 0 {
+        commit
+            .parent(0)
+            .map(|p| p.id())
+            .unwrap_or_else(|_| "initial".to_string())
+    } else {
+        "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()
+    };
+    let estimate = estimate_stats_cost(repo, &parent_sha, commit_sha, ignore_patterns)?;
+    Ok(StatsSkipEstimate {
+        should_skip: should_skip_expensive_post_commit_stats(&estimate),
+    })
 }
 
 fn estimate_stats_cost(
@@ -539,7 +610,11 @@ fn enqueue_prompt_messages_to_cas(
     }
 
     // Get API base URL for constructing messages_url
-    let api_base_url = Config::get().api_base_url();
+    let api_base_url = if crate::daemon::daemon_process_active() {
+        Config::fresh().api_base_url().to_string()
+    } else {
+        Config::get().api_base_url().to_string()
+    };
 
     for (_key, prompt) in prompts.iter_mut() {
         if !prompt.messages.is_empty() {
@@ -552,6 +627,25 @@ fn enqueue_prompt_messages_to_cas(
 
             // Enqueue to CAS (returns hash)
             let hash = db_lock.enqueue_cas_object(&messages_json, Some(&metadata))?;
+
+            let metadata_json = serde_json::to_string(&metadata).ok();
+            let canonical = serde_json_canonicalizer::to_string(&messages_json)
+                .unwrap_or_else(|_| messages_json.to_string());
+            let cas_payload = crate::daemon::control_api::CasSyncPayload {
+                hash: hash.clone(),
+                data: canonical,
+                metadata: metadata_json,
+            };
+
+            // In daemon mode, submit directly to the in-process telemetry worker.
+            // In wrapper-daemon mode, forward over the control socket so the
+            // background daemon can upload it immediately.
+            if crate::daemon::daemon_process_active() {
+                let _ =
+                    crate::daemon::telemetry_worker::submit_daemon_internal_cas(vec![cas_payload]);
+            } else if crate::daemon::telemetry_handle::daemon_telemetry_available() {
+                crate::daemon::telemetry_handle::submit_cas(vec![cas_payload]);
+            }
 
             // Set full URL and clear messages
             prompt.messages_url = Some(format!("{}/cas/{}", api_base_url, hash));

@@ -151,7 +151,13 @@ pub fn post_checkout_hook(
 
 /// Remove attributions for specific files from working log (pathspec checkout case).
 fn remove_attributions_for_pathspecs(repository: &Repository, head: &str, pathspecs: &[String]) {
-    let working_log = repository.storage.working_log_for_base_commit(head);
+    let working_log = match repository.storage.working_log_for_base_commit(head) {
+        Ok(wl) => wl,
+        Err(e) => {
+            debug_log(&format!("Failed to get working log for {}: {}", head, e));
+            return;
+        }
+    };
 
     // Filter INITIAL attributions
     let initial = working_log.read_initial_attributions();
@@ -161,7 +167,13 @@ fn remove_attributions_for_pathspecs(repository: &Repository, head: &str, pathsp
             .into_iter()
             .filter(|(file, _)| !matches_any_pathspec(file, pathspecs))
             .collect();
-        let _ = working_log.write_initial_attributions(filtered_files, initial.prompts);
+        let mut filtered_blobs = initial.file_blobs;
+        filtered_blobs.retain(|file, _| !matches_any_pathspec(file, pathspecs));
+        let _ = working_log.write_initial(crate::git::repo_storage::InitialAttributions {
+            files: filtered_files,
+            prompts: initial.prompts,
+            file_blobs: filtered_blobs,
+        });
     }
 
     // Filter checkpoints

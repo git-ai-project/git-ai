@@ -3,15 +3,7 @@ use crate::authorship::internal_db::{CasSyncRecord, InternalDatabase};
 use crate::observability::log_error;
 use std::collections::HashMap;
 
-const ENV_CAS_FLUSH_WORKER: &str = "GIT_AI_CAS_FLUSH_WORKER";
-
-/// Spawn a background process to flush CAS objects to the server
-pub fn spawn_background_cas_flush() {
-    let _ =
-        crate::utils::spawn_internal_git_ai_subcommand("flush-cas", &[], ENV_CAS_FLUSH_WORKER, &[]);
-}
-
-/// Handle the flush-cas command
+/// Handle the flush-cas command (kept for manual human use)
 pub fn handle_flush_cas(_args: &[String]) {
     // Create API client to check login status
     let context = ApiContext::new(None);

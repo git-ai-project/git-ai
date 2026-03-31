@@ -140,7 +140,6 @@ mod tests {
 
     #[test]
     fn test_metric_event_with_timestamp() {
-        use super::EventValues;
         use crate::metrics::events::CommittedValues;
 
         let values = CommittedValues::new().human_additions(50);
@@ -218,7 +217,6 @@ mod tests {
 
     #[test]
     fn test_metric_event_new_creates_current_timestamp() {
-        use super::EventValues;
         use crate::metrics::events::AgentUsageValues;
         use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -265,7 +263,7 @@ mod tests {
     #[test]
     fn test_metric_event_id_clone() {
         let id1 = MetricEventId::Checkpoint;
-        let id2 = id1.clone();
+        let id2 = id1;
         assert_eq!(id1, id2);
     }
 }

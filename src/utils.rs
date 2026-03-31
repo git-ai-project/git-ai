@@ -154,7 +154,7 @@ fn resolve_git_ai_exe_from_invocation_path(path: PathBuf) -> PathBuf {
     canonical_path
 }
 
-fn current_git_ai_exe() -> Result<PathBuf, GitAiError> {
+pub(crate) fn current_git_ai_exe() -> Result<PathBuf, GitAiError> {
     let path = std::env::current_exe()?;
     Ok(resolve_git_ai_exe_from_invocation_path(path))
 }
@@ -207,6 +207,8 @@ pub fn is_in_background_agent() -> bool {
             // Cloud agent environment (CLOUD_AGENT_* prefix)
             || std::env::vars().any(|(k, _)| k.starts_with("CLOUD_AGENT_"))
             || std::path::Path::new("/opt/.devin").is_dir()
+            // Explicit opt-in for cloud/background agent environments
+            || std::env::var("GIT_AI_CLOUD_AGENT").map(|v| v == "1").unwrap_or(false)
     })
 }
 
@@ -267,6 +269,12 @@ fn try_lock_exclusive(path: &std::path::Path) -> Option<std::fs::File> {
 /// Windows-specific flag to prevent console window creation
 #[cfg(windows)]
 pub const CREATE_NO_WINDOW: u32 = 0x08000000;
+/// Windows-specific flag to start a new process group
+#[cfg(windows)]
+pub const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+/// Windows-specific flag to allow a child process to break away from the current job object
+#[cfg(windows)]
+pub const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x01000000;
 /// Unescape a git-quoted path that may contain octal escape sequences.
 ///
 /// Git quotes filenames containing non-ASCII characters (and some special characters)
@@ -1123,5 +1131,17 @@ mod tests {
     fn test_create_no_window_constant() {
         // Verify the Windows constant is correct
         assert_eq!(CREATE_NO_WINDOW, 0x08000000);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_create_new_process_group_constant() {
+        assert_eq!(CREATE_NEW_PROCESS_GROUP, 0x00000200);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_create_breakaway_from_job_constant() {
+        assert_eq!(CREATE_BREAKAWAY_FROM_JOB, 0x01000000);
     }
 }

@@ -988,6 +988,22 @@ impl InternalDatabase {
         Ok(())
     }
 
+    /// Delete CAS sync records by their content hashes (used by daemon after successful upload).
+    pub fn delete_cas_by_hashes(&mut self, hashes: &[String]) -> Result<usize, GitAiError> {
+        if hashes.is_empty() {
+            return Ok(0);
+        }
+        let placeholders: Vec<&str> = hashes.iter().map(|_| "?").collect();
+        let sql = format!(
+            "DELETE FROM cas_sync_queue WHERE hash IN ({})",
+            placeholders.join(",")
+        );
+        let params: Vec<&dyn rusqlite::ToSql> =
+            hashes.iter().map(|h| h as &dyn rusqlite::ToSql).collect();
+        let deleted = self.conn.execute(&sql, params.as_slice())?;
+        Ok(deleted)
+    }
+
     /// Get cached CAS messages by hash
     pub fn get_cas_cache(&self, hash: &str) -> Result<Option<String>, GitAiError> {
         let result = self.conn.query_row(
