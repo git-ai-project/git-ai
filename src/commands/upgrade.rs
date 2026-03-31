@@ -351,6 +351,13 @@ fn try_mock_releases(base: &str, channel: UpdateChannel) -> Option<Result<Channe
 fn run_install_script(script_content: &str, tag: &str, silent: bool) -> Result<(), String> {
     #[cfg(windows)]
     {
+        if let Ok(daemon_config) = crate::daemon::DaemonConfig::from_env_or_default_paths() {
+            // Best effort: stop the daemon before we hand off to the detached installer.
+            // The install script also has a fallback kill path so old released binaries
+            // can still recover, but stopping here makes upgrades complete sooner.
+            let _ = crate::commands::daemon::stop_daemon(&daemon_config, Duration::from_secs(10));
+        }
+
         // On Windows, we need to run the installer detached because the current git-ai
         // binary and shims are in use and need to be replaced. The installer will wait
         // for the files to be released before proceeding.
@@ -428,7 +435,7 @@ fn run_install_script(script_content: &str, tag: &str, silent: bool) -> Result<(
                     );
                     println!("Check the log file for progress: {}", log_path_str);
                     println!(
-                        "The upgrade should complete shortly as long as there are no long-running git or git-ai processes in the background."
+                        "The installer will stop lingering git-ai background processes if needed, but active git commands can still delay completion."
                     );
                 }
                 Ok(())
@@ -877,6 +884,7 @@ fn is_newer_version(latest: &str, current: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     fn set_test_cache_dir(dir: &tempfile::TempDir) {
         unsafe {
@@ -925,6 +933,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_run_impl_with_url() {
         let temp_dir = tempfile::tempdir().unwrap();
         set_test_cache_dir(&temp_dir);
@@ -995,6 +1004,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_run_impl_with_url_enterprise_channels() {
         let temp_dir = tempfile::tempdir().unwrap();
         set_test_cache_dir(&temp_dir);
@@ -1526,6 +1536,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_check_for_update_available_no_cache_newer_version() {
         // When the cache is empty and a newer version is available, the function should
         // report UpdateReady (assuming version checks and auto-updates are enabled,
