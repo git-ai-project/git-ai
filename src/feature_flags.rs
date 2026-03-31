@@ -60,23 +60,17 @@ define_feature_flags!(
     git_hooks_externally_managed: git_hooks_externally_managed, debug = false, release = false,
 );
 
-/// Returns true when running under a non-daemon test mode
-/// (i.e. GIT_AI_TEST_GIT_MODE is set to "wrapper", "hooks", "both", or any value
-/// that does NOT imply daemon usage).  In this case async_mode should be off by
-/// default so that pure-wrapper tests do not accidentally try to reach a daemon.
+/// Returns true when running under any test mode (GIT_AI_TEST_GIT_MODE is set).
+/// In all test modes async_mode should be off by default so that tests using Wrapper
+/// repos do not accidentally try to reach a daemon that isn't running.
 ///
-/// File config and the GIT_AI_ASYNC_MODE env var can still override this baseline.
+/// wrapper-daemon repos get async_mode=true explicitly via apply_default_config_patch,
+/// which runs as a file-config override and takes precedence over this baseline.
+/// File config and the GIT_AI_ASYNC_MODE env var can also override this baseline.
 fn is_non_daemon_test_mode() -> bool {
-    if let Ok(mode) = std::env::var("GIT_AI_TEST_GIT_MODE") {
-        // Daemon modes: daemon, trace-daemon, pure-daemon, wrapper-daemon
-        // Everything else (wrapper, hooks, both, unknown) → non-daemon
-        !matches!(
-            mode.to_lowercase().as_str(),
-            "daemon" | "trace-daemon" | "pure-daemon" | "wrapper-daemon"
-        )
-    } else {
-        false // env var not set → production binary, no override
-    }
+    // Any test mode → disable async_mode at the baseline level.
+    // wrapper-daemon repos re-enable it via config patch.
+    std::env::var("GIT_AI_TEST_GIT_MODE").is_ok()
 }
 
 impl FeatureFlags {
@@ -289,22 +283,46 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn test_from_env_and_file_daemon_test_mode_keeps_async_mode_default() {
-        // Daemon modes (daemon, wrapper-daemon) should NOT override async_mode.
+    fn test_from_env_and_file_all_test_modes_disable_async_mode_at_baseline() {
+        // All test modes disable async_mode at the baseline level.
+        // wrapper-daemon repos re-enable it via file config (apply_default_config_patch).
         unsafe {
             std::env::remove_var("GIT_AI_ASYNC_MODE");
         }
-        for daemon_mode in &["daemon", "trace-daemon", "pure-daemon", "wrapper-daemon"] {
+        for test_mode in &[
+            "wrapper",
+            "hooks",
+            "both",
+            "daemon",
+            "trace-daemon",
+            "pure-daemon",
+            "wrapper-daemon",
+        ] {
             unsafe {
-                std::env::set_var("GIT_AI_TEST_GIT_MODE", daemon_mode);
+                std::env::set_var("GIT_AI_TEST_GIT_MODE", test_mode);
             }
             let flags = FeatureFlags::from_env_and_file(None);
             assert!(
-                flags.async_mode,
-                "async_mode should remain true in daemon test mode '{}'",
-                daemon_mode
+                !flags.async_mode,
+                "async_mode should be false in test mode '{}' without file config override",
+                test_mode
             );
         }
+
+        // wrapper-daemon repos re-enable via file config
+        let file_flags = DeserializableFeatureFlags {
+            async_mode: Some(true),
+            ..Default::default()
+        };
+        unsafe {
+            std::env::set_var("GIT_AI_TEST_GIT_MODE", "wrapper-daemon");
+        }
+        let flags = FeatureFlags::from_env_and_file(Some(file_flags));
+        assert!(
+            flags.async_mode,
+            "wrapper-daemon repos should have async_mode=true when set via file config"
+        );
+
         unsafe {
             std::env::remove_var("GIT_AI_TEST_GIT_MODE");
         }
