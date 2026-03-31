@@ -1,10 +1,8 @@
 use crate::error::GitAiError;
 use crate::git::diff_tree_to_tree::Diff;
 use std::io::IsTerminal;
-use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
 
 /// Check if debug logging is enabled via environment variable
 ///
@@ -13,24 +11,6 @@ static DEBUG_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static DEBUG_PERFORMANCE_LEVEL: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
 static IS_TERMINAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static IS_IN_BACKGROUND_AGENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-static DEBUG_LOG_FILE: std::sync::OnceLock<Mutex<std::fs::File>> = std::sync::OnceLock::new();
-
-pub fn set_debug_log_file(file: std::fs::File) {
-    let _ = DEBUG_LOG_FILE.set(Mutex::new(file));
-}
-
-fn write_debug_line_to_file(line: &str) {
-    let Some(file) = DEBUG_LOG_FILE.get() else {
-        return;
-    };
-
-    let Ok(mut file) = file.lock() else {
-        return;
-    };
-
-    let _ = writeln!(file, "{}", line);
-    let _ = file.flush();
-}
 
 fn is_debug_enabled() -> bool {
     *DEBUG_ENABLED.get_or_init(|| {
@@ -57,14 +37,12 @@ fn debug_performance_level() -> u8 {
 pub fn debug_performance_log(msg: &str) {
     if is_debug_performance_enabled() {
         eprintln!("\x1b[1;33m[git-ai (perf)]\x1b[0m {}", msg);
-        write_debug_line_to_file(&format!("[git-ai (perf)] {}", msg));
     }
 }
 
 pub fn debug_performance_log_structured(json: serde_json::Value) {
     if debug_performance_level() >= 2 {
         eprintln!("\x1b[1;33m[git-ai (perf-json)]\x1b[0m {}", json);
-        write_debug_line_to_file(&format!("[git-ai (perf-json)] {}", json));
     }
 }
 
@@ -77,7 +55,6 @@ pub fn debug_performance_log_structured(json: serde_json::Value) {
 ///
 /// * `msg` - The debug message to print
 pub fn debug_log(msg: &str) {
-    write_debug_line_to_file(&format!("[git-ai] {}", msg));
     if is_debug_enabled() {
         eprintln!("\x1b[1;33m[git-ai]\x1b[0m {}", msg);
     }
