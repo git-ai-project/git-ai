@@ -31,6 +31,13 @@ fn installed_git_ai_path(repo: &TestRepo) -> PathBuf {
         .join("git-ai.exe")
 }
 
+fn installed_git_wrapper_path(repo: &TestRepo) -> PathBuf {
+    repo.test_home_path()
+        .join(".git-ai")
+        .join("bin")
+        .join("git.exe")
+}
+
 fn foreground_daemon_stdout_path(repo: &TestRepo) -> PathBuf {
     repo.test_home_path().join("foreground-daemon.stdout.log")
 }
@@ -230,11 +237,10 @@ fn run_installed_git_ai(repo: &TestRepo, args: &[&str], timeout: Duration) -> Co
     run_command_with_timeout(&mut command, timeout)
 }
 
-fn run_git_wrapper_binary(repo: &TestRepo, args: &[&str], timeout: Duration) -> CommandResult {
-    let mut command = Command::new(get_binary_path());
+fn run_installed_git_wrapper(repo: &TestRepo, args: &[&str], timeout: Duration) -> CommandResult {
+    let mut command = Command::new(installed_git_wrapper_path(repo));
     command.args(args).current_dir(repo.path());
     configure_install_env(&mut command, repo);
-    command.env("GIT_AI", "git");
     run_command_with_timeout(&mut command, timeout)
 }
 
@@ -389,7 +395,15 @@ fn windows_daemon_creates_log_file() {
 fn windows_git_extension_upgrade_requires_direct_git_ai_binary() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
 
-    let result = run_git_wrapper_binary(
+    let initial_install = run_install_script(&repo, Duration::from_secs(90));
+    assert!(
+        initial_install.status.success(),
+        "initial install should succeed\nstdout:\n{}\nstderr:\n{}",
+        initial_install.stdout,
+        initial_install.stderr
+    );
+
+    let result = run_installed_git_wrapper(
         &repo,
         &["ai", "upgrade", "--force"],
         Duration::from_secs(15),

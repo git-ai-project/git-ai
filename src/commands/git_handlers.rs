@@ -110,14 +110,6 @@ pub fn handle_git(args: &[String]) {
         return;
     }
 
-    #[cfg(windows)]
-    if requires_direct_git_ai_upgrade(args) {
-        eprintln!(
-            "error: `git ai upgrade` is not supported on Windows. Run `git-ai upgrade` instead."
-        );
-        std::process::exit(1);
-    }
-
     // Async mode: wrapper should behave as a pure passthrough to git,
     // but capture and send authoritative pre/post state to the daemon.
     if config::Config::get().feature_flags().async_mode {
@@ -286,16 +278,6 @@ pub fn handle_git(args: &[String]) {
         )
     };
     exit_with_status(exit_status);
-}
-
-#[cfg(windows)]
-fn requires_direct_git_ai_upgrade(args: &[String]) -> bool {
-    let parsed = parse_git_cli_args(args);
-    parsed.command.as_deref() == Some("ai")
-        && matches!(
-            parsed.command_args.first().map(String::as_str),
-            Some("upgrade")
-        )
 }
 
 /// Handle alias invocations
@@ -1121,36 +1103,6 @@ mod tests {
                 "-5".to_string()
             ])
         );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn requires_direct_git_ai_upgrade_matches_plain_upgrade() {
-        let args = vec![
-            "ai".to_string(),
-            "upgrade".to_string(),
-            "--force".to_string(),
-        ];
-        assert!(super::requires_direct_git_ai_upgrade(&args));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn requires_direct_git_ai_upgrade_matches_upgrade_with_global_args() {
-        let args = vec![
-            "-C".to_string(),
-            "repo".to_string(),
-            "ai".to_string(),
-            "upgrade".to_string(),
-        ];
-        assert!(super::requires_direct_git_ai_upgrade(&args));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn requires_direct_git_ai_upgrade_ignores_other_git_ai_commands() {
-        let args = vec!["ai".to_string(), "status".to_string()];
-        assert!(!super::requires_direct_git_ai_upgrade(&args));
     }
 
     #[test]
