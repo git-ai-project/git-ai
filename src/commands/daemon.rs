@@ -1,6 +1,7 @@
+use crate::daemon::daemon_log_file_path;
 use crate::daemon::{
-    ControlRequest, DaemonConfig, daemon_log_file_path, local_socket_connects_with_timeout,
-    read_daemon_pid, send_control_request,
+    ControlRequest, DaemonConfig, local_socket_connects_with_timeout, read_daemon_pid,
+    send_control_request,
 };
 use crate::utils::LockFile;
 #[cfg(windows)]
@@ -551,7 +552,7 @@ fn hard_kill_daemon(config: &DaemonConfig) -> Result<(), String> {
 fn hard_kill_daemon(config: &DaemonConfig) -> Result<(), String> {
     let pid = read_daemon_pid(config).map_err(|e| format!("cannot read daemon pid: {}", e))?;
     let output = Command::new("taskkill")
-        .args(["/F", "/PID", &pid.to_string()])
+        .args(["/F", "/T", "/PID", &pid.to_string()])
         .output()
         .map_err(|e| format!("failed to run taskkill: {}", e))?;
     if !output.status.success() {
@@ -559,7 +560,7 @@ fn hard_kill_daemon(config: &DaemonConfig) -> Result<(), String> {
         // Process already dead is not an error.
         if !stderr.contains("not found") {
             return Err(format!(
-                "taskkill /F /PID {} failed: {}",
+                "taskkill /F /T /PID {} failed: {}",
                 pid,
                 stderr.trim()
             ));

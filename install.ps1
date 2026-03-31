@@ -23,21 +23,121 @@ function Write-Warning {
     Write-Host $Message -ForegroundColor Yellow
 }
 
+function Normalize-PathString {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    try {
+        return ([IO.Path]::GetFullPath($Path.Trim())).TrimEnd('\').ToLowerInvariant()
+    } catch {
+        return ($Path.Trim()).TrimEnd('\').ToLowerInvariant()
+    }
+}
+
+function Test-FileAvailable {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    try {
+        $stream = [System.IO.File]::Open($Path, 'Open', 'Write', 'None')
+        $stream.Close()
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Stop-GitAiBackgroundService {
+    param(
+        [Parameter(Mandatory = $true)][string]$GitAiExe,
+        [Parameter(Mandatory = $false)][switch]$Hard
+    )
+
+    if (-not (Test-Path -LiteralPath $GitAiExe)) {
+        return $false
+    }
+
+    $args = @('bg', 'shutdown')
+    if ($Hard) {
+        $args += '--hard'
+    }
+
+    try {
+        & $GitAiExe @args *> $null
+        return $LASTEXITCODE -eq 0
+    } catch {
+        return $false
+    }
+}
+
+function Get-GitAiManagedProcesses {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallDir
+    )
+
+    $targetPaths = @(
+        (Normalize-PathString (Join-Path $InstallDir 'git-ai.exe')),
+        (Normalize-PathString (Join-Path $InstallDir 'git.exe'))
+    )
+
+    $processes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+            $_.ProcessId -ne $PID -and
+            $_.ExecutablePath -and
+            ($targetPaths -contains (Normalize-PathString $_.ExecutablePath))
+        })
+
+    return $processes
+}
+
+function Stop-GitAiManagedProcesses {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallDir
+    )
+
+    $processes = @(Get-GitAiManagedProcesses -InstallDir $InstallDir)
+    if ($processes.Count -eq 0) {
+        return $false
+    }
+
+    $pids = @($processes | Sort-Object ProcessId -Unique | Select-Object -ExpandProperty ProcessId)
+    Write-Warning ("Stopping lingering git-ai processes: {0}" -f ($pids -join ', '))
+
+    foreach ($pid in $pids) {
+        try {
+            Stop-Process -Id $pid -Force -ErrorAction Stop
+        } catch { }
+    }
+
+    return $true
+}
+
 function Wait-ForFileAvailable {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$InstallDir,
         [Parameter(Mandatory = $false)][int]$MaxWaitSeconds = 300,
-        [Parameter(Mandatory = $false)][int]$RetryIntervalSeconds = 5
+        [Parameter(Mandatory = $false)][int]$RetryIntervalSeconds = 5,
+        [Parameter(Mandatory = $false)][int]$ForceKillAfterSeconds = 20
     )
-    
+
     $elapsed = 0
+    $gitAiExe = Join-Path $InstallDir 'git-ai.exe'
+
+    [void](Stop-GitAiBackgroundService -GitAiExe $gitAiExe)
+
     while ($elapsed -lt $MaxWaitSeconds) {
-        try {
-            # Try to open the file for writing to check if it's available
-            $stream = [System.IO.File]::Open($Path, 'Open', 'Write', 'None')
-            $stream.Close()
+        if (Test-FileAvailable -Path $Path) {
             return $true
-        } catch {
+        }
+
+        if ($elapsed -ge $ForceKillAfterSeconds) {
+            [void](Stop-GitAiBackgroundService -GitAiExe $gitAiExe -Hard)
+            [void](Stop-GitAiManagedProcesses -InstallDir $InstallDir)
+        }
+
+        if (-not (Test-FileAvailable -Path $Path)) {
             if ($elapsed -eq 0) {
                 Write-Host "Waiting for file to be available: $Path" -ForegroundColor Yellow
             }
@@ -363,7 +463,7 @@ $finalExe = Join-Path $installDir 'git-ai.exe'
 
 # Wait for git-ai.exe to be available if it exists and is in use
 if (Test-Path -LiteralPath $finalExe) {
-    if (-not (Wait-ForFileAvailable -Path $finalExe -MaxWaitSeconds 300 -RetryIntervalSeconds 5)) {
+    if (-not (Wait-ForFileAvailable -Path $finalExe -InstallDir $installDir -MaxWaitSeconds 300 -RetryIntervalSeconds 5)) {
         Remove-Item -Force -ErrorAction SilentlyContinue $tmpFile
         Write-ErrorAndExit "Timeout waiting for $finalExe to be available. Please close any running git-ai processes and try again."
     }
@@ -377,7 +477,7 @@ $gitShim = Join-Path $installDir 'git.exe'
 
 # Wait for git.exe shim to be available if it exists and is in use
 if (Test-Path -LiteralPath $gitShim) {
-    if (-not (Wait-ForFileAvailable -Path $gitShim -MaxWaitSeconds 300 -RetryIntervalSeconds 5)) {
+    if (-not (Wait-ForFileAvailable -Path $gitShim -InstallDir $installDir -MaxWaitSeconds 300 -RetryIntervalSeconds 5)) {
         Write-ErrorAndExit "Timeout waiting for $gitShim to be available. Please close any running git processes and try again."
     }
 }
@@ -414,7 +514,16 @@ try {
 }
 
 # Update PATH so our shim takes precedence over any Git entries
-$pathUpdate = Set-PathPrependBeforeGit -PathToAdd $installDir
+$skipPathUpdate = $env:GIT_AI_SKIP_PATH_UPDATE -eq '1'
+if ($skipPathUpdate) {
+    Write-Warning 'Skipping PATH updates because GIT_AI_SKIP_PATH_UPDATE=1'
+    $pathUpdate = [PSCustomObject]@{
+        UserStatus    = 'Skipped'
+        MachineStatus = 'Skipped'
+    }
+} else {
+    $pathUpdate = Set-PathPrependBeforeGit -PathToAdd $installDir
+}
 if ($pathUpdate.UserStatus -eq 'Updated') {
     Write-Success 'Successfully added git-ai to the user PATH.'
 } elseif ($pathUpdate.UserStatus -eq 'AlreadyPresent') {
