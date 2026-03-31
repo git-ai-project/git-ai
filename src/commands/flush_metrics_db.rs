@@ -22,7 +22,7 @@ pub fn handle_flush_metrics_db(_args: &[String]) {
         && !client.has_api_key()
         && !cfg!(debug_assertions)
     {
-        user_log!("flush-metrics-db: skipping (not logged in and using default API)");
+        eprintln!("flush-metrics-db: skipping (not logged in and using default API)");
         return;
     }
 
