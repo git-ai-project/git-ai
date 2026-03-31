@@ -826,6 +826,11 @@ mod tests {
             derive_directory_from_url(r"\\?\C:\Temp\bare-repo"),
             Some("bare-repo".to_string())
         );
+        // Trailing backslash
+        assert_eq!(
+            derive_directory_from_url("C:\\Users\\user\\repos\\repo.git\\"),
+            Some("repo".to_string())
+        );
     }
 
     #[test]
