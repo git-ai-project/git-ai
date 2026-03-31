@@ -255,7 +255,10 @@ mod tests {
             std::env::set_var("GIT_AI_TEST_GIT_MODE", "wrapper");
         }
         let flags = FeatureFlags::from_env_and_file(None);
-        assert!(!flags.async_mode, "async_mode should be false in wrapper test mode");
+        assert!(
+            !flags.async_mode,
+            "async_mode should be false in wrapper test mode"
+        );
 
         // Explicit file override can re-enable it
         let file_flags = DeserializableFeatureFlags {

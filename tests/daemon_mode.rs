@@ -606,7 +606,9 @@ fn should_skip_non_daemon_mode() -> bool {
 #[test]
 #[serial]
 fn daemon_start_spawns_detached_run_process() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
 
     let mut command = Command::new(get_binary_path());
@@ -659,7 +661,9 @@ fn daemon_start_spawns_detached_run_process() {
 #[test]
 #[serial]
 fn checkpoint_delegate_autostarts_daemon_when_unavailable() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
 
     fs::write(repo.path().join("delegate-fallback.txt"), "base\n").expect("failed to write base");
@@ -711,7 +715,9 @@ fn checkpoint_delegate_autostarts_daemon_when_unavailable() {
 #[test]
 #[serial]
 fn checkpoint_delegate_falls_back_when_daemon_startup_is_blocked() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
 
     fs::write(repo.path().join("delegate-fallback-blocked.txt"), "base\n")
@@ -770,7 +776,9 @@ fn checkpoint_delegate_falls_back_when_daemon_startup_is_blocked() {
 #[test]
 #[serial]
 fn daemon_write_mode_applies_delegated_checkpoint_and_updates_state() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
     let completion_baseline = repo.daemon_total_completion_count();
@@ -810,7 +818,9 @@ fn daemon_write_mode_applies_delegated_checkpoint_and_updates_state() {
 #[test]
 #[serial]
 fn daemon_test_mode_git_ai_checkpoint_runs_via_daemon() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo =
         TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
 
@@ -859,7 +869,9 @@ fn daemon_test_mode_git_ai_checkpoint_runs_via_daemon() {
 #[test]
 #[serial]
 fn daemon_test_mode_pathless_mock_ai_uses_waited_live_checkpoint_path() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo =
         TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
 
@@ -916,7 +928,9 @@ fn daemon_test_mode_pathless_mock_ai_uses_waited_live_checkpoint_path() {
 #[test]
 #[serial]
 fn daemon_test_mode_human_checkpoint_direct_file_arg_queues_as_scoped_capture() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo =
         TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
 
@@ -974,7 +988,9 @@ fn daemon_test_mode_human_checkpoint_direct_file_arg_queues_as_scoped_capture() 
 #[test]
 #[serial]
 fn daemon_captured_checkpoint_replay_uses_blob_snapshot_after_worktree_changes() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Daemon);
     let _daemon = DaemonGuard::start(&repo);
 
@@ -1057,7 +1073,9 @@ fn daemon_captured_checkpoint_replay_uses_blob_snapshot_after_worktree_changes()
 #[test]
 #[serial]
 fn daemon_captured_checkpoint_replay_supports_mixed_dirty_and_blob_sources() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Daemon);
     let _daemon = DaemonGuard::start(&repo);
 
@@ -1161,7 +1179,9 @@ fn daemon_captured_checkpoint_replay_supports_mixed_dirty_and_blob_sources() {
 #[test]
 #[serial]
 fn daemon_captured_checkpoint_failure_cleans_up_capture_dir() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Daemon);
     let _daemon = DaemonGuard::start(&repo);
 
@@ -1226,7 +1246,9 @@ fn daemon_captured_checkpoint_failure_cleans_up_capture_dir() {
 #[test]
 #[serial]
 fn daemon_captured_checkpoint_rejects_manifest_for_different_repo() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Daemon);
     let other_repo = TestRepo::new();
     let _daemon = DaemonGuard::start(&repo);
@@ -1298,7 +1320,9 @@ fn daemon_captured_checkpoint_rejects_manifest_for_different_repo() {
 #[test]
 #[serial]
 fn daemon_pure_trace_socket_commit_after_ai_checkpoint_preserves_ai_replacement_attribution() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
@@ -1359,7 +1383,9 @@ fn daemon_pure_trace_socket_commit_after_ai_checkpoint_preserves_ai_replacement_
 #[test]
 #[serial]
 fn daemon_trace_ingest_treats_atexit_as_terminal_for_reflog_capture() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
@@ -1399,7 +1425,9 @@ fn daemon_trace_ingest_treats_atexit_as_terminal_for_reflog_capture() {
 #[test]
 #[serial]
 fn daemon_pure_trace_socket_checkpoint_stage_checkpoint_two_commits_preserve_ai_lines() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
@@ -1502,7 +1530,9 @@ fn daemon_pure_trace_socket_checkpoint_stage_checkpoint_two_commits_preserve_ai_
 #[test]
 #[serial]
 fn daemon_pure_trace_socket_checkpoint_stage_checkpoint_non_adjacent_hunks_survive_split_commits() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
@@ -1640,7 +1670,9 @@ omega body
 #[test]
 #[serial]
 fn daemon_pure_trace_socket_write_mode_applies_amend_rewrite() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
@@ -1698,7 +1730,9 @@ fn daemon_pure_trace_socket_write_mode_applies_amend_rewrite() {
 #[test]
 #[serial]
 fn daemon_pure_trace_socket_rebase_abort_emits_abort_event() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
@@ -1822,7 +1856,9 @@ fn daemon_pure_trace_socket_rebase_abort_emits_abort_event() {
 #[test]
 #[serial]
 fn daemon_pure_trace_socket_cherry_pick_abort_emits_abort_event() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
@@ -1944,7 +1980,9 @@ fn daemon_pure_trace_socket_cherry_pick_abort_emits_abort_event() {
 #[test]
 #[serial]
 fn daemon_pure_trace_socket_stash_main_ops_emit_stash_events() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
@@ -2067,7 +2105,9 @@ fn daemon_pure_trace_socket_stash_main_ops_emit_stash_events() {
 #[test]
 #[serial]
 fn daemon_commit_replay_recovers_stash_restore_when_working_log_is_missing() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo =
         TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
     let mut file = repo.filename("stash-recover.txt");
@@ -2108,7 +2148,9 @@ fn daemon_commit_replay_recovers_stash_restore_when_working_log_is_missing() {
 #[test]
 #[serial]
 fn daemon_pure_trace_socket_reset_modes_emit_reset_kinds() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
@@ -2236,7 +2278,9 @@ fn daemon_pure_trace_socket_reset_modes_emit_reset_kinds() {
 #[test]
 #[serial]
 fn daemon_commit_replay_recovers_backward_reset_when_working_log_is_missing() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo =
         TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
     let mut file = repo.filename("reset-recover.txt");
@@ -2286,7 +2330,9 @@ fn daemon_commit_replay_recovers_backward_reset_when_working_log_is_missing() {
 #[test]
 #[serial]
 fn daemon_commit_replay_recovers_same_head_pathspec_reset_when_working_log_is_missing() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo =
         TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
     let mut keep = repo.filename("pathspec-keep.txt");
@@ -2367,7 +2413,9 @@ fn daemon_commit_replay_recovers_same_head_pathspec_reset_when_working_log_is_mi
 #[test]
 #[serial]
 fn daemon_commit_replay_recovers_squash_prep_when_working_log_is_missing() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo =
         TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
     let mut file = repo.filename("squash-recover.txt");
@@ -2420,7 +2468,9 @@ fn daemon_commit_replay_recovers_squash_prep_when_working_log_is_missing() {
 #[test]
 #[serial]
 fn daemon_pure_trace_socket_rebase_continue_emits_complete_event() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
@@ -2488,7 +2538,9 @@ fn daemon_pure_trace_socket_rebase_continue_emits_complete_event() {
 #[test]
 #[serial]
 fn daemon_commit_replay_recovers_switch_migration_when_working_log_is_missing() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo =
         TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
     let default_branch = repo.current_branch();
@@ -2535,7 +2587,9 @@ fn daemon_commit_replay_recovers_switch_migration_when_working_log_is_missing() 
 #[test]
 #[serial]
 fn daemon_pure_trace_socket_cherry_pick_continue_emits_complete_event() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
@@ -2606,7 +2660,9 @@ fn daemon_pure_trace_socket_cherry_pick_continue_emits_complete_event() {
 #[test]
 #[serial]
 fn daemon_pure_trace_socket_rebase_with_short_sha_emits_complete_event() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
@@ -2728,7 +2784,9 @@ fn daemon_pure_trace_socket_rebase_with_short_sha_emits_complete_event() {
 #[test]
 #[serial]
 fn daemon_pure_trace_socket_cherry_pick_with_short_sha_emits_complete_event() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
@@ -2844,7 +2902,9 @@ fn daemon_pure_trace_socket_cherry_pick_with_short_sha_emits_complete_event() {
 #[test]
 #[serial]
 fn daemon_pure_trace_socket_switch_tracks_success_and_conflict_failure() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
@@ -2898,7 +2958,9 @@ fn daemon_pure_trace_socket_switch_tracks_success_and_conflict_failure() {
 #[test]
 #[serial]
 fn daemon_pure_trace_socket_checkout_tracks_success_failure_and_new_branch() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
@@ -2957,7 +3019,9 @@ fn daemon_pure_trace_socket_checkout_tracks_success_failure_and_new_branch() {
 #[test]
 #[serial]
 fn daemon_pure_trace_socket_pull_fast_forward_tracks_pull_command() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
@@ -3070,7 +3134,9 @@ fn daemon_pure_trace_socket_pull_fast_forward_tracks_pull_command() {
 #[test]
 #[serial]
 fn daemon_pure_trace_socket_pull_rebase_tracks_pull_and_rebase_completion() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
@@ -3192,7 +3258,9 @@ fn daemon_pure_trace_socket_pull_rebase_tracks_pull_and_rebase_completion() {
 #[test]
 #[serial]
 fn daemon_pure_trace_socket_pull_autostash_preserves_local_changes_and_tracks_command() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
@@ -3326,7 +3394,9 @@ fn daemon_pure_trace_socket_pull_autostash_preserves_local_changes_and_tracks_co
 #[test]
 #[serial]
 fn daemon_pure_trace_socket_high_throughput_ai_commit_burst_preserves_exact_blame() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
@@ -3369,7 +3439,9 @@ fn daemon_pure_trace_socket_high_throughput_ai_commit_burst_preserves_exact_blam
 #[test]
 #[serial]
 fn daemon_pure_trace_socket_concurrent_worktree_burst_preserves_exact_line_attribution() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
@@ -3446,7 +3518,9 @@ fn daemon_pure_trace_socket_concurrent_worktree_burst_preserves_exact_line_attri
 #[test]
 #[serial]
 fn daemon_pure_trace_socket_concurrent_checkpoint_requests_preserve_exact_line_attribution() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
@@ -3502,7 +3576,9 @@ fn daemon_pure_trace_socket_concurrent_checkpoint_requests_preserve_exact_line_a
 #[test]
 #[serial]
 fn daemon_pure_trace_socket_parallel_worktree_streams_preserve_exact_line_attribution() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
@@ -3681,7 +3757,9 @@ fn update_enabled_config_patch() -> String {
 #[test]
 #[serial]
 fn daemon_update_check_loop_detects_cached_update_and_shuts_down() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
 
     // Seed update cache with a pending update before starting the daemon.
@@ -3741,7 +3819,9 @@ fn daemon_update_check_loop_detects_cached_update_and_shuts_down() {
 #[test]
 #[serial]
 fn daemon_update_check_loop_respects_disabled_auto_updates() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
 
     // Seed update cache with a pending update.
@@ -3786,7 +3866,9 @@ fn daemon_update_check_loop_respects_disabled_auto_updates() {
 #[test]
 #[serial]
 fn daemon_update_check_loop_no_update_stays_alive() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
 
     // Seed update cache with NO pending update.
@@ -3822,7 +3904,9 @@ fn daemon_update_check_loop_no_update_stays_alive() {
 #[test]
 #[serial]
 fn daemon_memory_does_not_grow_unbounded_under_trace_load() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo =
         TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
 
@@ -3930,7 +4014,9 @@ use std::process::Output;
 #[test]
 #[serial]
 fn daemon_shutdown_hard_kills_process() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let mut guard = DaemonGuard::start(&repo);
     guard.wait_until_ready();
@@ -3972,7 +4058,9 @@ fn daemon_shutdown_hard_kills_process() {
 #[test]
 #[serial]
 fn daemon_restart_brings_up_new_process() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let mut guard = DaemonGuard::start(&repo);
     guard.wait_until_ready();
@@ -4017,7 +4105,9 @@ fn daemon_restart_brings_up_new_process() {
 #[test]
 #[serial]
 fn daemon_restart_hard_kills_and_restarts() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
     let mut guard = DaemonGuard::start(&repo);
     guard.wait_until_ready();
@@ -4053,7 +4143,9 @@ fn daemon_restart_hard_kills_and_restarts() {
 #[test]
 #[serial]
 fn daemon_shutdown_hard_when_not_running_fails_gracefully() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
 
     // Don't start any daemon — just run shutdown --hard on a cold config.
@@ -4078,7 +4170,9 @@ fn daemon_shutdown_hard_when_not_running_fails_gracefully() {
 #[test]
 #[serial]
 fn daemon_restart_when_not_running_starts_fresh() {
-    if should_skip_non_daemon_mode() { return; }
+    if should_skip_non_daemon_mode() {
+        return;
+    }
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
 
     // No daemon running — restart should just start a new one.
