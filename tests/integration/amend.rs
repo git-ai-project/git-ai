@@ -572,6 +572,119 @@ fn test_amend_preserves_custom_attributes_from_config() {
     ]);
 }
 
+/// Regression test: `git commit --amend --no-edit` should be tracked the same as
+/// `git commit --amend -m "..."`. The `--no-edit` flag tells git to reuse the
+/// existing commit message without opening an editor, but git-ai must still
+/// detect the amend, run the rewrite pipeline, and preserve AI authorship.
+#[test]
+fn test_amend_no_edit_preserves_ai_attribution() {
+    let repo = TestRepo::new();
+    let mut file = repo.filename("test.txt");
+
+    // Initial file with human content
+    file.set_contents(crate::lines![
+        "line 1", "line 2", "line 3", "line 4", "line 5"
+    ]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    // AI adds lines in the middle
+    file.insert_at(
+        2,
+        crate::lines!["// AI inserted line 1".ai(), "// AI inserted line 2".ai()],
+    );
+
+    // Amend with --no-edit (should behave identically to -m)
+    repo.git(&["add", "-A"]).unwrap();
+    repo.git(&["commit", "--amend", "--no-edit"])
+        .expect("amend --no-edit should succeed");
+
+    // Verify AI authorship is preserved after amend --no-edit
+    file.assert_lines_and_blame(crate::lines![
+        "line 1".human(),
+        "line 2".human(),
+        "// AI inserted line 1".ai(),
+        "// AI inserted line 2".ai(),
+        "line 3".human(),
+        "line 4".human(),
+        "line 5".human()
+    ]);
+}
+
+/// Regression test: `git commit --amend --no-edit` with only AI content should
+/// produce an authorship note on the amended commit.
+#[test]
+fn test_amend_no_edit_creates_authorship_note() {
+    let repo = TestRepo::new();
+    let mut file = repo.filename("code.txt");
+
+    // Initial commit with AI content
+    file.set_contents(crate::lines!["fn main() {}".ai()]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    let original_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    assert!(
+        repo.read_authorship_note(&original_sha).is_some(),
+        "original commit should have authorship note"
+    );
+
+    // Add more AI content and amend with --no-edit
+    file.insert_at(1, crate::lines!["fn helper() {}".ai()]);
+    repo.git(&["add", "-A"]).unwrap();
+    repo.git(&["commit", "--amend", "--no-edit"])
+        .expect("amend --no-edit should succeed");
+
+    let amended_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    assert_ne!(original_sha, amended_sha, "amend should create new SHA");
+    assert!(
+        repo.read_authorship_note(&amended_sha).is_some(),
+        "amended commit (--no-edit) should have authorship note"
+    );
+
+    // Verify the content and attribution
+    file.assert_lines_and_blame(crate::lines!["fn main() {}".ai(), "fn helper() {}".ai()]);
+}
+
+/// Regression test: repeated amend --no-edit cycles should preserve attribution
+/// exactly the same as amend with -m.
+#[test]
+fn test_amend_no_edit_repeated_round_trips() {
+    let repo = TestRepo::new();
+    let mut file = repo.filename("code.js");
+
+    file.set_contents(crate::lines![
+        "function example() {".ai(),
+        "  return 42;".ai(),
+        "}".ai()
+    ]);
+    repo.stage_all_and_commit("Add example function").unwrap();
+
+    // First amend with --no-edit
+    file.insert_at(0, crate::lines!["// Header comment".ai()]);
+    file.insert_at(2, crate::lines!["  // Added documentation".ai()]);
+    file.insert_at(5, crate::lines!["// Footer".ai()]);
+    repo.git(&["add", "-A"]).unwrap();
+    repo.git(&["commit", "--amend", "--no-edit"])
+        .expect("first amend --no-edit should succeed");
+
+    // Second amend with --no-edit
+    file.insert_at(0, crate::lines!["// Human TODO".human()]);
+    file.insert_at(7, crate::lines!["// AI trailing note".ai()]);
+    repo.git(&["add", "-A"]).unwrap();
+    repo.git(&["commit", "--amend", "--no-edit"])
+        .expect("second amend --no-edit should succeed");
+
+    file.assert_lines_and_blame(crate::lines![
+        "// Human TODO".human(),
+        "// Header comment".ai(),
+        "function example() {".ai(),
+        "  // Added documentation".ai(),
+        "  return 42;".ai(),
+        "}".ai(),
+        "// Footer".ai(),
+        "// AI trailing note".ai()
+    ]);
+}
+
 crate::reuse_tests_in_worktree!(
     test_amend_add_lines_at_top,
     test_amend_add_lines_in_middle,
@@ -584,4 +697,7 @@ crate::reuse_tests_in_worktree!(
     test_amend_with_partially_staged_mixed_content,
     test_amend_with_unstaged_middle_section,
     test_amend_repeated_round_trips_preserve_exact_line_authorship,
+    test_amend_no_edit_preserves_ai_attribution,
+    test_amend_no_edit_creates_authorship_note,
+    test_amend_no_edit_repeated_round_trips,
 );

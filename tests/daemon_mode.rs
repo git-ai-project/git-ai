@@ -1957,6 +1957,64 @@ fn daemon_pure_trace_socket_write_mode_applies_amend_rewrite() {
     );
 }
 
+/// Regression test: `git commit --amend --no-edit` should emit a commit_amend
+/// rewrite event in daemon pure-trace mode, just like `--amend -m "..."`.
+#[test]
+#[serial]
+fn daemon_pure_trace_socket_amend_no_edit_emits_rewrite_event() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let _daemon = DaemonGuard::start(&repo);
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let env = git_trace_env(&trace_socket);
+    let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
+    let completion_baseline = repo.daemon_total_completion_count();
+    let mut expected_top_level_completions = 0u64;
+
+    fs::write(repo.path().join("no-edit.txt"), "line 1\n").expect("failed to write file");
+    traced_git_with_env(
+        &repo,
+        &["add", "no-edit.txt"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("add should succeed");
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "initial"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("commit should succeed");
+
+    fs::write(repo.path().join("no-edit.txt"), "line 1\nline 2\n").expect("failed to update file");
+    traced_git_with_env(
+        &repo,
+        &["add", "no-edit.txt"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("add before amend should succeed");
+    traced_git_with_env(
+        &repo,
+        &["commit", "--amend", "--no-edit"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("amend --no-edit should succeed");
+
+    wait_for_expected_top_level_completions(
+        &repo,
+        completion_baseline,
+        expected_top_level_completions,
+    );
+
+    let amend_events = wait_for_rewrite_event_count(&repo, "\"commit_amend\"", 1);
+    assert_eq!(
+        amend_events, 1,
+        "pure trace socket mode should emit exactly one commit_amend rewrite event for --amend --no-edit"
+    );
+}
+
 #[test]
 #[serial]
 fn daemon_pure_trace_socket_rebase_abort_emits_abort_event() {
