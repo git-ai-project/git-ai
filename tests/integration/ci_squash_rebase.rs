@@ -487,6 +487,176 @@ fn test_ci_rebase_merge_multiple_commits() {
     ]);
 }
 
+/// Test that prompts metadata is preserved during squash merge
+/// Regression test for https://github.com/git-ai-project/git-ai/issues/870
+#[test]
+fn test_ci_squash_merge_preserves_prompts() {
+    let repo = direct_test_repo();
+    let mut file = repo.filename("feature.js");
+
+    // Create initial commit on main
+    file.set_contents(crate::lines!["// Original code", "function original() {}"]);
+    let _base_commit = repo.stage_all_and_commit("Initial commit").unwrap();
+    repo.git(&["branch", "-M", "main"]).unwrap();
+
+    // Create feature branch with AI code
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    file.insert_at(
+        2,
+        crate::lines![
+            "// AI added function".ai(),
+            "function aiFeature() {".ai(),
+            "  return 'ai code';".ai(),
+            "}".ai()
+        ],
+    );
+    let feature_commit = repo.stage_all_and_commit("Add AI feature").unwrap();
+    let feature_sha = feature_commit.commit_sha;
+
+    // Verify prompts exist in the feature commit
+    let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("Failed to find repository");
+    let feature_log = get_reference_as_authorship_log_v3(&git_ai_repo, &feature_sha)
+        .expect("Feature commit should have authorship log");
+    assert!(
+        !feature_log.metadata.prompts.is_empty(),
+        "Feature commit should have prompt metadata, but prompts are empty"
+    );
+
+    // Simulate CI squash merge: checkout main, create merge commit
+    repo.git(&["checkout", "main"]).unwrap();
+
+    // Manually create the squashed state (as CI would do)
+    file.set_contents(crate::lines![
+        "// Original code",
+        "function original() {}",
+        "// AI added function",
+        "function aiFeature() {",
+        "  return 'ai code';",
+        "}"
+    ]);
+    let merge_commit = repo
+        .stage_all_and_commit("Merge feature via squash")
+        .unwrap();
+    let merge_sha = merge_commit.commit_sha;
+
+    // Call the CI rewrite function
+    use git_ai::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
+    rewrite_authorship_after_squash_or_rebase(
+        &git_ai_repo,
+        "feature",
+        "main",
+        &feature_sha,
+        &merge_sha,
+        false,
+    )
+    .unwrap();
+
+    // Verify prompts are preserved in the merge commit
+    let merge_log = get_reference_as_authorship_log_v3(&git_ai_repo, &merge_sha)
+        .expect("Merge commit should have authorship log");
+    assert!(
+        !merge_log.metadata.prompts.is_empty(),
+        "Bug #870: Prompts should be preserved in squash merge, but prompts are empty"
+    );
+
+    // Verify the prompts from the feature commit are present in the merge commit
+    for (prompt_id, _) in &feature_log.metadata.prompts {
+        assert!(
+            merge_log.metadata.prompts.contains_key(prompt_id),
+            "Bug #870: Prompt {} from feature commit should be in merge commit",
+            prompt_id
+        );
+    }
+}
+
+/// Test squash merge when notes need to be read directly from source commits
+/// This simulates the CI scenario where we can read source commit notes directly,
+/// but they may not be findable via grep in refs/notes/ai
+/// Regression test for https://github.com/git-ai-project/git-ai/issues/870
+#[test]
+fn test_ci_squash_merge_prompts_from_source_commits() {
+    let repo = direct_test_repo();
+    let mut file = repo.filename("feature.js");
+
+    // Create initial commit on main
+    file.set_contents(crate::lines!["// Original code", "function original() {}"]);
+    let _base_commit = repo.stage_all_and_commit("Initial commit").unwrap();
+    repo.git(&["branch", "-M", "main"]).unwrap();
+
+    // Create feature branch with AI code
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    file.insert_at(
+        2,
+        crate::lines![
+            "// AI added function".ai(),
+            "function aiFeature() {".ai(),
+            "  return 'ai code';".ai(),
+            "}".ai()
+        ],
+    );
+    let feature_commit = repo.stage_all_and_commit("Add AI feature").unwrap();
+    let feature_sha = feature_commit.commit_sha.clone();
+
+    // Verify prompts exist in the feature commit
+    let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("Failed to find repository");
+    let feature_log = get_reference_as_authorship_log_v3(&git_ai_repo, &feature_sha)
+        .expect("Feature commit should have authorship log");
+    assert!(
+        !feature_log.metadata.prompts.is_empty(),
+        "Feature commit should have prompt metadata"
+    );
+    let expected_prompts = feature_log.metadata.prompts.clone();
+
+    // Simulate CI squash merge: checkout main, create merge commit
+    repo.git(&["checkout", "main"]).unwrap();
+    file.set_contents(crate::lines![
+        "// Original code",
+        "function original() {}",
+        "// AI added function",
+        "function aiFeature() {",
+        "  return 'ai code';",
+        "}"
+    ]);
+    let merge_commit = repo
+        .stage_all_and_commit("Merge feature via squash")
+        .unwrap();
+    let merge_sha = merge_commit.commit_sha;
+
+    // Call the CI rewrite function
+    use git_ai::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
+    rewrite_authorship_after_squash_or_rebase(
+        &git_ai_repo,
+        "feature",
+        "main",
+        &feature_sha,
+        &merge_sha,
+        false,
+    )
+    .unwrap();
+
+    // Verify prompts are preserved from source commits
+    let merge_log = get_reference_as_authorship_log_v3(&git_ai_repo, &merge_sha)
+        .expect("Merge commit should have authorship log");
+
+    // Bug #870 fix: Prompts should be read directly from source commits
+    // even when VirtualAttributions can't find them via grep
+    assert!(
+        !merge_log.metadata.prompts.is_empty(),
+        "Bug #870 fixed: Prompts should be preserved from source commits"
+    );
+
+    // Verify all prompts from the feature commit are present in the merge commit
+    for (prompt_id, _) in &expected_prompts {
+        assert!(
+            merge_log.metadata.prompts.contains_key(prompt_id),
+            "Bug #870 fixed: Prompt {} from feature commit should be in merge commit",
+            prompt_id
+        );
+    }
+}
+
 crate::reuse_tests_in_worktree!(
     test_ci_squash_merge_basic,
     test_ci_squash_merge_multiple_files,
@@ -495,4 +665,5 @@ crate::reuse_tests_in_worktree!(
     test_ci_squash_merge_no_notes_no_authorship_created,
     test_ci_squash_merge_with_manual_changes,
     test_ci_rebase_merge_multiple_commits,
+    test_ci_squash_merge_preserves_prompts,
 );

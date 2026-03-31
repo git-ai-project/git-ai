@@ -640,11 +640,18 @@ pub fn rewrite_authorship_after_squash_or_rebase(
     let mut authorship_log = merged_va.to_authorship_log()?;
     authorship_log.metadata.base_commit_sha = merge_commit_sha.to_string();
 
-    // Preserve accumulated totals from source commits (squash/rebase should not drop session totals).
+    // Preserve prompts and accumulated totals from source commits (squash/rebase should not drop prompts).
+    // This is critical for CI scenarios where source commit notes may not be available in refs/notes/ai
+    // (e.g., when PR branches aren't pushed with notes), but are still accessible via direct commit lookup.
+    let mut source_prompts: BTreeMap<String, crate::authorship::authorship_log::PromptRecord> =
+        BTreeMap::new();
     let mut summed_totals: HashMap<String, (u32, u32)> = HashMap::new();
     for commit_sha in &source_commits {
         if let Ok(log) = get_reference_as_authorship_log_v3(repo, commit_sha) {
             for (prompt_id, record) in log.metadata.prompts {
+                // Collect all source prompts (will be merged into authorship_log)
+                source_prompts.insert(prompt_id.clone(), record.clone());
+                // Accumulate totals across all source commits
                 let entry = summed_totals.entry(prompt_id).or_insert((0, 0));
                 entry.0 = entry.0.saturating_add(record.total_additions);
                 entry.1 = entry.1.saturating_add(record.total_deletions);
@@ -652,6 +659,16 @@ pub fn rewrite_authorship_after_squash_or_rebase(
         }
     }
 
+    // Merge source prompts into authorship_log, preserving any prompts that were found during blame
+    for (prompt_id, source_record) in source_prompts {
+        authorship_log
+            .metadata
+            .prompts
+            .entry(prompt_id)
+            .or_insert(source_record);
+    }
+
+    // Update totals for all prompts
     for (prompt_id, record) in authorship_log.metadata.prompts.iter_mut() {
         if let Some((additions, deletions)) = summed_totals.get(prompt_id) {
             record.total_additions = *additions;
@@ -3385,6 +3402,22 @@ pub fn filter_pathspecs_to_ai_touched_files(
         repo,
         commit_shas.to_vec(),
     ))?;
+
+    // If we can't determine which files have AI touches (e.g., notes missing from refs/notes/ai),
+    // BUT we know notes do exist for these commits, fall back to processing all changed files
+    // rather than skipping them entirely. This is critical for CI scenarios where PR branch
+    // notes may not be pushed but are still readable via direct commit access.
+    if touched_files.is_empty() && !pathspecs.is_empty() {
+        // Only fall back if at least one commit has authorship notes
+        if commits_have_authorship_notes(repo, commit_shas)? {
+            debug_log(&format!(
+                "No AI-touched files found in notes index, but notes exist; falling back to processing all {} changed files",
+                pathspecs.len()
+            ));
+            return Ok(pathspecs.to_vec());
+        }
+    }
+
     Ok(pathspecs
         .iter()
         .filter(|p| touched_files.contains(p.as_str()))
