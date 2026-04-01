@@ -1,5 +1,5 @@
 use crate::repos::test_file::ExpectedLineExt;
-use crate::repos::test_repo::TestRepo;
+use crate::repos::test_repo::{TestRepo, real_git_executable};
 use crate::test_utils::fixture_path;
 use rusqlite::{Connection, OpenFlags};
 
@@ -591,6 +591,117 @@ fn test_cursor_e2e_with_resync() {
     );
 
     // The temp directory and database will be automatically cleaned up when temp_dir goes out of scope
+}
+
+#[test]
+fn test_cursor_checkpoint_routes_nested_worktree_file_to_worktree_repo() {
+    use git_ai::git::repository::find_repository_in_path;
+    use std::fs;
+    use std::process::Command;
+
+    let repo = TestRepo::new();
+    let db_path = fixture_path("cursor_test.vscdb");
+    let db_path_str = db_path.to_string_lossy().to_string();
+
+    let mut readme = repo.filename("README.md");
+    readme.set_contents(crate::lines!["# Parent Repo"]);
+    repo.stage_all_and_commit("initial commit").unwrap();
+
+    let worktree_path = repo.path().join("hbd-worktree");
+    let worktree_output = Command::new(real_git_executable())
+        .args([
+            "-C",
+            repo.path().to_str().unwrap(),
+            "worktree",
+            "add",
+            "-b",
+            "hbd-cli",
+            worktree_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to create nested linked worktree");
+    assert!(
+        worktree_output.status.success(),
+        "failed to create nested linked worktree:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&worktree_output.stdout),
+        String::from_utf8_lossy(&worktree_output.stderr)
+    );
+
+    let file_path = worktree_path.join("main.go");
+    fs::write(
+        &file_path,
+        "package main\n\nfunc main() {\n\tprintln(\"hbd\")\n}\n",
+    )
+    .unwrap();
+
+    let hook_input = serde_json::json!({
+        "conversation_id": TEST_CONVERSATION_ID,
+        "workspace_roots": [repo.canonical_path().to_string_lossy().to_string()],
+        "hook_event_name": "postToolUse",
+        "tool_name": "Write",
+        "tool_input": { "file_path": file_path.to_string_lossy().to_string() },
+        "model": "model-name-from-hook-test"
+    })
+    .to_string();
+
+    let output = repo
+        .git_ai_with_env(
+            &["checkpoint", "cursor", "--hook-input", &hook_input],
+            &[("GIT_AI_CURSOR_GLOBAL_DB_PATH", &db_path_str)],
+        )
+        .expect("cursor checkpoint should succeed");
+    println!("Checkpoint output: {}", output);
+
+    repo.sync_daemon_force();
+
+    let parent_repo =
+        find_repository_in_path(repo.path().to_str().unwrap()).expect("find parent repo");
+    let parent_base = parent_repo
+        .head()
+        .ok()
+        .and_then(|head| head.target().ok())
+        .unwrap_or_else(|| "initial".to_string());
+    let parent_working_log = parent_repo
+        .storage
+        .working_log_for_base_commit(&parent_base)
+        .expect("parent working log");
+
+    assert!(
+        parent_working_log
+            .all_ai_touched_files()
+            .unwrap_or_default()
+            .is_empty(),
+        "checkpoint must not stay on the parent repo when the edited file lives in a nested linked worktree"
+    );
+
+    let worktree_repo =
+        find_repository_in_path(worktree_path.to_str().unwrap()).expect("find worktree repo");
+    let worktree_base = worktree_repo
+        .head()
+        .ok()
+        .and_then(|head| head.target().ok())
+        .unwrap_or_else(|| "initial".to_string());
+    let worktree_working_log = worktree_repo
+        .storage
+        .working_log_for_base_commit(&worktree_base)
+        .expect("worktree working log");
+
+    let touched_files = worktree_working_log
+        .all_ai_touched_files()
+        .expect("read worktree touched files");
+    assert!(
+        touched_files.contains("main.go"),
+        "cursor checkpoint should be recorded in the linked worktree working log when only the parent repo is listed in workspace_roots; found {:?}",
+        touched_files
+    );
+
+    let checkpoints = worktree_working_log
+        .read_all_checkpoints()
+        .expect("read worktree checkpoints");
+    assert!(
+        !checkpoints.is_empty(),
+        "worktree checkpoint log should not be empty for a nested linked worktree edit"
+    );
 }
 
 crate::reuse_tests_in_worktree!(
