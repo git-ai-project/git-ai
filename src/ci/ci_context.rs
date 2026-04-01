@@ -606,6 +606,247 @@ mod tests {
     }
 
     #[test]
+    fn test_single_commit_rebase_parent_on_base_ref() {
+        // Single-commit rebase where the parent IS reachable from base ref.
+        // This is the happy path — parent_on_refname() should succeed,
+        // and the new parent(0) shortcut should produce the same result.
+        let test_repo = TmpRepo::new().unwrap();
+
+        // Initial commit
+        test_repo.write_file("file.txt", "init", true).unwrap();
+        test_repo.commit_with_message("init").unwrap();
+        let init_sha = test_repo.head_commit_sha().unwrap();
+        let default_branch = test_repo.current_branch().unwrap();
+
+        // Create feature branch with 1 commit
+        test_repo.create_branch("feature").unwrap();
+        test_repo.write_file("feature.txt", "feature work", true).unwrap();
+        test_repo.commit_with_message("feature commit").unwrap();
+        let feature_sha = test_repo.head_commit_sha().unwrap();
+
+        // Advance default branch
+        test_repo.switch_branch(&default_branch).unwrap();
+        test_repo.write_file("main2.txt", "main work", true).unwrap();
+        test_repo.commit_with_message("advance main").unwrap();
+
+        // Rebase feature onto default branch (single commit, parent becomes branch HEAD)
+        test_repo.switch_branch("feature").unwrap();
+        test_repo.rebase_onto("feature", &default_branch).unwrap();
+
+        // Merge the rebased commit into default branch
+        test_repo.switch_branch(&default_branch).unwrap();
+        test_repo.merge_branch("feature", "merge feature").unwrap();
+        let merge_sha = test_repo.head_commit_sha().unwrap();
+
+        // Set up base ref pointing at init (on default branch's ancestry)
+        test_repo.repo().reference(
+            "refs/worker/pr/test/base",
+            git2::Oid::from_str(&init_sha).unwrap(),
+            true,
+            "test base ref",
+        ).unwrap();
+
+        let repo_path = test_repo.path().to_path_buf();
+        let gitai_repo =
+            crate::git::repository::find_repository_in_path(repo_path.to_str().unwrap()).unwrap();
+
+        let event = CiEvent::Merge {
+            merge_commit_sha: merge_sha.clone(),
+            head_ref: "feature".to_string(),
+            head_sha: feature_sha.clone(),
+            base_ref: "refs/worker/pr/test/base".to_string(),
+            base_sha: init_sha,
+        };
+
+        let ctx = CiContext::with_repository(gitai_repo, event);
+        let result = ctx.run_with_options(CiRunOptions {
+            skip_fetch_notes: true,
+            skip_fetch_base: true,
+        });
+
+        assert!(
+            !matches!(&result, Err(e) if e.to_string().contains("No parent of commit")),
+            "Single-commit rebase with reachable parent should not fail, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_multi_commit_squash_merge_single_parent() {
+        // Multi-commit PR squashed to 1 merge commit (single parent).
+        // Verifies the squash path handles multiple original commits correctly.
+        let test_repo = TmpRepo::new().unwrap();
+
+        // Initial commit
+        test_repo.write_file("file.txt", "init", true).unwrap();
+        test_repo.commit_with_message("init").unwrap();
+        let init_sha = test_repo.head_commit_sha().unwrap();
+        let default_branch = test_repo.current_branch().unwrap();
+
+        // Create feature branch with 3 commits
+        test_repo.create_branch("feature").unwrap();
+        test_repo.write_file("a.txt", "aaa", true).unwrap();
+        test_repo.commit_with_message("feature commit 1").unwrap();
+        test_repo.write_file("b.txt", "bbb", true).unwrap();
+        test_repo.commit_with_message("feature commit 2").unwrap();
+        test_repo.write_file("c.txt", "ccc", true).unwrap();
+        test_repo.commit_with_message("feature commit 3").unwrap();
+        let feature_head_sha = test_repo.head_commit_sha().unwrap();
+
+        // Advance default branch independently
+        test_repo.switch_branch(&default_branch).unwrap();
+        test_repo.write_file("main2.txt", "main work", true).unwrap();
+        test_repo.commit_with_message("advance main").unwrap();
+
+        // Squash merge feature (produces single-parent commit)
+        test_repo.merge_squash("feature").unwrap();
+        test_repo.commit_staged_with_message("squash feature").unwrap();
+        let merge_sha = test_repo.head_commit_sha().unwrap();
+
+        // Verify it's actually a single-parent commit
+        let merge_commit = test_repo.repo().find_commit(
+            git2::Oid::from_str(&merge_sha).unwrap()
+        ).unwrap();
+        assert_eq!(merge_commit.parent_count(), 1, "Squash merge should have exactly 1 parent");
+
+        // Base ref points to init commit
+        test_repo.repo().reference(
+            "refs/worker/pr/test/base",
+            git2::Oid::from_str(&init_sha).unwrap(),
+            true,
+            "test base ref",
+        ).unwrap();
+
+        let repo_path = test_repo.path().to_path_buf();
+        let gitai_repo =
+            crate::git::repository::find_repository_in_path(repo_path.to_str().unwrap()).unwrap();
+
+        let event = CiEvent::Merge {
+            merge_commit_sha: merge_sha.clone(),
+            head_ref: "feature".to_string(),
+            head_sha: feature_head_sha.clone(),
+            base_ref: "refs/worker/pr/test/base".to_string(),
+            base_sha: init_sha,
+        };
+
+        let ctx = CiContext::with_repository(gitai_repo, event);
+        let result = ctx.run_with_options(CiRunOptions {
+            skip_fetch_notes: true,
+            skip_fetch_base: true,
+        });
+
+        assert!(
+            !matches!(&result, Err(e) if e.to_string().contains("No parent of commit")),
+            "Multi-commit squash merge should not fail with parent_on_refname error, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_regular_two_parent_merge_skipped() {
+        // True merge commit (2 parents) should be detected as a simple merge
+        // and skipped entirely — verifying the multi-parent path is unchanged.
+        // Uses raw git2 commits to avoid the post-commit hook writing authorship
+        // notes, which would cause an early AlreadyExists return.
+        let test_repo = TmpRepo::new().unwrap();
+        let sig = test_repo.repo().signature().unwrap();
+
+        // Initial commit
+        let file_path = test_repo.path().join("file.txt");
+        fs::write(&file_path, "init").unwrap();
+        let mut index = test_repo.repo().index().unwrap();
+        index.add_path(std::path::Path::new("file.txt")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = test_repo.repo().find_tree(tree_id).unwrap();
+        let init_oid = test_repo
+            .repo()
+            .commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
+        let init_commit = test_repo.repo().find_commit(init_oid).unwrap();
+
+        // Feature commit (diverges from init)
+        fs::write(&file_path, "feature work").unwrap();
+        index.add_path(std::path::Path::new("file.txt")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = test_repo.repo().find_tree(tree_id).unwrap();
+        let feature_oid = test_repo
+            .repo()
+            .commit(None, &sig, &sig, "feature commit", &tree, &[&init_commit])
+            .unwrap();
+        let feature_commit = test_repo.repo().find_commit(feature_oid).unwrap();
+        let feature_sha = feature_oid.to_string();
+
+        // Advance default branch
+        fs::write(&file_path, "main advance").unwrap();
+        index.add_path(std::path::Path::new("file.txt")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = test_repo.repo().find_tree(tree_id).unwrap();
+        let adv_oid = test_repo
+            .repo()
+            .commit(
+                Some("HEAD"),
+                &sig,
+                &sig,
+                "advance main",
+                &tree,
+                &[&init_commit],
+            )
+            .unwrap();
+        let adv_commit = test_repo.repo().find_commit(adv_oid).unwrap();
+        let base_sha = adv_oid.to_string();
+
+        // True merge commit (2 parents)
+        fs::write(&file_path, "merged").unwrap();
+        index.add_path(std::path::Path::new("file.txt")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = test_repo.repo().find_tree(tree_id).unwrap();
+        let merge_oid = test_repo
+            .repo()
+            .commit(
+                Some("HEAD"),
+                &sig,
+                &sig,
+                "Merge feature",
+                &tree,
+                &[&adv_commit, &feature_commit],
+            )
+            .unwrap();
+        let merge_sha = merge_oid.to_string();
+
+        // Verify it's a 2-parent commit
+        let merge_commit = test_repo.repo().find_commit(merge_oid).unwrap();
+        assert_eq!(merge_commit.parent_count(), 2, "Regular merge should have 2 parents");
+
+        let repo_path = test_repo.path().to_path_buf();
+        let gitai_repo =
+            crate::git::repository::find_repository_in_path(repo_path.to_str().unwrap()).unwrap();
+
+        let event = CiEvent::Merge {
+            merge_commit_sha: merge_sha.clone(),
+            head_ref: "feature".to_string(),
+            head_sha: feature_sha.clone(),
+            base_ref: "refs/heads/master".to_string(),
+            base_sha,
+        };
+
+        let ctx = CiContext::with_repository(gitai_repo, event);
+        let result = ctx.run_with_options(CiRunOptions {
+            skip_fetch_notes: true,
+            skip_fetch_base: true,
+        });
+
+        assert!(
+            matches!(&result, Ok(CiRunResult::SkippedSimpleMerge)),
+            "2-parent merge should be skipped as simple merge, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
     fn test_ci_context_debug() {
         let test_repo = TmpRepo::new().unwrap();
         let repo_path = test_repo.path().to_path_buf();
