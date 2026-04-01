@@ -1354,16 +1354,15 @@ impl Repository {
         // Fallback for paths that don't exist yet: try to canonicalize the parent directory
         // and append the filename. This handles cases where the path contains symlinks
         // (e.g., /var -> /private/var on macOS).
-        if let Some(parent) = path.parent() {
-            if let Some(filename) = path.file_name() {
-                if let Ok(canonical_parent) = parent.canonicalize() {
-                    let canonical_path = canonical_parent.join(filename);
-                    if !canonical_path.starts_with(&self.canonical_workdir) {
-                        return false;
-                    }
-                    return !has_intervening_git_dir(&canonical_path, &self.canonical_workdir);
-                }
+        if let Some(parent) = path.parent()
+            && let Some(filename) = path.file_name()
+            && let Ok(canonical_parent) = parent.canonicalize()
+        {
+            let canonical_path = canonical_parent.join(filename);
+            if !canonical_path.starts_with(&self.canonical_workdir) {
+                return false;
             }
+            return !has_intervening_git_dir(&canonical_path, &self.canonical_workdir);
         }
 
         // Final fallback: normalize by resolving .. and . and check against both
