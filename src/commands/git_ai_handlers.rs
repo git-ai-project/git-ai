@@ -255,7 +255,6 @@ fn print_help() {
     eprintln!(
         "    --hook-input <json|stdin>   JSON payload required by presets, or 'stdin' to read from stdin"
     );
-    eprintln!("    --reset                     Reset working log");
     eprintln!("    mock_ai [pathspecs...]      Test preset accepting optional file pathspecs");
     eprintln!("  blame <file>       Git blame with AI authorship overlay");
     eprintln!("  diff <commit|range>  Show diff with AI authorship annotations");
@@ -354,16 +353,11 @@ fn handle_checkpoint(args: &[String]) {
         .to_string();
 
     // Parse checkpoint-specific arguments
-    let mut reset = false;
     let mut hook_input = None;
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--reset" => {
-                reset = true;
-                i += 1;
-            }
             "--hook-input" => {
                 if i + 1 < args.len() {
                     hook_input = Some(strip_utf8_bom(args[i + 1].clone()));
@@ -773,7 +767,6 @@ fn handle_checkpoint(args: &[String]) {
                     &repo,
                     &default_user_name,
                     checkpoint_kind,
-                    reset,
                     false,
                     repo_agent_result,
                     allow_captured_async,
@@ -950,7 +943,6 @@ fn handle_checkpoint(args: &[String]) {
         &repo,
         &default_user_name,
         checkpoint_kind,
-        reset,
         false,
         agent_run_result,
         allow_captured_async,
@@ -1014,7 +1006,6 @@ fn handle_checkpoint(args: &[String]) {
                 &ext_user_name,
                 checkpoint_kind,
                 false,
-                false,
                 Some(modified),
                 allow_captured_async,
                 false,
@@ -1067,7 +1058,6 @@ fn run_checkpoint_via_daemon_or_local(
     repo: &Repository,
     author: &str,
     kind: CheckpointKind,
-    reset: bool,
     quiet: bool,
     agent_run_result: Option<AgentRunResult>,
     allow_captured_async: bool,
@@ -1096,7 +1086,6 @@ fn run_checkpoint_via_daemon_or_local(
                             repo,
                             author,
                             kind,
-                            reset,
                             agent_run_result.as_ref(),
                             is_pre_commit,
                             None,
@@ -1174,7 +1163,6 @@ fn run_checkpoint_via_daemon_or_local(
                                 repo_working_dir: repo_working_dir.clone(),
                                 kind: Some(checkpoint_kind_to_str(kind).to_string()),
                                 author: Some(author.to_string()),
-                                reset: Some(reset),
                                 quiet: Some(quiet),
                                 is_pre_commit: Some(is_pre_commit),
                                 agent_run_result: agent_run_result.clone(),
@@ -1223,15 +1211,8 @@ fn run_checkpoint_via_daemon_or_local(
             }
         }
     }
-    let stats = commands::checkpoint::run(
-        repo,
-        author,
-        kind,
-        reset,
-        quiet,
-        agent_run_result,
-        is_pre_commit,
-    )?;
+    let stats =
+        commands::checkpoint::run(repo, author, kind, quiet, agent_run_result, is_pre_commit)?;
     Ok(CheckpointDispatchOutcome {
         stats,
         queued: false,

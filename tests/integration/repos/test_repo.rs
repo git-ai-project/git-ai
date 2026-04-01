@@ -666,10 +666,6 @@ fn normalize_test_git_ai_checkpoint_args(args: &[&str]) -> Vec<String> {
     let mut i = 1usize;
     while i < args.len() {
         match args[i] {
-            "--reset" => {
-                normalized.push(args[i].to_string());
-                i += 1;
-            }
             "--hook-input" => {
                 normalized.push(args[i].to_string());
                 if let Some(value) = args.get(i + 1) {
@@ -1710,9 +1706,6 @@ impl TestRepo {
                 }
                 "--hook-input" => {
                     i += 2;
-                }
-                "--reset" => {
-                    i += 1;
                 }
                 _ if arg.starts_with("--hook-input=") || arg.starts_with('-') => {
                     i += 1;
@@ -2905,10 +2898,6 @@ mod tests {
         assert_eq!(
             normalize_test_git_ai_checkpoint_args(&["checkpoint", "src/lib.rs"]),
             vec!["checkpoint", "--", "src/lib.rs"]
-        );
-        assert_eq!(
-            normalize_test_git_ai_checkpoint_args(&["checkpoint", "--reset", "src/lib.rs"]),
-            vec!["checkpoint", "--reset", "--", "src/lib.rs"]
         );
     }
 

@@ -66,8 +66,6 @@ pub struct LiveCheckpointRunRequest {
     #[serde(default)]
     pub author: Option<String>,
     #[serde(default)]
-    pub reset: Option<bool>,
-    #[serde(default)]
     pub quiet: Option<bool>,
     #[serde(default)]
     pub is_pre_commit: Option<bool>,

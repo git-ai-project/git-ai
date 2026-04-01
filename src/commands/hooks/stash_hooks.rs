@@ -33,7 +33,6 @@ pub fn pre_stash_hook(
             repository,
             &get_commit_default_author(repository, &parsed_args.command_args),
             CheckpointKind::Human,
-            false,
             true,
             None,
             true, // same optimizations as pre_commit.rs

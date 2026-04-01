@@ -76,7 +76,6 @@ pub struct PreparedCheckpointManifest {
     pub captured_at_ms: u128,
     pub kind: CheckpointKind,
     pub author: String,
-    pub reset: bool,
     pub is_pre_commit: bool,
     pub explicit_path_role: PreparedPathRole,
     pub explicit_paths: Vec<String>,
@@ -310,7 +309,6 @@ pub fn run(
     repo: &Repository,
     author: &str,
     kind: CheckpointKind,
-    reset: bool,
     quiet: bool,
     agent_run_result: Option<AgentRunResult>,
     is_pre_commit: bool,
@@ -319,7 +317,6 @@ pub fn run(
         repo,
         author,
         kind,
-        reset,
         quiet,
         agent_run_result,
         is_pre_commit,
@@ -332,7 +329,6 @@ pub fn run_with_base_commit_override(
     repo: &Repository,
     author: &str,
     kind: CheckpointKind,
-    reset: bool,
     quiet: bool,
     agent_run_result: Option<AgentRunResult>,
     is_pre_commit: bool,
@@ -342,7 +338,6 @@ pub fn run_with_base_commit_override(
         repo,
         author,
         kind,
-        reset,
         quiet,
         agent_run_result,
         is_pre_commit,
@@ -356,7 +351,6 @@ pub(crate) fn run_with_base_commit_override_with_policy(
     repo: &Repository,
     author: &str,
     kind: CheckpointKind,
-    reset: bool,
     quiet: bool,
     agent_run_result: Option<AgentRunResult>,
     is_pre_commit: bool,
@@ -385,7 +379,6 @@ pub(crate) fn run_with_base_commit_override_with_policy(
         repo,
         author,
         kind,
-        reset,
         quiet,
         agent_run_result,
         is_pre_commit,
@@ -636,7 +629,6 @@ fn execute_resolved_checkpoint(
     repo: &Repository,
     author: &str,
     kind: CheckpointKind,
-    reset: bool,
     quiet: bool,
     agent_run_result: Option<AgentRunResult>,
     is_pre_commit: bool,
@@ -651,12 +643,7 @@ fn execute_resolved_checkpoint(
     }
 
     let read_checkpoints_start = Instant::now();
-    let mut checkpoints = if reset {
-        working_log.reset_working_log()?;
-        Vec::new()
-    } else {
-        working_log.read_all_checkpoints()?
-    };
+    let mut checkpoints = working_log.read_all_checkpoints()?;
     debug_log(&format!(
         "[BENCHMARK] Reading {} checkpoints took {:?}",
         checkpoints.len(),
@@ -791,10 +778,6 @@ fn execute_resolved_checkpoint(
         None
     };
 
-    if reset {
-        debug_log("Working log reset. Starting fresh checkpoint.");
-    }
-
     let label = if entries.len() > 1 {
         "checkpoint"
     } else {
@@ -839,7 +822,6 @@ pub fn prepare_captured_checkpoint(
     repo: &Repository,
     author: &str,
     kind: CheckpointKind,
-    reset: bool,
     agent_run_result: Option<&AgentRunResult>,
     is_pre_commit: bool,
     base_commit_override: Option<&str>,
@@ -864,7 +846,7 @@ pub fn prepare_captured_checkpoint(
         return Ok(None);
     };
 
-    if resolved.files.is_empty() && !reset {
+    if resolved.files.is_empty() {
         return Ok(None);
     }
 
@@ -916,7 +898,6 @@ pub fn prepare_captured_checkpoint(
             captured_at_ms: resolved.ts,
             kind,
             author: author.to_string(),
-            reset,
             is_pre_commit,
             explicit_path_role,
             explicit_paths,
@@ -1026,7 +1007,6 @@ pub fn execute_captured_checkpoint(
         repo,
         &manifest.author,
         manifest.kind,
-        manifest.reset,
         true,
         manifest.agent_run_result,
         manifest.is_pre_commit,
@@ -2324,7 +2304,6 @@ mod tests {
             tmp_repo.gitai_repo(),
             "mock-ai",
             CheckpointKind::AiAgent,
-            false,
             true,
             Some(agent_run_result),
             false,
@@ -2382,7 +2361,6 @@ mod tests {
             tmp_repo.gitai_repo(),
             "mock-ai",
             CheckpointKind::AiAgent,
-            false,
             true,
             Some(agent_run_result),
             false,
@@ -2439,7 +2417,6 @@ mod tests {
             tmp_repo.gitai_repo(),
             "mock-ai",
             CheckpointKind::AiAgent,
-            false,
             true,
             Some(agent_run_result),
             false,

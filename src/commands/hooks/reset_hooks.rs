@@ -16,7 +16,6 @@ pub fn pre_reset_hook(parsed_args: &ParsedGitInvocation, repository: &mut Reposi
         repository,
         &human_author,
         CheckpointKind::Human,
-        false,
         true,
         None,
         true,
