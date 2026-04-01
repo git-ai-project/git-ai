@@ -16,6 +16,10 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, interval};
 
+use sentry::protocol::{Event as SentryEvent, Level as SentryLevel};
+use sentry::types::Dsn;
+use std::time::SystemTime;
+
 const FLUSH_INTERVAL: Duration = Duration::from_secs(3);
 
 /// Accumulated telemetry events waiting to be flushed.
@@ -235,6 +239,10 @@ async fn telemetry_flush_loop(buffer: Arc<Mutex<TelemetryBuffer>>) {
     // The first tick completes immediately; skip it.
     ticker.tick().await;
 
+    // Build long-lived Sentry clients once, reused across all flush cycles.
+    // This avoids repeatedly creating/tearing down transport worker threads.
+    let sentry_clients = Arc::new(SentryClients::new(Config::get()));
+
     loop {
         ticker.tick().await;
 
@@ -246,9 +254,10 @@ async fn telemetry_flush_loop(buffer: Arc<Mutex<TelemetryBuffer>>) {
             buf.take()
         };
 
+        let clients = sentry_clients.clone();
         // Flush in a blocking task since the underlying HTTP clients are synchronous.
         tokio::task::spawn_blocking(move || {
-            flush_telemetry_batch(snapshot);
+            flush_telemetry_batch(snapshot, &clients);
         })
         .await
         .unwrap_or_else(|e| {
@@ -257,7 +266,7 @@ async fn telemetry_flush_loop(buffer: Arc<Mutex<TelemetryBuffer>>) {
     }
 }
 
-fn flush_telemetry_batch(batch: TelemetryBuffer) {
+fn flush_telemetry_batch(batch: TelemetryBuffer, sentry_clients: &SentryClients) {
     let config = Config::get();
     let distinct_id = get_or_create_distinct_id();
 
@@ -274,6 +283,7 @@ fn flush_telemetry_batch(batch: TelemetryBuffer) {
         flush_sentry_and_posthog(
             config,
             &distinct_id,
+            sentry_clients,
             &batch.errors,
             &batch.performances,
             &batch.messages,
@@ -330,15 +340,9 @@ fn store_metrics_in_db(events: &[MetricEvent]) {
     }
 }
 
-fn flush_sentry_and_posthog(
-    config: &Config,
-    distinct_id: &str,
-    errors: &[ErrorEvent],
-    performances: &[PerformanceEvent],
-    messages: &[MessageEvent],
-) {
-    // Check for Enterprise DSN
-    let enterprise_dsn = config
+/// Resolve the enterprise Sentry DSN from config, env var, or compile-time env.
+fn resolve_enterprise_dsn(config: &Config) -> Option<String> {
+    config
         .telemetry_enterprise_dsn()
         .map(|s| s.to_string())
         .or_else(|| {
@@ -346,18 +350,127 @@ fn flush_sentry_and_posthog(
                 .ok()
                 .or_else(|| option_env!("SENTRY_ENTERPRISE").map(|s| s.to_string()))
                 .filter(|s| !s.is_empty())
-        });
+        })
+}
 
-    // Check for OSS DSN
-    let oss_dsn = if config.is_telemetry_oss_disabled() {
+/// Resolve the OSS Sentry DSN from env var or compile-time env.
+fn resolve_oss_dsn(config: &Config) -> Option<String> {
+    if config.is_telemetry_oss_disabled() {
         None
     } else {
         std::env::var("SENTRY_OSS")
             .ok()
             .or_else(|| option_env!("SENTRY_OSS").map(|s| s.to_string()))
             .filter(|s| !s.is_empty())
-    };
+    }
+}
 
+/// Build a `sentry::Client` from a DSN string with standard options.
+fn build_sentry_client(dsn: &str) -> Option<Arc<sentry::Client>> {
+    let parsed_dsn: Dsn = dsn.parse().ok()?;
+    let client = sentry::Client::with_options(sentry::ClientOptions {
+        dsn: Some(parsed_dsn),
+        release: Some(format!("git-ai@{}", env!("CARGO_PKG_VERSION")).into()),
+        default_integrations: false,
+        ..Default::default()
+    });
+    Some(Arc::new(client))
+}
+
+/// Build base tags applied to all Sentry events.
+fn base_sentry_tags(distinct_id: &str) -> BTreeMap<String, String> {
+    let mut tags = BTreeMap::new();
+    tags.insert("os".to_string(), std::env::consts::OS.to_string());
+    tags.insert("arch".to_string(), std::env::consts::ARCH.to_string());
+    tags.insert("distinct_id".to_string(), distinct_id.to_string());
+    tags
+}
+
+/// Convert a JSON Value context map into a BTreeMap<String, Value> for Sentry extra.
+fn context_to_extra(context: &Option<Value>) -> BTreeMap<String, Value> {
+    let mut extra = BTreeMap::new();
+    if let Some(ctx) = context
+        && let Some(obj) = ctx.as_object()
+    {
+        for (key, value) in obj {
+            extra.insert(key.clone(), value.clone());
+        }
+    }
+    extra
+}
+
+/// Convert a level string (e.g. "error", "info", "warning") to a sentry Level.
+fn parse_sentry_level(level: &str) -> SentryLevel {
+    match level {
+        "fatal" => SentryLevel::Fatal,
+        "error" => SentryLevel::Error,
+        "warning" => SentryLevel::Warning,
+        "info" => SentryLevel::Info,
+        _ => SentryLevel::Debug,
+    }
+}
+
+/// Parse an RFC 3339 timestamp string into a `SystemTime`.
+/// Falls back to `SystemTime::now()` if parsing fails.
+fn parse_timestamp(ts: &str) -> SystemTime {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .ok()
+        .and_then(|dt| {
+            let secs = dt.timestamp();
+            if secs >= 0 {
+                Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs as u64))
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(SystemTime::now)
+}
+
+/// Send a Sentry event to a client via a scoped Hub.
+///
+/// Creates a Hub bound to the client so events are routed to the
+/// correct DSN without touching the global/thread-local Hub.
+fn send_event_to_client(client: &Arc<sentry::Client>, event: SentryEvent<'static>) {
+    let hub = sentry::Hub::new(Some(client.clone()), Arc::new(sentry::Scope::default()));
+    hub.capture_event(event);
+}
+
+/// Long-lived Sentry clients reused across flush cycles.
+///
+/// Constructed once per DSN configuration and stored alongside the flush loop.
+/// This avoids the overhead of creating/tearing down transport worker threads
+/// every flush interval.
+struct SentryClients {
+    oss: Option<Arc<sentry::Client>>,
+    enterprise: Option<Arc<sentry::Client>>,
+}
+
+impl SentryClients {
+    fn new(config: &Config) -> Self {
+        let oss = resolve_oss_dsn(config).and_then(|dsn| build_sentry_client(&dsn));
+        let enterprise = resolve_enterprise_dsn(config).and_then(|dsn| build_sentry_client(&dsn));
+        SentryClients { oss, enterprise }
+    }
+
+    /// Flush both clients to ensure all enqueued events are delivered.
+    fn flush(&self, timeout: std::time::Duration) {
+        if let Some(client) = &self.oss {
+            client.flush(Some(timeout));
+        }
+        if let Some(client) = &self.enterprise {
+            client.flush(Some(timeout));
+        }
+    }
+}
+
+fn flush_sentry_and_posthog(
+    config: &Config,
+    distinct_id: &str,
+    sentry_clients: &SentryClients,
+    errors: &[ErrorEvent],
+    performances: &[PerformanceEvent],
+    messages: &[MessageEvent],
+) {
     // Check for PostHog configuration
     let posthog_api_key = if config.is_telemetry_oss_disabled() {
         None
@@ -374,109 +487,86 @@ fn flush_sentry_and_posthog(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "https://us.i.posthog.com".to_string());
 
-    // Build Sentry clients
-    let oss_client = oss_dsn.and_then(|dsn| SentryClient::from_dsn(&dsn));
-    let enterprise_client = enterprise_dsn.and_then(|dsn| SentryClient::from_dsn(&dsn));
-
-    // Build base tags
-    let mut base_tags = BTreeMap::new();
-    base_tags.insert("os".to_string(), json!(std::env::consts::OS));
-    base_tags.insert("arch".to_string(), json!(std::env::consts::ARCH));
-    base_tags.insert("distinct_id".to_string(), json!(distinct_id));
+    let tags = base_sentry_tags(distinct_id);
 
     // Send errors
     for error in errors {
-        let mut extra = BTreeMap::new();
-        if let Some(ctx) = &error.context
-            && let Some(obj) = ctx.as_object()
-        {
-            for (key, value) in obj {
-                extra.insert(key.clone(), value.clone());
-            }
-        }
+        let extra = context_to_extra(&error.context);
+        let timestamp = parse_timestamp(&error.timestamp);
 
-        let event = json!({
-            "message": error.message,
-            "level": "error",
-            "timestamp": error.timestamp,
-            "platform": "other",
-            "tags": base_tags,
-            "extra": extra,
-            "release": format!("git-ai@{}", env!("CARGO_PKG_VERSION")),
-        });
+        let event = SentryEvent {
+            message: Some(error.message.clone()),
+            level: SentryLevel::Error,
+            timestamp,
+            platform: "other".into(),
+            tags: tags.clone(),
+            extra,
+            ..Default::default()
+        };
 
-        if let Some(client) = &oss_client {
-            let _ = client.send_event(event.clone());
+        if let Some(client) = &sentry_clients.oss {
+            send_event_to_client(client, event.clone());
         }
-        if let Some(client) = &enterprise_client {
-            let _ = client.send_event(event);
+        if let Some(client) = &sentry_clients.enterprise {
+            send_event_to_client(client, event);
         }
     }
 
     // Send performance events
     for perf in performances {
-        let mut extra = BTreeMap::new();
+        let mut extra = context_to_extra(&perf.context);
         extra.insert("operation".to_string(), json!(perf.operation));
         extra.insert("duration_ms".to_string(), json!(perf.duration_ms));
-        if let Some(ctx) = &perf.context
-            && let Some(obj) = ctx.as_object()
-        {
-            for (key, value) in obj {
-                extra.insert(key.clone(), value.clone());
+        let timestamp = parse_timestamp(&perf.timestamp);
+
+        let mut perf_tags = tags.clone();
+        if let Some(t) = &perf.tags {
+            for (key, value) in t {
+                perf_tags.insert(key.clone(), value.clone());
             }
         }
 
-        let mut perf_tags = base_tags.clone();
-        if let Some(tags) = &perf.tags {
-            for (key, value) in tags {
-                perf_tags.insert(key.clone(), json!(value));
-            }
-        }
+        let event = SentryEvent {
+            message: Some(format!(
+                "Performance: {} ({}ms)",
+                perf.operation, perf.duration_ms
+            )),
+            level: SentryLevel::Info,
+            timestamp,
+            platform: "other".into(),
+            tags: perf_tags,
+            extra,
+            ..Default::default()
+        };
 
-        let event = json!({
-            "message": format!("Performance: {} ({}ms)", perf.operation, perf.duration_ms),
-            "level": "info",
-            "timestamp": perf.timestamp,
-            "platform": "other",
-            "tags": perf_tags,
-            "extra": extra,
-            "release": format!("git-ai@{}", env!("CARGO_PKG_VERSION")),
-        });
-
-        if let Some(client) = &oss_client {
-            let _ = client.send_event(event.clone());
+        if let Some(client) = &sentry_clients.oss {
+            send_event_to_client(client, event.clone());
         }
-        if let Some(client) = &enterprise_client {
-            let _ = client.send_event(event);
+        if let Some(client) = &sentry_clients.enterprise {
+            send_event_to_client(client, event);
         }
     }
 
     // Send messages (to Sentry + PostHog)
     for msg in messages {
-        let mut extra = BTreeMap::new();
-        if let Some(ctx) = &msg.context
-            && let Some(obj) = ctx.as_object()
-        {
-            for (key, value) in obj {
-                extra.insert(key.clone(), value.clone());
-            }
-        }
+        let extra = context_to_extra(&msg.context);
+        let timestamp = parse_timestamp(&msg.timestamp);
 
-        let sentry_event = json!({
-            "message": msg.message,
-            "level": msg.level,
-            "timestamp": msg.timestamp,
-            "platform": "other",
-            "tags": base_tags,
-            "extra": extra,
-            "release": format!("git-ai@{}", env!("CARGO_PKG_VERSION")),
-        });
+        let event = SentryEvent {
+            message: Some(msg.message.clone()),
+            level: parse_sentry_level(&msg.level),
+            timestamp,
+            platform: "other".into(),
+            tags: tags.clone(),
+            extra,
+            ..Default::default()
+        };
 
-        if let Some(client) = &oss_client {
-            let _ = client.send_event(sentry_event.clone());
+        if let Some(client) = &sentry_clients.oss {
+            send_event_to_client(client, event.clone());
         }
-        if let Some(client) = &enterprise_client {
-            let _ = client.send_event(sentry_event);
+        if let Some(client) = &sentry_clients.enterprise {
+            send_event_to_client(client, event);
         }
 
         // PostHog only gets messages
@@ -510,6 +600,10 @@ fn flush_sentry_and_posthog(
                 .send();
         }
     }
+
+    // Flush the sentry transport to ensure all enqueued events are delivered
+    // before this batch is considered complete.
+    sentry_clients.flush(std::time::Duration::from_secs(5));
 }
 
 fn flush_cas(records: Vec<CasSyncPayload>) {
@@ -572,49 +666,6 @@ fn flush_cas(records: Vec<CasSyncPayload>) {
             Err(e) => {
                 debug_log(&format!("daemon telemetry: CAS upload error: {}", e));
             }
-        }
-    }
-}
-
-/// Minimal Sentry client (mirrors flush.rs SentryClient)
-struct SentryClient {
-    endpoint: String,
-    public_key: String,
-}
-
-impl SentryClient {
-    fn from_dsn(dsn: &str) -> Option<Self> {
-        let url = url::Url::parse(dsn).ok()?;
-        let public_key = url.username().to_string();
-        let host = url.host_str()?;
-        let project_id = url.path().trim_start_matches('/');
-        let scheme = url.scheme();
-        let endpoint = format!("{}://{}/api/{}/store/", scheme, host, project_id);
-        Some(SentryClient {
-            endpoint,
-            public_key,
-        })
-    }
-
-    fn send_event(&self, event: Value) -> Result<(), Box<dyn std::error::Error>> {
-        let auth_header = format!(
-            "Sentry sentry_version=7, sentry_key={}, sentry_client=git-ai/{}",
-            self.public_key,
-            env!("CARGO_PKG_VERSION")
-        );
-
-        let body = serde_json::to_string(&event)?;
-        let response = minreq::post(&self.endpoint)
-            .with_header("X-Sentry-Auth", auth_header)
-            .with_header("Content-Type", "application/json")
-            .with_body(body)
-            .send()?;
-
-        let status = response.status_code;
-        if (200..300).contains(&status) {
-            Ok(())
-        } else {
-            Err(format!("Sentry returned status {}", status).into())
         }
     }
 }
