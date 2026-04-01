@@ -505,6 +505,128 @@ mod tests {
         assert_eq!(commits.len(), 1);
     }
 
+    /// Reproduces the customer bug where a single-commit squash merge fails in
+    /// a partial clone because parent_on_refname can't find the merge commit's
+    /// parent in the base ref's ancestry.
+    ///
+    /// Scenario:
+    ///   main:    init ── advance_main ── squash_merge (1 parent = advance_main)
+    ///   feature: init ── feature_commit
+    ///   base_ref: points at feature_commit (unreachable from squash_merge's parent)
+    ///
+    /// Before the fix: "No parent of commit ... is reachable from refname ..."
+    /// After the fix:  single-parent commit skips parent_on_refname entirely
+    #[test]
+    fn test_squash_merge_single_parent_not_on_base_ref() {
+        let test_repo = TmpRepo::new().unwrap();
+        let file_path = test_repo.path().join("file.txt");
+        let sig = test_repo.repo().signature().unwrap();
+
+        // Initial commit on main
+        fs::write(&file_path, "init").unwrap();
+        let mut index = test_repo.repo().index().unwrap();
+        index.add_path(std::path::Path::new("file.txt")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = test_repo.repo().find_tree(tree_id).unwrap();
+        let init_oid = test_repo
+            .repo()
+            .commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
+        let init_commit = test_repo.repo().find_commit(init_oid).unwrap();
+
+        // Feature commit (branches off init, on a detached ref)
+        fs::write(&file_path, "feature work").unwrap();
+        index.add_path(std::path::Path::new("file.txt")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = test_repo.repo().find_tree(tree_id).unwrap();
+        let feature_oid = test_repo
+            .repo()
+            .commit(None, &sig, &sig, "feature commit", &tree, &[&init_commit])
+            .unwrap();
+        let head_sha = feature_oid.to_string();
+
+        // Advance main past init (simulates main moving forward independently)
+        fs::write(&file_path, "main advance").unwrap();
+        index.add_path(std::path::Path::new("file.txt")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = test_repo.repo().find_tree(tree_id).unwrap();
+        let adv_oid = test_repo
+            .repo()
+            .commit(
+                Some("refs/heads/main"),
+                &sig,
+                &sig,
+                "advance main",
+                &tree,
+                &[&init_commit],
+            )
+            .unwrap();
+        let adv_commit = test_repo.repo().find_commit(adv_oid).unwrap();
+
+        // Squash merge: single parent = advance_main (main's tip)
+        // Contains the feature changes but as a single squashed commit
+        fs::write(&file_path, "feature work").unwrap();
+        index.add_path(std::path::Path::new("file.txt")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = test_repo.repo().find_tree(tree_id).unwrap();
+        let squash_oid = test_repo
+            .repo()
+            .commit(
+                Some("refs/heads/main"),
+                &sig,
+                &sig,
+                "squash feature",
+                &tree,
+                &[&adv_commit],
+            )
+            .unwrap();
+        let merge_commit_sha = squash_oid.to_string();
+
+        // Create a base ref pointing at feature_commit — NOT reachable from
+        // squash_merge's parent (adv_commit). This mimics refs/worker/pr/N/base
+        // in the monorepo worker's partial clone.
+        test_repo
+            .repo()
+            .reference(
+                "refs/worker/pr/test/base",
+                feature_oid,
+                true,
+                "test base ref",
+            )
+            .unwrap();
+
+        // Build CiContext
+        let repo_path = test_repo.path().to_path_buf();
+        let gitai_repo =
+            crate::git::repository::find_repository_in_path(repo_path.to_str().unwrap()).unwrap();
+
+        let event = CiEvent::Merge {
+            merge_commit_sha: merge_commit_sha.clone(),
+            head_ref: "feature".to_string(),
+            head_sha: head_sha.clone(),
+            base_ref: "refs/worker/pr/test/base".to_string(),
+            base_sha: feature_oid.to_string(),
+        };
+
+        let ctx = CiContext::with_repository(gitai_repo, event);
+        let result = ctx.run_with_options(CiRunOptions {
+            skip_fetch_notes: true,
+            skip_fetch_base: true,
+        });
+
+        // With the fix: single-parent commit uses parent(0) directly,
+        // so this should NOT error with "No parent of commit ... is reachable"
+        assert!(
+            !matches!(&result, Err(e) if e.to_string().contains("No parent of commit")),
+            "Should not fail with parent_on_refname error, got: {:?}",
+            result
+        );
+    }
+
     #[test]
     fn test_ci_context_debug() {
         let test_repo = TmpRepo::new().unwrap();
