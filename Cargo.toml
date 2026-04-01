@@ -48,7 +48,7 @@ keyring = ["dep:keyring"]
 git-ai = { path = ".", features = ["test-support"] }
 rustls-native-certs = "0.8"
 tempfile = "3.27"
-insta = "1.46"
+insta = "1.47"
 rand = "0.8"
 regex = "1.12"
 filetime = "0.2"
