@@ -63,6 +63,7 @@ mod prompt_hash_migration;
 mod prompt_picker_test;
 mod prompts_db_test;
 mod pull_rebase_ff;
+mod push_notes_survive_locally;
 mod push_upstream_authorship;
 mod realistic_complex_edits;
 mod rebase;
