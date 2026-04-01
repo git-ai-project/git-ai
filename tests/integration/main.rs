@@ -56,6 +56,7 @@ mod internal_spawn_safety;
 mod jetbrains_download;
 mod jetbrains_ide_types;
 mod merge_rebase;
+mod missing_attribution;
 mod multi_repo_workspace;
 mod non_utf8_files;
 mod opencode;
