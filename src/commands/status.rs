@@ -57,7 +57,6 @@ fn run_status(json: bool) -> Result<(), GitAiError> {
         &repo,
         &default_user_name,
         CheckpointKind::Human,
-        false,
         true,
         None,
         false,

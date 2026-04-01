@@ -504,7 +504,6 @@ impl TmpRepo {
             &self.repo_gitai,
             author,
             CheckpointKind::Human,
-            false, // reset
             true,
             agent_run_result,
             false,
@@ -559,7 +558,6 @@ impl TmpRepo {
             &self.repo_gitai,
             agent_name,
             CheckpointKind::AiAgent,
-            false, // reset
             true,
             Some(agent_run_result),
             false,
@@ -582,7 +580,6 @@ impl TmpRepo {
             &self.repo_gitai,
             author,
             checkpoint_kind,
-            false, // reset
             true,  // quiet
             agent_run_result,
             false,
