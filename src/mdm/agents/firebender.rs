@@ -6,6 +6,8 @@ use std::fs;
 use std::path::PathBuf;
 
 const FIREBENDER_CHECKPOINT_CMD: &str = "checkpoint firebender --hook-input stdin";
+const FIREBENDER_PRE_TOOL_USE_CMD: &str = "checkpoint firebender --hook-input stdin";
+const FIREBENDER_POST_TOOL_USE_CMD: &str = "checkpoint firebender --hook-input stdin";
 
 pub struct FirebenderInstaller;
 
@@ -51,9 +53,9 @@ impl HookInstaller for FirebenderInstaller {
         let content = fs::read_to_string(&hooks_path)?;
         let existing: Value = serde_json::from_str(&content).unwrap_or_else(|_| json!({}));
 
-        let has_before = existing
+        let has_pre = existing
             .get("hooks")
-            .and_then(|h| h.get("beforeSubmitPrompt"))
+            .and_then(|h| h.get("preToolUse"))
             .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter().any(|item| {
@@ -65,9 +67,9 @@ impl HookInstaller for FirebenderInstaller {
             })
             .unwrap_or(false);
 
-        let has_after = existing
+        let has_post = existing
             .get("hooks")
-            .and_then(|h| h.get("afterFileEdit"))
+            .and_then(|h| h.get("postToolUse"))
             .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter().any(|item| {
@@ -81,8 +83,8 @@ impl HookInstaller for FirebenderInstaller {
 
         Ok(HookCheckResult {
             tool_installed: true,
-            hooks_installed: has_before && has_after,
-            hooks_up_to_date: has_before && has_after,
+            hooks_installed: has_pre && has_post,
+            hooks_up_to_date: has_pre && has_post,
         })
     }
 
@@ -108,23 +110,28 @@ impl HookInstaller for FirebenderInstaller {
             serde_json::from_str(&existing_content)?
         };
 
-        let command = format!(
+        let pre_tool_use_cmd = format!(
             "{} {}",
             params.binary_path.display(),
-            FIREBENDER_CHECKPOINT_CMD
+            FIREBENDER_PRE_TOOL_USE_CMD
+        );
+        let post_tool_use_cmd = format!(
+            "{} {}",
+            params.binary_path.display(),
+            FIREBENDER_POST_TOOL_USE_CMD
         );
 
         let desired: Value = json!({
             "version": 1,
             "hooks": {
-                "beforeSubmitPrompt": [
+                "preToolUse": [
                     {
-                        "command": command
+                        "command": pre_tool_use_cmd
                     }
                 ],
-                "afterFileEdit": [
+                "postToolUse": [
                     {
-                        "command": command
+                        "command": post_tool_use_cmd
                     }
                 ]
             }
@@ -139,7 +146,7 @@ impl HookInstaller for FirebenderInstaller {
 
         let mut hooks_obj = merged.get("hooks").cloned().unwrap_or_else(|| json!({}));
 
-        for hook_name in &["beforeSubmitPrompt", "afterFileEdit"] {
+        for hook_name in &["preToolUse", "postToolUse"] {
             let desired_hooks = desired
                 .get("hooks")
                 .and_then(|h| h.get(*hook_name))
@@ -221,7 +228,7 @@ impl HookInstaller for FirebenderInstaller {
         let mut hooks_obj = merged.get("hooks").cloned().unwrap_or_else(|| json!({}));
         let mut changed = false;
 
-        for hook_name in &["beforeSubmitPrompt", "afterFileEdit"] {
+        for hook_name in &["preToolUse", "postToolUse"] {
             if let Some(arr) = hooks_obj.get_mut(*hook_name).and_then(|v| v.as_array_mut()) {
                 let original_len = arr.len();
                 arr.retain(|item| {
@@ -329,13 +336,13 @@ mod tests {
                 serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
             assert_eq!(content.get("version").unwrap(), &json!(1));
             assert!(
-                content["hooks"]["beforeSubmitPrompt"][0]["command"]
+                content["hooks"]["preToolUse"][0]["command"]
                     .as_str()
                     .unwrap()
                     .contains("checkpoint firebender")
             );
             assert!(
-                content["hooks"]["afterFileEdit"][0]["command"]
+                content["hooks"]["postToolUse"][0]["command"]
                     .as_str()
                     .unwrap()
                     .contains("checkpoint firebender")
@@ -355,8 +362,8 @@ mod tests {
             let existing = json!({
                 "version": 1,
                 "hooks": {
-                    "beforeSubmitPrompt": [{ "command": "/old/path/git-ai checkpoint firebender --hook-input stdin" }],
-                    "afterFileEdit": [{ "command": "/old/path/git-ai checkpoint firebender --hook-input stdin" }]
+                    "preToolUse": [{ "command": "/old/path/git-ai checkpoint firebender --hook-input stdin" }],
+                    "postToolUse": [{ "command": "/old/path/git-ai checkpoint firebender --hook-input stdin" }]
                 }
             });
             fs::write(
@@ -385,13 +392,13 @@ mod tests {
                 FIREBENDER_CHECKPOINT_CMD
             );
             assert_eq!(
-                updated["hooks"]["beforeSubmitPrompt"][0]["command"]
+                updated["hooks"]["preToolUse"][0]["command"]
                     .as_str()
                     .unwrap(),
                 expected
             );
             assert_eq!(
-                updated["hooks"]["afterFileEdit"][0]["command"]
+                updated["hooks"]["postToolUse"][0]["command"]
                     .as_str()
                     .unwrap(),
                 expected
@@ -411,11 +418,11 @@ mod tests {
             let existing = json!({
                 "version": 1,
                 "hooks": {
-                    "beforeSubmitPrompt": [
+                    "preToolUse": [
                         { "command": "/usr/local/bin/git-ai checkpoint firebender --hook-input stdin" },
                         { "command": "echo keep-before" }
                     ],
-                    "afterFileEdit": [
+                    "postToolUse": [
                         { "command": "/usr/local/bin/git-ai checkpoint firebender --hook-input stdin" },
                         { "command": "echo keep-after" }
                     ]
@@ -441,25 +448,16 @@ mod tests {
 
             let updated: Value =
                 serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
+            assert_eq!(updated["hooks"]["preToolUse"].as_array().unwrap().len(), 1);
+            assert_eq!(updated["hooks"]["postToolUse"].as_array().unwrap().len(), 1);
             assert_eq!(
-                updated["hooks"]["beforeSubmitPrompt"]
-                    .as_array()
-                    .unwrap()
-                    .len(),
-                1
-            );
-            assert_eq!(
-                updated["hooks"]["afterFileEdit"].as_array().unwrap().len(),
-                1
-            );
-            assert_eq!(
-                updated["hooks"]["beforeSubmitPrompt"][0]["command"]
+                updated["hooks"]["preToolUse"][0]["command"]
                     .as_str()
                     .unwrap(),
                 "echo keep-before"
             );
             assert_eq!(
-                updated["hooks"]["afterFileEdit"][0]["command"]
+                updated["hooks"]["postToolUse"][0]["command"]
                     .as_str()
                     .unwrap(),
                 "echo keep-after"
