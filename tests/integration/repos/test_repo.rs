@@ -369,6 +369,10 @@ impl DaemonProcess {
 fn configure_test_home_env(command: &mut Command, test_home: &Path) {
     command.env("HOME", test_home);
     command.env("GIT_CONFIG_GLOBAL", test_home.join(".gitconfig"));
+    // Redirect XDG_CONFIG_HOME so git does not read the real user's
+    // $XDG_CONFIG_HOME/git/config (which may contain filter drivers,
+    // aliases, or other settings that break test isolation).
+    command.env("XDG_CONFIG_HOME", test_home.join(".config"));
     #[cfg(windows)]
     {
         command.env("USERPROFILE", test_home);

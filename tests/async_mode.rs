@@ -50,6 +50,10 @@ fn configure_test_home_env(command: &mut Command, repo: &TestRepo) {
         "GIT_CONFIG_GLOBAL",
         repo.test_home_path().join(".gitconfig"),
     );
+    // Redirect XDG_CONFIG_HOME so git does not read the real user's
+    // $XDG_CONFIG_HOME/git/config (which may contain filter drivers,
+    // aliases, or other settings that break test isolation).
+    command.env("XDG_CONFIG_HOME", repo.test_home_path().join(".config"));
     #[cfg(windows)]
     {
         command.env("USERPROFILE", repo.test_home_path());
