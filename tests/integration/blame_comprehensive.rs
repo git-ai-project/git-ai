@@ -279,7 +279,10 @@ fn test_blame_error_file_outside_repo() {
     // Error case: Attempt to blame a file outside the repository
     let repo = TestRepo::new();
 
-    let outside_file = std::env::temp_dir().join("outside.txt");
+    // Use a unique temp dir per test instance to avoid races when the
+    // worktree variant of this test runs concurrently in the same process.
+    let outside_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let outside_file = outside_dir.path().join("outside.txt");
     std::fs::write(&outside_file, "outside content").unwrap();
 
     let result = repo.git_ai(&["blame", outside_file.to_str().unwrap()]);
@@ -302,8 +305,6 @@ fn test_blame_error_file_outside_repo() {
             "unexpected error message: {err}"
         );
     }
-
-    std::fs::remove_file(outside_file).ok();
 }
 
 #[test]
