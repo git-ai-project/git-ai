@@ -33,8 +33,12 @@ fn test_squash_merge_single_parent_not_on_base_ref() {
         let git_repo = git2::Repository::open(repo.path()).unwrap();
         let sig = git_repo.signature().unwrap();
         let tree = git_repo.find_tree(tree_id).unwrap();
-        let init_commit = git_repo.find_commit(git2::Oid::from_str(&init_sha).unwrap()).unwrap();
-        git_repo.commit(None, &sig, &sig, "feature commit", &tree, &[&init_commit]).unwrap()
+        let init_commit = git_repo
+            .find_commit(git2::Oid::from_str(&init_sha).unwrap())
+            .unwrap();
+        git_repo
+            .commit(None, &sig, &sig, "feature commit", &tree, &[&init_commit])
+            .unwrap()
     };
     let feature_sha = feature_oid.to_string();
 
@@ -51,7 +55,8 @@ fn test_squash_merge_single_parent_not_on_base_ref() {
     let squash_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
     // Create a ref pointing to the feature commit (simulating worker base ref)
-    repo.git_og(&["update-ref", "refs/worker/pr/test/base", &feature_sha]).unwrap();
+    repo.git_og(&["update-ref", "refs/worker/pr/test/base", &feature_sha])
+        .unwrap();
 
     // Set up CI event
     let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
@@ -95,7 +100,10 @@ fn test_single_commit_rebase_parent_on_base_ref() {
     repo.git(&["checkout", "-b", "feature"]).unwrap();
     let mut feature_file = repo.filename("feature.txt");
     feature_file.set_contents(crate::lines!["feature work"]);
-    let feature_sha = repo.stage_all_and_commit("feature commit").unwrap().commit_sha;
+    let feature_sha = repo
+        .stage_all_and_commit("feature commit")
+        .unwrap()
+        .commit_sha;
 
     // Advance default branch
     repo.git(&["checkout", &default_branch]).unwrap();
@@ -109,11 +117,13 @@ fn test_single_commit_rebase_parent_on_base_ref() {
 
     // Merge the rebased commit into default branch
     repo.git(&["checkout", &default_branch]).unwrap();
-    repo.git(&["merge", "feature", "-m", "merge feature"]).unwrap();
+    repo.git(&["merge", "feature", "-m", "merge feature"])
+        .unwrap();
     let merge_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
     // Set up base ref pointing at init (on default branch's ancestry)
-    repo.git_og(&["update-ref", "refs/worker/pr/test/base", &init_sha]).unwrap();
+    repo.git_og(&["update-ref", "refs/worker/pr/test/base", &init_sha])
+        .unwrap();
 
     let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
         .expect("Failed to find repository");
@@ -163,7 +173,10 @@ fn test_multi_commit_squash_merge_single_parent() {
 
     let mut c_file = repo.filename("c.txt");
     c_file.set_contents(crate::lines!["ccc"]);
-    let feature_head_sha = repo.stage_all_and_commit("feature commit 3").unwrap().commit_sha;
+    let feature_head_sha = repo
+        .stage_all_and_commit("feature commit 3")
+        .unwrap()
+        .commit_sha;
 
     // Advance default branch independently
     repo.git(&["checkout", &default_branch]).unwrap();
@@ -173,15 +186,25 @@ fn test_multi_commit_squash_merge_single_parent() {
 
     // Squash merge feature (produces single-parent commit)
     repo.git(&["merge", "--squash", "feature"]).unwrap();
-    let merge_sha = repo.stage_all_and_commit("squash feature").unwrap().commit_sha;
+    let merge_sha = repo
+        .stage_all_and_commit("squash feature")
+        .unwrap()
+        .commit_sha;
 
     // Verify it's actually a single-parent commit
     let git_repo = git2::Repository::open(repo.path()).unwrap();
-    let merge_commit = git_repo.find_commit(git2::Oid::from_str(&merge_sha).unwrap()).unwrap();
-    assert_eq!(merge_commit.parent_count(), 1, "Squash merge should have exactly 1 parent");
+    let merge_commit = git_repo
+        .find_commit(git2::Oid::from_str(&merge_sha).unwrap())
+        .unwrap();
+    assert_eq!(
+        merge_commit.parent_count(),
+        1,
+        "Squash merge should have exactly 1 parent"
+    );
 
     // Base ref points to init commit
-    repo.git_og(&["update-ref", "refs/worker/pr/test/base", &init_sha]).unwrap();
+    repo.git_og(&["update-ref", "refs/worker/pr/test/base", &init_sha])
+        .unwrap();
 
     let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
         .expect("Failed to find repository");
@@ -231,9 +254,13 @@ fn test_regular_two_parent_merge_skipped() {
         index.write().unwrap();
         let tree_id = index.write_tree().unwrap();
         let tree = git_repo.find_tree(tree_id).unwrap();
-        let init_commit = git_repo.find_commit(git2::Oid::from_str(&init_sha).unwrap()).unwrap();
+        let init_commit = git_repo
+            .find_commit(git2::Oid::from_str(&init_sha).unwrap())
+            .unwrap();
 
-        git_repo.commit(None, &sig, &sig, "feature commit", &tree, &[&init_commit]).unwrap()
+        git_repo
+            .commit(None, &sig, &sig, "feature commit", &tree, &[&init_commit])
+            .unwrap()
     };
     let feature_sha = feature_oid.to_string();
 
@@ -255,24 +282,34 @@ fn test_regular_two_parent_merge_skipped() {
         let tree_id = index.write_tree().unwrap();
         let tree = git_repo.find_tree(tree_id).unwrap();
 
-        let adv_commit = git_repo.find_commit(git2::Oid::from_str(&adv_sha).unwrap()).unwrap();
+        let adv_commit = git_repo
+            .find_commit(git2::Oid::from_str(&adv_sha).unwrap())
+            .unwrap();
         let feature_commit = git_repo.find_commit(feature_oid).unwrap();
 
-        let merge_oid = git_repo.commit(
-            Some("HEAD"),
-            &sig,
-            &sig,
-            "Merge feature",
-            &tree,
-            &[&adv_commit, &feature_commit],
-        ).unwrap();
+        let merge_oid = git_repo
+            .commit(
+                Some("HEAD"),
+                &sig,
+                &sig,
+                "Merge feature",
+                &tree,
+                &[&adv_commit, &feature_commit],
+            )
+            .unwrap();
         merge_oid.to_string()
     };
 
     // Verify it's a 2-parent commit
     let git_repo = git2::Repository::open(repo.path()).unwrap();
-    let merge_commit = git_repo.find_commit(git2::Oid::from_str(&merge_sha).unwrap()).unwrap();
-    assert_eq!(merge_commit.parent_count(), 2, "Regular merge should have 2 parents");
+    let merge_commit = git_repo
+        .find_commit(git2::Oid::from_str(&merge_sha).unwrap())
+        .unwrap();
+    assert_eq!(
+        merge_commit.parent_count(),
+        2,
+        "Regular merge should have 2 parents"
+    );
 
     let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
         .expect("Failed to find repository");
