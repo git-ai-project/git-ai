@@ -3658,9 +3658,8 @@ struct FirebenderHookInput {
     model: String,
     repo_working_dir: Option<String>,
     workspace_roots: Option<Vec<String>>,
-    will_edit_filepaths: Option<Vec<String>>,
-    edited_filepaths: Option<Vec<String>>,
-    file_path: Option<String>,
+    tool_name: Option<String>,
+    tool_input: Option<serde_json::Value>,
     completion_id: Option<String>,
     dirty_files: Option<HashMap<String, String>>,
 }
@@ -3679,34 +3678,46 @@ impl AgentCheckpointPreset for FirebenderPreset {
             model,
             repo_working_dir,
             workspace_roots,
-            will_edit_filepaths,
-            edited_filepaths,
-            file_path,
+            tool_name,
+            tool_input,
             completion_id,
             dirty_files,
         } = hook_input;
 
-        let normalized_event = match hook_event_name.as_str() {
-            "before_edit" | "beforeSubmitPrompt" => "before_edit",
-            "after_edit" | "afterFileEdit" => "after_edit",
-            _ => {
-                return Err(GitAiError::PresetError(format!(
-                    "Unsupported hook_event_name '{}' for firebender preset (expected 'before_edit' or 'after_edit')",
-                    hook_event_name
-                )));
-            }
-        };
-
-        let mut resolved_will_edit = will_edit_filepaths;
-        let mut resolved_edited = edited_filepaths;
-        if let Some(path) = file_path.filter(|p| !p.trim().is_empty()) {
-            if normalized_event == "before_edit" && resolved_will_edit.is_none() {
-                resolved_will_edit = Some(vec![path.clone()]);
-            }
-            if normalized_event == "after_edit" && resolved_edited.is_none() {
-                resolved_edited = Some(vec![path]);
-            }
+        if hook_event_name == "beforeSubmitPrompt" || hook_event_name == "afterFileEdit" {
+            std::process::exit(0);
         }
+
+        if hook_event_name != "preToolUse" && hook_event_name != "postToolUse" {
+            return Err(GitAiError::PresetError(format!(
+                "Invalid hook_event_name: {}. Expected 'preToolUse' or 'postToolUse'",
+                hook_event_name
+            )));
+        }
+
+        let tool_name = tool_name.unwrap_or_default();
+        if !matches!(
+            tool_name.as_str(),
+            "Write" | "Edit" | "Delete" | "RenameSymbol" | "DeleteSymbol"
+        ) {
+            return Err(GitAiError::PresetError(format!(
+                "Skipping Firebender hook for non-edit tool_name '{}'.",
+                tool_name
+            )));
+        }
+
+        let tool_input = tool_input.unwrap_or(serde_json::Value::Null);
+        let file_path = tool_input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .or_else(|| tool_input.get("target_file").and_then(|v| v.as_str()))
+            .or_else(|| {
+                tool_input
+                    .get("relative_workspace_path")
+                    .and_then(|v| v.as_str())
+            })
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
 
         let repo_working_dir = repo_working_dir
             .map(|s| s.trim().to_string())
@@ -3729,7 +3740,7 @@ impl AgentCheckpointPreset for FirebenderPreset {
             model,
         };
 
-        if normalized_event == "before_edit" {
+        if hook_event_name == "preToolUse" {
             return Ok(AgentRunResult {
                 agent_id,
                 agent_metadata: None,
@@ -3737,7 +3748,7 @@ impl AgentCheckpointPreset for FirebenderPreset {
                 transcript: None,
                 repo_working_dir,
                 edited_filepaths: None,
-                will_edit_filepaths: resolved_will_edit,
+                will_edit_filepaths: file_path.clone().map(|path| vec![path]),
                 dirty_files,
             });
         }
@@ -3748,7 +3759,7 @@ impl AgentCheckpointPreset for FirebenderPreset {
             checkpoint_kind: CheckpointKind::AiAgent,
             transcript: None,
             repo_working_dir,
-            edited_filepaths: resolved_edited,
+            edited_filepaths: file_path.map(|path| vec![path]),
             will_edit_filepaths: None,
             dirty_files,
         })
@@ -3760,12 +3771,15 @@ mod firebender_tests {
     use super::*;
 
     #[test]
-    fn test_firebender_before_submit_prompt_maps_to_human_checkpoint() {
+    fn test_firebender_pre_tool_use_maps_to_human_checkpoint() {
         let hook_input = serde_json::json!({
-            "hook_event_name": "beforeSubmitPrompt",
+            "hook_event_name": "preToolUse",
             "model": "gpt-5",
             "workspace_roots": ["/tmp/workspace"],
-            "file_path": "src/main.rs",
+            "tool_name": "Write",
+            "tool_input": {
+                "file_path": "src/main.rs"
+            },
             "completion_id": "abc123"
         })
         .to_string();
@@ -3789,12 +3803,15 @@ mod firebender_tests {
     }
 
     #[test]
-    fn test_firebender_after_file_edit_maps_to_ai_agent_checkpoint() {
+    fn test_firebender_post_tool_use_maps_to_ai_agent_checkpoint() {
         let hook_input = serde_json::json!({
-            "hook_event_name": "afterFileEdit",
+            "hook_event_name": "postToolUse",
             "model": "claude-sonnet",
             "repo_working_dir": "/tmp/repo",
-            "edited_filepaths": ["src/lib.rs"],
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": "src/lib.rs"
+            },
             "completion_id": "done456"
         })
         .to_string();
@@ -3820,7 +3837,8 @@ mod firebender_tests {
     fn test_firebender_rejects_unknown_event_name() {
         let hook_input = serde_json::json!({
             "hook_event_name": "somethingElse",
-            "model": "gpt-5"
+            "model": "gpt-5",
+            "tool_name": "Write"
         })
         .to_string();
 
@@ -3833,7 +3851,29 @@ mod firebender_tests {
         assert!(
             error
                 .to_string()
-                .contains("Unsupported hook_event_name 'somethingElse'")
+                .contains("Invalid hook_event_name: somethingElse")
+        );
+    }
+
+    #[test]
+    fn test_firebender_rejects_non_edit_tools() {
+        let hook_input = serde_json::json!({
+            "hook_event_name": "preToolUse",
+            "model": "gpt-5",
+            "tool_name": "Read"
+        })
+        .to_string();
+
+        let error = FirebenderPreset
+            .run(AgentCheckpointFlags {
+                hook_input: Some(hook_input),
+            })
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("Skipping Firebender hook for non-edit tool_name 'Read'.")
         );
     }
 }
