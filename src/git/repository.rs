@@ -1351,7 +1351,23 @@ impl Repository {
             return !has_intervening_git_dir(&canonical_path, &self.canonical_workdir);
         }
 
-        // Fallback for paths that don't exist yet: normalize by resolving .. and .
+        // Fallback for paths that don't exist yet: try to canonicalize the parent directory
+        // and append the filename. This handles cases where the path contains symlinks
+        // (e.g., /var -> /private/var on macOS).
+        if let Some(parent) = path.parent() {
+            if let Some(filename) = path.file_name() {
+                if let Ok(canonical_parent) = parent.canonicalize() {
+                    let canonical_path = canonical_parent.join(filename);
+                    if !canonical_path.starts_with(&self.canonical_workdir) {
+                        return false;
+                    }
+                    return !has_intervening_git_dir(&canonical_path, &self.canonical_workdir);
+                }
+            }
+        }
+
+        // Final fallback: normalize by resolving .. and . and check against both
+        // canonical and non-canonical workdir (in case of symlinks)
         let normalized = path
             .components()
             .fold(std::path::PathBuf::new(), |mut acc, component| {
@@ -1364,10 +1380,23 @@ impl Repository {
                 }
                 acc
             });
-        if !normalized.starts_with(&self.workdir) {
+
+        // Try both canonical and non-canonical workdir to handle symlinks
+        let in_canonical = normalized.starts_with(&self.canonical_workdir);
+        let in_workdir = normalized.starts_with(&self.workdir);
+
+        if !in_canonical && !in_workdir {
             return false;
         }
-        !has_intervening_git_dir(&normalized, &self.workdir)
+
+        // Use canonical_workdir if path matches it, otherwise use workdir
+        let base = if in_canonical {
+            &self.canonical_workdir
+        } else {
+            &self.workdir
+        };
+
+        !has_intervening_git_dir(&normalized, base)
     }
 
     // List all remotes for a given repository
