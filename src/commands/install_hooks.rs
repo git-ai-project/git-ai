@@ -348,7 +348,10 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
 
     // In async mode, daemon trace2 config must be in place before any install work starts.
     // If async mode was disabled, tear down any leftover daemon and trace2 config.
-    maybe_configure_async_mode_daemon_trace2(dry_run)?;
+    // Non-fatal: the global git config may be read-only (e.g. Nix store symlink).
+    if let Err(e) = maybe_configure_async_mode_daemon_trace2(dry_run) {
+        eprintln!("Warning: could not configure trace2 (non-fatal): {e}");
+    }
     maybe_teardown_async_mode(dry_run);
     maybe_ensure_daemon(dry_run);
 
