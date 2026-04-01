@@ -89,6 +89,10 @@ macro_rules! subdir_test_variants {
                             "GIT_CONFIG_GLOBAL",
                             self.inner.test_home_path().join(".gitconfig"),
                         );
+                        command.env(
+                            "XDG_CONFIG_HOME",
+                            self.inner.test_home_path().join(".config"),
+                        );
                         if mode.uses_wrapper() {
                             command.env("GIT_AI", "git");
                         }
@@ -206,6 +210,10 @@ macro_rules! subdir_test_variants {
                             command.env(
                                 "GIT_CONFIG_GLOBAL",
                                 self.inner.test_home_path().join(".gitconfig"),
+                            );
+                            command.env(
+                                "XDG_CONFIG_HOME",
+                                self.inner.test_home_path().join(".config"),
                             );
                             if mode.uses_wrapper() {
                                 command.env("GIT_AI", "git");

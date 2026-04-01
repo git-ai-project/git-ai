@@ -213,6 +213,7 @@ fn apply_deterministic_git_env(command: &mut Command, repo: &TestRepo) {
         "GIT_CONFIG_GLOBAL",
         repo.test_home_path().join(".gitconfig"),
     );
+    command.env("XDG_CONFIG_HOME", repo.test_home_path().join(".config"));
 
     command.env("GIT_AUTHOR_NAME", DETERMINISTIC_GIT_NAME);
     command.env("GIT_AUTHOR_EMAIL", DETERMINISTIC_GIT_EMAIL);
@@ -403,6 +404,7 @@ fn install_hooks(repo: &TestRepo) {
         "GIT_CONFIG_GLOBAL",
         repo.test_home_path().join(".gitconfig"),
     );
+    command.env("XDG_CONFIG_HOME", repo.test_home_path().join(".config"));
     command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
     command.env("GIT_AI_TEST_DB_PATH", repo.test_db_path().to_str().unwrap());
 

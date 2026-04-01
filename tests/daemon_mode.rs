@@ -314,6 +314,47 @@ fn write_http_response(stream: &mut TcpStream, body: &[u8]) {
 fn configure_test_home_env(command: &mut Command, test_home: &Path) {
     command.env("HOME", test_home);
     command.env("GIT_CONFIG_GLOBAL", test_home.join(".gitconfig"));
+    // Redirect XDG_CONFIG_HOME so git does not read the real user's
+    // $XDG_CONFIG_HOME/git/config (which may contain filter drivers,
+    // aliases, or other settings that break test isolation).
+    command.env("XDG_CONFIG_HOME", test_home.join(".config"));
+    // Suppress system-level git config (e.g., Xcode credential helpers)
+    // that could interfere with test isolation.
+    command.env("GIT_CONFIG_NOSYSTEM", "1");
+    // Sanitize PATH to remove directories containing the Nix git-ai
+    // wrapper.  When the wrapper (a release build with async_mode=true)
+    // runs with HOME pointing to the test home it starts a background
+    // daemon at the test socket path, poisoning the test environment.
+    if let Ok(path) = std::env::var("PATH") {
+        let sanitized: Vec<&str> = path
+            .split(':')
+            .filter(|dir| {
+                // Keep only dirs that do NOT contain a git-ai wrapper
+                // (heuristic: skip dirs where the `git` binary is a
+                //  shell-script wrapper for git-ai, or a symlink to git-ai).
+                let git_path = std::path::Path::new(dir).join("git");
+                if git_path.is_file() || git_path.is_symlink() {
+                    if let Ok(contents) = std::fs::read_to_string(&git_path)
+                        && contents.contains("git-ai")
+                    {
+                        return false;
+                    }
+                    if let Ok(target) = std::fs::read_link(&git_path)
+                        && target.to_string_lossy().contains("git-ai")
+                    {
+                        return false;
+                    }
+                    if let Ok(canonical) = git_path.canonicalize()
+                        && canonical.to_string_lossy().contains("git-ai")
+                    {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect();
+        command.env("PATH", sanitized.join(":"));
+    }
     #[cfg(windows)]
     {
         command.env("USERPROFILE", test_home);
@@ -950,6 +991,18 @@ fn checkpoint_delegate_autostarts_daemon_when_unavailable() {
     )
     .expect("failed to write updated file");
 
+    // Shut down any stale daemon that may have been spawned by a
+    // previous wrapper invocation (e.g., the Nix-installed release
+    // binary triggered via PATH during the `git add` / `git commit`
+    // wrapper steps).  The test must start with no daemon so that the
+    // checkpoint delegation path actually auto-starts a fresh one.
+    let _ = send_control_request(
+        &daemon_control_socket_path(&repo),
+        &ControlRequest::Shutdown,
+    );
+    // Wait briefly for the daemon to release the sockets.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
     repo.git_ai_with_env(
         &["checkpoint", "mock_ai", "delegate-fallback.txt"],
         &[("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true")],
@@ -965,7 +1018,12 @@ fn checkpoint_delegate_autostarts_daemon_when_unavailable() {
     .expect("daemon status request should succeed after auto-start");
     assert!(
         status.ok,
-        "daemon should be running after delegated checkpoint auto-start"
+        "daemon should be running after delegated checkpoint auto-start; ok={}, error={:?}, data={:?}, socket={}, workdir={}",
+        status.ok,
+        status.error,
+        status.data,
+        daemon_control_socket_path(&repo).display(),
+        repo_workdir_string(&repo)
     );
     let _ = send_control_request(
         &daemon_control_socket_path(&repo),
@@ -1001,6 +1059,14 @@ fn checkpoint_delegate_falls_back_when_daemon_startup_is_blocked() {
         "base\nchanged while startup blocked\n",
     )
     .expect("failed to write updated file");
+
+    // Shut down any stale daemon that may have been spawned by a
+    // previous wrapper invocation so we can acquire the lock ourselves.
+    let _ = send_control_request(
+        &daemon_control_socket_path(&repo),
+        &ControlRequest::Shutdown,
+    );
+    std::thread::sleep(std::time::Duration::from_millis(500));
 
     fs::create_dir_all(
         daemon_lock_path(&repo)

@@ -7042,6 +7042,44 @@ fn handle_trace_connection_actor_reader<R: Read>(
     Ok(())
 }
 
+/// Git environment variables that must not leak into the daemon process.
+///
+/// The daemon is a long-lived, repository-agnostic process that serves requests
+/// for many different repositories. Environment variables like `GIT_DIR` and
+/// `GIT_WORK_TREE` pin git operations to a single repository and override the
+/// `-C <path>` flag that the daemon uses to target each repository individually.
+///
+/// When a daemon is spawned by a git wrapper invocation (e.g. `git add`), the
+/// parent process may have these variables set by git itself (hook context) or
+/// by test harnesses. Clearing them at daemon startup prevents incorrect
+/// repository resolution that manifests as `fatal: not a git repository: '/dev/null'`.
+///
+/// This list is used in two places:
+/// - `spawn_daemon_run_detached` strips them from the child process via `env_remove`.
+/// - `sanitize_git_env_for_daemon` clears them from the current process at daemon startup
+///   as a belt-and-suspenders defence (the daemon may be launched by another mechanism).
+pub const GIT_ENV_VARS_TO_SANITIZE: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_QUARANTINE_PATH",
+    "GIT_NAMESPACE",
+];
+
+fn sanitize_git_env_for_daemon() {
+    for var in GIT_ENV_VARS_TO_SANITIZE {
+        // SAFETY: daemon startup is single-threaded at this point -- the tokio
+        // runtime is not yet running and no other threads exist.
+        unsafe {
+            std::env::remove_var(var);
+        }
+    }
+}
+
 fn disable_trace2_for_daemon_process() {
     // The daemon executes internal git commands while processing events and control requests.
     // If trace2.eventTarget points at this daemon socket globally, those internal git
@@ -7154,6 +7192,7 @@ pub(crate) fn daemon_run_pending_self_update() {
 }
 
 pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
+    sanitize_git_env_for_daemon();
     disable_trace2_for_daemon_process();
     config.ensure_parent_dirs()?;
     if let Err(error) = crate::commands::checkpoint::prune_stale_captured_checkpoints(

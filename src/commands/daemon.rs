@@ -294,6 +294,10 @@ fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        // Remove git environment variables that must not leak into the daemon.
+        for var in crate::daemon::GIT_ENV_VARS_TO_SANITIZE {
+            child.env_remove(var);
+        }
 
         let preferred_flags =
             CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB;
@@ -326,6 +330,12 @@ fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        // Remove git environment variables that must not leak into the daemon.
+        // The daemon is repository-agnostic; variables like GIT_DIR override
+        // the -C flag and cause repository resolution failures.
+        for var in crate::daemon::GIT_ENV_VARS_TO_SANITIZE {
+            child.env_remove(var);
+        }
         child.spawn().map(|_| ()).map_err(|e| e.to_string())
     }
 }
@@ -344,6 +354,10 @@ fn spawn_daemon_run_with_piped_stderr(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
+    // Remove git environment variables that must not leak into the daemon.
+    for var in crate::daemon::GIT_ENV_VARS_TO_SANITIZE {
+        child.env_remove(var);
+    }
 
     #[cfg(windows)]
     {
