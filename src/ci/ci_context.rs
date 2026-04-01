@@ -750,12 +750,12 @@ mod tests {
         // notes, which would cause an early AlreadyExists return.
         let test_repo = TmpRepo::new().unwrap();
         let sig = test_repo.repo().signature().unwrap();
+        let file_name = std::path::Path::new("file.txt");
 
         // Initial commit
-        let file_path = test_repo.path().join("file.txt");
-        fs::write(&file_path, "init").unwrap();
+        test_repo.write_file("file.txt", "init", false).unwrap();
         let mut index = test_repo.repo().index().unwrap();
-        index.add_path(std::path::Path::new("file.txt")).unwrap();
+        index.add_path(file_name).unwrap();
         index.write().unwrap();
         let tree_id = index.write_tree().unwrap();
         let tree = test_repo.repo().find_tree(tree_id).unwrap();
@@ -766,8 +766,8 @@ mod tests {
         let init_commit = test_repo.repo().find_commit(init_oid).unwrap();
 
         // Feature commit (diverges from init)
-        fs::write(&file_path, "feature work").unwrap();
-        index.add_path(std::path::Path::new("file.txt")).unwrap();
+        test_repo.write_file("file.txt", "feature work", false).unwrap();
+        index.add_path(file_name).unwrap();
         index.write().unwrap();
         let tree_id = index.write_tree().unwrap();
         let tree = test_repo.repo().find_tree(tree_id).unwrap();
@@ -779,8 +779,8 @@ mod tests {
         let feature_sha = feature_oid.to_string();
 
         // Advance default branch
-        fs::write(&file_path, "main advance").unwrap();
-        index.add_path(std::path::Path::new("file.txt")).unwrap();
+        test_repo.write_file("file.txt", "main advance", false).unwrap();
+        index.add_path(file_name).unwrap();
         index.write().unwrap();
         let tree_id = index.write_tree().unwrap();
         let tree = test_repo.repo().find_tree(tree_id).unwrap();
@@ -799,8 +799,8 @@ mod tests {
         let base_sha = adv_oid.to_string();
 
         // True merge commit (2 parents)
-        fs::write(&file_path, "merged").unwrap();
-        index.add_path(std::path::Path::new("file.txt")).unwrap();
+        test_repo.write_file("file.txt", "merged", false).unwrap();
+        index.add_path(file_name).unwrap();
         index.write().unwrap();
         let tree_id = index.write_tree().unwrap();
         let tree = test_repo.repo().find_tree(tree_id).unwrap();
