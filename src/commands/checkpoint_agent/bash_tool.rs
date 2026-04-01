@@ -951,7 +951,6 @@ fn attempt_pre_hook_capture(
         &repo,
         "bash-tool", // author
         CheckpointKind::Human,
-        false, // reset
         Some(&agent_run_result),
         false, // is_pre_commit
         None,  // base_commit_override
@@ -1031,7 +1030,6 @@ fn attempt_post_hook_capture(
         &repo,
         "bash-tool", // author
         CheckpointKind::AiAgent,
-        false, // reset
         Some(&agent_run_result),
         false, // is_pre_commit
         None,  // base_commit_override
