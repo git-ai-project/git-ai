@@ -779,7 +779,24 @@ fn build_feature_flags(file_cfg: &Option<FileConfig>) -> FeatureFlags {
         serde_json::from_value(value).ok()
     });
 
-    FeatureFlags::from_env_and_file(file_flags)
+    let mut flags = FeatureFlags::from_env_and_file(file_flags);
+
+    // Auto-enable cloud_default_ai_attribution when running in a cloud/background agent
+    // environment, unless the user has explicitly set it via env var or config file.
+    // We check if it was explicitly set by looking for the env var; if absent and not
+    // set in file config, apply the cloud-env default.
+    let explicitly_set_in_env = env::var("GIT_AI_CLOUD_DEFAULT_AI_ATTRIBUTION").is_ok();
+    let explicitly_set_in_file = file_cfg
+        .as_ref()
+        .and_then(|c| c.feature_flags.as_ref())
+        .and_then(|v| v.get("cloud_default_ai_attribution"))
+        .is_some();
+
+    if !explicitly_set_in_env && !explicitly_set_in_file && crate::utils::is_in_background_agent() {
+        flags.cloud_default_ai_attribution = true;
+    }
+
+    flags
 }
 
 fn resolve_git_path(file_cfg: &Option<FileConfig>) -> String {

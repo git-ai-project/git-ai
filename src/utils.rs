@@ -10,7 +10,7 @@ use std::process::{Command, Stdio};
 static DEBUG_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static DEBUG_PERFORMANCE_LEVEL: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
 static IS_TERMINAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-static IS_IN_BACKGROUND_AGENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static BACKGROUND_AGENT_TOOL: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
 
 fn is_debug_enabled() -> bool {
     *DEBUG_ENABLED.get_or_init(|| {
@@ -197,19 +197,61 @@ pub fn is_interactive_terminal() -> bool {
     *IS_TERMINAL.get_or_init(|| std::io::stdin().is_terminal())
 }
 
+/// Detect the background agent tool name from environment variables and filesystem markers.
+/// Returns `Some("cursor-agent")`, `Some("claude-web")`, `Some("devin")`, etc. if running
+/// inside a known cloud/background agent environment, or `None` if not.
+///
+/// This is the single source of truth for all agent-name ↔ env-var mappings.
+/// Detection priority: CLOUD_AGENT_TOOL (explicit) > CURSOR_AGENT > CLAUDE_CODE_REMOTE >
+/// GIT_AI_CLOUD_AGENT (explicit opt-in) > CLOUD_AGENT_* prefix > /opt/.devin path.
+pub fn detect_background_agent_tool() -> Option<String> {
+    BACKGROUND_AGENT_TOOL
+        .get_or_init(|| {
+            // Explicit CLOUD_AGENT_TOOL env var takes highest priority
+            if let Ok(tool) = std::env::var("CLOUD_AGENT_TOOL")
+                && !tool.is_empty()
+            {
+                return Some(tool);
+            }
+            // Cursor background agent
+            if std::env::var("CURSOR_AGENT")
+                .map(|v| v == "1")
+                .unwrap_or(false)
+            {
+                return Some("cursor-agent".to_string());
+            }
+            // Claude Code remote agent (Anthropic)
+            if std::env::var("CLAUDE_CODE_REMOTE")
+                .map(|v| v == "true")
+                .unwrap_or(false)
+            {
+                return Some("claude-web".to_string());
+            }
+            // Explicit opt-in for cloud/background agent environments
+            if std::env::var("GIT_AI_CLOUD_AGENT")
+                .map(|v| v == "1")
+                .unwrap_or(false)
+            {
+                return Some("cloud-agent".to_string());
+            }
+            // Cloud agent environment (CLOUD_AGENT_* prefix, excluding CLOUD_AGENT_TOOL)
+            if std::env::vars()
+                .any(|(k, _)| k.starts_with("CLOUD_AGENT_") && k != "CLOUD_AGENT_TOOL")
+            {
+                return Some("cloud-agent".to_string());
+            }
+            // Path-based detection
+            if std::path::Path::new("/opt/.devin").is_dir() {
+                return Some("devin".to_string());
+            }
+            None
+        })
+        .clone()
+}
+
 /// Returns true if the process is running inside a background AI agent environment.
 pub fn is_in_background_agent() -> bool {
-    *IS_IN_BACKGROUND_AGENT.get_or_init(|| {
-        // Claude Code remote agent (Anthropic)
-        std::env::var("CLAUDE_CODE_REMOTE").map(|v| v == "true").unwrap_or(false)
-            // Cursor background agent
-            || std::env::var("CURSOR_AGENT").map(|v| v == "1").unwrap_or(false)
-            // Cloud agent environment (CLOUD_AGENT_* prefix)
-            || std::env::vars().any(|(k, _)| k.starts_with("CLOUD_AGENT_"))
-            || std::path::Path::new("/opt/.devin").is_dir()
-            // Explicit opt-in for cloud/background agent environments
-            || std::env::var("GIT_AI_CLOUD_AGENT").map(|v| v == "1").unwrap_or(false)
-    })
+    detect_background_agent_tool().is_some()
 }
 
 /// A cross-platform exclusive file lock.

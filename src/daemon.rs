@@ -1270,7 +1270,7 @@ fn apply_checkpoint_side_effect(request: CheckpointRunRequest) -> Result<(), Git
                 .author
                 .unwrap_or_else(|| repo.git_author_identity().name_or_unknown());
 
-            let _ = crate::commands::checkpoint::run(
+            let _ = crate::commands::checkpoint::run_with_captured_cloud_env_tool(
                 &repo,
                 &author,
                 kind,
@@ -1278,6 +1278,7 @@ fn apply_checkpoint_side_effect(request: CheckpointRunRequest) -> Result<(), Git
                 request.quiet.unwrap_or(true),
                 request.agent_run_result,
                 request.is_pre_commit.unwrap_or(false),
+                request.captured_cloud_env_tool,
             )?;
             Ok(())
         }
@@ -7594,6 +7595,7 @@ mod tests {
                     quiet: Some(true),
                     is_pre_commit: Some(false),
                     agent_run_result: None,
+                    captured_cloud_env_tool: None,
                 },
             ))),
             wait: Some(true),
