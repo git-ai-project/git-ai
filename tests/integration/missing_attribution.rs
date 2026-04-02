@@ -783,6 +783,7 @@ fn test_h6d_ai_checkpoint_wrong_file_path() {
     );
     fs::write(cp_dir.join("checkpoints.jsonl"), &checkpoint_json).unwrap();
 
+    repo.set_allow_daemon_errors(true);
     let result = repo.stage_all_and_commit("add ai code");
 
     match result {
@@ -862,6 +863,7 @@ fn test_h7a_truncated_jsonl_poisons_all_checkpoints() {
     let checkpoints = format!("{}\n{}\n", valid_checkpoint, corrupt_line);
     fs::write(cp_dir.join("checkpoints.jsonl"), &checkpoints).unwrap();
 
+    repo.set_allow_daemon_errors(true);
     let result = repo.stage_all_and_commit("add ai code");
 
     // The corrupt line causes read_all_checkpoints() to fail with Err.
@@ -1643,6 +1645,7 @@ fn test_h18_append_checkpoint_on_corrupt_jsonl_overwrites_valid_data() {
     // The corrupt JSONL may cause post-commit to fail entirely (no note written),
     // or the note may be written but with file_a's AI data lost. Either outcome
     // confirms the data-loss bug in append_checkpoint.
+    repo.set_allow_daemon_errors(true);
     let result = repo.stage_all_and_commit("commit both");
 
     match result {
