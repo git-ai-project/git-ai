@@ -771,11 +771,7 @@ fn test_stats_ignores_renamed_files() {
             "Line 16"
         ]);
     repo.filename("misc/Usage Guide.md")
-        .set_contents(crate::lines![
-            "# Usage Guide",
-            "",
-            "Usage info"
-        ]);
+        .set_contents(crate::lines!["# Usage Guide", "", "Usage info"]);
     repo.stage_all_and_commit("Initial commit with misc directory")
         .unwrap();
 
@@ -788,7 +784,8 @@ fn test_stats_ignores_renamed_files() {
     fs::rename(&misc_usage, new_dir.join("Usage Guide.md")).unwrap();
     fs::remove_dir(repo.path().join("misc")).unwrap();
 
-    repo.stage_all_and_commit("Rename misc to Misc Docs").unwrap();
+    repo.stage_all_and_commit("Rename misc to Misc Docs")
+        .unwrap();
 
     // Verify that git ai diff recognizes this as a rename
     let diff_output = repo.git_ai(&["diff", "HEAD"]).unwrap();
