@@ -225,7 +225,10 @@ impl HookInstaller for FirebenderInstaller {
         let existing: Value = serde_json::from_str(&existing_content)?;
 
         let mut merged = existing.clone();
-        let mut hooks_obj = merged.get("hooks").cloned().unwrap_or_else(|| json!({}));
+        let mut hooks_obj = match merged.get("hooks").cloned() {
+            Some(h) => h,
+            None => return Ok(None),
+        };
         let mut changed = false;
 
         for hook_name in &["preToolUse", "postToolUse"] {
