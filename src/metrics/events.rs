@@ -1,9 +1,9 @@
 //! Event-specific value structs for metrics.
 
 use super::pos_encoded::{
-    PosEncoded, PosField, sparse_get_string, sparse_get_u32, sparse_get_u64, sparse_get_vec_string,
-    sparse_get_vec_u32, sparse_get_vec_u64, sparse_set, string_to_json, u32_to_json, u64_to_json,
-    vec_string_to_json, vec_u32_to_json, vec_u64_to_json,
+    PosEncoded, PosField, bool_to_json, sparse_get_bool, sparse_get_string, sparse_get_u32,
+    sparse_get_u64, sparse_get_vec_string, sparse_get_vec_u32, sparse_get_vec_u64, sparse_set,
+    string_to_json, u32_to_json, u64_to_json, vec_string_to_json, vec_u32_to_json, vec_u64_to_json,
 };
 use super::types::{EventValues, MetricEventId, SparseArray};
 
@@ -665,6 +665,132 @@ impl EventValues for CheckpointValues {
     }
 }
 
+/// Value positions for "prompt_event" event.
+/// Tracks individual events within a prompt session (messages, tool calls, etc.).
+pub mod prompt_event_pos {
+    pub const KIND: usize = 0; // String - event kind (HumanMessage, AiMessage, ThinkingMessage, ToolCall, FileWrite, etc.)
+    pub const EVENT_ID: usize = 1; // String - content-based stable ID, prefixed with prompt_id
+    pub const PARENT_ID: usize = 2; // Option<String> - parent event ID (null for first events)
+    pub const PARENT_ID_ESTIMATED: usize = 3; // bool - true if parent_id was estimated (fallback)
+}
+
+/// Values for Event ID 5: prompt_event
+///
+/// Tracks individual prompt events (messages, tool calls, file writes, etc.)
+/// within a prompt session identified by the prompt_id attribute.
+///
+/// **Fields:**
+/// | Position | Name | Type |
+/// |----------|------|------|
+/// | 0 | kind | String |
+/// | 1 | event_id | String |
+/// | 2 | parent_id | `Option<String>` |
+/// | 3 | parent_id_estimated | bool |
+#[derive(Debug, Clone, Default)]
+pub struct PromptEventValues {
+    pub kind: PosField<String>,
+    pub event_id: PosField<String>,
+    pub parent_id: PosField<String>,
+    pub parent_id_estimated: PosField<bool>,
+}
+
+impl PromptEventValues {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn kind(mut self, value: impl Into<String>) -> Self {
+        self.kind = Some(Some(value.into()));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn kind_null(mut self) -> Self {
+        self.kind = Some(None);
+        self
+    }
+
+    pub fn event_id(mut self, value: impl Into<String>) -> Self {
+        self.event_id = Some(Some(value.into()));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn event_id_null(mut self) -> Self {
+        self.event_id = Some(None);
+        self
+    }
+
+    pub fn parent_id(mut self, value: impl Into<String>) -> Self {
+        self.parent_id = Some(Some(value.into()));
+        self
+    }
+
+    pub fn parent_id_null(mut self) -> Self {
+        self.parent_id = Some(None);
+        self
+    }
+
+    pub fn parent_id_estimated(mut self, value: bool) -> Self {
+        self.parent_id_estimated = Some(Some(value));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn parent_id_estimated_null(mut self) -> Self {
+        self.parent_id_estimated = Some(None);
+        self
+    }
+}
+
+impl PosEncoded for PromptEventValues {
+    fn to_sparse(&self) -> SparseArray {
+        let mut map = SparseArray::new();
+
+        sparse_set(&mut map, prompt_event_pos::KIND, string_to_json(&self.kind));
+        sparse_set(
+            &mut map,
+            prompt_event_pos::EVENT_ID,
+            string_to_json(&self.event_id),
+        );
+        sparse_set(
+            &mut map,
+            prompt_event_pos::PARENT_ID,
+            string_to_json(&self.parent_id),
+        );
+        sparse_set(
+            &mut map,
+            prompt_event_pos::PARENT_ID_ESTIMATED,
+            bool_to_json(&self.parent_id_estimated),
+        );
+
+        map
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        Self {
+            kind: sparse_get_string(arr, prompt_event_pos::KIND),
+            event_id: sparse_get_string(arr, prompt_event_pos::EVENT_ID),
+            parent_id: sparse_get_string(arr, prompt_event_pos::PARENT_ID),
+            parent_id_estimated: sparse_get_bool(arr, prompt_event_pos::PARENT_ID_ESTIMATED),
+        }
+    }
+}
+
+impl EventValues for PromptEventValues {
+    fn event_id() -> MetricEventId {
+        MetricEventId::PromptEvent
+    }
+
+    fn to_sparse(&self) -> SparseArray {
+        PosEncoded::to_sparse(self)
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        PosEncoded::from_sparse(arr)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1033,5 +1159,103 @@ mod tests {
         assert_eq!(values.total_ai_additions, Some(None));
         assert_eq!(values.total_ai_deletions, Some(None));
         assert_eq!(values.time_waiting_for_ai, Some(None));
+    }
+
+    #[test]
+    fn test_prompt_event_values_builder() {
+        let values = PromptEventValues::new()
+            .kind("HumanMessage")
+            .event_id("p1:abc123")
+            .parent_id("p1:def456")
+            .parent_id_estimated(false);
+
+        assert_eq!(values.kind, Some(Some("HumanMessage".to_string())));
+        assert_eq!(values.event_id, Some(Some("p1:abc123".to_string())));
+        assert_eq!(values.parent_id, Some(Some("p1:def456".to_string())));
+        assert_eq!(values.parent_id_estimated, Some(Some(false)));
+    }
+
+    #[test]
+    fn test_prompt_event_values_to_sparse() {
+        use super::PosEncoded;
+
+        let values = PromptEventValues::new()
+            .kind("ToolCall")
+            .event_id("p1:xyz")
+            .parent_id("p1:prev")
+            .parent_id_estimated(true);
+
+        let sparse = PosEncoded::to_sparse(&values);
+
+        assert_eq!(
+            sparse.get("0"),
+            Some(&Value::String("ToolCall".to_string()))
+        );
+        assert_eq!(sparse.get("1"), Some(&Value::String("p1:xyz".to_string())));
+        assert_eq!(sparse.get("2"), Some(&Value::String("p1:prev".to_string())));
+        assert_eq!(sparse.get("3"), Some(&Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_prompt_event_values_from_sparse() {
+        use super::PosEncoded;
+
+        let mut sparse = SparseArray::new();
+        sparse.insert("0".to_string(), Value::String("FileWrite".to_string()));
+        sparse.insert("1".to_string(), Value::String("p2:abc".to_string()));
+        sparse.insert("2".to_string(), Value::Null);
+        sparse.insert("3".to_string(), Value::Bool(false));
+
+        let values = <PromptEventValues as PosEncoded>::from_sparse(&sparse);
+
+        assert_eq!(values.kind, Some(Some("FileWrite".to_string())));
+        assert_eq!(values.event_id, Some(Some("p2:abc".to_string())));
+        assert_eq!(values.parent_id, Some(None)); // explicit null
+        assert_eq!(values.parent_id_estimated, Some(Some(false)));
+    }
+
+    #[test]
+    fn test_prompt_event_values_roundtrip() {
+        use super::PosEncoded;
+
+        let original = PromptEventValues::new()
+            .kind("AiMessage")
+            .event_id("p1:msg1")
+            .parent_id("p1:msg0")
+            .parent_id_estimated(false);
+
+        let sparse = PosEncoded::to_sparse(&original);
+        let restored = <PromptEventValues as PosEncoded>::from_sparse(&sparse);
+
+        assert_eq!(restored.kind, original.kind);
+        assert_eq!(restored.event_id, original.event_id);
+        assert_eq!(restored.parent_id, original.parent_id);
+        assert_eq!(restored.parent_id_estimated, original.parent_id_estimated);
+    }
+
+    #[test]
+    fn test_prompt_event_metric_event_id() {
+        assert_eq!(
+            <PromptEventValues as EventValues>::event_id(),
+            MetricEventId::PromptEvent
+        );
+        assert_eq!(<PromptEventValues as EventValues>::event_id() as u16, 5);
+    }
+
+    #[test]
+    fn test_prompt_event_null_parent() {
+        use super::PosEncoded;
+
+        let values = PromptEventValues::new()
+            .kind("HumanMessage")
+            .event_id("p1:first")
+            .parent_id_null()
+            .parent_id_estimated(false);
+
+        let sparse = PosEncoded::to_sparse(&values);
+        assert_eq!(sparse.get("2"), Some(&Value::Null));
+
+        let restored = <PromptEventValues as PosEncoded>::from_sparse(&sparse);
+        assert_eq!(restored.parent_id, Some(None));
     }
 }

@@ -193,7 +193,7 @@ impl HookInstaller for CursorInstaller {
                 .cloned()
                 .unwrap_or_default();
 
-            // Update outdated git-ai checkpoint commands (or add if missing)
+            // Update outdated git-ai commands (or add if missing)
             for desired_hook in desired_hooks {
                 let desired_cmd = desired_hook.get("command").and_then(|c| c.as_str());
                 if desired_cmd.is_none() {
@@ -201,7 +201,6 @@ impl HookInstaller for CursorInstaller {
                 }
                 let desired_cmd = desired_cmd.unwrap();
 
-                // Look for existing git-ai checkpoint cursor commands
                 let mut found_idx = None;
                 let mut needs_update = false;
 
@@ -283,7 +282,7 @@ impl HookInstaller for CursorInstaller {
 
         let mut changed = false;
 
-        // Remove git-ai checkpoint cursor commands from both hook types
+        // Remove git-ai checkpoint commands from both hook types
         for hook_name in &["preToolUse", "postToolUse"] {
             if let Some(hooks_array) = hooks_obj.get_mut(*hook_name).and_then(|v| v.as_array_mut())
             {

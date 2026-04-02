@@ -95,62 +95,29 @@ impl HookInstaller for GitHubCopilotInstaller {
             params.binary_path.display(),
             GITHUB_COPILOT_POST_TOOL_CMD
         );
-
-        let has_pre_installed = existing
-            .get("hooks")
-            .and_then(|h| h.get("PreToolUse"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter().any(|hook| {
-                    hook.get("command")
-                        .and_then(|c| c.as_str())
-                        .map(Self::is_github_copilot_checkpoint_command)
-                        .unwrap_or(false)
+        let hook_array_has = |hook_name: &str, predicate: &dyn Fn(&str) -> bool| -> bool {
+            existing
+                .get("hooks")
+                .and_then(|h| h.get(hook_name))
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter().any(|hook| {
+                        hook.get("command")
+                            .and_then(|c| c.as_str())
+                            .map(predicate)
+                            .unwrap_or(false)
+                    })
                 })
-            })
-            .unwrap_or(false);
+                .unwrap_or(false)
+        };
 
-        let has_post_installed = existing
-            .get("hooks")
-            .and_then(|h| h.get("PostToolUse"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter().any(|hook| {
-                    hook.get("command")
-                        .and_then(|c| c.as_str())
-                        .map(Self::is_github_copilot_checkpoint_command)
-                        .unwrap_or(false)
-                })
-            })
-            .unwrap_or(false);
+        let has_pre_installed =
+            hook_array_has("PreToolUse", &Self::is_github_copilot_checkpoint_command);
+        let has_post_installed =
+            hook_array_has("PostToolUse", &Self::is_github_copilot_checkpoint_command);
 
-        let has_pre_up_to_date = existing
-            .get("hooks")
-            .and_then(|h| h.get("PreToolUse"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter().any(|hook| {
-                    hook.get("command")
-                        .and_then(|c| c.as_str())
-                        .map(|cmd| cmd == pre_desired)
-                        .unwrap_or(false)
-                })
-            })
-            .unwrap_or(false);
-
-        let has_post_up_to_date = existing
-            .get("hooks")
-            .and_then(|h| h.get("PostToolUse"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter().any(|hook| {
-                    hook.get("command")
-                        .and_then(|c| c.as_str())
-                        .map(|cmd| cmd == post_desired)
-                        .unwrap_or(false)
-                })
-            })
-            .unwrap_or(false);
+        let has_pre_up_to_date = hook_array_has("PreToolUse", &|cmd: &str| cmd == pre_desired);
+        let has_post_up_to_date = hook_array_has("PostToolUse", &|cmd: &str| cmd == post_desired);
 
         Ok(HookCheckResult {
             tool_installed: true,
@@ -192,7 +159,6 @@ impl HookInstaller for GitHubCopilotInstaller {
             params.binary_path.display(),
             GITHUB_COPILOT_POST_TOOL_CMD
         );
-
         let desired: Value = json!({
             "hooks": {
                 "PreToolUse": [
@@ -222,20 +188,12 @@ impl HookInstaller for GitHubCopilotInstaller {
         };
 
         for hook_name in &["PreToolUse", "PostToolUse"] {
-            let desired_hook = desired
+            let desired_hooks_for_type = desired
                 .get("hooks")
                 .and_then(|h| h.get(*hook_name))
                 .and_then(|v| v.as_array())
-                .and_then(|arr| arr.first())
-                .cloned();
-            let Some(desired_hook) = desired_hook else {
-                continue;
-            };
-
-            let desired_cmd = desired_hook.get("command").and_then(|c| c.as_str());
-            let Some(desired_cmd) = desired_cmd else {
-                continue;
-            };
+                .cloned()
+                .unwrap_or_default();
 
             let mut existing_hooks = hooks_obj
                 .get(*hook_name)
@@ -243,44 +201,52 @@ impl HookInstaller for GitHubCopilotInstaller {
                 .cloned()
                 .unwrap_or_default();
 
-            let mut found_idx = None;
-            let mut needs_update = false;
+            for desired_hook in &desired_hooks_for_type {
+                let desired_cmd = match desired_hook.get("command").and_then(|c| c.as_str()) {
+                    Some(cmd) => cmd,
+                    None => continue,
+                };
 
-            for (idx, existing_hook) in existing_hooks.iter().enumerate() {
-                if let Some(existing_cmd) = existing_hook.get("command").and_then(|c| c.as_str())
-                    && Self::is_github_copilot_checkpoint_command(existing_cmd)
-                    && found_idx.is_none()
-                {
-                    found_idx = Some(idx);
-                    if existing_cmd != desired_cmd {
-                        needs_update = true;
-                    }
-                }
-            }
+                let mut found_idx = None;
+                let mut needs_update = false;
 
-            match found_idx {
-                Some(idx) => {
-                    if needs_update {
-                        existing_hooks[idx] = desired_hook.clone();
-                    }
-
-                    let keep_idx = idx;
-                    let mut current_idx = 0;
-                    existing_hooks.retain(|hook| {
-                        if current_idx == keep_idx {
-                            current_idx += 1;
-                            true
-                        } else if let Some(cmd) = hook.get("command").and_then(|c| c.as_str()) {
-                            let keep = !Self::is_github_copilot_checkpoint_command(cmd);
-                            current_idx += 1;
-                            keep
-                        } else {
-                            current_idx += 1;
-                            true
+                for (idx, existing_hook) in existing_hooks.iter().enumerate() {
+                    if let Some(existing_cmd) =
+                        existing_hook.get("command").and_then(|c| c.as_str())
+                        && Self::is_github_copilot_checkpoint_command(existing_cmd)
+                        && found_idx.is_none()
+                    {
+                        found_idx = Some(idx);
+                        if existing_cmd != desired_cmd {
+                            needs_update = true;
                         }
-                    });
+                    }
                 }
-                None => existing_hooks.push(desired_hook.clone()),
+
+                match found_idx {
+                    Some(idx) => {
+                        if needs_update {
+                            existing_hooks[idx] = desired_hook.clone();
+                        }
+
+                        let keep_idx = idx;
+                        let mut current_idx = 0;
+                        existing_hooks.retain(|hook| {
+                            if current_idx == keep_idx {
+                                current_idx += 1;
+                                true
+                            } else if let Some(cmd) = hook.get("command").and_then(|c| c.as_str()) {
+                                let keep = !Self::is_github_copilot_checkpoint_command(cmd);
+                                current_idx += 1;
+                                keep
+                            } else {
+                                current_idx += 1;
+                                true
+                            }
+                        });
+                    }
+                    None => existing_hooks.push(desired_hook.clone()),
+                }
             }
 
             if let Some(obj) = hooks_obj.as_object_mut() {
@@ -449,6 +415,10 @@ mod tests {
             assert_eq!(post.len(), 1);
             assert_eq!(
                 pre[0].get("command").and_then(|v| v.as_str()),
+                Some("/tmp/git-ai/bin/git-ai checkpoint github-copilot --hook-input stdin")
+            );
+            assert_eq!(
+                post[0].get("command").and_then(|v| v.as_str()),
                 Some("/tmp/git-ai/bin/git-ai checkpoint github-copilot --hook-input stdin")
             );
         });

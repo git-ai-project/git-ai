@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 const WINDSURF_CHECKPOINT_CMD: &str = "checkpoint windsurf --hook-input stdin";
 
-/// The three Windsurf Cascade hook events we install into.
+/// The three Windsurf Cascade hook events we install into for checkpoints.
 const HOOK_EVENTS: &[&str] = &[
     "pre_write_code",
     "post_write_code",
@@ -227,7 +227,7 @@ impl HookInstaller for WindsurfInstaller {
             let content = fs::read_to_string(&hooks_path)?;
             let existing: Value = serde_json::from_str(&content).unwrap_or_else(|_| json!({}));
 
-            let has_hooks = HOOK_EVENTS.iter().all(|event| {
+            let has_checkpoint_hooks = HOOK_EVENTS.iter().all(|event| {
                 existing
                     .get("hooks")
                     .and_then(|h| h.get(*event))
@@ -243,7 +243,7 @@ impl HookInstaller for WindsurfInstaller {
                     .unwrap_or(false)
             });
 
-            if has_hooks {
+            if has_checkpoint_hooks {
                 any_installed = true;
             } else {
                 all_installed = false;

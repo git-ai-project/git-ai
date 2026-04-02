@@ -391,6 +391,13 @@ fn handle_checkpoint(args: &[String]) {
         }
     }
 
+    // Emit prompt events as a side-effect of the checkpoint (best-effort).
+    // Done before the agent preset so events are emitted even if the preset fails.
+    if let Some(ref hi) = hook_input {
+        let agent_name = args.first().map(|s| s.as_str()).unwrap_or("unknown");
+        commands::prompt_event::emit_prompt_events_from_checkpoint(agent_name, hi);
+    }
+
     let mut agent_run_result = None;
     // Handle preset arguments after parsing all flags
     if !args.is_empty() {

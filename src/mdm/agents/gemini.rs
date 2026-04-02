@@ -314,6 +314,19 @@ impl HookInstaller for GeminiInstaller {
                         }
                     }
                 }
+
+                // Remove catch-all blocks that are now empty
+                let original_len = hook_type_array.len();
+                hook_type_array.retain(|block| {
+                    if let Some(hooks_arr) = block.get("hooks").and_then(|h| h.as_array()) {
+                        !hooks_arr.is_empty()
+                    } else {
+                        true
+                    }
+                });
+                if hook_type_array.len() != original_len {
+                    changed = true;
+                }
             }
         }
 

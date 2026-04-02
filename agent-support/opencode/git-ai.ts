@@ -100,8 +100,20 @@ export const GitAiPlugin: Plugin = async (ctx) => {
     },
 
     "tool.execute.after": async (input, _output) => {
-      // Only intercept file editing tools
+      // Only intercept file editing tools for checkpoints
       if (!FILE_EDIT_TOOLS.includes(input.tool)) {
+        // Still emit checkpoint (which includes prompt-event) for non-file-edit tools
+        try {
+          const hookInput = JSON.stringify({
+            hook_event_name: "PostToolUse",
+            session_id: input.sessionID,
+            cwd: process.cwd(),
+            tool_input: { toolName: input.tool },
+          })
+          await $`echo ${hookInput} | ${GIT_AI_BIN} checkpoint opencode --hook-input stdin`.quiet()
+        } catch {
+          // Best-effort
+        }
         return
       }
 
