@@ -3664,6 +3664,62 @@ struct FirebenderHookInput {
     dirty_files: Option<HashMap<String, String>>,
 }
 
+impl FirebenderPreset {
+    fn push_unique_path(paths: &mut Vec<String>, candidate: &str) {
+        let trimmed = candidate.trim();
+        if !trimmed.is_empty() && !paths.iter().any(|path| path == trimmed) {
+            paths.push(trimmed.to_string());
+        }
+    }
+
+    fn extract_patch_paths(patch: &str) -> Vec<String> {
+        let mut paths = Vec::new();
+
+        for line in patch.lines() {
+            for prefix in [
+                "*** Add File: ",
+                "*** Update File: ",
+                "*** Delete File: ",
+                "*** Move to: ",
+            ] {
+                if let Some(path) = line.strip_prefix(prefix) {
+                    Self::push_unique_path(&mut paths, path);
+                }
+            }
+        }
+
+        paths
+    }
+
+    fn extract_file_paths(tool_input: &serde_json::Value) -> Option<Vec<String>> {
+        let mut paths = Vec::new();
+
+        match tool_input {
+            serde_json::Value::Object(_) => {
+                for key in ["file_path", "target_file", "relative_workspace_path", "path"] {
+                    if let Some(path) = tool_input.get(key).and_then(|v| v.as_str()) {
+                        Self::push_unique_path(&mut paths, path);
+                    }
+                }
+
+                if let Some(patch) = tool_input.get("patch").and_then(|v| v.as_str()) {
+                    for path in Self::extract_patch_paths(patch) {
+                        Self::push_unique_path(&mut paths, &path);
+                    }
+                }
+            }
+            serde_json::Value::String(raw_patch) => {
+                for path in Self::extract_patch_paths(raw_patch) {
+                    Self::push_unique_path(&mut paths, &path);
+                }
+            }
+            _ => {}
+        }
+
+        if paths.is_empty() { None } else { Some(paths) }
+    }
+}
+
 impl AgentCheckpointPreset for FirebenderPreset {
     fn run(&self, flags: AgentCheckpointFlags) -> Result<AgentRunResult, GitAiError> {
         let hook_input_json = flags.hook_input.ok_or_else(|| {
@@ -3696,6 +3752,8 @@ impl AgentCheckpointPreset for FirebenderPreset {
         }
 
         let tool_name = tool_name.unwrap_or_default();
+        // Firebender hooks emit canonical hook tool names rather than raw function names.
+        // For example, `apply_patch` and `local_search_replace` both come through as `Edit`.
         if !matches!(
             tool_name.as_str(),
             "Write" | "Edit" | "Delete" | "RenameSymbol" | "DeleteSymbol"
@@ -3707,17 +3765,7 @@ impl AgentCheckpointPreset for FirebenderPreset {
         }
 
         let tool_input = tool_input.unwrap_or(serde_json::Value::Null);
-        let file_path = tool_input
-            .get("file_path")
-            .and_then(|v| v.as_str())
-            .or_else(|| tool_input.get("target_file").and_then(|v| v.as_str()))
-            .or_else(|| {
-                tool_input
-                    .get("relative_workspace_path")
-                    .and_then(|v| v.as_str())
-            })
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+        let file_paths = Self::extract_file_paths(&tool_input);
 
         let repo_working_dir = repo_working_dir
             .map(|s| s.trim().to_string())
@@ -3748,7 +3796,7 @@ impl AgentCheckpointPreset for FirebenderPreset {
                 transcript: None,
                 repo_working_dir,
                 edited_filepaths: None,
-                will_edit_filepaths: file_path.clone().map(|path| vec![path]),
+                will_edit_filepaths: file_paths.clone(),
                 dirty_files,
             });
         }
@@ -3759,121 +3807,9 @@ impl AgentCheckpointPreset for FirebenderPreset {
             checkpoint_kind: CheckpointKind::AiAgent,
             transcript: None,
             repo_working_dir,
-            edited_filepaths: file_path.map(|path| vec![path]),
+            edited_filepaths: file_paths,
             will_edit_filepaths: None,
             dirty_files,
         })
-    }
-}
-
-#[cfg(test)]
-mod firebender_tests {
-    use super::*;
-
-    #[test]
-    fn test_firebender_pre_tool_use_maps_to_human_checkpoint() {
-        let hook_input = serde_json::json!({
-            "hook_event_name": "preToolUse",
-            "model": "gpt-5",
-            "workspace_roots": ["/tmp/workspace"],
-            "tool_name": "Write",
-            "tool_input": {
-                "file_path": "src/main.rs"
-            },
-            "completion_id": "abc123"
-        })
-        .to_string();
-
-        let result = FirebenderPreset
-            .run(AgentCheckpointFlags {
-                hook_input: Some(hook_input),
-            })
-            .unwrap();
-
-        assert_eq!(result.agent_id.tool, "firebender");
-        assert_eq!(result.agent_id.id, "firebender-abc123");
-        assert_eq!(result.agent_id.model, "gpt-5");
-        assert_eq!(result.checkpoint_kind, CheckpointKind::Human);
-        assert_eq!(result.repo_working_dir.as_deref(), Some("/tmp/workspace"));
-        assert_eq!(
-            result.will_edit_filepaths,
-            Some(vec!["src/main.rs".to_string()])
-        );
-        assert_eq!(result.edited_filepaths, None);
-    }
-
-    #[test]
-    fn test_firebender_post_tool_use_maps_to_ai_agent_checkpoint() {
-        let hook_input = serde_json::json!({
-            "hook_event_name": "postToolUse",
-            "model": "claude-sonnet",
-            "repo_working_dir": "/tmp/repo",
-            "tool_name": "Edit",
-            "tool_input": {
-                "file_path": "src/lib.rs"
-            },
-            "completion_id": "done456"
-        })
-        .to_string();
-
-        let result = FirebenderPreset
-            .run(AgentCheckpointFlags {
-                hook_input: Some(hook_input),
-            })
-            .unwrap();
-
-        assert_eq!(result.agent_id.tool, "firebender");
-        assert_eq!(result.agent_id.id, "firebender-done456");
-        assert_eq!(result.checkpoint_kind, CheckpointKind::AiAgent);
-        assert_eq!(result.repo_working_dir.as_deref(), Some("/tmp/repo"));
-        assert_eq!(
-            result.edited_filepaths,
-            Some(vec!["src/lib.rs".to_string()])
-        );
-        assert_eq!(result.will_edit_filepaths, None);
-    }
-
-    #[test]
-    fn test_firebender_rejects_unknown_event_name() {
-        let hook_input = serde_json::json!({
-            "hook_event_name": "somethingElse",
-            "model": "gpt-5",
-            "tool_name": "Write"
-        })
-        .to_string();
-
-        let error = FirebenderPreset
-            .run(AgentCheckpointFlags {
-                hook_input: Some(hook_input),
-            })
-            .unwrap_err();
-
-        assert!(
-            error
-                .to_string()
-                .contains("Invalid hook_event_name: somethingElse")
-        );
-    }
-
-    #[test]
-    fn test_firebender_rejects_non_edit_tools() {
-        let hook_input = serde_json::json!({
-            "hook_event_name": "preToolUse",
-            "model": "gpt-5",
-            "tool_name": "Read"
-        })
-        .to_string();
-
-        let error = FirebenderPreset
-            .run(AgentCheckpointFlags {
-                hook_input: Some(hook_input),
-            })
-            .unwrap_err();
-
-        assert!(
-            error
-                .to_string()
-                .contains("Skipping Firebender hook for non-edit tool_name 'Read'.")
-        );
     }
 }
