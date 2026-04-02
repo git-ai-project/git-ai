@@ -77,6 +77,8 @@ mod show_prompt;
 mod simple_additions;
 mod simple_benchmark;
 mod squash_merge;
+#[cfg(unix)]
+mod ssh_alias_resolution;
 mod stash_attribution;
 mod stats;
 mod status_ignore;
