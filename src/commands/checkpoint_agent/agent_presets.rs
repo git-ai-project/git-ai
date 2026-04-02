@@ -3659,6 +3659,27 @@ impl FirebenderPreset {
         }
     }
 
+    fn normalize_hook_path(raw_path: &str, cwd: &str) -> Option<String> {
+        let trimmed = raw_path.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        let path = std::path::Path::new(trimmed);
+        let normalized = if path.is_absolute() {
+            let cwd_path = std::path::Path::new(cwd);
+            if let Ok(relative) = path.strip_prefix(cwd_path) {
+                relative.to_string_lossy().to_string()
+            } else {
+                trimmed.to_string()
+            }
+        } else {
+            trimmed.to_string()
+        };
+
+        Some(normalized.replace('\\', "/"))
+    }
+
     fn extract_patch_paths(patch: &str) -> Vec<String> {
         let mut paths = Vec::new();
 
@@ -3754,20 +3775,27 @@ impl AgentCheckpointPreset for FirebenderPreset {
             )));
         }
 
-        let tool_input = tool_input.unwrap_or(serde_json::Value::Null);
-        let file_paths = Self::extract_file_paths(&tool_input);
-
         let repo_working_dir = repo_working_dir
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .or_else(|| workspace_roots.and_then(|roots| roots.into_iter().next()));
 
-        let model = model.trim().to_string();
-        if model.is_empty() {
-            return Err(GitAiError::PresetError(
-                "model must be a non-empty string for firebender preset".to_string(),
-            ));
-        }
+        let tool_input = tool_input.unwrap_or(serde_json::Value::Null);
+        let file_paths = Self::extract_file_paths(&tool_input).map(|paths| {
+            if let Some(cwd) = repo_working_dir.as_deref() {
+                paths
+                    .into_iter()
+                    .filter_map(|path| Self::normalize_hook_path(&path, cwd))
+                    .collect::<Vec<String>>()
+            } else {
+                paths
+            }
+        });
+
+        let model = {
+            let m = model.trim().to_string();
+            if m.is_empty() { "unknown".to_string() } else { m }
+        };
 
         let agent_id = AgentId {
             tool: "firebender".to_string(),
