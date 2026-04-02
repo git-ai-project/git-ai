@@ -7192,7 +7192,7 @@ pub(crate) fn daemon_run_pending_self_update() {
     }
 }
 
-pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
+pub(crate) async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
     config.ensure_parent_dirs()?;
     if let Err(error) = crate::commands::checkpoint::prune_stale_captured_checkpoints(
         Duration::from_secs(60 * 60 * 24),
