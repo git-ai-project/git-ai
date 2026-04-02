@@ -4,7 +4,7 @@ use crate::authorship::authorship_log_serialization::generate_short_hash;
 use crate::authorship::working_log::{CHECKPOINT_API_VERSION, Checkpoint, CheckpointKind};
 use crate::error::GitAiError;
 use crate::git::rewrite_log::{RewriteLogEvent, append_event_to_file};
-use crate::utils::{debug_log, normalize_to_posix};
+use crate::utils::{debug_log, is_debug_enabled, normalize_to_posix};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -105,7 +105,7 @@ impl RepoStorage {
     pub fn delete_working_log_for_base_commit(&self, sha: &str) -> Result<(), GitAiError> {
         let working_log_dir = self.working_logs.join(sha);
         if working_log_dir.exists() {
-            if cfg!(debug_assertions) {
+            if is_debug_enabled() {
                 // In debug mode, move to old-{sha} instead of deleting
                 let old_dir = self.working_logs.join(format!("old-{}", sha));
                 // If old-{sha} already exists, remove it first

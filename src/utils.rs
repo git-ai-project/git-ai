@@ -12,7 +12,7 @@ static DEBUG_PERFORMANCE_LEVEL: std::sync::OnceLock<u8> = std::sync::OnceLock::n
 static IS_TERMINAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static IS_IN_BACKGROUND_AGENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
-fn is_debug_enabled() -> bool {
+pub fn is_debug_enabled() -> bool {
     *DEBUG_ENABLED.get_or_init(|| {
         (cfg!(debug_assertions)
             || std::env::var("GIT_AI_DEBUG").unwrap_or_default() == "1"
