@@ -119,6 +119,56 @@ fn test_firebender_edit_supports_raw_apply_patch_payloads() {
 }
 
 #[test]
+fn test_firebender_edit_normalizes_absolute_patch_paths_to_repo_relative() {
+    let hook_input = json!({
+        "hook_event_name": "postToolUse",
+        "model": "gpt-5",
+        "repo_working_dir": "/tmp/repo",
+        "tool_name": "Edit",
+        "tool_input": "*** Begin Patch\n*** Update File: /tmp/repo/src/old.rs\n*** Move to: /tmp/repo/src/new.rs\n@@\n-old\n+new\n*** End Patch"
+    })
+    .to_string();
+
+    let result = FirebenderPreset
+        .run(AgentCheckpointFlags {
+            hook_input: Some(hook_input),
+        })
+        .unwrap();
+
+    assert_eq!(
+        result.edited_filepaths,
+        Some(vec!["src/old.rs".to_string(), "src/new.rs".to_string()])
+    );
+}
+
+#[test]
+fn test_firebender_edit_normalizes_absolute_structured_paths_to_repo_relative() {
+    let hook_input = json!({
+        "hook_event_name": "preToolUse",
+        "model": "gpt-5",
+        "repo_working_dir": "/tmp/repo",
+        "tool_name": "Edit",
+        "tool_input": {
+            "path": "/tmp/repo/src/lib.rs",
+            "operation_type": "update_file",
+            "diff": "@@ ..."
+        }
+    })
+    .to_string();
+
+    let result = FirebenderPreset
+        .run(AgentCheckpointFlags {
+            hook_input: Some(hook_input),
+        })
+        .unwrap();
+
+    assert_eq!(
+        result.will_edit_filepaths,
+        Some(vec!["src/lib.rs".to_string()])
+    );
+}
+
+#[test]
 fn test_firebender_rejects_unknown_event_name() {
     let hook_input = json!({
         "hook_event_name": "somethingElse",
@@ -222,13 +272,8 @@ fn test_firebender_preset_empty_model() {
         hook_input: Some(hook_input),
     });
 
-    assert!(result.is_err());
-    match result {
-        Err(GitAiError::PresetError(msg)) => {
-            assert!(msg.contains("model must be a non-empty string"));
-        }
-        _ => panic!("Expected PresetError for empty model"),
-    }
+    let result = result.expect("Empty model should fall back to unknown");
+    assert_eq!(result.agent_id.model, "unknown");
 }
 
 #[test]
