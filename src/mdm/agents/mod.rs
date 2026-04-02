@@ -3,6 +3,7 @@ mod claude_code;
 mod codex;
 mod cursor;
 mod droid;
+mod firebender;
 mod gemini;
 mod github_copilot;
 mod jetbrains;
@@ -15,6 +16,7 @@ pub use claude_code::ClaudeCodeInstaller;
 pub use codex::CodexInstaller;
 pub use cursor::CursorInstaller;
 pub use droid::DroidInstaller;
+pub use firebender::FirebenderInstaller;
 pub use gemini::GeminiInstaller;
 pub use github_copilot::GitHubCopilotInstaller;
 pub use jetbrains::JetBrainsInstaller;
@@ -36,6 +38,7 @@ pub fn get_all_installers() -> Vec<Box<dyn HookInstaller>> {
         Box::new(OpenCodeInstaller),
         Box::new(GeminiInstaller),
         Box::new(DroidInstaller),
+        Box::new(FirebenderInstaller),
         Box::new(JetBrainsInstaller),
         Box::new(WindsurfInstaller),
     ]
