@@ -183,6 +183,11 @@ export const GitAiPlugin: Plugin = async (ctx) => {
       }
     }
 
+    const fromProcessCwd = await findGitRepo(process.cwd())
+    if (fromProcessCwd) {
+      return fromProcessCwd
+    }
+
     for (const filePath of filePaths) {
       const repo = await findGitRepo(filePath)
       if (repo) {
@@ -205,6 +210,10 @@ export const GitAiPlugin: Plugin = async (ctx) => {
         ? output.args.workdir
         : typeof output.args?.cwd === "string"
           ? output.args.cwd
+          : typeof (input as { cwd?: unknown }).cwd === "string"
+            ? ((input as { cwd: string }).cwd)
+            : typeof (input as { workdir?: unknown }).workdir === "string"
+              ? ((input as { workdir: string }).workdir)
           : undefined
 
       const filePaths = extractFilePaths(toolInput, toolCwd)
