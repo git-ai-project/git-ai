@@ -39,7 +39,10 @@ fn test_cursor_jsonl_basic_parsing() {
 
     assert_eq!(user_count, 1, "Should have 1 user message");
     assert_eq!(assistant_count, 10, "Should have 10 assistant messages");
-    assert_eq!(tool_count, 10, "Should have 10 tool_use messages (Read x3, WebSearch x4, WebFetch, Grep, Write)");
+    assert_eq!(
+        tool_count, 10,
+        "Should have 10 tool_use messages (Read x3, WebSearch x4, WebFetch, Grep, Write)"
+    );
 }
 
 #[test]
@@ -67,7 +70,10 @@ fn test_cursor_jsonl_user_query_tag_stripping() {
             !text.contains("</user_query>"),
             "User message should not contain </user_query> tag"
         );
-        assert_eq!(text, "Generate a file with all the HBO shows from the 90's in it");
+        assert_eq!(
+            text,
+            "Generate a file with all the HBO shows from the 90's in it"
+        );
     }
 }
 
@@ -171,9 +177,7 @@ fn test_cursor_jsonl_preserves_text_content() {
         })
         .collect();
     assert!(
-        assistant_messages
-            .iter()
-            .any(|t| t.contains("HBO")),
+        assistant_messages.iter().any(|t| t.contains("HBO")),
         "Should keep real content from assistant messages"
     );
 }
@@ -191,7 +195,10 @@ fn test_cursor_jsonl_empty_file() {
         CursorPreset::transcript_and_model_from_cursor_jsonl(temp_file.path().to_str().unwrap())
             .expect("Should handle empty file");
 
-    assert!(transcript.messages().is_empty(), "Empty file should produce empty transcript");
+    assert!(
+        transcript.messages().is_empty(),
+        "Empty file should produce empty transcript"
+    );
     assert_eq!(model, None);
 }
 
@@ -202,9 +209,17 @@ fn test_cursor_jsonl_malformed_lines_skipped() {
     use tempfile::NamedTempFile;
 
     let mut temp_file = NamedTempFile::new().expect("Should create temp file");
-    writeln!(temp_file, r#"{{"role":"user","message":{{"content":[{{"type":"text","text":"hello"}}]}}}}"#).unwrap();
+    writeln!(
+        temp_file,
+        r#"{{"role":"user","message":{{"content":[{{"type":"text","text":"hello"}}]}}}}"#
+    )
+    .unwrap();
     writeln!(temp_file, "this is not valid json").unwrap();
-    writeln!(temp_file, r#"{{"role":"assistant","message":{{"content":[{{"type":"text","text":"hi there"}}]}}}}"#).unwrap();
+    writeln!(
+        temp_file,
+        r#"{{"role":"assistant","message":{{"content":[{{"type":"text","text":"hi there"}}]}}}}"#
+    )
+    .unwrap();
     temp_file.flush().unwrap();
 
     let (transcript, _) =

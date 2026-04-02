@@ -1478,9 +1478,7 @@ impl AgentCheckpointPreset for CursorPreset {
                 }
             }
         } else {
-            eprintln!(
-                "[Warning] No transcript_path in Cursor hook input. Will retry at commit."
-            );
+            eprintln!("[Warning] No transcript_path in Cursor hook input. Will retry at commit.");
             AiTranscript::new()
         };
 
@@ -1497,9 +1495,8 @@ impl AgentCheckpointPreset for CursorPreset {
         };
 
         // Store transcript_path in metadata for re-reading at commit time
-        let agent_metadata = transcript_path.map(|tp| {
-            HashMap::from([("transcript_path".to_string(), tp)])
-        });
+        let agent_metadata =
+            transcript_path.map(|tp| HashMap::from([("transcript_path".to_string(), tp)]));
 
         Ok(AgentRunResult {
             agent_id,
@@ -1609,8 +1606,7 @@ impl CursorPreset {
                                 if let Some(text) = item["text"].as_str() {
                                     let cleaned = Self::strip_user_query_tags(text);
                                     if !cleaned.is_empty() {
-                                        transcript
-                                            .add_message(Message::user(cleaned, None));
+                                        transcript.add_message(Message::user(cleaned, None));
                                     }
                                 }
                             }
@@ -1625,7 +1621,8 @@ impl CursorPreset {
                                     if let Some(text) = item["text"].as_str() {
                                         if !text.trim().is_empty() {
                                             transcript.add_message(Message::assistant(
-                                                text.to_string(), None,
+                                                text.to_string(),
+                                                None,
                                             ));
                                         }
                                     }
@@ -1634,7 +1631,8 @@ impl CursorPreset {
                                     if let Some(thinking) = item["thinking"].as_str() {
                                         if !thinking.trim().is_empty() {
                                             transcript.add_message(Message::assistant(
-                                                thinking.to_string(), None,
+                                                thinking.to_string(),
+                                                None,
                                             ));
                                         }
                                     }
@@ -1727,17 +1725,20 @@ impl CursorPreset {
     ) {
         match tool_name {
             // Edit tools: store only file_path (content is too large)
-            "Write" | "Edit" | "StrReplace" | "Delete" | "MultiEdit" | "edit_file"
-            | "apply_patch" | "edit_file_v2_apply_patch" | "search_replace"
+            "Write"
+            | "Edit"
+            | "StrReplace"
+            | "Delete"
+            | "MultiEdit"
+            | "edit_file"
+            | "apply_patch"
+            | "edit_file_v2_apply_patch"
+            | "search_replace"
             | "edit_file_v2_search_replace" => {
                 let file_path = normalized_input
                     .get("file_path")
                     .and_then(|v| v.as_str())
-                    .or_else(|| {
-                        normalized_input
-                            .get("target_file")
-                            .and_then(|v| v.as_str())
-                    });
+                    .or_else(|| normalized_input.get("target_file").and_then(|v| v.as_str()));
                 transcript.add_message(Message::tool_use(
                     tool_name.to_string(),
                     serde_json::json!({ "file_path": file_path.unwrap_or("") }),
