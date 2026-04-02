@@ -1,14 +1,10 @@
-#[macro_use]
-mod repos;
-mod test_utils;
-
+use crate::repos::test_file::ExpectedLineExt;
+use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::transcript::Message;
 use git_ai::authorship::working_log::CheckpointKind;
 use git_ai::commands::checkpoint_agent::agent_presets::{
     AgentCheckpointFlags, AgentCheckpointPreset, KimiCodePreset,
 };
-use repos::test_file::ExpectedLineExt;
-use repos::test_repo::TestRepo;
 use serde_json::json;
 use std::fs;
 
@@ -198,7 +194,10 @@ fn test_kimi_code_preset_with_inline_transcript() {
         })
         .expect("Should run");
 
-    assert!(result.transcript.is_some(), "Should parse inline transcript");
+    assert!(
+        result.transcript.is_some(),
+        "Should parse inline transcript"
+    );
     let transcript = result.transcript.unwrap();
     assert_eq!(transcript.messages().len(), 3);
 
@@ -247,15 +246,15 @@ fn test_kimi_code_preset_no_transcript_when_absent() {
 
 #[test]
 fn test_kimi_code_preset_missing_hook_input() {
-    let result = KimiCodePreset.run(AgentCheckpointFlags {
-        hook_input: None,
-    });
+    let result = KimiCodePreset.run(AgentCheckpointFlags { hook_input: None });
 
     assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("hook_input is required"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("hook_input is required")
+    );
 }
 
 #[test]
@@ -265,10 +264,7 @@ fn test_kimi_code_preset_invalid_json() {
     });
 
     assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("Invalid JSON"));
+    assert!(result.unwrap_err().to_string().contains("Invalid JSON"));
 }
 
 #[test]
@@ -284,10 +280,12 @@ fn test_kimi_code_preset_missing_session_id() {
     });
 
     assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("session_id not found"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("session_id not found")
+    );
 }
 
 #[test]
@@ -303,10 +301,7 @@ fn test_kimi_code_preset_missing_cwd() {
     });
 
     assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("cwd not found"));
+    assert!(result.unwrap_err().to_string().contains("cwd not found"));
 }
 
 // ============================================================================
@@ -315,18 +310,12 @@ fn test_kimi_code_preset_missing_cwd() {
 
 #[test]
 fn test_kimi_code_e2e_checkpoint_and_commit() {
-    let mut repo = TestRepo::new();
-
-    repo.patch_git_ai_config(|patch| {
-        patch.exclude_prompts_in_repositories = Some(vec![]);
-    });
-
-    let repo_root = repo.canonical_path();
+    let repo = TestRepo::new();
 
     // Create initial file and commit
-    let src_dir = repo_root.join("src");
+    let src_dir = repo.path().join("src");
     fs::create_dir_all(&src_dir).unwrap();
-    let file_path = src_dir.join("main.rs");
+    let file_path = repo.path().join("src/main.rs");
     fs::write(&file_path, "fn main() {}\n").unwrap();
     repo.stage_all_and_commit("Initial commit").unwrap();
 
@@ -338,18 +327,20 @@ fn test_kimi_code_e2e_checkpoint_and_commit() {
     .unwrap();
 
     // Run checkpoint
+    let canonical_file = repo.canonical_path().join("src/main.rs");
     let hook_input = json!({
         "session_id": "kimi-e2e-session-001",
-        "cwd": repo_root.to_string_lossy().to_string(),
+        "cwd": repo.canonical_path().to_string_lossy().to_string(),
         "model": "moonshot-v1-128k",
         "hook_event_name": "PostToolUse",
         "tool_input": {
-            "file_path": file_path.to_string_lossy().to_string()
+            "file_path": canonical_file.to_string_lossy().to_string()
         }
     })
     .to_string();
 
-    repo.git_ai(&["checkpoint", "kimi-code", "--hook-input", &hook_input])
+    let result = repo
+        .git_ai(&["checkpoint", "kimi-code", "--hook-input", &hook_input])
         .expect("checkpoint should succeed");
 
     // Commit the changes
@@ -387,27 +378,21 @@ fn test_kimi_code_e2e_checkpoint_and_commit() {
 
 #[test]
 fn test_kimi_code_e2e_human_then_ai_checkpoint() {
-    let mut repo = TestRepo::new();
-
-    repo.patch_git_ai_config(|patch| {
-        patch.exclude_prompts_in_repositories = Some(vec![]);
-    });
-
-    let repo_root = repo.canonical_path();
+    let repo = TestRepo::new();
 
     // Create initial file
-    let file_path = repo_root.join("index.ts");
+    let file_path = repo.path().join("index.ts");
     fs::write(&file_path, "console.log('hello');\n").unwrap();
     repo.stage_all_and_commit("Initial commit").unwrap();
 
     // Human checkpoint (PreToolUse)
     let pre_hook_input = json!({
         "session_id": "kimi-e2e-session-002",
-        "cwd": repo_root.to_string_lossy().to_string(),
+        "cwd": repo.canonical_path().to_string_lossy().to_string(),
         "model": "moonshot-v1-128k",
         "hook_event_name": "PreToolUse",
         "tool_input": {
-            "file_path": file_path.to_string_lossy().to_string()
+            "file_path": "index.ts"
         }
     })
     .to_string();
@@ -425,11 +410,11 @@ fn test_kimi_code_e2e_human_then_ai_checkpoint() {
     // AI checkpoint (PostToolUse)
     let post_hook_input = json!({
         "session_id": "kimi-e2e-session-002",
-        "cwd": repo_root.to_string_lossy().to_string(),
+        "cwd": repo.canonical_path().to_string_lossy().to_string(),
         "model": "moonshot-v1-128k",
         "hook_event_name": "PostToolUse",
         "tool_input": {
-            "file_path": file_path.to_string_lossy().to_string()
+            "file_path": "index.ts"
         }
     })
     .to_string();
@@ -444,7 +429,7 @@ fn test_kimi_code_e2e_human_then_ai_checkpoint() {
 
     // Verify attribution — first line human, second line AI
     let mut file = repo.filename("index.ts");
-    file.assert_lines_and_blame(lines![
+    file.assert_lines_and_blame(crate::lines![
         "console.log('hello');".human(),
         "console.log('from kimi');".ai(),
     ]);
@@ -457,16 +442,10 @@ fn test_kimi_code_e2e_human_then_ai_checkpoint() {
 
 #[test]
 fn test_kimi_code_e2e_with_transcript() {
-    let mut repo = TestRepo::new();
-
-    repo.patch_git_ai_config(|patch| {
-        patch.exclude_prompts_in_repositories = Some(vec![]);
-    });
-
-    let repo_root = repo.canonical_path();
+    let repo = TestRepo::new();
 
     // Create initial file
-    let file_path = repo_root.join("app.py");
+    let file_path = repo.path().join("app.py");
     fs::write(&file_path, "# app\n").unwrap();
     repo.stage_all_and_commit("Initial commit").unwrap();
 
@@ -476,11 +455,10 @@ fn test_kimi_code_e2e_with_transcript() {
     // Run checkpoint with inline transcript
     let hook_input = json!({
         "session_id": "kimi-transcript-session",
-        "cwd": repo_root.to_string_lossy().to_string(),
+        "cwd": repo.canonical_path().to_string_lossy().to_string(),
         "model": "moonshot-v1-128k",
-        "hook_event_name": "PostToolUse",
         "tool_input": {
-            "file_path": file_path.to_string_lossy().to_string()
+            "file_path": "app.py"
         },
         "transcript": {
             "messages": [
