@@ -17,7 +17,8 @@ pub fn handle_whoami(args: &[String]) {
         std::process::exit(1);
     }
 
-    let api_base_url = config::Config::get().api_base_url().to_string();
+    // Use Config::fresh() to support runtime config updates (daemon mode)
+    let api_base_url = config::Config::fresh().api_base_url().to_string();
     let auth = collect_auth_status();
     let api_ctx = ApiContext::new(None);
 

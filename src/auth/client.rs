@@ -32,8 +32,10 @@ fn validate_https_url(url: &str) -> Result<(), String> {
 }
 
 impl OAuthClient {
+    /// Create a new OAuth client using the current config
+    /// Uses Config::fresh() to support runtime config updates (daemon mode)
     pub fn new() -> Self {
-        let config = config::Config::get();
+        let config = config::Config::fresh();
         let base_url = config.api_base_url().to_string();
 
         // Validate HTTPS in release mode (panics on invalid URL - fail-safe)

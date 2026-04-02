@@ -95,8 +95,9 @@ pub struct ApiContext {
 
 impl ApiContext {
     /// Get the default API base URL from config
+    /// Uses Config::fresh() to support runtime config updates (daemon mode)
     fn default_base_url() -> String {
-        config::Config::get().api_base_url().to_string()
+        config::Config::fresh().api_base_url().to_string()
     }
 
     /// Create a GET request with common headers (User-Agent, X-Distinct-ID)
@@ -123,8 +124,9 @@ impl ApiContext {
 
     /// Create a new API context, automatically using stored credentials if available
     /// If base_url is None, uses api_base_url from config (which can be set via config file, env var, or defaults)
+    /// Uses Config::fresh() to support runtime config updates (daemon mode)
     pub fn new(base_url: Option<String>) -> Self {
-        let cfg = config::Config::get();
+        let cfg = config::Config::fresh();
         let api_key = cfg.api_key().map(|s| s.to_string());
         let author_identity = if api_key.is_some() {
             resolve_git_identity()
@@ -142,9 +144,10 @@ impl ApiContext {
 
     /// Create a new API context explicitly without authentication
     /// Use this when you need to ensure no auth token is sent
+    /// Uses Config::fresh() to support runtime config updates (daemon mode)
     #[allow(dead_code)]
     pub fn without_auth(base_url: Option<String>) -> Self {
-        let cfg = config::Config::get();
+        let cfg = config::Config::fresh();
         let api_key = cfg.api_key().map(|s| s.to_string());
         let author_identity = if api_key.is_some() {
             resolve_git_identity()
@@ -162,9 +165,10 @@ impl ApiContext {
 
     /// Create a new API context with authentication
     /// If base_url is None, uses api_base_url from config (which can be set via config file, env var, or defaults)
+    /// Uses Config::fresh() to support runtime config updates (daemon mode)
     #[allow(dead_code)]
     pub fn with_auth(base_url: Option<String>, auth_token: String) -> Self {
-        let cfg = config::Config::get();
+        let cfg = config::Config::fresh();
         let api_key = cfg.api_key().map(|s| s.to_string());
         let author_identity = if api_key.is_some() {
             resolve_git_identity()

@@ -2582,12 +2582,9 @@ pub fn rewrite_authorship_after_commit_amend_with_snapshot(
     authorship_log.metadata.base_commit_sha = amended_commit.to_string();
 
     // Inject custom attributes into all PromptRecords (same behavior as post_commit).
-    // In daemon mode we need a fresh config snapshot because the daemon is long-lived.
-    let custom_attrs = if crate::daemon::daemon_process_active() {
-        crate::config::Config::fresh().custom_attributes().clone()
-    } else {
-        crate::config::Config::get().custom_attributes().clone()
-    };
+    // Always use Config::fresh() to support runtime config updates
+    // (especially important for daemon mode, but also good for consistency)
+    let custom_attrs = crate::config::Config::fresh().custom_attributes().clone();
     if !custom_attrs.is_empty() {
         for pr in authorship_log.metadata.prompts.values_mut() {
             pr.custom_attributes = Some(custom_attrs.clone());
