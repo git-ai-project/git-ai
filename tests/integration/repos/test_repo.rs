@@ -1523,6 +1523,7 @@ impl TestRepo {
                 .iter()
                 .skip(baseline_count as usize)
                 .find(|entry| entry.status == "error")
+                && !self.allow_daemon_errors.load(Ordering::Relaxed)
             {
                 panic!(
                     "daemon completion log reported an error for family {}: {}",
@@ -1631,6 +1632,7 @@ impl TestRepo {
                 .iter()
                 .skip(baseline_count as usize)
                 .find(|entry| entry.status == "error")
+                && !self.allow_daemon_errors.load(Ordering::Relaxed)
             {
                 panic!(
                     "daemon completion log reported an error for family {}: {}",
