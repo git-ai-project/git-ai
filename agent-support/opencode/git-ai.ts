@@ -57,11 +57,9 @@ const normalizePath = (rawPath: string, cwd?: string): string | null => {
     return withoutScheme
   }
 
-  if (!cwd) {
-    return null
-  }
-
-  return join(cwd, withoutScheme)
+  // Use provided cwd, or fall back to process.cwd() for relative paths
+  const resolvedCwd = cwd || process.cwd()
+  return join(resolvedCwd, withoutScheme)
 }
 
 const collectApplyPatchPaths = (raw: string, out: Set<string>): void => {
