@@ -23,7 +23,6 @@ use std::time::Duration;
 const DAEMON_SOCKET_IO_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Maximum time to wait for the daemon socket on process start.
-#[cfg(not(any(test, feature = "test-support")))]
 const DAEMON_TELEMETRY_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Global handle to the daemon control socket for telemetry submission.
@@ -95,6 +94,39 @@ impl DaemonTelemetryHandle {
     }
 }
 
+fn daemon_control_socket_override() -> Option<PathBuf> {
+    std::env::var("GIT_AI_DAEMON_CONTROL_SOCKET")
+        .ok()
+        .filter(|p| !p.trim().is_empty())
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+}
+
+fn daemon_telemetry_test_harness_active() -> bool {
+    std::env::var_os("GIT_AI_TEST_DB_PATH").is_some()
+        || std::env::var_os("GITAI_TEST_DB_PATH").is_some()
+}
+
+fn store_daemon_telemetry_handle(handle: Option<DaemonTelemetryHandle>) {
+    let handle_mutex = DAEMON_TELEMETRY_HANDLE.get_or_init(|| Mutex::new(None));
+    if let Ok(mut guard) = handle_mutex.lock() {
+        *guard = handle;
+    }
+}
+
+fn connect_daemon_telemetry_handle(
+    socket_path: PathBuf,
+    timeout: Duration,
+) -> Result<DaemonTelemetryHandle, String> {
+    let mut stream =
+        open_local_socket_stream_with_timeout(&socket_path, timeout).map_err(|e| e.to_string())?;
+    DaemonTelemetryHandle::apply_socket_timeouts(&mut stream, &socket_path);
+    Ok(DaemonTelemetryHandle {
+        socket_path,
+        conn: BufReader::new(stream),
+    })
+}
+
 /// Result of attempting to initialize the global daemon telemetry handle.
 pub enum DaemonTelemetryInitResult {
     /// Successfully connected to daemon.
@@ -116,79 +148,53 @@ pub enum DaemonTelemetryInitResult {
 pub fn init_daemon_telemetry_handle() -> DaemonTelemetryInitResult {
     // Don't initialize if we're inside the daemon process itself
     if crate::daemon::daemon_process_active() {
-        let _ = DAEMON_TELEMETRY_HANDLE.get_or_init(|| Mutex::new(None));
+        store_daemon_telemetry_handle(None);
         return DaemonTelemetryInitResult::Skipped;
     }
 
-    // In test builds, only connect if the daemon control socket is explicitly set
-    // (i.e., wrapper-daemon mode where the test harness manages the daemon).
-    #[cfg(any(test, feature = "test-support"))]
-    {
-        let socket_path = std::env::var("GIT_AI_DAEMON_CONTROL_SOCKET")
-            .ok()
-            .filter(|p| !p.trim().is_empty())
-            .map(PathBuf::from)
-            .filter(|p| p.exists());
-
-        match socket_path {
-            Some(path) => {
-                match open_local_socket_stream_with_timeout(&path, Duration::from_secs(2)) {
-                    Ok(mut stream) => {
-                        DaemonTelemetryHandle::apply_socket_timeouts(&mut stream, &path);
-                        let handle = DaemonTelemetryHandle {
-                            socket_path: path,
-                            conn: BufReader::new(stream),
-                        };
-                        let _ = DAEMON_TELEMETRY_HANDLE.get_or_init(|| Mutex::new(Some(handle)));
-                        DaemonTelemetryInitResult::Connected
-                    }
-                    Err(e) => {
-                        let _ = DAEMON_TELEMETRY_HANDLE.get_or_init(|| Mutex::new(None));
-                        DaemonTelemetryInitResult::Failed(e.to_string())
-                    }
-                }
+    // Integration harnesses set a dedicated test DB path and only inject daemon
+    // sockets when they explicitly want authoritative wrapper state. When that
+    // marker is absent, a locally run debug/test-support binary should behave
+    // like a normal product build and auto-connect to the daemon.
+    if let Some(path) = daemon_control_socket_override() {
+        match connect_daemon_telemetry_handle(path, DAEMON_TELEMETRY_CONNECT_TIMEOUT) {
+            Ok(handle) => {
+                store_daemon_telemetry_handle(Some(handle));
+                return DaemonTelemetryInitResult::Connected;
             }
-            None => {
-                let _ = DAEMON_TELEMETRY_HANDLE.get_or_init(|| Mutex::new(None));
-                DaemonTelemetryInitResult::Skipped
+            Err(e) => {
+                store_daemon_telemetry_handle(None);
+                return DaemonTelemetryInitResult::Failed(e.to_string());
             }
         }
     }
 
-    #[cfg(not(any(test, feature = "test-support")))]
-    {
-        // Try to ensure daemon is running and connect
-        let config = match crate::commands::daemon::ensure_daemon_running(
-            DAEMON_TELEMETRY_CONNECT_TIMEOUT,
-        ) {
+    if daemon_telemetry_test_harness_active() {
+        store_daemon_telemetry_handle(None);
+        return DaemonTelemetryInitResult::Skipped;
+    }
+
+    // Try to ensure daemon is running and connect.
+    let config =
+        match crate::commands::daemon::ensure_daemon_running(DAEMON_TELEMETRY_CONNECT_TIMEOUT) {
             Ok(config) => config,
             Err(e) => {
-                let _ = DAEMON_TELEMETRY_HANDLE.get_or_init(|| Mutex::new(None));
+                store_daemon_telemetry_handle(None);
                 return DaemonTelemetryInitResult::Failed(e);
             }
         };
 
-        // Open a persistent connection to the control socket
-        match open_local_socket_stream_with_timeout(
-            &config.control_socket_path,
-            DAEMON_TELEMETRY_CONNECT_TIMEOUT,
-        ) {
-            Ok(mut stream) => {
-                DaemonTelemetryHandle::apply_socket_timeouts(
-                    &mut stream,
-                    &config.control_socket_path,
-                );
-                let handle = DaemonTelemetryHandle {
-                    socket_path: config.control_socket_path,
-                    conn: BufReader::new(stream),
-                };
-                let _ = DAEMON_TELEMETRY_HANDLE.get_or_init(|| Mutex::new(Some(handle)));
-                DaemonTelemetryInitResult::Connected
-            }
-            Err(e) => {
-                let _ = DAEMON_TELEMETRY_HANDLE.get_or_init(|| Mutex::new(None));
-                DaemonTelemetryInitResult::Failed(e.to_string())
-            }
+    match connect_daemon_telemetry_handle(
+        config.control_socket_path,
+        DAEMON_TELEMETRY_CONNECT_TIMEOUT,
+    ) {
+        Ok(handle) => {
+            store_daemon_telemetry_handle(Some(handle));
+            DaemonTelemetryInitResult::Connected
+        }
+        Err(e) => {
+            store_daemon_telemetry_handle(None);
+            DaemonTelemetryInitResult::Failed(e.to_string())
         }
     }
 }
@@ -272,4 +278,77 @@ pub fn send_wrapper_post_state(
         repo_context,
     };
     send_via_daemon(&request).map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var_os(key);
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, original }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let original = std::env::var_os(key);
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.original.as_ref() {
+                Some(value) => unsafe {
+                    std::env::set_var(self.key, value);
+                },
+                None => unsafe {
+                    std::env::remove_var(self.key);
+                },
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_harness_detection_uses_test_db_override_vars() {
+        let _unset_test = EnvVarGuard::unset("GIT_AI_TEST_DB_PATH");
+        let _unset_legacy_test = EnvVarGuard::unset("GITAI_TEST_DB_PATH");
+
+        assert!(!daemon_telemetry_test_harness_active());
+
+        let _test = EnvVarGuard::set("GIT_AI_TEST_DB_PATH", "/tmp/git-ai-test.db");
+        assert!(daemon_telemetry_test_harness_active());
+    }
+
+    #[test]
+    #[serial]
+    fn explicit_control_socket_override_wins_over_test_harness_marker() {
+        let _test = EnvVarGuard::set("GIT_AI_TEST_DB_PATH", "/tmp/git-ai-test.db");
+        let temp_dir = tempfile::tempdir().expect("tempdir should succeed");
+        let socket_path = temp_dir.path().join("control.sock");
+        std::fs::write(&socket_path, []).expect("test socket placeholder should be created");
+        let _socket = EnvVarGuard::set(
+            "GIT_AI_DAEMON_CONTROL_SOCKET",
+            socket_path
+                .to_str()
+                .expect("temp socket path should be utf-8"),
+        );
+
+        let override_path = daemon_control_socket_override();
+        assert_eq!(override_path.as_deref(), Some(socket_path.as_path()));
+        assert!(daemon_telemetry_test_harness_active());
+    }
 }
