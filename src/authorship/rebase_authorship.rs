@@ -541,7 +541,14 @@ pub fn rewrite_authorship_after_squash_or_rebase(
     // Step 1: Get target branch head (first parent on merge_ref)
     // This is more correct than just parent(0) in cases with complex back-and-forth merge history
     let merge_commit = repo.find_commit(merge_commit_sha.to_string())?;
-    let target_branch_head = merge_commit.parent_on_refname(merge_ref)?;
+    let target_branch_head = if merge_commit.parent_count()? == 1 {
+        // For single-parent commits (squash merges), there's no ambiguity - use the only parent
+        // This avoids issues in partial clones where parent_on_refname might fail
+        merge_commit.parent(0)?
+    } else {
+        // For multi-parent commits, find the parent that's on the target branch
+        merge_commit.parent_on_refname(merge_ref)?
+    };
     let target_branch_head_sha = target_branch_head.id().to_string();
 
     debug_log(&format!(
