@@ -4,6 +4,7 @@ use crate::{
         working_log::{AgentId, CheckpointKind},
     },
     error::GitAiError,
+    git::repository::find_repository_for_file,
     observability::log_error,
 };
 use chrono::{TimeZone, Utc};
@@ -1431,28 +1432,10 @@ impl AgentCheckpointPreset for CursorPreset {
             .map(Self::normalize_cursor_path)
             .unwrap_or_default();
 
-        let repo_working_dir = if !file_path.is_empty() {
-            workspace_roots
-                .iter()
-                .find(|root| {
-                    let root_str = root.as_str();
-                    file_path.starts_with(root_str)
-                        && (file_path.len() == root_str.len()
-                            || file_path[root_str.len()..].starts_with('/')
-                            || file_path[root_str.len()..].starts_with('\\')
-                            || root_str.ends_with('/')
-                            || root_str.ends_with('\\'))
-                })
-                .cloned()
-                .or_else(|| workspace_roots.first().cloned())
-                .ok_or_else(|| {
-                    GitAiError::PresetError("No workspace root found in hook_input".to_string())
-                })?
-        } else {
-            workspace_roots.first().cloned().ok_or_else(|| {
+        let repo_working_dir = Self::resolve_repo_working_dir(&file_path, &workspace_roots)
+            .ok_or_else(|| {
                 GitAiError::PresetError("No workspace root found in hook_input".to_string())
-            })?
-        };
+            })?;
 
         if hook_event_name == "preToolUse" {
             let will_edit = if !file_path.is_empty() {
@@ -1556,6 +1539,36 @@ impl AgentCheckpointPreset for CursorPreset {
 }
 
 impl CursorPreset {
+    fn matching_workspace_root(file_path: &str, workspace_roots: &[String]) -> Option<String> {
+        workspace_roots
+            .iter()
+            .find(|root| {
+                let root_str = root.as_str();
+                file_path.starts_with(root_str)
+                    && (file_path.len() == root_str.len()
+                        || file_path[root_str.len()..].starts_with('/')
+                        || file_path[root_str.len()..].starts_with('\\')
+                        || root_str.ends_with('/')
+                        || root_str.ends_with('\\'))
+            })
+            .cloned()
+    }
+
+    fn resolve_repo_working_dir(file_path: &str, workspace_roots: &[String]) -> Option<String> {
+        if file_path.is_empty() {
+            return workspace_roots.first().cloned();
+        }
+
+        let matched_workspace = Self::matching_workspace_root(file_path, workspace_roots)
+            .or_else(|| workspace_roots.first().cloned())?;
+
+        find_repository_for_file(file_path, Some(&matched_workspace))
+            .ok()
+            .and_then(|repo| repo.workdir().ok())
+            .map(|path| path.to_string_lossy().to_string())
+            .or(Some(matched_workspace))
+    }
+
     /// Normalize Windows paths that Cursor sends in Unix-style format.
     ///
     /// On Windows, Cursor sometimes sends paths like `/c:/Users/...` instead of `C:\Users\...`.

@@ -16,6 +16,7 @@ mod blame_comprehensive;
 mod blame_flags;
 mod blame_subdirectory;
 mod checkout_switch;
+mod checkpoint_explicit_paths;
 mod checkpoint_size;
 mod cherry_pick;
 mod chinese_text_edits;

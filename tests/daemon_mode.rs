@@ -6,7 +6,7 @@ use git_ai::authorship::working_log::CheckpointKind;
 use git_ai::authorship::{transcript::AiTranscript, working_log::AgentId};
 use git_ai::commands::checkpoint::{
     PreparedCheckpointFile, PreparedCheckpointFileSource, PreparedCheckpointManifest,
-    PreparedPathRole,
+    PreparedPathRole, prepare_captured_checkpoint,
 };
 use git_ai::commands::checkpoint_agent::agent_presets::AgentRunResult;
 use git_ai::daemon::{
@@ -563,6 +563,16 @@ fn latest_checkpoint_blob_content_for_file(repo: &TestRepo, file_path: &str) -> 
         .expect("checkpoint blob should be readable")
 }
 
+fn write_base_files(repo: &TestRepo) {
+    fs::write(repo.path().join("lines.md"), "base lines\n").expect("failed to write lines.md");
+    fs::write(repo.path().join("alphabet.md"), "base alphabet\n")
+        .expect("failed to write alphabet.md");
+    repo.git_og(&["add", "lines.md", "alphabet.md"])
+        .expect("add should succeed");
+    repo.git_og(&["commit", "-m", "initial commit"])
+        .expect("initial commit should succeed");
+}
+
 fn ai_agent_run_result(
     repo: &TestRepo,
     edited_filepaths: Vec<String>,
@@ -588,6 +598,66 @@ fn ai_agent_run_result(
         will_edit_filepaths: None,
         dirty_files,
     }
+}
+
+#[test]
+#[serial]
+fn prepare_captured_checkpoint_only_captures_explicit_files_when_other_ai_touched_files_are_dirty()
+{
+    let repo = TestRepo::new();
+    write_base_files(&repo);
+
+    fs::write(
+        repo.path().join("lines.md"),
+        "line touched by first checkpoint\n",
+    )
+    .expect("failed to update lines.md");
+    repo.git_ai(&["checkpoint", "mock_ai", "lines.md"])
+        .expect("first explicit checkpoint should succeed");
+
+    fs::write(
+        repo.path().join("alphabet.md"),
+        "line touched by second checkpoint\n",
+    )
+    .expect("failed to update alphabet.md");
+
+    let _daemon_home = ScopedEnvVar::set(
+        "GIT_AI_DAEMON_HOME",
+        repo.daemon_home_path()
+            .to_str()
+            .expect("daemon home should be utf-8"),
+    );
+    let prepared = prepare_captured_checkpoint(
+        &repo_storage(&repo),
+        "Test User",
+        CheckpointKind::AiAgent,
+        Some(&ai_agent_run_result(
+            &repo,
+            vec!["alphabet.md".to_string()],
+            None,
+        )),
+        false,
+        None,
+    )
+    .expect("captured checkpoint prepare should succeed")
+    .expect("captured checkpoint should be created");
+
+    let manifest_path =
+        async_checkpoint_capture_dir(&repo, &prepared.capture_id).join("manifest.json");
+    let manifest: PreparedCheckpointManifest =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("manifest should be readable"))
+            .expect("manifest should deserialize");
+    let captured_paths = manifest
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        captured_paths,
+        vec!["alphabet.md"],
+        "captured checkpoint preparation must only persist the explicitly targeted file"
+    );
 }
 
 #[derive(Clone)]

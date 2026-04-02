@@ -478,6 +478,115 @@ fn resolve_base_override_dirty_file_execution(
     }
 }
 
+fn explicit_dirty_file_content_if_text(
+    working_log: &PersistedWorkingLog,
+    file_path: &str,
+) -> Option<String> {
+    working_log
+        .dirty_files
+        .as_ref()
+        .and_then(|files| files.get(file_path))
+        .filter(|content| !content.chars().any(|c| c == '\0'))
+        .cloned()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_explicit_path_execution(
+    repo: &Repository,
+    working_log: &PersistedWorkingLog,
+    base_commit: &str,
+    ts: u128,
+    explicit_paths: &[String],
+    ignore_matcher: &IgnoreMatcher,
+    kind: CheckpointKind,
+    is_pre_commit: bool,
+) -> Result<Option<ResolvedCheckpointExecution>, GitAiError> {
+    let repo_workdir = repo.workdir()?;
+    let mut candidate_paths = Vec::new();
+    let mut seen = HashSet::new();
+
+    for path in explicit_paths {
+        let normalized_path = normalize_to_posix(path);
+        if !seen.insert(normalized_path.clone()) {
+            continue;
+        }
+        if should_ignore_file_with_matcher(&normalized_path, ignore_matcher) {
+            continue;
+        }
+
+        let path_buf = if std::path::Path::new(&normalized_path).is_absolute() {
+            PathBuf::from(&normalized_path)
+        } else {
+            repo_workdir.join(&normalized_path)
+        };
+        if !repo.path_is_in_workdir(&path_buf) {
+            continue;
+        }
+
+        candidate_paths.push(normalized_path);
+    }
+
+    if candidate_paths.is_empty() {
+        return Ok(None);
+    }
+
+    let status_pathspecs = candidate_paths.iter().cloned().collect::<HashSet<_>>();
+    let explicit_statuses = repo
+        .status(Some(&status_pathspecs), false)?
+        .into_iter()
+        .map(|entry| (entry.path.clone(), entry))
+        .collect::<HashMap<_, _>>();
+    let preserve_unchanged_explicit_paths = kind == CheckpointKind::Human && is_pre_commit;
+
+    let mut files = Vec::new();
+    let mut resolved_dirty_files = HashMap::new();
+
+    for normalized_path in candidate_paths {
+        let status_entry = explicit_statuses.get(&normalized_path);
+        if matches!(status_entry, Some(entry) if entry.kind == EntryKind::Unmerged) {
+            continue;
+        }
+
+        let explicit_dirty_content =
+            explicit_dirty_file_content_if_text(working_log, &normalized_path);
+        if status_entry.is_none()
+            && explicit_dirty_content.is_none()
+            && !preserve_unchanged_explicit_paths
+        {
+            continue;
+        }
+
+        if let Some(content) = explicit_dirty_content {
+            resolved_dirty_files.insert(normalized_path.clone(), content);
+            files.push(normalized_path);
+            continue;
+        }
+
+        let is_deleted = matches!(
+            status_entry,
+            Some(entry)
+                if entry.staged == StatusCode::Deleted || entry.unstaged == StatusCode::Deleted
+        );
+
+        if is_text_file(working_log, &normalized_path)
+            || (is_deleted && is_text_file_in_head(repo, &normalized_path))
+        {
+            files.push(normalized_path);
+        }
+    }
+
+    if files.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(ResolvedCheckpointExecution {
+            base_commit: base_commit.to_string(),
+            ts,
+            files,
+            dirty_files: resolved_dirty_files,
+        }))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn resolve_live_checkpoint_execution(
     repo: &Repository,
@@ -532,6 +641,7 @@ fn resolve_live_checkpoint_execution(
         .unwrap_or_default()
         .as_millis();
 
+    let has_explicit_target_paths = explicit_capture_target_paths(kind, agent_run_result).is_some();
     let pathspec_start = Instant::now();
     let filtered_pathspec = filtered_pathspecs_for_agent_run_result(repo, kind, agent_run_result);
     debug_log(&format!(
@@ -587,6 +697,23 @@ fn resolve_live_checkpoint_execution(
             }
             _ => {}
         }
+    }
+
+    if has_explicit_target_paths {
+        return if let Some(explicit_paths) = filtered_pathspec.as_ref() {
+            resolve_explicit_path_execution(
+                repo,
+                &working_log,
+                &base_commit,
+                ts,
+                explicit_paths,
+                &ignore_matcher,
+                kind,
+                is_pre_commit,
+            )
+        } else {
+            Ok(None)
+        };
     }
 
     let files_start = Instant::now();
