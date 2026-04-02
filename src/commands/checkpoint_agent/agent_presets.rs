@@ -3678,6 +3678,9 @@ impl FirebenderPreset {
         paths
     }
 
+    // Firebender emits multiple real tool_input shapes across editing flows.
+    // Normalize direct file fields, structured patch payloads, and raw apply-patch
+    // text into a single edited-file list for checkpointing.
     fn extract_file_paths(tool_input: &serde_json::Value) -> Option<Vec<String>> {
         let mut paths = Vec::new();
 
