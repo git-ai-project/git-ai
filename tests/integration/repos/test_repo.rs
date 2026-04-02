@@ -20,7 +20,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -747,6 +747,7 @@ pub struct TestRepo {
     /// Base repo's test DB path for cleanup.
     _base_test_db_path: Option<PathBuf>,
     daemon_family_key: OnceLock<String>,
+    allow_daemon_errors: AtomicBool,
 }
 
 #[allow(dead_code)]
@@ -1014,6 +1015,7 @@ impl TestRepo {
             _base_repo_path: Some(base_path),
             _base_test_db_path: Some(base_test_db_path),
             daemon_family_key: OnceLock::new(),
+            allow_daemon_errors: AtomicBool::new(false),
         };
 
         repo.apply_default_config_patch();
@@ -1051,6 +1053,7 @@ impl TestRepo {
             _base_repo_path: None,
             _base_test_db_path: None,
             daemon_family_key: OnceLock::new(),
+            allow_daemon_errors: AtomicBool::new(false),
         };
 
         repo.apply_default_config_patch();
@@ -1133,6 +1136,7 @@ impl TestRepo {
             _base_repo_path: Some(main_path),
             _base_test_db_path: None,
             daemon_family_key: OnceLock::new(),
+            allow_daemon_errors: AtomicBool::new(false),
         };
 
         repo.apply_default_config_patch();
@@ -1177,6 +1181,7 @@ impl TestRepo {
             _base_repo_path: None,
             _base_test_db_path: None,
             daemon_family_key: OnceLock::new(),
+            allow_daemon_errors: AtomicBool::new(false),
         };
 
         let mut repo = repo;
@@ -1235,6 +1240,7 @@ impl TestRepo {
             _base_repo_path: None,
             _base_test_db_path: None,
             daemon_family_key: OnceLock::new(),
+            allow_daemon_errors: AtomicBool::new(false),
         };
 
         // Ensure the upstream default branch is named "main" for consistency across Git versions
@@ -1278,6 +1284,7 @@ impl TestRepo {
             _base_repo_path: None,
             _base_test_db_path: None,
             daemon_family_key: OnceLock::new(),
+            allow_daemon_errors: AtomicBool::new(false),
         };
 
         // Ensure the default branch is named "main" for consistency across Git versions
@@ -1334,6 +1341,7 @@ impl TestRepo {
             _base_repo_path: None,
             _base_test_db_path: None,
             daemon_family_key: OnceLock::new(),
+            allow_daemon_errors: AtomicBool::new(false),
         };
 
         repo.apply_default_config_patch();
@@ -1344,6 +1352,10 @@ impl TestRepo {
 
     pub fn set_feature_flags(&mut self, feature_flags: FeatureFlags) {
         self.feature_flags = feature_flags;
+    }
+
+    pub fn set_allow_daemon_errors(&self, allow: bool) {
+        self.allow_daemon_errors.store(allow, Ordering::Relaxed);
     }
 
     pub(crate) fn daemon_control_socket_path(&self) -> PathBuf {
@@ -1525,6 +1537,10 @@ impl TestRepo {
                     continue;
                 }
                 if entry.status == "error" {
+                    if self.allow_daemon_errors.load(Ordering::Relaxed) {
+                        completed.insert(session);
+                        continue;
+                    }
                     panic!(
                         "daemon completion log reported an error for family {} session {}: {}",
                         family_key,
