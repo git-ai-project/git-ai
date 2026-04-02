@@ -497,10 +497,11 @@ fn resolve_explicit_path_execution(
     ts: u128,
     explicit_paths: &[String],
     ignore_matcher: &IgnoreMatcher,
+    kind: CheckpointKind,
+    is_pre_commit: bool,
 ) -> Result<Option<ResolvedCheckpointExecution>, GitAiError> {
     let repo_workdir = repo.workdir()?;
-    let mut files = Vec::new();
-    let mut resolved_dirty_files = HashMap::new();
+    let mut candidate_paths = Vec::new();
     let mut seen = HashSet::new();
 
     for path in explicit_paths {
@@ -521,14 +522,53 @@ fn resolve_explicit_path_execution(
             continue;
         }
 
-        if let Some(content) = explicit_dirty_file_content_if_text(working_log, &normalized_path) {
+        candidate_paths.push(normalized_path);
+    }
+
+    if candidate_paths.is_empty() {
+        return Ok(None);
+    }
+
+    let status_pathspecs = candidate_paths.iter().cloned().collect::<HashSet<_>>();
+    let explicit_statuses = repo
+        .status(Some(&status_pathspecs), false)?
+        .into_iter()
+        .map(|entry| (entry.path.clone(), entry))
+        .collect::<HashMap<_, _>>();
+    let preserve_unchanged_explicit_paths = kind == CheckpointKind::Human && is_pre_commit;
+
+    let mut files = Vec::new();
+    let mut resolved_dirty_files = HashMap::new();
+
+    for normalized_path in candidate_paths {
+        let status_entry = explicit_statuses.get(&normalized_path);
+        if matches!(status_entry, Some(entry) if entry.kind == EntryKind::Unmerged) {
+            continue;
+        }
+
+        let explicit_dirty_content =
+            explicit_dirty_file_content_if_text(working_log, &normalized_path);
+        if status_entry.is_none()
+            && explicit_dirty_content.is_none()
+            && !preserve_unchanged_explicit_paths
+        {
+            continue;
+        }
+
+        if let Some(content) = explicit_dirty_content {
             resolved_dirty_files.insert(normalized_path.clone(), content);
             files.push(normalized_path);
             continue;
         }
 
+        let is_deleted = matches!(
+            status_entry,
+            Some(entry)
+                if entry.staged == StatusCode::Deleted || entry.unstaged == StatusCode::Deleted
+        );
+
         if is_text_file(working_log, &normalized_path)
-            || is_text_file_in_head(repo, &normalized_path)
+            || (is_deleted && is_text_file_in_head(repo, &normalized_path))
         {
             files.push(normalized_path);
         }
@@ -667,6 +707,8 @@ fn resolve_live_checkpoint_execution(
                 ts,
                 explicit_paths,
                 &ignore_matcher,
+                kind,
+                is_pre_commit,
             )
         } else {
             Ok(None)
