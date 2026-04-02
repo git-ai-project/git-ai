@@ -10,6 +10,20 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use zip::write::{SimpleFileOptions, ZipWriter};
 
+/// Validate that a string looks like a valid git SHA (hex characters only).
+/// Prevents path traversal via crafted SHA values like "../../etc/passwd".
+fn validate_hex_sha(sha: &str) -> Result<(), String> {
+    if sha.is_empty() {
+        return Err("SHA is empty".to_string());
+    }
+    if !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!("Invalid SHA (non-hex characters): {}", sha));
+    }
+    Ok(())
+}
+
+
+
 /// Handle the `logs` command
 ///
 /// Usage: `git-ai logs <commitsha> [-o <outputfolder>]`
@@ -23,6 +37,12 @@ pub fn handle_logs(args: &[String]) {
             std::process::exit(1);
         }
     };
+
+    // Validate commit SHA to prevent path traversal
+    if let Err(e) = validate_hex_sha(&parsed.commit_sha) {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    }
 
     let repo = match find_repository(&Vec::<String>::new()) {
         Ok(repo) => repo,
@@ -108,6 +128,15 @@ pub fn handle_logs(args: &[String]) {
 
     // Collect working log files
     let base_sha = &authorship_log.metadata.base_commit_sha;
+
+    // Validate base_sha to prevent path traversal
+    if !base_sha.is_empty() {
+        if let Err(e) = validate_hex_sha(base_sha) {
+            eprintln!("Warning: invalid base commit SHA in authorship note: {}", e);
+            std::process::exit(1);
+        }
+    }
+
     let working_log_dir = repo.storage.working_logs.join(base_sha);
     // Also check for debug-mode "old-<sha>" directory
     let old_working_log_dir = repo.storage.working_logs.join(format!("old-{}", base_sha));
@@ -262,8 +291,13 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, String> {
     let commit_sha = commit_sha.ok_or("logs requires a commit SHA")?;
     let output_dir = output_dir.unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    if !output_dir.exists() {
-        return Err(format!("Output directory does not exist: {}", output_dir.display()));
+    // Canonicalize the output directory to resolve any ".." or symlink components
+    let output_dir = output_dir.canonicalize().map_err(|e| {
+        format!("Output directory does not exist or is inaccessible: {} ({})", output_dir.display(), e)
+    })?;
+
+    if !output_dir.is_dir() {
+        return Err(format!("Output path is not a directory: {}", output_dir.display()));
     }
 
     Ok(ParsedArgs {
@@ -571,8 +605,27 @@ fn collect_dir_recursive(base: &Path, dir: &Path, out: &mut Vec<(String, PathBuf
         Ok(e) => e,
         Err(_) => return,
     };
+
+    // Canonicalize base once for containment checks
+    let canonical_base = match base.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+
     for entry in entries.flatten() {
         let path = entry.path();
+
+        // Verify the path stays within the base directory (guards against symlink escapes)
+        if let Ok(canonical) = path.canonicalize() {
+            if !canonical.starts_with(&canonical_base) {
+                eprintln!(
+                    "Warning: skipping path that escapes base directory: {}",
+                    path.display()
+                );
+                continue;
+            }
+        }
+
         if path.is_dir() {
             // Skip blobs/ (full file snapshots) and INITIAL (seed attribution state)
             let name = path.file_name().unwrap_or_default();
