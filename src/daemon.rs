@@ -6685,17 +6685,11 @@ fn control_listener_loop_actor(
             };
             let coord = coordinator.clone();
             let handle = runtime_handle.clone();
-            if std::thread::Builder::new()
-                .spawn(move || {
-                    if let Err(e) = handle_control_connection_actor(stream, coord, handle) {
-                        debug_log(&format!("daemon control connection error: {}", e));
-                    }
-                })
-                .is_err()
-            {
-                debug_log("daemon control listener: failed to spawn handler thread");
-                break;
-            }
+            drop(runtime_handle.spawn_blocking(move || {
+                if let Err(e) = handle_control_connection_actor(stream, coord, handle) {
+                    debug_log(&format!("daemon control connection error: {}", e));
+                }
+            }));
         }
         Ok(())
     }
@@ -6860,9 +6854,11 @@ fn handle_control_connection_actor_reader<R: Read + Write>(
     Ok(())
 }
 
+#[allow(unused_variables)]
 fn trace_listener_loop_actor(
     trace_socket_path: PathBuf,
     coordinator: Arc<ActorDaemonCoordinator>,
+    runtime_handle: tokio::runtime::Handle,
 ) -> Result<(), GitAiError> {
     #[cfg(not(windows))]
     {
@@ -6880,17 +6876,11 @@ fn trace_listener_loop_actor(
                 continue;
             };
             let coord = coordinator.clone();
-            if std::thread::Builder::new()
-                .spawn(move || {
-                    if let Err(e) = handle_trace_connection_actor(stream, coord) {
-                        debug_log(&format!("daemon trace connection error: {}", e));
-                    }
-                })
-                .is_err()
-            {
-                debug_log("daemon trace listener: failed to spawn handler thread");
-                break;
-            }
+            drop(runtime_handle.spawn_blocking(move || {
+                if let Err(e) = handle_trace_connection_actor(stream, coord) {
+                    debug_log(&format!("daemon trace connection error: {}", e));
+                }
+            }));
         }
         Ok(())
     }
@@ -7243,9 +7233,10 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
 
     let trace_coord = coordinator.clone();
     let trace_shutdown_coord = coordinator.clone();
+    let trace_handle = rt_handle.clone();
     let trace_thread = std::thread::spawn(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            trace_listener_loop_actor(trace_socket_path, trace_coord)
+            trace_listener_loop_actor(trace_socket_path, trace_coord, trace_handle)
         }));
         match result {
             Ok(Ok(())) => {}
