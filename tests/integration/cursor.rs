@@ -1,174 +1,230 @@
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::{TestRepo, real_git_executable};
 use crate::test_utils::fixture_path;
-use rusqlite::{Connection, OpenFlags};
 
-const TEST_CONVERSATION_ID: &str = "00812842-49fe-4699-afae-bb22cda3f6e1";
-
-/// Helper function to open the test cursor database in read-only mode
-fn open_test_db() -> Connection {
-    let db_path = fixture_path("cursor_test.vscdb");
-    Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .expect("Failed to open test cursor database")
-}
+const TEST_CONVERSATION_ID: &str = "de751938-f32b-4441-8239-a31d60aa4cf0";
 
 #[test]
-fn test_can_open_cursor_test_database() {
-    let conn = open_test_db();
-
-    // Verify we can query the database
-    let mut stmt = conn
-        .prepare("SELECT COUNT(*) FROM cursorDiskKV")
-        .expect("Failed to prepare statement");
-
-    let count: i64 = stmt
-        .query_row([], |row| row.get(0))
-        .expect("Failed to query");
-
-    assert_eq!(count, 50, "Database should have exactly 50 records");
-}
-
-#[test]
-fn test_cursor_database_has_composer_data() {
-    let conn = open_test_db();
-
-    // Check that we have the expected composer data
-    let mut stmt = conn
-        .prepare("SELECT key FROM cursorDiskKV WHERE key LIKE 'composerData:%'")
-        .expect("Failed to prepare statement");
-
-    let keys: Vec<String> = stmt
-        .query_map([], |row| row.get(0))
-        .expect("Failed to query")
-        .collect::<Result<Vec<_>, _>>()
-        .expect("Failed to collect keys");
-
-    assert!(!keys.is_empty(), "Should have at least one composer");
-    assert!(
-        keys.contains(&format!("composerData:{}", TEST_CONVERSATION_ID)),
-        "Should contain the test conversation"
-    );
-}
-
-#[test]
-fn test_cursor_database_has_bubble_data() {
-    let conn = open_test_db();
-
-    // Check that we have bubble data for the test conversation
-    let pattern = format!("bubbleId:{}:%", TEST_CONVERSATION_ID);
-    let mut stmt = conn
-        .prepare("SELECT COUNT(*) FROM cursorDiskKV WHERE key LIKE ?")
-        .expect("Failed to prepare statement");
-
-    let count: i64 = stmt
-        .query_row([&pattern], |row| row.get(0))
-        .expect("Failed to query");
-
-    assert_eq!(
-        count, 42,
-        "Should have exactly 42 bubbles for the test conversation"
-    );
-}
-
-#[test]
-fn test_fetch_composer_payload_from_test_db() {
+fn test_cursor_jsonl_basic_parsing() {
     use git_ai::commands::checkpoint_agent::agent_presets::CursorPreset;
 
-    let db_path = fixture_path("cursor_test.vscdb");
+    let fixture = fixture_path("cursor-session-simple.jsonl");
+    let (transcript, model) =
+        CursorPreset::transcript_and_model_from_cursor_jsonl(fixture.to_str().unwrap())
+            .expect("Should parse cursor JSONL");
 
-    // Use the actual CursorPreset function
-    let composer_payload = CursorPreset::fetch_composer_payload(&db_path, TEST_CONVERSATION_ID)
-        .expect("Should fetch composer payload");
+    // Model should be None (comes from hook input, not JSONL)
+    assert_eq!(model, None, "Model should be None for Cursor JSONL");
 
-    // Verify the structure
+    // Real Cursor session: HBO shows generation
+    // 1 user message, 3 assistant texts ([REDACTED]-only skipped), 10 tool_use
+    let messages = transcript.messages();
     assert!(
-        composer_payload
-            .get("fullConversationHeadersOnly")
-            .is_some(),
-        "Should have fullConversationHeadersOnly field"
+        !messages.is_empty(),
+        "Should have parsed messages from the fixture"
     );
 
-    let headers = composer_payload
-        .get("fullConversationHeadersOnly")
-        .and_then(|v| v.as_array())
-        .expect("fullConversationHeadersOnly should be an array");
+    let user_count = messages
+        .iter()
+        .filter(|m| matches!(m, git_ai::authorship::transcript::Message::User { .. }))
+        .count();
+    let assistant_count = messages
+        .iter()
+        .filter(|m| matches!(m, git_ai::authorship::transcript::Message::Assistant { .. }))
+        .count();
+    let tool_count = messages
+        .iter()
+        .filter(|m| matches!(m, git_ai::authorship::transcript::Message::ToolUse { .. }))
+        .count();
 
-    assert_eq!(
-        headers.len(),
-        42,
-        "Should have exactly 42 conversation headers"
+    assert_eq!(user_count, 1, "Should have 1 user message");
+    assert_eq!(assistant_count, 3, "Should have 3 assistant messages ([REDACTED]-only texts skipped)");
+    assert_eq!(tool_count, 10, "Should have 10 tool_use messages (Read x3, WebSearch x4, WebFetch, Grep, Write)");
+}
+
+#[test]
+fn test_cursor_jsonl_user_query_tag_stripping() {
+    use git_ai::commands::checkpoint_agent::agent_presets::CursorPreset;
+
+    let fixture = fixture_path("cursor-session-simple.jsonl");
+    let (transcript, _) =
+        CursorPreset::transcript_and_model_from_cursor_jsonl(fixture.to_str().unwrap())
+            .expect("Should parse cursor JSONL");
+
+    let messages = transcript.messages();
+    let first_user = messages
+        .iter()
+        .find(|m| matches!(m, git_ai::authorship::transcript::Message::User { .. }))
+        .expect("Should have at least one user message");
+
+    if let git_ai::authorship::transcript::Message::User { text, .. } = first_user {
+        assert!(
+            !text.contains("<user_query>"),
+            "User message should not contain <user_query> tag, got: {}",
+            text
+        );
+        assert!(
+            !text.contains("</user_query>"),
+            "User message should not contain </user_query> tag"
+        );
+        assert_eq!(text, "Generate a file with all the HBO shows from the 90's in it");
+    }
+}
+
+#[test]
+fn test_cursor_jsonl_tool_normalization() {
+    use git_ai::commands::checkpoint_agent::agent_presets::CursorPreset;
+
+    let fixture = fixture_path("cursor-session-simple.jsonl");
+    let (transcript, _) =
+        CursorPreset::transcript_and_model_from_cursor_jsonl(fixture.to_str().unwrap())
+            .expect("Should parse cursor JSONL");
+
+    let messages = transcript.messages();
+    let tool_messages: Vec<_> = messages
+        .iter()
+        .filter_map(|m| match m {
+            git_ai::authorship::transcript::Message::ToolUse { name, input, .. } => {
+                Some((name.as_str(), input))
+            }
+            _ => None,
+        })
+        .collect();
+
+    // Write tool should have file_path, not path, and content should be stripped
+    let write_tool = tool_messages
+        .iter()
+        .find(|(name, _)| *name == "Write")
+        .expect("Should have a Write tool_use");
+    assert!(
+        write_tool.1.get("file_path").is_some(),
+        "Write tool should have file_path (normalized from path)"
+    );
+    assert!(
+        write_tool.1.get("content").is_none(),
+        "Write tool should have content stripped (edit tool)"
+    );
+    assert!(
+        write_tool.1.get("contents").is_none(),
+        "Write tool should not have original 'contents' field"
     );
 
-    // Check that first header has bubbleId
-    let first_header = &headers[0];
+    // Read tool should have file_path normalized from path
+    let read_tool = tool_messages
+        .iter()
+        .find(|(name, _)| *name == "Read")
+        .expect("Should have a Read tool_use");
     assert!(
-        first_header.get("bubbleId").is_some(),
-        "Header should have bubbleId"
+        read_tool.1.get("file_path").is_some(),
+        "Read tool should have file_path (normalized from path)"
+    );
+    assert!(
+        read_tool.1.get("path").is_none(),
+        "Read tool should not have original 'path' field"
     );
 }
 
 #[test]
-fn test_fetch_bubble_content_from_test_db() {
+fn test_cursor_jsonl_read_tool_full_args() {
     use git_ai::commands::checkpoint_agent::agent_presets::CursorPreset;
 
-    let db_path = fixture_path("cursor_test.vscdb");
+    let fixture = fixture_path("cursor-session-simple.jsonl");
+    let (transcript, _) =
+        CursorPreset::transcript_and_model_from_cursor_jsonl(fixture.to_str().unwrap())
+            .expect("Should parse cursor JSONL");
 
-    // First, get a bubble ID from the composer data using actual function
-    let composer_payload = CursorPreset::fetch_composer_payload(&db_path, TEST_CONVERSATION_ID)
-        .expect("Should fetch composer payload");
+    let messages = transcript.messages();
+    let read_tool = messages
+        .iter()
+        .find_map(|m| match m {
+            git_ai::authorship::transcript::Message::ToolUse { name, input, .. }
+                if name == "Read" =>
+            {
+                Some(input)
+            }
+            _ => None,
+        })
+        .expect("Should have a Read tool_use");
 
-    let headers = composer_payload
-        .get("fullConversationHeadersOnly")
-        .and_then(|v| v.as_array())
-        .expect("Should have headers");
-
-    let first_bubble_id = headers[0]
-        .get("bubbleId")
-        .and_then(|v| v.as_str())
-        .expect("Should have bubble ID");
-
-    // Use the actual CursorPreset function to fetch bubble content
-    let bubble_data =
-        CursorPreset::fetch_bubble_content_from_db(&db_path, TEST_CONVERSATION_ID, first_bubble_id)
-            .expect("Should fetch bubble content")
-            .expect("Bubble content should exist");
-
-    // Verify bubble structure
+    // Read tool should preserve full args with normalized field name
     assert!(
-        bubble_data.get("text").is_some() || bubble_data.get("content").is_some(),
-        "Bubble should have text or content field"
+        read_tool.get("file_path").is_some(),
+        "Read tool should have file_path (normalized from path)"
     );
 }
 
 #[test]
-fn test_extract_transcript_from_test_conversation() {
+fn test_cursor_jsonl_redacted_text_stripped() {
     use git_ai::commands::checkpoint_agent::agent_presets::CursorPreset;
 
-    let db_path = fixture_path("cursor_test.vscdb");
+    let fixture = fixture_path("cursor-session-simple.jsonl");
+    let (transcript, _) =
+        CursorPreset::transcript_and_model_from_cursor_jsonl(fixture.to_str().unwrap())
+            .expect("Should parse cursor JSONL");
 
-    // Use the actual CursorPreset function to extract transcript data
-    let composer_payload = CursorPreset::fetch_composer_payload(&db_path, TEST_CONVERSATION_ID)
-        .expect("Should fetch composer payload");
+    let transcript_json =
+        serde_json::to_string(&transcript.messages()).expect("Should serialize messages");
+    assert!(
+        !transcript_json.contains("[REDACTED]"),
+        "[REDACTED] markers should be stripped from transcript"
+    );
 
-    let transcript_data = CursorPreset::transcript_data_from_composer_payload(
-        &composer_payload,
-        &db_path,
-        TEST_CONVERSATION_ID,
-    )
-    .expect("Should extract transcript data")
-    .expect("Should have transcript data");
+    // Most assistant texts are [REDACTED]-only and get skipped; real text is preserved without the marker
+    let assistant_messages: Vec<_> = transcript
+        .messages()
+        .iter()
+        .filter_map(|m| match m {
+            git_ai::authorship::transcript::Message::Assistant { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        assistant_messages
+            .iter()
+            .any(|t| t.contains("HBO")),
+        "Should keep real content from messages that also had [REDACTED]"
+    );
+}
 
-    let (transcript, model) = transcript_data;
+#[test]
+fn test_cursor_jsonl_empty_file() {
+    use git_ai::commands::checkpoint_agent::agent_presets::CursorPreset;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
 
-    // Verify exact message count
+    let temp_file = NamedTempFile::new().expect("Should create temp file");
+    // Write nothing — empty file
+    let _ = temp_file.as_file().sync_all();
+
+    let (transcript, model) =
+        CursorPreset::transcript_and_model_from_cursor_jsonl(temp_file.path().to_str().unwrap())
+            .expect("Should handle empty file");
+
+    assert!(transcript.messages().is_empty(), "Empty file should produce empty transcript");
+    assert_eq!(model, None);
+}
+
+#[test]
+fn test_cursor_jsonl_malformed_lines_skipped() {
+    use git_ai::commands::checkpoint_agent::agent_presets::CursorPreset;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    let mut temp_file = NamedTempFile::new().expect("Should create temp file");
+    writeln!(temp_file, r#"{{"role":"user","message":{{"content":[{{"type":"text","text":"hello"}}]}}}}"#).unwrap();
+    writeln!(temp_file, "this is not valid json").unwrap();
+    writeln!(temp_file, r#"{{"role":"assistant","message":{{"content":[{{"type":"text","text":"hi there"}}]}}}}"#).unwrap();
+    temp_file.flush().unwrap();
+
+    let (transcript, _) =
+        CursorPreset::transcript_and_model_from_cursor_jsonl(temp_file.path().to_str().unwrap())
+            .expect("Should handle malformed lines");
+
     assert_eq!(
         transcript.messages().len(),
-        31,
-        "Should extract exactly 31 messages from the conversation"
+        2,
+        "Should have parsed 2 valid messages, skipping malformed line"
     );
-
-    // Verify model extraction
-    assert_eq!(model, "gpt-5", "Model should be 'gpt-5'");
 }
 
 #[test]
@@ -357,8 +413,8 @@ fn test_cursor_e2e_with_attribution() {
     use std::fs;
 
     let repo = TestRepo::new();
-    let db_path = fixture_path("cursor_test.vscdb");
-    let db_path_str = db_path.to_string_lossy().to_string();
+    let jsonl_fixture = fixture_path("cursor-session-simple.jsonl");
+    let jsonl_path_str = jsonl_fixture.to_string_lossy().to_string();
 
     // Create parent directory for the test file
     let src_dir = repo.path().join("src");
@@ -375,24 +431,20 @@ fn test_cursor_e2e_with_attribution() {
     let edited_content = "fn main() {\n    println!(\"Hello, World!\");\n    // This is from Cursor\n    println!(\"Additional line from Cursor\");\n}\n";
     fs::write(&file_path, edited_content).unwrap();
 
-    // Run checkpoint with the cursor database environment variable
-    // Use serde_json to properly escape paths (especially important on Windows)
-    // Note: Using a test model name to verify it comes from hook input, not DB (DB has "gpt-5")
+    // Run checkpoint with transcript_path pointing to JSONL fixture
     let hook_input = serde_json::json!({
         "conversation_id": TEST_CONVERSATION_ID,
         "workspace_roots": [repo.canonical_path().to_string_lossy().to_string()],
         "hook_event_name": "postToolUse",
         "tool_name": "Write",
         "tool_input": { "file_path": file_path.to_string_lossy().to_string() },
-        "model": "model-name-from-hook-test"
+        "model": "model-name-from-hook-test",
+        "transcript_path": jsonl_path_str
     })
     .to_string();
 
     let result = repo
-        .git_ai_with_env(
-            &["checkpoint", "cursor", "--hook-input", &hook_input],
-            &[("GIT_AI_CURSOR_GLOBAL_DB_PATH", &db_path_str)],
-        )
+        .git_ai(&["checkpoint", "cursor", "--hook-input", &hook_input])
         .unwrap();
 
     println!("Checkpoint output: {}", result);
@@ -431,42 +483,41 @@ fn test_cursor_e2e_with_attribution() {
         .next()
         .expect("Should have at least one prompt record");
 
-    // Verify that the prompt record has messages (transcript)
+    // Verify that the prompt record has messages (transcript from JSONL)
     assert!(
         !prompt_record.messages.is_empty(),
-        "Prompt record should contain messages from the cursor database"
+        "Prompt record should contain messages from the JSONL transcript"
     );
 
-    // Based on the test database, we expect 31 messages
+    // The JSONL fixture has 14 messages (1 user + 3 assistant + 10 tool_use; [REDACTED]-only texts skipped)
     assert_eq!(
         prompt_record.messages.len(),
-        31,
-        "Should have exactly 31 messages from the test conversation"
+        14,
+        "Should have exactly 14 messages from the JSONL fixture"
     );
 
-    // Verify the model was extracted from hook input (not from the database which has "gpt-5")
+    // Verify the model was extracted from hook input
     assert_eq!(
         prompt_record.agent_id.model, "model-name-from-hook-test",
-        "Model should be 'model-name-from-hook-test' from hook input (not 'gpt-5' from database)"
+        "Model should be 'model-name-from-hook-test' from hook input"
     );
 }
 
 #[test]
 fn test_cursor_e2e_with_resync() {
-    use rusqlite::Connection;
     use std::fs;
+    use std::io::Write;
     use tempfile::TempDir;
 
     let repo = TestRepo::new();
-    let db_path = fixture_path("cursor_test.vscdb");
 
-    // Copy the fixture database to a temp location so we can modify it in-place later.
-    // Using a single path for both checkpoint and commit ensures the daemon's metadata
-    // fallback (__test_cursor_db_path) points to the right file in all execution modes.
+    // Create a temp JSONL file that we can modify
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
-    let temp_db_path = temp_dir.path().join("cursor_test.vscdb");
-    fs::copy(&db_path, &temp_db_path).expect("Failed to copy database");
-    let temp_db_path_str = temp_db_path.to_string_lossy().to_string();
+    let temp_jsonl_path = temp_dir.path().join("cursor-session.jsonl");
+    let fixture_content = fs::read_to_string(fixture_path("cursor-session-simple.jsonl"))
+        .expect("Should read fixture");
+    fs::write(&temp_jsonl_path, &fixture_content).expect("Should write temp JSONL");
+    let temp_jsonl_str = temp_jsonl_path.to_string_lossy().to_string();
 
     // Create parent directory for the test file
     let src_dir = repo.path().join("src");
@@ -483,70 +534,38 @@ fn test_cursor_e2e_with_resync() {
     let edited_content = "fn main() {\n    println!(\"Hello, World!\");\n    // This is from Cursor\n    println!(\"Additional line from Cursor\");\n}\n";
     fs::write(&file_path, edited_content).unwrap();
 
-    // Run checkpoint with the UNMODIFIED temp database.
-    // Note: Using a test model name to verify it comes from hook input, not DB (DB has "gpt-5")
+    // Run checkpoint with the UNMODIFIED temp JSONL
     let hook_input = serde_json::json!({
         "conversation_id": TEST_CONVERSATION_ID,
         "workspace_roots": [repo.canonical_path().to_string_lossy().to_string()],
         "hook_event_name": "postToolUse",
         "tool_name": "Write",
         "tool_input": { "file_path": file_path.to_string_lossy().to_string() },
-        "model": "model-name-from-hook-test"
+        "model": "model-name-from-hook-test",
+        "transcript_path": temp_jsonl_str
     })
     .to_string();
 
     let result = repo
-        .git_ai_with_env(
-            &["checkpoint", "cursor", "--hook-input", &hook_input],
-            &[("GIT_AI_CURSOR_GLOBAL_DB_PATH", &temp_db_path_str)],
-        )
+        .git_ai(&["checkpoint", "cursor", "--hook-input", &hook_input])
         .unwrap();
 
     println!("Checkpoint output: {}", result);
 
-    // Now modify the temp database IN PLACE — same path the checkpoint stored in metadata.
-    // This tests that post-commit resync re-reads the DB and picks up changes.
+    // Now append a new message to the JSONL file (simulating Cursor adding more data)
     {
-        let conn = Connection::open(&temp_db_path).expect("Failed to open temp database");
-
-        let bubble_key: String = conn
-            .query_row(
-                "SELECT key FROM cursorDiskKV WHERE key LIKE 'bubbleId:00812842-49fe-4699-afae-bb22cda3f6e1:%' LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .expect("Should find at least one bubble");
-
-        let current_value: String = conn
-            .query_row(
-                "SELECT value FROM cursorDiskKV WHERE key = ?",
-                [&bubble_key],
-                |row| row.get(0),
-            )
-            .expect("Should get bubble value");
-
-        let mut bubble_json: serde_json::Value =
-            serde_json::from_str(&current_value).expect("Should parse bubble JSON");
-
-        if let Some(obj) = bubble_json.as_object_mut() {
-            obj.insert(
-                "text".to_string(),
-                serde_json::Value::String(
-                    "RESYNC_TEST_MESSAGE: This message was updated after checkpoint".to_string(),
-                ),
-            );
-        }
-
-        let updated_value = serde_json::to_string(&bubble_json).expect("Should serialize JSON");
-        conn.execute(
-            "UPDATE cursorDiskKV SET value = ? WHERE key = ?",
-            [&updated_value, &bubble_key],
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&temp_jsonl_path)
+            .expect("Should open temp JSONL for appending");
+        writeln!(
+            file,
+            r#"{{"role":"assistant","message":{{"content":[{{"type":"text","text":"RESYNC_TEST_MESSAGE: This was added after the checkpoint"}}]}}}}"#
         )
-        .expect("Should update bubble");
+        .expect("Should append to JSONL");
     }
 
-    // Commit — no env var needed. In wrapper mode the metadata fallback resolves the DB path;
-    // in daemon mode the daemon reads __test_cursor_db_path from checkpoint metadata.
+    // Commit — post-commit hook will re-read the JSONL via transcript_path in metadata
     repo.git(&["add", "-A"]).expect("add --all should succeed");
     let commit = repo.commit("Add cursor edits").unwrap();
 
@@ -581,16 +600,14 @@ fn test_cursor_e2e_with_resync() {
         .next()
         .expect("Should have at least one prompt record");
 
-    // Verify that the resync logic picked up the updated message
+    // Verify that the resync logic picked up the appended message
     let transcript_json =
         serde_json::to_string(&prompt_record.messages).expect("Should serialize messages");
 
     assert!(
         transcript_json.contains("RESYNC_TEST_MESSAGE"),
-        "Resync logic should have picked up the updated message from the modified database"
+        "Resync logic should have picked up the appended message from the modified JSONL file"
     );
-
-    // The temp directory and database will be automatically cleaned up when temp_dir goes out of scope
 }
 
 #[test]
@@ -600,8 +617,8 @@ fn test_cursor_checkpoint_routes_nested_worktree_file_to_worktree_repo() {
     use std::process::Command;
 
     let repo = TestRepo::new();
-    let db_path = fixture_path("cursor_test.vscdb");
-    let db_path_str = db_path.to_string_lossy().to_string();
+    let jsonl_fixture = fixture_path("cursor-session-simple.jsonl");
+    let jsonl_path_str = jsonl_fixture.to_string_lossy().to_string();
 
     let mut readme = repo.filename("README.md");
     readme.set_contents(crate::lines!["# Parent Repo"]);
@@ -640,15 +657,13 @@ fn test_cursor_checkpoint_routes_nested_worktree_file_to_worktree_repo() {
         "hook_event_name": "postToolUse",
         "tool_name": "Write",
         "tool_input": { "file_path": file_path.to_string_lossy().to_string() },
-        "model": "model-name-from-hook-test"
+        "model": "model-name-from-hook-test",
+        "transcript_path": jsonl_path_str
     })
     .to_string();
 
     let output = repo
-        .git_ai_with_env(
-            &["checkpoint", "cursor", "--hook-input", &hook_input],
-            &[("GIT_AI_CURSOR_GLOBAL_DB_PATH", &db_path_str)],
-        )
+        .git_ai(&["checkpoint", "cursor", "--hook-input", &hook_input])
         .expect("cursor checkpoint should succeed");
     println!("Checkpoint output: {}", output);
 
@@ -705,12 +720,9 @@ fn test_cursor_checkpoint_routes_nested_worktree_file_to_worktree_repo() {
 }
 
 crate::reuse_tests_in_worktree!(
-    test_can_open_cursor_test_database,
-    test_cursor_database_has_composer_data,
-    test_cursor_database_has_bubble_data,
-    test_fetch_composer_payload_from_test_db,
-    test_fetch_bubble_content_from_test_db,
-    test_extract_transcript_from_test_conversation,
+    test_cursor_jsonl_basic_parsing,
+    test_cursor_jsonl_user_query_tag_stripping,
+    test_cursor_jsonl_tool_normalization,
     test_cursor_preset_multi_root_workspace_detection,
     test_cursor_preset_human_checkpoint_no_filepath,
     test_cursor_e2e_with_attribution,

@@ -221,52 +221,38 @@ fn update_codex_prompt(
     }
 }
 
-/// Update Cursor prompt by fetching from Cursor's database
+/// Update Cursor prompt by re-reading the JSONL transcript file
 fn update_cursor_prompt(
-    conversation_id: &str,
+    _conversation_id: &str,
     metadata: Option<&HashMap<String, String>>,
     current_model: &str,
 ) -> PromptUpdateResult {
-    // For Cursor, we check the env var first (it represents the current database state),
-    // then fall back to metadata (stored during checkpoint for git hook subprocesses
-    // which don't inherit env vars).
-    let res = if let Ok(env_db_path) = std::env::var("GIT_AI_CURSOR_GLOBAL_DB_PATH") {
-        // Environment variable takes precedence (allows resync to use updated database)
-        CursorPreset::fetch_cursor_conversation_from_db(
-            std::path::Path::new(&env_db_path),
-            conversation_id,
-        )
-    } else if let Some(db_path) = metadata.and_then(|m| m.get("__test_cursor_db_path")) {
-        // Fall back to metadata path (for git hook subprocesses in tests)
-        CursorPreset::fetch_cursor_conversation_from_db(
-            std::path::Path::new(db_path),
-            conversation_id,
-        )
+    if let Some(metadata) = metadata {
+        if let Some(transcript_path) = metadata.get("transcript_path") {
+            match CursorPreset::transcript_and_model_from_cursor_jsonl(transcript_path) {
+                Ok((transcript, _)) => {
+                    PromptUpdateResult::Updated(transcript, current_model.to_string())
+                }
+                Err(e) => {
+                    debug_log(&format!(
+                        "Failed to parse Cursor JSONL transcript from {}: {}",
+                        transcript_path, e
+                    ));
+                    log_error(
+                        &e,
+                        Some(serde_json::json!({
+                            "agent_tool": "cursor",
+                            "operation": "transcript_and_model_from_cursor_jsonl"
+                        })),
+                    );
+                    PromptUpdateResult::Failed(e)
+                }
+            }
+        } else {
+            PromptUpdateResult::Unchanged
+        }
     } else {
-        // Use default Cursor database location
-        CursorPreset::fetch_latest_cursor_conversation(conversation_id)
-    };
-    match res {
-        Ok(Some((latest_transcript, _db_model))) => {
-            // For Cursor, preserve the model from the checkpoint (which came from hook input)
-            // rather than using the database model
-            PromptUpdateResult::Updated(latest_transcript, current_model.to_string())
-        }
-        Ok(None) => PromptUpdateResult::Unchanged,
-        Err(e) => {
-            debug_log(&format!(
-                "Failed to fetch latest Cursor conversation for ID {}: {}",
-                conversation_id, e
-            ));
-            log_error(
-                &e,
-                Some(serde_json::json!({
-                    "agent_tool": "cursor",
-                    "operation": "fetch_latest_cursor_conversation"
-                })),
-            );
-            PromptUpdateResult::Failed(e)
-        }
+        PromptUpdateResult::Unchanged
     }
 }
 
