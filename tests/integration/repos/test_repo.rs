@@ -646,6 +646,7 @@ fn is_known_checkpoint_preset(arg: &str) -> bool {
             | "amp"
             | "windsurf"
             | "opencode"
+            | "pi"
             | "ai_tab"
             | "mock_ai"
             | "droid"

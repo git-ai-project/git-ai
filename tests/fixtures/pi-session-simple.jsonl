@@ -1,0 +1,3 @@
+{"type":"session","version":3,"id":"pi-session-123","timestamp":"2026-03-31T10:00:00.000Z","cwd":"/tmp/project"}
+{"type":"message","id":"11111111","parentId":null,"timestamp":"2026-03-31T10:00:01.000Z","message":{"role":"user","content":"Please update src/main.rs","timestamp":1774951201000}}
+{"type":"message","id":"22222222","parentId":"11111111","timestamp":"2026-03-31T10:00:02.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-sonnet-4-5","content":[{"type":"text","text":"I will update the file now."}],"timestamp":1774951202000}}
