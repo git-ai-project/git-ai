@@ -23,13 +23,7 @@ struct OpenCodeHookInput {
     hook_event_name: String,
     session_id: String,
     cwd: String,
-    tool_input: Option<ToolInput>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ToolInput {
-    #[serde(rename = "filePath")]
-    file_path: Option<String>,
+    tool_input: Option<serde_json::Value>,
 }
 
 /// Message metadata from legacy file storage message/{session_id}/{msg_id}.json
@@ -167,10 +161,7 @@ impl AgentCheckpointPreset for OpenCodePreset {
             tool_input,
         } = hook_input;
 
-        // Extract file_path from tool_input if present
-        let file_path_as_vec = tool_input
-            .and_then(|ti| ti.file_path)
-            .map(|path| vec![path]);
+        let file_paths = Self::extract_filepaths_from_tool_input(tool_input.as_ref(), &cwd);
 
         // Determine OpenCode path (test override can point to either root or legacy storage path)
         let opencode_path = if let Ok(test_path) = std::env::var("GIT_AI_OPENCODE_STORAGE_PATH") {
@@ -219,7 +210,7 @@ impl AgentCheckpointPreset for OpenCodePreset {
                 transcript: None,
                 repo_working_dir: Some(cwd),
                 edited_filepaths: None,
-                will_edit_filepaths: file_path_as_vec,
+                will_edit_filepaths: file_paths,
                 dirty_files: None,
             });
         }
@@ -231,7 +222,7 @@ impl AgentCheckpointPreset for OpenCodePreset {
             checkpoint_kind: CheckpointKind::AiAgent,
             transcript: Some(transcript),
             repo_working_dir: Some(cwd),
-            edited_filepaths: file_path_as_vec,
+            edited_filepaths: file_paths,
             will_edit_filepaths: None,
             dirty_files: None,
         })
@@ -239,6 +230,128 @@ impl AgentCheckpointPreset for OpenCodePreset {
 }
 
 impl OpenCodePreset {
+    fn extract_filepaths_from_tool_input(
+        tool_input: Option<&serde_json::Value>,
+        cwd: &str,
+    ) -> Option<Vec<String>> {
+        let mut raw_paths = Vec::new();
+
+        if let Some(value) = tool_input {
+            Self::collect_tool_paths(value, &mut raw_paths);
+        }
+
+        let mut normalized_paths = Vec::new();
+        for raw in raw_paths {
+            if let Some(path) = Self::normalize_hook_path(&raw, cwd)
+                && !normalized_paths.contains(&path)
+            {
+                normalized_paths.push(path);
+            }
+        }
+
+        if normalized_paths.is_empty() {
+            None
+        } else {
+            Some(normalized_paths)
+        }
+    }
+
+    fn collect_apply_patch_paths_from_text(raw: &str, out: &mut Vec<String>) {
+        for line in raw.lines() {
+            let trimmed = line.trim();
+            let maybe_path = trimmed
+                .strip_prefix("*** Update File: ")
+                .or_else(|| trimmed.strip_prefix("*** Add File: "))
+                .or_else(|| trimmed.strip_prefix("*** Delete File: "))
+                .or_else(|| trimmed.strip_prefix("*** Move to: "));
+
+            if let Some(path) = maybe_path {
+                let path = path.trim().trim_matches('"').trim_matches('\'');
+                if !path.is_empty() && !out.iter().any(|existing| existing == path) {
+                    out.push(path.to_string());
+                }
+            }
+        }
+    }
+
+    fn collect_tool_paths(value: &serde_json::Value, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, val) in map {
+                    let key_lower = key.to_ascii_lowercase();
+                    let is_single_path_key = key_lower == "file_path"
+                        || key_lower == "filepath"
+                        || key_lower == "path"
+                        || key_lower == "fspath";
+
+                    let is_multi_path_key = key_lower == "files"
+                        || key_lower == "filepaths"
+                        || key_lower == "file_paths";
+
+                    if is_single_path_key {
+                        if let Some(path) = val.as_str() {
+                            out.push(path.to_string());
+                        }
+                    } else if is_multi_path_key {
+                        match val {
+                            serde_json::Value::String(path) => out.push(path.to_string()),
+                            serde_json::Value::Array(paths) => {
+                                for path_value in paths {
+                                    if let Some(path) = path_value.as_str() {
+                                        out.push(path.to_string());
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    Self::collect_tool_paths(val, out);
+                }
+            }
+            serde_json::Value::Array(arr) => {
+                for item in arr {
+                    Self::collect_tool_paths(item, out);
+                }
+            }
+            serde_json::Value::String(s) => {
+                if s.starts_with("file://") {
+                    out.push(s.to_string());
+                }
+                Self::collect_apply_patch_paths_from_text(s, out);
+            }
+            _ => {}
+        }
+    }
+
+    fn normalize_hook_path(raw_path: &str, cwd: &str) -> Option<String> {
+        let trimmed = raw_path.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        let path_without_scheme = trimmed
+            .strip_prefix("file://localhost")
+            .or_else(|| trimmed.strip_prefix("file://"))
+            .unwrap_or(trimmed);
+
+        let path = Path::new(path_without_scheme);
+        let joined = if path.is_absolute()
+            || path_without_scheme.starts_with("\\\\")
+            || path_without_scheme
+                .as_bytes()
+                .get(1)
+                .map(|b| *b == b':')
+                .unwrap_or(false)
+        {
+            PathBuf::from(path_without_scheme)
+        } else {
+            Path::new(cwd).join(path_without_scheme)
+        };
+
+        Some(joined.to_string_lossy().replace('\\', "/"))
+    }
+
     /// Get the OpenCode data directory based on platform.
     /// Expected layout: {data_dir}/opencode.db and {data_dir}/storage
     pub fn opencode_data_path() -> Result<PathBuf, GitAiError> {
