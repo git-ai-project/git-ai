@@ -474,6 +474,47 @@ fn test_opencode_tool_use_only_from_assistant() {
 }
 
 #[test]
+#[serial_test::serial]
+fn test_opencode_preset_extracts_apply_patch_paths() {
+    let storage_path = opencode_storage_fixture_path();
+
+    let patch_text = "*** Begin Patch\n*** Update File: src/main.ts\n@@\n-old\n+new\n*** End Patch";
+    let hook_input = json!({
+        "hook_event_name": "PostToolUse",
+        "session_id": "test-session-123",
+        "cwd": "/Users/test/my-project",
+        "tool_name": "apply_patch",
+        "tool_input": {
+            "patchText": patch_text
+        }
+    })
+    .to_string();
+
+    unsafe {
+        std::env::set_var(
+            "GIT_AI_OPENCODE_STORAGE_PATH",
+            storage_path.to_str().unwrap(),
+        );
+    }
+
+    let result = OpenCodePreset
+        .run(AgentCheckpointFlags {
+            hook_input: Some(hook_input),
+        })
+        .expect("Failed to run OpenCodePreset");
+
+    unsafe {
+        std::env::remove_var("GIT_AI_OPENCODE_STORAGE_PATH");
+    }
+
+    assert_eq!(result.checkpoint_kind, CheckpointKind::AiAgent);
+    assert_eq!(
+        result.edited_filepaths,
+        Some(vec!["/Users/test/my-project/src/main.ts".to_string()])
+    );
+}
+
+#[test]
 #[serial_test::serial] // Run serially to avoid env var conflicts with other tests
 fn test_opencode_e2e_checkpoint_and_commit() {
     use crate::repos::test_repo::TestRepo;

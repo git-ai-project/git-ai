@@ -22,7 +22,7 @@ Build `git-ai` (`cargo build`) and then run the `git-ai install-hooks` or `cargo
 
 ## How It Works
 
-The plugin intercepts file editing operations (`edit` and `write` tools) and:
+The plugin intercepts file editing operations (`edit`, `write`, `patch`, `multiedit`, and `apply_patch`) and:
 
 1. **Before AI edit**: Creates a human checkpoint to mark any changes since the last checkpoint as human-authored
 2. **After AI edit**: Creates an AI checkpoint with:
@@ -52,4 +52,3 @@ yarn install
 
 - [git-ai Documentation](https://github.com/git-ai-project/git-ai)
 - [OpenCode Plugin Documentation](https://opencode.ai/docs/plugins/)
-

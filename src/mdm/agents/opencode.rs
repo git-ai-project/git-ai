@@ -200,6 +200,7 @@ mod tests {
         assert!(content.contains("FILE_EDIT_TOOLS"));
         assert!(content.contains("edit"));
         assert!(content.contains("write"));
+        assert!(content.contains("apply_patch"));
         // Template contains placeholder for binary path
         assert!(content.contains("__GIT_AI_BINARY_PATH__"));
         assert!(content.contains("hook_event_name"));
