@@ -8,9 +8,11 @@ import com.intellij.openapi.components.service
 import com.intellij.openapi.diagnostic.thisLogger
 import com.intellij.openapi.extensions.PluginId
 import com.posthog.java.PostHog as PostHogClient
+import io.sentry.Hint
 import io.sentry.Sentry
 import io.sentry.SentryEvent
 import io.sentry.SentryLevel
+import io.sentry.SentryOptions
 import io.sentry.protocol.Message
 import java.io.File
 
@@ -32,6 +34,19 @@ class TelemetryService : Disposable {
         private const val POSTHOG_HOST = "https://us.i.posthog.com"
         private const val SENTRY_DSN = "https://8316e787580a70ad21e7158027caf849@o4510273204649984.ingest.us.sentry.io/4510812879060992"
         private const val PLUGIN_ID = "com.usegitai.plugins.jetbrains"
+
+        /**
+         * Package prefixes used to identify events originating from our plugin.
+         * Events with stack frames matching these prefixes are sent to Sentry;
+         * all other JVM exceptions (e.g. JetBrains internal errors) are dropped.
+         */
+        private val PLUGIN_PACKAGE_PREFIXES = listOf(
+            "org.jetbrains.plugins.template",
+            "com.usegitai"
+        )
+
+        /** Tag key set on events we create directly (not from uncaught exceptions). */
+        private const val PLUGIN_EVENT_TAG = "git_ai_plugin_event"
 
         fun getInstance(): TelemetryService = service()
     }
@@ -68,11 +83,36 @@ class TelemetryService : Disposable {
                 options.tracesSampleRate = 0.3
                 options.setTag("ide", "intellij")
                 options.setTag("ide_version", ApplicationInfo.getInstance().fullVersion)
+
+                // Filter out events that don't originate from our plugin.
+                // Since the plugin runs in the same JVM as the IDE, Sentry would
+                // otherwise capture JetBrains internal errors as well.
+                options.beforeSend = SentryOptions.BeforeSendCallback { event: SentryEvent, _: Hint ->
+                    if (isPluginEvent(event)) event else null
+                }
             }
             sentryInitialized = true
             logger.info("Sentry initialized")
         } catch (e: Exception) {
             logger.warn("Failed to initialize Sentry: ${e.message}")
+        }
+    }
+
+    /**
+     * Returns true if the event was explicitly sent by our plugin (tagged) or if
+     * any exception in the event has a stack frame from our plugin packages.
+     */
+    private fun isPluginEvent(event: SentryEvent): Boolean {
+        // Events we send ourselves are tagged
+        if (event.getTag(PLUGIN_EVENT_TAG) != null) return true
+
+        // Check exception stack traces for our package prefixes
+        val exceptions = event.exceptions ?: return false
+        return exceptions.any { exception ->
+            exception.stacktrace?.frames?.any { frame ->
+                val module = frame.module ?: return@any false
+                PLUGIN_PACKAGE_PREFIXES.any { prefix -> module.startsWith(prefix) }
+            } ?: false
         }
     }
 
@@ -213,6 +253,7 @@ class TelemetryService : Disposable {
         if (sentryInitialized) {
             try {
                 Sentry.captureException(throwable) { scope ->
+                    scope.setTag(PLUGIN_EVENT_TAG, "true")
                     context.forEach { (key, value) ->
                         scope.setExtra(key, value)
                     }
@@ -241,6 +282,7 @@ class TelemetryService : Disposable {
             val event = SentryEvent().apply {
                 this.message = Message().apply { this.message = message }
                 this.level = level
+                setTag(PLUGIN_EVENT_TAG, "true")
                 context.forEach { (key, value) ->
                     setExtra(key, value)
                 }
