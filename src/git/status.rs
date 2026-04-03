@@ -2,6 +2,16 @@ use crate::error::GitAiError;
 use crate::git::repository::{InternalGitProfile, Repository, exec_git_with_profile};
 use std::collections::HashSet;
 use std::str;
+use unicode_normalization::UnicodeNormalization;
+
+/// Normalize a path string to NFC form so that decomposed (NFD) filenames
+/// from macOS match precomposed (NFC) paths used internally.
+fn nfc_path(path: String) -> String {
+    if path.is_ascii() {
+        return path;
+    }
+    path.nfc().collect()
+}
 
 /// Maximum number of pathspec arguments to pass on the command line.
 /// Beyond this threshold, we run git without pathspecs and post-filter
@@ -78,11 +88,14 @@ impl Repository {
         }
 
         // With -z, output is NUL-separated. The output may contain a trailing NUL.
+        // Apply NFC normalization so that decomposed (NFD) paths from macOS match
+        // precomposed (NFC) paths used internally (see normalize_to_posix).
         let filenames: HashSet<String> = output
             .stdout
             .split(|&b| b == 0)
             .filter(|bytes| !bytes.is_empty())
             .filter_map(|bytes| String::from_utf8(bytes.to_vec()).ok())
+            .map(nfc_path)
             .collect();
 
         Ok(filenames)
@@ -148,7 +161,12 @@ impl Repository {
 
         // Add combined pathspecs as CLI args only if under the threshold;
         // otherwise run without pathspecs and post-filter to avoid E2BIG.
-        let needs_post_filter = !should_full_scan && combined_pathspecs.len() > MAX_PATHSPEC_ARGS;
+        // Also force post-filtering when any pathspec contains non-ASCII characters,
+        // because NFC-normalised pathspecs may not match NFD entries in git's
+        // index on macOS when core.precomposeunicode is false.
+        let has_non_ascii = combined_pathspecs.iter().any(|s| !s.is_ascii());
+        let needs_post_filter =
+            !should_full_scan && (combined_pathspecs.len() > MAX_PATHSPEC_ARGS || has_non_ascii);
         if !should_full_scan && !needs_post_filter && !combined_pathspecs.is_empty() {
             args.push("--".to_string());
             for path in &combined_pathspecs {
@@ -168,11 +186,17 @@ impl Repository {
         let mut entries = parse_porcelain_v2(&output.stdout)?;
 
         if needs_post_filter {
+            // NFC-normalize pathspecs for comparison because parse_porcelain_v2
+            // emits NFC paths, but caller-supplied pathspecs may be NFD.
+            let nfc_pathspecs: HashSet<String> = combined_pathspecs
+                .iter()
+                .map(|s| nfc_path(s.clone()))
+                .collect();
             entries.retain(|e| {
-                combined_pathspecs.contains(&e.path)
+                nfc_pathspecs.contains(&e.path)
                     || e.orig_path
                         .as_ref()
-                        .is_some_and(|op| combined_pathspecs.contains(op))
+                        .is_some_and(|op| nfc_pathspecs.contains(op))
             });
         }
 
@@ -215,10 +239,12 @@ fn parse_porcelain_v2(data: &[u8]) -> Result<Vec<StatusEntry>, GitAiError> {
                     fields.next();
                 }
 
-                let path = fields
-                    .next()
-                    .ok_or_else(|| GitAiError::Generic("Missing path field".into()))?
-                    .to_string();
+                let path = nfc_path(
+                    fields
+                        .next()
+                        .ok_or_else(|| GitAiError::Generic("Missing path field".into()))?
+                        .to_string(),
+                );
 
                 entries.push(StatusEntry {
                     path,
@@ -254,15 +280,17 @@ fn parse_porcelain_v2(data: &[u8]) -> Result<Vec<StatusEntry>, GitAiError> {
                     fields.next();
                 }
 
-                let path = fields
-                    .next()
-                    .ok_or_else(|| GitAiError::Generic("Missing path field".into()))?
-                    .to_string();
+                let path = nfc_path(
+                    fields
+                        .next()
+                        .ok_or_else(|| GitAiError::Generic("Missing path field".into()))?
+                        .to_string(),
+                );
 
                 let orig_path_bytes = parts.next().ok_or_else(|| {
                     GitAiError::Generic("Missing original path for rename/copy".into())
                 })?;
-                let orig_path = str::from_utf8(orig_path_bytes)?.to_string();
+                let orig_path = nfc_path(str::from_utf8(orig_path_bytes)?.to_string());
 
                 let kind = match staged {
                     StatusCode::Renamed => EntryKind::Rename,
@@ -279,7 +307,7 @@ fn parse_porcelain_v2(data: &[u8]) -> Result<Vec<StatusEntry>, GitAiError> {
                 });
             }
             '?' => {
-                let path = record.strip_prefix("? ").unwrap_or(record).to_string();
+                let path = nfc_path(record.strip_prefix("? ").unwrap_or(record).to_string());
 
                 entries.push(StatusEntry {
                     path,
@@ -290,7 +318,7 @@ fn parse_porcelain_v2(data: &[u8]) -> Result<Vec<StatusEntry>, GitAiError> {
                 });
             }
             '!' => {
-                let path = record.strip_prefix("! ").unwrap_or(record).to_string();
+                let path = nfc_path(record.strip_prefix("! ").unwrap_or(record).to_string());
 
                 entries.push(StatusEntry {
                     path,

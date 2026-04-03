@@ -9,6 +9,7 @@ use crate::git::repository::Repository;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use unicode_normalization::UnicodeNormalization;
 
 pub struct VirtualAttributions {
     repo: Repository,
@@ -924,8 +925,11 @@ impl VirtualAttributions {
                     line_ranges,
                 );
 
-                // Add to authorship log
-                let file_attestation = authorship_log.get_or_create_file(file_path);
+                // Add to authorship log.
+                // NFC-normalise the path so that attestation file_path is
+                // consistent with NFC paths emitted by git diff parsing.
+                let nfc_fp: String = file_path.nfc().collect();
+                let file_attestation = authorship_log.get_or_create_file(&nfc_fp);
                 file_attestation.add_entry(entry);
             }
         }
@@ -1249,9 +1253,13 @@ impl VirtualAttributions {
                 continue;
             }
 
-            // Get unstaged lines for this file (in working directory coordinates)
+            // Diff output keys are NFC-normalised, but working-log paths may be
+            // NFD.  Compute the NFC form once for all lookups in this iteration.
+            let nfc_file_path: String = file_path.nfc().collect();
+
+            // Get unstaged lines for this file (in working directory coordinates).
             let mut unstaged_lines: Vec<u32> = Vec::new();
-            if let Some(unstaged_ranges) = unstaged_hunks.get(file_path) {
+            if let Some(unstaged_ranges) = unstaged_hunks.get(&nfc_file_path) {
                 for range in unstaged_ranges {
                     unstaged_lines.extend(range.expand());
                 }
@@ -1264,8 +1272,8 @@ impl VirtualAttributions {
             let mut committed_lines_map: StdHashMap<String, Vec<u32>> = StdHashMap::new();
             let mut uncommitted_lines_map: StdHashMap<String, Vec<u32>> = StdHashMap::new();
 
-            // Get the committed hunks for this file (if any) - these are in commit coordinates
-            let file_committed_hunks = committed_hunks.get(file_path);
+            // Get the committed hunks for this file (if any) - these are in commit coordinates.
+            let file_committed_hunks = committed_hunks.get(&nfc_file_path);
 
             for line_attr in line_attrs {
                 // Check each line individually
@@ -1366,7 +1374,7 @@ impl VirtualAttributions {
                             author_id, ranges,
                         );
 
-                    let file_attestation = authorship_log.get_or_create_file(file_path);
+                    let file_attestation = authorship_log.get_or_create_file(&nfc_file_path);
                     file_attestation.add_entry(entry);
                 }
             }
@@ -1486,8 +1494,10 @@ impl VirtualAttributions {
                 continue;
             }
 
-            // Get the committed hunks for this file (if any)
-            let file_committed_hunks = match committed_hunks.get(file_path) {
+            // Get the committed hunks for this file (if any).
+            // NFC-normalise the key (see first loop's comment for rationale).
+            let nfc_file_path: String = file_path.nfc().collect();
+            let file_committed_hunks = match committed_hunks.get(&nfc_file_path) {
                 Some(hunks) => hunks,
                 None => continue, // No committed hunks for this file, skip
             };
@@ -1570,7 +1580,7 @@ impl VirtualAttributions {
                             author_id, ranges,
                         );
 
-                    let file_attestation = authorship_log.get_or_create_file(file_path);
+                    let file_attestation = authorship_log.get_or_create_file(&nfc_file_path);
                     file_attestation.add_entry(entry);
                 }
             }
@@ -2240,7 +2250,22 @@ fn file_exists_in_commit(
 ) -> Result<bool, GitAiError> {
     let commit = repo.find_commit(commit_sha.to_string())?;
     let tree = commit.tree()?;
-    Ok(tree.get_path(std::path::Path::new(file_path)).is_ok())
+    if tree.get_path(std::path::Path::new(file_path)).is_ok() {
+        return Ok(true);
+    }
+    // The caller's path may be NFC or NFD while the tree stores the opposite
+    // form.  Try both normalisations before giving up.
+    if !file_path.is_ascii() {
+        let nfc_path: String = file_path.nfc().collect();
+        if nfc_path != file_path && tree.get_path(std::path::Path::new(&nfc_path)).is_ok() {
+            return Ok(true);
+        }
+        let nfd_path: String = file_path.nfd().collect();
+        if nfd_path != file_path && tree.get_path(std::path::Path::new(&nfd_path)).is_ok() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]

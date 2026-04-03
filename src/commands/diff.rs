@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::IsTerminal;
+use unicode_normalization::UnicodeNormalization;
 
 // ============================================================================
 // Data Structures
@@ -571,12 +572,11 @@ fn parse_diff_hunks(diff_text: &str) -> Result<Vec<DiffHunk>, GitAiError> {
 fn normalize_diff_path_token(path: &str) -> String {
     let unescaped = crate::utils::unescape_git_path(path.trim_end());
     let prefixes = ["a/", "b/", "c/", "w/", "i/", "o/"];
-    for prefix in prefixes {
-        if let Some(stripped) = unescaped.strip_prefix(prefix) {
-            return stripped.to_string();
-        }
-    }
-    unescaped
+    let stripped = prefixes
+        .iter()
+        .find_map(|prefix| unescaped.strip_prefix(prefix))
+        .unwrap_or(&unescaped);
+    stripped.nfc().collect()
 }
 
 fn parse_new_file_path_from_plus_header_line(line: &str) -> Option<Option<String>> {

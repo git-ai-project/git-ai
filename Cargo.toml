@@ -36,6 +36,7 @@ gix-config = "0.53.0"
 gix-index = "0.48.0"
 regex = "1.12"
 toml = "0.9"
+unicode-normalization = "0.1"
 
 [target.'cfg(windows)'.dependencies]
 named_pipe = "0.4.1"

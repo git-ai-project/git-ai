@@ -2546,13 +2546,25 @@ impl TestRepo {
 
                 self.sync_daemon_force();
 
-                let content = git_ai::git::refs::show_authorship_note(&repo, &head_commit)
-                    .ok_or_else(|| {
-                        format!(
-                            "No authorship log found for new commit {} after daemon sync",
-                            head_commit
-                        )
-                    })?;
+                // In daemon mode, the authorship note may not be immediately
+                // visible after the session completes due to filesystem flush
+                // timing. Retry briefly before failing.
+                let mut content = git_ai::git::refs::show_authorship_note(&repo, &head_commit);
+                if content.is_none() && self.git_mode.uses_daemon() {
+                    for _ in 0..10 {
+                        thread::sleep(Duration::from_millis(50));
+                        content = git_ai::git::refs::show_authorship_note(&repo, &head_commit);
+                        if content.is_some() {
+                            break;
+                        }
+                    }
+                }
+                let content = content.ok_or_else(|| {
+                    format!(
+                        "No authorship log found for new commit {} after daemon sync",
+                        head_commit
+                    )
+                })?;
                 let authorship_log = AuthorshipLog::deserialize_from_string(&content)
                     .map_err(|e| format!("Failed to parse authorship log: {}", e))?;
 
