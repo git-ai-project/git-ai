@@ -30,3 +30,6 @@ pub mod status;
 pub mod sync_prompts;
 pub mod upgrade;
 pub mod whoami;
+
+#[cfg(debug_assertions)]
+pub mod simulate_authorship;
