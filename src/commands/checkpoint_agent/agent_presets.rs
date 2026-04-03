@@ -1602,12 +1602,12 @@ impl CursorPreset {
                             if item["type"].as_str() == Some("tool_result") {
                                 continue;
                             }
-                            if item["type"].as_str() == Some("text") {
-                                if let Some(text) = item["text"].as_str() {
-                                    let cleaned = Self::strip_user_query_tags(text);
-                                    if !cleaned.is_empty() {
-                                        transcript.add_message(Message::user(cleaned, None));
-                                    }
+                            if item["type"].as_str() == Some("text")
+                                && let Some(text) = item["text"].as_str()
+                            {
+                                let cleaned = Self::strip_user_query_tags(text);
+                                if !cleaned.is_empty() {
+                                    transcript.add_message(Message::user(cleaned, None));
                                 }
                             }
                         }
@@ -1618,23 +1618,23 @@ impl CursorPreset {
                         for item in content_array {
                             match item["type"].as_str() {
                                 Some("text") => {
-                                    if let Some(text) = item["text"].as_str() {
-                                        if !text.trim().is_empty() {
-                                            transcript.add_message(Message::assistant(
-                                                text.to_string(),
-                                                None,
-                                            ));
-                                        }
+                                    if let Some(text) = item["text"].as_str()
+                                        && !text.trim().is_empty()
+                                    {
+                                        transcript.add_message(Message::assistant(
+                                            text.to_string(),
+                                            None,
+                                        ));
                                     }
                                 }
                                 Some("thinking") => {
-                                    if let Some(thinking) = item["thinking"].as_str() {
-                                        if !thinking.trim().is_empty() {
-                                            transcript.add_message(Message::assistant(
-                                                thinking.to_string(),
-                                                None,
-                                            ));
-                                        }
+                                    if let Some(thinking) = item["thinking"].as_str()
+                                        && !thinking.trim().is_empty()
+                                    {
+                                        transcript.add_message(Message::assistant(
+                                            thinking.to_string(),
+                                            None,
+                                        ));
                                     }
                                 }
                                 Some("tool_use") => {
@@ -1699,18 +1699,17 @@ impl CursorPreset {
         let mut normalized = input.clone();
         if let Some(obj) = normalized.as_object_mut() {
             // Rename `path` → `file_path`
-            if let Some(path_val) = obj.remove("path") {
-                if !obj.contains_key("file_path") {
-                    obj.insert("file_path".to_string(), path_val);
-                }
+            if let Some(path_val) = obj.remove("path")
+                && !obj.contains_key("file_path")
+            {
+                obj.insert("file_path".to_string(), path_val);
             }
             // For Write tool: rename `contents` → `content`
-            if tool_name == "Write" {
-                if let Some(contents_val) = obj.remove("contents") {
-                    if !obj.contains_key("content") {
-                        obj.insert("content".to_string(), contents_val);
-                    }
-                }
+            if tool_name == "Write"
+                && let Some(contents_val) = obj.remove("contents")
+                && !obj.contains_key("content")
+            {
+                obj.insert("content".to_string(), contents_val);
             }
         }
         normalized
