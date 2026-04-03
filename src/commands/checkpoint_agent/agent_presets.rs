@@ -3720,7 +3720,12 @@ impl FirebenderPreset {
 
         match tool_input {
             serde_json::Value::Object(_) => {
-                for key in ["file_path", "target_file", "relative_workspace_path", "path"] {
+                for key in [
+                    "file_path",
+                    "target_file",
+                    "relative_workspace_path",
+                    "path",
+                ] {
                     if let Some(path) = tool_input.get(key).and_then(|v| v.as_str()) {
                         Self::push_unique_path(&mut paths, path);
                     }
@@ -3807,7 +3812,11 @@ impl AgentCheckpointPreset for FirebenderPreset {
 
         let model = {
             let m = model.trim().to_string();
-            if m.is_empty() { "unknown".to_string() } else { m }
+            if m.is_empty() {
+                "unknown".to_string()
+            } else {
+                m
+            }
         };
 
         let agent_id = AgentId {
