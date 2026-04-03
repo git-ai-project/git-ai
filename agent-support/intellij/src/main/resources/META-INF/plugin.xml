@@ -12,6 +12,25 @@
             serviceImplementation="org.jetbrains.plugins.template.services.DocumentChangeTrackerService"/>
         <applicationService
             serviceImplementation="org.jetbrains.plugins.template.services.GitAiService"/>
+        <projectService
+            serviceImplementation="org.jetbrains.plugins.template.blame.BlameService"/>
+        <projectService
+            serviceImplementation="org.jetbrains.plugins.template.blame.BlameEditorManager"/>
         <postStartupActivity implementation="org.jetbrains.plugins.template.startup.DocumentTrackerStartupActivity"/>
+        <postStartupActivity implementation="org.jetbrains.plugins.template.blame.BlameStartupActivity"/>
+        <statusBarWidgetFactory id="GitAiBlame"
+            implementation="org.jetbrains.plugins.template.blame.BlameStatusBarWidgetFactory"
+            order="after position"/>
     </extensions>
+
+    <actions>
+        <action id="GitAi.ToggleBlame"
+                class="org.jetbrains.plugins.template.blame.BlameToggleAction"
+                text="Toggle Git AI Blame"
+                description="Toggle AI blame annotations (Off/Line/All)">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl shift G"/>
+            <keyboard-shortcut keymap="Mac OS X" first-keystroke="meta shift G"/>
+            <keyboard-shortcut keymap="Mac OS X 10.5+" first-keystroke="meta shift G"/>
+        </action>
+    </actions>
 </idea-plugin>
