@@ -721,6 +721,228 @@ fn test_pull_rebase_with_conflict_preserves_ai_notes() {
     );
 }
 
+// =============================================================================
+// Pull --rebase abort preserves original notes
+// =============================================================================
+
+#[test]
+fn test_pull_rebase_with_conflict_abort_preserves_original_notes() {
+    let setup = setup_conflict_pull_test();
+    let local = setup.local;
+
+    // Verify Session B's AI commit has authorship notes before rebase
+    let pre_rebase_note = local.read_authorship_note(&setup.session_b_ai_commit_sha);
+    assert!(
+        pre_rebase_note.is_some(),
+        "Session B's AI commit should have authorship notes before rebase"
+    );
+
+    // Configure pull to use rebase
+    local
+        .git(&["config", "pull.rebase", "true"])
+        .expect("set pull.rebase should succeed");
+
+    // Fetch so we know about upstream's diverged state
+    local
+        .git(&["fetch", "origin"])
+        .expect("fetch should succeed");
+
+    // Pull will rebase — this should conflict on README.md
+    let pull_result = local.git(&["pull"]);
+    assert!(
+        pull_result.is_err(),
+        "pull --rebase should fail due to conflict on README.md"
+    );
+
+    // Abort the rebase instead of resolving
+    local
+        .git(&["rebase", "--abort"])
+        .expect("rebase --abort should succeed");
+
+    // Verify HEAD is back to Session B's original SHA
+    let current_head = local
+        .git(&["rev-parse", "HEAD"])
+        .expect("rev-parse should succeed")
+        .trim()
+        .to_string();
+
+    assert_eq!(
+        current_head, setup.session_b_ai_commit_sha,
+        "HEAD should be back to Session B's original commit after abort"
+    );
+
+    // Verify authorship notes on the original SHA are still intact
+    let post_abort_note = local.read_authorship_note(&setup.session_b_ai_commit_sha);
+    assert!(
+        post_abort_note.is_some(),
+        "Session B's AI commit should still have authorship notes after abort"
+    );
+}
+
+// =============================================================================
+// Regular (non-pull) rebase with conflict scenarios
+// =============================================================================
+
+/// Setup for regular rebase conflict tests: local-only repo with a feature branch
+/// that has AI commits conflicting with main.
+struct RegularRebaseConflictSetup {
+    repo: TestRepo,
+    /// SHA of the AI commit on the feature branch
+    feature_ai_commit_sha: String,
+    /// Name of the default branch
+    default_branch: String,
+}
+
+fn setup_regular_rebase_conflict() -> RegularRebaseConflictSetup {
+    let repo = TestRepo::new();
+
+    // Create initial commit with a shared file
+    let mut shared_file = repo.filename("shared.txt");
+    shared_file.set_contents(vec!["line 1".human(), "line 2".human()]);
+    repo.stage_all_and_commit("initial commit")
+        .expect("initial commit should succeed");
+
+    let default_branch = repo.current_branch();
+
+    // Create feature branch with AI-authored changes to the shared file
+    repo.git(&["checkout", "-b", "feature"])
+        .expect("checkout -b feature should succeed");
+
+    let mut feature_file = repo.filename("shared.txt");
+    feature_file.set_contents(vec!["line 1".human(), "AI feature line 2".ai()]);
+    repo.stage_all_and_commit("AI feature changes")
+        .expect("AI feature commit should succeed");
+
+    let feature_sha = repo
+        .git(&["rev-parse", "HEAD"])
+        .expect("rev-parse should succeed")
+        .trim()
+        .to_string();
+
+    // Make conflicting change on main
+    repo.git(&["checkout", &default_branch])
+        .expect("checkout main should succeed");
+
+    let mut main_file = repo.filename("shared.txt");
+    main_file.set_contents(vec!["line 1".human(), "main change line 2".human()]);
+    repo.stage_all_and_commit("main conflicting change")
+        .expect("main commit should succeed");
+
+    // Switch back to feature
+    repo.git(&["checkout", "feature"])
+        .expect("checkout feature should succeed");
+
+    RegularRebaseConflictSetup {
+        repo,
+        feature_ai_commit_sha: feature_sha,
+        default_branch,
+    }
+}
+
+#[test]
+fn test_regular_rebase_with_conflict_preserves_ai_notes() {
+    let setup = setup_regular_rebase_conflict();
+    let repo = setup.repo;
+
+    // Verify AI commit has authorship notes before rebase
+    let pre_rebase_note = repo.read_authorship_note(&setup.feature_ai_commit_sha);
+    assert!(
+        pre_rebase_note.is_some(),
+        "Feature AI commit should have authorship notes before rebase"
+    );
+
+    // Rebase feature onto main — should conflict on shared.txt
+    let rebase_result = repo.git(&["rebase", &setup.default_branch]);
+    assert!(
+        rebase_result.is_err(),
+        "rebase should fail due to conflict on shared.txt"
+    );
+
+    // Resolve the conflict: keep both changes
+    use std::fs;
+    fs::write(
+        repo.path().join("shared.txt"),
+        "line 1\nmain change line 2\nAI feature line 2\n",
+    )
+    .expect("writing resolved file should succeed");
+
+    repo.git(&["add", "shared.txt"])
+        .expect("staging resolved file should succeed");
+
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .expect("rebase --continue should succeed");
+
+    // The rebased commit has a new SHA
+    let new_head = repo
+        .git(&["rev-parse", "HEAD"])
+        .expect("rev-parse should succeed")
+        .trim()
+        .to_string();
+
+    assert_ne!(
+        new_head, setup.feature_ai_commit_sha,
+        "HEAD should have a new SHA after rebase"
+    );
+
+    // Verify authorship notes were preserved on the new commit
+    let post_rebase_note = repo.read_authorship_note(&new_head);
+    assert!(
+        post_rebase_note.is_some(),
+        "Rebased commit should have authorship notes (notes should follow SHA rewrite)"
+    );
+
+    // Verify the note content references the AI-authored file
+    let note_content = post_rebase_note.unwrap();
+    assert!(
+        note_content.contains("shared.txt"),
+        "Authorship note should reference shared.txt, got: {}",
+        note_content
+    );
+}
+
+#[test]
+fn test_regular_rebase_with_conflict_abort_preserves_original_notes() {
+    let setup = setup_regular_rebase_conflict();
+    let repo = setup.repo;
+
+    // Verify AI commit has authorship notes before rebase
+    let pre_rebase_note = repo.read_authorship_note(&setup.feature_ai_commit_sha);
+    assert!(
+        pre_rebase_note.is_some(),
+        "Feature AI commit should have authorship notes before rebase"
+    );
+
+    // Rebase feature onto main — should conflict on shared.txt
+    let rebase_result = repo.git(&["rebase", &setup.default_branch]);
+    assert!(
+        rebase_result.is_err(),
+        "rebase should fail due to conflict on shared.txt"
+    );
+
+    // Abort the rebase
+    repo.git(&["rebase", "--abort"])
+        .expect("rebase --abort should succeed");
+
+    // Verify HEAD is back to original feature SHA
+    let current_head = repo
+        .git(&["rev-parse", "HEAD"])
+        .expect("rev-parse should succeed")
+        .trim()
+        .to_string();
+
+    assert_eq!(
+        current_head, setup.feature_ai_commit_sha,
+        "HEAD should be back to original feature commit after abort"
+    );
+
+    // Verify authorship notes on the original SHA are still intact
+    let post_abort_note = repo.read_authorship_note(&setup.feature_ai_commit_sha);
+    assert!(
+        post_abort_note.is_some(),
+        "Feature AI commit should still have authorship notes after abort"
+    );
+}
+
 crate::reuse_tests_in_worktree!(
     test_fast_forward_pull_preserves_ai_attribution,
     test_fast_forward_pull_without_local_changes,
@@ -732,4 +954,7 @@ crate::reuse_tests_in_worktree!(
     test_pull_rebase_committed_and_autostash_preserves_all_authorship,
     test_pull_rebase_skip_commit_does_not_map_entire_upstream_history,
     test_pull_rebase_with_conflict_preserves_ai_notes,
+    test_pull_rebase_with_conflict_abort_preserves_original_notes,
+    test_regular_rebase_with_conflict_preserves_ai_notes,
+    test_regular_rebase_with_conflict_abort_preserves_original_notes,
 );
