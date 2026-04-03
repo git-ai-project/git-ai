@@ -16,6 +16,7 @@ pub mod git_hook_handlers;
 pub mod hooks;
 pub mod install_hooks;
 pub mod login;
+pub mod logs;
 pub mod logout;
 pub mod personal_dashboard;
 pub mod prompt_picker;
