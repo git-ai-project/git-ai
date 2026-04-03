@@ -252,7 +252,9 @@ fn test_firebender_preset_missing_model() {
     assert!(result.is_err());
     match result {
         Err(GitAiError::PresetError(msg)) => {
-            assert!(msg.contains("missing field `model`") || msg.contains("Invalid JSON in hook_input"));
+            assert!(
+                msg.contains("missing field `model`") || msg.contains("Invalid JSON in hook_input")
+            );
         }
         _ => panic!("Expected PresetError for missing model"),
     }
