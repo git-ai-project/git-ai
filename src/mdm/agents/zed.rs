@@ -130,7 +130,7 @@ Replace "claude" with your preferred agent command if different.
         );
 
         Ok(vec![InstallResult {
-            changed: true,
+            changed: false,
             diff: None,
             message: instructions,
         }])
