@@ -266,7 +266,7 @@ pub fn render_conversation(log: &ConversationLog, max_chars: usize) -> String {
             // Truncate to fit within budget
             let remaining = max_chars.saturating_sub(out.len());
             if remaining > 64 {
-                out.push_str(&line[..remaining]);
+                out.push_str(&line[..line.floor_char_boundary(remaining)]);
                 out.push_str("\n\n[... conversation truncated for length ...]\n");
             }
             break;

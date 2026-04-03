@@ -126,6 +126,7 @@ fn maybe_spawn_synopsis_background(commit_sha: &str) {
     // the whole environment, which is simplest and correct.
     let mut cmd = std::process::Command::new(&exe);
     cmd.args(["synopsis", "generate", "--commit", commit_sha]);
+    cmd.env_remove("GIT_AI");
 
     // Detach: on Unix, double-fork is the cleanest approach, but simply
     // spawning without waiting is sufficient for a short-lived helper.
