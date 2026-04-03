@@ -1,0 +1,10 @@
+{
+  "type": "text",
+  "id": "prt-003",
+  "messageID": "msg-assistant-001",
+  "text": "Done! I've updated the comment to 'Hello World'.",
+  "time": {
+    "start": 1706459834000,
+    "end": 1706459834500
+  }
+}
