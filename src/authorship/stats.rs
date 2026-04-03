@@ -535,29 +535,30 @@ pub fn stats_for_commit_stats(
 ) -> Result<CommitStats, GitAiError> {
     let commit_obj = repo.revparse_single(commit_sha)?.peel_to_commit()?;
 
-    // Step 1: get the diff between this commit and its parent ON refname (if more than one parent)
-    // If initial than everything is additions
-    // We want the count here git shows +111 -55
-    let (git_diff_added_lines, git_diff_deleted_lines) =
-        get_git_diff_stats(repo, commit_sha, ignore_patterns)?;
+    // Step 1: get the diff between this commit and its parent.
+    // For merge commits, diff against the first parent to see what the merge introduced.
+    // For regular commits, use git show --numstat.
+    let parent_count = commit_obj.parent_count()?;
+    let is_merge_commit = parent_count > 1;
+    let (git_diff_added_lines, git_diff_deleted_lines) = if is_merge_commit {
+        get_git_diff_stats_first_parent(repo, commit_sha, ignore_patterns)?
+    } else {
+        get_git_diff_stats(repo, commit_sha, ignore_patterns)?
+    };
 
     // Step 2: get the authorship log for this commit
     let authorship_log = get_authorship(repo, commit_sha);
 
     // Step 3: get line numbers added by this specific commit, then intersect with attestations.
     // This keeps accepted stats scoped to the target commit while avoiding expensive blame traversal.
-    let parent_count = commit_obj.parent_count()?;
-    let is_merge_commit = parent_count > 1;
-    let mut added_lines_by_file: HashMap<String, Vec<u32>> = if is_merge_commit {
-        HashMap::new()
+    // For merge commits, diff against the first parent to capture conflict resolution changes.
+    let from_ref = if parent_count == 0 {
+        "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()
     } else {
-        let from_ref = if parent_count == 0 {
-            "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()
-        } else {
-            commit_obj.parent(0)?.id()
-        };
-        repo.diff_added_lines(&from_ref, commit_sha, None)?
+        commit_obj.parent(0)?.id()
     };
+    let mut added_lines_by_file: HashMap<String, Vec<u32>> =
+        repo.diff_added_lines(&from_ref, commit_sha, None)?;
     let ignore_matcher = build_ignore_matcher(ignore_patterns);
     added_lines_by_file
         .retain(|file_path, _| !should_ignore_file_with_matcher(file_path, &ignore_matcher));
@@ -567,11 +568,8 @@ pub fn stats_for_commit_stats(
     }
 
     // Step 4: derive accepted lines directly from note attestations for lines added in this commit.
-    let (ai_accepted, ai_accepted_by_tool) = accepted_lines_from_attestations(
-        authorship_log.as_ref(),
-        &added_lines_by_file,
-        is_merge_commit,
-    );
+    let (ai_accepted, ai_accepted_by_tool) =
+        accepted_lines_from_attestations(authorship_log.as_ref(), &added_lines_by_file);
 
     // Step 5: Calculate stats from authorship log
     Ok(stats_from_authorship_log(
@@ -586,12 +584,7 @@ pub fn stats_for_commit_stats(
 fn accepted_lines_from_attestations(
     authorship_log: Option<&crate::authorship::authorship_log_serialization::AuthorshipLog>,
     added_lines_by_file: &HashMap<String, Vec<u32>>,
-    is_merge_commit: bool,
 ) -> (u32, BTreeMap<String, u32>) {
-    if is_merge_commit {
-        return (0, BTreeMap::new());
-    }
-
     let mut total_ai_accepted = 0u32;
     let mut per_tool_model = BTreeMap::new();
 
@@ -657,6 +650,36 @@ pub fn get_git_diff_stats(
     let output = exec_git_with_profile(&args, InternalGitProfile::NumstatParse)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
 
+    parse_numstat_output(&stdout, ignore_patterns)
+}
+
+/// Get git diff statistics for a merge commit by diffing against first parent.
+/// `git show --numstat` on merge commits uses the combined diff format, which only shows
+/// files that differ from ALL parents (i.e. conflict resolutions). This misses changes
+/// that were cleanly merged. Instead, we diff against the first parent to see everything
+/// the merge introduced relative to the branch it was merged into.
+fn get_git_diff_stats_first_parent(
+    repo: &Repository,
+    commit_sha: &str,
+    ignore_patterns: &[String],
+) -> Result<(u32, u32), GitAiError> {
+    let mut args = repo.global_args_for_exec();
+    args.push("diff".to_string());
+    args.push("--numstat".to_string());
+    args.push(format!("{}^1", commit_sha));
+    args.push(commit_sha.to_string());
+
+    let output = exec_git_with_profile(&args, InternalGitProfile::NumstatParse)?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    parse_numstat_output(&stdout, ignore_patterns)
+}
+
+/// Parse numstat output lines into (added, deleted) totals.
+fn parse_numstat_output(
+    stdout: &str,
+    ignore_patterns: &[String],
+) -> Result<(u32, u32), GitAiError> {
     let mut added_lines = 0u32;
     let mut deleted_lines = 0u32;
     let ignore_matcher = build_ignore_matcher(ignore_patterns);
@@ -1281,14 +1304,16 @@ mod tests {
     #[test]
     fn test_accepted_lines_no_authorship_log() {
         let added_lines: HashMap<String, Vec<u32>> = HashMap::new();
-        let (accepted, per_tool) = accepted_lines_from_attestations(None, &added_lines, false);
+        let (accepted, per_tool) = accepted_lines_from_attestations(None, &added_lines);
         assert_eq!(accepted, 0);
         assert!(per_tool.is_empty());
     }
 
     #[test]
-    fn test_accepted_lines_merge_commit() {
-        // Even with a real authorship log, merge commits should short-circuit to (0, empty)
+    fn test_accepted_lines_merge_commit_now_counts_ai() {
+        // After fixing issue #910, merge commits should correctly count AI accepted lines
+        // when added_lines_by_file is populated (which stats_for_commit_stats now does
+        // by diffing against the first parent).
         let mut log = crate::authorship::authorship_log_serialization::AuthorshipLog::new();
         let agent_id = crate::authorship::working_log::AgentId {
             tool: "cursor".to_string(),
@@ -1328,9 +1353,9 @@ mod tests {
         let mut added_lines: HashMap<String, Vec<u32>> = HashMap::new();
         added_lines.insert("foo.rs".to_string(), vec![1, 2, 3]);
 
-        let (accepted, per_tool) = accepted_lines_from_attestations(Some(&log), &added_lines, true);
-        assert_eq!(accepted, 0);
-        assert!(per_tool.is_empty());
+        let (accepted, per_tool) = accepted_lines_from_attestations(Some(&log), &added_lines);
+        assert_eq!(accepted, 3);
+        assert_eq!(per_tool.get("cursor::claude-3-sonnet"), Some(&3));
     }
 
     #[test]
@@ -1375,8 +1400,7 @@ mod tests {
         let mut added_lines: HashMap<String, Vec<u32>> = HashMap::new();
         added_lines.insert("bar.rs".to_string(), vec![1, 2, 3]);
 
-        let (accepted, per_tool) =
-            accepted_lines_from_attestations(Some(&log), &added_lines, false);
+        let (accepted, per_tool) = accepted_lines_from_attestations(Some(&log), &added_lines);
         assert_eq!(accepted, 0);
         assert!(per_tool.is_empty());
     }
@@ -1422,8 +1446,7 @@ mod tests {
         let mut added_lines: HashMap<String, Vec<u32>> = HashMap::new();
         added_lines.insert("foo.rs".to_string(), vec![1, 2, 3]);
 
-        let (accepted, per_tool) =
-            accepted_lines_from_attestations(Some(&log), &added_lines, false);
+        let (accepted, per_tool) = accepted_lines_from_attestations(Some(&log), &added_lines);
         assert_eq!(accepted, 3);
 
         // Verify per-tool breakdown contains the right key
@@ -1471,7 +1494,12 @@ mod tests {
     }
 
     #[test]
-    fn test_stats_for_merge_commit_skips_ai_acceptance() {
+    fn test_stats_for_merge_commit_no_notes_on_merge() {
+        // Non-conflicting merge where the AI authorship notes live on the feature commit,
+        // not on the merge commit itself.  The merge commit has no authorship log, so
+        // ai_accepted should be 0.  However, the merge introduces lines relative to the
+        // first parent, so git_diff_added_lines > 0 (unlike the old combined-diff path
+        // which returned 0 for non-conflicting merges).
         let tmp_repo = TmpRepo::new().unwrap();
 
         tmp_repo.write_file("test.txt", "base\n", true).unwrap();
@@ -1504,8 +1532,12 @@ mod tests {
         let merge_sha = tmp_repo.get_head_commit_sha().unwrap();
         let stats = stats_for_commit_stats(tmp_repo.gitai_repo(), &merge_sha, &[]).unwrap();
 
+        // No authorship log on the merge commit → ai_accepted stays 0
         assert_eq!(stats.ai_accepted, 0);
-        assert_eq!(stats.ai_additions, stats.mixed_additions);
+        // The merge introduced 1 line ("feature line") relative to the first parent
+        assert_eq!(stats.git_diff_added_lines, 1);
+        // With no AI notes, the added line is attributed to human
+        assert_eq!(stats.human_additions, 1);
     }
 
     #[test]
