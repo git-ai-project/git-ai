@@ -75,18 +75,17 @@ pub fn pull_pre_command_hook(
 
     // Write RebaseStart so that `git rebase --continue` (after conflict)
     // can recover the correct original_head from the rewrite log.
-    if config.is_rebase {
-        if let Some(head_sha) = repository.head().ok().and_then(|h| h.target().ok()) {
-            let start_event = RewriteLogEvent::rebase_start(
-                crate::git::rewrite_log::RebaseStartEvent::new_with_onto(
-                    head_sha,
-                    false,
-                    None,
-                ),
-            );
-            if let Err(e) = repository.storage.append_rewrite_event(start_event) {
-                debug_log(&format!("pull pre-hook: failed to write RebaseStart: {}", e));
-            }
+    if config.is_rebase
+        && let Some(head_sha) = repository.head().ok().and_then(|h| h.target().ok())
+    {
+        let start_event = RewriteLogEvent::rebase_start(
+            crate::git::rewrite_log::RebaseStartEvent::new_with_onto(head_sha, false, None),
+        );
+        if let Err(e) = repository.storage.append_rewrite_event(start_event) {
+            debug_log(&format!(
+                "pull pre-hook: failed to write RebaseStart: {}",
+                e
+            ));
         }
     }
 
