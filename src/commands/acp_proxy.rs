@@ -8,12 +8,12 @@ use std::thread;
 #[derive(Debug, Clone)]
 struct TrackedToolCall {
     file_paths: Vec<String>,
+    session_id: String,
 }
 
 /// Shared proxy state
 struct ProxyState {
     tracked_edits: HashMap<String, TrackedToolCall>,
-    session_id: Option<String>,
     cwd: String,
     git_ai_binary: String,
 }
@@ -199,13 +199,12 @@ fn inspect_agent_message(
 
     match method {
         "session/update" => {
-            // Extract session_id if present
-            if let Some(sid) = params.get("sessionId").and_then(|v| v.as_str()) {
-                let mut st = state.lock().unwrap();
-                if st.session_id.is_none() {
-                    st.session_id = Some(sid.to_string());
-                }
-            }
+            // Extract session_id from this notification — passed to handlers so
+            // each tool call is attributed to the correct session.
+            let session_id = params
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
 
             // ACP protocol: params.update is a single SessionUpdate object
             // discriminated by the "sessionUpdate" field
@@ -215,13 +214,13 @@ fn inspect_agent_message(
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 match update_type {
-                    "tool_call" => handle_tool_call(update, state, tracker),
+                    "tool_call" => handle_tool_call(update, state, tracker, session_id),
                     "tool_call_update" => handle_tool_call_update(update, state, tracker),
                     _ => {}
                 }
             }
         }
-        "tool_call" => handle_tool_call(params, state, tracker),
+        "tool_call" => handle_tool_call(params, state, tracker, "unknown"),
         "tool_call_update" => handle_tool_call_update(params, state, tracker),
         _ => {}
     }
@@ -232,6 +231,7 @@ fn handle_tool_call(
     params: &serde_json::Value,
     state: &Arc<Mutex<ProxyState>>,
     tracker: &Arc<CheckpointTracker>,
+    session_id: &str,
 ) {
     let kind = match params.get("kind").and_then(|v| v.as_str()) {
         Some(k) => k,
@@ -249,30 +249,25 @@ fn handle_tool_call(
 
     let file_paths = extract_file_paths(params);
 
-    let (git_ai_binary, session_id, cwd) = {
+    let (git_ai_binary, cwd) = {
         let mut st = state.lock().unwrap();
 
         st.tracked_edits.insert(
             tool_call_id.clone(),
             TrackedToolCall {
                 file_paths: file_paths.clone(),
+                session_id: session_id.to_string(),
             },
         );
 
-        (
-            st.git_ai_binary.clone(),
-            st.session_id
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string()),
-            st.cwd.clone(),
-        )
+        (st.git_ai_binary.clone(), st.cwd.clone())
     };
 
     if !file_paths.is_empty() {
         spawn_checkpoint(
             &git_ai_binary,
             "PreToolUse",
-            &session_id,
+            session_id,
             &cwd,
             &file_paths,
             tracker,
@@ -306,6 +301,10 @@ fn handle_tool_call_update(
         match status {
             "completed" => {
                 let tracked = st.tracked_edits.remove(tool_call_id);
+                let session_id = tracked
+                    .as_ref()
+                    .map(|t| t.session_id.clone())
+                    .unwrap_or_else(|| "unknown".to_string());
                 let mut paths = tracked.map(|t| t.file_paths).unwrap_or_default();
 
                 // Merge update paths
@@ -315,14 +314,7 @@ fn handle_tool_call_update(
                     }
                 }
 
-                (
-                    st.git_ai_binary.clone(),
-                    st.session_id
-                        .clone()
-                        .unwrap_or_else(|| "unknown".to_string()),
-                    st.cwd.clone(),
-                    paths,
-                )
+                (st.git_ai_binary.clone(), session_id, st.cwd.clone(), paths)
             }
             "failed" | "cancelled" => {
                 st.tracked_edits.remove(tool_call_id);
@@ -437,7 +429,6 @@ pub fn handle_acp_proxy(args: &[String]) {
 
     let state = Arc::new(Mutex::new(ProxyState {
         tracked_edits: HashMap::new(),
-        session_id: None,
         cwd,
         git_ai_binary,
     }));
@@ -636,7 +627,6 @@ mod tests {
     fn test_inspect_agent_message_tool_call() {
         let state = Arc::new(Mutex::new(ProxyState {
             tracked_edits: HashMap::new(),
-            session_id: Some("test-session".to_string()),
             cwd: "/tmp".to_string(),
             git_ai_binary: "/usr/bin/false".to_string(), // won't actually run
         }));
@@ -666,7 +656,6 @@ mod tests {
     fn test_inspect_agent_message_non_edit_kind_not_tracked() {
         let state = Arc::new(Mutex::new(ProxyState {
             tracked_edits: HashMap::new(),
-            session_id: Some("test-session".to_string()),
             cwd: "/tmp".to_string(),
             git_ai_binary: "/usr/bin/false".to_string(),
         }));
@@ -695,7 +684,6 @@ mod tests {
     fn test_inspect_agent_message_tool_call_update_completed() {
         let state = Arc::new(Mutex::new(ProxyState {
             tracked_edits: HashMap::new(),
-            session_id: Some("test-session".to_string()),
             cwd: "/tmp".to_string(),
             git_ai_binary: "/usr/bin/false".to_string(),
         }));
@@ -711,6 +699,7 @@ mod tests {
                 "tc-3".to_string(),
                 TrackedToolCall {
                     file_paths: vec!["src/main.rs".to_string()],
+                    session_id: "test-session".to_string(),
                 },
             );
         }
@@ -735,7 +724,6 @@ mod tests {
     fn test_inspect_agent_message_tool_call_update_failed() {
         let state = Arc::new(Mutex::new(ProxyState {
             tracked_edits: HashMap::new(),
-            session_id: Some("test-session".to_string()),
             cwd: "/tmp".to_string(),
             git_ai_binary: "/usr/bin/false".to_string(),
         }));
@@ -750,6 +738,7 @@ mod tests {
                 "tc-4".to_string(),
                 TrackedToolCall {
                     file_paths: vec!["src/main.rs".to_string()],
+                    session_id: "test-session".to_string(),
                 },
             );
         }
@@ -770,10 +759,9 @@ mod tests {
     }
 
     #[test]
-    fn test_inspect_agent_message_session_update_with_session_id() {
+    fn test_inspect_session_update_captures_session_id_per_tool_call() {
         let state = Arc::new(Mutex::new(ProxyState {
             tracked_edits: HashMap::new(),
-            session_id: None,
             cwd: "/tmp".to_string(),
             git_ai_binary: "/usr/bin/false".to_string(),
         }));
@@ -782,29 +770,51 @@ mod tests {
             done: Condvar::new(),
         });
 
-        let msg = serde_json::json!({
+        // Tool call from session "acp-A"
+        let msg_a = serde_json::json!({
             "jsonrpc": "2.0",
             "method": "session/update",
             "params": {
-                "sessionId": "acp-123",
+                "sessionId": "acp-A",
                 "update": {
-                    "sessionUpdate": "agent_message_chunk",
-                    "content": []
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "tc-from-a",
+                    "kind": "edit",
+                    "title": "Edit",
+                    "locations": [{"path": "a.rs"}]
                 }
             }
         });
 
-        inspect_agent_message(&msg.to_string(), &state, &tracker);
+        // Tool call from session "acp-B"
+        let msg_b = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "acp-B",
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "tc-from-b",
+                    "kind": "edit",
+                    "title": "Edit",
+                    "locations": [{"path": "b.rs"}]
+                }
+            }
+        });
+
+        inspect_agent_message(&msg_a.to_string(), &state, &tracker);
+        inspect_agent_message(&msg_b.to_string(), &state, &tracker);
 
         let st = state.lock().unwrap();
-        assert_eq!(st.session_id, Some("acp-123".to_string()));
+        // Each tool call should carry its own session's ID
+        assert_eq!(st.tracked_edits["tc-from-a"].session_id, "acp-A");
+        assert_eq!(st.tracked_edits["tc-from-b"].session_id, "acp-B");
     }
 
     #[test]
     fn test_inspect_session_update_tool_call() {
         let state = Arc::new(Mutex::new(ProxyState {
             tracked_edits: HashMap::new(),
-            session_id: Some("test-session".to_string()),
             cwd: "/tmp".to_string(),
             git_ai_binary: "/usr/bin/false".to_string(),
         }));
@@ -839,7 +849,6 @@ mod tests {
     fn test_inspect_session_update_tool_call_update() {
         let state = Arc::new(Mutex::new(ProxyState {
             tracked_edits: HashMap::new(),
-            session_id: Some("test-session".to_string()),
             cwd: "/tmp".to_string(),
             git_ai_binary: "/usr/bin/false".to_string(),
         }));
@@ -855,6 +864,7 @@ mod tests {
                 "tc-acp-2".to_string(),
                 TrackedToolCall {
                     file_paths: vec!["src/lib.rs".to_string()],
+                    session_id: "test-session".to_string(),
                 },
             );
         }

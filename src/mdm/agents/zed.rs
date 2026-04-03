@@ -1,6 +1,6 @@
 use crate::error::GitAiError;
 use crate::mdm::hook_installer::{
-    HookCheckResult, HookInstaller, HookInstallerParams, InstallResult,
+    HookCheckResult, HookInstaller, HookInstallerParams, InstallResult, UninstallResult,
 };
 use crate::mdm::utils::{binary_exists, home_dir};
 use std::fs;
@@ -73,7 +73,11 @@ impl HookInstaller for ZedInstaller {
             return Ok(None); // Already configured
         }
 
-        let binary_path = params.binary_path.display().to_string();
+        let binary_path = params
+            .binary_path
+            .display()
+            .to_string()
+            .replace('\\', "\\\\");
 
         // We can't safely auto-modify Zed's settings.json (it's JSONC with comments),
         // so we print instructions for the user.
@@ -115,7 +119,11 @@ Replace "claude" with your preferred agent command if different.
             }]);
         }
 
-        let binary_path = params.binary_path.display().to_string();
+        let binary_path = params
+            .binary_path
+            .display()
+            .to_string()
+            .replace('\\', "\\\\");
         let instructions = format!(
             r#"Zed: Add the following to ~/.config/zed/settings.json:
 
@@ -141,17 +149,26 @@ Replace "claude" with your preferred agent command if different.
         _params: &HookInstallerParams,
         _dry_run: bool,
     ) -> Result<Option<String>, GitAiError> {
+        // Zed's settings.json is not auto-modified, so there are no hooks to
+        // remove programmatically. Returning Ok(None) avoids the framework
+        // claiming hooks were removed when settings.json is still untouched.
+        Ok(None)
+    }
+
+    fn uninstall_extras(
+        &self,
+        _params: &HookInstallerParams,
+        _dry_run: bool,
+    ) -> Result<Vec<UninstallResult>, GitAiError> {
         if !Self::is_acp_proxy_configured() {
-            return Ok(None);
+            return Ok(vec![]);
         }
 
-        let instructions = r#"
-To remove git-ai from Zed, delete the "agent_servers" entry containing
-"acp-proxy" from your Zed settings.json (~/.config/zed/settings.json).
-"#
-        .to_string();
-
-        Ok(Some(instructions))
+        Ok(vec![UninstallResult {
+            changed: false,
+            diff: None,
+            message: "Zed: Remove the \"agent_servers\" entry containing \"acp-proxy\" from ~/.config/zed/settings.json".to_string(),
+        }])
     }
 }
 
