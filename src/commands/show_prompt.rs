@@ -2,7 +2,9 @@ use crate::api::client::{ApiClient, ApiContext};
 use crate::api::types::CasMessagesObject;
 use crate::authorship::internal_db::InternalDatabase;
 use crate::authorship::prompt_utils::find_prompt;
+use crate::authorship::transcript::Message;
 use crate::git::find_repository;
+use crate::git::repository::Repository;
 use crate::utils::debug_log;
 
 /// Handle the `show-prompt` command
@@ -113,6 +115,26 @@ pub fn handle_show_prompt(args: &[String]) {
                 }
             }
 
+            // When --commit is specified, scope messages to only those up to the
+            // commit's timestamp.  In multi-commit sessions the same prompt ID
+            // appears in several commits, but messages may have been resolved
+            // from a single shared source (CAS / SQLite) that contains the full
+            // session.  Truncating by the commit's author-date keeps the output
+            // specific to the requested commit.
+            if parsed.commit.is_some()
+                && !prompt_record.messages.is_empty()
+                && let Ok(truncated) =
+                    truncate_messages_to_commit(&repo, &commit_sha, &prompt_record.messages)
+            {
+                debug_log(&format!(
+                    "show-prompt: truncated messages from {} to {} for commit {}",
+                    prompt_record.messages.len(),
+                    truncated.len(),
+                    &commit_sha[..8.min(commit_sha.len())]
+                ));
+                prompt_record.messages = truncated;
+            }
+
             // Output the prompt as JSON, including the commit SHA for context
             let output = serde_json::json!({
                 "commit": commit_sha,
@@ -136,6 +158,40 @@ pub struct ParsedArgs {
     pub prompt_id: String,
     pub commit: Option<String>,
     pub offset: usize,
+}
+
+/// Truncate messages to only those that occurred up to (and including) the
+/// specified commit.  Uses the commit's author-date as the cutoff: any message
+/// whose RFC-3339 timestamp is **after** the commit time is dropped.
+///
+/// Messages without a timestamp are always kept (we cannot prove they are
+/// beyond the commit).  This is a best-effort heuristic that works well when
+/// agent transcripts carry per-message timestamps (Claude Code, Cursor, etc.).
+///
+/// Returns the truncated Vec, or an error if the commit metadata cannot be read.
+pub fn truncate_messages_to_commit(
+    repo: &Repository,
+    commit_sha: &str,
+    messages: &[Message],
+) -> Result<Vec<Message>, crate::error::GitAiError> {
+    let commit = repo.find_commit(commit_sha.to_string())?;
+    let commit_time = commit.time()?.seconds();
+
+    // Find the truncation point: keep all messages up to and including the
+    // last message whose timestamp is <= commit_time.  Once we see a message
+    // with a timestamp strictly after the commit, we stop.
+    let mut truncation_index = messages.len(); // default: keep everything
+    for (i, msg) in messages.iter().enumerate() {
+        if let Some(ts_str) = msg.timestamp()
+            && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts_str)
+            && dt.timestamp() > commit_time
+        {
+            truncation_index = i;
+            break;
+        }
+    }
+
+    Ok(messages[..truncation_index].to_vec())
 }
 
 pub fn parse_args(args: &[String]) -> Result<ParsedArgs, String> {
