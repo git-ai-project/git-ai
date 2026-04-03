@@ -160,7 +160,27 @@ pub fn pull_post_command_hook(
     }
 
     if !exit_status.success() {
-        debug_log("Pull failed, skipping post-pull authorship restoration");
+        // If pull --rebase hit a conflict, a rebase is paused. Log a RebaseStart
+        // event so that `git rebase --continue` can find the correct original HEAD.
+        let rebase_dir = repository.path().join("rebase-merge");
+        let rebase_apply_dir = repository.path().join("rebase-apply");
+        if (rebase_dir.exists() || rebase_apply_dir.exists())
+            && let Some(original_head) = &repository.pre_command_base_commit
+        {
+            debug_log(&format!(
+                "Pull --rebase paused (conflict); logging RebaseStart with original_head={}",
+                original_head
+            ));
+            let onto_head = resolve_pull_rebase_onto_head(repository);
+            let start_event = RewriteLogEvent::rebase_start(
+                crate::git::rewrite_log::RebaseStartEvent::new_with_onto(
+                    original_head.clone(),
+                    false,
+                    onto_head,
+                ),
+            );
+            let _ = repository.storage.append_rewrite_event(start_event);
+        }
         return;
     }
 
