@@ -1,24 +1,30 @@
 version: "3"
 tasks:
-  # CLI
+  dev:
+    desc: Setup git-ai debug build for local dev
+    deps: [build-debug]
+    cmds:
+      - ./scripts/dev.sh
   build:
-    desc: Build the project in release mode (native Apple Silicon)
+    desc: Build the project in release mode
     cmds:
       - cargo build --release
     sources:
       - src/**/*.rs
       - Cargo.toml
     generates:
-      - target/release/git-ai-cli
+      - target/release/git-ai
+
   build-debug:
-    desc: Build the project in debug mode (native Apple Silicon)
+    desc: Build the project in debug mode
     cmds:
       - cargo build
     sources:
       - src/**/*.rs
       - Cargo.toml
     generates:
-      - target/debug/git-ai-cli
+      - target/debug/git-ai
+
   clean:
     desc: Clean build artifacts
     cmds:
