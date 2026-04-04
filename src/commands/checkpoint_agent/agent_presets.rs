@@ -5,6 +5,7 @@ use crate::{
     },
     error::GitAiError,
     observability::log_error,
+    utils::normalize_to_posix,
 };
 use chrono::{TimeZone, Utc};
 use dirs;
@@ -3665,19 +3666,25 @@ impl FirebenderPreset {
             return None;
         }
 
-        let path = std::path::Path::new(trimmed);
-        let normalized = if path.is_absolute() {
-            let cwd_path = std::path::Path::new(cwd);
-            if let Ok(relative) = path.strip_prefix(cwd_path) {
-                relative.to_string_lossy().to_string()
-            } else {
-                trimmed.to_string()
-            }
+        let normalized_path = normalize_to_posix(trimmed);
+        let normalized_cwd = normalize_to_posix(cwd.trim())
+            .trim_end_matches('/')
+            .to_string();
+
+        if normalized_cwd.is_empty() {
+            return Some(normalized_path);
+        }
+
+        let relative = if normalized_path == normalized_cwd {
+            String::new()
+        } else if let Some(stripped) = normalized_path.strip_prefix(&(normalized_cwd.clone() + "/"))
+        {
+            stripped.to_string()
         } else {
-            trimmed.to_string()
+            normalized_path
         };
 
-        Some(normalized.replace('\\', "/"))
+        Some(relative)
     }
 
     fn extract_patch_paths(patch: &str) -> Vec<String> {
