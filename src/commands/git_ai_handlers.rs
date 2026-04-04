@@ -1052,6 +1052,10 @@ fn handle_checkpoint(args: &[String]) {
 
             let mut modified = base_result.clone();
             modified.repo_working_dir = Some(repo_workdir.to_string_lossy().to_string());
+            // Clear stale captured checkpoint ID — the original capture was consumed
+            // (or will be consumed) by the primary repo's checkpoint dispatch and
+            // the on-disk files may already be deleted by the daemon.
+            modified.captured_checkpoint_id = None;
             if base_result.checkpoint_kind == CheckpointKind::Human {
                 modified.will_edit_filepaths = Some(repo_file_paths);
                 modified.edited_filepaths = None;
