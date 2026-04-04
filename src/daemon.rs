@@ -6188,6 +6188,15 @@ impl ActorDaemonCoordinator {
         family: Option<&str>,
         applied: &crate::daemon::domain::AppliedCommand,
     ) -> Result<(), GitAiError> {
+        // Test-only: allow inducing a panic in the side-effect pipeline to verify
+        // that the daemon's catch_unwind recovery keeps the process alive.
+        // Uses a file-based flag so the test can remove the file between commands.
+        if let Ok(path) = std::env::var("GIT_AI_TEST_PANIC_IN_SIDE_EFFECT_FLAG")
+            && std::path::Path::new(&path).exists()
+        {
+            panic!("test-induced panic in side-effect pipeline");
+        }
+
         let cmd = &applied.command;
         let events = &applied.analysis.events;
         let parsed_invocation = parsed_invocation_for_normalized_command(cmd);

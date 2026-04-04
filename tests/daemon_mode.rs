@@ -383,6 +383,10 @@ struct DaemonGuard {
 
 impl DaemonGuard {
     fn start(repo: &TestRepo) -> Self {
+        Self::start_with_env(repo, &[])
+    }
+
+    fn start_with_env(repo: &TestRepo, extra_env: &[(&str, &str)]) -> Self {
         let daemon_home = repo.daemon_home_path();
         let control_socket_path = daemon_control_socket_path(repo);
         let trace_socket_path = daemon_trace_socket_path(repo);
@@ -395,6 +399,9 @@ impl DaemonGuard {
             .env("GITAI_TEST_DB_PATH", repo.test_db_path())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        for (key, value) in extra_env {
+            command.env(key, value);
+        }
         configure_test_home_env(&mut command, repo.test_home_path());
         configure_test_daemon_env(
             &mut command,
@@ -4484,4 +4491,133 @@ fn process_exists(pid: u32) -> bool {
             .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
             .unwrap_or(false)
     }
+}
+
+/// Regression test for issue #919: daemon must recover from panics in the
+/// side-effect pipeline and continue processing subsequent commands.
+///
+/// This test:
+/// 1. Starts a dedicated daemon with a file-based panic flag.
+/// 2. Sends a git commit that triggers side-effect processing → panic.
+/// 3. Verifies the daemon process is still alive (not a zombie).
+/// 4. Removes the panic flag file.
+/// 5. Sends another git commit and verifies the daemon processes it normally.
+/// 6. Cleanly shuts down the daemon.
+#[test]
+#[serial]
+fn daemon_recovers_from_panic_in_side_effect_pipeline() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+
+    // Create a flag file that will trigger a panic in the side-effect pipeline.
+    let panic_flag_path = repo.path().join(".panic_flag");
+    fs::write(&panic_flag_path, "1").expect("failed to write panic flag");
+
+    let mut daemon = DaemonGuard::start_with_env(
+        &repo,
+        &[(
+            "GIT_AI_TEST_PANIC_IN_SIDE_EFFECT_FLAG",
+            panic_flag_path
+                .to_str()
+                .expect("panic flag path should be utf-8"),
+        )],
+    );
+    let daemon_pid = daemon.child.id();
+
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let env = git_trace_env(&trace_socket);
+    let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
+
+    // Phase 1 — Send a commit while the panic flag is active.
+    // The daemon will panic inside the side-effect pipeline, but catch_unwind
+    // should keep it alive.  Because panicked commands do NOT emit completion
+    // log entries, we cannot use wait_for_expected_top_level_completions here.
+    // Instead we track these commands in a throwaway counter and poll the
+    // daemon's control socket to confirm it is still responsive.
+    let mut _throwaway = 0u64;
+
+    fs::write(repo.path().join("file.txt"), "initial\n").expect("failed to write initial file");
+    traced_git_with_env(&repo, &["add", "file.txt"], &env_refs, &mut _throwaway)
+        .expect("add should succeed");
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "initial"],
+        &env_refs,
+        &mut _throwaway,
+    )
+    .expect("initial commit should succeed");
+
+    // Give the daemon enough time to ingest the trace events and attempt
+    // (and panic in) side-effect processing.  Poll the control socket to
+    // confirm the daemon is still responsive.
+    let mut daemon_responded = false;
+    for _ in 0..30 {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if send_control_request(
+            &daemon.control_socket_path,
+            &ControlRequest::StatusFamily {
+                repo_working_dir: daemon.repo_working_dir.clone(),
+            },
+        )
+        .is_ok()
+        {
+            daemon_responded = true;
+            break;
+        }
+    }
+    assert!(
+        daemon_responded,
+        "daemon control socket should respond after panic in side-effect pipeline"
+    );
+
+    // Verify the daemon process is still alive after the panic.
+    assert!(
+        process_exists(daemon_pid),
+        "daemon process should still be alive after a panic in side-effect pipeline"
+    );
+    assert!(
+        daemon
+            .child
+            .try_wait()
+            .expect("failed to poll daemon")
+            .is_none(),
+        "daemon should not have exited after panic"
+    );
+
+    // Phase 2 — Remove the panic flag and verify the daemon processes a new
+    // commit end-to-end (completion log entry recorded).
+    fs::remove_file(&panic_flag_path).expect("failed to remove panic flag");
+
+    let completion_baseline = repo.daemon_total_completion_count();
+    let mut expected_top_level_completions = 0u64;
+
+    fs::write(repo.path().join("file.txt"), "updated\n").expect("failed to write updated file");
+    traced_git_with_env(
+        &repo,
+        &["add", "file.txt"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("second add should succeed");
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "second commit"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("second commit should succeed");
+
+    wait_for_expected_top_level_completions(
+        &repo,
+        completion_baseline,
+        expected_top_level_completions,
+    );
+
+    // Verify the daemon is still alive after recovering and processing normal commands.
+    assert!(
+        process_exists(daemon_pid),
+        "daemon should still be alive after recovering and processing normal commands"
+    );
+
+    // Clean shutdown.
+    daemon.shutdown();
 }
