@@ -2285,15 +2285,17 @@ fn run_diff_tree_with_hunks(
 
     for line in text.lines() {
         // Commit header line (hex SHA)
-        if line.len() >= 40
-            && commit_set.contains(&line[..40])
-            && line[..40].chars().all(|c| c.is_ascii_hexdigit())
+        // Use .get(..40) instead of &line[..40] to safely handle lines containing
+        // multi-byte UTF-8 characters where byte index 40 may not be a char boundary.
+        if let Some(prefix) = line.get(..40)
+            && commit_set.contains(prefix)
+            && prefix.chars().all(|c| c.is_ascii_hexdigit())
         {
             // Save previous commit's delta
             if let Some(ref prev_commit) = current_commit {
                 commit_deltas.push((prev_commit.clone(), std::mem::take(&mut current_delta)));
             }
-            current_commit = Some(line[..40].to_string());
+            current_commit = Some(prefix.to_string());
             current_diff_file = None;
             continue;
         }
