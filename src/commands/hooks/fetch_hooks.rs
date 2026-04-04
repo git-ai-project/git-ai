@@ -73,22 +73,6 @@ pub fn pull_pre_command_hook(
         config.is_rebase, config.is_autostash, has_changes
     ));
 
-    // Write RebaseStart so that `git rebase --continue` (after conflict)
-    // can recover the correct original_head from the rewrite log.
-    if config.is_rebase
-        && let Some(head_sha) = repository.head().ok().and_then(|h| h.target().ok())
-    {
-        let start_event = RewriteLogEvent::rebase_start(
-            crate::git::rewrite_log::RebaseStartEvent::new_with_onto(head_sha, false, None),
-        );
-        if let Err(e) = repository.storage.append_rewrite_event(start_event) {
-            debug_log(&format!(
-                "pull pre-hook: failed to write RebaseStart: {}",
-                e
-            ));
-        }
-    }
-
     // Only capture VA if we're in rebase+autostash mode AND have uncommitted changes
     if config.is_rebase && config.is_autostash && has_changes {
         debug_log(
