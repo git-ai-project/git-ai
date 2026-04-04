@@ -1306,7 +1306,14 @@ fn compute_watermarks_from_stat(
                 .duration_since(std::time::SystemTime::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos();
-            watermarks.insert(path.clone(), nanos);
+            // Normalize watermark keys the same way bash_tool::normalize_path does
+            // so that case-folded snapshot lookups on macOS/Windows find a match.
+            let key = crate::commands::checkpoint_agent::bash_tool::normalize_path(
+                std::path::Path::new(path),
+            )
+            .to_string_lossy()
+            .to_string();
+            watermarks.insert(key, nanos);
         }
     }
     watermarks

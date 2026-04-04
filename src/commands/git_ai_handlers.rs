@@ -1083,6 +1083,21 @@ fn run_checkpoint_via_daemon_or_local(
                         .as_ref()
                         .and_then(|r| r.captured_checkpoint_id.as_deref())
                     {
+                        // Patch the manifest with the real agent identity/transcript/metadata
+                        // so the daemon sees the actual agent context instead of the synthetic
+                        // placeholder written at bash-tool capture time.
+                        if let Err(e) =
+                            crate::commands::checkpoint::update_captured_checkpoint_agent_context(
+                                capture_id,
+                                agent_run_result.as_ref(),
+                            )
+                        {
+                            crate::utils::debug_log(&format!(
+                                "Failed to update captured checkpoint agent context: {}",
+                                e
+                            ));
+                        }
+
                         let request = ControlRequest::CheckpointRun {
                             request: Box::new(CheckpointRunRequest::Captured(
                                 CapturedCheckpointRunRequest {
