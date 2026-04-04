@@ -39,17 +39,58 @@ def read_tests_list(path: Path) -> List[str]:
     return tests
 
 
-def ensure_git_clone(clone_dir: Path, clone_url: str) -> None:
+def make_isolated_env(isolated_home: str) -> dict:
+    """
+    Build an environment dict with HOME redirected to an isolated temp directory
+    and a minimal git-ai config that disables daemon auto-spawn (async_mode=false).
+
+    This prevents compat tests from:
+    - Reading/writing the developer's ~/.git-ai/config.json or ~/.claude/
+    - Triggering daemon auto-start for every git command (which causes the
+      2-second-per-command timeout that makes the suite run for hours on CI)
+    """
+    env = os.environ.copy()
+    env["HOME"] = isolated_home
+    env["XDG_CONFIG_HOME"] = os.path.join(isolated_home, ".config")
+
+    # Write minimal git-ai config: async_mode=false to disable daemon auto-spawn
+    git_ai_dir = os.path.join(isolated_home, ".git-ai")
+    os.makedirs(git_ai_dir, exist_ok=True)
+    import json as _json
+    with open(os.path.join(git_ai_dir, "config.json"), "w") as f:
+        _json.dump({"feature_flags": {"async_mode": False}}, f)
+
+    # Sanitize PATH: remove any entries where git resolves to a git-ai wrapper.
+    # This prevents the compat test suite from accidentally invoking git-ai for
+    # git operations that should go directly to the real git binary.
+    sanitized = []
+    for entry in env.get("PATH", "").split(os.pathsep):
+        git_bin = os.path.join(entry, "git")
+        if os.path.isfile(git_bin) or os.path.islink(git_bin):
+            try:
+                real = os.path.realpath(git_bin)
+                if "git-ai" in real:
+                    continue  # skip git-ai wrapper directories
+            except OSError:
+                pass
+        sanitized.append(entry)
+    env["PATH"] = os.pathsep.join(sanitized)
+
+    return env
+
+
+def ensure_git_clone(clone_dir: Path, clone_url: str, env: dict) -> None:
     if clone_dir.exists():
         return
     clone_dir.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         ["git", "clone", "--depth", "1", clone_url, str(clone_dir)],
         check=True,
+        env=env,
     )
 
 
-def ensure_git_build(clone_dir: Path, jobs: int) -> None:
+def ensure_git_build(clone_dir: Path, jobs: int, env: dict) -> None:
     build_options = clone_dir / "GIT-BUILD-OPTIONS"
     if build_options.exists():
         return
@@ -63,11 +104,12 @@ def ensure_git_build(clone_dir: Path, jobs: int) -> None:
             "NO_GETTEXT=YesPlease",
         ],
         check=True,
+        env=env,
     )
 
 
-def run_prove(git_tests_dir: Path, tests: List[str], git_installed: Path, jobs: int) -> Tuple[int, str]:
-    env = os.environ.copy()
+def run_prove(git_tests_dir: Path, tests: List[str], git_installed: Path, jobs: int, env: dict) -> Tuple[int, str]:
+    env = dict(env)  # copy so we can add GIT_TEST_INSTALLED without mutating caller's dict
     env["GIT_TEST_INSTALLED"] = str(git_installed)
     env.setdefault("GIT_TEST_DEFAULT_HASH", "sha1")
 
@@ -251,25 +293,34 @@ def main() -> int:
             f"git-ai binary not found at {args.git_ai_bin}. Build it with `cargo build --release`."
         )
 
-    ensure_git_clone(args.clone_dir, args.git_url)
-    ensure_git_build(args.clone_dir, args.jobs)
-    git_tests_dir = args.clone_dir / "t"
-
-    if not git_tests_dir.exists():
-        raise FileNotFoundError(f"Git tests directory not found at {git_tests_dir}")
-
     whitelist = load_whitelist(args.whitelist)
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        wrapper_dir = Path(tmpdir)
-        (wrapper_dir / "git").symlink_to(args.git_ai_bin)
-        (wrapper_dir / "git-ai").symlink_to(args.git_ai_bin)
+    # Wrap the entire test run (including git clone/build) in an isolated HOME so
+    # that the release git-ai binary cannot read or write the developer's real
+    # ~/.git-ai/config.json, ~/.claude/settings.json, etc.  The isolated config
+    # sets async_mode=false which prevents daemon auto-spawn and the resulting
+    # 2-second-per-git-command timeout that causes CI to run for hours.
+    with tempfile.TemporaryDirectory(prefix="git-ai-compat-home-") as isolated_home:
+        env = make_isolated_env(isolated_home)
 
-        cmd_preview = " ".join(shlex.quote(t) for t in tests)
-        print(f"[+] Running core Git tests with: prove -j{args.jobs} {cmd_preview}")
-        print(f"[+] GIT_TEST_INSTALLED={wrapper_dir}")
+        ensure_git_clone(args.clone_dir, args.git_url, env)
+        ensure_git_build(args.clone_dir, args.jobs, env)
+        git_tests_dir = args.clone_dir / "t"
 
-        exit_code, output = run_prove(git_tests_dir, tests, wrapper_dir, args.jobs)
+        if not git_tests_dir.exists():
+            raise FileNotFoundError(f"Git tests directory not found at {git_tests_dir}")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            wrapper_dir = Path(tmpdir)
+            (wrapper_dir / "git").symlink_to(args.git_ai_bin)
+            (wrapper_dir / "git-ai").symlink_to(args.git_ai_bin)
+
+            cmd_preview = " ".join(shlex.quote(t) for t in tests)
+            print(f"[+] Running core Git tests with: prove -j{args.jobs} {cmd_preview}")
+            print(f"[+] GIT_TEST_INSTALLED={wrapper_dir}")
+            print(f"[+] HOME={isolated_home} (isolated)")
+
+            exit_code, output = run_prove(git_tests_dir, tests, wrapper_dir, args.jobs, env)
 
     summary = extract_summary_section(output)
     failures = parse_failures(summary) if summary else {}

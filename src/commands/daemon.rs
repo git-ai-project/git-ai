@@ -298,6 +298,7 @@ fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
         for var in crate::daemon::GIT_ENV_VARS_TO_SANITIZE {
             child.env_remove(var);
         }
+        child.env_remove("GIT_AI");
 
         let preferred_flags =
             CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB;
@@ -336,6 +337,10 @@ fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
         for var in crate::daemon::GIT_ENV_VARS_TO_SANITIZE {
             child.env_remove(var);
         }
+        // GIT_AI controls debug routing in the binary (GIT_AI=git → handle_git).
+        // A daemon that inherits this would route "bg run" to the git proxy instead
+        // of starting as a daemon.
+        child.env_remove("GIT_AI");
         child.spawn().map(|_| ()).map_err(|e| e.to_string())
     }
 }
@@ -358,6 +363,7 @@ fn spawn_daemon_run_with_piped_stderr(
     for var in crate::daemon::GIT_ENV_VARS_TO_SANITIZE {
         child.env_remove(var);
     }
+    child.env_remove("GIT_AI");
 
     #[cfg(windows)]
     {

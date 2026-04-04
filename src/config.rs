@@ -796,8 +796,22 @@ fn resolve_git_path(file_cfg: &Option<FileConfig>) -> String {
         }
     }
 
-    // 2) Probe common locations across platforms
+    // 2) Probe common locations across platforms.
+    // Also check ~/.local/bin/git — the XDG user binary dir used by the Linux installer.
+    // All candidates are guarded by path_is_git_ai_binary so that a git-ai shim at any
+    // of these locations can never be returned as the "real git" (fork bomb prevention).
+    let local_bin_git;
+    #[cfg(not(windows))]
+    {
+        local_bin_git = format!("{}/.local/bin/git", home_dir().display());
+    }
+    #[cfg(windows)]
+    {
+        local_bin_git = String::new();
+    }
     let candidates: &[&str] = &[
+        #[cfg(not(windows))]
+        local_bin_git.as_str(),       // Linux/macOS user install (~/.local/bin/git-ai)
         // macOS Homebrew (ARM and Intel)
         "/opt/homebrew/bin/git",
         "/usr/local/bin/git",
@@ -811,7 +825,11 @@ fn resolve_git_path(file_cfg: &Option<FileConfig>) -> String {
         r"C:\\Program Files (x86)\\Git\\bin\\git.exe",
     ];
 
-    if let Some(found) = candidates.iter().map(Path::new).find(|p| is_executable(p)) {
+    if let Some(found) = candidates
+        .iter()
+        .map(Path::new)
+        .find(|p| is_executable(p) && !path_is_git_ai_binary(p))
+    {
         return found.to_string_lossy().to_string();
     }
 
@@ -986,6 +1004,13 @@ fn path_is_git_ai_binary(path: &Path) -> bool {
     }
 
     false
+}
+
+/// Returns true if `p` is an executable git binary that is NOT git-ai.
+/// Used by test infrastructure to probe for the real git binary independently
+/// of `Config::get()` (which reads HOME and must not be called before HOME is isolated).
+pub fn is_real_git_candidate(p: &Path) -> bool {
+    is_executable(p) && !path_is_git_ai_binary(p)
 }
 
 /// Apply test config patch from environment variable (test-only)
