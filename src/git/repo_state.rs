@@ -431,7 +431,22 @@ fn read_complete_rebase_segments_for_worktree(
             if rebase_like_start(&transition.message).is_some() {
                 break;
             }
-            if let Some(target) = rebase_like_finish_target(&transition.message, &action_prefix) {
+            // When `git pull --rebase` completes without conflict, all
+            // reflog entries share the pull-style prefix (e.g.
+            // "pull --rebase origin main (finish): ...").  But when the
+            // pull hits a conflict and the user runs `git rebase
+            // --continue`, the continue/finish entries use the bare
+            // "rebase" prefix instead.  Try the original prefix first,
+            // then fall back to "rebase" for pull-initiated rebases.
+            let finish =
+                rebase_like_finish_target(&transition.message, &action_prefix).or_else(|| {
+                    if action_prefix.starts_with("pull") {
+                        rebase_like_finish_target(&transition.message, "rebase")
+                    } else {
+                        None
+                    }
+                });
+            if let Some(target) = finish {
                 finish_target = Some(target);
                 if transition.old != transition.new {
                     new_head = transition.new.clone();
@@ -440,12 +455,15 @@ fn read_complete_rebase_segments_for_worktree(
                 cursor += 1;
                 break;
             }
-            if transition.old != transition.new
-                && transition
+            if transition.old != transition.new {
+                let is_step = transition
                     .message
-                    .starts_with(&format!("{} (", action_prefix))
-            {
-                new_head = transition.new.clone();
+                    .starts_with(&format!("{action_prefix} ("))
+                    || (action_prefix.starts_with("pull")
+                        && transition.message.starts_with("rebase ("));
+                if is_step {
+                    new_head = transition.new.clone();
+                }
             }
             cursor += 1;
         }
