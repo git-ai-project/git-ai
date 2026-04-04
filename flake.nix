@@ -193,7 +193,7 @@
             # SDK (14.4) and apple-sdk_15 (15.5) baked into the clang wrapper.
             unset DEVELOPER_DIR
 
-            # Set up development git-ai wrappers (replicates scripts/dev-symlinks.sh)
+            # Set up development git-ai wrappers for nix develop (Nix-specific; non-Nix devs use scripts/dev.sh)
             BUILD_TYPE="''${GIT_AI_BUILD_TYPE:-debug}"
             GITWRAP_DIR="$HOME/.git-ai-local-dev/gitwrap/bin"
             TARGET_DIR="''${CARGO_TARGET_DIR:-$(pwd)/target}"

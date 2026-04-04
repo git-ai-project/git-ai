@@ -68,9 +68,9 @@ class GitAiService {
      * Finds the git-ai binary by checking known installation locations first,
      * then falling back to PATH lookup.
      *
-     * Known locations (from install.sh, install.ps1, dev-symlinks.sh):
-     * - Production: ~/.git-ai/bin/git-ai
-     * - Development: ~/.git-ai-local-dev/gitwrap/bin/git-ai
+     * Known locations (from install.sh, install.ps1, scripts/dev.sh):
+     * - Production/dev build: ~/.git-ai/bin/git-ai  (dev.sh installs here too)
+     * - Nix development: ~/.git-ai-local-dev/gitwrap/bin/git-ai  (nix develop shellHook)
      *
      * @return The full path to git-ai if found, or null if not found
      */
@@ -87,17 +87,17 @@ class GitAiService {
         val homeDir = System.getProperty("user.home")
         val isWindows = System.getProperty("os.name").lowercase().contains("win")
 
-        // Known installation locations from install.sh/install.ps1/dev-symlinks.sh
-        // Dev symlinks checked first so developers can test local builds
+        // Known installation locations from install.sh/install.ps1/scripts/dev.sh
+        // Nix dev path checked first so nix develop users can test local builds
         val knownPaths = if (isWindows) {
             listOf(
-                "$homeDir\\.git-ai-local-dev\\gitwrap\\bin\\git-ai.exe",  // Dev symlinks (checked first)
-                "$homeDir\\.git-ai\\bin\\git-ai.exe"                      // Production install (install.ps1)
+                "$homeDir\\.git-ai-local-dev\\gitwrap\\bin\\git-ai.exe",  // Nix dev (nix develop shellHook)
+                "$homeDir\\.git-ai\\bin\\git-ai.exe"                      // Production + non-Nix dev (install.ps1 / dev.sh)
             )
         } else {
             listOf(
-                "$homeDir/.git-ai-local-dev/gitwrap/bin/git-ai", // Dev symlinks (checked first)
-                "$homeDir/.git-ai/bin/git-ai"                    // Production install (install.sh)
+                "$homeDir/.git-ai-local-dev/gitwrap/bin/git-ai", // Nix dev (nix develop shellHook)
+                "$homeDir/.git-ai/bin/git-ai"                    // Production + non-Nix dev (install.sh / dev.sh)
             )
         }
 

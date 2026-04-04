@@ -38,16 +38,14 @@ Thank you for your interest in contributing to `git-ai`. This is a cool moment f
 
 ### (Option 1) Putting a development build on your path
 
-It's often helpful to point your `git` and `git-ai`  to a development build of `git-ai`. 
-
-First add the development symlinks and build a debug build:
+It's often helpful to point your `git-ai` to a development build. The dev script builds the binary and installs it to `~/.git-ai/bin/git-ai`, replacing the production binary so you can test changes with real git repositories.
 
 ```bash
-sh scripts/dev-symlinks.sh
-task debug:local 
+sh scripts/dev.sh          # debug build (default)
+sh scripts/dev.sh --release  # release build
 ```
 
-This will create symlinks to your development build, allowing you to test your changes with real git repositories.
+If `~/.git-ai` isn't set up yet, the script will run the installer automatically first.
 
 ### (Option 2) Running with Cargo
 
