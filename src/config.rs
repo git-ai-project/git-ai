@@ -800,18 +800,11 @@ fn resolve_git_path(file_cfg: &Option<FileConfig>) -> String {
     // Also check ~/.local/bin/git — the XDG user binary dir used by the Linux installer.
     // All candidates are guarded by path_is_git_ai_binary so that a git-ai shim at any
     // of these locations can never be returned as the "real git" (fork bomb prevention).
-    let local_bin_git;
     #[cfg(not(windows))]
-    {
-        local_bin_git = format!("{}/.local/bin/git", home_dir().display());
-    }
-    #[cfg(windows)]
-    {
-        local_bin_git = String::new();
-    }
+    let local_bin_git = format!("{}/.local/bin/git", home_dir().display());
     let candidates: &[&str] = &[
         #[cfg(not(windows))]
-        local_bin_git.as_str(),       // Linux/macOS user install (~/.local/bin/git-ai)
+        local_bin_git.as_str(), // Linux/macOS user install (~/.local/bin/git-ai)
         // macOS Homebrew (ARM and Intel)
         "/opt/homebrew/bin/git",
         "/usr/local/bin/git",

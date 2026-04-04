@@ -2822,8 +2822,7 @@ fn find_real_git_by_probe() -> String {
 fn ensure_isolated_process_home() {
     static PROCESS_HOME: OnceLock<std::path::PathBuf> = OnceLock::new();
     PROCESS_HOME.get_or_init(|| {
-        let home = std::env::temp_dir()
-            .join(format!("git-ai-test-home-{}", std::process::id()));
+        let home = std::env::temp_dir().join(format!("git-ai-test-home-{}", std::process::id()));
 
         fs::create_dir_all(&home).expect("create isolated process HOME");
 
@@ -2844,9 +2843,7 @@ fn ensure_isolated_process_home() {
         let real_git_json = real_git.replace('\\', "\\\\");
         fs::write(
             git_ai_dir.join("config.json"),
-            format!(
-                r#"{{"git_path":"{real_git_json}","feature_flags":{{"async_mode":false}}}}"#
-            ),
+            format!(r#"{{"git_path":"{real_git_json}","feature_flags":{{"async_mode":false}}}}"#),
         )
         .expect("write test git-ai config");
 
