@@ -1,6 +1,10 @@
 version: "3"
 tasks:
-  # CLI
+  dev:
+    desc: Setup git-ai debug build for local dev
+    deps: [build-debug]
+    cmds:
+      - ./scripts/dev.sh
   build:
     desc: Build the project in release mode
     cmds:
