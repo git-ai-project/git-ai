@@ -991,6 +991,14 @@ fn attempt_post_hook_capture(
     repo_root: &Path,
     changed_paths: &[String],
 ) -> Option<CapturedCheckpointInfo> {
+    // Guard: only attempt capture when the daemon is reachable, since captured
+    // checkpoint files are only consumed/cleaned-up by the daemon.  Without this
+    // check the files would accumulate indefinitely when daemon mode is disabled.
+    if DaemonConfig::from_env_or_default_paths().is_err() {
+        debug_log("Post-hook capture: daemon config unavailable, skipping capture");
+        return None;
+    }
+
     let repo_working_dir = repo_root.to_string_lossy().to_string();
 
     // 1. Convert changed paths to PathBuf for capture_file_contents.
