@@ -154,23 +154,14 @@ pub fn post_commit_with_final_state(
     authorship_log.metadata.base_commit_sha = commit_sha.clone();
 
     // Long-lived daemon processes should read a fresh config snapshot.
-    // Wrapper/hooks mode can use the process-global cached config.
-    let (effective_storage, using_custom_api, custom_attrs) =
-        if crate::daemon::daemon_process_active() {
-            let config = Config::fresh();
-            (
-                config.effective_prompt_storage(&Some(repo.clone())),
-                config.api_base_url() != crate::config::DEFAULT_API_BASE_URL,
-                config.custom_attributes().clone(),
-            )
-        } else {
-            let config = Config::get();
-            (
-                config.effective_prompt_storage(&Some(repo.clone())),
-                config.api_base_url() != crate::config::DEFAULT_API_BASE_URL,
-                config.custom_attributes().clone(),
-            )
-        };
+    // Always use Config::fresh() to support runtime config updates
+    // (especially important for daemon mode, but also good for consistency)
+    let config = Config::fresh();
+    let (effective_storage, using_custom_api, custom_attrs) = (
+        config.effective_prompt_storage(&Some(repo.clone())),
+        config.api_base_url() != crate::config::DEFAULT_API_BASE_URL,
+        config.custom_attributes().clone(),
+    );
 
     // Inject custom attributes into all PromptRecords.
     if !custom_attrs.is_empty() {
@@ -307,7 +298,8 @@ pub fn post_commit_with_final_state(
     // // Clean up old working log
     repo_storage.delete_working_log_for_base_commit(&parent_sha)?;
 
-    if !supress_output && !Config::get().is_quiet() {
+    // Use Config::fresh() to support runtime config updates
+    if !supress_output && !Config::fresh().is_quiet() {
         // Only print stats if we're in an interactive terminal and quiet mode is disabled
         let is_interactive = std::io::stdout().is_terminal();
         if let Some(stats) = stats.as_ref() {
@@ -596,11 +588,8 @@ fn enqueue_prompt_messages_to_cas(
     }
 
     // Get API base URL for constructing messages_url
-    let api_base_url = if crate::daemon::daemon_process_active() {
-        Config::fresh().api_base_url().to_string()
-    } else {
-        Config::get().api_base_url().to_string()
-    };
+    // Always use Config::fresh() to support runtime config updates
+    let api_base_url = Config::fresh().api_base_url().to_string();
 
     for (_key, prompt) in prompts.iter_mut() {
         if !prompt.messages.is_empty() {
@@ -733,8 +722,8 @@ fn record_commit_metrics(
         attrs = attrs.branch(short_branch);
     }
 
-    // Attach custom attributes
-    attrs = attrs.custom_attributes_map(Config::get().custom_attributes());
+    // Attach custom attributes using Config::fresh() to support runtime config updates
+    attrs = attrs.custom_attributes_map(Config::fresh().custom_attributes());
 
     // Record the metric
     record(values, attrs);

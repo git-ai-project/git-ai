@@ -32,7 +32,8 @@ impl CredentialStore {
         // Production build with keyring feature enabled
         #[cfg(all(not(test), feature = "keyring"))]
         {
-            let use_keyring = Config::get().get_feature_flags().auth_keyring;
+            // Use Config::fresh() to support runtime config updates (daemon mode)
+            let use_keyring = Config::fresh().get_feature_flags().auth_keyring;
 
             if use_keyring && KeyringBackend::is_available(SERVICE_NAME) {
                 Self {
@@ -54,7 +55,8 @@ impl CredentialStore {
         // Production build without keyring feature
         #[cfg(all(not(test), not(feature = "keyring")))]
         {
-            let use_keyring = Config::get().get_feature_flags().auth_keyring;
+            // Use Config::fresh() to support runtime config updates (daemon mode)
+            let use_keyring = Config::fresh().get_feature_flags().auth_keyring;
 
             if use_keyring {
                 // User wanted keyring but binary was built without keyring support

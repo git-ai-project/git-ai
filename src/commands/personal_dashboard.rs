@@ -2,7 +2,8 @@ use crate::config;
 
 /// Handle the `git-ai personal-dashboard` command
 pub fn handle_personal_dashboard(_args: &[String]) {
-    let config = config::Config::get();
+    // Use Config::fresh() to support runtime config updates (daemon mode)
+    let config = config::Config::fresh();
     let api_base_url = config.api_base_url();
 
     let dashboard_url = format!("{}/me", api_base_url);
