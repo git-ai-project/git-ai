@@ -2110,3 +2110,62 @@ fn test_rebase_file_delete_recreate_after_hunk_modification() {
         "recreated_d".ai()
     ]);
 }
+
+/// Regression test for issue #919: daemon panics on multi-byte UTF-8 characters
+/// during rebase authorship tracking. The `→` character (U+2192, 3 bytes in UTF-8)
+/// placed so that byte index 40 falls inside its encoding triggers a panic in
+/// `run_diff_tree_with_hunks` when `&line[..40]` is used instead of `line.get(..40)`.
+#[test]
+fn test_rebase_preserves_authorship_with_multibyte_utf8_in_diff_context() {
+    let repo = TestRepo::new();
+
+    let mut base_file = repo.filename("base.txt");
+    base_file.set_contents(crate::lines!["base"]);
+    repo.stage_all_and_commit("Initial").unwrap();
+    let default_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+    // Create a file with multi-byte UTF-8 characters (→ is 3 bytes: 0xE2 0x86 0x92).
+    // The content is crafted so that a diff context line will contain multi-byte chars
+    // near the 40-byte boundary that previously caused the panic.
+    let mut utf8_file = repo.filename("rules.py");
+    utf8_file.set_contents(crate::lines![
+        "def test_rules():".ai(),
+        "    \"\"\"98 rules high, 2 rules low → with threshold 90, low should be trimmed.\"\"\""
+            .ai(),
+        "    pass".ai()
+    ]);
+    repo.stage_all_and_commit("Add rules with arrow char")
+        .unwrap();
+
+    // Second commit modifying the same file to ensure diff hunks include the UTF-8 context
+    utf8_file.set_contents(crate::lines![
+        "def test_rules():".ai(),
+        "    \"\"\"98 rules high, 2 rules low → with threshold 90, low should be trimmed.\"\"\""
+            .ai(),
+        "    result = run_rules()".ai(),
+        "    assert result".ai()
+    ]);
+    repo.stage_all_and_commit("Expand rules test").unwrap();
+
+    // Advance default branch
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let mut main_file = repo.filename("main.txt");
+    main_file.set_contents(crate::lines!["main advance"]);
+    repo.stage_all_and_commit("Main advance").unwrap();
+
+    // Rebase — this previously panicked with:
+    // byte index 40 is not a char boundary; it is inside '→' (bytes 39..42)
+    repo.git(&["checkout", "feature"]).unwrap();
+    repo.git(&["rebase", &default_branch]).unwrap();
+
+    // Verify authorship preserved through the rebase
+    utf8_file.assert_lines_and_blame(crate::lines![
+        "def test_rules():".ai(),
+        "    \"\"\"98 rules high, 2 rules low → with threshold 90, low should be trimmed.\"\"\""
+            .ai(),
+        "    result = run_rules()".ai(),
+        "    assert result".ai()
+    ]);
+}
