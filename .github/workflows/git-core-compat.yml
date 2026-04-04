@@ -66,9 +66,25 @@ jobs:
           restore-keys: |
             git-source-${{ runner.os }}-
 
+      - name: Clone git source
+        run: |
+          if [ ! -d /tmp/git-core-tests ]; then
+            git clone --depth 1 https://github.com/git/git.git /tmp/git-core-tests
+          else
+            echo "Using cached git source"
+          fi
+
+      - name: Build git source
+        run: |
+          if [ ! -f /tmp/git-core-tests/GIT-BUILD-OPTIONS ]; then
+            make -C /tmp/git-core-tests -j$(nproc) NO_CURL=YesPlease NO_GETTEXT=YesPlease
+          else
+            echo "Using cached git build"
+          fi
+
       - name: Build git-ai
         run: cargo build --release --bin git-ai
 
       - name: Run core Git compatibility tests
-        timeout-minutes: 20
+        timeout-minutes: 10
         run: python3 tests/git-compat/run-core-tests.py
