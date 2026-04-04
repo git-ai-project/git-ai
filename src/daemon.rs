@@ -5441,7 +5441,11 @@ impl ActorDaemonCoordinator {
                         CheckpointRunRequest::Live(req) => req
                             .agent_run_result
                             .as_ref()
-                            .and_then(|r| r.edited_filepaths.clone())
+                            .and_then(|r| {
+                                r.edited_filepaths
+                                    .clone()
+                                    .or_else(|| r.will_edit_filepaths.clone())
+                            })
                             .unwrap_or_default(),
                         CheckpointRunRequest::Captured(req) => {
                             crate::commands::checkpoint::load_captured_checkpoint_manifest(
