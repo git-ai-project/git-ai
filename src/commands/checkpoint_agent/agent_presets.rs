@@ -49,6 +49,14 @@ impl AgentCheckpointPreset for ClaudePreset {
         let hook_data: serde_json::Value = serde_json::from_str(&stdin_json)
             .map_err(|e| GitAiError::PresetError(format!("Invalid JSON in hook_input: {}", e)))?;
 
+        // When running inside the ACP proxy, the proxy handles checkpointing.
+        // Skip to avoid double-tracking the same edits.
+        if std::env::var("GIT_AI_ACP_PROXY").is_ok() {
+            return Err(GitAiError::PresetError(
+                "Skipping Claude preset inside ACP proxy; proxy handles checkpointing.".to_string(),
+            ));
+        }
+
         // VS Code Copilot hooks can be imported into Claude settings. We ignore those payloads
         // here because dedicated VS Code/GitHub Copilot hooks should handle them directly.
         if ClaudePreset::is_vscode_copilot_hook_payload(&hook_data) {
@@ -3646,5 +3654,35 @@ impl AgentCheckpointPreset for AiTabPreset {
             will_edit_filepaths: None,
             dirty_files,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[serial_test::serial]
+    fn test_claude_preset_skips_inside_acp_proxy() {
+        // Set the env var that the ACP proxy sets on its child process
+        unsafe { std::env::set_var("GIT_AI_ACP_PROXY", "1") };
+
+        let preset = ClaudePreset;
+        let flags = AgentCheckpointFlags {
+            hook_input: Some(r#"{"transcript_path":"/tmp/test.jsonl","cwd":"/tmp"}"#.to_string()),
+        };
+
+        let result = preset.run(flags);
+
+        // Clean up before asserting so the var is removed even if assertions fail
+        unsafe { std::env::remove_var("GIT_AI_ACP_PROXY") };
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("ACP proxy"),
+            "Expected error about ACP proxy, got: {}",
+            err_msg
+        );
     }
 }
