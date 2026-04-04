@@ -6,6 +6,7 @@
 use crate::authorship::working_log::{AgentId, CheckpointKind};
 use crate::commands::checkpoint::prepare_captured_checkpoint;
 use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
+use crate::config;
 use crate::daemon::control_api::ControlRequest;
 use crate::daemon::{DaemonConfig, send_control_request_with_timeout};
 use crate::error::GitAiError;
@@ -979,6 +980,25 @@ fn attempt_pre_hook_capture(
     }
 }
 
+/// Check whether async/daemon checkpoint delegation is enabled.
+///
+/// Mirrors the logic of `daemon_checkpoint_delegate_enabled()` in
+/// `git_ai_handlers.rs` so the bash tool can skip capture work when the
+/// daemon will not be available to consume the files.
+fn captured_checkpoint_delegate_enabled() -> bool {
+    if config::Config::get().feature_flags().async_mode {
+        return true;
+    }
+    matches!(
+        std::env::var("GIT_AI_DAEMON_CHECKPOINT_DELEGATE")
+            .ok()
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    )
+}
+
 /// Attempt to prepare a captured checkpoint during the post-hook.
 ///
 /// Captures the current contents of changed files and prepares a captured
@@ -991,11 +1011,13 @@ fn attempt_post_hook_capture(
     repo_root: &Path,
     changed_paths: &[String],
 ) -> Option<CapturedCheckpointInfo> {
-    // Guard: only attempt capture when the daemon is reachable, since captured
-    // checkpoint files are only consumed/cleaned-up by the daemon.  Without this
-    // check the files would accumulate indefinitely when daemon mode is disabled.
-    if DaemonConfig::from_env_or_default_paths().is_err() {
-        debug_log("Post-hook capture: daemon config unavailable, skipping capture");
+    // Guard: only attempt capture when async/daemon checkpoint delegation is
+    // enabled.  Captured checkpoint files are only consumed/cleaned-up by the
+    // daemon, so without this check they would accumulate indefinitely.
+    // This mirrors the daemon_checkpoint_delegate_enabled() check used by the
+    // handler in run_checkpoint_via_daemon_or_local.
+    if !captured_checkpoint_delegate_enabled() {
+        debug_log("Post-hook capture: async checkpoint delegation not enabled, skipping capture");
         return None;
     }
 
