@@ -198,17 +198,30 @@ pub fn pull_post_command_hook(
     // Get old HEAD from pre-command capture
     let old_head = match &repository.pre_command_base_commit {
         Some(sha) => sha.clone(),
-        None => return,
+        None => {
+            if config.is_rebase {
+                cancel_speculative_rebase_start(repository);
+            }
+            return;
+        }
     };
 
     // Get new HEAD
     let new_head = match repository.head().ok().and_then(|h| h.target().ok()) {
         Some(sha) => sha,
-        None => return,
+        None => {
+            if config.is_rebase {
+                cancel_speculative_rebase_start(repository);
+            }
+            return;
+        }
     };
 
     if old_head == new_head {
         debug_log("HEAD unchanged, skipping post-pull authorship handling");
+        if config.is_rebase {
+            cancel_speculative_rebase_start(repository);
+        }
         return;
     }
 
