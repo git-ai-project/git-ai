@@ -37,6 +37,7 @@ mod diff_comprehensive;
 mod diff_ignore_binary;
 mod droid;
 mod e2big_post_filter;
+mod firebender;
 mod formatting_non_substantial_ai_attribution;
 mod gemini;
 mod git_alias_resolution;
