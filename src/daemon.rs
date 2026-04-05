@@ -5277,6 +5277,11 @@ impl ActorDaemonCoordinator {
                             .unwrap_or_default()
                         }
                     };
+                    // Extract kind before request is consumed by apply_checkpoint_side_effect.
+                    let is_live_human_checkpoint = matches!(
+                        request.as_ref(),
+                        CheckpointRunRequest::Live(req) if req.kind.as_deref() == Some("human")
+                    );
                     let ack = self
                         .coordinator
                         .apply_checkpoint(Path::new(request.repo_working_dir()))
@@ -5287,13 +5292,39 @@ impl ActorDaemonCoordinator {
                         Ok(ack) => apply_checkpoint_side_effect(*request).map(|_| ack.seq),
                         Err(error) => Err(error),
                     };
-                    if result.is_ok() && !checkpoint_file_paths.is_empty() {
-                        let watermarks =
-                            compute_watermarks_from_stat(&repo_wd, &checkpoint_file_paths);
-                        if !watermarks.is_empty() {
+                    if result.is_ok() {
+                        let per_file = if !checkpoint_file_paths.is_empty() {
+                            compute_watermarks_from_stat(&repo_wd, &checkpoint_file_paths)
+                        } else {
+                            std::collections::HashMap::new()
+                        };
+                        // Full (non-scoped) Human checkpoint: advance the worktree watermark
+                        // so the bash tool pre-hook knows there is a baseline for all files.
+                        // Only Human checkpoints qualify — a full AiAgent checkpoint (rare,
+                        // but possible via bare CLI) must not set the baseline because it
+                        // doesn't guarantee all human-edited files were captured.
+                        // Captured checkpoints are always scoped and never reach this branch.
+                        let is_full_human_checkpoint =
+                            is_live_human_checkpoint && checkpoint_file_paths.is_empty();
+                        let per_worktree = if is_full_human_checkpoint {
+                            let now_ns = std::time::SystemTime::now()
+                                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_nanos();
+                            std::collections::HashMap::from([(repo_wd.clone(), now_ns)])
+                        } else {
+                            std::collections::HashMap::new()
+                        };
+                        if !per_file.is_empty() || !per_worktree.is_empty() {
                             let _ = self
                                 .coordinator
-                                .update_watermarks_family(Path::new(&repo_wd), watermarks)
+                                .update_watermarks_family(
+                                    Path::new(&repo_wd),
+                                    crate::daemon::domain::WatermarkState {
+                                        per_file,
+                                        per_worktree,
+                                    },
+                                )
                                 .await;
                         }
                     }
@@ -6553,7 +6584,7 @@ impl ActorDaemonCoordinator {
     async fn watermarks_for_family(
         &self,
         repo_working_dir: String,
-    ) -> Result<HashMap<String, u128>, GitAiError> {
+    ) -> Result<crate::daemon::domain::WatermarkState, GitAiError> {
         self.coordinator
             .watermarks_family(Path::new(&repo_working_dir))
             .await
@@ -6594,12 +6625,16 @@ impl ActorDaemonCoordinator {
                         .map_err(GitAiError::from)
                 }),
             ControlRequest::SnapshotWatermarks { repo_working_dir } => self
-                .watermarks_for_family(repo_working_dir)
+                .watermarks_for_family(repo_working_dir.clone())
                 .await
-                .and_then(|watermarks| {
-                    serde_json::to_value(json!({ "watermarks": watermarks }))
-                        .map(|v| ControlResponse::ok(None, Some(v)))
-                        .map_err(GitAiError::from)
+                .and_then(|ws| {
+                    let worktree_wm = ws.per_worktree.get(&repo_working_dir).copied();
+                    serde_json::to_value(json!({
+                        "watermarks": ws.per_file,
+                        "worktree_watermark": worktree_wm,
+                    }))
+                    .map(|v| ControlResponse::ok(None, Some(v)))
+                    .map_err(GitAiError::from)
                 }),
             ControlRequest::SubmitTelemetry { envelopes } => {
                 if let Some(worker) = &self.telemetry_worker {
