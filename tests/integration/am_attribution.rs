@@ -7,6 +7,11 @@ use crate::repos::test_repo::TestRepo;
 fn test_format_patch_embeds_attribution_header() {
     let source = TestRepo::new();
 
+    // format-patch/am hooks only run in wrapper (non-async) mode
+    if source.mode().uses_daemon() {
+        return;
+    }
+
     // Create initial commit
     let mut file = source.filename("file.txt");
     file.set_contents(crate::lines!["Initial content"]);
@@ -58,6 +63,11 @@ fn test_format_patch_embeds_attribution_header() {
 #[test]
 fn test_am_preserves_attribution_via_patch_header() {
     let source = TestRepo::new();
+
+    // format-patch/am hooks only run in wrapper (non-async) mode
+    if source.mode().uses_daemon() {
+        return;
+    }
 
     // Create initial commit in source repo
     let mut file = source.filename("file.txt");
@@ -132,6 +142,12 @@ fn test_am_preserves_attribution_via_patch_header() {
 fn test_am_without_header_shows_zero_ai() {
     // Create a source repo to generate a valid patch (without AI attribution header)
     let source = TestRepo::new();
+
+    // format-patch/am hooks only run in wrapper (non-async) mode
+    if source.mode().uses_daemon() {
+        return;
+    }
+
     let mut src_file = source.filename("file.txt");
     src_file.set_contents(crate::lines!["Initial content"]);
     source.stage_all_and_commit("Initial commit").unwrap();
@@ -203,6 +219,11 @@ fn test_am_without_header_shows_zero_ai() {
 #[test]
 fn test_am_preserves_attribution_multiple_patches() {
     let source = TestRepo::new();
+
+    // format-patch/am hooks only run in wrapper (non-async) mode
+    if source.mode().uses_daemon() {
+        return;
+    }
 
     // Create initial commit
     let mut file = source.filename("file.txt");
