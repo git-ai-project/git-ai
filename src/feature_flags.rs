@@ -58,7 +58,6 @@ define_feature_flags!(
     async_mode: async_mode, debug = false, release = true,
     git_hooks_enabled: git_hooks_enabled, debug = false, release = false,
     git_hooks_externally_managed: git_hooks_externally_managed, debug = false, release = false,
-    non_git_cwd_cross_repo_attribution: non_git_cwd_cross_repo_attribution, debug = true, release = true,
 );
 
 impl FeatureFlags {
@@ -134,7 +133,6 @@ mod tests {
             assert!(!flags.async_mode);
             assert!(!flags.git_hooks_enabled);
             assert!(!flags.git_hooks_externally_managed);
-            assert!(flags.non_git_cwd_cross_repo_attribution);
         }
         #[cfg(not(debug_assertions))]
         {
@@ -144,7 +142,6 @@ mod tests {
             assert!(flags.async_mode);
             assert!(!flags.git_hooks_enabled);
             assert!(!flags.git_hooks_externally_managed);
-            assert!(flags.non_git_cwd_cross_repo_attribution);
         }
     }
 
@@ -254,7 +251,6 @@ mod tests {
             async_mode: true,
             git_hooks_enabled: false,
             git_hooks_externally_managed: false,
-            non_git_cwd_cross_repo_attribution: true,
         };
 
         let serialized = serde_json::to_string(&flags).unwrap();
@@ -264,7 +260,6 @@ mod tests {
         assert!(serialized.contains("async_mode"));
         assert!(serialized.contains("git_hooks_enabled"));
         assert!(serialized.contains("git_hooks_externally_managed"));
-        assert!(serialized.contains("non_git_cwd_cross_repo_attribution"));
     }
 
     #[test]
@@ -276,7 +271,6 @@ mod tests {
             async_mode: true,
             git_hooks_enabled: true,
             git_hooks_externally_managed: false,
-            non_git_cwd_cross_repo_attribution: true,
         };
         let cloned = flags.clone();
         assert_eq!(cloned.rewrite_stash, flags.rewrite_stash);
@@ -287,10 +281,6 @@ mod tests {
         assert_eq!(
             cloned.git_hooks_externally_managed,
             flags.git_hooks_externally_managed
-        );
-        assert_eq!(
-            cloned.non_git_cwd_cross_repo_attribution,
-            flags.non_git_cwd_cross_repo_attribution
         );
     }
 
