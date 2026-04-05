@@ -1586,7 +1586,12 @@ fn get_checkpoint_entry_for_file(
         // whether the HEAD commit has AI attribution for this file.  If so,
         // we need to run the full attribution pipeline to preserve those
         // attributions through the reflow.
-        let is_reflow = {
+        //
+        // Only do this when previous_state is None (i.e. previous_content
+        // actually comes from HEAD).  When previous_state is Some, the
+        // content comes from a prior checkpoint blob whose line numbers
+        // may not match the HEAD authorship note.
+        let is_reflow = previous_state.is_none() && {
             let old_stripped: String = previous_content
                 .chars()
                 .filter(|c| !c.is_whitespace())
