@@ -6010,7 +6010,7 @@ impl ActorDaemonCoordinator {
                         stash_sha,
                         head_sha,
                         pathspecs,
-                        true,
+                        cmd.exit_code == 0,
                         Vec::new(),
                     )));
                 }
