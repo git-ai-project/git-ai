@@ -1150,6 +1150,7 @@ fn run_checkpoint_via_daemon_or_local(
                         if let Err(e) =
                             crate::commands::checkpoint::update_captured_checkpoint_agent_context(
                                 capture_id,
+                                author,
                                 agent_run_result.as_ref(),
                             )
                         {

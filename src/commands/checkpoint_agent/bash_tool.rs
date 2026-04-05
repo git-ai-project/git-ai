@@ -892,6 +892,11 @@ fn attempt_pre_hook_capture(
     snap: &StatSnapshot,
     repo_root: &Path,
 ) -> Option<CapturedCheckpointInfo> {
+    if !captured_checkpoint_delegate_enabled() {
+        debug_log("Pre-hook capture: async checkpoint delegation not enabled, skipping capture");
+        return None;
+    }
+
     let repo_working_dir = repo_root.to_string_lossy().to_string();
 
     // 1. Query daemon watermarks (graceful degradation on failure).
