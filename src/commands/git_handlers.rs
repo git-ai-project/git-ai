@@ -11,6 +11,7 @@ use crate::commands::hooks::merge_hooks;
 use crate::commands::hooks::push_hooks;
 use crate::commands::hooks::rebase_hooks;
 use crate::commands::hooks::reset_hooks;
+use crate::commands::hooks::revert_hooks;
 use crate::commands::hooks::stash_hooks;
 use crate::commands::hooks::switch_hooks;
 use crate::commands::hooks::update_ref_hooks;
@@ -98,6 +99,8 @@ pub struct CommandHooksContext {
     /// VirtualAttributions captured before a pull --rebase --autostash operation.
     /// Used to preserve uncommitted AI attributions that git's internal stash would lose.
     pub stashed_va: Option<VirtualAttributions>,
+    /// HEAD SHA captured before a revert operation, used by post_revert_hook.
+    pub revert_original_head: Option<String>,
 }
 
 pub fn handle_git(args: &[String]) {
@@ -231,6 +234,7 @@ pub fn handle_git(args: &[String]) {
             stash_sha: None,
             push_authorship_handle: None,
             stashed_va: None,
+            revert_original_head: None,
         };
 
         let repository = repository_option.as_mut().unwrap();
@@ -440,6 +444,9 @@ fn run_pre_command_hooks(
                     command_hooks_context,
                 );
             }
+            Some("revert") => {
+                revert_hooks::pre_revert_hook(parsed_args, repository, command_hooks_context);
+            }
             Some("push") => {
                 command_hooks_context.push_authorship_handle =
                     push_hooks::push_pre_command_hook(parsed_args, repository);
@@ -534,6 +541,12 @@ fn run_post_command_hooks(
                 exit_status,
                 repository,
             ),
+            Some("revert") => revert_hooks::post_revert_hook(
+                command_hooks_context,
+                parsed_args,
+                exit_status,
+                repository,
+            ),
             Some("stash") => {
                 let config = config::Config::get();
 
@@ -614,6 +627,7 @@ fn command_uses_managed_hooks(command: Option<&str>) -> bool {
             "commit"
                 | "rebase"
                 | "cherry-pick"
+                | "revert"
                 | "reset"
                 | "stash"
                 | "merge"

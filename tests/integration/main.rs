@@ -86,6 +86,7 @@ mod rebase_merge_commit_note_leak;
 mod rebase_note_integrity;
 mod rebase_realworld;
 mod reset;
+mod revert_attribution;
 mod search;
 mod secrets_benchmark;
 mod share_tui_comprehensive;

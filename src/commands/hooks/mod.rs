@@ -8,6 +8,7 @@ pub mod plumbing_rewrite_hooks;
 pub mod push_hooks;
 pub mod rebase_hooks;
 pub mod reset_hooks;
+pub mod revert_hooks;
 pub mod stash_hooks;
 pub mod switch_hooks;
 pub mod update_ref_hooks;
