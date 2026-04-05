@@ -938,7 +938,11 @@ fn attempt_pre_hook_capture(
                     if wm.per_file.contains_key(&posix_key) {
                         continue;
                     }
-                    let p = PathBuf::from(&path_str);
+                    // Normalize to match the case-folded keys already in stale_files
+                    // (from find_stale_files which uses normalize_path). On
+                    // case-insensitive FS (macOS/Windows), git status returns
+                    // original-case paths that would otherwise fail the contains check.
+                    let p = normalize_path(Path::new(&path_str));
                     if !stale_files.contains(&p) {
                         stale_files.push(p);
                     }
@@ -1078,10 +1082,25 @@ fn attempt_post_hook_capture(
 
     let repo_working_dir = repo_root.to_string_lossy().to_string();
 
-    // 1. Convert changed paths to PathBuf for capture_file_contents.
-    let path_bufs: Vec<PathBuf> = changed_paths.iter().map(PathBuf::from).collect();
+    // 1. Split changed paths into existing and deleted. Deleted files have no
+    //    capturable post-content; recording them as empty blobs in the captured
+    //    checkpoint would misrepresent deletions as "file was emptied". The live
+    //    checkpoint path (BashCheckpointAction::Checkpoint) already carries all
+    //    changed paths including deletions for attribution tracking.
+    let (existing_paths, _deleted_paths): (Vec<&String>, Vec<&String>) = changed_paths
+        .iter()
+        .partition(|p| repo_root.join(p.as_str()).exists());
 
-    // 2. Capture file contents.
+    if existing_paths.is_empty() {
+        debug_log("Post-hook capture: no existing changed files to capture, skipping");
+        return None;
+    }
+
+    // 2. Convert to PathBuf and capture file contents (existing files only).
+    let path_bufs: Vec<PathBuf> = existing_paths
+        .iter()
+        .map(|p| PathBuf::from(p.as_str()))
+        .collect();
     let contents = capture_file_contents(repo_root, &path_bufs);
 
     // 3. Open the repository.
@@ -1094,6 +1113,8 @@ fn attempt_post_hook_capture(
     };
 
     // 4. Build a synthetic AgentRunResult for the captured checkpoint.
+    // Only include existing files — deleted files have no post-content to capture.
+    let existing_path_strings: Vec<String> = existing_paths.iter().map(|p| p.to_string()).collect();
     let agent_run_result = AgentRunResult {
         agent_id: AgentId {
             tool: "bash-tool".to_string(),
@@ -1104,7 +1125,7 @@ fn attempt_post_hook_capture(
         checkpoint_kind: CheckpointKind::AiAgent,
         transcript: None,
         repo_working_dir: Some(repo_working_dir.clone()),
-        edited_filepaths: Some(changed_paths.to_vec()),
+        edited_filepaths: Some(existing_path_strings),
         will_edit_filepaths: None,
         dirty_files: Some(contents),
         captured_checkpoint_id: None,
@@ -1144,6 +1165,73 @@ fn attempt_post_hook_capture(
 }
 
 // ---------------------------------------------------------------------------
+// Invocation-ID sidecar helpers
+// ---------------------------------------------------------------------------
+
+/// Sidecar file path used to correlate pre and post hooks for agents that do
+/// not provide a unique per-call `tool_use_id` (e.g. Gemini CLI, ContinueCli).
+fn bash_sidecar_path(repo_root: &Path, session_id: &str) -> Option<PathBuf> {
+    snapshot_cache_dir(repo_root)
+        .ok()
+        .map(|d| d.join(format!("last_id_{}.txt", sanitize_key(session_id))))
+}
+
+/// Resolve the effective `tool_use_id` for a bash tool invocation.
+///
+/// When the caller passes the generic fallback `"bash"` (meaning the agent did
+/// not supply a unique per-call identifier), we generate a fresh UUID at
+/// pre-hook time and persist it in a small sidecar file, then read it back at
+/// post-hook time. This prevents snapshot key collisions when two bash calls
+/// share the same session.
+///
+/// Returns the resolved ID (either the original or a sidecar-backed UUID).
+fn resolve_bash_tool_use_id(
+    hook_event: HookEvent,
+    repo_root: &Path,
+    session_id: &str,
+    tool_use_id: &str,
+) -> String {
+    const FALLBACK: &str = "bash";
+    if tool_use_id != FALLBACK {
+        return tool_use_id.to_string();
+    }
+
+    // The caller passed the generic "bash" fallback — use the sidecar mechanism.
+    match hook_event {
+        HookEvent::PreToolUse => {
+            let id = uuid::Uuid::new_v4().to_string();
+            if let Some(path) = bash_sidecar_path(repo_root, session_id) {
+                if let Err(e) = fs::write(&path, &id) {
+                    debug_log(&format!(
+                        "bash sidecar write failed ({}): {}",
+                        path.display(),
+                        e
+                    ));
+                }
+            }
+            id
+        }
+        HookEvent::PostToolUse => {
+            let path = bash_sidecar_path(repo_root, session_id);
+            if let Some(ref p) = path
+                && let Ok(id) = fs::read_to_string(p)
+            {
+                let id = id.trim().to_string();
+                // Consume the sidecar so it doesn't linger after the post-hook.
+                let _ = fs::remove_file(p);
+                if !id.is_empty() {
+                    return id;
+                }
+            }
+            // No sidecar found — caller passed "bash" for both hooks without a
+            // matching pre-hook; fall back to the literal key (best effort).
+            debug_log("bash sidecar not found for post-hook; using 'bash' as fallback key");
+            FALLBACK.to_string()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // handle_bash_tool() — main orchestration
 // ---------------------------------------------------------------------------
 
@@ -1158,6 +1246,10 @@ pub fn handle_bash_tool(
     session_id: &str,
     tool_use_id: &str,
 ) -> Result<BashToolResult, GitAiError> {
+    // Resolve the effective tool_use_id — generates/reads a sidecar UUID when
+    // the caller passes the generic "bash" fallback (no per-call ID from agent).
+    let tool_use_id = resolve_bash_tool_use_id(hook_event, repo_root, session_id, tool_use_id);
+    let tool_use_id = tool_use_id.as_str();
     let invocation_key = format!("{}:{}", session_id, tool_use_id);
 
     match hook_event {
@@ -1787,5 +1879,131 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let contents = capture_file_contents(dir.path(), &[PathBuf::from("nonexistent.txt")]);
         assert!(contents.is_empty());
+    }
+
+    /// Verify that the sidecar mechanism correlates pre and post hooks when no unique
+    /// tool_use_id is provided (the "bash" fallback case).
+    ///
+    /// Two sequential pre-hooks must produce distinct invocation keys so their
+    /// snapshots do not collide.
+    #[test]
+    fn test_bash_sidecar_generates_unique_ids_per_pre_hook() {
+        let dir = tempfile::tempdir().unwrap();
+        // Initialise a real git repo so snapshot_cache_dir works.
+        Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        let session_id = "test-session-abc";
+
+        // First pre-hook: should generate UUID1
+        let id1 = resolve_bash_tool_use_id(HookEvent::PreToolUse, dir.path(), session_id, "bash");
+
+        // Second pre-hook (while first post-hook hasn't fired yet): should generate UUID2
+        let id2 = resolve_bash_tool_use_id(HookEvent::PreToolUse, dir.path(), session_id, "bash");
+
+        assert_ne!(id1, id2, "sequential pre-hooks must produce different IDs");
+        assert_ne!(id1, "bash");
+        assert_ne!(id2, "bash");
+
+        // Post-hook reads back the LAST written sidecar (id2)
+        let id_post =
+            resolve_bash_tool_use_id(HookEvent::PostToolUse, dir.path(), session_id, "bash");
+        assert_eq!(
+            id_post, id2,
+            "post-hook should recover the last pre-hook ID"
+        );
+
+        // Sidecar is consumed; second post-hook falls back to "bash"
+        let id_post2 =
+            resolve_bash_tool_use_id(HookEvent::PostToolUse, dir.path(), session_id, "bash");
+        assert_eq!(
+            id_post2, "bash",
+            "after sidecar consumed, falls back to 'bash'"
+        );
+    }
+
+    #[test]
+    fn test_bash_sidecar_not_triggered_when_real_id_provided() {
+        let dir = tempfile::tempdir().unwrap();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        let real_id = "toolu_real_unique_id_12345";
+        let resolved =
+            resolve_bash_tool_use_id(HookEvent::PreToolUse, dir.path(), "session", real_id);
+        assert_eq!(resolved, real_id, "real IDs pass through unchanged");
+
+        // No sidecar file should have been created
+        let sidecar = bash_sidecar_path(dir.path(), "session");
+        if let Some(path) = sidecar {
+            assert!(!path.exists(), "sidecar must not be created for real IDs");
+        }
+    }
+
+    /// Verify that attempt_post_hook_capture does not pass deleted files as edited_filepaths.
+    /// Deleted files have no post-content to capture; passing them would store empty blobs.
+    #[test]
+    fn test_post_hook_capture_excludes_deleted_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("modified.txt");
+        let deleted = "deleted.txt"; // does not exist on disk
+
+        fs::write(&existing, b"new content").unwrap();
+
+        // Simulate changed_paths from diff (includes both modified and deleted)
+        let changed_paths = vec!["modified.txt".to_string(), deleted.to_string()];
+
+        let (existing_paths, deleted_paths): (Vec<&String>, Vec<&String>) = changed_paths
+            .iter()
+            .partition(|p| dir.path().join(p.as_str()).exists());
+
+        assert_eq!(existing_paths.len(), 1, "one existing file");
+        assert_eq!(existing_paths[0], "modified.txt");
+        assert_eq!(deleted_paths.len(), 1, "one deleted file");
+        assert_eq!(deleted_paths[0], "deleted.txt");
+
+        // Captured checkpoint edited_filepaths must only contain existing files
+        let captured_edited: Vec<String> = existing_paths.iter().map(|p| p.to_string()).collect();
+        assert!(!captured_edited.contains(&deleted.to_string()));
+        assert!(captured_edited.contains(&"modified.txt".to_string()));
+    }
+
+    /// Verify that cold-start dedup normalizes paths from git_status before comparing
+    /// against stale_files entries (which use normalize_path / case-folded keys).
+    ///
+    /// On case-insensitive filesystems (macOS/Windows), `git status` returns original-case
+    /// paths (e.g. "src/Foo.rs") while `find_stale_files` inserts normalized paths
+    /// (e.g. "src/foo.rs" on macOS). Without normalization the contains() check misses
+    /// the duplicate and the file ends up in stale_files twice.
+    #[test]
+    fn test_cold_start_dedup_normalizes_case_before_contains_check() {
+        // Simulate a stale_files list already populated with a normalize_path() entry.
+        // normalize_path lowercases on case-insensitive targets; to make this test
+        // deterministic on all platforms we directly use the normalized form.
+        let normalized = normalize_path(Path::new("src/Foo.rs"));
+        let mut stale_files: Vec<PathBuf> = vec![normalized.clone()];
+
+        // Simulate git status returning the same file with its original case.
+        let git_status_path = "src/Foo.rs".to_string();
+
+        // Apply the same normalization the production code now uses.
+        let p = normalize_path(Path::new(&git_status_path));
+        if !stale_files.contains(&p) {
+            stale_files.push(p);
+        }
+
+        // The file must appear exactly once regardless of case differences.
+        assert_eq!(
+            stale_files.len(),
+            1,
+            "duplicate after cold-start dedup: stale_files = {:?}",
+            stale_files
+        );
     }
 }

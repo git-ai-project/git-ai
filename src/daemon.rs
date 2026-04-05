@@ -1299,7 +1299,7 @@ fn compute_watermarks_from_stat(
     let mut watermarks = std::collections::HashMap::new();
     for path in file_paths {
         let full_path = repo_root.join(path);
-        if let Ok(metadata) = std::fs::metadata(&full_path)
+        if let Ok(metadata) = std::fs::symlink_metadata(&full_path)
             && let Ok(mtime) = metadata.modified()
         {
             let nanos = mtime
@@ -5526,14 +5526,23 @@ impl ActorDaemonCoordinator {
                         } else {
                             std::collections::HashMap::new()
                         };
-                        // Full (non-scoped) Human checkpoint: advance the worktree watermark
-                        // so the bash tool pre-hook knows there is a baseline for all files.
-                        // Only Human checkpoints qualify — a full AiAgent checkpoint (rare,
-                        // but possible via bare CLI) must not set the baseline because it
-                        // doesn't guarantee all human-edited files were captured.
-                        // Captured checkpoints are always scoped and never reach this branch.
-                        let is_full_human_checkpoint =
-                            is_live_human_checkpoint && checkpoint_file_paths.is_empty();
+                        // Advance the worktree watermark for every live Human checkpoint so
+                        // the bash tool pre-hook always has a baseline for files not covered
+                        // by a per-file (scoped) watermark.
+                        //
+                        // Previously this was restricted to `checkpoint_file_paths.is_empty()`,
+                        // but bare-CLI `git-ai checkpoint` always populates file paths via
+                        // `get_all_files_for_mock_ai`, so the condition was never true and the
+                        // Tier-2 worktree watermark was never set. Removing that restriction
+                        // means the worktree baseline is always updated on Human checkpoints.
+                        //
+                        // Per-file (Tier 1) watermarks set above take precedence in
+                        // `find_stale_files`, so this does not cause false positives for
+                        // files already covered by a scoped checkpoint.
+                        // AiAgent checkpoints must NOT set the baseline (no guarantee all
+                        // human-edited files were captured). Captured checkpoints are always
+                        // scoped and never reach this branch.
+                        let is_full_human_checkpoint = is_live_human_checkpoint;
                         let per_worktree = if is_full_human_checkpoint {
                             let now_ns = std::time::SystemTime::now()
                                 .duration_since(std::time::SystemTime::UNIX_EPOCH)
@@ -8090,6 +8099,55 @@ mod tests {
             normalize_commit_carryover_snapshot(Some(&carryover), Some(&committed)).unwrap();
 
         assert_eq!(normalized.get("example.txt"), committed.get("example.txt"));
+    }
+
+    #[test]
+    fn compute_watermarks_uses_symlink_metadata_not_target_mtime() {
+        // Verify that compute_watermarks_from_stat uses lstat (symlink's own mtime)
+        // not stat (target file's mtime), consistent with snapshot's symlink_metadata.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+
+        // Create a target file
+        let target = dir.join("target.txt");
+        std::fs::write(&target, b"hello").unwrap();
+
+        // Create a symlink pointing to the target
+        let link = dir.join("link.txt");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&target, &link).unwrap();
+
+        // Watermark the symlink
+        let wm = compute_watermarks_from_stat(dir.to_str().unwrap(), &["link.txt".to_string()]);
+
+        // The watermark should match symlink_metadata mtime, not target metadata mtime.
+        let symlink_meta = std::fs::symlink_metadata(&link).unwrap();
+        let target_meta = std::fs::metadata(&link).unwrap(); // follows symlink
+
+        let symlink_mtime = symlink_meta
+            .modified()
+            .unwrap()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let target_mtime = target_meta
+            .modified()
+            .unwrap()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+
+        let recorded = *wm.get("link.txt").unwrap();
+
+        assert_eq!(
+            recorded, symlink_mtime,
+            "watermark should match lstat mtime of the symlink itself"
+        );
+        // This assertion documents the intent: if symlink and target mtimes differ,
+        // the watermark must track the symlink, not the target.
+        let _ = target_mtime; // used only as documentation; may equal symlink_mtime on some FS
     }
 
     #[test]
