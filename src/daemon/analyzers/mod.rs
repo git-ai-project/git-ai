@@ -47,6 +47,7 @@ impl AnalyzerRegistry {
             "reset",
             "rebase",
             "cherry-pick",
+            "revert",
             "merge",
             "update-ref",
         ] {
