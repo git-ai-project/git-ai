@@ -23,6 +23,7 @@ fn setup() {
         async_mode: false,
         git_hooks_enabled: false,
         git_hooks_externally_managed: false,
+        non_git_cwd_cross_repo_attribution: true,
     };
 
     git_ai::config::Config::set_test_feature_flags(test_flags.clone());

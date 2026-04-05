@@ -680,9 +680,21 @@ fn handle_checkpoint(args: &[String]) {
                 })
                 .collect();
 
-            // Group files by their containing repository
+            // Group files by their containing repository.
+            // When the feature flag is enabled, pass None as workspace_root so that
+            // find_repository_for_file can search outside the CWD boundary. This fixes
+            // issue #954 where launching from a non-git directory (e.g. /tmp) caused
+            // the workspace boundary to block discovery of repos in sibling directories.
+            let workspace_root_for_detection = if config
+                .feature_flags()
+                .non_git_cwd_cross_repo_attribution
+            {
+                None
+            } else {
+                Some(repository_working_dir.as_str())
+            };
             let (repo_files, orphan_files) =
-                group_files_by_repository(&absolute_files, Some(&repository_working_dir));
+                group_files_by_repository(&absolute_files, workspace_root_for_detection);
 
             if repo_files.is_empty() {
                 eprintln!(
