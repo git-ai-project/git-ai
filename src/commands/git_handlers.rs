@@ -2,11 +2,13 @@ use crate::authorship::virtual_attribution::VirtualAttributions;
 use crate::commands::git_hook_handlers::{
     ENV_SKIP_MANAGED_HOOKS, has_repo_hook_state, resolve_previous_non_managed_hooks_path,
 };
+use crate::commands::hooks::am_hooks;
 use crate::commands::hooks::checkout_hooks;
 use crate::commands::hooks::cherry_pick_hooks;
 use crate::commands::hooks::clone_hooks;
 use crate::commands::hooks::commit_hooks;
 use crate::commands::hooks::fetch_hooks;
+use crate::commands::hooks::format_patch_hooks;
 use crate::commands::hooks::merge_hooks;
 use crate::commands::hooks::push_hooks;
 use crate::commands::hooks::rebase_hooks;
@@ -99,6 +101,10 @@ pub struct CommandHooksContext {
     /// VirtualAttributions captured before a pull --rebase --autostash operation.
     /// Used to preserve uncommitted AI attributions that git's internal stash would lose.
     pub stashed_va: Option<VirtualAttributions>,
+    /// HEAD SHA captured before `git am` starts, used to determine new commits.
+    pub am_original_head: Option<String>,
+    /// Patch file paths captured from `git am` arguments.
+    pub am_patch_paths: Option<Vec<String>>,
 }
 
 pub fn handle_git(args: &[String]) {
@@ -223,6 +229,8 @@ pub fn handle_git(args: &[String]) {
             stash_sha: None,
             push_authorship_handle: None,
             stashed_va: None,
+            am_original_head: None,
+            am_patch_paths: None,
         };
 
         let repository = repository_option.as_mut().unwrap();
@@ -459,6 +467,9 @@ fn run_pre_command_hooks(
                     command_hooks_context,
                 );
             }
+            Some("am") => {
+                am_hooks::pre_am_hook(parsed_args, repository, command_hooks_context);
+            }
             _ => {}
         }
     }));
@@ -562,6 +573,17 @@ fn run_post_command_hooks(
                     command_hooks_context,
                 );
             }
+            Some("am") => {
+                am_hooks::post_am_hook(command_hooks_context, parsed_args, exit_status, repository);
+            }
+            Some("format-patch") => {
+                format_patch_hooks::post_format_patch_hook(
+                    command_hooks_context,
+                    parsed_args,
+                    exit_status,
+                    repository,
+                );
+            }
             _ => {}
         }
     }));
@@ -615,6 +637,8 @@ fn command_uses_managed_hooks(command: Option<&str>) -> bool {
                 | "fetch"
                 | "push"
                 | "update-ref"
+                | "am"
+                | "format-patch"
         )
     )
 }

@@ -1,8 +1,10 @@
+pub mod am_hooks;
 pub mod checkout_hooks;
 pub mod cherry_pick_hooks;
 pub mod clone_hooks;
 pub mod commit_hooks;
 pub mod fetch_hooks;
+pub mod format_patch_hooks;
 pub mod merge_hooks;
 pub mod plumbing_rewrite_hooks;
 pub mod push_hooks;
