@@ -132,13 +132,24 @@ fn find_reverted_commit(
 ) -> Option<String> {
     // First, try to find the reverted commit from the command args
     // `git revert <commit>` — the commit ref is in the args
-    for arg in &parsed_args.command_args {
-        // Skip flags and options
+    let mut i = 0;
+    while i < parsed_args.command_args.len() {
+        let arg = &parsed_args.command_args[i];
+        // Skip flags and their value arguments
         if arg.starts_with('-') {
+            if matches!(
+                arg.as_str(),
+                "-m" | "--mainline" | "-s" | "--strategy" | "-X" | "--strategy-option"
+            ) {
+                i += 2; // Skip flag and its value
+                continue;
+            }
+            i += 1;
             continue;
         }
         // Skip special keywords
         if arg == "continue" || arg == "abort" || arg == "quit" || arg == "skip" {
+            i += 1;
             continue;
         }
 
@@ -148,11 +159,18 @@ fn find_reverted_commit(
         args.push(arg.clone());
 
         if let Ok(output) = crate::git::repository::exec_git(&args) {
-            let sha = String::from_utf8(output.stdout).ok()?.trim().to_string();
+            let sha = match String::from_utf8(output.stdout) {
+                Ok(s) => s.trim().to_string(),
+                Err(_) => {
+                    i += 1;
+                    continue;
+                }
+            };
             if !sha.is_empty() {
                 return Some(sha);
             }
         }
+        i += 1;
     }
 
     None
@@ -167,8 +185,8 @@ fn find_reverted_commit(
 /// Strategy:
 /// - If the reverted commit HAS AI attribution, this revert is undoing AI work (deletion).
 ///   Do NOT copy attribution — the revert removes those lines.
-/// - If the reverted commit has NO AI attribution, it might be a revert commit itself.
-///   Check its parent (one level of chain traversal) for AI attribution to restore.
+/// - If the reverted commit has NO AI attribution AND its commit message indicates it is
+///   itself a revert commit, check its parent for AI attribution to restore.
 fn find_attribution_source(repository: &Repository, reverted_commit: &str) -> Option<String> {
     if has_ai_attribution(repository, reverted_commit) {
         // The reverted commit has AI attribution. This means we're undoing AI work
@@ -180,16 +198,25 @@ fn find_attribution_source(repository: &Repository, reverted_commit: &str) -> Op
         return None;
     }
 
-    // The reverted commit has no AI attribution. This might be because:
-    // - It was a revert commit itself (pure deletion → ai_additions=0)
-    // - It was a human-only commit
+    // The reverted commit has no AI attribution. Only proceed with parent chain
+    // traversal if the reverted commit is itself a revert (checked via commit message).
+    // This prevents false attribution when reverting a normal human commit whose parent
+    // happens to be an AI commit.
     //
     // For revert-of-revert: check the reverted commit's first parent.
     // History: ... → A(ai) → B(revert of A, no ai) → C(revert of B, restores A's content)
     // B's parent is A. If A has AI attribution, copy it to C.
 
+    if !is_revert_commit(repository, reverted_commit) {
+        debug_log(&format!(
+            "Reverted commit {} is not itself a revert commit, skipping parent check",
+            reverted_commit
+        ));
+        return None;
+    }
+
     debug_log(&format!(
-        "Reverted commit {} has no AI attribution, checking parent (revert-of-revert case)",
+        "Reverted commit {} is a revert commit with no AI attribution, checking parent",
         reverted_commit
     ));
 
@@ -222,6 +249,31 @@ fn has_ai_attribution(repository: &Repository, commit_sha: &str) -> bool {
             debug_log(&format!(
                 "Commit {} has no parseable authorship note",
                 commit_sha
+            ));
+            false
+        }
+    }
+}
+
+/// Check if a commit is itself a revert commit by examining its commit message.
+/// `git revert` generates messages starting with "Revert " by default.
+fn is_revert_commit(repository: &Repository, commit_sha: &str) -> bool {
+    match repository.find_commit(commit_sha.to_string()) {
+        Ok(commit) => {
+            let summary = commit.summary().unwrap_or_default();
+            let is_revert = summary.starts_with("Revert ");
+            debug_log(&format!(
+                "Commit {} is_revert_commit: {} (summary: {:?})",
+                commit_sha,
+                is_revert,
+                &summary[..summary.len().min(40)]
+            ));
+            is_revert
+        }
+        Err(e) => {
+            debug_log(&format!(
+                "Failed to read commit message for {}: {}",
+                commit_sha, e
             ));
             false
         }

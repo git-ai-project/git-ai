@@ -1402,8 +1402,23 @@ fn apply_revert_attribution_side_effect(
         return Ok(());
     }
 
-    // The reverted commit has no AI attribution. Check its parent for
-    // revert-of-revert chain traversal.
+    // Only proceed with parent chain traversal if the reverted commit is itself
+    // a revert commit (by commit message convention). This prevents false attribution
+    // when reverting a normal human commit whose parent happens to be an AI commit.
+    let is_revert = match repo.find_commit(reverted_commit.clone()) {
+        Ok(commit) => commit.summary().unwrap_or_default().starts_with("Revert "),
+        Err(_) => false,
+    };
+    if !is_revert {
+        debug_log(&format!(
+            "daemon revert: reverted commit {} is not itself a revert, skipping parent check",
+            reverted_commit
+        ));
+        return Ok(());
+    }
+
+    // The reverted commit has no AI attribution and is itself a revert.
+    // Check its parent for revert-of-revert chain traversal.
     let parent_sha = {
         match repo.find_commit(reverted_commit.clone()) {
             Ok(commit) => commit.parents().next().map(|p| p.id().to_string()),
