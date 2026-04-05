@@ -42,7 +42,10 @@ const APPLY_PATCH_FILE_PREFIXES = [
 
 const isEditTool = (toolName: string): boolean => FILE_EDIT_TOOLS.has(toolName.toLowerCase())
 
-const isBashTool = (toolName: string): boolean => toolName.toLowerCase() === "bash"
+const isBashTool = (toolName: string): boolean => {
+  const name = toolName.toLowerCase()
+  return name === "bash" || name === "shell"
+}
 
 const normalizePath = (rawPath: string, cwd?: string): string | null => {
   const trimmed = rawPath.trim().replace(/^['"]|['"]$/g, "")
@@ -223,6 +226,7 @@ export const GitAiPlugin: Plugin = async (ctx) => {
           const hookInput = JSON.stringify({
             hook_event_name: "PreToolUse",
             session_id: input.sessionID,
+            tool_use_id: input.callID,
             cwd: repoDir,
             tool_name: input.tool,
             tool_input: toolInput,
@@ -245,6 +249,7 @@ export const GitAiPlugin: Plugin = async (ctx) => {
           const hookInput = JSON.stringify({
             hook_event_name: "PreToolUse",
             session_id: input.sessionID,
+            tool_use_id: input.callID,
             cwd: repoDir,
             tool_name: input.tool,
             tool_input: toolInput,
@@ -274,6 +279,7 @@ export const GitAiPlugin: Plugin = async (ctx) => {
         const hookInput = JSON.stringify({
           hook_event_name: "PostToolUse",
           session_id: sessionID,
+          tool_use_id: input.callID,
           cwd: repoDir,
           tool_name: input.tool,
           tool_input: toolInput,
