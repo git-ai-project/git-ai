@@ -175,10 +175,12 @@ fn test_interactive_rebase_edit_amend_preserves_notes() {
         "AI commit should have authorship note before rebase"
     );
 
-    // Interactive rebase: mark the commit as 'edit' then amend
+    // Interactive rebase: mark the commit as 'edit' then amend.
+    // Use perl -i -pe for cross-platform in-place editing (macOS BSD sed
+    // requires a backup suffix with -i, unlike GNU sed).
     repo.git_with_env(
         &["rebase", "-i", "HEAD~1"],
-        &[("GIT_SEQUENCE_EDITOR", "sed -i 's/^pick/edit/'")],
+        &[("GIT_SEQUENCE_EDITOR", "perl -i -pe 's/^pick/edit/'")],
         None,
     )
     .unwrap();
