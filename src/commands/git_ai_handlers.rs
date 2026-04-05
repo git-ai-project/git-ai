@@ -685,14 +685,12 @@ fn handle_checkpoint(args: &[String]) {
             // find_repository_for_file can search outside the CWD boundary. This fixes
             // issue #954 where launching from a non-git directory (e.g. /tmp) caused
             // the workspace boundary to block discovery of repos in sibling directories.
-            let workspace_root_for_detection = if config
-                .feature_flags()
-                .non_git_cwd_cross_repo_attribution
-            {
-                None
-            } else {
-                Some(repository_working_dir.as_str())
-            };
+            let workspace_root_for_detection =
+                if config.feature_flags().non_git_cwd_cross_repo_attribution {
+                    None
+                } else {
+                    Some(repository_working_dir.as_str())
+                };
             let (repo_files, orphan_files) =
                 group_files_by_repository(&absolute_files, workspace_root_for_detection);
 

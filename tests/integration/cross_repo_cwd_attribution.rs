@@ -1286,9 +1286,7 @@ fn test_issue_954_non_git_cwd_unrelated_to_target_repo_mock_ai() {
     );
 
     // Commit in the target repo and verify AI attribution
-    let commit = repo_target
-        .stage_all_and_commit("add AI jwt auth")
-        .unwrap();
+    let commit = repo_target.stage_all_and_commit("add AI jwt auth").unwrap();
     assert!(
         !commit.authorship_log.attestations.is_empty(),
         "Issue #954: AI attribution should be present when Claude is launched from \
@@ -1366,9 +1364,7 @@ fn test_issue_954_claude_preset_non_git_cwd() {
     // Set up initial commit
     let target_file_path = target_root.join("auth.ts");
     fs::write(&target_file_path, "// initial\n").unwrap();
-    repo_target
-        .stage_all_and_commit("initial commit")
-        .unwrap();
+    repo_target.stage_all_and_commit("initial commit").unwrap();
 
     // Copy transcript fixture
     let transcript_path = target_root.join("claude-session.jsonl");
