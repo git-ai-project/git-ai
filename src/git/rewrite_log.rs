@@ -482,6 +482,8 @@ pub enum StashOperation {
     Drop,
     /// List stashes
     List,
+    /// Branch from stash (create branch, apply, drop stash)
+    Branch,
 }
 
 /// Serialize events to JSONL format (newest events first)
