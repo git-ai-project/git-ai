@@ -17,13 +17,22 @@
 
 git-ai:
   stage: build
+  variables:
+    GIT_AI_VERSION: "__GIT_AI_VERSION__"
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "push"
       when: always
   script:
-    - curl -fsSL https://usegitai.com/install.sh | bash
+    - curl -fsSL "https://github.com/git-ai-project/git-ai/releases/download/${GIT_AI_VERSION}/install.sh" -o /tmp/git-ai-install.sh
+    - bash /tmp/git-ai-install.sh
     - export PATH="$HOME/.git-ai/bin:$PATH"
+    - |
+      INSTALLED=$(git-ai --version)
+      EXPECTED="${GIT_AI_VERSION#v}"
+      if [ "$INSTALLED" != "$EXPECTED" ]; then
+        echo "ERROR: git-ai version mismatch: expected $EXPECTED, got $INSTALLED"
+        exit 1
+      fi
     - git config --global user.name "gitlab-ci[bot]"
     - git config --global user.email "gitlab-ci[bot]@users.noreply.gitlab.com"
     - git-ai ci gitlab run
-
