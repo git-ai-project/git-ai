@@ -14,11 +14,11 @@ pub fn pre_am_hook(
 ) {
     debug_log("=== AM PRE-COMMAND HOOK ===");
 
-    if let Ok(head) = repository.head() {
-        if let Ok(target) = head.target() {
-            debug_log(&format!("Captured pre-am HEAD: {}", target));
-            context.am_original_head = Some(target);
-        }
+    if let Ok(head) = repository.head()
+        && let Ok(target) = head.target()
+    {
+        debug_log(&format!("Captured pre-am HEAD: {}", target));
+        context.am_original_head = Some(target);
     }
 
     // Capture the patch file paths from args so we can read headers later
