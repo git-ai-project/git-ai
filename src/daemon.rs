@@ -1019,7 +1019,7 @@ fn resolve_stash_target_oid_for_terminal_payload(
                 ))
             })
             .map(Some),
-        "pop" | "drop" => {
+        "pop" | "drop" | "branch" => {
             if let Some(target_oid) = ref_changes
                 .iter()
                 .rfind(|change| change.reference == "refs/stash")
