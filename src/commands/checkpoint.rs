@@ -1062,6 +1062,7 @@ pub fn prepare_captured_checkpoint(
 /// synthetic placeholder written at bash-tool capture time.
 pub(crate) fn update_captured_checkpoint_agent_context(
     capture_id: &str,
+    author: &str,
     agent_run_result: Option<&AgentRunResult>,
 ) -> Result<(), GitAiError> {
     let manifest_path = async_checkpoint_manifest_path(capture_id)?;
@@ -1073,6 +1074,9 @@ pub(crate) fn update_captured_checkpoint_agent_context(
                 error
             ))
         })?)?;
+
+    // Replace the synthetic "bash-tool" author with the real git user name.
+    manifest.author = author.to_string();
 
     // Merge real agent context while preserving capture-specific fields
     // (edited_filepaths, will_edit_filepaths, dirty_files) from the original.
