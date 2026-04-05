@@ -913,6 +913,26 @@ fn handle_checkpoint(args: &[String]) {
         .as_ref()
         .map(|r| r.checkpoint_kind)
         .unwrap_or(CheckpointKind::Human);
+
+    // If a git commit fires inside an AI bash tool call (e.g. `echo foo > f && git commit -am x`),
+    // the pre-commit hook reaches here with no agent context and would default to Human.
+    // Override to AI when a non-stale pre-snapshot exists, which is the precise signal
+    // that a bash invocation is in flight. This uses existing snapshot lifecycle — no new
+    // daemon messages or side-channel files needed.
+    let checkpoint_kind = if checkpoint_kind == CheckpointKind::Human
+        && agent_run_result.is_none()
+        && crate::commands::checkpoint_agent::bash_tool::has_active_bash_inflight(
+            std::path::Path::new(&effective_working_dir),
+        )
+    {
+        crate::utils::debug_log(
+            "Overriding checkpoint kind to AI: bash tool call in flight (pre-snapshot present)",
+        );
+        CheckpointKind::AiAgent
+    } else {
+        checkpoint_kind
+    };
+
     let allow_captured_async =
         checkpoint_request_has_explicit_capture_scope(args, agent_run_result.as_ref());
 

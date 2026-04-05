@@ -1196,6 +1196,45 @@ fn attempt_post_hook_capture(
 }
 
 // ---------------------------------------------------------------------------
+// Inflight bash-call detection
+// ---------------------------------------------------------------------------
+//
+// When an AI agent runs a bash tool that internally calls `git commit`, the
+// git pre-commit hook fires with no agent context and would normally be
+// attributed as human. We detect this via the pre-snapshot files that already
+// exist in the bash_snapshots cache: a snapshot is written at pre-hook time
+// and deleted when the post-hook consumes it, so its presence is a precise
+// signal that a bash invocation is currently in flight.
+//
+// Stale snapshots (> SNAPSHOT_STALE_SECS old) are excluded so a crashed
+// pre-hook does not permanently block human attribution.
+
+/// Returns `true` if any non-stale pre-snapshot exists for this repo,
+/// indicating an AI bash tool call is currently in flight.
+///
+/// Used by the checkpoint handler to override Human attribution to AI when
+/// a `git commit` is triggered from within a bash tool invocation.
+pub fn has_active_bash_inflight(repo_root: &Path) -> bool {
+    let Ok(cache_dir) = snapshot_cache_dir(repo_root) else {
+        return false;
+    };
+    let Ok(entries) = fs::read_dir(&cache_dir) else {
+        return false;
+    };
+    let now = SystemTime::now();
+    entries.flatten().any(|e| {
+        let p = e.path();
+        p.extension().is_some_and(|ext| ext == "json")
+            && fs::metadata(&p)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| now.duration_since(t).ok())
+                .map(|age| age.as_secs() <= SNAPSHOT_STALE_SECS)
+                .unwrap_or(false)
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Invocation-ID sidecar helpers
 // ---------------------------------------------------------------------------
 
@@ -2132,5 +2171,107 @@ mod tests {
             should_include_new_file(&gitignore, Path::new("generated/manual.go"), false),
             "non-generated file in generated/ should not be ignored"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // has_active_bash_inflight tests
+    // -----------------------------------------------------------------------
+
+    fn make_snapshot_file(cache_dir: &Path, name: &str) -> PathBuf {
+        let path = cache_dir.join(format!("{}.json", name));
+        fs::write(&path, b"{}").unwrap();
+        path
+    }
+
+    /// No snapshot files → not in flight.
+    #[test]
+    fn test_inflight_false_when_no_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        Command::new("git").args(["init"]).current_dir(dir.path()).output().unwrap();
+        assert!(!has_active_bash_inflight(dir.path()));
+    }
+
+    /// A fresh snapshot file (just written) → in flight.
+    #[test]
+    fn test_inflight_true_when_snapshot_present() {
+        let dir = tempfile::tempdir().unwrap();
+        Command::new("git").args(["init"]).current_dir(dir.path()).output().unwrap();
+        let cache = snapshot_cache_dir(dir.path()).unwrap();
+        make_snapshot_file(&cache, "session1_call1");
+        assert!(has_active_bash_inflight(dir.path()));
+    }
+
+    /// Snapshot consumed (deleted) by post-hook → not in flight.
+    #[test]
+    fn test_inflight_false_after_snapshot_consumed() {
+        let dir = tempfile::tempdir().unwrap();
+        Command::new("git").args(["init"]).current_dir(dir.path()).output().unwrap();
+        let cache = snapshot_cache_dir(dir.path()).unwrap();
+        let snap = make_snapshot_file(&cache, "session1_call1");
+        assert!(has_active_bash_inflight(dir.path()));
+        fs::remove_file(&snap).unwrap(); // post-hook consumes it
+        assert!(!has_active_bash_inflight(dir.path()));
+    }
+
+    /// Stale snapshot (backdated mtime) is ignored — does not count as in flight.
+    #[test]
+    fn test_inflight_false_for_stale_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        Command::new("git").args(["init"]).current_dir(dir.path()).output().unwrap();
+        let cache = snapshot_cache_dir(dir.path()).unwrap();
+        let snap = make_snapshot_file(&cache, "session_stale");
+        // Backdate the mtime beyond the stale threshold
+        let stale_time = SystemTime::now()
+            .checked_sub(Duration::from_secs(SNAPSHOT_STALE_SECS + 60))
+            .unwrap();
+        filetime::set_file_mtime(
+            &snap,
+            filetime::FileTime::from_system_time(stale_time),
+        )
+        .unwrap();
+        assert!(!has_active_bash_inflight(dir.path()), "stale snapshot should not count as inflight");
+    }
+
+    /// REGRESSION: Two parallel bash calls are in flight simultaneously.
+    /// Removing one does not clear the inflight signal; only when both are
+    /// consumed does `has_active_bash_inflight` return false.
+    /// This ensures parallel AI bash calls never cause a commit to be
+    /// attributed as human.
+    #[test]
+    fn test_inflight_parallel_calls_regression() {
+        let dir = tempfile::tempdir().unwrap();
+        Command::new("git").args(["init"]).current_dir(dir.path()).output().unwrap();
+        let cache = snapshot_cache_dir(dir.path()).unwrap();
+
+        // Two bash calls start (pre-hooks fire)
+        let snap1 = make_snapshot_file(&cache, "session1_callA");
+        let snap2 = make_snapshot_file(&cache, "session1_callB");
+
+        // Both in flight → commits during this window must be AI
+        assert!(has_active_bash_inflight(dir.path()), "both in flight");
+
+        // First call finishes (post-hook consumes its snapshot)
+        fs::remove_file(&snap1).unwrap();
+        // Second call still in flight → commits must STILL be AI
+        assert!(
+            has_active_bash_inflight(dir.path()),
+            "second call still in flight — must not regress to human"
+        );
+
+        // Second call finishes
+        fs::remove_file(&snap2).unwrap();
+        // Now safe to attribute as human again
+        assert!(!has_active_bash_inflight(dir.path()), "all calls complete");
+    }
+
+    /// Sidecar .txt files in the same directory do not count as snapshots.
+    #[test]
+    fn test_inflight_ignores_sidecar_txt_files() {
+        let dir = tempfile::tempdir().unwrap();
+        Command::new("git").args(["init"]).current_dir(dir.path()).output().unwrap();
+        let cache = snapshot_cache_dir(dir.path()).unwrap();
+        // Write a sidecar (the kind resolve_bash_tool_use_id creates)
+        fs::write(cache.join("last_id_mysession.txt"), "some-uuid").unwrap();
+        assert!(!has_active_bash_inflight(dir.path()), "txt sidecar must not be treated as snapshot");
     }
 }
