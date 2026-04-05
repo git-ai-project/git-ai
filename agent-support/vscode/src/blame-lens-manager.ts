@@ -248,6 +248,11 @@ export class BlameLensManager {
     
     // Invalidate cached blame for this document
     this.blameService.invalidateCache(document.uri);
+
+    // Nothing to do when blame is off
+    if (this.blameMode === 'off') {
+      return;
+    }
     
     // If this is the current document with blame, clear and re-fetch
     if (this.currentDocumentUri === documentUri) {
@@ -649,6 +654,11 @@ export class BlameLensManager {
           this.pendingBlameRequest = null;
           if (result) {
             this.currentBlameResult = result;
+
+            // Bail out if blame was switched off while the request was in flight
+            if (this.blameMode === 'off') {
+              return;
+            }
 
             // Trigger async CAS fetches for prompts with messages_url but no messages
             this.triggerCASFetches(result, document.uri);
