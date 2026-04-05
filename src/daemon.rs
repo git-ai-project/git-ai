@@ -6191,6 +6191,7 @@ impl ActorDaemonCoordinator {
         // Test-only: allow inducing a panic in the side-effect pipeline to verify
         // that the daemon's catch_unwind recovery keeps the process alive.
         // Uses a file-based flag so the test can remove the file between commands.
+        #[cfg(feature = "test-support")]
         if let Ok(path) = std::env::var("GIT_AI_TEST_PANIC_IN_SIDE_EFFECT_FLAG")
             && std::path::Path::new(&path).exists()
         {
