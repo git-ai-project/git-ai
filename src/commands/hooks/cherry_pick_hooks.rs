@@ -398,6 +398,10 @@ fn handle_cherry_pick_skip(repository: &mut Repository) {
 /// Fix #955: Try to fetch notes from remotes for source commits that don't have local notes.
 /// This handles the case where a cherry-pick source is from a remote repo whose notes
 /// haven't been fetched locally.
+///
+/// Uses the safe fetch pattern from `sync_authorship::fetch_authorship_notes`:
+/// fetch to a per-remote tracking ref, then merge with `git notes merge -s ours`
+/// so local notes are never destructively overwritten.
 fn try_fetch_missing_notes_for_commits(repository: &Repository, source_commits: &[String]) {
     use crate::git::repository::exec_git;
 
@@ -425,18 +429,24 @@ fn try_fetch_missing_notes_for_commits(repository: &Repository, source_commits: 
         missing
     ));
 
-    // Try to fetch notes from each remote (best-effort)
+    // Use the established safe fetch pattern: fetch to a per-remote tracking ref
+    // then merge with `git notes merge -s ours`, preserving local notes.
     if let Ok(remotes) = repository.remotes_with_urls() {
         for (remote_name, _) in remotes {
-            let mut args = repository.global_args_for_exec();
-            args.extend(["fetch", "--quiet"].iter().map(|s| s.to_string()));
-            args.push(remote_name.clone());
-            args.push("+refs/notes/ai:refs/notes/ai".to_string());
-            let _ = exec_git(&args); // best-effort
             debug_log(&format!(
-                "Attempted to fetch notes from remote {}",
+                "Attempting safe notes fetch from remote {}",
                 remote_name
             ));
+            match crate::git::sync_authorship::fetch_authorship_notes(repository, &remote_name) {
+                Ok(_) => debug_log(&format!(
+                    "✓ Fetched and merged notes from remote {}",
+                    remote_name
+                )),
+                Err(e) => debug_log(&format!(
+                    "Notes fetch from remote {} failed (best-effort): {}",
+                    remote_name, e
+                )),
+            }
         }
     }
 }

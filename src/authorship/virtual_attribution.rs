@@ -2051,14 +2051,34 @@ pub fn restore_stashed_va(
 }
 
 /// Check whether a file's content contains git conflict markers.
+///
+/// Requires both an opening `<<<<<<<` and a closing `>>>>>>>` marker to avoid
+/// false positives on files that happen to contain `=======` (e.g. Markdown
+/// setext headings).
 fn content_has_conflict_markers(content: &str) -> bool {
-    content
-        .lines()
-        .any(|l| l.starts_with("<<<<<<<") || l.starts_with("=======") || l.starts_with(">>>>>>>"))
+    let mut has_open = false;
+    let mut has_close = false;
+    for line in content.lines() {
+        if line.starts_with("<<<<<<<") {
+            has_open = true;
+        } else if line.starts_with(">>>>>>>") {
+            has_close = true;
+        }
+        if has_open && has_close {
+            return true;
+        }
+    }
+    false
 }
 
 /// Strip conflict markers from content, keeping the "ours" side
 /// (the section between `<<<<<<<` and `=======`).
+///
+/// Handles both the standard two-way conflict style and the diff3/zdiff3 style
+/// that includes a `|||||||` base section between "ours" and "theirs".
+///
+/// Also preserves the trailing newline of the original content so byte-level
+/// attribution diffing sees the same length as the actual on-disk file.
 ///
 /// This is used when a `checkout --merge` produces conflicts: the stashed VA
 /// was built from "our" pre-checkout state, so we want to keep "our" content
@@ -2072,8 +2092,10 @@ fn strip_conflict_markers_keep_ours(content: &str) -> String {
         if line.starts_with("<<<<<<<") {
             in_conflict = true;
             in_ours = true; // entering "ours" section
-        } else if in_conflict && line.starts_with("=======") {
-            in_ours = false; // entering "theirs" section
+        } else if in_conflict && (line.starts_with("=======") || line.starts_with("|||||||")) {
+            // `=======` separates ours from theirs (standard style).
+            // `|||||||` starts the base section in diff3/zdiff3 style — also stop keeping.
+            in_ours = false;
         } else if in_conflict && line.starts_with(">>>>>>>") {
             in_conflict = false;
             in_ours = true; // back to normal content
@@ -2081,7 +2103,13 @@ fn strip_conflict_markers_keep_ours(content: &str) -> String {
             result.push(line);
         }
     }
-    result.join("\n")
+    let mut out = result.join("\n");
+    // Preserve the trailing newline that std::fs::read_to_string typically returns,
+    // so the cleaned content has the same byte length as the actual file.
+    if content.ends_with('\n') {
+        out.push('\n');
+    }
+    out
 }
 
 /// Transform attributions from old content to new content
