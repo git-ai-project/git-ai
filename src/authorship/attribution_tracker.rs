@@ -433,16 +433,32 @@ impl AttributionTracker {
         let (new_start, new_end) =
             line_range_to_byte_range(new_lines, new_start_line, new_end_line, new_content.len());
 
-        // For AI checkpoints, skip token-aligned sub-hunk diffing when the old and
-        // new content have the same number of lines (a line-for-line replacement).
-        // This ensures byte-identical lines within a replaced region are attributed
-        // to AI. We don't force_split when line counts differ (e.g., inserting new
-        // lines) to avoid misattributing unchanged lines that are only in the hunk
-        // due to newline boundary changes.
+        // For AI checkpoints, skip token-aligned sub-hunk diffing when the hunk
+        // represents a line-for-line replacement (N→N, N>1) or a reflow where
+        // lines are merged or split (N→1 or 1→N).  Using force_split=true emits
+        // Delete+Insert ops instead of Equal, so transform_attributions assigns
+        // the current (AI) author to all new bytes – including tokens that happen
+        // to match old content (e.g. a `)` that was part of a human line but is
+        // now on its own line after AI reformatting).
+        //
+        // For 1→N hunks we only force-split when the non-whitespace content is
+        // unchanged (a pure reflow).  This avoids re-attributing a human line
+        // when AI merely appends new lines after it in the same hunk.
+        //
+        // We intentionally keep 0→N (pure insertions) and N→0 (pure deletions)
+        // on the token-aligned path because there is no old↔new content overlap.
         if is_ai_checkpoint {
             let old_line_count = old_end_line - old_start_line;
             let new_line_count = new_end_line - new_start_line;
-            if old_line_count == new_line_count && old_line_count > 1 {
+            let is_one_to_many_reflow = old_line_count == 1
+                && new_line_count > 1
+                && is_whitespace_only_change(
+                    &old_content[old_start..old_end],
+                    &new_content[new_start..new_end],
+                );
+            if (new_line_count == 1 || old_line_count == new_line_count) && old_line_count > 1
+                || is_one_to_many_reflow
+            {
                 append_range_diffs(
                     &mut computation.diffs,
                     old_content,
@@ -1886,6 +1902,17 @@ fn data_is_whitespace(data: &[u8]) -> bool {
     std::str::from_utf8(data)
         .map(|s| s.chars().all(|c| c.is_whitespace()))
         .unwrap_or(false)
+}
+
+/// Returns `true` when `old` and `new` differ only in whitespace (spaces,
+/// tabs, newlines).  This is used to detect pure reflow/reformatting hunks
+/// so we can force-split them for AI attribution.
+///
+/// Uses an iterator-based comparison to avoid heap-allocating stripped copies.
+fn is_whitespace_only_change(old: &str, new: &str) -> bool {
+    old.chars()
+        .filter(|c| !c.is_whitespace())
+        .eq(new.chars().filter(|c| !c.is_whitespace()))
 }
 
 impl Default for AttributionTracker {
