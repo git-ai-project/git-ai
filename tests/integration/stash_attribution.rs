@@ -1142,6 +1142,14 @@ fn test_stash_pop_conflict_preserves_ai_attribution_without_new_checkpoint() {
     // The AI lines from the stash should still be attributed to AI
     // This will fail if the post_stash_hook bailed on exit code 1
     // and never restored attribution from refs/notes/ai-stash
+    conflict_file.assert_lines_and_blame(vec![
+        "original line".human(),
+        "human edit on same file".human(),
+        "ai addition 1".ai(),
+        "ai addition 2".ai(),
+        "ai addition 3".ai(),
+    ]);
+
     assert!(
         commit
             .authorship_log
