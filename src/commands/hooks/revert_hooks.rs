@@ -14,11 +14,11 @@ pub fn pre_revert_hook(
     debug_log("=== REVERT PRE-COMMAND HOOK ===");
 
     // Capture the current HEAD before the revert
-    if let Ok(head) = repository.head() {
-        if let Ok(target) = head.target() {
-            debug_log(&format!("Pre-revert HEAD: {}", target));
-            command_hooks_context.revert_original_head = Some(target);
-        }
+    if let Ok(head) = repository.head()
+        && let Ok(target) = head.target()
+    {
+        debug_log(&format!("Pre-revert HEAD: {}", target));
+        command_hooks_context.revert_original_head = Some(target);
     }
 }
 
