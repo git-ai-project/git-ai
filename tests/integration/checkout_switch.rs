@@ -463,7 +463,8 @@ fn test_checkout_merge_conflict_preserves_ai_attribution() {
         std::fs::write(repo.path().join("file.txt"), "AI_CONTENT\n")
             .expect("write resolved content");
         repo.git(&["add", "file.txt"]).unwrap();
-        repo.stage_all_and_commit("resolved: keep AI_CONTENT").unwrap();
+        repo.stage_all_and_commit("resolved: keep AI_CONTENT")
+            .unwrap();
 
         // After fix: restore_stashed_va correctly stripped conflict markers before
         // computing the VA merge, so "AI_CONTENT" retains AI attribution.

@@ -671,7 +671,10 @@ fn test_cherry_pick_bad_args_dont_corrupt_subsequent_attribution() {
     // the rewrite log (fixed by skipping CherryPickStart when source_commits is empty).
     let bad_arg = format!("{} {}", sha1, sha2);
     let bad_result = repo.git(&["cherry-pick", &bad_arg]);
-    assert!(bad_result.is_err(), "cherry-pick with invalid revision should fail");
+    assert!(
+        bad_result.is_err(),
+        "cherry-pick with invalid revision should fail"
+    );
     let _ = repo.git(&["cherry-pick", "--abort"]); // clean up any partial state
 
     // Cherry-pick sha1 — must produce correct per-line AI attribution despite the
@@ -679,10 +682,7 @@ fn test_cherry_pick_bad_args_dont_corrupt_subsequent_attribution() {
     repo.git(&["cherry-pick", &sha1]).unwrap();
     // Single-commit cherry-pick: the source commit's note covers all file content,
     // so all lines (including "base line") end up AI-attributed after the copy.
-    file.assert_lines_and_blame(crate::lines![
-        "base line".ai(),
-        "AI line 1".ai(),
-    ]);
+    file.assert_lines_and_blame(crate::lines!["base line".ai(), "AI line 1".ai(),]);
 
     // Cherry-pick sha2 as well — state must still be clean.
     repo.git(&["cherry-pick", &sha2]).unwrap();
@@ -729,7 +729,8 @@ fn test_cherry_pick_skip_preserves_subsequent_attribution() {
     // results in an empty diff — forcing git to stop and require --skip.
     let mut main_file = repo.filename("file.txt");
     main_file.insert_at(1, crate::lines!["AI line 1"]); // no .ai() — human commit
-    repo.stage_all_and_commit("pre-apply sha1 as human").unwrap();
+    repo.stage_all_and_commit("pre-apply sha1 as human")
+        .unwrap();
 
     // Start cherry-picking all three.  sha1 is now empty → git stops with an error.
     let pick_result = repo.git(&["cherry-pick", &sha1, &sha2, &sha3]);
@@ -797,11 +798,7 @@ fn test_cherry_pick_from_remote_without_prefetched_notes() {
         .unwrap();
     // Fetch only the branch objects, explicitly excluding notes.
     target_repo
-        .git(&[
-            "fetch",
-            "source",
-            "refs/heads/*:refs/remotes/source/*",
-        ])
+        .git(&["fetch", "source", "refs/heads/*:refs/remotes/source/*"])
         .unwrap();
 
     // Confirm notes are absent (the fix relies on detecting this absence).
@@ -814,10 +811,7 @@ fn test_cherry_pick_from_remote_without_prefetched_notes() {
 
     // Single-commit cherry-pick: the source note covers all file content, so both lines
     // end up AI-attributed after the note is copied to the cherry-picked commit.
-    target_file.assert_lines_and_blame(crate::lines![
-        "base".ai(),
-        "AI line".ai(),
-    ]);
+    target_file.assert_lines_and_blame(crate::lines!["base".ai(), "AI line".ai(),]);
 }
 
 crate::reuse_tests_in_worktree!(

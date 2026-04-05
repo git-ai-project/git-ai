@@ -448,11 +448,9 @@ fn test_squash_rebase_preserves_interleaved_attribution() {
     // Before the fix, lines from session A that ended up surrounded by session B
     // lines after the interleave were incorrectly attributed as human.
     assert_eq!(
-        stats.ai_additions,
-        10,
+        stats.ai_additions, 10,
         "All 10 lines should be AI-attributed after squash, got ai={} human={}",
-        stats.ai_additions,
-        stats.human_additions
+        stats.ai_additions, stats.human_additions
     );
     assert_eq!(stats.human_additions, 0, "No human lines expected");
 
