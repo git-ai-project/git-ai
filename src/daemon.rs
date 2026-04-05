@@ -977,7 +977,7 @@ fn inferred_top_stash_sha_from_rewrite_history(
                     stack.push(stash_sha);
                 }
             }
-            StashOperation::Pop | StashOperation::Drop => {
+            StashOperation::Pop | StashOperation::Drop | StashOperation::Branch => {
                 if let Some(stash_sha) = stash.stash_sha
                     && let Some(position) =
                         stack.iter().rposition(|existing| existing == &stash_sha)
@@ -2409,7 +2409,10 @@ fn apply_rewrite_side_effect(
     }
     match &rewrite_event {
         RewriteLogEvent::Stash { stash }
-            if matches!(stash.operation, StashOperation::Apply | StashOperation::Pop) =>
+            if matches!(
+                stash.operation,
+                StashOperation::Apply | StashOperation::Pop | StashOperation::Branch
+            ) =>
         {
             if let (Some(head_sha), Some(stash_sha)) =
                 (stash.head_sha.as_ref(), stash.stash_sha.as_ref())
@@ -2592,15 +2595,15 @@ fn apply_stash_rewrite_side_effect(
                 &stash_event.pathspecs,
             )?;
         }
-        StashOperation::Apply | StashOperation::Pop => {
+        StashOperation::Apply | StashOperation::Pop | StashOperation::Branch => {
             let Some(head_sha) = stash_event.head_sha.as_deref() else {
                 return Err(GitAiError::Generic(
-                    "stash apply/pop missing destination head".to_string(),
+                    "stash apply/pop/branch missing destination head".to_string(),
                 ));
             };
             let Some(stash_sha) = stash_event.stash_sha.as_deref() else {
                 return Err(GitAiError::Generic(
-                    "stash apply/pop missing stash oid".to_string(),
+                    "stash apply/pop/branch missing stash oid".to_string(),
                 ));
             };
             stash_hooks::restore_stash_attributions(repo, head_sha, stash_sha)?;
@@ -2612,6 +2615,22 @@ fn apply_stash_rewrite_side_effect(
 
 fn is_valid_oid(oid: &str) -> bool {
     matches!(oid.len(), 40 | 64) && oid.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Detect whether a stash pop/apply failure was due to a merge conflict.
+/// Checks `git status --porcelain=v2` for unmerged ('u') entries in the repo.
+fn has_stash_conflict_for_repo(repo: &Repository) -> bool {
+    let mut args = repo.global_args_for_exec();
+    args.push("status".to_string());
+    args.push("--porcelain=v2".to_string());
+
+    match exec_git(&args) {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            stdout.lines().any(|line| line.starts_with("u "))
+        }
+        Err(_) => false,
+    }
 }
 
 fn is_zero_oid(oid: &str) -> bool {
@@ -5466,7 +5485,7 @@ impl ActorDaemonCoordinator {
                         .flatten()
                 })
             }),
-            StashOperation::Pop | StashOperation::Drop => {
+            StashOperation::Pop | StashOperation::Drop | StashOperation::Branch => {
                 cmd.stash_target_oid.clone().or_else(|| {
                     cmd.ref_changes
                         .iter()
@@ -5477,7 +5496,12 @@ impl ActorDaemonCoordinator {
             }
             StashOperation::List => None,
         };
-        if resolved.is_some() || !matches!(operation, StashOperation::Pop | StashOperation::Drop) {
+        if resolved.is_some()
+            || !matches!(
+                operation,
+                StashOperation::Pop | StashOperation::Drop | StashOperation::Branch
+            )
+        {
             return Ok(resolved);
         }
         if !stash_target_spec_is_top_of_stack(stash_ref) {
@@ -5949,6 +5973,7 @@ impl ActorDaemonCoordinator {
                         crate::daemon::domain::StashOpKind::Pop => StashOperation::Pop,
                         crate::daemon::domain::StashOpKind::Drop => StashOperation::Drop,
                         crate::daemon::domain::StashOpKind::List => StashOperation::List,
+                        crate::daemon::domain::StashOpKind::Branch => StashOperation::Branch,
                         _ => StashOperation::Create,
                     };
                     let stash_sha =
@@ -5959,7 +5984,7 @@ impl ActorDaemonCoordinator {
                             stash_sha.as_deref(),
                             head.as_ref(),
                         )?,
-                        StashOperation::Apply | StashOperation::Pop => {
+                        StashOperation::Apply | StashOperation::Pop | StashOperation::Branch => {
                             Self::resolve_stash_restore_head_for_event(head.as_ref(), cmd)
                         }
                         StashOperation::Drop | StashOperation::List => None,
@@ -5971,7 +5996,10 @@ impl ActorDaemonCoordinator {
                     };
                     if matches!(
                         operation,
-                        StashOperation::Apply | StashOperation::Pop | StashOperation::Drop
+                        StashOperation::Apply
+                            | StashOperation::Pop
+                            | StashOperation::Branch
+                            | StashOperation::Drop
                     ) && stash_sha.is_none()
                     {
                         return Err(GitAiError::Generic(format!(
@@ -5981,7 +6009,10 @@ impl ActorDaemonCoordinator {
                     }
                     if matches!(
                         operation,
-                        StashOperation::Create | StashOperation::Apply | StashOperation::Pop
+                        StashOperation::Create
+                            | StashOperation::Apply
+                            | StashOperation::Pop
+                            | StashOperation::Branch
                     ) && head_sha.is_none()
                     {
                         return Err(GitAiError::Generic(format!(
@@ -6245,7 +6276,33 @@ impl ActorDaemonCoordinator {
                     self.set_pending_cherry_pick_sources_for_worktree(worktree, source_refs)?;
                 }
             }
-            return Ok(());
+            // For stash pop/apply/branch with conflicts (exit code 1), don't skip processing.
+            // The stash was partially applied and attribution should still be restored.
+            let is_stash_conflict = cmd.primary_command.as_deref() == Some("stash")
+                && events.iter().any(|event| {
+                    matches!(
+                        event,
+                        crate::daemon::domain::SemanticEvent::StashOperation {
+                            kind: crate::daemon::domain::StashOpKind::Pop
+                                | crate::daemon::domain::StashOpKind::Apply
+                                | crate::daemon::domain::StashOpKind::Branch,
+                            ..
+                        }
+                    )
+                })
+                && cmd.worktree.as_ref().is_some_and(|worktree| {
+                    let repo_path = worktree.to_string_lossy().to_string();
+                    find_repository_in_path(&repo_path)
+                        .ok()
+                        .is_some_and(|repo| has_stash_conflict_for_repo(&repo))
+                });
+            if !is_stash_conflict {
+                return Ok(());
+            }
+            debug_log(&format!(
+                "Stash conflict detected for sid={}, continuing to restore attribution",
+                cmd.root_sid
+            ));
         }
 
         if let Some(worktree) = cmd.worktree.as_ref() {
