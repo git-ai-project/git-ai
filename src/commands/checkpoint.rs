@@ -266,6 +266,34 @@ pub fn run(
         pathspec_start.elapsed()
     ));
 
+    // Read checkpoints for file discovery, then apply --reset if requested.
+    // When --reset is set and the read fails, perform the reset eagerly so
+    // the unreadable file is cleared before we continue.  If the reset write
+    // also fails the error propagates — we never silently swallow errors.
+    // Without --reset, all read errors propagate immediately.
+    let read_checkpoints_start = Instant::now();
+    let mut reset_already_applied = false;
+    let previous_checkpoints = match working_log.read_all_checkpoints() {
+        Ok(cps) => cps,
+        Err(e) if reset => {
+            debug_log(&format!(
+                "checkpoints.jsonl is unreadable ({}); applying --reset now",
+                e
+            ));
+            // Clear the unreadable file immediately.  If this write fails
+            // too the error propagates — no silent data loss.
+            working_log.reset_working_log()?;
+            reset_already_applied = true;
+            Vec::new()
+        }
+        Err(e) => return Err(e),
+    };
+    debug_log(&format!(
+        "[BENCHMARK] Reading {} checkpoints took {:?}",
+        previous_checkpoints.len(),
+        read_checkpoints_start.elapsed()
+    ));
+
     let files_start = Instant::now();
     let files = get_all_tracked_files(
         repo,
@@ -274,6 +302,7 @@ pub fn run(
         pathspec_filter,
         is_pre_commit,
         &ignore_matcher,
+        &previous_checkpoints,
     )?;
     debug_log(&format!(
         "[BENCHMARK] get_all_tracked_files found {} files, took {:?}",
@@ -281,19 +310,15 @@ pub fn run(
         files_start.elapsed()
     ));
 
-    let read_checkpoints_start = Instant::now();
-    let mut checkpoints = if reset {
-        // If reset flag is set, start with an empty working log
+    // Apply --reset if it hasn't been applied already (due to read failure).
+    let mut checkpoints = if reset && !reset_already_applied {
         working_log.reset_working_log()?;
         Vec::new()
+    } else if reset {
+        Vec::new()
     } else {
-        working_log.read_all_checkpoints()?
+        previous_checkpoints
     };
-    debug_log(&format!(
-        "[BENCHMARK] Reading {} checkpoints took {:?}",
-        checkpoints.len(),
-        read_checkpoints_start.elapsed()
-    ));
 
     if show_working_log {
         if checkpoints.is_empty() {
@@ -611,6 +636,7 @@ fn get_all_tracked_files(
     edited_filepaths: Option<&Vec<String>>,
     is_pre_commit: bool,
     ignore_matcher: &IgnoreMatcher,
+    previous_checkpoints: &[Checkpoint],
 ) -> Result<Vec<String>, GitAiError> {
     let mut files: HashSet<String> = edited_filepaths
         .map(|paths| {
@@ -664,43 +690,37 @@ fn get_all_tracked_files(
     ));
 
     let checkpoints_read_start = Instant::now();
-    if let Ok(working_log_data) = working_log.read_all_checkpoints() {
-        for checkpoint in &working_log_data {
-            for entry in &checkpoint.entries {
-                // Normalize path separators to forward slashes
-                let normalized_path = normalize_to_posix(&entry.file);
-                // Filter out paths outside the repository to prevent git command failures
-                if !is_path_in_repo(&normalized_path) {
-                    debug_log(&format!(
-                        "Skipping checkpoint file outside repository: {}",
-                        normalized_path
-                    ));
-                    continue;
-                }
-                if should_ignore_file_with_matcher(&normalized_path, ignore_matcher) {
-                    continue;
-                }
-                if !files.contains(&normalized_path) {
-                    // Check if it's a text file before adding
-                    if is_text_file(working_log, &normalized_path) {
-                        files.insert(normalized_path);
-                    }
+    for checkpoint in previous_checkpoints {
+        for entry in &checkpoint.entries {
+            // Normalize path separators to forward slashes
+            let normalized_path = normalize_to_posix(&entry.file);
+            // Filter out paths outside the repository to prevent git command failures
+            if !is_path_in_repo(&normalized_path) {
+                debug_log(&format!(
+                    "Skipping checkpoint file outside repository: {}",
+                    normalized_path
+                ));
+                continue;
+            }
+            if should_ignore_file_with_matcher(&normalized_path, ignore_matcher) {
+                continue;
+            }
+            if !files.contains(&normalized_path) {
+                // Check if it's a text file before adding
+                if is_text_file(working_log, &normalized_path) {
+                    files.insert(normalized_path);
                 }
             }
         }
     }
     debug_log(&format!(
-        "[BENCHMARK]   Reading checkpoints in get_all_tracked_files took {:?}",
+        "[BENCHMARK]   Scanning checkpoints in get_all_tracked_files took {:?}",
         checkpoints_read_start.elapsed()
     ));
 
-    let has_ai_checkpoints = if let Ok(working_log_data) = working_log.read_all_checkpoints() {
-        working_log_data.iter().any(|checkpoint| {
-            checkpoint.kind == CheckpointKind::AiAgent || checkpoint.kind == CheckpointKind::AiTab
-        })
-    } else {
-        false
-    };
+    let has_ai_checkpoints = previous_checkpoints.iter().any(|checkpoint| {
+        checkpoint.kind == CheckpointKind::AiAgent || checkpoint.kind == CheckpointKind::AiTab
+    });
 
     let status_files_start = Instant::now();
     let mut results_for_tracked_files = if is_pre_commit && !has_ai_checkpoints {

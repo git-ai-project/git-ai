@@ -115,7 +115,8 @@ pub fn get_github_ci_context() -> Result<Option<CiContext>, GitAiError> {
 }
 
 /// Install or update the GitHub Actions workflow in the current repository
-/// Writes the embedded template to .github/workflows/git-ai.yaml at the repo root
+/// Writes the embedded template to .github/workflows/git-ai.yaml at the repo root,
+/// pinned to the current git-ai version for supply chain security.
 pub fn install_github_ci_workflow() -> Result<PathBuf, GitAiError> {
     // Discover repository at current working directory
     let repo = find_repository_in_path(".")?;
@@ -126,10 +127,82 @@ pub fn install_github_ci_workflow() -> Result<PathBuf, GitAiError> {
     fs::create_dir_all(&workflows_dir)
         .map_err(|e| GitAiError::Generic(format!("Failed to create workflows dir: {}", e)))?;
 
+    // Pin template to current git-ai version
+    let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let workflow_content = GITHUB_CI_TEMPLATE_YAML.replace("__GIT_AI_VERSION__", &version);
+
     // Write template
     let dest_path = workflows_dir.join("git-ai.yaml");
-    fs::write(&dest_path, GITHUB_CI_TEMPLATE_YAML)
+    fs::write(&dest_path, workflow_content)
         .map_err(|e| GitAiError::Generic(format!("Failed to write workflow file: {}", e)))?;
 
     Ok(dest_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_github_ci_template_yaml_not_empty() {
+        assert!(
+            !GITHUB_CI_TEMPLATE_YAML.is_empty(),
+            "GitHub CI template YAML should not be empty"
+        );
+    }
+
+    #[test]
+    fn test_github_ci_template_contains_version_placeholder() {
+        assert!(
+            GITHUB_CI_TEMPLATE_YAML.contains("__GIT_AI_VERSION__"),
+            "GitHub CI template should contain __GIT_AI_VERSION__ placeholder"
+        );
+    }
+
+    #[test]
+    fn test_github_ci_template_no_curl_pipe_bash() {
+        // Ensure the template doesn't use the insecure `curl | bash` pattern
+        assert!(
+            !GITHUB_CI_TEMPLATE_YAML.contains("| bash"),
+            "GitHub CI template should not pipe curl directly to bash"
+        );
+        assert!(
+            !GITHUB_CI_TEMPLATE_YAML.contains("| sh"),
+            "GitHub CI template should not pipe curl directly to sh"
+        );
+    }
+
+    #[test]
+    fn test_github_ci_template_uses_release_url() {
+        assert!(
+            GITHUB_CI_TEMPLATE_YAML.contains("github.com/git-ai-project/git-ai/releases/download"),
+            "GitHub CI template should download install script from GitHub releases"
+        );
+    }
+
+    #[test]
+    fn test_github_ci_template_has_version_verification() {
+        assert!(
+            GITHUB_CI_TEMPLATE_YAML.contains("version mismatch"),
+            "GitHub CI template should verify installed version"
+        );
+    }
+
+    #[test]
+    fn test_github_ci_template_version_replacement() {
+        let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+        let rendered = GITHUB_CI_TEMPLATE_YAML.replace("__GIT_AI_VERSION__", &version);
+
+        // Placeholder should be gone
+        assert!(
+            !rendered.contains("__GIT_AI_VERSION__"),
+            "Rendered template should not contain placeholder"
+        );
+
+        // Version should appear
+        assert!(
+            rendered.contains(&version),
+            "Rendered template should contain the pinned version"
+        );
+    }
 }
