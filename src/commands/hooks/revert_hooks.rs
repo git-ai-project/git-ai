@@ -266,7 +266,10 @@ fn is_revert_commit(repository: &Repository, commit_sha: &str) -> bool {
                 "Commit {} is_revert_commit: {} (summary: {:?})",
                 commit_sha,
                 is_revert,
-                &summary[..summary.len().min(40)]
+                &summary[..summary
+                    .char_indices()
+                    .nth(40)
+                    .map_or(summary.len(), |(i, _)| i)]
             ));
             is_revert
         }
