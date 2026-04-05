@@ -1291,6 +1291,34 @@ fn apply_checkpoint_side_effect(request: CheckpointRunRequest) -> Result<(), Git
     }
 }
 
+fn compute_watermarks_from_stat(
+    repo_working_dir: &str,
+    file_paths: &[String],
+) -> std::collections::HashMap<String, u128> {
+    let repo_root = std::path::Path::new(repo_working_dir);
+    let mut watermarks = std::collections::HashMap::new();
+    for path in file_paths {
+        let full_path = repo_root.join(path);
+        if let Ok(metadata) = std::fs::metadata(&full_path)
+            && let Ok(mtime) = metadata.modified()
+        {
+            let nanos = mtime
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            // Normalize watermark keys the same way bash_tool::normalize_path does
+            // so that case-folded snapshot lookups on macOS/Windows find a match.
+            let key = crate::commands::checkpoint_agent::bash_tool::normalize_path(
+                std::path::Path::new(path),
+            )
+            .to_string_lossy()
+            .to_string();
+            watermarks.insert(key, nanos);
+        }
+    }
+    watermarks
+}
+
 fn parse_checkpoint_kind(value: &str) -> Option<CheckpointKind> {
     match value {
         "human" => Some(CheckpointKind::Human),
@@ -1641,6 +1669,7 @@ fn build_human_replay_agent_result(
         edited_filepaths: None,
         will_edit_filepaths: Some(files),
         dirty_files: Some(dirty_files),
+        captured_checkpoint_id: None,
     }
 }
 
@@ -5228,6 +5257,31 @@ impl ActorDaemonCoordinator {
                         CheckpointRunRequest::Captured(request) => Some(request.capture_id.clone()),
                         CheckpointRunRequest::Live(_) => None,
                     };
+                    let repo_wd = request.repo_working_dir().to_string();
+                    let checkpoint_file_paths: Vec<String> = match request.as_ref() {
+                        CheckpointRunRequest::Live(req) => req
+                            .agent_run_result
+                            .as_ref()
+                            .and_then(|r| {
+                                r.edited_filepaths
+                                    .clone()
+                                    .or_else(|| r.will_edit_filepaths.clone())
+                            })
+                            .unwrap_or_default(),
+                        CheckpointRunRequest::Captured(req) => {
+                            crate::commands::checkpoint::load_captured_checkpoint_manifest(
+                                &req.capture_id,
+                            )
+                            .ok()
+                            .map(|m| m.files.iter().map(|f| f.path.clone()).collect())
+                            .unwrap_or_default()
+                        }
+                    };
+                    // Extract kind before request is consumed by apply_checkpoint_side_effect.
+                    let is_live_human_checkpoint = matches!(
+                        request.as_ref(),
+                        CheckpointRunRequest::Live(req) if req.kind.as_deref() == Some("human")
+                    );
                     let ack = self
                         .coordinator
                         .apply_checkpoint(Path::new(request.repo_working_dir()))
@@ -5238,6 +5292,42 @@ impl ActorDaemonCoordinator {
                         Ok(ack) => apply_checkpoint_side_effect(*request).map(|_| ack.seq),
                         Err(error) => Err(error),
                     };
+                    if result.is_ok() {
+                        let per_file = if !checkpoint_file_paths.is_empty() {
+                            compute_watermarks_from_stat(&repo_wd, &checkpoint_file_paths)
+                        } else {
+                            std::collections::HashMap::new()
+                        };
+                        // Full (non-scoped) Human checkpoint: advance the worktree watermark
+                        // so the bash tool pre-hook knows there is a baseline for all files.
+                        // Only Human checkpoints qualify — a full AiAgent checkpoint (rare,
+                        // but possible via bare CLI) must not set the baseline because it
+                        // doesn't guarantee all human-edited files were captured.
+                        // Captured checkpoints are always scoped and never reach this branch.
+                        let is_full_human_checkpoint =
+                            is_live_human_checkpoint && checkpoint_file_paths.is_empty();
+                        let per_worktree = if is_full_human_checkpoint {
+                            let now_ns = std::time::SystemTime::now()
+                                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_nanos();
+                            std::collections::HashMap::from([(repo_wd.clone(), now_ns)])
+                        } else {
+                            std::collections::HashMap::new()
+                        };
+                        if !per_file.is_empty() || !per_worktree.is_empty() {
+                            let _ = self
+                                .coordinator
+                                .update_watermarks_family(
+                                    Path::new(&repo_wd),
+                                    crate::daemon::domain::WatermarkState {
+                                        per_file,
+                                        per_worktree,
+                                    },
+                                )
+                                .await;
+                        }
+                    }
                     if let Some(capture_id) = captured_checkpoint_id
                         && let Err(cleanup_error) =
                             crate::commands::checkpoint::delete_captured_checkpoint(&capture_id)
@@ -6491,6 +6581,15 @@ impl ActorDaemonCoordinator {
         Ok(ControlResponse::ok(None, None))
     }
 
+    async fn watermarks_for_family(
+        &self,
+        repo_working_dir: String,
+    ) -> Result<crate::daemon::domain::WatermarkState, GitAiError> {
+        self.coordinator
+            .watermarks_family(Path::new(&repo_working_dir))
+            .await
+    }
+
     async fn status_for_family(
         &self,
         repo_working_dir: String,
@@ -6524,6 +6623,18 @@ impl ActorDaemonCoordinator {
                     serde_json::to_value(status)
                         .map(|v| ControlResponse::ok(None, Some(v)))
                         .map_err(GitAiError::from)
+                }),
+            ControlRequest::SnapshotWatermarks { repo_working_dir } => self
+                .watermarks_for_family(repo_working_dir.clone())
+                .await
+                .and_then(|ws| {
+                    let worktree_wm = ws.per_worktree.get(&repo_working_dir).copied();
+                    serde_json::to_value(json!({
+                        "watermarks": ws.per_file,
+                        "worktree_watermark": worktree_wm,
+                    }))
+                    .map(|v| ControlResponse::ok(None, Some(v)))
+                    .map_err(GitAiError::from)
                 }),
             ControlRequest::SubmitTelemetry { envelopes } => {
                 if let Some(worker) = &self.telemetry_worker {
@@ -7313,6 +7424,7 @@ fn checkpoint_control_response_timeout(
             DAEMON_CHECKPOINT_RESPONSE_TIMEOUT
         }
         ControlRequest::CheckpointRun { .. } => DAEMON_CONTROL_RESPONSE_TIMEOUT,
+        ControlRequest::SnapshotWatermarks { .. } => Duration::from_millis(500),
         _ => DAEMON_CONTROL_RESPONSE_TIMEOUT,
     }
 }

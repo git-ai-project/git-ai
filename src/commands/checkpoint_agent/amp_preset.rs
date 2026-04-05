@@ -3,8 +3,9 @@ use crate::{
         transcript::{AiTranscript, Message},
         working_log::{AgentId, CheckpointKind},
     },
-    commands::checkpoint_agent::agent_presets::{
-        AgentCheckpointFlags, AgentCheckpointPreset, AgentRunResult,
+    commands::checkpoint_agent::{
+        agent_presets::{AgentCheckpointFlags, AgentCheckpointPreset, AgentRunResult},
+        bash_tool::{self, Agent, BashCheckpointAction, HookEvent, ToolClass},
     },
     error::GitAiError,
     observability::log_error,
@@ -31,6 +32,8 @@ struct AmpHookInput {
     edited_filepaths: Option<Vec<String>>,
     #[serde(default)]
     tool_input: Option<serde_json::Value>,
+    #[serde(default)]
+    tool_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -102,6 +105,13 @@ impl AgentCheckpointPreset for AmpPreset {
 
         let is_pre_tool_use = hook_input.hook_event_name == "PreToolUse";
 
+        // Determine if this is a bash tool invocation
+        let is_bash_tool = hook_input
+            .tool_name
+            .as_deref()
+            .map(|name| bash_tool::classify_tool(Agent::Amp, name) == ToolClass::Bash)
+            .unwrap_or(false);
+
         let file_paths = Self::extract_file_paths(&hook_input);
         let resolved_thread_path = Self::resolve_thread_path(
             hook_input.transcript_path.as_deref(),
@@ -142,6 +152,19 @@ impl AgentCheckpointPreset for AmpPreset {
         };
 
         if is_pre_tool_use {
+            // For bash tools, take a pre-snapshot before the tool executes
+            let mut pre_hook_captured_id = None;
+            if is_bash_tool && let Some(ref cwd) = hook_input.cwd {
+                let repo_root = Path::new(cwd.as_str());
+                pre_hook_captured_id = bash_tool::handle_bash_tool(
+                    HookEvent::PreToolUse,
+                    repo_root,
+                    &agent_id.id,
+                    hook_input.tool_use_id.as_deref().unwrap_or("bash"),
+                )
+                .ok()
+                .and_then(|r| r.captured_checkpoint.map(|info| info.capture_id));
+            }
             return Ok(AgentRunResult {
                 agent_id,
                 agent_metadata: None,
@@ -151,8 +174,47 @@ impl AgentCheckpointPreset for AmpPreset {
                 edited_filepaths: None,
                 will_edit_filepaths: file_paths,
                 dirty_files: None,
+                captured_checkpoint_id: pre_hook_captured_id,
             });
         }
+
+        // PostToolUse: for bash tools, diff snapshots to detect changed files
+        let bash_result = if is_bash_tool {
+            if let Some(ref cwd) = hook_input.cwd {
+                Some(bash_tool::handle_bash_tool(
+                    HookEvent::PostToolUse,
+                    Path::new(cwd.as_str()),
+                    &agent_id.id,
+                    hook_input.tool_use_id.as_deref().unwrap_or("bash"),
+                ))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let edited_filepaths = if is_bash_tool {
+            if let Some(ref bash_res) = bash_result {
+                match bash_res.as_ref().map(|r| &r.action) {
+                    Ok(BashCheckpointAction::Checkpoint(paths)) => Some(paths.clone()),
+                    Ok(BashCheckpointAction::NoChanges) => None,
+                    Ok(BashCheckpointAction::Fallback) => {
+                        // git_status_fallback already failed inside handle_bash_tool
+                        None
+                    }
+                    Ok(BashCheckpointAction::TakePreSnapshot) => None,
+                    Err(e) => {
+                        crate::utils::debug_log(&format!("Bash tool post-hook error: {}", e));
+                        let cwd = hook_input.cwd.as_deref().unwrap_or("");
+                        bash_tool::git_status_fallback(Path::new(cwd)).ok()
+                    }
+                }
+            } else {
+                file_paths
+            }
+        } else {
+            file_paths
+        };
 
         let mut agent_metadata = HashMap::new();
         if let Some(tool_use_id) = hook_input.tool_use_id.clone() {
@@ -179,6 +241,12 @@ impl AgentCheckpointPreset for AmpPreset {
             agent_metadata.insert("thread_id".to_string(), thread_id);
         }
 
+        let bash_captured_checkpoint_id = bash_result
+            .as_ref()
+            .and_then(|r| r.as_ref().ok())
+            .and_then(|r| r.captured_checkpoint.as_ref())
+            .map(|info| info.capture_id.clone());
+
         Ok(AgentRunResult {
             agent_id,
             agent_metadata: if agent_metadata.is_empty() {
@@ -189,9 +257,10 @@ impl AgentCheckpointPreset for AmpPreset {
             checkpoint_kind: CheckpointKind::AiAgent,
             transcript: Some(transcript),
             repo_working_dir: hook_input.cwd,
-            edited_filepaths: file_paths,
+            edited_filepaths,
             will_edit_filepaths: None,
             dirty_files: None,
+            captured_checkpoint_id: bash_captured_checkpoint_id,
         })
     }
 }

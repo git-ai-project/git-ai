@@ -1,6 +1,7 @@
 use crate::daemon::analyzers::AnalyzerRegistry;
 use crate::daemon::domain::{
     AppliedCommand, ApplyAck, FamilyKey, FamilyState, FamilyStatus, NormalizedCommand,
+    WatermarkState,
 };
 use crate::daemon::reducer;
 use crate::error::GitAiError;
@@ -14,6 +15,8 @@ pub enum FamilyMsg {
     ),
     ApplyCheckpoint(oneshot::Sender<Result<ApplyAck, GitAiError>>),
     Status(oneshot::Sender<Result<FamilyStatus, GitAiError>>),
+    GetWatermarks(oneshot::Sender<Result<WatermarkState, GitAiError>>),
+    UpdateWatermarks(WatermarkState),
     Shutdown,
 }
 
@@ -55,6 +58,26 @@ impl FamilyActorHandle {
             .map_err(|_| GitAiError::Generic("family actor status receive failed".to_string()))?
     }
 
+    pub async fn watermarks(&self) -> Result<WatermarkState, GitAiError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(FamilyMsg::GetWatermarks(tx))
+            .await
+            .map_err(|_| GitAiError::Generic("family actor watermarks send failed".to_string()))?;
+        rx.await.map_err(|_| {
+            GitAiError::Generic("family actor watermarks receive failed".to_string())
+        })?
+    }
+
+    pub async fn update_watermarks(&self, update: WatermarkState) -> Result<(), GitAiError> {
+        self.tx
+            .send(FamilyMsg::UpdateWatermarks(update))
+            .await
+            .map_err(|_| {
+                GitAiError::Generic("family actor update_watermarks send failed".to_string())
+            })
+    }
+
     pub async fn shutdown(&self) -> Result<(), GitAiError> {
         self.tx
             .send(FamilyMsg::Shutdown)
@@ -78,6 +101,7 @@ pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
             worktrees: HashMap::new(),
             last_error: None,
             applied_seq: 0,
+            watermarks: WatermarkState::default(),
         };
 
         while let Some(msg) = rx.recv().await {
@@ -100,6 +124,23 @@ pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
                         applied_seq: state.applied_seq,
                         last_error: state.last_error.clone(),
                     }));
+                }
+                FamilyMsg::GetWatermarks(respond_to) => {
+                    let _ = respond_to.send(Ok(state.watermarks.clone()));
+                }
+                FamilyMsg::UpdateWatermarks(update) => {
+                    for (path, mtime_ns) in update.per_file {
+                        let entry = state.watermarks.per_file.entry(path).or_insert(0);
+                        if mtime_ns > *entry {
+                            *entry = mtime_ns;
+                        }
+                    }
+                    for (worktree, ts) in update.per_worktree {
+                        let entry = state.watermarks.per_worktree.entry(worktree).or_insert(0);
+                        if ts > *entry {
+                            *entry = ts;
+                        }
+                    }
                 }
                 FamilyMsg::Shutdown => break,
             }
@@ -167,5 +208,85 @@ mod tests {
         let status = actor.status().await.unwrap();
         assert_eq!(status.applied_seq, 1);
         actor.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_watermarks_initially_empty() {
+        let handle = spawn_family_actor(FamilyKey::new("test-family"));
+        let watermarks = handle.watermarks().await.unwrap();
+        assert!(watermarks.per_file.is_empty());
+        assert!(watermarks.per_worktree.is_empty());
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_watermarks_update_and_retrieve() {
+        let handle = spawn_family_actor(FamilyKey::new("test-family"));
+
+        let mut per_file = HashMap::new();
+        per_file.insert("src/main.rs".to_string(), 1000_u128);
+        per_file.insert("src/lib.rs".to_string(), 2000_u128);
+        handle
+            .update_watermarks(WatermarkState {
+                per_file,
+                per_worktree: HashMap::new(),
+            })
+            .await
+            .unwrap();
+
+        let wm = handle.watermarks().await.unwrap();
+        assert_eq!(wm.per_file.get("src/main.rs"), Some(&1000));
+        assert_eq!(wm.per_file.get("src/lib.rs"), Some(&2000));
+
+        // Higher per-file mtime overwrites; lower does not
+        let mut per_file2 = HashMap::new();
+        per_file2.insert("src/main.rs".to_string(), 3000_u128);
+        handle
+            .update_watermarks(WatermarkState {
+                per_file: per_file2,
+                per_worktree: HashMap::new(),
+            })
+            .await
+            .unwrap();
+
+        let wm = handle.watermarks().await.unwrap();
+        assert_eq!(wm.per_file.get("src/main.rs"), Some(&3000));
+        assert_eq!(wm.per_file.get("src/lib.rs"), Some(&2000));
+
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_worktree_watermark_update_and_retrieve() {
+        let handle = spawn_family_actor(FamilyKey::new("test-family"));
+
+        let mut per_worktree = HashMap::new();
+        per_worktree.insert("/repo".to_string(), 5000_u128);
+        handle
+            .update_watermarks(WatermarkState {
+                per_file: HashMap::new(),
+                per_worktree,
+            })
+            .await
+            .unwrap();
+
+        let wm = handle.watermarks().await.unwrap();
+        assert_eq!(wm.per_worktree.get("/repo"), Some(&5000));
+
+        // Monotonic: lower value does not overwrite
+        let mut per_worktree2 = HashMap::new();
+        per_worktree2.insert("/repo".to_string(), 1000_u128);
+        handle
+            .update_watermarks(WatermarkState {
+                per_file: HashMap::new(),
+                per_worktree: per_worktree2,
+            })
+            .await
+            .unwrap();
+
+        let wm = handle.watermarks().await.unwrap();
+        assert_eq!(wm.per_worktree.get("/repo"), Some(&5000));
+
+        handle.shutdown().await.unwrap();
     }
 }

@@ -163,7 +163,7 @@ mod tests {
     use super::*;
     use crate::daemon::analyzers::AnalyzerRegistry;
     use crate::daemon::domain::{
-        CommandScope, Confidence, FamilyKey, FamilyState, GlobalState, RefChange,
+        CommandScope, Confidence, FamilyKey, FamilyState, GlobalState, RefChange, WatermarkState,
     };
     use std::collections::HashMap;
 
@@ -174,6 +174,7 @@ mod tests {
             worktrees: HashMap::new(),
             last_error: None,
             applied_seq: 0,
+            watermarks: WatermarkState::default(),
         }
     }
 

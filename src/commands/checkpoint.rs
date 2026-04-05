@@ -1057,7 +1057,45 @@ pub fn prepare_captured_checkpoint(
     }))
 }
 
-fn load_captured_checkpoint_manifest(
+/// Patch the `agent_run_result` stored in a captured checkpoint manifest so that
+/// it carries the real agent identity, transcript, and metadata instead of the
+/// synthetic placeholder written at bash-tool capture time.
+pub(crate) fn update_captured_checkpoint_agent_context(
+    capture_id: &str,
+    author: &str,
+    agent_run_result: Option<&AgentRunResult>,
+) -> Result<(), GitAiError> {
+    let manifest_path = async_checkpoint_manifest_path(capture_id)?;
+    let mut manifest: PreparedCheckpointManifest =
+        serde_json::from_str(&fs::read_to_string(&manifest_path).map_err(|error| {
+            GitAiError::Generic(format!(
+                "failed reading captured checkpoint manifest {}: {}",
+                manifest_path.display(),
+                error
+            ))
+        })?)?;
+
+    // Replace the synthetic "bash-tool" author with the real git user name.
+    manifest.author = author.to_string();
+
+    // Merge real agent context while preserving capture-specific fields
+    // (edited_filepaths, will_edit_filepaths, dirty_files) from the original.
+    if let Some(real) = agent_run_result {
+        let mut updated = real.clone();
+        if let Some(existing) = &manifest.agent_run_result {
+            updated.edited_filepaths = existing.edited_filepaths.clone();
+            updated.will_edit_filepaths = existing.will_edit_filepaths.clone();
+        }
+        updated.dirty_files = None;
+        updated.captured_checkpoint_id = None;
+        manifest.agent_run_result = Some(updated);
+    }
+
+    fs::write(&manifest_path, serde_json::to_vec(&manifest)?)?;
+    Ok(())
+}
+
+pub(crate) fn load_captured_checkpoint_manifest(
     capture_id: &str,
 ) -> Result<PreparedCheckpointManifest, GitAiError> {
     let manifest_path = async_checkpoint_manifest_path(capture_id)?;
@@ -2189,6 +2227,7 @@ mod tests {
                     .map(|(path, content)| (path.to_string(), content.to_string()))
                     .collect()
             }),
+            captured_checkpoint_id: None,
         }
     }
 
@@ -2429,6 +2468,7 @@ mod tests {
             edited_filepaths: Some(vec![filename]),
             will_edit_filepaths: None,
             dirty_files: Some(dirty_files),
+            captured_checkpoint_id: None,
         };
 
         let (entries_len, files_len, _) = run_with_base_commit_override_with_policy(
@@ -2486,6 +2526,7 @@ mod tests {
             edited_filepaths: Some(vec![filename.clone()]),
             will_edit_filepaths: None,
             dirty_files: None,
+            captured_checkpoint_id: None,
         };
 
         let error = run_with_base_commit_override_with_policy(
@@ -2542,6 +2583,7 @@ mod tests {
             edited_filepaths: Some(vec![filename]),
             will_edit_filepaths: None,
             dirty_files: None,
+            captured_checkpoint_id: None,
         };
 
         let (entries_len, files_len, _) = run_with_base_commit_override(
@@ -2637,6 +2679,7 @@ mod tests {
             ]),
             will_edit_filepaths: None,
             dirty_files: None,
+            captured_checkpoint_id: None,
         };
 
         // Run checkpoint - should not crash even with paths outside repo
