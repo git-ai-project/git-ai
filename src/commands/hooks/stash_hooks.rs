@@ -18,11 +18,19 @@ pub fn pre_stash_hook(
         None => return, // Implicit push, nothing to capture
     };
 
-    if subcommand == "pop" || subcommand == "apply" {
-        // Capture the stash SHA BEFORE git runs (pop will delete it)
-        let stash_ref = parsed_args
-            .pos_command(1)
-            .unwrap_or_else(|| "stash@{0}".to_string());
+    if subcommand == "pop" || subcommand == "apply" || subcommand == "branch" {
+        // Capture the stash SHA BEFORE git runs (pop/branch will delete it)
+        // For "branch", the stash ref is the second positional arg:
+        //   git stash branch <branchname> [<stash>]
+        let stash_ref = if subcommand == "branch" {
+            parsed_args
+                .pos_command(2)
+                .unwrap_or_else(|| "stash@{0}".to_string())
+        } else {
+            parsed_args
+                .pos_command(1)
+                .unwrap_or_else(|| "stash@{0}".to_string())
+        };
 
         if let Ok(stash_sha) = resolve_stash_to_sha(repository, &stash_ref) {
             command_hooks_context.stash_sha = Some(stash_sha);
@@ -52,11 +60,6 @@ pub fn post_stash_hook(
     repository: &mut Repository,
     exit_status: std::process::ExitStatus,
 ) {
-    if !exit_status.success() {
-        debug_log("Stash failed, skipping post-stash hook");
-        return;
-    }
-
     // Check what subcommand was used
     let subcommand = match parsed_args.pos_command(0) {
         Some(cmd) => cmd,
@@ -65,6 +68,25 @@ pub fn post_stash_hook(
             "push".to_string()
         }
     };
+
+    // For pop/apply/branch, don't bail on exit code 1 if it's a conflict
+    // (stash was partially applied). For other subcommands, bail on any failure.
+    if !exit_status.success() {
+        let is_restore_subcommand =
+            subcommand == "pop" || subcommand == "apply" || subcommand == "branch";
+        if is_restore_subcommand && has_stash_conflict(repository) {
+            debug_log(&format!(
+                "Stash {} had conflicts, but will still restore attributions",
+                subcommand
+            ));
+        } else {
+            debug_log(&format!(
+                "Stash {} failed (non-conflict), skipping post-stash hook",
+                subcommand
+            ));
+            return;
+        }
+    }
 
     debug_log(&format!("Post-stash: processing stash {}", subcommand));
 
@@ -94,7 +116,7 @@ pub fn post_stash_hook(
         if let Err(e) = save_stash_authorship_log(repository, &head_sha, &stash_sha, &pathspecs) {
             debug_log(&format!("Failed to save stash authorship log: {}", e));
         }
-    } else if subcommand == "pop" || subcommand == "apply" {
+    } else if subcommand == "pop" || subcommand == "apply" || subcommand == "branch" {
         // Stash was applied - restore attributions from git note
         // Use the stash SHA we captured in pre-hook (before Git deleted it)
         let stash_sha = match &command_hooks_context.stash_sha {
@@ -123,6 +145,26 @@ pub fn post_stash_hook(
         if let Err(e) = restore_stash_attributions(repository, &head_sha, &stash_sha) {
             debug_log(&format!("Failed to restore stash attributions: {}", e));
         }
+    }
+}
+
+/// Detect whether a stash pop/apply failure was due to a merge conflict.
+/// When `git stash pop` encounters a conflict, the working tree has unmerged entries.
+/// We check for this by looking at `git status --porcelain=v2` for unmerged ('u') entries.
+/// A conflict means the stash was partially applied (with conflict markers) and attribution
+/// should still be restored. A non-conflict failure means the stash was not applied at all.
+fn has_stash_conflict(repo: &Repository) -> bool {
+    let mut args = repo.global_args_for_exec();
+    args.push("status".to_string());
+    args.push("--porcelain=v2".to_string());
+
+    match exec_git(&args) {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // Unmerged entries start with 'u' in porcelain v2 format
+            stdout.lines().any(|line| line.starts_with("u "))
+        }
+        Err(_) => false,
     }
 }
 
