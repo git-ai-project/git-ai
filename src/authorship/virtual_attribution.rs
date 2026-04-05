@@ -1952,7 +1952,24 @@ pub fn restore_stashed_va(
             if abs_path.exists()
                 && let Ok(content) = std::fs::read_to_string(&abs_path)
             {
-                working_files.insert(file_path.clone(), content);
+                // Fix #957: Strip conflict markers from working files before merging
+                // attributions. When --merge checkout produces conflicts, the working
+                // file may contain conflict markers. We keep "ours" (stashed VA) lines
+                // so the attribution merge operates on clean content.
+                let clean_content = if crate::config::Config::get()
+                    .feature_flags()
+                    .fix_attribution_edge_cases
+                    && content_has_conflict_markers(&content)
+                {
+                    debug_log(&format!(
+                        "Conflict markers detected in {}, stripping for VA merge",
+                        file_path
+                    ));
+                    strip_conflict_markers_keep_ours(&content)
+                } else {
+                    content
+                };
+                working_files.insert(file_path.clone(), clean_content);
             }
         }
     }
@@ -2031,6 +2048,40 @@ pub fn restore_stashed_va(
             &new_head[..8.min(new_head.len())]
         ));
     }
+}
+
+/// Check whether a file's content contains git conflict markers.
+fn content_has_conflict_markers(content: &str) -> bool {
+    content
+        .lines()
+        .any(|l| l.starts_with("<<<<<<<") || l.starts_with("=======") || l.starts_with(">>>>>>>"))
+}
+
+/// Strip conflict markers from content, keeping the "ours" side
+/// (the section between `<<<<<<<` and `=======`).
+///
+/// This is used when a `checkout --merge` produces conflicts: the stashed VA
+/// was built from "our" pre-checkout state, so we want to keep "our" content
+/// for the purpose of attribution merging.
+fn strip_conflict_markers_keep_ours(content: &str) -> String {
+    let mut result = Vec::new();
+    let mut in_ours = true; // outside a conflict block → keep the line
+    let mut in_conflict = false;
+
+    for line in content.lines() {
+        if line.starts_with("<<<<<<<") {
+            in_conflict = true;
+            in_ours = true; // entering "ours" section
+        } else if in_conflict && line.starts_with("=======") {
+            in_ours = false; // entering "theirs" section
+        } else if in_conflict && line.starts_with(">>>>>>>") {
+            in_conflict = false;
+            in_ours = true; // back to normal content
+        } else if in_ours {
+            result.push(line);
+        }
+    }
+    result.join("\n")
 }
 
 /// Transform attributions from old content to new content

@@ -23,6 +23,7 @@ fn setup() {
         async_mode: false,
         git_hooks_enabled: false,
         git_hooks_externally_managed: false,
+        fix_attribution_edge_cases: true,
     };
 
     git_ai::config::Config::set_test_feature_flags(test_flags.clone());

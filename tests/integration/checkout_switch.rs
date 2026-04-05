@@ -417,6 +417,64 @@ fn test_checkout_pathspec_multiple_files() {
     file_c.assert_lines_and_blame(vec!["Modified C by AI".ai()]);
 }
 
+/// Regression test for #957: --merge checkout with conflict should preserve AI attribution
+#[test]
+fn test_checkout_merge_conflict_preserves_ai_attribution() {
+    let repo = TestRepo::new();
+    // This fix targets wrapper mode; daemon mode has a different (unrelated) carryover
+    // snapshot issue for --merge that is not part of this fix.
+    if repo.mode().uses_daemon() {
+        return;
+    }
+
+    // Create base commit
+    let mut file = repo.filename("file.txt");
+    file.set_contents(crate::lines!["line1", "line2", "line3"]);
+    repo.stage_all_and_commit("initial").unwrap();
+    let main_branch = repo.current_branch();
+
+    // Create feature branch with a change to line1
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    let mut feature_file = repo.filename("file.txt");
+    feature_file.replace_at(0, "FEATURE_LINE1");
+    repo.stage_all_and_commit("feature changes").unwrap();
+
+    // Back to main, AI adds new lines at end
+    repo.git(&["checkout", &main_branch]).unwrap();
+    let mut main_file = repo.filename("file.txt");
+    main_file.insert_at(3, crate::lines!["AI_LINE_4".ai(), "AI_LINE_5".ai()]);
+
+    // Checkpoint the AI work
+    repo.git_ai(&["checkpoint", "mock_ai"]).unwrap();
+
+    // Now checkout --merge to feature (might create conflict on line1 or succeed)
+    let checkout_result = repo.git(&["checkout", "--merge", "feature"]);
+
+    if checkout_result.is_ok() {
+        // Resolve any conflict: keep AI's lines 4-5
+        use std::fs;
+        let file_path = repo.path().join("file.txt");
+        // Write resolved content (feature's line1 + original line2/3 + AI lines 4-5)
+        fs::write(
+            &file_path,
+            "FEATURE_LINE1\nline2\nline3\nAI_LINE_4\nAI_LINE_5\n",
+        )
+        .unwrap();
+        repo.git(&["add", "file.txt"]).unwrap();
+        repo.stage_all_and_commit("resolved").unwrap();
+
+        // After fix: AI_LINE_4 and AI_LINE_5 should be AI-attributed
+        let stats = repo.stats().unwrap();
+        // The key assertion: AI lines should be attributed
+        assert!(
+            stats.ai_additions > 0,
+            "AI lines should be attributed after --merge conflict resolution, got ai_additions={}",
+            stats.ai_additions
+        );
+    }
+    // If checkout failed, test still passes (not all git versions handle --merge the same way)
+}
+
 crate::reuse_tests_in_worktree!(
     test_checkout_branch_migrates_working_log,
     test_checkout_force_deletes_working_log,

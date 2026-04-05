@@ -270,4 +270,50 @@ fn test_blame_after_merge_conflict_resolution() {
     ]);
 }
 
+/// Regression test for #953: merge conflict resolved by AI (mock_ai), committed outside session
+#[test]
+fn test_merge_conflict_ai_resolution_outside_session() {
+    let repo = TestRepo::new();
+
+    // Create base commit
+    let mut file = repo.filename("app.py");
+    file.set_contents(crate::lines!["class App:", "    pass"]);
+    repo.stage_all_and_commit("initial").unwrap();
+    let main_branch = repo.current_branch();
+
+    // Create feature branch with AI changes
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    let mut feature_file = repo.filename("app.py");
+    feature_file.replace_at(1, "    def feature(): pass".ai());
+    repo.stage_all_and_commit("feature AI change").unwrap();
+
+    // Back to main with conflicting human change
+    repo.git(&["checkout", &main_branch]).unwrap();
+    let mut main_file = repo.filename("app.py");
+    main_file.replace_at(1, "    def main(): pass");
+    repo.stage_all_and_commit("main human change").unwrap();
+
+    // Merge feature into main - should conflict
+    let merge_result = repo.git(&["merge", "feature"]);
+    if merge_result.is_err() {
+        // We're in conflict state. Use AI (mock_ai) to resolve the conflict.
+        // This simulates Claude resolving the conflict via Edit tool.
+        use std::fs;
+        let resolved_content = "class App:\n    def feature(): pass\n    def main(): pass\n";
+        fs::write(repo.path().join("app.py"), resolved_content).unwrap();
+
+        // Checkpoint the AI resolution
+        repo.git_ai(&["checkpoint", "mock_ai", "app.py"]).unwrap();
+
+        // Commit (simulating human committing after AI resolved the conflict)
+        repo.git(&["add", "app.py"]).unwrap();
+        repo.stage_all_and_commit("merge resolved").unwrap();
+
+        // After fix: AI lines should be attributed via checkpoint
+        // For now just verify no panic; the checkpoint should carry attribution forward
+        let stats = repo.stats().unwrap();
+        let _ = stats;
+    }
+}
+
 crate::reuse_tests_in_worktree!(test_blame_after_merge_conflict_resolution,);

@@ -396,6 +396,64 @@ fn test_squash_merge_preserves_custom_attributes_from_config() {
     ]);
 }
 
+/// Regression test for #950: squash rebase should preserve all AI attribution
+/// even when two sessions have interleaved lines
+#[test]
+fn test_squash_rebase_preserves_interleaved_attribution() {
+    let repo = TestRepo::new();
+
+    // Create initial commit
+    let mut file = repo.filename("module.py");
+    file.set_contents(crate::lines!["# module"]);
+    repo.stage_all_and_commit("initial").unwrap();
+    let main_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+    // Session A creates a 5-line class
+    file.set_contents(crate::lines![
+        "class Store:".ai(),
+        "    def __init__(self):".ai(),
+        "        self.data = {}".ai(),
+        "    def get(self, k):".ai(),
+        "        return self.data.get(k)".ai(),
+    ]);
+    repo.stage_all_and_commit("Session A: create Store class")
+        .unwrap();
+
+    // Session B adds interleaved lines (some between A's lines, some after)
+    file.set_contents(crate::lines![
+        "class Store:".ai(),
+        "    \"\"\"A data store.\"\"\"".ai(),
+        "    def __init__(self):".ai(),
+        "        self.data = {}".ai(),
+        "        self.cache = {}".ai(),
+        "    def get(self, k):".ai(),
+        "        \"\"\"Get value.\"\"\"".ai(),
+        "        return self.data.get(k)".ai(),
+        "    def set(self, k, v):".ai(),
+        "        self.data[k] = v".ai(),
+    ]);
+    repo.stage_all_and_commit("Session B: add docstrings and set method")
+        .unwrap();
+
+    // Squash the two commits using merge --squash
+    repo.git(&["checkout", &main_branch]).unwrap();
+    repo.git(&["merge", "--squash", "feature"]).unwrap();
+    repo.stage_all_and_commit("squash merge").unwrap();
+
+    let stats = repo.stats().unwrap();
+
+    // ALL 10 lines should be AI-attributed (5 from session A, 5 from session B)
+    // Before fix: some A lines that got surrounded by B would be unattributed
+    assert_eq!(
+        stats.ai_additions, 10,
+        "All 10 lines should be AI-attributed after squash, got ai={} human={}",
+        stats.ai_additions, stats.human_additions
+    );
+    assert_eq!(stats.human_additions, 0, "No human lines expected");
+}
+
 crate::reuse_tests_in_worktree!(
     test_prepare_working_log_simple_squash,
     test_prepare_working_log_squash_with_main_changes,

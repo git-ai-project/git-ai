@@ -1,6 +1,7 @@
 use crate::authorship::rebase_authorship::walk_commits_to_base;
 use crate::commands::git_handlers::CommandHooksContext;
 use crate::commands::hooks::commit_hooks::get_commit_default_author;
+use crate::config::Config;
 use crate::git::cli_parser::{ParsedGitInvocation, is_dry_run};
 use crate::git::repository::Repository;
 use crate::git::rewrite_log::RewriteLogEvent;
@@ -49,6 +50,17 @@ pub fn pre_cherry_pick_hook(
                     source_commits
                 ));
 
+                // Fix #952: If source_commits is empty (e.g. bad args), skip writing
+                // the Start event to prevent state corruption for subsequent operations.
+                if source_commits.is_empty()
+                    && Config::get().feature_flags().fix_attribution_edge_cases
+                {
+                    debug_log(
+                        "No valid source commits parsed, skipping CherryPickStart event (prevents state corruption from bad args)",
+                    );
+                    return;
+                }
+
                 // Log the cherry-pick start event
                 let start_event = RewriteLogEvent::cherry_pick_start(
                     crate::git::rewrite_log::CherryPickStartEvent::new(
@@ -70,6 +82,13 @@ pub fn pre_cherry_pick_hook(
         debug_log(
             "Continuing existing cherry-pick (will read original head from log in post-hook)",
         );
+        // Fix #951: If --skip is being used, update source_commits to remove
+        // the skipped commit so subsequent cherry-picks get correct attribution.
+        if Config::get().feature_flags().fix_attribution_edge_cases
+            && parsed_args.command_args.iter().any(|a| a == "--skip")
+        {
+            handle_cherry_pick_skip(repository);
+        }
     }
 }
 
@@ -290,6 +309,138 @@ fn resolve_commit_sha(
     Ok(sha)
 }
 
+/// Fix #951: Handle cherry-pick --skip by removing the skipped commit from source_commits.
+/// This prevents the skipped commit from corrupting attribution for remaining commits.
+fn handle_cherry_pick_skip(repository: &mut Repository) {
+    // Read CHERRY_PICK_HEAD to find which commit is being skipped
+    let cherry_pick_head = repository.path().join("CHERRY_PICK_HEAD");
+    let skipped_sha = match std::fs::read_to_string(&cherry_pick_head) {
+        Ok(content) => content.trim().to_string(),
+        Err(_) => {
+            debug_log("Could not read CHERRY_PICK_HEAD for skip handling");
+            return;
+        }
+    };
+
+    debug_log(&format!(
+        "Skipping commit {}, updating CherryPickStart source_commits",
+        skipped_sha
+    ));
+
+    // Find the most recent CherryPickStart event (events are newest-first).
+    // Stop if we hit a Complete or Abort (no active cherry-pick).
+    let events = match repository.storage.read_rewrite_events() {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    let mut current_start: Option<crate::git::rewrite_log::CherryPickStartEvent> = None;
+    for event in events {
+        match event {
+            RewriteLogEvent::CherryPickComplete { .. }
+            | RewriteLogEvent::CherryPickAbort { .. } => {
+                break; // No active start
+            }
+            RewriteLogEvent::CherryPickStart { cherry_pick_start } => {
+                current_start = Some(cherry_pick_start);
+                break;
+            }
+            _ => continue,
+        }
+    }
+
+    let start = match current_start {
+        Some(s) => s,
+        None => {
+            debug_log("No active CherryPickStart event found for skip handling");
+            return;
+        }
+    };
+
+    // Remove the skipped commit from source_commits
+    let updated_source_commits: Vec<String> = start
+        .source_commits
+        .iter()
+        .filter(|sha| sha.as_str() != skipped_sha.as_str())
+        .cloned()
+        .collect();
+
+    if updated_source_commits.len() == start.source_commits.len() {
+        debug_log(&format!(
+            "Skipped commit {} not found in source_commits, no update needed",
+            skipped_sha
+        ));
+        return;
+    }
+
+    debug_log(&format!(
+        "Updated source_commits: {} -> {} (removed {})",
+        start.source_commits.len(),
+        updated_source_commits.len(),
+        skipped_sha
+    ));
+
+    // Write a new CherryPickStart event with updated source_commits.
+    // Since find_cherry_pick_start_event_source_commits returns the most recent
+    // Start event (newest-first), the new event will be read first.
+    let new_start_event =
+        RewriteLogEvent::cherry_pick_start(crate::git::rewrite_log::CherryPickStartEvent::new(
+            start.original_head.clone(),
+            updated_source_commits,
+        ));
+
+    match repository.storage.append_rewrite_event(new_start_event) {
+        Ok(_) => debug_log("Updated CherryPickStart event for --skip"),
+        Err(e) => debug_log(&format!("Failed to update CherryPickStart event: {}", e)),
+    }
+}
+
+/// Fix #955: Try to fetch notes from remotes for source commits that don't have local notes.
+/// This handles the case where a cherry-pick source is from a remote repo whose notes
+/// haven't been fetched locally.
+fn try_fetch_missing_notes_for_commits(repository: &Repository, source_commits: &[String]) {
+    use crate::git::repository::exec_git;
+
+    // Check which source commits are missing notes locally
+    let missing: Vec<&String> = source_commits
+        .iter()
+        .filter(|sha| {
+            let mut args = repository.global_args_for_exec();
+            args.extend(
+                ["notes", "--ref=refs/notes/ai", "show"]
+                    .iter()
+                    .map(|s| s.to_string()),
+            );
+            args.push(sha.to_string());
+            exec_git(&args).map(|o| !o.status.success()).unwrap_or(true)
+        })
+        .collect();
+
+    if missing.is_empty() {
+        return;
+    }
+
+    debug_log(&format!(
+        "Source commits missing notes: {:?}, trying to fetch from remotes",
+        missing
+    ));
+
+    // Try to fetch notes from each remote (best-effort)
+    if let Ok(remotes) = repository.remotes_with_urls() {
+        for (remote_name, _) in remotes {
+            let mut args = repository.global_args_for_exec();
+            args.extend(["fetch", "--quiet"].iter().map(|s| s.to_string()));
+            args.push(remote_name.clone());
+            args.push("+refs/notes/ai:refs/notes/ai".to_string());
+            let _ = exec_git(&args); // best-effort
+            debug_log(&format!(
+                "Attempted to fetch notes from remote {}",
+                remote_name
+            ));
+        }
+    }
+}
+
 fn process_completed_cherry_pick(
     repository: &mut Repository,
     original_head: &str,
@@ -335,6 +486,11 @@ fn process_completed_cherry_pick(
             return;
         }
     };
+
+    // Fix #955: Try to fetch missing notes from remotes before processing.
+    if Config::get().feature_flags().fix_attribution_edge_cases {
+        try_fetch_missing_notes_for_commits(repository, &source_commits);
+    }
 
     // Build commit mappings
     debug_log(&format!(
