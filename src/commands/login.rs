@@ -1,7 +1,13 @@
 use crate::auth::{CredentialStore, OAuthClient};
+use crate::config;
 
 /// Handle the `git-ai login` command
 pub fn handle_login(_args: &[String]) {
+    if config::Config::get().get_feature_flags().disable_auth {
+        eprintln!("Error: Authentication is disabled. The disable_auth feature flag is enabled.");
+        std::process::exit(1);
+    }
+
     let store = CredentialStore::new();
 
     // Check if already logged in

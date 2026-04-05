@@ -58,6 +58,7 @@ define_feature_flags!(
     async_mode: async_mode, debug = false, release = true,
     git_hooks_enabled: git_hooks_enabled, debug = false, release = false,
     git_hooks_externally_managed: git_hooks_externally_managed, debug = false, release = false,
+    disable_auth: disable_auth, debug = false, release = false,
 );
 
 impl FeatureFlags {
@@ -133,6 +134,7 @@ mod tests {
             assert!(!flags.async_mode);
             assert!(!flags.git_hooks_enabled);
             assert!(!flags.git_hooks_externally_managed);
+            assert!(!flags.disable_auth);
         }
         #[cfg(not(debug_assertions))]
         {
@@ -142,6 +144,7 @@ mod tests {
             assert!(flags.async_mode);
             assert!(!flags.git_hooks_enabled);
             assert!(!flags.git_hooks_externally_managed);
+            assert!(!flags.disable_auth);
         }
     }
 
@@ -210,6 +213,7 @@ mod tests {
             std::env::remove_var("GIT_AI_CHECKPOINT_INTER_COMMIT_MOVE");
             std::env::remove_var("GIT_AI_AUTH_KEYRING");
             std::env::remove_var("GIT_AI_ASYNC_MODE");
+            std::env::remove_var("GIT_AI_DISABLE_AUTH");
         }
 
         let flags = FeatureFlags::from_env_and_file(None);
@@ -217,6 +221,7 @@ mod tests {
         assert_eq!(flags.rewrite_stash, defaults.rewrite_stash);
         assert_eq!(flags.inter_commit_move, defaults.inter_commit_move);
         assert_eq!(flags.auth_keyring, defaults.auth_keyring);
+        assert_eq!(flags.disable_auth, defaults.disable_auth);
     }
 
     #[test]
@@ -227,6 +232,7 @@ mod tests {
             std::env::remove_var("GIT_AI_CHECKPOINT_INTER_COMMIT_MOVE");
             std::env::remove_var("GIT_AI_AUTH_KEYRING");
             std::env::remove_var("GIT_AI_ASYNC_MODE");
+            std::env::remove_var("GIT_AI_DISABLE_AUTH");
         }
 
         let file_flags = DeserializableFeatureFlags {
@@ -251,6 +257,7 @@ mod tests {
             async_mode: true,
             git_hooks_enabled: false,
             git_hooks_externally_managed: false,
+            disable_auth: false,
         };
 
         let serialized = serde_json::to_string(&flags).unwrap();
@@ -260,6 +267,7 @@ mod tests {
         assert!(serialized.contains("async_mode"));
         assert!(serialized.contains("git_hooks_enabled"));
         assert!(serialized.contains("git_hooks_externally_managed"));
+        assert!(serialized.contains("disable_auth"));
     }
 
     #[test]
@@ -271,6 +279,7 @@ mod tests {
             async_mode: true,
             git_hooks_enabled: true,
             git_hooks_externally_managed: false,
+            disable_auth: true,
         };
         let cloned = flags.clone();
         assert_eq!(cloned.rewrite_stash, flags.rewrite_stash);
@@ -282,6 +291,7 @@ mod tests {
             cloned.git_hooks_externally_managed,
             flags.git_hooks_externally_managed
         );
+        assert_eq!(cloned.disable_auth, flags.disable_auth);
     }
 
     #[test]
@@ -289,5 +299,22 @@ mod tests {
         let flags = FeatureFlags::default();
         let debug_str = format!("{:?}", flags);
         assert!(debug_str.contains("FeatureFlags"));
+    }
+
+    #[test]
+    fn test_disable_auth_flag_from_file_config() {
+        let deserializable = DeserializableFeatureFlags {
+            disable_auth: Some(true),
+            ..Default::default()
+        };
+
+        let flags = FeatureFlags::from_file_config(Some(deserializable));
+        assert!(flags.disable_auth);
+    }
+
+    #[test]
+    fn test_disable_auth_flag_defaults_to_false() {
+        let flags = FeatureFlags::default();
+        assert!(!flags.disable_auth);
     }
 }

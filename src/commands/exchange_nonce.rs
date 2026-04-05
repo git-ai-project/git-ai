@@ -9,12 +9,18 @@
 
 use crate::auth::CredentialStore;
 use crate::auth::client::OAuthClient;
+use crate::config;
 
 /// Handle the exchange-nonce command (internal - called by install scripts)
 ///
 /// Exits with code 1 on failure (silently) so install script can run `git-ai login`.
 /// Exits with code 0 on success.
 pub fn handle_exchange_nonce(_args: &[String]) {
+    if config::Config::get().get_feature_flags().disable_auth {
+        eprintln!("Error: Authentication is disabled. The disable_auth feature flag is enabled.");
+        std::process::exit(1);
+    }
+
     // Read from environment variables (injected by install script)
     let nonce = std::env::var("INSTALL_NONCE")
         .ok()

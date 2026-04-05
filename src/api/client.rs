@@ -13,8 +13,13 @@ static REFRESH_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 /// Attempt to load stored credentials and refresh if needed.
 /// Returns None on any failure (not logged in, expired, refresh failed).
+/// Returns None immediately when disable_auth feature flag is enabled.
 /// Uses in-process Mutex for thread safety during token refresh.
 fn try_load_auth_token() -> Option<String> {
+    if config::Config::get().get_feature_flags().disable_auth {
+        return None;
+    }
+
     let store = CredentialStore::new();
 
     let creds = match store.load() {

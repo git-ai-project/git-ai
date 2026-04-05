@@ -6,6 +6,10 @@ use crate::auth::types::StoredCredentials;
 use crate::config::Config;
 use std::path::PathBuf;
 
+#[cfg(not(test))]
+const AUTH_DISABLED_MSG: &str =
+    "Authentication is disabled. The disable_auth feature flag is enabled.";
+
 #[cfg(all(not(test), feature = "keyring"))]
 const SERVICE_NAME: &str = "git-ai";
 #[cfg(all(not(test), feature = "keyring"))]
@@ -99,16 +103,28 @@ impl CredentialStore {
         ))
     }
 
-    /// Store credentials securely
+    /// Store credentials securely.
+    /// Returns an error when the disable_auth feature flag is enabled.
     pub fn store(&self, creds: &StoredCredentials) -> Result<(), String> {
+        #[cfg(not(test))]
+        if Config::get().get_feature_flags().disable_auth {
+            return Err(AUTH_DISABLED_MSG.to_string());
+        }
+
         let json = serde_json::to_string(creds)
             .map_err(|e| format!("Failed to serialize credentials: {}", e))?;
 
         self.backend.store(&json)
     }
 
-    /// Load stored credentials
+    /// Load stored credentials.
+    /// Returns Ok(None) when the disable_auth feature flag is enabled.
     pub fn load(&self) -> Result<Option<StoredCredentials>, String> {
+        #[cfg(not(test))]
+        if Config::get().get_feature_flags().disable_auth {
+            return Ok(None);
+        }
+
         let json = self.backend.load()?;
 
         match json {
