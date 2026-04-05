@@ -680,9 +680,12 @@ fn handle_checkpoint(args: &[String]) {
                 })
                 .collect();
 
-            // Group files by their containing repository
-            let (repo_files, orphan_files) =
-                group_files_by_repository(&absolute_files, Some(&repository_working_dir));
+            // Group files by their containing repository.
+            // Pass None as workspace_root so that find_repository_for_file can search
+            // outside the CWD boundary. This fixes issue #954 where launching from a
+            // non-git directory (e.g. /tmp) caused the workspace boundary to block
+            // discovery of repos in sibling directories.
+            let (repo_files, orphan_files) = group_files_by_repository(&absolute_files, None);
 
             if repo_files.is_empty() {
                 eprintln!(
