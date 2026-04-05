@@ -814,7 +814,16 @@ fn capture_file_contents(repo_root: &Path, file_paths: &[PathBuf]) -> HashMap<St
 /// Returns `None` on any failure (daemon not running, socket error, parse
 /// error, etc.) for graceful degradation — the caller simply skips the
 /// captured-checkpoint path when watermarks are unavailable.
-fn query_daemon_watermarks(repo_working_dir: &str) -> Option<HashMap<String, u128>> {
+/// Watermarks returned by the daemon for a single worktree.
+struct DaemonWatermarks {
+    /// Per-file mtime watermarks from scoped checkpoints.
+    per_file: HashMap<String, u128>,
+    /// Timestamp of the last full (non-scoped) Human checkpoint, if any.
+    /// `None` on cold start (daemon has never processed a full checkpoint).
+    worktree: Option<u128>,
+}
+
+fn query_daemon_watermarks(repo_working_dir: &str) -> Option<DaemonWatermarks> {
     let config = DaemonConfig::from_env_or_default_paths().ok()?;
     let request = ControlRequest::SnapshotWatermarks {
         repo_working_dir: repo_working_dir.to_string(),
@@ -834,20 +843,27 @@ fn query_daemon_watermarks(repo_working_dir: &str) -> Option<HashMap<String, u12
         return None;
     }
 
-    // The daemon returns `{ "watermarks": { "<path>": <u128>, ... } }`.
+    // The daemon returns `{ "watermarks": {...}, "worktree_watermark": <u128|null> }`.
     let data = response.data?;
-    let watermarks_value = data.get("watermarks")?;
-    let map: HashMap<String, u128> = serde_json::from_value(watermarks_value.clone()).ok()?;
-    Some(map)
+    let per_file: HashMap<String, u128> = data
+        .get("watermarks")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let worktree: Option<u128> = data
+        .get("worktree_watermark")
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
+    Some(DaemonWatermarks { per_file, worktree })
 }
 
 /// Compare snapshot entries against daemon watermarks to find stale files.
 ///
-/// A file is "stale" (modified since last checkpoint) when its `mtime`
-/// exceeds the watermark for that path by more than `MTIME_GRACE_WINDOW_NS`.
-/// Files not present in the watermark map are considered stale if they exist
-/// in the snapshot.
-fn find_stale_files(snapshot: &StatSnapshot, watermarks: &HashMap<String, u128>) -> Vec<PathBuf> {
+/// Three-tier logic per file:
+/// 1. Per-file watermark exists → stale if `mtime > watermark + GRACE`.
+/// 2. No per-file watermark but worktree watermark exists → stale if
+///    `mtime > worktree_watermark + GRACE`.
+/// 3. Neither watermark → not included here; the caller handles cold-start via
+///    `git status` (see `attempt_pre_hook_capture`).
+fn find_stale_files(snapshot: &StatSnapshot, wm: &DaemonWatermarks) -> Vec<PathBuf> {
     let mut stale = Vec::new();
     for (rel_path, entry) in &snapshot.entries {
         if !entry.exists {
@@ -859,16 +875,21 @@ fn find_stale_files(snapshot: &StatSnapshot, watermarks: &HashMap<String, u128>)
         let mtime_ns = system_time_to_nanos(mtime);
         let posix_key = crate::utils::normalize_to_posix(&rel_path.to_string_lossy());
 
-        match watermarks.get(&posix_key) {
-            Some(&watermark_ns) => {
-                if mtime_ns > watermark_ns + MTIME_GRACE_WINDOW_NS {
+        match wm.per_file.get(&posix_key) {
+            Some(&file_wm) => {
+                // Tier 1: precise per-file watermark from a prior scoped checkpoint.
+                if mtime_ns > file_wm + MTIME_GRACE_WINDOW_NS {
                     stale.push(rel_path.clone());
                 }
             }
             None => {
-                // No watermark means this file has never been checkpointed —
-                // treat as stale so the pre-hook captures it.
-                stale.push(rel_path.clone());
+                // Tier 2: fall back to worktree-level watermark.
+                if let Some(worktree_wm) = wm.worktree {
+                    if mtime_ns > worktree_wm + MTIME_GRACE_WINDOW_NS {
+                        stale.push(rel_path.clone());
+                    }
+                }
+                // Tier 3 (no worktree watermark): cold-start, handled in caller.
             }
         }
     }
@@ -900,10 +921,39 @@ fn attempt_pre_hook_capture(
     let repo_working_dir = repo_root.to_string_lossy().to_string();
 
     // 1. Query daemon watermarks (graceful degradation on failure).
-    let watermarks = query_daemon_watermarks(&repo_working_dir)?;
+    let wm = query_daemon_watermarks(&repo_working_dir)?;
 
-    // 2. Find stale files.
-    let stale_files = find_stale_files(snap, &watermarks);
+    // 2. Find stale files (tiers 1 & 2: per-file and worktree watermarks).
+    let mut stale_files = find_stale_files(snap, &wm);
+
+    // 3. Cold-start: no worktree watermark means we have no baseline for files
+    //    that have never appeared in a scoped checkpoint. Use `git status` to
+    //    find only actually-dirty files instead of scanning all tracked files.
+    if wm.worktree.is_none() {
+        match git_status_fallback(repo_root) {
+            Ok(dirty_paths) => {
+                for path_str in dirty_paths {
+                    let posix_key = crate::utils::normalize_to_posix(&path_str);
+                    // Skip if already covered by a per-file watermark comparison.
+                    if wm.per_file.contains_key(&posix_key) {
+                        continue;
+                    }
+                    let p = PathBuf::from(&path_str);
+                    if !stale_files.contains(&p) {
+                        stale_files.push(p);
+                    }
+                }
+                stale_files.sort();
+            }
+            Err(e) => {
+                debug_log(&format!(
+                    "Pre-hook capture: git status fallback failed: {}",
+                    e
+                ));
+            }
+        }
+    }
+
     if stale_files.is_empty() {
         debug_log("Pre-hook capture: no stale files found, skipping");
         return None;
@@ -917,10 +967,10 @@ fn attempt_pre_hook_capture(
         return None;
     }
 
-    // 3. Capture file contents for the stale files.
+    // 4. Capture file contents for the stale files.
     let contents = capture_file_contents(repo_root, &stale_files);
 
-    // 4. Open the repository.
+    // 5. Open the repository.
     let repo = match find_repository_in_path(&repo_working_dir) {
         Ok(r) => r,
         Err(e) => {
@@ -929,13 +979,13 @@ fn attempt_pre_hook_capture(
         }
     };
 
-    // 5. Build stale paths as posix-normalized strings.
+    // 6. Build stale paths as posix-normalized strings.
     let stale_paths: Vec<String> = stale_files
         .iter()
         .map(|p| crate::utils::normalize_to_posix(&p.to_string_lossy()))
         .collect();
 
-    // 6. Build a synthetic AgentRunResult for the captured checkpoint.
+    // 7. Build a synthetic AgentRunResult for the captured checkpoint.
     let agent_run_result = AgentRunResult {
         agent_id: AgentId {
             tool: "bash-tool".to_string(),
@@ -952,7 +1002,7 @@ fn attempt_pre_hook_capture(
         captured_checkpoint_id: None,
     };
 
-    // 7. Prepare the captured checkpoint.
+    // 8. Prepare the captured checkpoint.
     match prepare_captured_checkpoint(
         &repo,
         "bash-tool", // author
@@ -1585,35 +1635,103 @@ mod tests {
         }
     }
 
+    fn make_daemon_watermarks(
+        per_file: HashMap<String, u128>,
+        worktree: Option<u128>,
+    ) -> DaemonWatermarks {
+        DaemonWatermarks { per_file, worktree }
+    }
+
     #[test]
-    fn test_find_stale_files_empty_watermarks() {
-        // File with mtime=100s. Empty watermarks -> no watermark for the file,
-        // so it is treated as stale (never checkpointed).
+    fn test_find_stale_files_cold_start_excludes_unwatermarked_files() {
+        // On cold start (no per-file and no worktree watermark), files with no
+        // watermark are NOT returned by find_stale_files — they are handled via
+        // git status in attempt_pre_hook_capture instead.
         let mut entries = HashMap::new();
         entries.insert(
             normalize_path(Path::new("src/main.rs")),
             make_entry(100, true),
         );
         let snapshot = make_snapshot(entries);
-        let watermarks: HashMap<String, u128> = HashMap::new();
+        let wm = make_daemon_watermarks(HashMap::new(), None);
 
-        let stale = find_stale_files(&snapshot, &watermarks);
+        let stale = find_stale_files(&snapshot, &wm);
+        assert!(
+            stale.is_empty(),
+            "cold-start: unwatermarked files not returned; git status handles them"
+        );
+    }
+
+    #[test]
+    fn test_find_stale_files_uses_worktree_watermark_as_fallback() {
+        // File has no per-file watermark, but worktree watermark exists at 90s.
+        // File mtime is 100s → beyond grace window → stale.
+        let mut entries = HashMap::new();
+        entries.insert(
+            normalize_path(Path::new("src/main.rs")),
+            make_entry(100, true),
+        );
+        let snapshot = make_snapshot(entries);
+        let wm = make_daemon_watermarks(
+            HashMap::new(),
+            Some(Duration::from_secs(90).as_nanos()),
+        );
+
+        let stale = find_stale_files(&snapshot, &wm);
+        assert_eq!(stale.len(), 1, "file modified after worktree watermark is stale");
+    }
+
+    #[test]
+    fn test_find_stale_files_worktree_watermark_within_grace() {
+        // File mtime=100s, worktree watermark=99s → within 2s grace → NOT stale.
+        let mut entries = HashMap::new();
+        entries.insert(
+            normalize_path(Path::new("src/main.rs")),
+            make_entry(100, true),
+        );
+        let snapshot = make_snapshot(entries);
+        let wm = make_daemon_watermarks(
+            HashMap::new(),
+            Some(Duration::from_secs(99).as_nanos()),
+        );
+
+        let stale = find_stale_files(&snapshot, &wm);
+        assert!(stale.is_empty(), "file within grace of worktree watermark is not stale");
+    }
+
+    #[test]
+    fn test_find_stale_files_per_file_wins_over_worktree() {
+        // Per-file watermark (95s) is older than worktree watermark (98s).
+        // File mtime=100s → 5s beyond per-file watermark → stale.
+        // (Even though it would also be stale via worktree watermark, the
+        // per-file path is taken.)
+        let mut entries = HashMap::new();
+        let path = normalize_path(Path::new("src/lib.rs"));
+        entries.insert(path, make_entry(100, true));
+        let snapshot = make_snapshot(entries);
+
+        let mut per_file = HashMap::new();
+        per_file.insert("src/lib.rs".to_string(), Duration::from_secs(95).as_nanos());
+        let wm = make_daemon_watermarks(per_file, Some(Duration::from_secs(98).as_nanos()));
+
+        let stale = find_stale_files(&snapshot, &wm);
         assert_eq!(stale.len(), 1);
     }
 
     #[test]
     fn test_find_stale_files_within_grace_window() {
-        // File with mtime=100s, watermark at 99s.
+        // File with mtime=100s, per-file watermark at 99s.
         // Difference is 1s which is within the 2s grace window -> NOT stale.
         let mut entries = HashMap::new();
         let path = normalize_path(Path::new("src/lib.rs"));
         entries.insert(path, make_entry(100, true));
         let snapshot = make_snapshot(entries);
 
-        let mut watermarks = HashMap::new();
-        watermarks.insert("src/lib.rs".to_string(), Duration::from_secs(99).as_nanos());
+        let mut per_file = HashMap::new();
+        per_file.insert("src/lib.rs".to_string(), Duration::from_secs(99).as_nanos());
+        let wm = make_daemon_watermarks(per_file, None);
 
-        let stale = find_stale_files(&snapshot, &watermarks);
+        let stale = find_stale_files(&snapshot, &wm);
         assert!(
             stale.is_empty(),
             "file within grace window should not be stale"
@@ -1622,29 +1740,30 @@ mod tests {
 
     #[test]
     fn test_find_stale_files_beyond_grace_window() {
-        // File with mtime=100s, watermark at 95s.
+        // File with mtime=100s, per-file watermark at 95s.
         // Difference is 5s which exceeds the 2s grace window -> stale.
         let mut entries = HashMap::new();
         let path = normalize_path(Path::new("src/lib.rs"));
         entries.insert(path, make_entry(100, true));
         let snapshot = make_snapshot(entries);
 
-        let mut watermarks = HashMap::new();
-        watermarks.insert("src/lib.rs".to_string(), Duration::from_secs(95).as_nanos());
+        let mut per_file = HashMap::new();
+        per_file.insert("src/lib.rs".to_string(), Duration::from_secs(95).as_nanos());
+        let wm = make_daemon_watermarks(per_file, None);
 
-        let stale = find_stale_files(&snapshot, &watermarks);
+        let stale = find_stale_files(&snapshot, &wm);
         assert_eq!(stale.len(), 1, "file beyond grace window should be stale");
     }
 
     #[test]
     fn test_find_stale_files_nonexistent_skipped() {
-        // File with exists=false should not appear in stale list.
+        // File with exists=false should not appear in stale list regardless of watermarks.
         let mut entries = HashMap::new();
         entries.insert(normalize_path(Path::new("gone.rs")), make_entry(100, false));
         let snapshot = make_snapshot(entries);
-        let watermarks: HashMap<String, u128> = HashMap::new();
+        let wm = make_daemon_watermarks(HashMap::new(), Some(0));
 
-        let stale = find_stale_files(&snapshot, &watermarks);
+        let stale = find_stale_files(&snapshot, &wm);
         assert!(stale.is_empty(), "nonexistent file should not be stale");
     }
 

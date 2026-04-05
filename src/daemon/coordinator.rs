@@ -1,5 +1,6 @@
 use crate::daemon::domain::{
     AppliedCommand, ApplyAck, CommandScope, FamilyKey, FamilyStatus, NormalizedCommand,
+    WatermarkState,
 };
 use crate::daemon::family_actor::{FamilyActorHandle, spawn_family_actor};
 use crate::daemon::git_backend::GitBackend;
@@ -47,7 +48,7 @@ impl<B: GitBackend> Coordinator<B> {
     pub async fn watermarks_family(
         &self,
         repo_working_dir: &Path,
-    ) -> Result<HashMap<String, u128>, GitAiError> {
+    ) -> Result<WatermarkState, GitAiError> {
         let family = self.backend.resolve_family(repo_working_dir)?;
         let actor = self.get_or_create_family_actor(family).await;
         actor.watermarks().await
@@ -56,11 +57,11 @@ impl<B: GitBackend> Coordinator<B> {
     pub async fn update_watermarks_family(
         &self,
         repo_working_dir: &Path,
-        watermarks: HashMap<String, u128>,
+        update: WatermarkState,
     ) -> Result<(), GitAiError> {
         let family = self.backend.resolve_family(repo_working_dir)?;
         let actor = self.get_or_create_family_actor(family).await;
-        actor.update_watermarks(watermarks).await
+        actor.update_watermarks(update).await
     }
 
     pub async fn status_family(&self, repo_working_dir: &Path) -> Result<FamilyStatus, GitAiError> {
