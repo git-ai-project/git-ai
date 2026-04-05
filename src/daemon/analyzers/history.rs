@@ -109,6 +109,14 @@ impl CommandAnalyzer for HistoryAnalyzer {
                     });
                 }
             }
+            "revert" => {
+                if let Some((old_head, new_head)) = head_change(cmd, state.refs) {
+                    events.push(SemanticEvent::RevertComplete {
+                        original_head: old_head,
+                        new_head,
+                    });
+                }
+            }
             "merge" => {
                 if args.iter().any(|arg| arg == "--squash") {
                     let source_ref = merge_source_ref(&args).ok_or_else(|| {
