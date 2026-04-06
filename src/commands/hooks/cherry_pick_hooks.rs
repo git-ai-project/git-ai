@@ -205,13 +205,19 @@ fn find_cherry_pick_start_event_original_head(repository: &Repository) -> Option
     None
 }
 
-/// Find the source commits from the most recent CherryPick Start event in the log
+/// Find the source commits from the most recent CherryPick Start event in the log.
+/// Stops at Complete/Abort events so orphaned Start events from a prior aborted
+/// cherry-pick are not mistakenly returned.
 fn find_cherry_pick_start_event_source_commits(repository: &Repository) -> Option<Vec<String>> {
     let events = repository.storage.read_rewrite_events().ok()?;
 
-    // Find the most recent Start event (events are newest-first)
+    // Events are newest-first; stop at Complete/Abort before finding a Start.
     for event in events {
         match event {
+            RewriteLogEvent::CherryPickComplete { .. }
+            | RewriteLogEvent::CherryPickAbort { .. } => {
+                return None; // No active cherry-pick
+            }
             RewriteLogEvent::CherryPickStart { cherry_pick_start } => {
                 return Some(cherry_pick_start.source_commits.clone());
             }

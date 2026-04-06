@@ -1577,10 +1577,31 @@ fn recent_checkout_switch_prerequisite_from_command(
     let is_merge = parsed.has_command_flag("--merge") || parsed.has_command_flag("-m");
     if is_merge {
         return carryover_snapshot.and_then(|snapshot| {
-            (!snapshot.is_empty()).then(|| RecentReplayPrerequisite::CheckoutSwitchMerge {
-                target_head: new_head,
-                old_head,
-                final_state: snapshot.clone(),
+            (!snapshot.is_empty()).then(|| {
+                // Strip conflict markers before storing so the replay path receives
+                // clean content.  Mirrors the stripping done in the direct side-effect
+                // path (apply_checkout_switch_working_log_side_effect) for the same
+                // reason: --merge with exit_code != 0 leaves conflict markers on disk.
+                let clean_state: HashMap<String, String> = if cmd.exit_code != 0 {
+                    snapshot
+                        .iter()
+                        .map(|(k, v)| {
+                            let clean = if crate::authorship::virtual_attribution::content_has_conflict_markers(v) {
+                                crate::authorship::virtual_attribution::strip_conflict_markers_keep_ours(v)
+                            } else {
+                                v.clone()
+                            };
+                            (k.clone(), clean)
+                        })
+                        .collect()
+                } else {
+                    snapshot.clone()
+                };
+                RecentReplayPrerequisite::CheckoutSwitchMerge {
+                    target_head: new_head,
+                    old_head,
+                    final_state: clean_state,
+                }
             })
         });
     }
