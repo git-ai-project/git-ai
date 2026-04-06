@@ -4119,17 +4119,15 @@ impl AgentCheckpointPreset for FirebenderPreset {
 
         if hook_event_name == "preToolUse" {
             let mut pre_hook_captured_id = None;
-            if is_bash_tool {
-                if let Some(cwd) = repo_working_dir.as_deref() {
-                    pre_hook_captured_id = bash_tool::handle_bash_tool(
-                        HookEvent::PreToolUse,
-                        Path::new(cwd),
-                        &session_id,
-                        "bash",
-                    )
-                    .ok()
-                    .and_then(|r| r.captured_checkpoint.map(|info| info.capture_id));
-                }
+            if is_bash_tool && let Some(cwd) = repo_working_dir.as_deref() {
+                pre_hook_captured_id = bash_tool::handle_bash_tool(
+                    HookEvent::PreToolUse,
+                    Path::new(cwd),
+                    &session_id,
+                    "bash",
+                )
+                .ok()
+                .and_then(|r| r.captured_checkpoint.map(|info| info.capture_id));
             }
             return Ok(AgentRunResult {
                 agent_id,

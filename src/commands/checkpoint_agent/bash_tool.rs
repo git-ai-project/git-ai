@@ -669,10 +669,10 @@ pub fn diff(pre: &StatSnapshot, post: &StatSnapshot) -> StatDiffResult {
 
     // Files in both but stat-tuple differs.
     for (path, post_entry) in &post.entries {
-        if let Some(pre_entry) = pre.entries.get(path) {
-            if pre_entry != post_entry {
-                result.modified.push(path.clone());
-            }
+        if let Some(pre_entry) = pre.entries.get(path)
+            && pre_entry != post_entry
+        {
+            result.modified.push(path.clone());
         }
     }
 
@@ -864,15 +864,15 @@ fn capture_file_contents(repo_root: &Path, file_paths: &[PathBuf]) -> HashMap<St
                 continue;
             }
         };
-        if let Ok(meta) = file.metadata() {
-            if meta.len() > MAX_CAPTURE_FILE_SIZE {
-                debug_log(&format!(
-                    "Skipping large file for capture: {} ({} bytes)",
-                    rel_path.display(),
-                    meta.len()
-                ));
-                continue;
-            }
+        if let Ok(meta) = file.metadata()
+            && meta.len() > MAX_CAPTURE_FILE_SIZE
+        {
+            debug_log(&format!(
+                "Skipping large file for capture: {} ({} bytes)",
+                rel_path.display(),
+                meta.len()
+            ));
+            continue;
         }
         let mut content = String::new();
         match file.read_to_string(&mut content) {
