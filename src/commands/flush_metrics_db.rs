@@ -65,13 +65,6 @@ pub fn handle_flush_metrics_db(_args: &[String]) {
 
         for record in &batch {
             if let Ok(event) = serde_json::from_str::<MetricEvent>(&record.event_json) {
-                if event.has_mock_ai_tool() {
-                    // Discard mock_ai events from the DB queue.
-                    if let Ok(mut db_lock) = db.lock() {
-                        let _ = db_lock.delete_records(&[record.id]);
-                    }
-                    continue;
-                }
                 events.push(event);
                 record_ids.push(record.id);
             } else {

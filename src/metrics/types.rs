@@ -68,38 +68,6 @@ impl MetricEvent {
             attrs,
         }
     }
-
-    /// Returns true if this event's attrs contain the mock_ai test tool.
-    ///
-    /// Checks the tool attribute (position 20) against [`super::MOCK_AI_TOOL`].
-    /// Also inspects `tool_model_pairs` (committed event value position 3) for
-    /// mock_ai entries, catching committed events that carry mock_ai only in
-    /// their values rather than in the attributes.
-    pub fn has_mock_ai_tool(&self) -> bool {
-        use super::attrs::attr_pos;
-        use super::events::committed_pos;
-
-        let tool_pos = attr_pos::TOOL.to_string();
-        if let Some(Value::String(tool)) = self.attrs.get(&tool_pos)
-            && tool == super::MOCK_AI_TOOL
-        {
-            return true;
-        }
-
-        // For committed events, check tool_model_pairs in values
-        let pairs_pos = committed_pos::TOOL_MODEL_PAIRS.to_string();
-        if let Some(Value::Array(pairs)) = self.values.get(&pairs_pos) {
-            for pair in pairs {
-                if let Value::String(s) = pair
-                    && s.starts_with(super::MOCK_AI_TOOL)
-                {
-                    return true;
-                }
-            }
-        }
-
-        false
-    }
 }
 
 /// Metrics batch for wire format.
@@ -297,80 +265,5 @@ mod tests {
         let id1 = MetricEventId::Checkpoint;
         let id2 = id1;
         assert_eq!(id1, id2);
-    }
-
-    #[test]
-    fn test_has_mock_ai_tool_via_attrs() {
-        use crate::metrics::attrs::attr_pos;
-
-        let mut attrs = SparseArray::new();
-        attrs.insert(
-            attr_pos::TOOL.to_string(),
-            Value::String("mock_ai".to_string()),
-        );
-
-        let event = MetricEvent {
-            timestamp: 1704067200,
-            event_id: MetricEventId::AgentUsage as u16,
-            values: SparseArray::new(),
-            attrs,
-        };
-
-        assert!(event.has_mock_ai_tool());
-    }
-
-    #[test]
-    fn test_has_mock_ai_tool_via_committed_values() {
-        use crate::metrics::events::committed_pos;
-
-        let mut values = SparseArray::new();
-        values.insert(
-            committed_pos::TOOL_MODEL_PAIRS.to_string(),
-            Value::Array(vec![
-                Value::String("all".to_string()),
-                Value::String("mock_ai::unknown".to_string()),
-            ]),
-        );
-
-        let event = MetricEvent {
-            timestamp: 1704067200,
-            event_id: MetricEventId::Committed as u16,
-            values,
-            attrs: SparseArray::new(),
-        };
-
-        assert!(event.has_mock_ai_tool());
-    }
-
-    #[test]
-    fn test_has_mock_ai_tool_false_for_real_tool() {
-        use crate::metrics::attrs::attr_pos;
-
-        let mut attrs = SparseArray::new();
-        attrs.insert(
-            attr_pos::TOOL.to_string(),
-            Value::String("cursor".to_string()),
-        );
-
-        let event = MetricEvent {
-            timestamp: 1704067200,
-            event_id: MetricEventId::AgentUsage as u16,
-            values: SparseArray::new(),
-            attrs,
-        };
-
-        assert!(!event.has_mock_ai_tool());
-    }
-
-    #[test]
-    fn test_has_mock_ai_tool_false_for_no_tool() {
-        let event = MetricEvent {
-            timestamp: 1704067200,
-            event_id: MetricEventId::AgentUsage as u16,
-            values: SparseArray::new(),
-            attrs: SparseArray::new(),
-        };
-
-        assert!(!event.has_mock_ai_tool());
     }
 }

@@ -287,17 +287,6 @@ fn flush_telemetry_batch(batch: TelemetryBuffer) {
 }
 
 fn flush_metrics(events: &[MetricEvent]) {
-    // Filter out mock_ai events that may have been buffered before the
-    // record()-level guard was added or that arrived via older code paths.
-    let events: Vec<MetricEvent> = events
-        .iter()
-        .filter(|e| !e.has_mock_ai_tool())
-        .cloned()
-        .collect();
-    if events.is_empty() {
-        return;
-    }
-
     let context = ApiContext::new(None);
     let api_base_url = context.base_url.clone();
     let client = ApiClient::new(context);
