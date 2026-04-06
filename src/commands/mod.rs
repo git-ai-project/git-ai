@@ -1,3 +1,4 @@
+pub mod acp_proxy;
 pub mod blame;
 pub mod checkpoint;
 pub mod checkpoint_agent;
