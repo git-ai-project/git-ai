@@ -2958,10 +2958,10 @@ fn revert_source_ref_from_command(
         if matches!(
             arg.as_str(),
             "-m" | "--mainline" | "-X" | "--strategy-option" | "--strategy"
-        ) || arg == "--gpg-sign"
-        {
+        ) {
             skip_next = true;
             continue;
+        }
         }
         if arg.starts_with('-') {
             continue;
