@@ -744,6 +744,127 @@ fn test_post_commit_large_ignored_files_do_not_trigger_skip_warning() {
     assert_eq!(stats.human_additions, 0);
 }
 
+/// Test that merge commits with AI-resolved conflicts correctly show AI stats.
+/// Regression test for https://github.com/git-ai-project/git-ai/issues/910
+///
+/// When AI resolves a merge conflict, `git ai blame` correctly attributes lines to AI,
+/// but `git ai stats head` was incorrectly showing 100% human / 0% AI because
+/// stats_for_commit_stats() skipped AI acceptance counting for all merge commits.
+///
+/// The test simulates the real-world flow:
+/// 1. Start merge (conflicts occur, auto-resolved with -X theirs but not committed)
+/// 2. AI checkpoint marks the conflict resolution as AI-authored
+/// 3. Commit the merge (hooks write authorship notes from the working log)
+#[test]
+fn test_stats_merge_commit_with_ai_conflict_resolution() {
+    let repo = TestRepo::new();
+    let mut file = repo.filename("test.txt");
+
+    // Create base file
+    file.set_contents(crate::lines!["Line 1", "Line 2", "Line 3"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    let default_branch = repo.current_branch();
+
+    // Create feature branch with changes that will conflict
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    file.replace_at(1, "AI FEATURE VERSION".ai());
+    repo.stage_all_and_commit("Feature change").unwrap();
+
+    // Go back to default branch and make conflicting human changes
+    repo.git(&["checkout", &default_branch]).unwrap();
+    file = repo.filename("test.txt");
+    file.replace_at(1, "HUMAN MAIN VERSION");
+    repo.stage_all_and_commit("Human main change").unwrap();
+
+    // Merge feature branch: resolve conflicts with theirs but don't commit yet.
+    // This simulates starting a merge that an AI tool will resolve.
+    repo.git(&["merge", "feature", "--no-commit", "-X", "theirs"])
+        .unwrap();
+
+    // Run AI checkpoint on the resolved file — this is what happens in practice when
+    // an AI tool (Cursor, Copilot, etc.) resolves the conflict and git-ai tracks it.
+    repo.git_ai(&["checkpoint", "mock_ai", "test.txt"]).unwrap();
+
+    // Commit the merge. The hooks read the working log (which now contains the AI
+    // checkpoint) and write authorship notes with attestations on the merge commit.
+    repo.stage_all_and_commit("Merge feature with AI conflict resolution")
+        .unwrap();
+
+    // Verify blame correctly shows AI attribution
+    file = repo.filename("test.txt");
+    file.assert_lines_and_blame(crate::lines![
+        "Line 1".human(),
+        "AI FEATURE VERSION".ai(),
+        "Line 3".human(),
+    ]);
+
+    // Verify stats correctly show AI additions (this is the bug from issue #910)
+    let stats = repo.stats().unwrap();
+
+    // The merge commit introduces 1 line change vs first parent (AI FEATURE VERSION
+    // replacing HUMAN MAIN VERSION). That line was authored by AI, so stats should
+    // reflect the AI contribution.
+    assert!(
+        stats.ai_accepted > 0,
+        "Merge commit with AI-resolved conflict should have ai_accepted > 0, got: ai_accepted={}, human_additions={}, ai_additions={}",
+        stats.ai_accepted,
+        stats.human_additions,
+        stats.ai_additions,
+    );
+}
+
+/// Test that non-conflicting merge commits with AI involvement also show correct AI stats.
+/// This simulates a scenario where AI assists during a non-conflicting merge (e.g., AI
+/// review/modification of merged files before committing).
+#[test]
+fn test_stats_merge_commit_non_conflicting_ai_changes() {
+    let repo = TestRepo::new();
+    let mut file = repo.filename("test.txt");
+
+    // Create base file
+    file.set_contents(crate::lines!["Line 1", "Line 2", "Line 3"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    let default_branch = repo.current_branch();
+
+    // Create feature branch with AI additions in a separate file (no conflict)
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    let mut ai_file = repo.filename("ai_feature.txt");
+    ai_file.set_contents(crate::lines!["AI Line 1".ai(), "AI Line 2".ai()]);
+    repo.stage_all_and_commit("AI feature additions").unwrap();
+
+    // Go back to default branch and make human changes to a different file
+    repo.git(&["checkout", &default_branch]).unwrap();
+    file = repo.filename("test.txt");
+    file.replace_at(1, "HUMAN CHANGE");
+    repo.stage_all_and_commit("Human main change").unwrap();
+
+    // Merge feature branch without committing
+    repo.git(&["merge", "feature", "--no-commit"]).unwrap();
+
+    // Run AI checkpoint on the new AI file — simulates AI involvement in the merge
+    repo.git_ai(&["checkpoint", "mock_ai", "ai_feature.txt"])
+        .unwrap();
+
+    // Commit the merge
+    repo.stage_all_and_commit("Merge feature with AI additions")
+        .unwrap();
+
+    // Stats for the merge commit
+    let stats = repo.stats().unwrap();
+
+    // The merge introduces ai_feature.txt (2 AI lines) relative to the first parent.
+    // With the AI checkpoint, the authorship notes should attribute them to AI.
+    assert!(
+        stats.ai_accepted > 0,
+        "Non-conflicting merge with AI changes should have ai_accepted > 0, got: ai_accepted={}, human_additions={}, git_diff_added_lines={}",
+        stats.ai_accepted,
+        stats.human_additions,
+        stats.git_diff_added_lines,
+    );
+}
+
 crate::reuse_tests_in_worktree!(
     test_authorship_log_stats,
     test_stats_cli_range,
@@ -763,4 +884,6 @@ crate::reuse_tests_in_worktree!(
     test_stats_ignore_flag_is_additive_to_defaults,
     test_stats_range_uses_default_ignores,
     test_post_commit_large_ignored_files_do_not_trigger_skip_warning,
+    test_stats_merge_commit_with_ai_conflict_resolution,
+    test_stats_merge_commit_non_conflicting_ai_changes,
 );
