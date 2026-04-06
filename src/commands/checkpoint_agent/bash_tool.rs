@@ -328,6 +328,11 @@ pub fn classify_tool(agent: Agent, tool_name: &str) -> ToolClass {
             "bash" | "shell" => ToolClass::Bash,
             _ => ToolClass::Skip,
         },
+        Agent::Firebender => match tool_name {
+            "Write" | "Edit" | "Delete" | "RenameSymbol" | "DeleteSymbol" => ToolClass::FileEdit,
+            "Bash" => ToolClass::Bash,
+            _ => ToolClass::Skip,
+        },
     }
 }
 
@@ -340,6 +345,7 @@ pub enum Agent {
     Droid,
     Amp,
     OpenCode,
+    Firebender,
 }
 
 // ---------------------------------------------------------------------------

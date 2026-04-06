@@ -4072,15 +4072,14 @@ impl AgentCheckpointPreset for FirebenderPreset {
 
         let tool_name = tool_name.unwrap_or_default();
         // Firebender hooks fire for all tool calls (no matcher in hooks.json). Silently
-        // skip tools that don't edit files — only checkpoint file-editing operations.
+        // skip tools that don't edit files or run shell commands.
         // Firebender hooks emit canonical hook tool names rather than raw function names.
         // For example, `apply_patch` and `local_search_replace` both come through as `Edit`.
-        if !matches!(
-            tool_name.as_str(),
-            "Write" | "Edit" | "Delete" | "RenameSymbol" | "DeleteSymbol"
-        ) {
+        let tool_class = bash_tool::classify_tool(Agent::Firebender, tool_name.as_str());
+        if tool_class == ToolClass::Skip {
             std::process::exit(0);
         }
+        let is_bash_tool = tool_class == ToolClass::Bash;
 
         let repo_working_dir = repo_working_dir
             .map(|s| s.trim().to_string())
@@ -4108,16 +4107,30 @@ impl AgentCheckpointPreset for FirebenderPreset {
             }
         };
 
+        let session_id = completion_id
+            .clone()
+            .unwrap_or_else(|| Utc::now().timestamp_millis().to_string());
+
         let agent_id = AgentId {
             tool: "firebender".to_string(),
-            id: format!(
-                "firebender-{}",
-                completion_id.unwrap_or_else(|| Utc::now().timestamp_millis().to_string())
-            ),
+            id: format!("firebender-{}", session_id),
             model,
         };
 
         if hook_event_name == "preToolUse" {
+            let mut pre_hook_captured_id = None;
+            if is_bash_tool {
+                if let Some(cwd) = repo_working_dir.as_deref() {
+                    pre_hook_captured_id = bash_tool::handle_bash_tool(
+                        HookEvent::PreToolUse,
+                        Path::new(cwd),
+                        &session_id,
+                        "bash",
+                    )
+                    .ok()
+                    .and_then(|r| r.captured_checkpoint.map(|info| info.capture_id));
+                }
+            }
             return Ok(AgentRunResult {
                 agent_id,
                 agent_metadata: None,
@@ -4127,8 +4140,42 @@ impl AgentCheckpointPreset for FirebenderPreset {
                 edited_filepaths: None,
                 will_edit_filepaths: file_paths.clone(),
                 dirty_files,
+                captured_checkpoint_id: pre_hook_captured_id,
             });
         }
+
+        let bash_result = if is_bash_tool {
+            repo_working_dir.as_deref().map(|cwd| {
+                bash_tool::handle_bash_tool(
+                    HookEvent::PostToolUse,
+                    Path::new(cwd),
+                    &session_id,
+                    "bash",
+                )
+            })
+        } else {
+            None
+        };
+        let edited_filepaths = if is_bash_tool {
+            match bash_result
+                .as_ref()
+                .and_then(|r| r.as_ref().ok())
+                .map(|r| &r.action)
+            {
+                Some(BashCheckpointAction::Checkpoint(paths)) => Some(paths.clone()),
+                Some(BashCheckpointAction::NoChanges)
+                | Some(BashCheckpointAction::TakePreSnapshot)
+                | Some(BashCheckpointAction::Fallback)
+                | None => None,
+            }
+        } else {
+            file_paths
+        };
+        let bash_captured_checkpoint_id = bash_result
+            .as_ref()
+            .and_then(|r| r.as_ref().ok())
+            .and_then(|r| r.captured_checkpoint.as_ref())
+            .map(|info| info.capture_id.clone());
 
         Ok(AgentRunResult {
             agent_id,
@@ -4136,9 +4183,10 @@ impl AgentCheckpointPreset for FirebenderPreset {
             checkpoint_kind: CheckpointKind::AiAgent,
             transcript: None,
             repo_working_dir,
-            edited_filepaths: file_paths,
+            edited_filepaths,
             will_edit_filepaths: None,
             dirty_files,
+            captured_checkpoint_id: bash_captured_checkpoint_id,
         })
     }
 }
