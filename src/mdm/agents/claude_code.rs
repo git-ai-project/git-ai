@@ -392,7 +392,7 @@ mod tests {
         serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
     }
 
-    fn git_ai_blocks_in<'a>(hook_type_array: &'a [Value]) -> Vec<&'a Value> {
+    fn git_ai_blocks_in(hook_type_array: &[Value]) -> Vec<&Value> {
         hook_type_array
             .iter()
             .filter(|block| {

@@ -484,8 +484,8 @@ fn test_bash_tool_diff_performance() {
     create_synthetic_repo(&repo_root, FILE_COUNT);
 
     // Take a baseline snapshot.
-    let pre =
-        bash_tool::snapshot(&repo_root, "diff-bench", "pre", None).expect("pre-snapshot should succeed");
+    let pre = bash_tool::snapshot(&repo_root, "diff-bench", "pre", None)
+        .expect("pre-snapshot should succeed");
 
     // Modify 1% of files to simulate realistic edits.
     let files_to_modify = FILE_COUNT / 100;
@@ -637,8 +637,8 @@ fn test_bash_tool_snapshot_entry_count_accuracy() {
 
     create_synthetic_repo(&repo_root, FILE_COUNT);
 
-    let snap =
-        bash_tool::snapshot(&repo_root, "accuracy", "check", None).expect("snapshot should succeed");
+    let snap = bash_tool::snapshot(&repo_root, "accuracy", "check", None)
+        .expect("snapshot should succeed");
 
     // The snapshot should contain at least FILE_COUNT entries (the .rs files)
     // plus the .gitignore.  It may contain more if the walker picks up

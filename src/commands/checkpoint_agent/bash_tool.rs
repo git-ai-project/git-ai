@@ -349,7 +349,7 @@ fn is_wm_covered(
     if let Some(&file_wm) = per_file_wm.get(posix_key) {
         return mtime_ns <= file_wm + MTIME_GRACE_WINDOW_NS;
     }
-    effective_wm.map_or(false, |ewm| mtime_ns <= ewm + MTIME_GRACE_WINDOW_NS)
+    effective_wm.is_some_and(|ewm| mtime_ns <= ewm + MTIME_GRACE_WINDOW_NS)
 }
 
 // ---------------------------------------------------------------------------
@@ -466,6 +466,7 @@ pub fn should_include_new_file(gitignore: &Gitignore, path: &Path, is_dir: bool)
 ///
 /// Only stores entries for files that pass the git-ai ignore filter (gitignore
 /// + defaults + .git-ai-ignore + linguist) AND have `mtime > effective_wm + GRACE`.
+///
 /// Filtering is applied uniformly to all files — there is no special treatment
 /// for git-tracked vs untracked files.
 ///
@@ -494,9 +495,7 @@ pub fn snapshot(
         None => None,
     };
 
-    let per_file_wm: HashMap<String, u128> = wm
-        .map(|w| w.per_file.clone())
-        .unwrap_or_default();
+    let per_file_wm: HashMap<String, u128> = wm.map(|w| w.per_file.clone()).unwrap_or_default();
 
     // Build the git-ai ignore ruleset: gitignore + defaults + .git-ai-ignore + linguist.
     // Arc is needed because filter_entry requires 'static, preventing a borrow.
@@ -1397,10 +1396,7 @@ pub fn handle_bash_tool(
                             }
                         }
                         Err(e) => {
-                            debug_log(&format!(
-                                "Post-snapshot failed: {}; returning fallback",
-                                e
-                            ));
+                            debug_log(&format!("Post-snapshot failed: {}; returning fallback", e));
                             Ok(BashToolResult {
                                 action: BashCheckpointAction::Fallback,
                                 captured_checkpoint: None,
@@ -1805,11 +1801,8 @@ mod tests {
 
         let mut per_file = HashMap::new();
         per_file.insert("src/lib.rs".to_string(), Duration::from_secs(95).as_nanos());
-        let snapshot = make_snapshot_with_wm(
-            entries,
-            per_file,
-            Some(Duration::from_secs(98).as_nanos()),
-        );
+        let snapshot =
+            make_snapshot_with_wm(entries, per_file, Some(Duration::from_secs(98).as_nanos()));
 
         let stale = find_stale_files(&snapshot);
         assert_eq!(stale.len(), 1);
@@ -1958,7 +1951,7 @@ mod tests {
         fs::write(&existing, b"new content").unwrap();
 
         // Simulate changed_paths from diff (includes both modified and deleted)
-        let changed_paths = vec!["modified.txt".to_string(), deleted.to_string()];
+        let changed_paths = ["modified.txt".to_string(), deleted.to_string()];
 
         let (existing_paths, deleted_paths): (Vec<&String>, Vec<&String>) = changed_paths
             .iter()
@@ -2085,7 +2078,11 @@ mod tests {
     #[test]
     fn test_inflight_false_when_no_snapshots() {
         let dir = tempfile::tempdir().unwrap();
-        Command::new("git").args(["init"]).current_dir(dir.path()).output().unwrap();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
         assert!(!has_active_bash_inflight(dir.path()));
     }
 
@@ -2093,7 +2090,11 @@ mod tests {
     #[test]
     fn test_inflight_true_when_snapshot_present() {
         let dir = tempfile::tempdir().unwrap();
-        Command::new("git").args(["init"]).current_dir(dir.path()).output().unwrap();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
         let cache = snapshot_cache_dir(dir.path()).unwrap();
         make_snapshot_file(&cache, "session1_call1");
         assert!(has_active_bash_inflight(dir.path()));
@@ -2103,7 +2104,11 @@ mod tests {
     #[test]
     fn test_inflight_false_after_snapshot_consumed() {
         let dir = tempfile::tempdir().unwrap();
-        Command::new("git").args(["init"]).current_dir(dir.path()).output().unwrap();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
         let cache = snapshot_cache_dir(dir.path()).unwrap();
         let snap = make_snapshot_file(&cache, "session1_call1");
         assert!(has_active_bash_inflight(dir.path()));
@@ -2115,19 +2120,22 @@ mod tests {
     #[test]
     fn test_inflight_false_for_stale_snapshot() {
         let dir = tempfile::tempdir().unwrap();
-        Command::new("git").args(["init"]).current_dir(dir.path()).output().unwrap();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
         let cache = snapshot_cache_dir(dir.path()).unwrap();
         let snap = make_snapshot_file(&cache, "session_stale");
         // Backdate the mtime beyond the stale threshold
         let stale_time = SystemTime::now()
             .checked_sub(Duration::from_secs(SNAPSHOT_STALE_SECS + 60))
             .unwrap();
-        filetime::set_file_mtime(
-            &snap,
-            filetime::FileTime::from_system_time(stale_time),
-        )
-        .unwrap();
-        assert!(!has_active_bash_inflight(dir.path()), "stale snapshot should not count as inflight");
+        filetime::set_file_mtime(&snap, filetime::FileTime::from_system_time(stale_time)).unwrap();
+        assert!(
+            !has_active_bash_inflight(dir.path()),
+            "stale snapshot should not count as inflight"
+        );
     }
 
     /// REGRESSION: Two parallel bash calls are in flight simultaneously.
@@ -2138,7 +2146,11 @@ mod tests {
     #[test]
     fn test_inflight_parallel_calls_regression() {
         let dir = tempfile::tempdir().unwrap();
-        Command::new("git").args(["init"]).current_dir(dir.path()).output().unwrap();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
         let cache = snapshot_cache_dir(dir.path()).unwrap();
 
         // Two bash calls start (pre-hooks fire)
@@ -2166,10 +2178,17 @@ mod tests {
     #[test]
     fn test_inflight_ignores_sidecar_txt_files() {
         let dir = tempfile::tempdir().unwrap();
-        Command::new("git").args(["init"]).current_dir(dir.path()).output().unwrap();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
         let cache = snapshot_cache_dir(dir.path()).unwrap();
         // Write a sidecar (the kind resolve_bash_tool_use_id creates)
         fs::write(cache.join("last_id_mysession.txt"), "some-uuid").unwrap();
-        assert!(!has_active_bash_inflight(dir.path()), "txt sidecar must not be treated as snapshot");
+        assert!(
+            !has_active_bash_inflight(dir.path()),
+            "txt sidecar must not be treated as snapshot"
+        );
     }
 }

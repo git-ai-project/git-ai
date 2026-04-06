@@ -210,7 +210,7 @@ impl AgentCheckpointPreset for ClaudePreset {
                 Ok(BashCheckpointAction::TakePreSnapshot) => None, // shouldn't happen on post
                 Err(e) => {
                     crate::utils::debug_log(&format!("Bash tool post-hook error: {}", e));
-                                        None
+                    None
                 }
             }
         } else {

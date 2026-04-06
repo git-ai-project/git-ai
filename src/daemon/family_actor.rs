@@ -325,8 +325,14 @@ mod tests {
 
         let wm = handle.watermarks().await.unwrap();
         // Entries at or before worktree_wm are pruned (they are superseded by the full checkpoint)
-        assert!(wm.per_file.get("src/old.rs").is_none(), "old entry should be pruned");
-        assert!(wm.per_file.get("src/also_old.rs").is_none(), "boundary entry should be pruned");
+        assert!(
+            !wm.per_file.contains_key("src/old.rs"),
+            "old entry should be pruned"
+        );
+        assert!(
+            !wm.per_file.contains_key("src/also_old.rs"),
+            "boundary entry should be pruned"
+        );
         // Entry newer than worktree_wm is preserved
         assert_eq!(wm.per_file.get("src/new.rs"), Some(&5000));
 

@@ -923,8 +923,7 @@ fn handle_checkpoint(args: &[String]) {
         && agent_run_result.is_none()
         && crate::commands::checkpoint_agent::bash_tool::has_active_bash_inflight(
             std::path::Path::new(&effective_working_dir),
-        )
-    {
+        ) {
         crate::utils::debug_log(
             "Overriding checkpoint kind to AI: bash tool call in flight (pre-snapshot present)",
         );

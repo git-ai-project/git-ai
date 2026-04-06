@@ -387,7 +387,6 @@ fn test_bash_provenance_mv_rename() {
 // Category 3: File deletion commands
 // ===========================================================================
 
-
 // ===========================================================================
 // Category 4: Build/compile tool simulations
 // ===========================================================================
@@ -548,8 +547,6 @@ fn test_bash_provenance_git_apply_patch() {
 // ===========================================================================
 // Category 6: Multi-command pipelines
 // ===========================================================================
-
-#[test]
 
 #[test]
 fn test_bash_provenance_loop_creating_multiple_files() {
@@ -1315,7 +1312,6 @@ fn test_bash_provenance_snapshot_diff_sed_modification() {
         modified
     );
 }
-
 
 // ───────────────────────────────────────────────────────────────────
 // 13. git_status_fallback parsing correctness
