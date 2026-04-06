@@ -110,7 +110,15 @@ impl CommandAnalyzer for HistoryAnalyzer {
                 }
             }
             "revert" => {
-                if let Some((old_head, new_head)) = head_change(cmd, state.refs) {
+                if args.iter().any(|arg| arg == "--abort") {
+                    events.push(SemanticEvent::RevertAbort {
+                        head: cmd
+                            .post_repo
+                            .as_ref()
+                            .and_then(|repo| repo.head.clone())
+                            .unwrap_or_default(),
+                    });
+                } else if let Some((old_head, new_head)) = head_change(cmd, state.refs) {
                     events.push(SemanticEvent::RevertComplete {
                         original_head: old_head,
                         new_head,

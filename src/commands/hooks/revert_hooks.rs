@@ -147,10 +147,12 @@ fn find_reverted_commit(
             i += 1;
             continue;
         }
-        // Skip special keywords
-        if arg == "continue" || arg == "abort" || arg == "quit" || arg == "skip" {
-            i += 1;
-            continue;
+        // Control-mode subcommands: git revert --continue/--abort/--quit/--skip
+        // These are already caught by arg.starts_with('-') above, but if somehow
+        // a bare keyword reaches here, treat it as control mode (no commit to find).
+        // Use --prefix to match how git actually accepts these.
+        if arg == "--continue" || arg == "--abort" || arg == "--quit" || arg == "--skip" {
+            return None;
         }
 
         // Try to resolve this as a commit SHA

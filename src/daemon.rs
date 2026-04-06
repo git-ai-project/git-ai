@@ -6185,6 +6185,10 @@ impl ActorDaemonCoordinator {
                         )));
                     }
                 }
+                crate::daemon::domain::SemanticEvent::RevertAbort { .. } => {
+                    // Revert abort restores working tree to pre-revert state.
+                    // No attribution or rewrite log action needed.
+                }
                 crate::daemon::domain::SemanticEvent::MergeSquash {
                     base_branch,
                     base_head,
