@@ -11,7 +11,7 @@ use git_ai::commands::checkpoint_agent::bash_tool::{
     ToolClass, build_gitignore, classify_tool, cleanup_stale_snapshots, diff, git_status_fallback,
     handle_bash_tool, load_and_consume_snapshot, normalize_path, save_snapshot, snapshot,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -54,11 +54,11 @@ fn test_bash_tool_detect_file_creation() {
     let repo = TestRepo::new();
     let root = repo_root(&repo);
 
-    let pre = snapshot(&root, "sess", "t1").expect("pre-snapshot should succeed");
+    let pre = snapshot(&root, "sess", "t1", None).expect("pre-snapshot should succeed");
 
     write_file(&repo, "new.txt", "hello");
 
-    let post = snapshot(&root, "sess", "t2").expect("post-snapshot should succeed");
+    let post = snapshot(&root, "sess", "t2", None).expect("post-snapshot should succeed");
     let result = diff(&pre, &post);
 
     let created: Vec<String> = result
@@ -72,7 +72,6 @@ fn test_bash_tool_detect_file_creation() {
         created
     );
     assert!(result.modified.is_empty(), "no files should be modified");
-    assert!(result.deleted.is_empty(), "no files should be deleted");
 }
 
 #[test]
@@ -82,13 +81,13 @@ fn test_bash_tool_detect_modification() {
 
     add_and_commit(&repo, "existing.txt", "foo", "initial");
 
-    let pre = snapshot(&root, "sess", "t1").expect("pre-snapshot should succeed");
+    let pre = snapshot(&root, "sess", "t1", None).expect("pre-snapshot should succeed");
 
     // Allow filesystem time granularity to advance so the stat-tuple changes.
     thread::sleep(Duration::from_millis(50));
     write_file(&repo, "existing.txt", "bar");
 
-    let post = snapshot(&root, "sess", "t2").expect("post-snapshot should succeed");
+    let post = snapshot(&root, "sess", "t2", None).expect("post-snapshot should succeed");
     let result = diff(&pre, &post);
 
     let modified: Vec<String> = result
@@ -102,35 +101,6 @@ fn test_bash_tool_detect_modification() {
         modified
     );
     assert!(result.created.is_empty(), "no files should be created");
-    assert!(result.deleted.is_empty(), "no files should be deleted");
-}
-
-#[test]
-fn test_bash_tool_detect_deletion() {
-    let repo = TestRepo::new();
-    let root = repo_root(&repo);
-
-    add_and_commit(&repo, "tracked.txt", "content", "initial");
-
-    let pre = snapshot(&root, "sess", "t1").expect("pre-snapshot should succeed");
-
-    fs::remove_file(repo.path().join("tracked.txt")).expect("remove should succeed");
-
-    let post = snapshot(&root, "sess", "t2").expect("post-snapshot should succeed");
-    let result = diff(&pre, &post);
-
-    let deleted: Vec<String> = result
-        .deleted
-        .iter()
-        .map(|p| p.display().to_string())
-        .collect();
-    assert!(
-        deleted.iter().any(|p| p.contains("tracked.txt")),
-        "tracked.txt should appear in deleted; got {:?}",
-        deleted
-    );
-    assert!(result.created.is_empty(), "no files should be created");
-    assert!(result.modified.is_empty(), "no files should be modified");
 }
 
 #[cfg(unix)]
@@ -143,7 +113,7 @@ fn test_bash_tool_detect_permission_change() {
 
     add_and_commit(&repo, "script.sh", "#!/bin/bash\necho hi", "initial");
 
-    let pre = snapshot(&root, "sess", "t1").expect("pre-snapshot should succeed");
+    let pre = snapshot(&root, "sess", "t1", None).expect("pre-snapshot should succeed");
 
     // chmod +x
     let abs = repo.path().join("script.sh");
@@ -151,7 +121,7 @@ fn test_bash_tool_detect_permission_change() {
     perms.set_mode(0o755);
     fs::set_permissions(&abs, perms).expect("chmod should succeed");
 
-    let post = snapshot(&root, "sess", "t2").expect("post-snapshot should succeed");
+    let post = snapshot(&root, "sess", "t2", None).expect("post-snapshot should succeed");
     let result = diff(&pre, &post);
 
     let modified: Vec<String> = result
@@ -173,30 +143,21 @@ fn test_bash_tool_detect_rename() {
 
     add_and_commit(&repo, "old.txt", "data", "initial");
 
-    let pre = snapshot(&root, "sess", "t1").expect("pre-snapshot should succeed");
+    let pre = snapshot(&root, "sess", "t1", None).expect("pre-snapshot should succeed");
 
     fs::rename(repo.path().join("old.txt"), repo.path().join("new.txt"))
         .expect("rename should succeed");
 
-    let post = snapshot(&root, "sess", "t2").expect("post-snapshot should succeed");
+    let post = snapshot(&root, "sess", "t2", None).expect("post-snapshot should succeed");
     let result = diff(&pre, &post);
 
-    let deleted: Vec<String> = result
-        .deleted
-        .iter()
-        .map(|p| p.display().to_string())
-        .collect();
+    // After rename: old.txt no longer exists (deletion not tracked), new.txt appears as created.
     let created: Vec<String> = result
         .created
         .iter()
         .map(|p| p.display().to_string())
         .collect();
 
-    assert!(
-        deleted.iter().any(|p| p.contains("old.txt")),
-        "old.txt should appear in deleted after rename; got {:?}",
-        deleted
-    );
     assert!(
         created.iter().any(|p| p.contains("new.txt")),
         "new.txt should appear in created after rename; got {:?}",
@@ -211,12 +172,12 @@ fn test_bash_tool_detect_copy() {
 
     add_and_commit(&repo, "source.txt", "copy-me", "initial");
 
-    let pre = snapshot(&root, "sess", "t1").expect("pre-snapshot should succeed");
+    let pre = snapshot(&root, "sess", "t1", None).expect("pre-snapshot should succeed");
 
     fs::copy(repo.path().join("source.txt"), repo.path().join("dest.txt"))
         .expect("copy should succeed");
 
-    let post = snapshot(&root, "sess", "t2").expect("post-snapshot should succeed");
+    let post = snapshot(&root, "sess", "t2", None).expect("post-snapshot should succeed");
     let result = diff(&pre, &post);
 
     let created: Vec<String> = result
@@ -253,9 +214,9 @@ fn test_bash_tool_no_changes_detected() {
 
     add_and_commit(&repo, "stable.txt", "unchanged", "initial");
 
-    let pre = snapshot(&root, "sess", "t1").expect("pre-snapshot should succeed");
+    let pre = snapshot(&root, "sess", "t1", None).expect("pre-snapshot should succeed");
     // No mutations between snapshots.
-    let post = snapshot(&root, "sess", "t2").expect("post-snapshot should succeed");
+    let post = snapshot(&root, "sess", "t2", None).expect("post-snapshot should succeed");
     let result = diff(&pre, &post);
 
     assert!(
@@ -264,7 +225,6 @@ fn test_bash_tool_no_changes_detected() {
     );
     assert!(result.created.is_empty());
     assert!(result.modified.is_empty());
-    assert!(result.deleted.is_empty());
 }
 
 #[test]
@@ -272,8 +232,8 @@ fn test_bash_tool_empty_repo_no_changes() {
     let repo = TestRepo::new();
     let root = repo_root(&repo);
 
-    let pre = snapshot(&root, "sess", "t1").expect("pre-snapshot should succeed");
-    let post = snapshot(&root, "sess", "t2").expect("post-snapshot should succeed");
+    let pre = snapshot(&root, "sess", "t1", None).expect("pre-snapshot should succeed");
+    let post = snapshot(&root, "sess", "t2", None).expect("post-snapshot should succeed");
     let result = diff(&pre, &post);
 
     assert!(result.is_empty(), "empty repo diff should be empty");
@@ -290,13 +250,13 @@ fn test_bash_tool_files_outside_repo_ignored() {
 
     add_and_commit(&repo, "inside.txt", "inside", "initial");
 
-    let pre = snapshot(&root, "sess", "t1").expect("pre-snapshot should succeed");
+    let pre = snapshot(&root, "sess", "t1", None).expect("pre-snapshot should succeed");
 
     // Modify a file outside the repo — this should not be detected.
     let outside = std::env::temp_dir().join("bash_tool_test_outside.txt");
     fs::write(&outside, "external change").expect("write outside repo should succeed");
 
-    let post = snapshot(&root, "sess", "t2").expect("post-snapshot should succeed");
+    let post = snapshot(&root, "sess", "t2", None).expect("post-snapshot should succeed");
     let result = diff(&pre, &post);
 
     assert!(
@@ -313,8 +273,8 @@ fn test_bash_tool_empty_stat_diff() {
     let repo = TestRepo::new();
     let root = repo_root(&repo);
 
-    let pre = snapshot(&root, "sess", "t1").expect("pre-snapshot should succeed");
-    let post = snapshot(&root, "sess", "t2").expect("post-snapshot should succeed");
+    let pre = snapshot(&root, "sess", "t1", None).expect("pre-snapshot should succeed");
+    let post = snapshot(&root, "sess", "t2", None).expect("post-snapshot should succeed");
     let result = diff(&pre, &post);
 
     assert!(
@@ -332,7 +292,7 @@ fn test_bash_tool_multiple_mutations_combined() {
     add_and_commit(&repo, "modify-me.txt", "original", "initial");
     add_and_commit(&repo, "delete-me.txt", "gone-soon", "add delete target");
 
-    let pre = snapshot(&root, "sess", "t1").expect("pre-snapshot should succeed");
+    let pre = snapshot(&root, "sess", "t1", None).expect("pre-snapshot should succeed");
 
     // Perform multiple mutations
     thread::sleep(Duration::from_millis(50));
@@ -340,7 +300,7 @@ fn test_bash_tool_multiple_mutations_combined() {
     write_file(&repo, "brand-new.txt", "fresh");
     fs::remove_file(repo.path().join("delete-me.txt")).expect("delete should succeed");
 
-    let post = snapshot(&root, "sess", "t2").expect("post-snapshot should succeed");
+    let post = snapshot(&root, "sess", "t2", None).expect("post-snapshot should succeed");
     let result = diff(&pre, &post);
 
     assert!(
@@ -359,11 +319,7 @@ fn test_bash_tool_multiple_mutations_combined() {
         "brand-new.txt should be in changed paths; got {:?}",
         all_paths
     );
-    assert!(
-        all_paths.iter().any(|p| p.contains("delete-me.txt")),
-        "delete-me.txt should be in changed paths; got {:?}",
-        all_paths
-    );
+    // delete-me.txt is not tracked (deletions are not reported)
 }
 
 // ===========================================================================
@@ -530,35 +486,26 @@ fn test_bash_tool_orchestration_create_file() {
 
 #[test]
 fn test_bash_tool_orchestration_delete_file() {
+    // Deletions are not tracked; a bash call that only deletes files
+    // produces NoChanges.
     let repo = TestRepo::new();
     let root = repo_root(&repo);
 
     add_and_commit(&repo, "doomed.txt", "temporary", "initial");
 
-    // Pre-hook
     handle_bash_tool(HookEvent::PreToolUse, &root, "del-sess", "del-tool")
         .expect("PreToolUse should succeed");
 
-    // Simulate bash deleting the file
     fs::remove_file(repo.path().join("doomed.txt")).expect("remove should succeed");
 
-    // Post-hook
     let action = handle_bash_tool(HookEvent::PostToolUse, &root, "del-sess", "del-tool")
         .expect("PostToolUse should succeed");
 
-    match &action.action {
-        BashCheckpointAction::Checkpoint(paths) => {
-            assert!(
-                paths.iter().any(|p| p.contains("doomed.txt")),
-                "Orchestrated checkpoint should include doomed.txt; got {:?}",
-                paths
-            );
-        }
-        BashCheckpointAction::NoChanges => {
-            panic!("Expected Checkpoint after deleting a file, got NoChanges");
-        }
-        _ => panic!("Expected Checkpoint after deleting a file"),
-    }
+    // Deletion-only bash call: no changed paths to report.
+    assert!(
+        matches!(action.action, BashCheckpointAction::NoChanges),
+        "Expected NoChanges for deletion-only bash call"
+    );
 }
 
 #[test]
@@ -691,13 +638,13 @@ fn test_bash_tool_gitignore_excludes_new_untracked_files() {
     // Create a .gitignore that ignores *.log files, then commit it
     add_and_commit(&repo, ".gitignore", "*.log\n", "add gitignore");
 
-    let pre = snapshot(&root, "sess", "t1").expect("pre-snapshot should succeed");
+    let pre = snapshot(&root, "sess", "t1", None).expect("pre-snapshot should succeed");
 
     // Create both an ignored and a non-ignored file
     write_file(&repo, "debug.log", "log output");
     write_file(&repo, "result.txt", "result data");
 
-    let post = snapshot(&root, "sess", "t2").expect("post-snapshot should succeed");
+    let post = snapshot(&root, "sess", "t2", None).expect("post-snapshot should succeed");
     let result = diff(&pre, &post);
 
     let created: Vec<String> = result
@@ -719,36 +666,6 @@ fn test_bash_tool_gitignore_excludes_new_untracked_files() {
 }
 
 #[test]
-fn test_bash_tool_gitignore_does_not_exclude_tracked_files() {
-    let repo = TestRepo::new();
-    let root = repo_root(&repo);
-
-    // Commit a .log file FIRST (making it tracked), then add gitignore
-    add_and_commit(&repo, "important.log", "valuable data", "track the log");
-    add_and_commit(&repo, ".gitignore", "*.log\n", "add gitignore");
-
-    let pre = snapshot(&root, "sess", "t1").expect("pre-snapshot should succeed");
-
-    // Modify the tracked .log file
-    thread::sleep(Duration::from_millis(50));
-    write_file(&repo, "important.log", "updated data");
-
-    let post = snapshot(&root, "sess", "t2").expect("post-snapshot should succeed");
-    let result = diff(&pre, &post);
-
-    let modified: Vec<String> = result
-        .modified
-        .iter()
-        .map(|p| p.display().to_string())
-        .collect();
-    assert!(
-        modified.iter().any(|p| p.contains("important.log")),
-        "tracked important.log should still appear as modified despite gitignore; got {:?}",
-        modified
-    );
-}
-
-#[test]
 fn test_bash_tool_gitignore_excludes_directory_patterns() {
     let repo = TestRepo::new();
     let root = repo_root(&repo);
@@ -762,7 +679,7 @@ fn test_bash_tool_gitignore_excludes_directory_patterns() {
         "add gitignore",
     );
 
-    let pre = snapshot(&root, "sess", "t1").expect("pre-snapshot should succeed");
+    let pre = snapshot(&root, "sess", "t1", None).expect("pre-snapshot should succeed");
 
     // Create files matching glob-based ignore patterns
     write_file(&repo, "build/output.o", "binary");
@@ -770,7 +687,7 @@ fn test_bash_tool_gitignore_excludes_directory_patterns() {
     // Also create a non-ignored file
     write_file(&repo, "src/main.rs", "fn main() {}");
 
-    let post = snapshot(&root, "sess", "t2").expect("post-snapshot should succeed");
+    let post = snapshot(&root, "sess", "t2", None).expect("post-snapshot should succeed");
     let result = diff(&pre, &post);
 
     let created: Vec<String> = result
@@ -922,7 +839,7 @@ fn test_snapshot_invocation_key_format() {
     let repo = TestRepo::new();
     let root = repo_root(&repo);
 
-    let snap = snapshot(&root, "my-session", "my-tool").expect("snapshot should succeed");
+    let snap = snapshot(&root, "my-session", "my-tool", None).expect("snapshot should succeed");
     assert_eq!(
         snap.invocation_key, "my-session:my-tool",
         "invocation_key should be session_id:tool_use_id"
@@ -941,25 +858,25 @@ fn test_diff_result_all_changed_paths_combines_categories() {
     add_and_commit(&repo, "modify.txt", "original", "initial");
     add_and_commit(&repo, "delete.txt", "doomed", "add delete target");
 
-    let pre = snapshot(&root, "sess", "t1").expect("pre-snapshot should succeed");
+    let pre = snapshot(&root, "sess", "t1", None).expect("pre-snapshot should succeed");
 
     thread::sleep(Duration::from_millis(50));
     write_file(&repo, "modify.txt", "changed");
     write_file(&repo, "create.txt", "new");
     fs::remove_file(repo.path().join("delete.txt")).expect("delete should succeed");
 
-    let post = snapshot(&root, "sess", "t2").expect("post-snapshot should succeed");
+    let post = snapshot(&root, "sess", "t2", None).expect("post-snapshot should succeed");
     let result = diff(&pre, &post);
 
     let all = result.all_changed_paths();
+    // Deletions are not tracked; only modify.txt and create.txt are reported.
     assert!(
-        all.len() >= 3,
-        "Should have at least 3 changed paths; got {}",
+        all.len() >= 2,
+        "Should have at least 2 changed paths; got {}",
         all.len()
     );
     assert!(all.iter().any(|p| p.contains("modify.txt")));
     assert!(all.iter().any(|p| p.contains("create.txt")));
-    assert!(all.iter().any(|p| p.contains("delete.txt")));
 }
 
 #[test]
@@ -967,8 +884,8 @@ fn test_diff_result_is_empty_true_when_no_changes() {
     let repo = TestRepo::new();
     let root = repo_root(&repo);
 
-    let pre = snapshot(&root, "sess", "t1").expect("pre-snapshot should succeed");
-    let post = snapshot(&root, "sess", "t2").expect("post-snapshot should succeed");
+    let pre = snapshot(&root, "sess", "t1", None).expect("pre-snapshot should succeed");
+    let post = snapshot(&root, "sess", "t2", None).expect("post-snapshot should succeed");
     let result = diff(&pre, &post);
 
     assert!(result.is_empty());
@@ -986,13 +903,13 @@ fn test_bash_tool_detect_file_in_subdirectory() {
 
     add_and_commit(&repo, "src/lib.rs", "pub fn foo() {}", "initial");
 
-    let pre = snapshot(&root, "sess", "t1").expect("pre-snapshot should succeed");
+    let pre = snapshot(&root, "sess", "t1", None).expect("pre-snapshot should succeed");
 
     thread::sleep(Duration::from_millis(50));
     write_file(&repo, "src/lib.rs", "pub fn bar() {}");
     write_file(&repo, "src/nested/deep/module.rs", "mod deep;");
 
-    let post = snapshot(&root, "sess", "t2").expect("post-snapshot should succeed");
+    let post = snapshot(&root, "sess", "t2", None).expect("post-snapshot should succeed");
     let result = diff(&pre, &post);
 
     let all = result.all_changed_paths();
@@ -1126,7 +1043,7 @@ fn test_snapshot_walker_prunes_ignored_directories() {
         fs::write(ignored_dir.join(format!("file_{}.txt", i)), "noise").expect("write file");
     }
 
-    let snap = snapshot(&root, "sess", "t1").expect("snapshot should succeed");
+    let snap = snapshot(&root, "sess", "t1", None).expect("snapshot should succeed");
 
     // Tracked file should be in the snapshot
     assert!(
@@ -1156,13 +1073,13 @@ fn test_snapshot_nested_gitignore_excludes_matching_new_files() {
     add_and_commit(&repo, ".gitignore", "", "root gitignore");
     add_and_commit(&repo, "src/.gitignore", "*.generated\n", "nested gitignore");
 
-    let pre = snapshot(&root, "sess", "t1").expect("pre-snapshot should succeed");
+    let pre = snapshot(&root, "sess", "t1", None).expect("pre-snapshot should succeed");
 
     // Create both an ignored and a non-ignored file under src/
     write_file(&repo, "src/output.generated", "generated code");
     write_file(&repo, "src/real.rs", "fn real() {}");
 
-    let post = snapshot(&root, "sess", "t2").expect("post-snapshot should succeed");
+    let post = snapshot(&root, "sess", "t2", None).expect("post-snapshot should succeed");
     let result = diff(&pre, &post);
 
     let created: Vec<String> = result
@@ -1193,7 +1110,7 @@ fn test_snapshot_save_load_round_trip() {
 
     add_and_commit(&repo, "tracked.txt", "content", "initial");
 
-    let snap = snapshot(&root, "rt-sess", "rt-tool").expect("snapshot should succeed");
+    let snap = snapshot(&root, "rt-sess", "rt-tool", None).expect("snapshot should succeed");
     let entry_count = snap.entries.len();
     let key = snap.invocation_key.clone();
 
@@ -1205,8 +1122,6 @@ fn test_snapshot_save_load_round_trip() {
         .expect("snapshot should exist");
     assert_eq!(loaded.entries.len(), entry_count);
     assert_eq!(loaded.invocation_key, key);
-    // gitignore is skipped during serialization
-    assert!(loaded.gitignore.is_none());
 
     // Second load — should return None (consumed)
     let second = load_and_consume_snapshot(&root, &key).expect("load should succeed");
@@ -1266,7 +1181,7 @@ fn test_cleanup_stale_snapshots_removes_old_files() {
     add_and_commit(&repo, "init.txt", "init", "initial");
 
     // Save a snapshot
-    let snap = snapshot(&root, "stale-sess", "stale-t1").expect("snapshot should succeed");
+    let snap = snapshot(&root, "stale-sess", "stale-t1", None).expect("snapshot should succeed");
     save_snapshot(&snap).expect("save should succeed");
 
     // Manually backdate the snapshot file to be older than SNAPSHOT_STALE_SECS
@@ -1328,11 +1243,11 @@ fn test_diff_no_gitignore_includes_all_new_files() {
     let now = SystemTime::now();
     let pre = StatSnapshot {
         entries: HashMap::new(),
-        tracked_files: HashSet::new(),
-        gitignore: None,
         taken_at: None,
         invocation_key: "test:1".to_string(),
         repo_root: PathBuf::from("/tmp"),
+        effective_worktree_wm: None,
+        per_file_wm: HashMap::new(),
     };
 
     let mut post_entries = HashMap::new();
@@ -1363,73 +1278,20 @@ fn test_diff_no_gitignore_includes_all_new_files() {
 
     let post = StatSnapshot {
         entries: post_entries,
-        tracked_files: HashSet::new(),
-        gitignore: None,
         taken_at: None,
         invocation_key: "test:2".to_string(),
         repo_root: PathBuf::from("/tmp"),
+        effective_worktree_wm: None,
+        per_file_wm: HashMap::new(),
     };
 
     let result = diff(&pre, &post);
-    // Without gitignore, both files should appear as created
+    // Both files appear as created (filter applied at snapshot time, not in diff).
     assert_eq!(
         result.created.len(),
         2,
         "Both files should be created when gitignore is None; got {:?}",
         result.created
-    );
-}
-
-// ===========================================================================
-// Tracked file deleted then recreated (in pre.tracked_files but absent
-// from pre.entries)
-// ===========================================================================
-
-#[test]
-fn test_diff_tracked_file_deleted_then_recreated() {
-    let repo = TestRepo::new();
-    let root = repo_root(&repo);
-
-    // Track a .log file and add a gitignore that would exclude *.log
-    add_and_commit(&repo, "important.log", "data", "track log");
-    add_and_commit(&repo, ".gitignore", "*.log\n", "add gitignore");
-
-    // Delete the file before pre-snapshot
-    fs::remove_file(repo.path().join("important.log")).expect("remove should succeed");
-
-    let pre = snapshot(&root, "sess", "t1").expect("pre-snapshot should succeed");
-    // Verify the file is NOT in pre.entries (it was deleted)
-    assert!(
-        !pre.entries
-            .keys()
-            .any(|p| p.display().to_string().contains("important.log")),
-        "important.log should not be in pre.entries since it was deleted"
-    );
-    // But it IS in tracked_files (git index still knows about it)
-    assert!(
-        pre.tracked_files
-            .iter()
-            .any(|p| p.display().to_string().contains("important.log")),
-        "important.log should still be in tracked_files"
-    );
-
-    // Recreate the file
-    write_file(&repo, "important.log", "recreated data");
-
-    let post = snapshot(&root, "sess", "t2").expect("post-snapshot should succeed");
-    let result = diff(&pre, &post);
-
-    // The file should appear as created despite matching gitignore,
-    // because it's in pre.tracked_files
-    let created: Vec<String> = result
-        .created
-        .iter()
-        .map(|p| p.display().to_string())
-        .collect();
-    assert!(
-        created.iter().any(|p| p.contains("important.log")),
-        "tracked important.log should appear as created even with gitignore; got {:?}",
-        created
     );
 }
 
@@ -1539,23 +1401,16 @@ fn test_stat_diff_result_is_empty_single_category() {
     let created_only = StatDiffResult {
         created: vec![PathBuf::from("new.txt")],
         modified: vec![],
-        deleted: vec![],
     };
     assert!(!created_only.is_empty());
 
     let modified_only = StatDiffResult {
         created: vec![],
         modified: vec![PathBuf::from("changed.txt")],
-        deleted: vec![],
     };
     assert!(!modified_only.is_empty());
 
-    let deleted_only = StatDiffResult {
-        created: vec![],
-        modified: vec![],
-        deleted: vec![PathBuf::from("removed.txt")],
-    };
-    assert!(!deleted_only.is_empty());
+    assert!(StatDiffResult::default().is_empty());
 }
 
 // ===========================================================================
@@ -1604,7 +1459,7 @@ fn test_snapshot_includes_hidden_files() {
 
     add_and_commit(&repo, ".hidden_config", "secret=val", "add hidden file");
 
-    let snap = snapshot(&root, "sess", "t1").expect("snapshot should succeed");
+    let snap = snapshot(&root, "sess", "t1", None).expect("snapshot should succeed");
     assert!(
         snap.entries
             .keys()
@@ -1636,7 +1491,7 @@ fn test_snapshot_handles_permission_denied_directory() {
     fs::set_permissions(&restricted_dir, perms).expect("chmod should succeed");
 
     // Snapshot should still succeed (walker errors are skipped)
-    let snap = snapshot(&root, "sess", "t1");
+    let snap = snapshot(&root, "sess", "t1", None);
 
     // Restore permissions before assertion (for cleanup)
     let mut perms = fs::metadata(&restricted_dir)
@@ -1683,47 +1538,6 @@ fn test_post_hook_without_pre_clean_repo_returns_no_changes() {
 // Multiple files in different states detected simultaneously
 // ===========================================================================
 
-#[test]
-fn test_diff_all_three_categories_simultaneously() {
-    let repo = TestRepo::new();
-    let root = repo_root(&repo);
-
-    add_and_commit(&repo, "keep.txt", "original", "initial");
-    add_and_commit(&repo, "remove.txt", "doomed", "add removal target");
-
-    let pre = snapshot(&root, "sess", "t1").expect("pre-snapshot");
-
-    thread::sleep(Duration::from_millis(50));
-    write_file(&repo, "keep.txt", "modified");
-    write_file(&repo, "brand-new.txt", "new");
-    fs::remove_file(repo.path().join("remove.txt")).expect("delete");
-
-    let post = snapshot(&root, "sess", "t2").expect("post-snapshot");
-    let result = diff(&pre, &post);
-
-    assert_eq!(result.created.len(), 1, "one file created");
-    assert_eq!(result.modified.len(), 1, "one file modified");
-    assert_eq!(result.deleted.len(), 1, "one file deleted");
-    assert!(
-        result
-            .created
-            .iter()
-            .any(|p| p.display().to_string().contains("brand-new.txt"))
-    );
-    assert!(
-        result
-            .modified
-            .iter()
-            .any(|p| p.display().to_string().contains("keep.txt"))
-    );
-    assert!(
-        result
-            .deleted
-            .iter()
-            .any(|p| p.display().to_string().contains("remove.txt"))
-    );
-}
-
 // ===========================================================================
 // handle_bash_tool full orchestration — rename detection through pre/post
 // ===========================================================================
@@ -1749,11 +1563,7 @@ fn test_handle_bash_tool_detects_rename() {
 
     match &action.action {
         BashCheckpointAction::Checkpoint(paths) => {
-            assert!(
-                paths.iter().any(|p| p.contains("original.txt")),
-                "should report deleted original; got {:?}",
-                paths
-            );
+            // Deletions are not tracked; only the new file appears.
             assert!(
                 paths.iter().any(|p| p.contains("renamed.txt")),
                 "should report created rename target; got {:?}",

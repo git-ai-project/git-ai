@@ -374,13 +374,8 @@ fn test_bash_provenance_mv_rename() {
     let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "mv-sess", "mv-t1")
         .expect("PostToolUse should succeed");
 
-    // Rename shows as delete of old + create of new
+    // Deletions are not tracked; rename shows only the new file as created.
     let paths = checkpoint_paths(&post_action);
-    assert!(
-        paths.iter().any(|p| p.contains("old_name.txt")),
-        "old_name.txt should appear in checkpoint paths (as deleted); got {:?}",
-        paths
-    );
     assert!(
         paths.iter().any(|p| p.contains("new_name.txt")),
         "new_name.txt should appear in checkpoint paths (as created); got {:?}",
@@ -392,54 +387,6 @@ fn test_bash_provenance_mv_rename() {
 // Category 3: File deletion commands
 // ===========================================================================
 
-#[test]
-fn test_bash_provenance_rm_simple() {
-    let repo = TestRepo::new();
-    let root = repo_root(&repo);
-    add_and_commit(&repo, "doomed.txt", "bye bye", "initial commit");
-
-    handle_bash_tool(HookEvent::PreToolUse, &root, "rm-sess", "rm-t1")
-        .expect("PreToolUse should succeed");
-
-    run_bash(&repo, "rm", &["doomed.txt"]);
-
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "rm-sess", "rm-t1")
-        .expect("PostToolUse should succeed");
-    assert_checkpoint_contains(&post_action, "doomed.txt");
-}
-
-#[test]
-fn test_bash_provenance_rm_rf_directory() {
-    let repo = TestRepo::new();
-    let root = repo_root(&repo);
-    add_and_commit(&repo, "subdir/a.txt", "file a", "add a");
-    add_and_commit(&repo, "subdir/b.txt", "file b", "add b");
-    add_and_commit(&repo, "subdir/deep/c.txt", "file c", "add c");
-
-    handle_bash_tool(HookEvent::PreToolUse, &root, "rmrf-sess", "rmrf-t1")
-        .expect("PreToolUse should succeed");
-
-    run_bash(&repo, "rm", &["-rf", "subdir"]);
-
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "rmrf-sess", "rmrf-t1")
-        .expect("PostToolUse should succeed");
-    let paths = checkpoint_paths(&post_action);
-    assert!(
-        paths.iter().any(|p| p.contains("a.txt")),
-        "subdir/a.txt should appear in checkpoint after rm -rf; got {:?}",
-        paths
-    );
-    assert!(
-        paths.iter().any(|p| p.contains("b.txt")),
-        "subdir/b.txt should appear in checkpoint after rm -rf; got {:?}",
-        paths
-    );
-    assert!(
-        paths.iter().any(|p| p.contains("c.txt")),
-        "subdir/deep/c.txt should appear in checkpoint after rm -rf; got {:?}",
-        paths
-    );
-}
 
 // ===========================================================================
 // Category 4: Build/compile tool simulations
@@ -603,43 +550,6 @@ fn test_bash_provenance_git_apply_patch() {
 // ===========================================================================
 
 #[test]
-fn test_bash_provenance_find_and_delete_bak_files() {
-    let repo = TestRepo::new();
-    let root = repo_root(&repo);
-    add_and_commit(&repo, "keep.txt", "keep this", "initial");
-    add_and_commit(&repo, "one.bak", "backup one", "add bak 1");
-    add_and_commit(&repo, "two.bak", "backup two", "add bak 2");
-    add_and_commit(&repo, "sub/three.bak", "backup three", "add bak 3");
-
-    handle_bash_tool(HookEvent::PreToolUse, &root, "finddel-sess", "finddel-t1")
-        .expect("PreToolUse should succeed");
-
-    run_bash(
-        &repo,
-        "sh",
-        &["-c", "find . -name '*.bak' -not -path './.git/*' -delete"],
-    );
-
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "finddel-sess", "finddel-t1")
-        .expect("PostToolUse should succeed");
-    let paths = checkpoint_paths(&post_action);
-    assert!(
-        paths.iter().any(|p| p.contains("one.bak")),
-        "one.bak should appear in checkpoint; got {:?}",
-        paths
-    );
-    assert!(
-        paths.iter().any(|p| p.contains("two.bak")),
-        "two.bak should appear in checkpoint; got {:?}",
-        paths
-    );
-    assert!(
-        paths.iter().any(|p| p.contains("three.bak")),
-        "three.bak should appear in checkpoint; got {:?}",
-        paths
-    );
-    assert_checkpoint_excludes(&post_action, "keep.txt");
-}
 
 #[test]
 fn test_bash_provenance_loop_creating_multiple_files() {
@@ -1349,11 +1259,11 @@ fn test_bash_provenance_snapshot_diff_echo_redirect() {
     let root = repo_root(&repo);
     add_and_commit(&repo, "init.txt", "seed", "initial commit");
 
-    let pre = snapshot(&root, "snap-echo", "t1").expect("pre-snapshot should succeed");
+    let pre = snapshot(&root, "snap-echo", "t1", None).expect("pre-snapshot should succeed");
 
     run_bash(&repo, "sh", &["-c", "echo 'snap test' > snap_created.txt"]);
 
-    let post = snapshot(&root, "snap-echo", "t2").expect("post-snapshot should succeed");
+    let post = snapshot(&root, "snap-echo", "t2", None).expect("post-snapshot should succeed");
     let result = diff(&pre, &post);
 
     let created: Vec<String> = result
@@ -1371,11 +1281,6 @@ fn test_bash_provenance_snapshot_diff_echo_redirect() {
         "no files should be modified; got {:?}",
         result.modified
     );
-    assert!(
-        result.deleted.is_empty(),
-        "no files should be deleted; got {:?}",
-        result.deleted
-    );
 }
 
 #[test]
@@ -1384,7 +1289,7 @@ fn test_bash_provenance_snapshot_diff_sed_modification() {
     let root = repo_root(&repo);
     add_and_commit(&repo, "editable.txt", "old text old text", "initial commit");
 
-    let pre = snapshot(&root, "snap-sed", "t1").expect("pre-snapshot should succeed");
+    let pre = snapshot(&root, "snap-sed", "t1", None).expect("pre-snapshot should succeed");
 
     thread::sleep(Duration::from_millis(50));
     run_bash(
@@ -1396,7 +1301,7 @@ fn test_bash_provenance_snapshot_diff_sed_modification() {
         ],
     );
 
-    let post = snapshot(&root, "snap-sed", "t2").expect("post-snapshot should succeed");
+    let post = snapshot(&root, "snap-sed", "t2", None).expect("post-snapshot should succeed");
     let result = diff(&pre, &post);
 
     let modified: Vec<String> = result
@@ -1411,30 +1316,6 @@ fn test_bash_provenance_snapshot_diff_sed_modification() {
     );
 }
 
-#[test]
-fn test_bash_provenance_snapshot_diff_rm_deletion() {
-    let repo = TestRepo::new();
-    let root = repo_root(&repo);
-    add_and_commit(&repo, "removable.txt", "remove me", "initial commit");
-
-    let pre = snapshot(&root, "snap-rm", "t1").expect("pre-snapshot should succeed");
-
-    run_bash(&repo, "rm", &["removable.txt"]);
-
-    let post = snapshot(&root, "snap-rm", "t2").expect("post-snapshot should succeed");
-    let result = diff(&pre, &post);
-
-    let deleted: Vec<String> = result
-        .deleted
-        .iter()
-        .map(|p| p.display().to_string())
-        .collect();
-    assert!(
-        deleted.iter().any(|p| p.contains("removable.txt")),
-        "removable.txt should appear in deleted via direct snapshot/diff; got {:?}",
-        deleted
-    );
-}
 
 // ───────────────────────────────────────────────────────────────────
 // 13. git_status_fallback parsing correctness
@@ -1515,14 +1396,8 @@ fn test_bash_provenance_mv_directory_rename() {
     let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "mvdir-sess", "mvdir-t1")
         .expect("PostToolUse should succeed");
 
+    // Deletions not tracked; only new paths (lib/*) appear as created.
     let paths = checkpoint_paths(&post_action);
-    // Old paths should appear as deleted
-    assert!(
-        paths.iter().any(|p| p.contains("src/lib.rs")),
-        "src/lib.rs should appear in checkpoint (deleted); got {:?}",
-        paths
-    );
-    // New paths should appear as created
     assert!(
         paths.iter().any(|p| p.contains("lib/lib.rs")),
         "lib/lib.rs should appear in checkpoint (created); got {:?}",

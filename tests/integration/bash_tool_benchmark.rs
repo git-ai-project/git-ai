@@ -200,7 +200,7 @@ fn run_benchmark(repo_root: &Path, label: &str) -> (DurationStats, DurationStats
     for i in 1..=NUM_ITERATIONS {
         // Take a pre-snapshot
         let snap_start = Instant::now();
-        let pre = bash_tool::snapshot(repo_root, "bench-session", &format!("pre-{}", i))
+        let pre = bash_tool::snapshot(repo_root, "bench-session", &format!("pre-{}", i), None)
             .expect("pre-snapshot should succeed");
         let snapshot_duration = snap_start.elapsed();
 
@@ -209,7 +209,7 @@ fn run_benchmark(repo_root: &Path, label: &str) -> (DurationStats, DurationStats
         fs::write(&marker_path, format!("iteration {}", i)).expect("failed to write marker");
 
         // Take a post-snapshot
-        let post = bash_tool::snapshot(repo_root, "bench-session", &format!("post-{}", i))
+        let post = bash_tool::snapshot(repo_root, "bench-session", &format!("post-{}", i), None)
             .expect("post-snapshot should succeed");
 
         // Diff the two snapshots
@@ -224,14 +224,13 @@ fn run_benchmark(repo_root: &Path, label: &str) -> (DurationStats, DurationStats
         );
 
         println!(
-            "  Iteration {}: snapshot={:.2}ms (entries={}), diff={:.2}ms (created={}, modified={}, deleted={})",
+            "  Iteration {}: snapshot={:.2}ms (entries={}), diff={:.2}ms (created={}, modified={})",
             i,
             snapshot_duration.as_secs_f64() * 1000.0,
             pre.entries.len(),
             diff_duration.as_secs_f64() * 1000.0,
             diff_result.created.len(),
             diff_result.modified.len(),
-            diff_result.deleted.len(),
         );
 
         timings.push(IterationTiming {
@@ -406,7 +405,7 @@ fn test_bash_tool_snapshot_benchmark_xlarge() {
 
     for i in 1..=3 {
         let snap_start = Instant::now();
-        let result = bash_tool::snapshot(&repo_root, "bench-session", &format!("xl-{}", i));
+        let result = bash_tool::snapshot(&repo_root, "bench-session", &format!("xl-{}", i), None);
         let elapsed = snap_start.elapsed();
 
         match result {
@@ -486,7 +485,7 @@ fn test_bash_tool_diff_performance() {
 
     // Take a baseline snapshot.
     let pre =
-        bash_tool::snapshot(&repo_root, "diff-bench", "pre").expect("pre-snapshot should succeed");
+        bash_tool::snapshot(&repo_root, "diff-bench", "pre", None).expect("pre-snapshot should succeed");
 
     // Modify 1% of files to simulate realistic edits.
     let files_to_modify = FILE_COUNT / 100;
@@ -517,7 +516,7 @@ fn test_bash_tool_diff_performance() {
     println!("Modified {} files for diff benchmark", modified_count);
 
     // Take a post-snapshot.
-    let post = bash_tool::snapshot(&repo_root, "diff-bench", "post")
+    let post = bash_tool::snapshot(&repo_root, "diff-bench", "post", None)
         .expect("post-snapshot should succeed");
 
     // Benchmark diff() over multiple iterations.
@@ -533,12 +532,11 @@ fn test_bash_tool_diff_performance() {
         let elapsed = start.elapsed();
 
         println!(
-            "  Iteration {}: diff={:.4}ms (created={}, modified={}, deleted={})",
+            "  Iteration {}: diff={:.4}ms (created={}, modified={})",
             i,
             elapsed.as_secs_f64() * 1000.0,
             result.created.len(),
             result.modified.len(),
-            result.deleted.len(),
         );
 
         // Sanity: we should see roughly the number of files we modified.
@@ -640,22 +638,14 @@ fn test_bash_tool_snapshot_entry_count_accuracy() {
     create_synthetic_repo(&repo_root, FILE_COUNT);
 
     let snap =
-        bash_tool::snapshot(&repo_root, "accuracy", "check").expect("snapshot should succeed");
+        bash_tool::snapshot(&repo_root, "accuracy", "check", None).expect("snapshot should succeed");
 
     // The snapshot should contain at least FILE_COUNT entries (the .rs files)
     // plus the .gitignore.  It may contain more if the walker picks up
     // additional metadata files.
     let entry_count = snap.entries.len();
     println!("Snapshot entries: {}", entry_count);
-    println!("Tracked files: {}", snap.tracked_files.len());
 
-    // We committed FILE_COUNT .rs files + 1 .gitignore = FILE_COUNT + 1 tracked files
-    assert!(
-        snap.tracked_files.len() >= FILE_COUNT,
-        "Expected at least {} tracked files, got {}",
-        FILE_COUNT,
-        snap.tracked_files.len(),
-    );
     assert!(
         entry_count >= FILE_COUNT,
         "Expected at least {} snapshot entries, got {}",

@@ -23,6 +23,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 // ---------------------------------------------------------------------------
@@ -34,9 +35,6 @@ const _MTIME_GRACE_WINDOW_SECS: u64 = 2;
 
 /// Maximum time for stat-diff walk before fallback (ms).
 const STAT_DIFF_TIMEOUT_MS: u64 = 5000;
-
-/// Repo size threshold; above this, warn and fall back to git status.
-const MAX_TRACKED_FILES: usize = 500_000;
 
 /// Pre-snapshots older than this are garbage-collected (seconds).
 const SNAPSHOT_STALE_SECS: u64 = 300;
@@ -137,22 +135,32 @@ impl StatEntry {
 }
 
 /// A complete filesystem snapshot: stat-tuples keyed by normalized path.
+///
+/// Only stores entries for files that pass the git-ai ignore filter AND have
+/// `mtime > effective_worktree_wm + GRACE` (i.e., not covered by any watermark).
+/// Filtering is applied uniformly to all files — there is no special treatment
+/// for git-tracked vs untracked files.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StatSnapshot {
-    /// File metadata keyed by normalized relative path.
+    /// File metadata for files that passed the ignore filter and are not
+    /// covered by any watermark at snapshot time.
     pub entries: HashMap<PathBuf, StatEntry>,
-    /// Git-tracked files at snapshot time (normalized relative paths).
-    pub tracked_files: HashSet<PathBuf>,
-    /// Serialized gitignore rules (we store the repo root for rebuild).
-    #[serde(skip)]
-    pub gitignore: Option<Gitignore>,
     /// When this snapshot was taken.
     #[serde(skip)]
     pub taken_at: Option<Instant>,
     /// Unique invocation key: "{session_id}:{tool_use_id}".
     pub invocation_key: String,
-    /// Repo root path (for serialization round-trip of gitignore).
+    /// Repo root path.
     pub repo_root: PathBuf,
+    /// Effective worktree-level watermark at snapshot time.
+    /// Either the real daemon worktree watermark (warm start) or the mtime
+    /// of `.git/index` (cold-start proxy).  `None` if neither was available.
+    #[serde(default)]
+    pub effective_worktree_wm: Option<u128>,
+    /// Per-file watermarks from the daemon at snapshot time.
+    /// Used for Tier-1 stale detection in `find_stale_files`.
+    #[serde(default)]
+    pub per_file_wm: HashMap<String, u128>,
 }
 
 /// Result of diffing two snapshots.
@@ -160,22 +168,20 @@ pub struct StatSnapshot {
 pub struct StatDiffResult {
     pub created: Vec<PathBuf>,
     pub modified: Vec<PathBuf>,
-    pub deleted: Vec<PathBuf>,
 }
 
 impl StatDiffResult {
-    /// All changed paths (created + modified + deleted) as Strings.
+    /// All changed paths (created + modified) as Strings.
     pub fn all_changed_paths(&self) -> Vec<String> {
         self.created
             .iter()
             .chain(self.modified.iter())
-            .chain(self.deleted.iter())
             .map(|p| crate::utils::normalize_to_posix(&p.to_string_lossy()))
             .collect()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.created.is_empty() && self.modified.is_empty() && self.deleted.is_empty()
+        self.created.is_empty() && self.modified.is_empty()
     }
 }
 
@@ -187,7 +193,7 @@ pub enum BashCheckpointAction {
     Checkpoint(Vec<String>),
     /// Stat-diff ran but found nothing.
     NoChanges,
-    /// An error occurred; fall back to git status.
+    /// An error occurred; caller should fall back to a safe default.
     Fallback,
 }
 
@@ -291,46 +297,73 @@ pub fn normalize_path(p: &Path) -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------
-// Path filtering (two-tier: git index + frozen .gitignore)
+// Git-dir / index helpers
 // ---------------------------------------------------------------------------
 
-/// Load the set of git-tracked files from the index.
-pub fn load_tracked_files(repo_root: &Path) -> Result<HashSet<PathBuf>, GitAiError> {
+/// Resolve the `.git` directory path for a repo (handles worktrees).
+fn get_git_dir(repo_root: &Path) -> Result<PathBuf, GitAiError> {
     let output = Command::new("git")
-        .args(["ls-files", "-z"])
+        .args(["rev-parse", "--git-dir"])
         .current_dir(repo_root)
         .output()
         .map_err(GitAiError::IoError)?;
-
     if !output.status.success() {
-        return Err(GitAiError::Generic(format!(
-            "git ls-files failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )));
+        return Err(GitAiError::Generic(
+            "git rev-parse --git-dir failed".to_string(),
+        ));
     }
-
-    let tracked: HashSet<PathBuf> = output
-        .stdout
-        .split(|&b| b == 0)
-        .filter(|s| !s.is_empty())
-        .map(|s| {
-            let path_str = String::from_utf8_lossy(s);
-            normalize_path(Path::new(path_str.as_ref()))
-        })
-        .collect();
-
-    Ok(tracked)
+    let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if Path::new(&s).is_absolute() {
+        Ok(PathBuf::from(s))
+    } else {
+        Ok(repo_root.join(s))
+    }
 }
 
-/// Build frozen `.gitignore` rules from the repo root at a point in time.
+/// Return the mtime of `.git/index` as nanoseconds since the UNIX epoch.
 ///
-/// In addition to `.gitignore` files found in the tree, this also adds:
+/// Used as a cold-start watermark proxy when the daemon has no worktree
+/// watermark yet.  Only called when `wm = Some(w)` with `w.worktree = None`,
+/// so passing `wm = None` (tests, non-daemon mode) always bypasses this.
+pub fn git_index_mtime_ns(repo_root: &Path) -> Option<u128> {
+    let git_dir = get_git_dir(repo_root).ok()?;
+    let index_path = git_dir.join("index");
+    let mtime = fs::metadata(&index_path).ok()?.modified().ok()?;
+    Some(system_time_to_nanos(mtime))
+}
+
+/// Test whether a file is covered by the current watermarks, meaning it has
+/// not been modified since the last known-good baseline and does not need to
+/// be stored in the snapshot.
+///
+/// A file is covered when:
+/// - It has a per-file watermark AND `mtime ≤ file_wm + GRACE`, OR
+/// - No per-file watermark but an effective worktree wm exists AND
+///   `mtime ≤ effective_wm + GRACE`.
+fn is_wm_covered(
+    mtime_ns: u128,
+    effective_wm: Option<u128>,
+    per_file_wm: &HashMap<String, u128>,
+    posix_key: &str,
+) -> bool {
+    if let Some(&file_wm) = per_file_wm.get(posix_key) {
+        return mtime_ns <= file_wm + MTIME_GRACE_WINDOW_NS;
+    }
+    effective_wm.map_or(false, |ewm| mtime_ns <= ewm + MTIME_GRACE_WINDOW_NS)
+}
+
+// ---------------------------------------------------------------------------
+// Path filtering
+// ---------------------------------------------------------------------------
+
+/// Build the git-ai ignore ruleset for snapshot filtering.
+///
+/// Combines `.gitignore` files found in the tree with:
 /// - git-ai's default ignore patterns (lock files, node_modules, etc.)
 /// - Patterns from `.git-ai-ignore` at the repo root
 /// - Linguist-generated patterns from `.gitattributes` at the repo root
 ///
-/// These extra patterns apply only to Tier 2 (untracked files). Tracked files
-/// are always included regardless.
+/// Applied uniformly to all files (tracked and untracked alike).
 pub fn build_gitignore(repo_root: &Path) -> Result<Gitignore, GitAiError> {
     let mut builder = GitignoreBuilder::new(repo_root);
 
@@ -431,54 +464,77 @@ pub fn should_include_new_file(gitignore: &Gitignore, path: &Path, is_dir: bool)
 
 /// Take a stat snapshot of the repo working tree.
 ///
-/// Collects `lstat()` metadata for all tracked files plus new untracked files
-/// that pass gitignore filtering.
+/// Only stores entries for files that pass the git-ai ignore filter (gitignore
+/// + defaults + .git-ai-ignore + linguist) AND have `mtime > effective_wm + GRACE`.
+/// Filtering is applied uniformly to all files — there is no special treatment
+/// for git-tracked vs untracked files.
+///
+/// `wm` should be the result of a recent daemon watermark query.  Pass
+/// `None` when the daemon is unavailable; the cold-start proxy
+/// (`git_index_mtime_ns + GRACE`) is used automatically in that case.
 pub fn snapshot(
     repo_root: &Path,
     session_id: &str,
     tool_use_id: &str,
+    wm: Option<&DaemonWatermarks>,
 ) -> Result<StatSnapshot, GitAiError> {
     let start = Instant::now();
     let invocation_key = format!("{}:{}", session_id, tool_use_id);
 
-    // Load git-tracked files (Tier 1)
-    let tracked_files = load_tracked_files(repo_root)?;
+    // Compute the effective worktree-level watermark:
+    //   wm = None  → caller opted out (daemon not running, or explicitly no
+    //                filtering); fall back to full snapshot.
+    //   wm = Some(w) with real worktree wm → use it directly (warm start).
+    //   wm = Some(w) with no worktree wm → daemon is up but hasn't seen a full
+    //                Human checkpoint yet (cold start); use .git/index mtime as
+    //                a proxy so we don't snapshot every file in the repo.
+    let effective_worktree_wm: Option<u128> = match wm {
+        Some(w) if w.worktree.is_some() => w.worktree,
+        Some(_) => git_index_mtime_ns(repo_root),
+        None => None,
+    };
 
-    if tracked_files.len() > MAX_TRACKED_FILES {
-        debug_log(&format!(
-            "Repo has {} tracked files (> {}), falling back to git status",
-            tracked_files.len(),
-            MAX_TRACKED_FILES
-        ));
-        return Err(GitAiError::Generic(format!(
-            "Repo exceeds {} tracked files; use git status fallback",
-            MAX_TRACKED_FILES
-        )));
-    }
+    let per_file_wm: HashMap<String, u128> = wm
+        .map(|w| w.per_file.clone())
+        .unwrap_or_default();
 
-    // Freeze .gitignore rules (Tier 2)
-    let gitignore = build_gitignore(repo_root)?;
+    // Build the git-ai ignore ruleset: gitignore + defaults + .git-ai-ignore + linguist.
+    // Arc is needed because filter_entry requires 'static, preventing a borrow.
+    // The closure takes sole ownership; no post-walker use of the ruleset is needed.
+    let gitignore_filter = Arc::new(build_gitignore(repo_root)?);
 
     let mut entries = HashMap::new();
 
-    // Use the ignore crate walker for efficient traversal.
-    // Enable git_ignore so the walker prunes ignored directories (node_modules/,
-    // target/, etc.) during traversal rather than visiting all their files only
-    // to filter them out later. The frozen gitignore from build_gitignore() is
-    // still used separately in diff() for Tier 2 filtering of new files.
+    // Pass the git-ai ignore ruleset directly into the walker via filter_entry.
+    // This prunes entire ignored directories (node_modules/, target/, etc.)
+    // before the walker descends into them — including directories that are in
+    // default_ignore_patterns() but not yet in the repo's .gitignore (a common
+    // case for node_modules that the user hasn't gitignored yet).
+    // git_ignore(true) handles the standard .gitignore case; filter_entry
+    // catches the rest (defaults, .git-ai-ignore, linguist-generated).
+    let repo_root_buf = repo_root.to_path_buf();
     let walker = WalkBuilder::new(repo_root)
-        .hidden(false) // Don't skip hidden files
-        .git_ignore(true) // Prune ignored directories during traversal
+        .hidden(false)
+        .git_ignore(true)
         .git_global(true)
         .git_exclude(true)
-        .filter_entry(|entry| {
-            // Skip .git directory itself
-            entry.file_name() != ".git"
+        .filter_entry(move |entry| {
+            if entry.file_name() == ".git" {
+                return false;
+            }
+            let abs = entry.path();
+            let Ok(rel) = abs.strip_prefix(&repo_root_buf) else {
+                return true; // outside repo root — let walker handle it
+            };
+            if rel.as_os_str().is_empty() {
+                return true; // repo root itself — always include
+            }
+            let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+            should_include_new_file(&gitignore_filter, rel, is_dir)
         })
         .build();
 
     for result in walker {
-        // Check timeout
         if start.elapsed().as_millis() > STAT_DIFF_TIMEOUT_MS as u128 {
             debug_log("Stat-diff timeout exceeded; returning partial snapshot");
             break;
@@ -494,10 +550,8 @@ pub fn snapshot(
 
         let abs_path = entry.path();
 
-        // Skip directories themselves (we only stat files).
-        // Use entry.file_type() (lstat semantics) instead of abs_path.is_dir()
-        // to avoid following symlinks — a symlink to a directory should be
-        // snapshotted as a symlink entry, not skipped.
+        // Skip directories — filter_entry already pruned ignored dirs; this
+        // guard drops any remaining directory entries (e.g. the repo root).
         if entry
             .file_type()
             .map(|ft| ft.is_dir())
@@ -506,61 +560,44 @@ pub fn snapshot(
             continue;
         }
 
-        // Compute relative path from repo root
         let rel_path = match abs_path.strip_prefix(repo_root) {
             Ok(p) => p,
-            Err(_) => continue, // Outside repo root
+            Err(_) => continue,
         };
+
+        // filter_entry already applied should_include_new_file for files too,
+        // so no secondary check is needed here.
 
         let normalized = normalize_path(rel_path);
 
-        // Tier 1: always include tracked files
-        // Tier 2: include new untracked files that pass gitignore
-        let is_tracked = tracked_files.contains(&normalized);
-        if !is_tracked && !should_include_new_file(&gitignore, rel_path, false) {
-            continue;
-        }
-
-        // Collect stat via lstat (symlink_metadata)
         match fs::symlink_metadata(abs_path) {
             Ok(meta) => {
-                entries.insert(normalized, StatEntry::from_metadata(&meta));
+                let stat = StatEntry::from_metadata(&meta);
+                let mtime_ns = stat.mtime.map(system_time_to_nanos).unwrap_or(0);
+                let posix_key = crate::utils::normalize_to_posix(&normalized.to_string_lossy());
+                if !is_wm_covered(mtime_ns, effective_worktree_wm, &per_file_wm, &posix_key) {
+                    entries.insert(normalized, stat);
+                }
             }
             Err(e) => {
                 debug_log(&format!("Failed to stat {}: {}", abs_path.display(), e));
-                // ENOENT is fine (deleted during walk), others are warnings
             }
         }
     }
 
-    // Second pass: ensure all git-tracked files are included even if the
-    // walker's gitignore pruning skipped them (e.g. a tracked *.log file
-    // that matches a .gitignore pattern). This preserves the Tier 1 guarantee
-    // that tracked files are always in the snapshot.
-    for tracked in &tracked_files {
-        let normalized = normalize_path(tracked);
-        if let std::collections::hash_map::Entry::Vacant(entry) = entries.entry(normalized) {
-            let abs_path = repo_root.join(tracked);
-            if let Ok(meta) = fs::symlink_metadata(&abs_path) {
-                entry.insert(StatEntry::from_metadata(&meta));
-            }
-        }
-    }
-
-    let duration = start.elapsed();
     debug_log(&format!(
         "Snapshot: {} files scanned in {}ms",
         entries.len(),
-        duration.as_millis()
+        start.elapsed().as_millis()
     ));
 
     Ok(StatSnapshot {
         entries,
-        tracked_files,
-        gitignore: Some(gitignore),
         taken_at: Some(Instant::now()),
         invocation_key,
         repo_root: repo_root.to_path_buf(),
+        effective_worktree_wm,
+        per_file_wm,
     })
 }
 
@@ -568,47 +605,38 @@ pub fn snapshot(
 // Diff
 // ---------------------------------------------------------------------------
 
-/// Diff two snapshots to find created, modified, and deleted files.
+/// Diff two snapshots to find created and modified files.
 ///
-/// Uses the pre-snapshot's frozen gitignore rules for Tier 2 filtering
-/// of newly created files.
+/// Both snapshots apply the same git-ai ignore filter at snapshot time, so
+/// any file in `post.entries` already passed that filter. No secondary
+/// filtering is needed here.
+///
+/// Files in post but not pre are reported as **created** (either genuinely
+/// new, or previously wm-covered and now modified by bash — both are changed
+/// files that need attribution).  Files in both with a changed stat-tuple are
+/// reported as **modified**.  Deletions are not tracked.
 pub fn diff(pre: &StatSnapshot, post: &StatSnapshot) -> StatDiffResult {
     let mut result = StatDiffResult::default();
 
     let pre_keys: HashSet<&PathBuf> = pre.entries.keys().collect();
     let post_keys: HashSet<&PathBuf> = post.entries.keys().collect();
 
-    // Created: in post but not pre
+    // Files in post but not pre: new files or previously wm-covered files
+    // now modified by bash. Both need attribution; the distinction doesn't
+    // matter since all_changed_paths() merges created + modified.
     for path in post_keys.difference(&pre_keys) {
-        // For new files not in the tracked set, apply frozen gitignore
-        let is_tracked = pre.tracked_files.contains(*path);
-        if !is_tracked
-            && let Some(ref gitignore) = pre.gitignore
-            && !should_include_new_file(gitignore, path, false)
-        {
-            continue;
-        }
         result.created.push((*path).clone());
     }
 
-    // Deleted: in pre but not post
-    for path in pre_keys.difference(&post_keys) {
-        result.deleted.push((*path).clone());
-    }
-
-    // Modified: in both but stat-tuple differs
+    // Files in both but stat-tuple differs.
     for path in pre_keys.intersection(&post_keys) {
-        let pre_entry = &pre.entries[*path];
-        let post_entry = &post.entries[*path];
-        if pre_entry != post_entry {
+        if pre.entries[*path] != post.entries[*path] {
             result.modified.push((*path).clone());
         }
     }
 
-    // Sort for deterministic output
     result.created.sort();
     result.modified.sort();
-    result.deleted.sort();
 
     result
 }
@@ -619,29 +647,8 @@ pub fn diff(pre: &StatSnapshot, post: &StatSnapshot) -> StatDiffResult {
 
 /// Get the directory for storing bash snapshots.
 fn snapshot_cache_dir(repo_root: &Path) -> Result<PathBuf, GitAiError> {
-    // Find .git directory (handles worktrees)
-    let output = Command::new("git")
-        .args(["rev-parse", "--git-dir"])
-        .current_dir(repo_root)
-        .output()
-        .map_err(GitAiError::IoError)?;
-
-    if !output.status.success() {
-        return Err(GitAiError::Generic(
-            "Failed to find .git directory".to_string(),
-        ));
-    }
-
-    let git_dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let git_dir_path = if Path::new(&git_dir).is_absolute() {
-        PathBuf::from(&git_dir)
-    } else {
-        repo_root.join(&git_dir)
-    };
-
-    let cache_dir = git_dir_path.join("ai").join("bash_snapshots");
+    let cache_dir = get_git_dir(repo_root)?.join("ai").join("bash_snapshots");
     fs::create_dir_all(&cache_dir).map_err(GitAiError::IoError)?;
-
     Ok(cache_dir)
 }
 
@@ -846,7 +853,7 @@ fn capture_file_contents(repo_root: &Path, file_paths: &[PathBuf]) -> HashMap<St
 /// error, etc.) for graceful degradation — the caller simply skips the
 /// captured-checkpoint path when watermarks are unavailable.
 /// Watermarks returned by the daemon for a single worktree.
-struct DaemonWatermarks {
+pub struct DaemonWatermarks {
     /// Per-file mtime watermarks from scoped checkpoints.
     per_file: HashMap<String, u128>,
     /// Timestamp of the last full (non-scoped) Human checkpoint, if any.
@@ -886,15 +893,19 @@ fn query_daemon_watermarks(repo_working_dir: &str) -> Option<DaemonWatermarks> {
     Some(DaemonWatermarks { per_file, worktree })
 }
 
-/// Compare snapshot entries against daemon watermarks to find stale files.
+/// Find files in the snapshot that are stale (modified since the last baseline).
 ///
-/// Three-tier logic per file:
-/// 1. Per-file watermark exists → stale if `mtime > watermark + GRACE`.
-/// 2. No per-file watermark but worktree watermark exists → stale if
-///    `mtime > worktree_watermark + GRACE`.
-/// 3. Neither watermark → not included here; the caller handles cold-start via
-///    `git status` (see `attempt_pre_hook_capture`).
-fn find_stale_files(snapshot: &StatSnapshot, wm: &DaemonWatermarks) -> Vec<PathBuf> {
+/// Because `snapshot()` already filters out wm-covered files, every entry in
+/// `snapshot.entries` is a candidate.  We still apply the per-file (Tier 1)
+/// check for precision: a file that passed the coarser worktree-wm filter may
+/// still be within the grace window of its own more-recent per-file watermark.
+///
+/// Three-tier logic per entry:
+/// 1. Per-file watermark → stale if `mtime > file_wm + GRACE`.
+/// 2. Worktree watermark (real or cold-start proxy) → all entries already
+///    passed this threshold via the snapshot filter; push unconditionally.
+/// 3. Neither watermark → no baseline, skip (cold-start with no index mtime).
+fn find_stale_files(snapshot: &StatSnapshot) -> Vec<PathBuf> {
     let mut stale = Vec::new();
     for (rel_path, entry) in &snapshot.entries {
         if !entry.exists {
@@ -906,23 +917,18 @@ fn find_stale_files(snapshot: &StatSnapshot, wm: &DaemonWatermarks) -> Vec<PathB
         let mtime_ns = system_time_to_nanos(mtime);
         let posix_key = crate::utils::normalize_to_posix(&rel_path.to_string_lossy());
 
-        match wm.per_file.get(&posix_key) {
-            Some(&file_wm) => {
-                // Tier 1: precise per-file watermark from a prior scoped checkpoint.
-                if mtime_ns > file_wm + MTIME_GRACE_WINDOW_NS {
-                    stale.push(rel_path.clone());
-                }
+        if let Some(&file_wm) = snapshot.per_file_wm.get(&posix_key) {
+            // Tier 1: precise per-file watermark — may be tighter than the
+            // effective worktree wm used for snapshot filtering.
+            if mtime_ns > file_wm + MTIME_GRACE_WINDOW_NS {
+                stale.push(rel_path.clone());
             }
-            None => {
-                // Tier 2: fall back to worktree-level watermark.
-                if let Some(worktree_wm) = wm.worktree
-                    && mtime_ns > worktree_wm + MTIME_GRACE_WINDOW_NS
-                {
-                    stale.push(rel_path.clone());
-                }
-                // Tier 3 (no worktree watermark): cold-start, handled in caller.
-            }
+        } else if snapshot.effective_worktree_wm.is_some() {
+            // Tier 2: entry passed the worktree-wm snapshot filter, so by
+            // definition mtime > effective_wm + GRACE → stale.
+            stale.push(rel_path.clone());
         }
+        // Tier 3: no watermark at all → no baseline, skip.
     }
     stale.sort();
     stale
@@ -934,9 +940,9 @@ fn find_stale_files(snapshot: &StatSnapshot, wm: &DaemonWatermarks) -> Vec<PathB
 
 /// Attempt to prepare a captured checkpoint during the pre-hook.
 ///
-/// Queries daemon watermarks, identifies stale files (modified since the last
-/// checkpoint), captures their contents, and prepares a captured checkpoint
-/// with `CheckpointKind::Human` and `will_edit_filepaths`.
+/// Uses watermarks already embedded in the snapshot to identify stale files
+/// (modified since the last checkpoint), captures their contents, and prepares
+/// a captured checkpoint with `CheckpointKind::Human` and `will_edit_filepaths`.
 ///
 /// Returns `None` on any failure or when no stale files are found, allowing
 /// the caller to proceed without a captured checkpoint.
@@ -951,43 +957,9 @@ fn attempt_pre_hook_capture(
 
     let repo_working_dir = repo_root.to_string_lossy().to_string();
 
-    // 1. Query daemon watermarks (graceful degradation on failure).
-    let wm = query_daemon_watermarks(&repo_working_dir)?;
-
-    // 2. Find stale files (tiers 1 & 2: per-file and worktree watermarks).
-    let mut stale_files = find_stale_files(snap, &wm);
-
-    // 3. Cold-start: no worktree watermark means we have no baseline for files
-    //    that have never appeared in a scoped checkpoint. Use `git status` to
-    //    find only actually-dirty files instead of scanning all tracked files.
-    if wm.worktree.is_none() {
-        match git_status_fallback(repo_root) {
-            Ok(dirty_paths) => {
-                for path_str in dirty_paths {
-                    let posix_key = crate::utils::normalize_to_posix(&path_str);
-                    // Skip if already covered by a per-file watermark comparison.
-                    if wm.per_file.contains_key(&posix_key) {
-                        continue;
-                    }
-                    // Normalize to match the case-folded keys already in stale_files
-                    // (from find_stale_files which uses normalize_path). On
-                    // case-insensitive FS (macOS/Windows), git status returns
-                    // original-case paths that would otherwise fail the contains check.
-                    let p = normalize_path(Path::new(&path_str));
-                    if !stale_files.contains(&p) {
-                        stale_files.push(p);
-                    }
-                }
-                stale_files.sort();
-            }
-            Err(e) => {
-                debug_log(&format!(
-                    "Pre-hook capture: git status fallback failed: {}",
-                    e
-                ));
-            }
-        }
-    }
+    // Watermarks are already embedded in the snapshot (queried before snapshot
+    // was taken); no second daemon round-trip needed.
+    let stale_files = find_stale_files(snap);
 
     if stale_files.is_empty() {
         debug_log("Pre-hook capture: no stale files found, skipping");
@@ -1327,16 +1299,24 @@ pub fn handle_bash_tool(
             // Clean up stale snapshots
             let _ = cleanup_stale_snapshots(repo_root);
 
-            // Take and store pre-snapshot
-            match snapshot(repo_root, session_id, tool_use_id) {
+            // Query daemon watermarks first so snapshot() can filter out
+            // wm-covered files and embed the watermarks for the post-hook.
+            let repo_working_dir = repo_root.to_string_lossy().to_string();
+            let wm = query_daemon_watermarks(&repo_working_dir);
+
+            // Take and store pre-snapshot (filtered by watermarks)
+            match snapshot(repo_root, session_id, tool_use_id, wm.as_ref()) {
                 Ok(snap) => {
                     save_snapshot(&snap)?;
                     debug_log(&format!(
-                        "Pre-snapshot stored for invocation {}",
-                        invocation_key
+                        "Pre-snapshot stored for invocation {} ({} entries, effective_wm={:?})",
+                        invocation_key,
+                        snap.entries.len(),
+                        snap.effective_worktree_wm,
                     ));
 
-                    // Attempt watermark-based pre-hook content capture.
+                    // Attempt watermark-based pre-hook content capture using
+                    // the embedded watermarks (no second daemon query needed).
                     let captured_checkpoint = attempt_pre_hook_capture(&snap, repo_root);
 
                     Ok(BashToolResult {
@@ -1349,7 +1329,7 @@ pub fn handle_bash_tool(
                         "Pre-snapshot failed: {}; will use fallback on post",
                         e
                     ));
-                    // Don't fail the tool call; post-hook will use git status fallback
+                    // Don't fail the tool call; post-hook will use fallback path
                     Ok(BashToolResult {
                         action: BashCheckpointAction::TakePreSnapshot,
                         captured_checkpoint: None,
@@ -1362,15 +1342,29 @@ pub fn handle_bash_tool(
             let pre_snapshot = load_and_consume_snapshot(repo_root, &invocation_key)?;
 
             match pre_snapshot {
-                Some(mut pre) => {
-                    // Take post-snapshot
-                    match snapshot(repo_root, session_id, tool_use_id) {
+                Some(pre) => {
+                    // Take post-snapshot using the same effective watermark as
+                    // the pre-snapshot so the coverage filter is consistent.
+                    // Files that bash modified will have crossed the threshold
+                    // and appear in post.entries even if they were absent from
+                    // pre.entries (wm-covered before the tool ran).
+                    //
+                    // When the pre-snapshot had no watermarks at all (no daemon
+                    // at pre-hook time → effective_worktree_wm = None and no
+                    // per-file wm), pass None so the post-snapshot also does a
+                    // full scan rather than falling through to git_index_mtime_ns
+                    // and producing an asymmetric filter.
+                    let post_wm: Option<DaemonWatermarks> =
+                        if pre.effective_worktree_wm.is_some() || !pre.per_file_wm.is_empty() {
+                            Some(DaemonWatermarks {
+                                per_file: pre.per_file_wm.clone(),
+                                worktree: pre.effective_worktree_wm,
+                            })
+                        } else {
+                            None
+                        };
+                    match snapshot(repo_root, session_id, tool_use_id, post_wm.as_ref()) {
                         Ok(post) => {
-                            // Rebuild gitignore from the pre-snapshot's repo root for filtering
-                            if pre.gitignore.is_none() {
-                                pre.gitignore = build_gitignore(&pre.repo_root).ok();
-                            }
-
                             let diff_result = diff(&pre, &post);
 
                             if diff_result.is_empty() {
@@ -1385,12 +1379,11 @@ pub fn handle_bash_tool(
                             } else {
                                 let paths = diff_result.all_changed_paths();
                                 debug_log(&format!(
-                                    "Bash tool {}: {} files changed ({} created, {} modified, {} deleted)",
+                                    "Bash tool {}: {} files changed ({} created, {} modified)",
                                     invocation_key,
                                     paths.len(),
                                     diff_result.created.len(),
                                     diff_result.modified.len(),
-                                    diff_result.deleted.len(),
                                 ));
 
                                 // Attempt post-hook content capture for async checkpoint.
@@ -1405,47 +1398,28 @@ pub fn handle_bash_tool(
                         }
                         Err(e) => {
                             debug_log(&format!(
-                                "Post-snapshot failed: {}; falling back to git status",
+                                "Post-snapshot failed: {}; returning fallback",
                                 e
                             ));
-                            // Fall back to git status
-                            match git_status_fallback(repo_root) {
-                                Ok(paths) if paths.is_empty() => Ok(BashToolResult {
-                                    action: BashCheckpointAction::NoChanges,
-                                    captured_checkpoint: None,
-                                }),
-                                Ok(paths) => Ok(BashToolResult {
-                                    action: BashCheckpointAction::Checkpoint(paths),
-                                    captured_checkpoint: None,
-                                }),
-                                Err(_) => Ok(BashToolResult {
-                                    action: BashCheckpointAction::Fallback,
-                                    captured_checkpoint: None,
-                                }),
-                            }
+                            Ok(BashToolResult {
+                                action: BashCheckpointAction::Fallback,
+                                captured_checkpoint: None,
+                            })
                         }
                     }
                 }
                 None => {
-                    // Pre-snapshot lost (process restart, etc.) — use git status fallback
+                    // Pre-snapshot lost (process restart, etc.) — return fallback.
+                    // We do not call git status here: it is extremely slow on large
+                    // monorepos and cannot be relied on at this point in the flow.
                     debug_log(&format!(
-                        "Pre-snapshot not found for {}; using git status fallback",
+                        "Pre-snapshot not found for {}; returning fallback (no git status)",
                         invocation_key
                     ));
-                    match git_status_fallback(repo_root) {
-                        Ok(paths) if paths.is_empty() => Ok(BashToolResult {
-                            action: BashCheckpointAction::NoChanges,
-                            captured_checkpoint: None,
-                        }),
-                        Ok(paths) => Ok(BashToolResult {
-                            action: BashCheckpointAction::Checkpoint(paths),
-                            captured_checkpoint: None,
-                        }),
-                        Err(_) => Ok(BashToolResult {
-                            action: BashCheckpointAction::Fallback,
-                            captured_checkpoint: None,
-                        }),
-                    }
+                    Ok(BashToolResult {
+                        action: BashCheckpointAction::Fallback,
+                        captured_checkpoint: None,
+                    })
                 }
             }
         }
@@ -1513,19 +1487,19 @@ mod tests {
     fn test_diff_empty_snapshots() {
         let pre = StatSnapshot {
             entries: HashMap::new(),
-            tracked_files: HashSet::new(),
-            gitignore: None,
             taken_at: None,
             invocation_key: "test:1".to_string(),
             repo_root: PathBuf::from("/tmp"),
+            effective_worktree_wm: None,
+            per_file_wm: HashMap::new(),
         };
         let post = StatSnapshot {
             entries: HashMap::new(),
-            tracked_files: HashSet::new(),
-            gitignore: None,
             taken_at: None,
             invocation_key: "test:2".to_string(),
             repo_root: PathBuf::from("/tmp"),
+            effective_worktree_wm: None,
+            per_file_wm: HashMap::new(),
         };
 
         let result = diff(&pre, &post);
@@ -1536,11 +1510,11 @@ mod tests {
     fn test_diff_detects_creation() {
         let pre = StatSnapshot {
             entries: HashMap::new(),
-            tracked_files: HashSet::new(),
-            gitignore: None,
             taken_at: None,
             invocation_key: "test:1".to_string(),
             repo_root: PathBuf::from("/tmp"),
+            effective_worktree_wm: None,
+            per_file_wm: HashMap::new(),
         };
 
         let mut post_entries = HashMap::new();
@@ -1558,61 +1532,16 @@ mod tests {
 
         let post = StatSnapshot {
             entries: post_entries,
-            tracked_files: HashSet::new(),
-            gitignore: None,
             taken_at: None,
             invocation_key: "test:2".to_string(),
             repo_root: PathBuf::from("/tmp"),
+            effective_worktree_wm: None,
+            per_file_wm: HashMap::new(),
         };
 
         let result = diff(&pre, &post);
         assert_eq!(result.created.len(), 1);
         assert!(result.modified.is_empty());
-        assert!(result.deleted.is_empty());
-    }
-
-    #[test]
-    fn test_diff_detects_deletion() {
-        let mut pre_entries = HashMap::new();
-        let path = normalize_path(Path::new("deleted.txt"));
-        pre_entries.insert(
-            path.clone(),
-            StatEntry {
-                exists: true,
-                mtime: Some(SystemTime::now()),
-                ctime: Some(SystemTime::now()),
-                size: 50,
-                mode: 0o644,
-                file_type: StatFileType::Regular,
-            },
-        );
-
-        let pre = StatSnapshot {
-            entries: pre_entries,
-            tracked_files: {
-                let mut s = HashSet::new();
-                s.insert(path);
-                s
-            },
-            gitignore: None,
-            taken_at: None,
-            invocation_key: "test:1".to_string(),
-            repo_root: PathBuf::from("/tmp"),
-        };
-
-        let post = StatSnapshot {
-            entries: HashMap::new(),
-            tracked_files: HashSet::new(),
-            gitignore: None,
-            taken_at: None,
-            invocation_key: "test:2".to_string(),
-            repo_root: PathBuf::from("/tmp"),
-        };
-
-        let result = diff(&pre, &post);
-        assert!(result.created.is_empty());
-        assert!(result.modified.is_empty());
-        assert_eq!(result.deleted.len(), 1);
     }
 
     #[test]
@@ -1649,30 +1578,25 @@ mod tests {
 
         let pre = StatSnapshot {
             entries: pre_entries,
-            tracked_files: {
-                let mut s = HashSet::new();
-                s.insert(path);
-                s
-            },
-            gitignore: None,
             taken_at: None,
             invocation_key: "test:1".to_string(),
             repo_root: PathBuf::from("/tmp"),
+            effective_worktree_wm: None,
+            per_file_wm: HashMap::new(),
         };
 
         let post = StatSnapshot {
             entries: post_entries,
-            tracked_files: HashSet::new(),
-            gitignore: None,
             taken_at: None,
             invocation_key: "test:2".to_string(),
             repo_root: PathBuf::from("/tmp"),
+            effective_worktree_wm: None,
+            per_file_wm: HashMap::new(),
         };
 
         let result = diff(&pre, &post);
         assert!(result.created.is_empty());
         assert_eq!(result.modified.len(), 1);
-        assert!(result.deleted.is_empty());
     }
 
     #[test]
@@ -1740,13 +1664,11 @@ mod tests {
         let result = StatDiffResult {
             created: vec![PathBuf::from("new.txt")],
             modified: vec![PathBuf::from("changed.txt")],
-            deleted: vec![PathBuf::from("removed.txt")],
         };
         let paths = result.all_changed_paths();
-        assert_eq!(paths.len(), 3);
+        assert_eq!(paths.len(), 2);
         assert!(paths.contains(&"new.txt".to_string()));
         assert!(paths.contains(&"changed.txt".to_string()));
-        assert!(paths.contains(&"removed.txt".to_string()));
     }
 
     // -----------------------------------------------------------------------
@@ -1768,16 +1690,26 @@ mod tests {
     // find_stale_files tests
     // -----------------------------------------------------------------------
 
-    /// Helper: build a minimal `StatSnapshot` with the given entries.
-    fn make_snapshot(entries: HashMap<PathBuf, StatEntry>) -> StatSnapshot {
+    /// Helper: build a minimal `StatSnapshot` with the given entries and
+    /// optional embedded watermarks.
+    fn make_snapshot_with_wm(
+        entries: HashMap<PathBuf, StatEntry>,
+        per_file_wm: HashMap<String, u128>,
+        effective_worktree_wm: Option<u128>,
+    ) -> StatSnapshot {
         StatSnapshot {
             entries,
-            tracked_files: HashSet::new(),
-            gitignore: None,
             taken_at: None,
             invocation_key: "test:stale".to_string(),
             repo_root: PathBuf::from("/tmp"),
+            effective_worktree_wm,
+            per_file_wm,
         }
+    }
+
+    /// Shorthand: no watermarks (cold-start, no index mtime).
+    fn make_snapshot(entries: HashMap<PathBuf, StatEntry>) -> StatSnapshot {
+        make_snapshot_with_wm(entries, HashMap::new(), None)
     }
 
     /// Helper: build a `StatEntry` for a regular file with the given mtime.
@@ -1790,53 +1722,47 @@ mod tests {
         StatEntry {
             exists,
             mtime,
-            ctime: mtime, // ctime not used by find_stale_files
+            ctime: mtime,
             size: 100,
             mode: 0o644,
             file_type: StatFileType::Regular,
         }
     }
 
-    fn make_daemon_watermarks(
-        per_file: HashMap<String, u128>,
-        worktree: Option<u128>,
-    ) -> DaemonWatermarks {
-        DaemonWatermarks { per_file, worktree }
-    }
-
     #[test]
     fn test_find_stale_files_cold_start_excludes_unwatermarked_files() {
         // On cold start (no per-file and no worktree watermark), files with no
-        // watermark are NOT returned by find_stale_files — they are handled via
-        // git status in attempt_pre_hook_capture instead.
+        // watermark are NOT returned by find_stale_files — they are simply skipped.
         let mut entries = HashMap::new();
         entries.insert(
             normalize_path(Path::new("src/main.rs")),
             make_entry(100, true),
         );
-        let snapshot = make_snapshot(entries);
-        let wm = make_daemon_watermarks(HashMap::new(), None);
+        let snapshot = make_snapshot(entries); // no embedded wm
 
-        let stale = find_stale_files(&snapshot, &wm);
+        let stale = find_stale_files(&snapshot);
         assert!(
             stale.is_empty(),
-            "cold-start: unwatermarked files not returned; git status handles them"
+            "cold-start: unwatermarked files are not returned (no baseline)"
         );
     }
 
     #[test]
     fn test_find_stale_files_uses_worktree_watermark_as_fallback() {
         // File has no per-file watermark, but worktree watermark exists at 90s.
-        // File mtime is 100s → beyond grace window → stale.
+        // File mtime is 100s → 10s beyond grace window → stale.
         let mut entries = HashMap::new();
         entries.insert(
             normalize_path(Path::new("src/main.rs")),
             make_entry(100, true),
         );
-        let snapshot = make_snapshot(entries);
-        let wm = make_daemon_watermarks(HashMap::new(), Some(Duration::from_secs(90).as_nanos()));
+        let snapshot = make_snapshot_with_wm(
+            entries,
+            HashMap::new(),
+            Some(Duration::from_secs(90).as_nanos()),
+        );
 
-        let stale = find_stale_files(&snapshot, &wm);
+        let stale = find_stale_files(&snapshot);
         assert_eq!(
             stale.len(),
             1,
@@ -1847,54 +1773,61 @@ mod tests {
     #[test]
     fn test_find_stale_files_worktree_watermark_within_grace() {
         // File mtime=100s, worktree watermark=99s → within 2s grace → NOT stale.
+        // Note: this file would have been filtered from the snapshot by
+        // is_wm_covered in production; this test exercises the Tier-2 guard
+        // inside find_stale_files for robustness.
         let mut entries = HashMap::new();
         entries.insert(
             normalize_path(Path::new("src/main.rs")),
             make_entry(100, true),
         );
-        let snapshot = make_snapshot(entries);
-        let wm = make_daemon_watermarks(HashMap::new(), Some(Duration::from_secs(99).as_nanos()));
-
-        let stale = find_stale_files(&snapshot, &wm);
-        assert!(
-            stale.is_empty(),
-            "file within grace of worktree watermark is not stale"
+        let snapshot = make_snapshot_with_wm(
+            entries,
+            HashMap::new(),
+            Some(Duration::from_secs(99).as_nanos()),
         );
+
+        // mtime 100s > effective_wm 99s, but find_stale_files pushes Tier-2
+        // entries unconditionally (coverage filter already checked).  The file
+        // is stale from find_stale_files' perspective even though the diff with
+        // an identical post-snapshot would report no change.
+        let stale = find_stale_files(&snapshot);
+        assert_eq!(stale.len(), 1, "entry that passed coverage filter is stale");
     }
 
     #[test]
     fn test_find_stale_files_per_file_wins_over_worktree() {
         // Per-file watermark (95s) is older than worktree watermark (98s).
         // File mtime=100s → 5s beyond per-file watermark → stale.
-        // (Even though it would also be stale via worktree watermark, the
-        // per-file path is taken.)
         let mut entries = HashMap::new();
         let path = normalize_path(Path::new("src/lib.rs"));
         entries.insert(path, make_entry(100, true));
-        let snapshot = make_snapshot(entries);
 
         let mut per_file = HashMap::new();
         per_file.insert("src/lib.rs".to_string(), Duration::from_secs(95).as_nanos());
-        let wm = make_daemon_watermarks(per_file, Some(Duration::from_secs(98).as_nanos()));
+        let snapshot = make_snapshot_with_wm(
+            entries,
+            per_file,
+            Some(Duration::from_secs(98).as_nanos()),
+        );
 
-        let stale = find_stale_files(&snapshot, &wm);
+        let stale = find_stale_files(&snapshot);
         assert_eq!(stale.len(), 1);
     }
 
     #[test]
     fn test_find_stale_files_within_grace_window() {
         // File with mtime=100s, per-file watermark at 99s.
-        // Difference is 1s which is within the 2s grace window -> NOT stale.
+        // Difference is 1s which is within the 2s grace window → NOT stale.
         let mut entries = HashMap::new();
         let path = normalize_path(Path::new("src/lib.rs"));
         entries.insert(path, make_entry(100, true));
-        let snapshot = make_snapshot(entries);
 
         let mut per_file = HashMap::new();
         per_file.insert("src/lib.rs".to_string(), Duration::from_secs(99).as_nanos());
-        let wm = make_daemon_watermarks(per_file, None);
+        let snapshot = make_snapshot_with_wm(entries, per_file, None);
 
-        let stale = find_stale_files(&snapshot, &wm);
+        let stale = find_stale_files(&snapshot);
         assert!(
             stale.is_empty(),
             "file within grace window should not be stale"
@@ -1904,17 +1837,16 @@ mod tests {
     #[test]
     fn test_find_stale_files_beyond_grace_window() {
         // File with mtime=100s, per-file watermark at 95s.
-        // Difference is 5s which exceeds the 2s grace window -> stale.
+        // Difference is 5s which exceeds the 2s grace window → stale.
         let mut entries = HashMap::new();
         let path = normalize_path(Path::new("src/lib.rs"));
         entries.insert(path, make_entry(100, true));
-        let snapshot = make_snapshot(entries);
 
         let mut per_file = HashMap::new();
         per_file.insert("src/lib.rs".to_string(), Duration::from_secs(95).as_nanos());
-        let wm = make_daemon_watermarks(per_file, None);
+        let snapshot = make_snapshot_with_wm(entries, per_file, None);
 
-        let stale = find_stale_files(&snapshot, &wm);
+        let stale = find_stale_files(&snapshot);
         assert_eq!(stale.len(), 1, "file beyond grace window should be stale");
     }
 
@@ -1923,10 +1855,9 @@ mod tests {
         // File with exists=false should not appear in stale list regardless of watermarks.
         let mut entries = HashMap::new();
         entries.insert(normalize_path(Path::new("gone.rs")), make_entry(100, false));
-        let snapshot = make_snapshot(entries);
-        let wm = make_daemon_watermarks(HashMap::new(), Some(0));
+        let snapshot = make_snapshot_with_wm(entries, HashMap::new(), Some(0));
 
-        let stale = find_stale_files(&snapshot, &wm);
+        let stale = find_stale_files(&snapshot);
         assert!(stale.is_empty(), "nonexistent file should not be stale");
     }
 
@@ -2042,39 +1973,6 @@ mod tests {
         let captured_edited: Vec<String> = existing_paths.iter().map(|p| p.to_string()).collect();
         assert!(!captured_edited.contains(&deleted.to_string()));
         assert!(captured_edited.contains(&"modified.txt".to_string()));
-    }
-
-    /// Verify that cold-start dedup normalizes paths from git_status before comparing
-    /// against stale_files entries (which use normalize_path / case-folded keys).
-    ///
-    /// On case-insensitive filesystems (macOS/Windows), `git status` returns original-case
-    /// paths (e.g. "src/Foo.rs") while `find_stale_files` inserts normalized paths
-    /// (e.g. "src/foo.rs" on macOS). Without normalization the contains() check misses
-    /// the duplicate and the file ends up in stale_files twice.
-    #[test]
-    fn test_cold_start_dedup_normalizes_case_before_contains_check() {
-        // Simulate a stale_files list already populated with a normalize_path() entry.
-        // normalize_path lowercases on case-insensitive targets; to make this test
-        // deterministic on all platforms we directly use the normalized form.
-        let normalized = normalize_path(Path::new("src/Foo.rs"));
-        let mut stale_files: Vec<PathBuf> = vec![normalized.clone()];
-
-        // Simulate git status returning the same file with its original case.
-        let git_status_path = "src/Foo.rs".to_string();
-
-        // Apply the same normalization the production code now uses.
-        let p = normalize_path(Path::new(&git_status_path));
-        if !stale_files.contains(&p) {
-            stale_files.push(p);
-        }
-
-        // The file must appear exactly once regardless of case differences.
-        assert_eq!(
-            stale_files.len(),
-            1,
-            "duplicate after cold-start dedup: stale_files = {:?}",
-            stale_files
-        );
     }
 
     // -----------------------------------------------------------------------

@@ -199,14 +199,13 @@ impl AgentCheckpointPreset for AmpPreset {
                     Ok(BashCheckpointAction::Checkpoint(paths)) => Some(paths.clone()),
                     Ok(BashCheckpointAction::NoChanges) => None,
                     Ok(BashCheckpointAction::Fallback) => {
-                        // git_status_fallback already failed inside handle_bash_tool
+                        // snapshot unavailable or repo too large; no paths to report
                         None
                     }
                     Ok(BashCheckpointAction::TakePreSnapshot) => None,
                     Err(e) => {
                         crate::utils::debug_log(&format!("Bash tool post-hook error: {}", e));
-                        let cwd = hook_input.cwd.as_deref().unwrap_or("");
-                        bash_tool::git_status_fallback(Path::new(cwd)).ok()
+                        None
                     }
                 }
             } else {
