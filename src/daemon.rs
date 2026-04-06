@@ -3300,7 +3300,6 @@ fn revert_source_ref_from_command(
             skip_next = true;
             continue;
         }
-        }
         if arg.starts_with('-') {
             continue;
         }
