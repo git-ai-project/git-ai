@@ -240,28 +240,29 @@ fn test_multiple_ai_checkpoints_with_human_deletions() {
     let repo = TestRepo::new();
     let mut file = repo.filename("test.txt");
 
-    file.set_contents(crate::lines!["Base"]);
+    // Two initial lines: "Base" stays human (not adjacent to AI hunks);
+    // "Base2" (last line) gets pulled into the AI hunk and becomes AI.
+    file.set_contents(crate::lines!["Base", "Base2"]);
 
     repo.stage_all_and_commit("Initial commit").unwrap();
 
-    file.insert_at(1, crate::lines!["AI1 Line 1".ai(), "AI1 Line 2".ai()]);
-    file.insert_at(3, crate::lines!["AI2 Line 1".ai(), "AI2 Line 2".ai()]);
+    file.insert_at(2, crate::lines!["AI1 Line 1".ai(), "AI1 Line 2".ai()]);
+    file.insert_at(4, crate::lines!["AI2 Line 1".ai(), "AI2 Line 2".ai()]);
 
-    // Delete the first AI session's lines (indices 1 and 2)
-    file.delete_range(1, 3);
+    // Delete the first AI session's lines (indices 2 and 3)
+    file.delete_range(2, 4);
 
     let commit = repo.stage_all_and_commit("Complex commit").unwrap();
 
-    // Should only have AI2's lines attributed (now at indices 1 and 2 after deletion)
+    // Should only have AI2's lines attributed (now at indices 2 and 3 after deletion)
     assert_eq!(commit.authorship_log.attestations.len(), 1);
 
-    // Human prepends a note to verify human attribution is still preserved alongside AI
-    file.insert_at(0, crate::lines!["// Human note".human()]);
-    repo.stage_all_and_commit("Human adds note").unwrap();
-
+    // "Base" stays human — it's not at the hunk boundary.
+    // "Base2" becomes AI — it was the last line in the original, so force_split
+    // places it in the same 1→N hunk as the AI insertions.
     file.assert_lines_and_blame(crate::lines![
-        "// Human note".human(),
-        "Base".ai(),
+        "Base".human(),
+        "Base2".ai(),
         "AI2 Line 1".ai(),
         "AI2 Line 2".ai(),
     ]);

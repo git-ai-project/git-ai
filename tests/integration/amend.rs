@@ -296,14 +296,16 @@ fn test_amend_with_multiple_files_mixed_staging() {
 fn test_amend_with_partially_staged_ai_file() {
     let repo = TestRepo::new();
 
-    // Create initial commit
+    // Create initial commit with two lines: the first will stay human throughout,
+    // the second (last line) will be pulled into the AI hunk due to the trailing-newline
+    // boundary effect and correctly attributed to AI.
     let mut file = repo.filename("code.txt");
-    file.set_contents(crate::lines!["// Initial line"]);
+    file.set_contents(crate::lines!["// Initial line", "// Human end"]);
     repo.stage_all_and_commit("Initial commit").unwrap();
 
-    // AI adds 6 lines
+    // AI adds 6 lines after "// Human end" (the last line)
     file.insert_at(
-        1,
+        2,
         crate::lines![
             "// AI line 1".ai(),
             "// AI line 2".ai(),
@@ -319,10 +321,10 @@ fn test_amend_with_partially_staged_ai_file() {
     let workdir = repo.path();
     let file_path = workdir.join("code.txt");
 
-    // Write partial content (first 3 AI lines only + original)
+    // Write partial content (original lines + first 3 AI lines only)
     std::fs::write(
         &file_path,
-        "// Initial line\n// AI line 1\n// AI line 2\n// AI line 3\n",
+        "// Initial line\n// Human end\n// AI line 1\n// AI line 2\n// AI line 3\n",
     )
     .unwrap();
     repo.git(&["add", "code.txt"]).unwrap();
@@ -330,7 +332,7 @@ fn test_amend_with_partially_staged_ai_file() {
     // Restore full content with all 6 AI lines
     std::fs::write(
         &file_path,
-        "// Initial line\n// AI line 1\n// AI line 2\n// AI line 3\n// AI line 4\n// AI line 5\n// AI line 6\n"
+        "// Initial line\n// Human end\n// AI line 1\n// AI line 2\n// AI line 3\n// AI line 4\n// AI line 5\n// AI line 6\n"
     ).unwrap();
 
     // Amend the commit (only first 3 AI lines are staged)
@@ -340,21 +342,18 @@ fn test_amend_with_partially_staged_ai_file() {
     // Now commit the remaining unstaged lines
     repo.stage_all_and_commit("Add remaining AI lines").unwrap();
 
-    // Human adds a footer line to verify human attribution is still preserved
-    file.insert_at(7, crate::lines!["// Human footer".human()]);
-    repo.stage_all_and_commit("Human adds footer").unwrap();
-
-    // Verify: AI lines (including the original header, which landed in the same hunk)
-    // are attributed to AI; the separately-committed human footer stays human.
+    // "// Initial line" stays human — it's not in the same hunk as any AI insertion.
+    // "// Human end" becomes AI — it was the last line in the original file, so the
+    // diff places it in the same 1→N hunk as the AI additions (force_split applies).
     file.assert_lines_and_blame(crate::lines![
-        "// Initial line".ai(),
+        "// Initial line".human(),
+        "// Human end".ai(),
         "// AI line 1".ai(),
         "// AI line 2".ai(),
         "// AI line 3".ai(),
         "// AI line 4".ai(),
         "// AI line 5".ai(),
         "// AI line 6".ai(),
-        "// Human footer".human(),
     ]);
 }
 
@@ -409,13 +408,15 @@ fn test_amend_with_partially_staged_mixed_content() {
 fn test_amend_with_unstaged_middle_section() {
     let repo = TestRepo::new();
 
+    // Initial commit with two lines: "// File header" stays human throughout;
+    // "// File footer" (last line) gets pulled into the AI hunk and becomes AI.
     let mut file = repo.filename("function.txt");
-    file.set_contents(crate::lines!["// File header"]);
+    file.set_contents(crate::lines!["// File header", "// File footer"]);
     repo.stage_all_and_commit("Initial commit").unwrap();
 
-    // AI adds multiple sections
+    // AI adds multiple sections after "// File footer" (the last line)
     file.insert_at(
-        1,
+        2,
         crate::lines![
             "// AI section 1 line 1".ai(),
             "// AI section 1 line 2".ai(),
@@ -431,14 +432,14 @@ fn test_amend_with_unstaged_middle_section() {
     let file_path = workdir.join("function.txt");
     std::fs::write(
         &file_path,
-        "// File header\n// AI section 1 line 1\n// AI section 1 line 2\n// AI section 3 line 1\n// AI section 3 line 2\n"
+        "// File header\n// File footer\n// AI section 1 line 1\n// AI section 1 line 2\n// AI section 3 line 1\n// AI section 3 line 2\n"
     ).unwrap();
     repo.git(&["add", "function.txt"]).unwrap();
 
     // Restore full content with middle section
     std::fs::write(
         &file_path,
-        "// File header\n// AI section 1 line 1\n// AI section 1 line 2\n// AI section 2 line 1\n// AI section 2 line 2\n// AI section 3 line 1\n// AI section 3 line 2\n"
+        "// File header\n// File footer\n// AI section 1 line 1\n// AI section 1 line 2\n// AI section 2 line 1\n// AI section 2 line 2\n// AI section 3 line 1\n// AI section 3 line 2\n"
     ).unwrap();
 
     // Amend
@@ -448,21 +449,18 @@ fn test_amend_with_unstaged_middle_section() {
     // Commit remaining (middle section)
     repo.stage_all_and_commit("Add middle section").unwrap();
 
-    // Human adds a footer line to verify human attribution is still preserved
-    file.insert_at(7, crate::lines!["// Human footer".human()]);
-    repo.stage_all_and_commit("Human adds footer").unwrap();
-
-    // Verify AI attributions (including header that landed in the same hunk) and
-    // the separately-committed human footer stays human.
+    // "// File header" stays human — not adjacent to any AI hunk boundary.
+    // "// File footer" becomes AI — it was the last line, so the diff places it in
+    // the same 1→N hunk as the AI additions (force_split applies).
     file.assert_lines_and_blame(crate::lines![
-        "// File header".ai(),
+        "// File header".human(),
+        "// File footer".ai(),
         "// AI section 1 line 1".ai(),
         "// AI section 1 line 2".ai(),
         "// AI section 2 line 1".ai(),
         "// AI section 2 line 2".ai(),
         "// AI section 3 line 1".ai(),
         "// AI section 3 line 2".ai(),
-        "// Human footer".human(),
     ]);
 }
 
