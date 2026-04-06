@@ -2974,7 +2974,7 @@ fn is_linked_worktree_git_file(git_file: &Path) -> bool {
     // A linked worktree's gitdir resolves to something like
     // `/repo/.git/worktrees/<name>`.  A submodule's gitdir looks like
     // `../.git/modules/<name>`.
-    gitdir.contains("/worktrees/")
+    gitdir.contains("/.git/worktrees/")
 }
 
 pub fn find_repository_in_path(path: &str) -> Result<Repository, GitAiError> {
