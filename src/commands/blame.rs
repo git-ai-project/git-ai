@@ -637,6 +637,16 @@ impl Repository {
             args.push("-w".to_string());
         }
 
+        // Detect lines moved within a file (-M) and copied from other files (-C, implies -M).
+        // Needed so that lines shifted by an adjacent insertion/deletion are traced back to the
+        // commit that originally wrote them rather than the commit that moved them.
+        if options.detect_moves {
+            args.push("-M".to_string());
+        }
+        for _ in 0..options.detect_copies {
+            args.push("-C".to_string());
+        }
+
         // Respect ignore options in use
         for rev in &options.ignore_revs {
             args.push("--ignore-rev".to_string());

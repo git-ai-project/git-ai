@@ -2601,6 +2601,132 @@ fn test_diff_json_commit_author_is_full_ident() {
     assert_eq!(author, "Test User <test@example.com>");
 }
 
+/// Regression test for the bug where `apply_blame_for_side` set `detect_copies: 1` on
+/// `GitAiBlameOptions` but `blame_hunks_for_ranges` never translated that field into a `-C`
+/// flag on the git-blame command line.  The result was that lines *moved* within a file in the
+/// same commit were attributed to that commit instead of to the commit that originally wrote
+/// them, so they fell through as Human when they should have been AI.
+///
+/// Scenario
+/// --------
+/// Commit A (AI):   [func_one × 6 lines, func_two × 6 lines]  – fully AI-attested.
+/// Commit B (AI):   [new_func × 6 lines, func_two × 6 lines, func_one × 6 lines]
+///                  – AI attests only new_func (lines 1-6); func_one moved to lines 13-18.
+///
+/// Myers diff A→B represents the change as:
+///   - func_one (lines 1-6 in A) deleted / replaced by new_func
+///   - func_two unchanged (context)
+///   - func_one (lines 13-18 in B) added at the end  ← these are in `added_lines`
+///
+/// `git blame A..B -L 13,18` without `-C` → commit B  (B has no attestation for 13-18 → Human)
+/// `git blame A..B -L 13,18`  with  `-C` → commit A  (A's attestation covers func_one  → AI)
+#[test]
+fn test_diff_blame_uses_detect_copies_for_moved_ai_lines() {
+    let repo = TestRepo::new();
+
+    // --- Commit A: AI writes two substantial functions ---
+    let mut file = repo.filename("src.rs");
+    file.set_contents(crate::lines![
+        "fn func_one() {".ai(),
+        "    // original function one body".ai(),
+        "    let x: u32 = 1;".ai(),
+        "    let y: u32 = 2;".ai(),
+        "    x + y".ai(),
+        "}".ai(),
+        "fn func_two() {".ai(),
+        "    // original function two body".ai(),
+        "    let a = String::from(\"hello\");".ai(),
+        "    let b = String::from(\"world\");".ai(),
+        "    format!(\"{} {}\", a, b)".ai(),
+        "}".ai()
+    ]);
+    repo.stage_all_and_commit("A: AI writes func_one and func_two")
+        .unwrap();
+
+    // --- Commit B: AI adds new_func; func_one ends up at the bottom (moved, not re-written) ---
+    // Marking func_one / func_two as .human() here means B's AI attestation covers ONLY
+    // new_func (lines 1-6).  func_one at its new position (lines 13-18) is NOT in B's note.
+    file.set_contents(crate::lines![
+        "fn new_func() {".ai(),
+        "    // brand new function".ai(),
+        "    let z: u32 = 99;".ai(),
+        "    let w: u32 = 100;".ai(),
+        "    z + w".ai(),
+        "}".ai(),
+        "fn func_two() {".human(),
+        "    // original function two body".human(),
+        "    let a = String::from(\"hello\");".human(),
+        "    let b = String::from(\"world\");".human(),
+        "    format!(\"{} {}\", a, b)".human(),
+        "}".human(),
+        "fn func_one() {".human(),
+        "    // original function one body".human(),
+        "    let x: u32 = 1;".human(),
+        "    let y: u32 = 2;".human(),
+        "    x + y".human(),
+        "}".human()
+    ]);
+    let commit_b = repo
+        .stage_all_and_commit("B: AI adds new_func and moves func_one to end")
+        .unwrap();
+
+    // Confirm the Myers diff actually puts func_one as explicit `+` lines (not context),
+    // which is the precondition for the bug to fire.
+    let raw_diff = repo
+        .git_og(&[
+            "--no-pager",
+            "diff",
+            &format!("{}^", commit_b.commit_sha),
+            &commit_b.commit_sha,
+        ])
+        .expect("git diff should succeed");
+    assert!(
+        raw_diff.contains("+fn func_one() {"),
+        "precondition: Myers diff must show func_one as an explicit addition (+), got:\n{raw_diff}"
+    );
+
+    // Run git-ai diff and check that func_one at its new position is attributed AI, not Human.
+    let output = repo
+        .git_ai(&["diff", &commit_b.commit_sha])
+        .expect("git-ai diff should succeed");
+
+    let lines = parse_diff_output(&output);
+
+    // new_func lines must be AI (B's own attestation).
+    let new_func_line = lines
+        .iter()
+        .find(|l| l.prefix == "+" && l.content.contains("fn new_func()"))
+        .expect("diff output must contain +fn new_func()");
+    assert!(
+        new_func_line
+            .attribution
+            .as_ref()
+            .map(|a| a.contains("ai"))
+            .unwrap_or(false),
+        "new_func should be AI-attributed; got: {:?}",
+        new_func_line.attribution
+    );
+
+    // func_one at its moved position must also be AI (traced to A via -C).
+    // Without the fix (detect_copies not wired through to the git-blame args),
+    // git blame attributes these lines to commit B → no attestation in B → Human.
+    let func_one_line = lines
+        .iter()
+        .find(|l| l.prefix == "+" && l.content.contains("fn func_one()"))
+        .expect("diff output must contain +fn func_one() from its moved position");
+    assert!(
+        func_one_line
+            .attribution
+            .as_ref()
+            .map(|a| a.contains("ai"))
+            .unwrap_or(false),
+        "func_one (moved to end of file by commit B) should be AI-attributed via -C move \
+         detection, but got: {:?}\nFull diff output:\n{}",
+        func_one_line.attribution,
+        output
+    );
+}
+
 crate::reuse_tests_in_worktree!(
     test_diff_single_commit,
     test_diff_commit_range,
