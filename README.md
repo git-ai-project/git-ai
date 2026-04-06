@@ -65,8 +65,8 @@ That's it — **no per-repo setup required.** Prompt and commit as normal. Git A
 - **No workflow changes** — Just prompt and commit. Git AI tracks AI code accurately without cluttering your git history.
 - **"Detecting" AI code is an anti-pattern** — Git AI does not guess whether a hunk is AI-generated. Supported agents report exactly which lines they wrote, giving you the most accurate attribution possible.
 - **Local-first** — Works 100% offline, no login required.
-- **Git native and open standard** — Git AI uses an [open standard](https://github.com/git-ai-project/git-ai/blob/main/specs/git_ai_standard_v3.0.0.md) for tracking AI-generated code with Git Notes.
-- **Transcripts stay out of Git** — Git Notes link to transcripts stored locally, in the Git AI Cloud, or in a self-hosted prompt store -- keeping your repos lean, free of sensitive information, and giving you control over your data.
+- **Git native and open standard** — Git AI built the [open standard](https://github.com/git-ai-project/git-ai/blob/main/specs/git_ai_standard_v3.0.0.md) for tracking AI-generated code with Git Notes.
+- **Secure Prompt Storage** — Git AI links each line of AI-code to the prompt that generated it. Since v1.0.0 Agent Sessions are stored outside of Git and can optionaly be synced to your team's [cloud](https://usegitai.com/docs/platform/overview) or [self-hosted](https://usegitai.com/docs/platform/self-hosting) prompt store -- keeping repos lean, enabling fine-grained access control, and preventing PII or secrets from leaking into Git.
 
 
 <table style="table-layout:fixed; width:100%">
