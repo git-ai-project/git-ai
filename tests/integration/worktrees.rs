@@ -546,7 +546,13 @@ fn checkpoint_routes_to_linked_worktree_when_cwd_is_main_repo() {
         .expect("find linked worktree repo");
 
     // Storage must be under {main_repo}/.git/ai/worktrees/ (worktree-isolated).
-    let expected_storage_prefix = main_repo_root.join(".git").join("ai").join("worktrees");
+    // Canonicalize to resolve symlinks (e.g. /var/... -> /private/var/... on macOS).
+    let expected_storage_prefix = main_repo_root
+        .canonicalize()
+        .expect("canonical main repo root")
+        .join(".git")
+        .join("ai")
+        .join("worktrees");
     assert!(
         wt_repo
             .storage
@@ -647,7 +653,13 @@ fn checkpoint_routes_to_nested_linked_worktree_when_cwd_is_main_repo() {
     let wt_repo = GitAiRepository::find_repository_in_path(linked_wt.to_str().unwrap())
         .expect("find nested worktree repo");
 
-    let expected_storage_prefix = main_repo_root.join(".git").join("ai").join("worktrees");
+    // Canonicalize to resolve symlinks (e.g. /var/... -> /private/var/... on macOS).
+    let expected_storage_prefix = main_repo_root
+        .canonicalize()
+        .expect("canonical main repo root")
+        .join(".git")
+        .join("ai")
+        .join("worktrees");
     assert!(
         wt_repo
             .storage
