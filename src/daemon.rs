@@ -977,7 +977,7 @@ fn inferred_top_stash_sha_from_rewrite_history(
                     stack.push(stash_sha);
                 }
             }
-            StashOperation::Pop | StashOperation::Drop => {
+            StashOperation::Pop | StashOperation::Drop | StashOperation::Branch => {
                 if let Some(stash_sha) = stash.stash_sha
                     && let Some(position) =
                         stack.iter().rposition(|existing| existing == &stash_sha)
@@ -1019,7 +1019,7 @@ fn resolve_stash_target_oid_for_terminal_payload(
                 ))
             })
             .map(Some),
-        "pop" | "drop" => {
+        "pop" | "drop" | "branch" => {
             if let Some(target_oid) = ref_changes
                 .iter()
                 .rfind(|change| change.reference == "refs/stash")
@@ -2455,7 +2455,10 @@ fn apply_rewrite_side_effect(
     }
     match &rewrite_event {
         RewriteLogEvent::Stash { stash }
-            if matches!(stash.operation, StashOperation::Apply | StashOperation::Pop) =>
+            if matches!(
+                stash.operation,
+                StashOperation::Apply | StashOperation::Pop | StashOperation::Branch
+            ) =>
         {
             if let (Some(head_sha), Some(stash_sha)) =
                 (stash.head_sha.as_ref(), stash.stash_sha.as_ref())
@@ -2638,15 +2641,15 @@ fn apply_stash_rewrite_side_effect(
                 &stash_event.pathspecs,
             )?;
         }
-        StashOperation::Apply | StashOperation::Pop => {
+        StashOperation::Apply | StashOperation::Pop | StashOperation::Branch => {
             let Some(head_sha) = stash_event.head_sha.as_deref() else {
                 return Err(GitAiError::Generic(
-                    "stash apply/pop missing destination head".to_string(),
+                    "stash apply/pop/branch missing destination head".to_string(),
                 ));
             };
             let Some(stash_sha) = stash_event.stash_sha.as_deref() else {
                 return Err(GitAiError::Generic(
-                    "stash apply/pop missing stash oid".to_string(),
+                    "stash apply/pop/branch missing stash oid".to_string(),
                 ));
             };
             stash_hooks::restore_stash_attributions(repo, head_sha, stash_sha)?;
@@ -5324,36 +5327,82 @@ impl ActorDaemonCoordinator {
         for (order, ready_entry) in ready {
             match ready_entry {
                 FamilySequencerEntry::ReadyCommand(command) => {
-                    let result = self.coordinator.route_command(*command).await;
-                    let applied = match result {
-                        Ok(applied) => applied,
-                        Err(error) => {
+                    // Wrap the entire command + side-effect pipeline in catch_unwind
+                    // so that a panic (e.g. from UTF-8 boundary issues in diff parsing)
+                    // does not kill the daemon process.
+                    let side_effect_result = {
+                        let future = async {
+                            let applied = self.coordinator.route_command(*command).await?;
+                            let side_effect = self
+                                .maybe_apply_side_effects_for_applied_command(
+                                    Some(family),
+                                    &applied,
+                                )
+                                .await;
+                            Ok::<_, GitAiError>((applied, side_effect))
+                        };
+                        let caught = std::panic::AssertUnwindSafe(future);
+                        futures::FutureExt::catch_unwind(caught).await
+                    };
+                    match side_effect_result {
+                        Ok(Ok((applied, side_effect_result))) => {
+                            if let Err(error) = &side_effect_result {
+                                let _ = self.record_side_effect_error(family, order, error);
+                                debug_log(&format!(
+                                    "daemon command side effect failed for family {} seq {}: {}",
+                                    family, applied.seq, error
+                                ));
+                            }
+                            if let Err(error) = self.append_command_completion_log(
+                                family,
+                                &applied,
+                                &side_effect_result,
+                                order,
+                            ) {
+                                let _ = self.record_side_effect_error(family, order, &error);
+                                debug_log(&format!(
+                                    "daemon command completion log write failed for family {} order {}: {}",
+                                    family, order, error
+                                ));
+                            }
+                        }
+                        Ok(Err(error)) => {
                             let _ = self.record_side_effect_error(family, order, &error);
                             debug_log(&format!(
                                 "daemon command apply failed for family {} order {}: {}",
                                 family, order, error
                             ));
-                            continue;
                         }
-                    };
-                    let result = self
-                        .maybe_apply_side_effects_for_applied_command(Some(family), &applied)
-                        .await;
-                    if let Err(error) = &result {
-                        let _ = self.record_side_effect_error(family, order, error);
-                        debug_log(&format!(
-                            "daemon command side effect failed for family {} seq {}: {}",
-                            family, applied.seq, error
-                        ));
-                    }
-                    if let Err(error) =
-                        self.append_command_completion_log(family, &applied, &result, order)
-                    {
-                        let _ = self.record_side_effect_error(family, order, &error);
-                        debug_log(&format!(
-                            "daemon command completion log write failed for family {} order {}: {}",
-                            family, order, error
-                        ));
+                        Err(panic_payload) => {
+                            let panic_msg = if let Some(s) = panic_payload.downcast_ref::<String>()
+                            {
+                                s.clone()
+                            } else if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                                s.to_string()
+                            } else {
+                                "unknown panic".to_string()
+                            };
+                            let error = GitAiError::Generic(format!(
+                                "daemon command side effect panic: {}",
+                                panic_msg
+                            ));
+                            let _ = self.record_side_effect_error(family, order, &error);
+                            debug_log(&format!(
+                                "daemon command side effect panic for family {} order {}: {}",
+                                family, order, panic_msg
+                            ));
+                            observability::log_error(
+                                &error,
+                                Some(serde_json::json!({
+                                    "component": "daemon",
+                                    "phase": "command_side_effect",
+                                    "reason": "panic_in_side_effect",
+                                    "panic_message": panic_msg,
+                                    "family": family,
+                                    "order": order,
+                                })),
+                            );
+                        }
                     }
                 }
                 FamilySequencerEntry::Checkpoint {
@@ -5364,15 +5413,58 @@ impl ActorDaemonCoordinator {
                         CheckpointRunRequest::Captured(request) => Some(request.capture_id.clone()),
                         CheckpointRunRequest::Live(_) => None,
                     };
-                    let ack = self
-                        .coordinator
-                        .apply_checkpoint(Path::new(request.repo_working_dir()))
-                        .await;
+                    // Compute before the future consumes `request`.
                     let should_log_completion =
                         crate::daemon::test_sync::tracks_checkpoint_request_for_test_sync(&request);
-                    let mut result = match ack {
-                        Ok(ack) => apply_checkpoint_side_effect(*request).map(|_| ack.seq),
-                        Err(error) => Err(error),
+                    // Wrap checkpoint processing in catch_unwind to recover from panics.
+                    let checkpoint_result = {
+                        let future = async {
+                            let ack = self
+                                .coordinator
+                                .apply_checkpoint(Path::new(request.repo_working_dir()))
+                                .await;
+                            match ack {
+                                Ok(ack) => apply_checkpoint_side_effect(*request).map(|_| ack.seq),
+                                Err(error) => Err(error),
+                            }
+                        };
+                        let caught = std::panic::AssertUnwindSafe(future);
+                        futures::FutureExt::catch_unwind(caught).await
+                    };
+                    let mut result = match checkpoint_result {
+                        Ok(inner) => inner,
+                        Err(panic_payload) => {
+                            let panic_msg = if let Some(s) = panic_payload.downcast_ref::<String>()
+                            {
+                                s.clone()
+                            } else if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                                s.to_string()
+                            } else {
+                                "unknown panic".to_string()
+                            };
+                            debug_log(&format!(
+                                "daemon checkpoint side effect panic for family {} order {}: {}",
+                                family, order, panic_msg
+                            ));
+                            observability::log_error(
+                                &GitAiError::Generic(format!(
+                                    "daemon checkpoint side effect panic: {}",
+                                    panic_msg
+                                )),
+                                Some(serde_json::json!({
+                                    "component": "daemon",
+                                    "phase": "checkpoint_side_effect",
+                                    "reason": "panic_in_side_effect",
+                                    "panic_message": panic_msg,
+                                    "family": family,
+                                    "order": order,
+                                })),
+                            );
+                            Err(GitAiError::Generic(format!(
+                                "daemon checkpoint panic: {}",
+                                panic_msg
+                            )))
+                        }
                     };
                     if let Some(capture_id) = captured_checkpoint_id
                         && let Err(cleanup_error) =
@@ -5602,7 +5694,7 @@ impl ActorDaemonCoordinator {
                         .flatten()
                 })
             }),
-            StashOperation::Pop | StashOperation::Drop => {
+            StashOperation::Pop | StashOperation::Drop | StashOperation::Branch => {
                 cmd.stash_target_oid.clone().or_else(|| {
                     cmd.ref_changes
                         .iter()
@@ -5613,7 +5705,12 @@ impl ActorDaemonCoordinator {
             }
             StashOperation::List => None,
         };
-        if resolved.is_some() || !matches!(operation, StashOperation::Pop | StashOperation::Drop) {
+        if resolved.is_some()
+            || !matches!(
+                operation,
+                StashOperation::Pop | StashOperation::Drop | StashOperation::Branch
+            )
+        {
             return Ok(resolved);
         }
         if !stash_target_spec_is_top_of_stack(stash_ref) {
@@ -6085,6 +6182,7 @@ impl ActorDaemonCoordinator {
                         crate::daemon::domain::StashOpKind::Pop => StashOperation::Pop,
                         crate::daemon::domain::StashOpKind::Drop => StashOperation::Drop,
                         crate::daemon::domain::StashOpKind::List => StashOperation::List,
+                        crate::daemon::domain::StashOpKind::Branch => StashOperation::Branch,
                         _ => StashOperation::Create,
                     };
                     let stash_sha =
@@ -6095,7 +6193,7 @@ impl ActorDaemonCoordinator {
                             stash_sha.as_deref(),
                             head.as_ref(),
                         )?,
-                        StashOperation::Apply | StashOperation::Pop => {
+                        StashOperation::Apply | StashOperation::Pop | StashOperation::Branch => {
                             Self::resolve_stash_restore_head_for_event(head.as_ref(), cmd)
                         }
                         StashOperation::Drop | StashOperation::List => None,
@@ -6107,7 +6205,10 @@ impl ActorDaemonCoordinator {
                     };
                     if matches!(
                         operation,
-                        StashOperation::Apply | StashOperation::Pop | StashOperation::Drop
+                        StashOperation::Apply
+                            | StashOperation::Pop
+                            | StashOperation::Branch
+                            | StashOperation::Drop
                     ) && stash_sha.is_none()
                     {
                         return Err(GitAiError::Generic(format!(
@@ -6117,7 +6218,10 @@ impl ActorDaemonCoordinator {
                     }
                     if matches!(
                         operation,
-                        StashOperation::Create | StashOperation::Apply | StashOperation::Pop
+                        StashOperation::Create
+                            | StashOperation::Apply
+                            | StashOperation::Pop
+                            | StashOperation::Branch
                     ) && head_sha.is_none()
                     {
                         return Err(GitAiError::Generic(format!(
@@ -6131,7 +6235,7 @@ impl ActorDaemonCoordinator {
                         stash_sha,
                         head_sha,
                         pathspecs,
-                        true,
+                        cmd.exit_code == 0,
                         Vec::new(),
                     )));
                 }
@@ -6235,6 +6339,16 @@ impl ActorDaemonCoordinator {
         family: Option<&str>,
         applied: &crate::daemon::domain::AppliedCommand,
     ) -> Result<(), GitAiError> {
+        // Test-only: allow inducing a panic in the side-effect pipeline to verify
+        // that the daemon's catch_unwind recovery keeps the process alive.
+        // Uses a file-based flag so the test can remove the file between commands.
+        #[cfg(feature = "test-support")]
+        if let Ok(path) = std::env::var("GIT_AI_TEST_PANIC_IN_SIDE_EFFECT_FLAG")
+            && std::path::Path::new(&path).exists()
+        {
+            panic!("test-induced panic in side-effect pipeline");
+        }
+
         let cmd = &applied.command;
         let events = &applied.analysis.events;
         let parsed_invocation = parsed_invocation_for_normalized_command(cmd);
@@ -6392,8 +6506,33 @@ impl ActorDaemonCoordinator {
                 let p = parsed_invocation_for_normalized_command(cmd);
                 p.has_command_flag("--merge") || p.has_command_flag("-m")
             };
-            if !is_merge_checkout {
+            // For stash pop/apply/branch with non-zero exit (typically conflict), don't
+            // skip processing. The stash may have been partially applied and attribution
+            // should still be restored. We cannot rely on `has_stash_conflict_for_repo`
+            // because in daemon mode the conflict check runs lazily at sync time -- by
+            // which point the user may already have resolved the conflict with `git add`.
+            // Instead, always attempt restoration for stash restore operations; if the
+            // stash was never applied the restore is a harmless no-op.
+            let is_stash_restore = cmd.primary_command.as_deref() == Some("stash")
+                && events.iter().any(|event| {
+                    matches!(
+                        event,
+                        crate::daemon::domain::SemanticEvent::StashOperation {
+                            kind: crate::daemon::domain::StashOpKind::Pop
+                                | crate::daemon::domain::StashOpKind::Apply
+                                | crate::daemon::domain::StashOpKind::Branch,
+                            ..
+                        }
+                    )
+                });
+            if !is_merge_checkout && !is_stash_restore {
                 return Ok(());
+            }
+            if is_stash_restore {
+                debug_log(&format!(
+                    "Stash restore with non-zero exit for sid={}, continuing to restore attribution",
+                    cmd.root_sid
+                ));
             }
         }
 

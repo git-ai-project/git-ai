@@ -8,6 +8,7 @@ mod test_utils;
 mod agent_commits_blame;
 mod agent_presets_comprehensive;
 mod agent_v1;
+mod ai_reflow_attribution;
 mod ai_tab;
 mod amend;
 mod amp;

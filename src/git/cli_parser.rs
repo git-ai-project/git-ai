@@ -261,7 +261,7 @@ pub fn stash_subcommand(command_args: &[String]) -> Option<&str> {
 pub fn stash_requires_target_resolution(command_args: &[String]) -> bool {
     matches!(
         stash_subcommand(command_args),
-        Some("apply" | "pop" | "drop")
+        Some("apply" | "pop" | "drop" | "branch")
     )
 }
 
@@ -270,14 +270,25 @@ pub fn stash_target_spec(command_args: &[String]) -> Option<&str> {
         return None;
     }
 
+    // For "branch", the format is: git stash branch <branchname> [<stash>]
+    // The stash ref is the second positional arg (after the branch name).
+    let is_branch = stash_subcommand(command_args) == Some("branch");
+
     let remaining = command_args.get(1..)?;
     let mut saw_separator = false;
+    let mut positional_count = 0u32;
     for arg in remaining {
         if arg == "--" {
             saw_separator = true;
             continue;
         }
         if !saw_separator && arg.starts_with('-') {
+            continue;
+        }
+        positional_count += 1;
+        // For "branch", skip the first positional (branch name) and return the second (stash ref).
+        // For other subcommands, return the first positional (stash ref).
+        if is_branch && positional_count == 1 {
             continue;
         }
         return Some(arg.as_str());

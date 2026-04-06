@@ -218,7 +218,7 @@ export class BlameLensManager {
     // of handleActiveEditorChange to avoid the border-clearing logic
     // which would race with any VS Code activation events.
     const initialEditor = vscode.window.activeTextEditor;
-    if (initialEditor) {
+    if (initialEditor && this.blameMode !== 'off') {
       if (this.blameMode === 'all') {
         this.requestBlameForFullFile(initialEditor);
       }
@@ -248,6 +248,11 @@ export class BlameLensManager {
     
     // Invalidate cached blame for this document
     this.blameService.invalidateCache(document.uri);
+
+    // Nothing to do when blame is off
+    if (this.blameMode === 'off') {
+      return;
+    }
     
     // If this is the current document with blame, clear and re-fetch
     if (this.currentDocumentUri === documentUri) {
@@ -257,10 +262,8 @@ export class BlameLensManager {
 
       const activeEditor = vscode.window.activeTextEditor;
       if (activeEditor && activeEditor.document.uri.toString() === documentUri) {
-        // Clear existing colored borders
-        this.clearColoredBorders(activeEditor);
-
         // Re-fetch blame if mode is 'all'
+        // Skip clearColoredBorders — applyFullFileDecorations replaces atomically (no flash).
         if (this.blameMode === 'all') {
           this.requestBlameForFullFile(activeEditor);
         }
@@ -279,13 +282,18 @@ export class BlameLensManager {
    */
   private documentChangeTimer: NodeJS.Timeout | null = null;
   private handleDocumentChange(event: vscode.TextDocumentChangeEvent): void {
+    // Nothing to do when blame is off
+    if (this.blameMode === 'off') {
+      return;
+    }
+
     const documentUri = event.document.uri.toString();
-    
+
     // Only handle changes to the current document we have blame for
     if (this.currentDocumentUri !== documentUri) {
       return;
     }
-    
+
     // Skip if no content changes (e.g., just metadata changes)
     if (event.contentChanges.length === 0) {
       return;
@@ -302,17 +310,17 @@ export class BlameLensManager {
     
     this.documentChangeTimer = setTimeout(() => {
       this.documentChangeTimer = null;
-      
+
       const activeEditor = vscode.window.activeTextEditor;
       if (activeEditor && activeEditor.document.uri.toString() === documentUri) {
-        // Clear existing colored borders
-        this.clearColoredBorders(activeEditor);
-        
         // Re-fetch blame if mode is 'all'
+        // Note: we intentionally do NOT clearColoredBorders() here —
+        // applyFullFileDecorations() atomically replaces all decoration types,
+        // so old decorations stay visible until new blame arrives (no flash).
         if (this.blameMode === 'all') {
           this.requestBlameForFullFile(activeEditor);
         }
-        
+
         // Update status bar
         this.updateStatusBar(activeEditor);
       }
@@ -353,6 +361,10 @@ export class BlameLensManager {
    * Handle active editor change - update status bar and decorations.
    */
   private handleActiveEditorChange(editor: vscode.TextEditor | undefined): void {
+    if (this.blameMode === 'off') {
+      return;
+    }
+
     const newDocumentUri = editor?.document.uri.toString() ?? null;
 
     // Only clear borders and reset state when switching to a different document.
@@ -433,28 +445,40 @@ export class BlameLensManager {
   private async applyBlameMode(newMode: BlameMode): Promise<void> {
     const oldMode = this.blameMode;
     this.blameMode = newMode;
-    
+
     // Persist to settings
     await Config.setBlameMode(newMode);
-    
+
     const editor = vscode.window.activeTextEditor;
-    
+
     // Handle mode transitions
-    if (newMode === 'all') {
+    if (newMode === 'off') {
+      // Switching to off: cancel everything and clear all state
+      this.pendingBlameRequest = null;
+      this.currentBlameResult = null;
+      if (this.documentChangeTimer) {
+        clearTimeout(this.documentChangeTimer);
+        this.documentChangeTimer = null;
+      }
+      if (editor) {
+        this.clearColoredBorders(editor);
+      }
+      this.statusBarItem.hide();
+      this.clearAfterTextDecoration();
+    } else if (newMode === 'all') {
       // Switching to all: request full file blame
       if (editor) {
         this.requestBlameForFullFile(editor);
       }
-    } else if (oldMode === 'all') {
-      // Switching from all to line/off: clear full-file decorations
-      if (editor) {
+      this.updateStatusBar(editor);
+    } else {
+      // Switching to line
+      if (oldMode === 'all' && editor) {
         this.clearColoredBorders(editor);
       }
+      this.updateStatusBar(editor);
     }
-    
-    // Update status bar
-    this.updateStatusBar(editor);
-    
+
     console.log(`[git-ai] Blame mode changed to: ${newMode}`);
   }
 
@@ -464,32 +488,44 @@ export class BlameLensManager {
    */
   private handleBlameModeChange(): void {
     const newMode = Config.getBlameMode();
-    
+
     // No change, nothing to do
     if (newMode === this.blameMode) {
       return;
     }
-    
+
     const oldMode = this.blameMode;
     this.blameMode = newMode;
     const editor = vscode.window.activeTextEditor;
-    
+
     // Handle mode transitions
-    if (newMode === 'all') {
+    if (newMode === 'off') {
+      // Switching to off: cancel everything and clear all state
+      this.pendingBlameRequest = null;
+      this.currentBlameResult = null;
+      if (this.documentChangeTimer) {
+        clearTimeout(this.documentChangeTimer);
+        this.documentChangeTimer = null;
+      }
+      if (editor) {
+        this.clearColoredBorders(editor);
+      }
+      this.statusBarItem.hide();
+      this.clearAfterTextDecoration();
+    } else if (newMode === 'all') {
       // Switching to all: request full file blame
       if (editor) {
         this.requestBlameForFullFile(editor);
       }
-    } else if (oldMode === 'all') {
-      // Switching from all to line/off: clear full-file decorations
-      if (editor) {
+      this.updateStatusBar(editor);
+    } else {
+      // Switching to line
+      if (oldMode === 'all' && editor) {
         this.clearColoredBorders(editor);
       }
+      this.updateStatusBar(editor);
     }
-    
-    // Update status bar
-    this.updateStatusBar(editor);
-    
+
     console.log(`[git-ai] Blame mode changed to: ${newMode} via settings`);
   }
 
@@ -575,6 +611,9 @@ export class BlameLensManager {
    * Handle cursor/selection change - update status bar to show current line's attribution.
    */
   private handleSelectionChange(event: vscode.TextEditorSelectionChangeEvent): void {
+    if (this.blameMode === 'off') {
+      return;
+    }
     const editor = event.textEditor;
     this.updateStatusBar(editor);
   }
@@ -598,6 +637,14 @@ export class BlameLensManager {
 
     // Check if we have blame for this document
     if (this.currentDocumentUri !== documentUri || !this.currentBlameResult) {
+      // Don't start a new blame request while we're in a document-change debounce window.
+      // The debounce callback will handle it after typing stops.
+      if (this.documentChangeTimer) {
+        this.statusBarItem.hide();
+        this.clearAfterTextDecoration();
+        return;
+      }
+
       // Request blame in background if we don't have it
       if (!this.pendingBlameRequest) {
         this.pendingBlameRequest = this.blameService.requestBlame(document, 'normal');
@@ -606,6 +653,11 @@ export class BlameLensManager {
         this.pendingBlameRequest.then(result => {
           this.pendingBlameRequest = null;
           if (result) {
+            // Bail out if blame was switched off while the request was in flight
+            if (this.blameMode === 'off') {
+              return;
+            }
+
             this.currentBlameResult = result;
 
             // Trigger async CAS fetches for prompts with messages_url but no messages
