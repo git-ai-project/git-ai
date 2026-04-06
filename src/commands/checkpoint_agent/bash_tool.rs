@@ -31,7 +31,7 @@ use std::time::{Duration, Instant, SystemTime};
 // ---------------------------------------------------------------------------
 
 /// Grace window for low-resolution filesystem detection (seconds).
-const _MTIME_GRACE_WINDOW_SECS: u64 = 2;
+const MTIME_GRACE_WINDOW_SECS: u64 = 2;
 
 /// Maximum time for stat-diff walk before fallback (ms).
 const STAT_DIFF_TIMEOUT_MS: u64 = 5000;
@@ -40,7 +40,7 @@ const STAT_DIFF_TIMEOUT_MS: u64 = 5000;
 const SNAPSHOT_STALE_SECS: u64 = 300;
 
 /// Grace window in nanoseconds for low-resolution filesystem mtime comparison.
-const MTIME_GRACE_WINDOW_NS: u128 = (_MTIME_GRACE_WINDOW_SECS as u128) * 1_000_000_000;
+const MTIME_GRACE_WINDOW_NS: u128 = (MTIME_GRACE_WINDOW_SECS as u128) * 1_000_000_000;
 
 /// Maximum number of stale files before skipping content capture.
 const MAX_STALE_FILES_FOR_CAPTURE: usize = 1000;
@@ -620,14 +620,18 @@ pub fn load_and_consume_snapshot(
     let filename = sanitize_key(invocation_key);
     let path = cache_dir.join(format!("{}.json", filename));
 
-    if !path.exists() {
-        return Ok(None);
-    }
-
-    let data = fs::read(&path).map_err(GitAiError::IoError)?;
+    // Read and then delete atomically: skip the exists() check to avoid a
+    // TOCTOU race where a concurrent post-hook deletes the file between the
+    // check and the read.  NotFound after the read means it was already
+    // consumed; any other error is a real failure.
+    let data = match fs::read(&path) {
+        Ok(d) => d,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(GitAiError::IoError(e)),
+    };
     let snapshot: StatSnapshot = serde_json::from_slice(&data).map_err(GitAiError::JsonError)?;
 
-    // Consume: remove the file after loading
+    // Consume: remove the file after a successful read.
     let _ = fs::remove_file(&path);
 
     debug_log(&format!(
