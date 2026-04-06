@@ -27,6 +27,7 @@ use crate::observability::{self, log_message};
 use crate::utils::debug_log;
 use crate::utils::is_interactive_terminal;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::env;
 use std::io::IsTerminal;
 use std::io::Read;
@@ -1843,10 +1844,12 @@ fn get_all_files_for_mock_ai(working_dir: &str) -> Vec<String> {
 const CODEX_MTIME_RACE_WINDOW_SECS: u64 = 5;
 
 /// Scan dirty files in the working directory and, if any were modified within
-/// [`CODEX_MTIME_RACE_WINDOW_SECS`], populate `edited_filepaths` on the
-/// `AgentRunResult` so the downstream checkpoint treats the write as an
-/// AI-authored edit.  This is intentionally scoped to Codex only because its
-/// `notify` hook is non-blocking.
+/// [`CODEX_MTIME_RACE_WINDOW_SECS`], populate both `edited_filepaths` and
+/// `dirty_files` on the `AgentRunResult`.  Reading the file content
+/// immediately (into `dirty_files`) gives a deterministic snapshot: the
+/// downstream checkpoint will use that content instead of re-reading from
+/// disk, closing the TOCTOU window where Codex could write again between the
+/// mtime check and the checkpoint snapshot.
 fn codex_apply_mtime_race_heuristic(agent_run: &mut AgentRunResult, working_dir: &str) {
     let workdir = PathBuf::from(working_dir);
     let now = SystemTime::now();
@@ -1865,8 +1868,48 @@ fn codex_apply_mtime_race_heuristic(agent_run: &mut AgentRunResult, working_dir:
             recent.len(),
             CODEX_MTIME_RACE_WINDOW_SECS,
         ));
+
+        // Snapshot file contents NOW so the checkpoint uses this
+        // deterministic capture rather than re-reading from disk later.
+        let dirty_files = codex_snapshot_file_contents(&workdir, &recent);
+        if !dirty_files.is_empty() {
+            debug_log(&format!(
+                "codex mtime race: captured {} file(s) into dirty_files snapshot",
+                dirty_files.len(),
+            ));
+            agent_run.dirty_files = Some(dirty_files);
+        }
+
         agent_run.edited_filepaths = Some(recent);
     }
+}
+
+/// Read the current on-disk content of `paths` (relative to `root`) and return
+/// a `HashMap` suitable for `AgentRunResult::dirty_files`.  Only text-like
+/// files that can be read successfully are included; binary or unreadable files
+/// are silently skipped.
+fn codex_snapshot_file_contents(
+    root: &std::path::Path,
+    paths: &[String],
+) -> HashMap<String, String> {
+    let mut map = HashMap::with_capacity(paths.len());
+    for rel_path in paths {
+        let abs = root.join(rel_path);
+        match std::fs::read_to_string(&abs) {
+            Ok(content) => {
+                map.insert(rel_path.clone(), content);
+            }
+            Err(_) => {
+                // Binary file or read error — skip; checkpoint will fall back
+                // to reading from disk for this file.
+                debug_log(&format!(
+                    "codex mtime race: skipping snapshot for {} (not readable as text)",
+                    rel_path,
+                ));
+            }
+        }
+    }
+    map
 }
 
 /// Recursively collect files under `dir` whose mtime is within `threshold` of
@@ -2242,7 +2285,7 @@ mod codex_mtime_tests {
     }
 
     #[test]
-    fn test_apply_mtime_race_heuristic_sets_edited_filepaths() {
+    fn test_apply_mtime_race_heuristic_sets_edited_filepaths_and_dirty_files() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
 
@@ -2251,18 +2294,32 @@ mod codex_mtime_tests {
 
         let mut agent_run = dummy_agent_run();
         assert!(agent_run.edited_filepaths.is_none());
+        assert!(agent_run.dirty_files.is_none());
 
         codex_apply_mtime_race_heuristic(&mut agent_run, root.to_str().unwrap());
 
+        // edited_filepaths populated
         assert!(
             agent_run.edited_filepaths.is_some(),
             "edited_filepaths should be populated when fresh files exist",
         );
-        let paths = agent_run.edited_filepaths.unwrap();
+        let paths = agent_run.edited_filepaths.as_ref().unwrap();
         assert!(
             paths.contains(&"codex_output.py".to_string()),
             "Should contain the freshly-written file; got: {:?}",
             paths,
+        );
+
+        // dirty_files populated with deterministic content snapshot
+        assert!(
+            agent_run.dirty_files.is_some(),
+            "dirty_files should be populated for deterministic snapshot",
+        );
+        let dirty = agent_run.dirty_files.as_ref().unwrap();
+        assert_eq!(
+            dirty.get("codex_output.py").map(String::as_str),
+            Some("print('hello')\n"),
+            "dirty_files should contain the file content at snapshot time",
         );
     }
 
@@ -2291,6 +2348,10 @@ mod codex_mtime_tests {
             agent_run.edited_filepaths.is_none(),
             "edited_filepaths should remain None when no recent files",
         );
+        assert!(
+            agent_run.dirty_files.is_none(),
+            "dirty_files should remain None when no recent files",
+        );
     }
 
     #[test]
@@ -2300,6 +2361,90 @@ mod codex_mtime_tests {
         assert!(
             agent_run.edited_filepaths.is_none(),
             "Nonexistent directory should not cause errors",
+        );
+        assert!(
+            agent_run.dirty_files.is_none(),
+            "dirty_files should remain None for nonexistent dir",
+        );
+    }
+
+    #[test]
+    fn test_snapshot_file_contents_reads_text_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("a.py"), "import os\n").unwrap();
+        std::fs::write(root.join("b.txt"), "hello world\n").unwrap();
+
+        let paths = vec!["a.py".to_string(), "b.txt".to_string()];
+        let snapshot = codex_snapshot_file_contents(&root, &paths);
+
+        assert_eq!(snapshot.len(), 2);
+        assert_eq!(
+            snapshot.get("a.py").map(String::as_str),
+            Some("import os\n")
+        );
+        assert_eq!(
+            snapshot.get("b.txt").map(String::as_str),
+            Some("hello world\n"),
+        );
+    }
+
+    #[test]
+    fn test_snapshot_file_contents_skips_missing_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("exists.txt"), "content\n").unwrap();
+
+        let paths = vec!["exists.txt".to_string(), "missing.txt".to_string()];
+        let snapshot = codex_snapshot_file_contents(&root, &paths);
+
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(
+            snapshot.get("exists.txt").map(String::as_str),
+            Some("content\n"),
+        );
+        assert!(
+            !snapshot.contains_key("missing.txt"),
+            "Missing file should be skipped, not cause error",
+        );
+    }
+
+    #[test]
+    fn test_snapshot_file_contents_empty_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        let snapshot = codex_snapshot_file_contents(&root, &[]);
+        assert!(snapshot.is_empty());
+    }
+
+    #[test]
+    fn test_heuristic_dirty_files_capture_nested_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        let subdir = root.join("src").join("lib");
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::write(subdir.join("mod.rs"), "pub fn init() {}\n").unwrap();
+
+        let mut agent_run = dummy_agent_run();
+        codex_apply_mtime_race_heuristic(&mut agent_run, root.to_str().unwrap());
+
+        // Both edited_filepaths and dirty_files should include the nested file
+        let paths = agent_run.edited_filepaths.as_ref().unwrap();
+        assert!(
+            paths.contains(&"src/lib/mod.rs".to_string()),
+            "Should detect nested file; got: {:?}",
+            paths,
+        );
+
+        let dirty = agent_run.dirty_files.as_ref().unwrap();
+        assert_eq!(
+            dirty.get("src/lib/mod.rs").map(String::as_str),
+            Some("pub fn init() {}\n"),
+            "dirty_files should capture nested file content",
         );
     }
 }
