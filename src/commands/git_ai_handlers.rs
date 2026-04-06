@@ -79,7 +79,11 @@ pub fn handle_git_ai(args: &[String]) {
             handle_checkpoint(&args[1..]);
         }
         "log" => {
-            commands::log::handle_log(&args[1..]);
+            let status = commands::log::handle_log(&args[1..]);
+            if is_interactive_terminal() {
+                log_message("log", "info", None)
+            }
+            exit_with_log_status(status);
         }
         "blame" => {
             handle_ai_blame(&args[1..]);
@@ -1636,4 +1640,22 @@ fn handle_show_transcript(args: &[String]) {
             std::process::exit(1);
         }
     }
+}
+
+/// Exit mirroring the child's termination status, re-raising the original
+/// signal on Unix so the calling shell sees the correct termination reason
+/// (e.g. SIGPIPE from `git ai log | head`).
+fn exit_with_log_status(status: std::process::ExitStatus) -> ! {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            unsafe {
+                libc::signal(sig, libc::SIG_DFL);
+                libc::raise(sig);
+            }
+            unreachable!();
+        }
+    }
+    std::process::exit(status.code().unwrap_or(1));
 }
