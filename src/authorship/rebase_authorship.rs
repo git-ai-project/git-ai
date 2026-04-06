@@ -2398,7 +2398,7 @@ fn run_diff_tree_with_hunks(
         // The `+++` file-header line is excluded. With -U0 there are no context lines,
         // so every `+` line is a genuine addition — exactly what we need for the
         // content-match attribution pass in the hunk-based transfer path.
-        if line.starts_with('+') && !line.starts_with("+++") {
+        if line.starts_with('+') && !line.starts_with("+++ ") {
             if let (Some(commit), Some(file)) = (&current_commit, &current_diff_file) {
                 if let Some(file_hunks) = hunks_by_commit.get_mut(commit) {
                     if let Some(hunks) = file_hunks.get_mut(file.as_str()) {
@@ -3544,46 +3544,6 @@ fn build_file_attestation_from_line_attributions(
     } else {
         Some(file_attestation)
     }
-}
-
-/// Serialize a FileAttestation into the text format used in authorship notes.
-fn serialize_file_attestation(
-    file_attestation: &crate::authorship::authorship_log_serialization::FileAttestation,
-) -> String {
-    use std::fmt::Write;
-    let mut output = String::with_capacity(256);
-    let file_path = if file_attestation.file_path.contains(' ')
-        || file_attestation.file_path.contains('\t')
-        || file_attestation.file_path.contains('\n')
-    {
-        format!("\"{}\"", &file_attestation.file_path)
-    } else {
-        file_attestation.file_path.clone()
-    };
-    output.push_str(&file_path);
-    output.push('\n');
-    for entry in &file_attestation.entries {
-        output.push_str("  ");
-        output.push_str(&entry.hash);
-        output.push(' ');
-        let mut first = true;
-        for range in &entry.line_ranges {
-            if !first {
-                output.push(',');
-            }
-            first = false;
-            match range {
-                crate::authorship::authorship_log::LineRange::Single(line) => {
-                    let _ = write!(output, "{}", line);
-                }
-                crate::authorship::authorship_log::LineRange::Range(start, end) => {
-                    let _ = write!(output, "{}-{}", start, end);
-                }
-            }
-        }
-        output.push('\n');
-    }
-    output
 }
 
 /// Serialize attestation text directly from line_attrs without building intermediate FileAttestation.

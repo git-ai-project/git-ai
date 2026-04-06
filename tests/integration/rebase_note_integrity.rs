@@ -59,7 +59,11 @@ use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 fn total_accepted_lines(note: &str) -> u32 {
     let log = AuthorshipLog::deserialize_from_string(note)
         .expect("should parse authorship note as AuthorshipLog");
-    log.metadata.prompts.values().map(|p| p.accepted_lines).sum()
+    log.metadata
+        .prompts
+        .values()
+        .map(|p| p.accepted_lines)
+        .sum()
 }
 
 fn files_in_note(note: &str) -> Vec<String> {
@@ -194,7 +198,9 @@ fn test_rebase_future_file_does_not_leak_into_earlier_commit_note() {
 
     // Sanity: A′ should reference the files A actually introduced.
     assert!(
-        files_a.iter().any(|f| f.contains("module_a") || f.contains("shared")),
+        files_a
+            .iter()
+            .any(|f| f.contains("module_a") || f.contains("shared")),
         "Commit A′'s note should contain module_a.rs or shared.rs, \
          but found: {:?}",
         files_a
@@ -380,7 +386,8 @@ fn test_rebase_three_commits_no_future_file_leakage() {
     shared.set_contents(crate::lines!["fn core_base() {}", "fn core_a() {}".ai()]);
     let mut unit_a = repo.filename("unit_a.rs");
     unit_a.set_contents(crate::lines!["fn ua() {}".ai()]);
-    repo.stage_all_and_commit("Commit A: core + unit_a").unwrap();
+    repo.stage_all_and_commit("Commit A: core + unit_a")
+        .unwrap();
 
     // Commit B: appends to core.rs + adds unit_b.rs.
     shared.set_contents(crate::lines![
@@ -390,7 +397,8 @@ fn test_rebase_three_commits_no_future_file_leakage() {
     ]);
     let mut unit_b = repo.filename("unit_b.rs");
     unit_b.set_contents(crate::lines!["fn ub() {}".ai()]);
-    repo.stage_all_and_commit("Commit B: core + unit_b").unwrap();
+    repo.stage_all_and_commit("Commit B: core + unit_b")
+        .unwrap();
 
     // Commit C: appends to core.rs + adds unit_c.rs.
     shared.set_contents(crate::lines![
@@ -401,7 +409,8 @@ fn test_rebase_three_commits_no_future_file_leakage() {
     ]);
     let mut unit_c = repo.filename("unit_c.rs");
     unit_c.set_contents(crate::lines!["fn uc() {}".ai()]);
-    repo.stage_all_and_commit("Commit C: core + unit_c").unwrap();
+    repo.stage_all_and_commit("Commit C: core + unit_c")
+        .unwrap();
 
     repo.git(&["rebase", &default_branch])
         .expect("rebase should succeed without conflicts");
@@ -455,7 +464,9 @@ fn test_rebase_three_commits_no_future_file_leakage() {
 
     // Sanity: A′ should reference what A actually introduced.
     assert!(
-        files_a.iter().any(|f| f.contains("unit_a") || f.contains("core")),
+        files_a
+            .iter()
+            .any(|f| f.contains("unit_a") || f.contains("core")),
         "Commit A′ should reference unit_a.rs or core.rs, but found: {:?}",
         files_a
     );
@@ -499,13 +510,11 @@ fn test_rebase_deleted_file_does_not_persist_in_later_notes() {
     let mut engine = repo.filename("engine.rs");
 
     // Commit A: appends to engine.rs + adds temp.rs.
-    engine.set_contents(crate::lines![
-        "fn engine_base() {}",
-        "fn eng_a() {}".ai()
-    ]);
+    engine.set_contents(crate::lines!["fn engine_base() {}", "fn eng_a() {}".ai()]);
     let mut temp = repo.filename("temp.rs");
     temp.set_contents(crate::lines!["fn tmp1() {}".ai(), "fn tmp2() {}".ai()]);
-    repo.stage_all_and_commit("Commit A: engine + temp.rs").unwrap();
+    repo.stage_all_and_commit("Commit A: engine + temp.rs")
+        .unwrap();
 
     // Commit B: appends to engine.rs + removes temp.rs + adds final.rs.
     engine.set_contents(crate::lines![
@@ -528,7 +537,8 @@ fn test_rebase_deleted_file_does_not_persist_in_later_notes() {
     ]);
     let mut extra = repo.filename("extra.rs");
     extra.set_contents(crate::lines!["fn ex() {}".ai()]);
-    repo.stage_all_and_commit("Commit C: engine + extra.rs").unwrap();
+    repo.stage_all_and_commit("Commit C: engine + extra.rs")
+        .unwrap();
 
     repo.git(&["rebase", &default_branch])
         .expect("rebase should succeed without conflicts");
@@ -746,10 +756,7 @@ fn test_rebase_hunk_path_does_not_drop_ai_attribution_for_new_lines() {
     let mut shared = repo.filename("shared.rs");
 
     // Commit A: appends fn_ai_a (AI).
-    shared.set_contents(crate::lines![
-        "fn original() {}",
-        "fn ai_a() {}".ai()
-    ]);
+    shared.set_contents(crate::lines!["fn original() {}", "fn ai_a() {}".ai()]);
     repo.stage_all_and_commit("Commit A: fn ai_a").unwrap();
 
     // Commit B: appends fn_ai_b (AI).
@@ -777,7 +784,7 @@ fn test_rebase_hunk_path_does_not_drop_ai_attribution_for_new_lines() {
         "// upstream",
         "fn original() {}",
         "fn ai_a() {}".ai(),
-        "fn ai_b() {}".ai()  // BUG: hunk-based path drops this → shown as human
+        "fn ai_b() {}".ai() // BUG: hunk-based path drops this → shown as human
     ]);
 }
 
@@ -831,7 +838,8 @@ fn test_rebase_second_commit_note_attributes_its_own_ai_lines() {
         "fn b2() {}".ai(),
         "fn b3() {}".ai()
     ]);
-    repo.stage_all_and_commit("Commit B: 3 more AI lines").unwrap();
+    repo.stage_all_and_commit("Commit B: 3 more AI lines")
+        .unwrap();
 
     repo.git(&["rebase", &default_branch])
         .expect("rebase should succeed without conflicts");
@@ -929,7 +937,8 @@ fn test_rebase_attribution_loss_compounds_across_three_commits() {
         "fn b1() {}".ai(),
         "fn b2() {}".ai()
     ]);
-    repo.stage_all_and_commit("Commit B: 2 more AI lines").unwrap();
+    repo.stage_all_and_commit("Commit B: 2 more AI lines")
+        .unwrap();
 
     // Commit C: adds fn_c (2 AI lines on top of B).
     lib.set_contents(crate::lines![
@@ -941,7 +950,8 @@ fn test_rebase_attribution_loss_compounds_across_three_commits() {
         "fn c1() {}".ai(),
         "fn c2() {}".ai()
     ]);
-    repo.stage_all_and_commit("Commit C: 2 more AI lines").unwrap();
+    repo.stage_all_and_commit("Commit C: 2 more AI lines")
+        .unwrap();
 
     repo.git(&["rebase", &default_branch])
         .expect("rebase should succeed without conflicts");
@@ -952,10 +962,10 @@ fn test_rebase_attribution_loss_compounds_across_three_commits() {
         "fn base() {}",
         "fn a1() {}".ai(),
         "fn a2() {}".ai(),
-        "fn b1() {}".ai(),  // BUG: hunk path drops this in B′ processing
-        "fn b2() {}".ai(),  // BUG: hunk path drops this in B′ processing
-        "fn c1() {}".ai(),  // BUG: hunk path drops this in C′ processing
-        "fn c2() {}".ai()   // BUG: hunk path drops this in C′ processing
+        "fn b1() {}".ai(), // BUG: hunk path drops this in B′ processing
+        "fn b2() {}".ai(), // BUG: hunk path drops this in B′ processing
+        "fn c1() {}".ai(), // BUG: hunk path drops this in C′ processing
+        "fn c2() {}".ai()  // BUG: hunk path drops this in C′ processing
     ]);
 }
 
