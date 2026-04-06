@@ -107,7 +107,9 @@ impl ClaudeCodeInstaller {
                 .unwrap_or_default();
 
             // Step 1: Strip git-ai from every non-catch-all matcher block (migration).
-            for block in hook_type_array.iter_mut() {
+            // Track which blocks we emptied so we can remove them below.
+            let mut emptied_by_migration = vec![false; hook_type_array.len()];
+            for (i, block) in hook_type_array.iter_mut().enumerate() {
                 let is_catch_all = block
                     .get("matcher")
                     .and_then(|m| m.as_str())
@@ -116,14 +118,25 @@ impl ClaudeCodeInstaller {
                 if !is_catch_all
                     && let Some(hooks) = block.get_mut("hooks").and_then(|h| h.as_array_mut())
                 {
+                    let before = hooks.len();
                     hooks.retain(|hook| {
                         hook.get("command")
                             .and_then(|c| c.as_str())
                             .map(|cmd| !is_git_ai_checkpoint_command(cmd))
                             .unwrap_or(true)
                     });
+                    if hooks.is_empty() && before > 0 {
+                        emptied_by_migration[i] = true;
+                    }
                 }
             }
+            // Remove blocks that we emptied; leave pre-existing empty blocks alone.
+            let mut i = 0;
+            hook_type_array.retain(|_| {
+                let remove = emptied_by_migration[i];
+                i += 1;
+                !remove
+            });
 
             // Step 2: Find or create the "*" catch-all matcher block.
             let catch_all_idx = hook_type_array
@@ -501,33 +514,17 @@ mod tests {
             let hooks = hooks_in_catch_all(&settings, hook_type);
             assert_eq!(hooks.len(), 1, "{hook_type}: expected git-ai in catch-all");
 
-            // git-ai must NOT be in the old matcher block
+            // The old matcher block had only our hook, so it must be removed entirely.
             let blocks = settings
                 .get("hooks")
                 .and_then(|h| h.get(*hook_type))
                 .and_then(|v| v.as_array())
                 .unwrap();
-            for block in blocks {
-                let matcher = block.get("matcher").and_then(|m| m.as_str()).unwrap_or("");
-                if matcher != CLAUDE_CATCH_ALL_MATCHER {
-                    let has_git_ai = block
-                        .get("hooks")
-                        .and_then(|h| h.as_array())
-                        .map(|hs| {
-                            hs.iter().any(|h| {
-                                h.get("command")
-                                    .and_then(|c| c.as_str())
-                                    .map(is_git_ai_checkpoint_command)
-                                    .unwrap_or(false)
-                            })
-                        })
-                        .unwrap_or(false);
-                    assert!(
-                        !has_git_ai,
-                        "{hook_type}: git-ai should not be in old matcher block '{matcher}'"
-                    );
-                }
-            }
+            assert_eq!(
+                blocks.len(),
+                1,
+                "{hook_type}: old matcher block should be removed, only catch-all should remain"
+            );
         }
     }
 
