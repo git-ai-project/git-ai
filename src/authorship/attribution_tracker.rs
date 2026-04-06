@@ -1888,17 +1888,6 @@ fn data_is_whitespace(data: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
-/// Returns `true` when `old` and `new` differ only in whitespace (spaces,
-/// tabs, newlines).  This is used to detect pure reflow/reformatting hunks
-/// so we can force-split them for AI attribution.
-///
-/// Uses an iterator-based comparison to avoid heap-allocating stripped copies.
-fn is_whitespace_only_change(old: &str, new: &str) -> bool {
-    old.chars()
-        .filter(|c| !c.is_whitespace())
-        .eq(new.chars().filter(|c| !c.is_whitespace()))
-}
-
 impl Default for AttributionTracker {
     fn default() -> Self {
         Self::new()
