@@ -99,6 +99,26 @@ pub fn normalize_to_posix(path: &str) -> String {
     path.replace('\\', "/")
 }
 
+/// Returns true when async/daemon checkpoint delegation is enabled.
+///
+/// Checks the `async_mode` feature flag first, then falls back to the
+/// `GIT_AI_DAEMON_CHECKPOINT_DELEGATE` environment variable.  Used by both
+/// the main hook handler and the bash tool to skip capture work when the
+/// daemon will not be available to consume captured checkpoint files.
+pub fn checkpoint_delegation_enabled() -> bool {
+    if crate::config::Config::get().feature_flags().async_mode {
+        return true;
+    }
+    matches!(
+        std::env::var("GIT_AI_DAEMON_CHECKPOINT_DELEGATE")
+            .ok()
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    )
+}
+
 fn resolve_git_ai_exe_from_invocation_path(path: PathBuf) -> PathBuf {
     let canonical_path = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
 

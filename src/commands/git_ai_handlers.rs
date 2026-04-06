@@ -1448,18 +1448,7 @@ fn log_daemon_checkpoint_delegate_failure(
 }
 
 fn daemon_checkpoint_delegate_enabled() -> bool {
-    if config::Config::get().feature_flags().async_mode {
-        return true;
-    }
-
-    matches!(
-        std::env::var("GIT_AI_DAEMON_CHECKPOINT_DELEGATE")
-            .ok()
-            .as_deref()
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("1") | Some("true") | Some("yes")
-    )
+    crate::utils::checkpoint_delegation_enabled()
 }
 
 fn checkpoint_kind_to_str(kind: CheckpointKind) -> &'static str {

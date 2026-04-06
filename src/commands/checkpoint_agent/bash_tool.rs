@@ -10,16 +10,15 @@ use crate::authorship::ignore::{
 use crate::authorship::working_log::{AgentId, CheckpointKind};
 use crate::commands::checkpoint::prepare_captured_checkpoint;
 use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
-use crate::config;
 use crate::daemon::control_api::ControlRequest;
 use crate::daemon::{DaemonConfig, send_control_request_with_timeout};
 use crate::error::GitAiError;
 use crate::git::find_repository_in_path;
-use crate::utils::debug_log;
+use crate::utils::{checkpoint_delegation_enabled, debug_log, normalize_to_posix};
 use ignore::WalkBuilder;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -109,7 +108,7 @@ const MAX_STALE_FILES_FOR_CAPTURE: usize = 1000;
 const MAX_TRACKED_FILES: usize = 50_000;
 
 /// Maximum file size for content capture (10 MB).
-const MAX_CAPTURE_FILE_SIZE: u64 = 10 * 1024 * 1024; // used by capture_file_contents
+const MAX_CAPTURE_FILE_SIZE: u64 = 10 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Core types
@@ -239,7 +238,7 @@ impl StatDiffResult {
         self.created
             .iter()
             .chain(self.modified.iter())
-            .map(|p| crate::utils::normalize_to_posix(&p.to_string_lossy()))
+            .map(|p| normalize_to_posix(&p.to_string_lossy()))
             .collect()
     }
 
@@ -475,8 +474,8 @@ pub fn should_include_new_file(gitignore: &Gitignore, path: &Path, is_dir: bool)
 /// for git-tracked vs untracked files.
 ///
 /// `wm` should be the result of a recent daemon watermark query.  Pass
-/// `None` when the daemon is unavailable; the cold-start proxy
-/// (`git_index_mtime_ns + GRACE`) is used automatically in that case.
+/// `None` to skip watermark filtering entirely (no daemon context, or direct
+/// `snapshot()` callers such as tests and `git_status_fallback`).
 pub fn snapshot(
     repo_root: &Path,
     session_id: &str,
@@ -599,7 +598,7 @@ pub fn snapshot(
             Ok(meta) => {
                 let stat = StatEntry::from_metadata(&meta);
                 let mtime_ns = stat.mtime.map(system_time_to_nanos).unwrap_or(0);
-                let posix_key = crate::utils::normalize_to_posix(&normalized.to_string_lossy());
+                let posix_key = normalize_to_posix(&normalized.to_string_lossy());
                 if !is_wm_covered(mtime_ns, effective_worktree_wm, &per_file_wm, &posix_key) {
                     entries.insert(normalized, stat);
                     if entries.len() > MAX_TRACKED_FILES {
@@ -653,20 +652,21 @@ pub fn snapshot(
 pub fn diff(pre: &StatSnapshot, post: &StatSnapshot) -> StatDiffResult {
     let mut result = StatDiffResult::default();
 
-    let pre_keys: HashSet<&PathBuf> = pre.entries.keys().collect();
-    let post_keys: HashSet<&PathBuf> = post.entries.keys().collect();
-
     // Files in post but not pre: new files or previously wm-covered files
     // now modified by bash. Both need attribution; the distinction doesn't
     // matter since all_changed_paths() merges created + modified.
-    for path in post_keys.difference(&pre_keys) {
-        result.created.push((*path).clone());
+    for path in post.entries.keys() {
+        if !pre.entries.contains_key(path) {
+            result.created.push(path.clone());
+        }
     }
 
     // Files in both but stat-tuple differs.
-    for path in pre_keys.intersection(&post_keys) {
-        if pre.entries[*path] != post.entries[*path] {
-            result.modified.push((*path).clone());
+    for (path, post_entry) in &post.entries {
+        if let Some(pre_entry) = pre.entries.get(path) {
+            if pre_entry != post_entry {
+                result.modified.push(path.clone());
+            }
         }
     }
 
@@ -803,25 +803,25 @@ pub fn git_status_fallback(repo_root: &Path) -> Result<Vec<String>, GitAiError> 
             let n = if line.starts_with("u ") { 11 } else { 9 };
             let fields: Vec<&str> = line.splitn(n, ' ').collect();
             if let Some(path) = fields.last() {
-                changed_files.push(crate::utils::normalize_to_posix(path));
+                changed_files.push(normalize_to_posix(path));
             }
         } else if line.starts_with("2 ") {
             // Rename/copy: 9 fields before new path, then NUL-delimited original path
             let fields: Vec<&str> = line.splitn(10, ' ').collect();
             if let Some(path) = fields.last() {
-                changed_files.push(crate::utils::normalize_to_posix(path));
+                changed_files.push(normalize_to_posix(path));
             }
             // Also include the original path (next NUL-delimited entry)
             if i + 1 < parts.len() {
                 let orig = String::from_utf8_lossy(parts[i + 1]);
                 if !orig.is_empty() {
-                    changed_files.push(crate::utils::normalize_to_posix(&orig));
+                    changed_files.push(normalize_to_posix(&orig));
                 }
             }
             i += 1;
         } else if let Some(path) = line.strip_prefix("? ") {
             // Untracked: path follows "? "
-            changed_files.push(crate::utils::normalize_to_posix(path));
+            changed_files.push(normalize_to_posix(path));
         }
 
         i += 1;
@@ -843,18 +843,12 @@ fn system_time_to_nanos(t: SystemTime) -> u128 {
 
 /// Read file contents for captured checkpoint, skipping binary/large/unreadable files.
 fn capture_file_contents(repo_root: &Path, file_paths: &[PathBuf]) -> HashMap<String, String> {
+    use std::io::Read;
     let mut contents = HashMap::new();
     for rel_path in file_paths {
         let abs_path = repo_root.join(rel_path);
-        match fs::metadata(&abs_path) {
-            Ok(meta) if meta.len() > MAX_CAPTURE_FILE_SIZE => {
-                debug_log(&format!(
-                    "Skipping large file for capture: {} ({} bytes)",
-                    rel_path.display(),
-                    meta.len()
-                ));
-                continue;
-            }
+        let mut file = match fs::File::open(&abs_path) {
+            Ok(f) => f,
             Err(e) => {
                 debug_log(&format!(
                     "Skipping unreadable file for capture: {}: {}",
@@ -863,11 +857,21 @@ fn capture_file_contents(repo_root: &Path, file_paths: &[PathBuf]) -> HashMap<St
                 ));
                 continue;
             }
-            _ => {}
+        };
+        if let Ok(meta) = file.metadata() {
+            if meta.len() > MAX_CAPTURE_FILE_SIZE {
+                debug_log(&format!(
+                    "Skipping large file for capture: {} ({} bytes)",
+                    rel_path.display(),
+                    meta.len()
+                ));
+                continue;
+            }
         }
-        match fs::read_to_string(&abs_path) {
-            Ok(content) => {
-                let key = crate::utils::normalize_to_posix(&rel_path.to_string_lossy());
+        let mut content = String::new();
+        match file.read_to_string(&mut content) {
+            Ok(_) => {
+                let key = normalize_to_posix(&rel_path.to_string_lossy());
                 contents.insert(key, content);
             }
             Err(e) => {
@@ -959,7 +963,7 @@ fn find_stale_files(snapshot: &StatSnapshot) -> Vec<PathBuf> {
             continue;
         };
         let mtime_ns = system_time_to_nanos(mtime);
-        let posix_key = crate::utils::normalize_to_posix(&rel_path.to_string_lossy());
+        let posix_key = normalize_to_posix(&rel_path.to_string_lossy());
 
         if let Some(&file_wm) = snapshot.per_file_wm.get(&posix_key) {
             // Tier 1: precise per-file watermark — may be tighter than the
@@ -994,7 +998,7 @@ fn attempt_pre_hook_capture(
     snap: &StatSnapshot,
     repo_root: &Path,
 ) -> Option<CapturedCheckpointInfo> {
-    if !captured_checkpoint_delegate_enabled() {
+    if !checkpoint_delegation_enabled() {
         debug_log("Pre-hook capture: async checkpoint delegation not enabled, skipping capture");
         return None;
     }
@@ -1018,10 +1022,8 @@ fn attempt_pre_hook_capture(
         return None;
     }
 
-    // 4. Capture file contents for the stale files.
     let contents = capture_file_contents(repo_root, &stale_files);
 
-    // 5. Open the repository.
     let repo = match find_repository_in_path(&repo_working_dir) {
         Ok(r) => r,
         Err(e) => {
@@ -1030,13 +1032,11 @@ fn attempt_pre_hook_capture(
         }
     };
 
-    // 6. Build stale paths as posix-normalized strings.
     let stale_paths: Vec<String> = stale_files
         .iter()
-        .map(|p| crate::utils::normalize_to_posix(&p.to_string_lossy()))
+        .map(|p| normalize_to_posix(&p.to_string_lossy()))
         .collect();
 
-    // 7. Build a synthetic AgentRunResult for the captured checkpoint.
     let agent_run_result = AgentRunResult {
         agent_id: AgentId {
             tool: "bash-tool".to_string(),
@@ -1053,7 +1053,6 @@ fn attempt_pre_hook_capture(
         captured_checkpoint_id: None,
     };
 
-    // 8. Prepare the captured checkpoint.
     match prepare_captured_checkpoint(
         &repo,
         "bash-tool", // author
@@ -1086,25 +1085,6 @@ fn attempt_pre_hook_capture(
     }
 }
 
-/// Check whether async/daemon checkpoint delegation is enabled.
-///
-/// Mirrors the logic of `daemon_checkpoint_delegate_enabled()` in
-/// `git_ai_handlers.rs` so the bash tool can skip capture work when the
-/// daemon will not be available to consume the files.
-fn captured_checkpoint_delegate_enabled() -> bool {
-    if config::Config::get().feature_flags().async_mode {
-        return true;
-    }
-    matches!(
-        std::env::var("GIT_AI_DAEMON_CHECKPOINT_DELEGATE")
-            .ok()
-            .as_deref()
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("1") | Some("true") | Some("yes")
-    )
-}
-
 /// Attempt to prepare a captured checkpoint during the post-hook.
 ///
 /// Captures the current contents of changed files and prepares a captured
@@ -1117,23 +1097,18 @@ fn attempt_post_hook_capture(
     repo_root: &Path,
     changed_paths: &[String],
 ) -> Option<CapturedCheckpointInfo> {
-    // Guard: only attempt capture when async/daemon checkpoint delegation is
-    // enabled.  Captured checkpoint files are only consumed/cleaned-up by the
-    // daemon, so without this check they would accumulate indefinitely.
-    // This mirrors the daemon_checkpoint_delegate_enabled() check used by the
-    // handler in run_checkpoint_via_daemon_or_local.
-    if !captured_checkpoint_delegate_enabled() {
+    // Only attempt capture when delegation is enabled — captured checkpoint
+    // files are consumed by the daemon; without it they would accumulate.
+    if !checkpoint_delegation_enabled() {
         debug_log("Post-hook capture: async checkpoint delegation not enabled, skipping capture");
         return None;
     }
 
     let repo_working_dir = repo_root.to_string_lossy().to_string();
 
-    // 1. Split changed paths into existing and deleted. Deleted files have no
-    //    capturable post-content; recording them as empty blobs in the captured
-    //    checkpoint would misrepresent deletions as "file was emptied". The live
-    //    checkpoint path (BashCheckpointAction::Checkpoint) already carries all
-    //    changed paths including deletions for attribution tracking.
+    // Exclude deleted files: they have no post-content to capture, and recording
+    // them as empty blobs would misrepresent deletions as "file was emptied".
+    // The Checkpoint action already carries all changed paths for attribution.
     let (existing_paths, _deleted_paths): (Vec<&String>, Vec<&String>) = changed_paths
         .iter()
         .partition(|p| repo_root.join(p.as_str()).exists());
@@ -1143,14 +1118,12 @@ fn attempt_post_hook_capture(
         return None;
     }
 
-    // 2. Convert to PathBuf and capture file contents (existing files only).
     let path_bufs: Vec<PathBuf> = existing_paths
         .iter()
         .map(|p| PathBuf::from(p.as_str()))
         .collect();
     let contents = capture_file_contents(repo_root, &path_bufs);
 
-    // 3. Open the repository.
     let repo = match find_repository_in_path(&repo_working_dir) {
         Ok(r) => r,
         Err(e) => {
@@ -1159,8 +1132,6 @@ fn attempt_post_hook_capture(
         }
     };
 
-    // 4. Build a synthetic AgentRunResult for the captured checkpoint.
-    // Only include existing files — deleted files have no post-content to capture.
     let existing_path_strings: Vec<String> = existing_paths.iter().map(|p| p.to_string()).collect();
     let agent_run_result = AgentRunResult {
         agent_id: AgentId {
@@ -1178,7 +1149,6 @@ fn attempt_post_hook_capture(
         captured_checkpoint_id: None,
     };
 
-    // 5. Prepare the captured checkpoint.
     match prepare_captured_checkpoint(
         &repo,
         "bash-tool", // author
