@@ -182,13 +182,19 @@ fn has_active_cherry_pick_start_event(repository: &Repository) -> bool {
     false // No cherry-pick events found
 }
 
-/// Find the original head from the most recent CherryPick Start event in the log
+/// Find the original head from the most recent CherryPick Start event in the log.
+/// Stops at Complete/Abort events so orphaned Start events from a prior aborted
+/// cherry-pick are not mistakenly returned.
 fn find_cherry_pick_start_event_original_head(repository: &Repository) -> Option<String> {
     let events = repository.storage.read_rewrite_events().ok()?;
 
-    // Find the most recent Start event (events are newest-first)
+    // Events are newest-first; stop at Complete/Abort before finding a Start.
     for event in events {
         match event {
+            RewriteLogEvent::CherryPickComplete { .. }
+            | RewriteLogEvent::CherryPickAbort { .. } => {
+                return None; // No active cherry-pick
+            }
             RewriteLogEvent::CherryPickStart { cherry_pick_start } => {
                 return Some(cherry_pick_start.original_head.clone());
             }
@@ -390,11 +396,6 @@ fn handle_cherry_pick_skip(repository: &mut Repository) {
     }
 }
 
-/// Fix #955: Try to fetch notes from remotes for source commits that don't have local notes.
-fn try_fetch_missing_notes_for_commits(repository: &Repository, source_commits: &[String]) {
-    crate::git::sync_authorship::fetch_missing_notes_for_commits(repository, source_commits);
-}
-
 fn process_completed_cherry_pick(
     repository: &mut Repository,
     original_head: &str,
@@ -440,9 +441,6 @@ fn process_completed_cherry_pick(
             return;
         }
     };
-
-    // Fix #955: Try to fetch missing notes from remotes before processing.
-    try_fetch_missing_notes_for_commits(repository, &source_commits);
 
     // Build commit mappings
     debug_log(&format!(
