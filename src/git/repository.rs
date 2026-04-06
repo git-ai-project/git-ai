@@ -4070,8 +4070,10 @@ index 0000000..abc1234 100644
 
     #[test]
     fn path_is_in_workdir_returns_false_for_linked_worktree_file() {
-        // A file inside a linked worktree (`.git` FILE) should NOT be
-        // considered part of the parent repo's working tree.
+        // Sibling worktree: the worktree lives OUTSIDE the main repo's working tree.
+        // path_is_in_workdir returns false purely because the path doesn't
+        // start_with(workdir) — no .git file inspection is needed.  This test
+        // passes even without the is_linked_worktree_git_file fix.
         let temp = tempfile::tempdir().expect("tempdir");
         let main_repo = temp.path().join("main");
         let worktree = temp.path().join("linked");
@@ -4082,20 +4084,77 @@ index 0000000..abc1234 100644
         run_git(&main_repo, &["config", "user.email", "test@example.com"]);
         run_git(&main_repo, &["worktree", "add", worktree.to_str().unwrap()]);
 
-        // Verify the worktree has a .git FILE (not a directory)
         let dot_git = worktree.join(".git");
         assert!(dot_git.is_file(), ".git should be a file in a linked worktree");
 
         let main = find_repository_in_path(main_repo.to_str().unwrap()).expect("find main repo");
 
-        // A file inside the linked worktree should NOT be in the main repo's workdir
         let wt_file = worktree.join("somefile.rs");
         assert!(
             !main.path_is_in_workdir(&wt_file),
-            "linked worktree file should not be in main repo workdir"
+            "sibling linked worktree file should not be in main repo workdir"
         );
 
-        // A file directly in the main repo should still be in workdir
+        let main_file = main_repo.join("src").join("lib.rs");
+        assert!(
+            main.path_is_in_workdir(&main_file),
+            "main repo file should be in main repo workdir"
+        );
+    }
+
+    #[test]
+    fn path_is_in_workdir_returns_false_for_nested_linked_worktree_file() {
+        // Nested worktree: the worktree lives INSIDE the main repo's working tree
+        // (e.g. main_repo/.worktrees/feature).  This is the exact Bug-A / Bug-B
+        // scenario: path starts_with(workdir) so the starts_with check passes,
+        // and only is_linked_worktree_git_file makes path_is_in_workdir return
+        // false.  This test FAILS without the fix.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let main_repo = temp.path().join("main");
+        let worktree = main_repo.join(".worktrees").join("feature");
+
+        fs::create_dir_all(&main_repo).expect("create main repo dir");
+        run_git(&main_repo, &["init"]);
+        run_git(&main_repo, &["config", "user.name", "Test User"]);
+        run_git(&main_repo, &["config", "user.email", "test@example.com"]);
+        // git worktree add requires at least one commit
+        fs::write(main_repo.join("README.md"), "# test\n").expect("write README");
+        run_git(&main_repo, &["add", "."]);
+        run_git(&main_repo, &["commit", "-m", "initial"]);
+        run_git(
+            &main_repo,
+            &["worktree", "add", "--detach", worktree.to_str().unwrap()],
+        );
+
+        let dot_git = worktree.join(".git");
+        assert!(dot_git.is_file(), ".git should be a file in a nested worktree");
+        let gitfile_content = fs::read_to_string(&dot_git).expect("read .git file");
+        assert!(
+            gitfile_content.contains("/worktrees/"),
+            ".git file should reference /worktrees/: {}",
+            gitfile_content.trim()
+        );
+
+        let main = find_repository_in_path(main_repo.to_str().unwrap()).expect("find main repo");
+
+        // The nested worktree file is physically under main_repo/ but must NOT
+        // be reported as part of the main repo's working tree.
+        let wt_file = worktree.join("somefile.rs");
+        assert!(
+            !main.path_is_in_workdir(&wt_file),
+            "nested linked worktree file should not be in main repo workdir \
+             (path starts_with workdir, but .git file marks a repo boundary)"
+        );
+
+        // Sanity: file is in the worktree's own workdir.
+        let wt_repo =
+            find_repository_in_path(worktree.to_str().unwrap()).expect("find nested worktree");
+        assert!(
+            wt_repo.path_is_in_workdir(&wt_file),
+            "nested worktree file should be in the worktree's own workdir"
+        );
+
+        // Sanity: a normal file in the main repo is still in the main workdir.
         let main_file = main_repo.join("src").join("lib.rs");
         assert!(
             main.path_is_in_workdir(&main_file),
