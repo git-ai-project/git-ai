@@ -241,28 +241,6 @@ fn test_firebender_rejects_unknown_event_name() {
 }
 
 #[test]
-fn test_firebender_rejects_non_edit_tools() {
-    let hook_input = json!({
-        "hook_event_name": "preToolUse",
-        "model": "gpt-5",
-        "tool_name": "Read"
-    })
-    .to_string();
-
-    let error = FirebenderPreset
-        .run(AgentCheckpointFlags {
-            hook_input: Some(hook_input),
-        })
-        .unwrap_err();
-
-    assert!(
-        error
-            .to_string()
-            .contains("Skipping Firebender hook for non-edit tool_name 'Read'.")
-    );
-}
-
-#[test]
 fn test_firebender_preset_missing_hook_input() {
     let preset = FirebenderPreset;
     let result = preset.run(AgentCheckpointFlags { hook_input: None });

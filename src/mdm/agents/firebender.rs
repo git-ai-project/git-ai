@@ -63,6 +63,7 @@ impl HookInstaller for FirebenderInstaller {
                         .and_then(|c| c.as_str())
                         .map(Self::is_firebender_checkpoint_command)
                         .unwrap_or(false)
+                        && item.get("matcher").is_none()
                 })
             })
             .unwrap_or(false);
@@ -77,6 +78,7 @@ impl HookInstaller for FirebenderInstaller {
                         .and_then(|c| c.as_str())
                         .map(Self::is_firebender_checkpoint_command)
                         .unwrap_or(false)
+                        && item.get("matcher").is_none()
                 })
             })
             .unwrap_or(false);
@@ -174,7 +176,7 @@ impl HookInstaller for FirebenderInstaller {
                         && Self::is_firebender_checkpoint_command(existing_cmd)
                     {
                         found_idx = Some(idx);
-                        if existing_cmd != desired_cmd {
+                        if existing_cmd != desired_cmd || existing_hook.get("matcher").is_some() {
                             needs_update = true;
                         }
                         break;
@@ -464,6 +466,108 @@ mod tests {
                     .as_str()
                     .unwrap(),
                 "echo keep-after"
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_check_hooks_not_up_to_date_when_matcher_present() {
+        with_temp_home(|home| {
+            let hooks_path = home.join(".firebender").join("hooks.json");
+            if let Some(parent) = hooks_path.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+
+            let existing = json!({
+                "version": 1,
+                "hooks": {
+                    "preToolUse": [{ "matcher": "Write|Edit|Delete", "command": "/usr/local/bin/git-ai checkpoint firebender --hook-input stdin" }],
+                    "postToolUse": [{ "matcher": "Write|Edit|Delete", "command": "/usr/local/bin/git-ai checkpoint firebender --hook-input stdin" }]
+                }
+            });
+            fs::write(
+                &hooks_path,
+                serde_json::to_string_pretty(&existing).unwrap(),
+            )
+            .unwrap();
+
+            let installer = FirebenderInstaller;
+            let result = installer
+                .check_hooks(&HookInstallerParams {
+                    binary_path: create_test_binary_path(),
+                })
+                .unwrap();
+
+            assert!(result.tool_installed);
+            assert!(
+                !result.hooks_installed,
+                "hooks with matcher should not be considered installed"
+            );
+            assert!(
+                !result.hooks_up_to_date,
+                "hooks with matcher should not be up to date"
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_install_hooks_removes_matcher_from_existing_entry() {
+        with_temp_home(|home| {
+            let hooks_path = home.join(".firebender").join("hooks.json");
+            if let Some(parent) = hooks_path.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+
+            let existing = json!({
+                "version": 1,
+                "hooks": {
+                    "preToolUse": [{ "matcher": "Write|Edit|Delete", "command": "/old/path/git-ai checkpoint firebender --hook-input stdin" }],
+                    "postToolUse": [{ "matcher": "Write|Edit|Delete", "command": "/old/path/git-ai checkpoint firebender --hook-input stdin" }]
+                }
+            });
+            fs::write(
+                &hooks_path,
+                serde_json::to_string_pretty(&existing).unwrap(),
+            )
+            .unwrap();
+
+            let installer = FirebenderInstaller;
+            let diff = installer
+                .install_hooks(
+                    &HookInstallerParams {
+                        binary_path: create_test_binary_path(),
+                    },
+                    false,
+                )
+                .unwrap();
+
+            assert!(
+                diff.is_some(),
+                "should produce a diff when removing matcher"
+            );
+
+            let updated: Value =
+                serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
+            assert!(
+                updated["hooks"]["preToolUse"][0].get("matcher").is_none(),
+                "matcher should be removed from preToolUse"
+            );
+            assert!(
+                updated["hooks"]["postToolUse"][0].get("matcher").is_none(),
+                "matcher should be removed from postToolUse"
+            );
+            let expected_cmd = format!(
+                "{} {}",
+                create_test_binary_path().display(),
+                FIREBENDER_CHECKPOINT_CMD
+            );
+            assert_eq!(
+                updated["hooks"]["preToolUse"][0]["command"]
+                    .as_str()
+                    .unwrap(),
+                expected_cmd
             );
         });
     }

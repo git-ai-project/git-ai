@@ -3788,16 +3788,15 @@ impl AgentCheckpointPreset for FirebenderPreset {
         }
 
         let tool_name = tool_name.unwrap_or_default();
+        // Firebender hooks fire for all tool calls (no matcher in hooks.json). Silently
+        // skip tools that don't edit files — only checkpoint file-editing operations.
         // Firebender hooks emit canonical hook tool names rather than raw function names.
         // For example, `apply_patch` and `local_search_replace` both come through as `Edit`.
         if !matches!(
             tool_name.as_str(),
             "Write" | "Edit" | "Delete" | "RenameSymbol" | "DeleteSymbol"
         ) {
-            return Err(GitAiError::PresetError(format!(
-                "Skipping Firebender hook for non-edit tool_name '{}'.",
-                tool_name
-            )));
+            std::process::exit(0);
         }
 
         let repo_working_dir = repo_working_dir
