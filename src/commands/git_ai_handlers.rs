@@ -226,6 +226,9 @@ pub fn handle_git_ai(args: &[String]) {
         "continue" => {
             commands::continue_session::handle_continue(&args[1..]);
         }
+        "fetch-notes" => {
+            commands::fetch_notes::handle_fetch_notes(&args[1..]);
+        }
         "effective-ignore-patterns" => {
             handle_effective_ignore_patterns_internal(&args[1..]);
         }
@@ -348,6 +351,9 @@ fn print_help() {
     eprintln!("    --launch              Launch agent CLI with restored context");
     eprintln!("    --clipboard           Copy context to system clipboard");
     eprintln!("    --json                Output context as structured JSON");
+    eprintln!("  fetch-notes [remote] Synchronously fetch AI authorship notes");
+    eprintln!("    --remote <name>       Explicit remote name (default: upstream or origin)");
+    eprintln!("    --json                Output result as JSON");
     eprintln!("  login              Authenticate with Git AI");
     eprintln!("  logout             Clear stored credentials");
     eprintln!("  whoami             Show auth state and login identity");
