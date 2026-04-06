@@ -73,6 +73,7 @@ mod rebase;
 mod rebase_attribution_remaining;
 mod rebase_benchmark;
 mod rebase_note_integrity;
+mod rebase_realworld;
 mod reset;
 mod search;
 mod secrets_benchmark;
