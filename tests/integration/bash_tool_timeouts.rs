@@ -13,9 +13,8 @@
 
 use crate::repos::test_repo::TestRepo;
 use git_ai::commands::checkpoint_agent::bash_tool::{
-    BashCheckpointAction, HookEvent, handle_bash_tool,
-    reset_timeout_overrides_for_test, set_hook_timeout_ms_for_test,
-    set_walk_timeout_ms_for_test, snapshot,
+    BashCheckpointAction, HookEvent, handle_bash_tool, reset_timeout_overrides_for_test,
+    set_hook_timeout_ms_for_test, set_walk_timeout_ms_for_test, snapshot,
 };
 use std::fs;
 
@@ -41,15 +40,21 @@ fn test_snapshot_walk_timeout_returns_err() {
 
     // Add a few files so the walker loop body is entered at least once.
     for i in 0..5 {
-        fs::write(root.join(format!("wt_file_{}.txt", i)), format!("content {}", i))
-            .expect("file write should succeed");
+        fs::write(
+            root.join(format!("wt_file_{}.txt", i)),
+            format!("content {}", i),
+        )
+        .expect("file write should succeed");
     }
 
     set_walk_timeout_ms_for_test(0);
     let result = snapshot(&root, "wt-sess", "wt-t1", None);
     reset_timeout_overrides_for_test();
 
-    assert!(result.is_err(), "snapshot should return Err on walk timeout");
+    assert!(
+        result.is_err(),
+        "snapshot should return Err on walk timeout"
+    );
     let err_msg = result.unwrap_err().to_string();
     assert!(
         err_msg.contains("walk") || err_msg.contains("abandoning"),
@@ -170,9 +175,8 @@ fn test_timeout_override_reset_restores_normal_operation() {
 
     fs::write(root.join("reset_check.txt"), "hello").expect("write should succeed");
 
-    let result =
-        handle_bash_tool(HookEvent::PostToolUse, &root, "reset-sess", "reset-t1")
-            .expect("post-hook should succeed after reset");
+    let result = handle_bash_tool(HookEvent::PostToolUse, &root, "reset-sess", "reset-t1")
+        .expect("post-hook should succeed after reset");
 
     assert!(
         matches!(

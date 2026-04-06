@@ -16,13 +16,12 @@
 
 use git_ai::commands::checkpoint_agent::bash_tool;
 use git_ai::commands::checkpoint_agent::bash_tool::HookEvent;
-use git_ai::daemon::send_control_request_with_timeout;
 use git_ai::daemon::control_api::ControlRequest;
+use git_ai::daemon::send_control_request_with_timeout;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
-
 
 // ---------------------------------------------------------------------------
 // Per-test isolated daemon
@@ -74,7 +73,9 @@ impl BenchDaemon {
         };
         let mut ready = false;
         for _ in 0..200 {
-            if send_control_request_with_timeout(&control_socket, &probe, Duration::from_millis(25)).is_ok() {
+            if send_control_request_with_timeout(&control_socket, &probe, Duration::from_millis(25))
+                .is_ok()
+            {
                 ready = true;
                 break;
             }
@@ -88,7 +89,11 @@ impl BenchDaemon {
         // threads read this env var concurrently during the test.
         unsafe { std::env::set_var("GIT_AI_DAEMON_CONTROL_SOCKET", &control_socket) };
 
-        BenchDaemon { child, control_socket, prev_socket_env }
+        BenchDaemon {
+            child,
+            control_socket,
+            prev_socket_env,
+        }
     }
 }
 
@@ -331,9 +336,13 @@ fn run_benchmark(repo_root: &Path, label: &str) -> (DurationStats, DurationStats
 
         // Post-hook: JSON read + deserialisation + snapshot walk + in-memory diff
         let post_start = Instant::now();
-        let result =
-            bash_tool::handle_bash_tool(HookEvent::PostToolUse, repo_root, session_id, &tool_use_id)
-                .expect("post-hook should succeed");
+        let result = bash_tool::handle_bash_tool(
+            HookEvent::PostToolUse,
+            repo_root,
+            session_id,
+            &tool_use_id,
+        )
+        .expect("post-hook should succeed");
         let post_hook_duration = post_start.elapsed();
 
         // Sanity: the marker file must appear as a change
@@ -390,7 +399,10 @@ fn test_bash_tool_snapshot_benchmark_small() {
 
     println!("\n========================================");
     println!("Bash Tool Benchmark: SMALL ({} files)", FILE_COUNT);
-    println!("Target pre P95: < {}ms, post P95: < {}ms", TARGET_PRE_P95_MS, TARGET_POST_P95_MS);
+    println!(
+        "Target pre P95: < {}ms, post P95: < {}ms",
+        TARGET_PRE_P95_MS, TARGET_POST_P95_MS
+    );
     println!("(end-to-end handle_bash_tool: cleanup+walk+JSON I/O+diff)");
     println!("========================================");
 
@@ -410,21 +422,27 @@ fn test_bash_tool_snapshot_benchmark_small() {
     let post_p95_ms = post_stats.p95.as_secs_f64() * 1000.0;
     println!(
         "\nSmall repo pre P95: {:.2}ms (target: {}ms, CI limit: {}ms)",
-        pre_p95_ms, TARGET_PRE_P95_MS, TARGET_PRE_P95_MS * CI_MARGIN,
+        pre_p95_ms,
+        TARGET_PRE_P95_MS,
+        TARGET_PRE_P95_MS * CI_MARGIN,
     );
     println!(
         "Small repo post P95: {:.2}ms (target: {}ms, CI limit: {}ms)",
-        post_p95_ms, TARGET_POST_P95_MS, TARGET_POST_P95_MS * CI_MARGIN,
+        post_p95_ms,
+        TARGET_POST_P95_MS,
+        TARGET_POST_P95_MS * CI_MARGIN,
     );
     assert!(
         pre_p95_ms < TARGET_PRE_P95_MS * CI_MARGIN,
         "Small repo pre-hook P95 ({:.2}ms) exceeded CI limit ({}ms)",
-        pre_p95_ms, TARGET_PRE_P95_MS * CI_MARGIN,
+        pre_p95_ms,
+        TARGET_PRE_P95_MS * CI_MARGIN,
     );
     assert!(
         post_p95_ms < TARGET_POST_P95_MS * CI_MARGIN,
         "Small repo post-hook P95 ({:.2}ms) exceeded CI limit ({}ms)",
-        post_p95_ms, TARGET_POST_P95_MS * CI_MARGIN,
+        post_p95_ms,
+        TARGET_POST_P95_MS * CI_MARGIN,
     );
 }
 
@@ -441,7 +459,10 @@ fn test_bash_tool_snapshot_benchmark_medium() {
 
     println!("\n========================================");
     println!("Bash Tool Benchmark: MEDIUM ({} files)", FILE_COUNT);
-    println!("Target pre P95: < {}ms, post P95: < {}ms", TARGET_PRE_P95_MS, TARGET_POST_P95_MS);
+    println!(
+        "Target pre P95: < {}ms, post P95: < {}ms",
+        TARGET_PRE_P95_MS, TARGET_POST_P95_MS
+    );
     println!("(end-to-end handle_bash_tool: cleanup+walk+JSON I/O+diff)");
     println!("========================================");
 
@@ -461,21 +482,27 @@ fn test_bash_tool_snapshot_benchmark_medium() {
     let post_p95_ms = post_stats.p95.as_secs_f64() * 1000.0;
     println!(
         "\nMedium repo pre P95: {:.2}ms (target: {}ms, CI limit: {}ms)",
-        pre_p95_ms, TARGET_PRE_P95_MS, TARGET_PRE_P95_MS * CI_MARGIN,
+        pre_p95_ms,
+        TARGET_PRE_P95_MS,
+        TARGET_PRE_P95_MS * CI_MARGIN,
     );
     println!(
         "Medium repo post P95: {:.2}ms (target: {}ms, CI limit: {}ms)",
-        post_p95_ms, TARGET_POST_P95_MS, TARGET_POST_P95_MS * CI_MARGIN,
+        post_p95_ms,
+        TARGET_POST_P95_MS,
+        TARGET_POST_P95_MS * CI_MARGIN,
     );
     assert!(
         pre_p95_ms < TARGET_PRE_P95_MS * CI_MARGIN,
         "Medium repo pre-hook P95 ({:.2}ms) exceeded CI limit ({}ms)",
-        pre_p95_ms, TARGET_PRE_P95_MS * CI_MARGIN,
+        pre_p95_ms,
+        TARGET_PRE_P95_MS * CI_MARGIN,
     );
     assert!(
         post_p95_ms < TARGET_POST_P95_MS * CI_MARGIN,
         "Medium repo post-hook P95 ({:.2}ms) exceeded CI limit ({}ms)",
-        post_p95_ms, TARGET_POST_P95_MS * CI_MARGIN,
+        post_p95_ms,
+        TARGET_POST_P95_MS * CI_MARGIN,
     );
 }
 
@@ -492,7 +519,10 @@ fn test_bash_tool_snapshot_benchmark_large() {
 
     println!("\n========================================");
     println!("Bash Tool Benchmark: LARGE ({} files)", FILE_COUNT);
-    println!("Target pre P95: < {}ms, post P95: < {}ms", TARGET_PRE_P95_MS, TARGET_POST_P95_MS);
+    println!(
+        "Target pre P95: < {}ms, post P95: < {}ms",
+        TARGET_PRE_P95_MS, TARGET_POST_P95_MS
+    );
     println!("(end-to-end handle_bash_tool: cleanup+walk+JSON I/O+diff)");
     println!("========================================");
 
@@ -509,21 +539,27 @@ fn test_bash_tool_snapshot_benchmark_large() {
     let post_p95_ms = post_stats.p95.as_secs_f64() * 1000.0;
     println!(
         "\nLarge repo pre P95: {:.2}ms (target: {}ms, CI limit: {}ms)",
-        pre_p95_ms, TARGET_PRE_P95_MS, TARGET_PRE_P95_MS * CI_MARGIN,
+        pre_p95_ms,
+        TARGET_PRE_P95_MS,
+        TARGET_PRE_P95_MS * CI_MARGIN,
     );
     println!(
         "Large repo post P95: {:.2}ms (target: {}ms, CI limit: {}ms)",
-        post_p95_ms, TARGET_POST_P95_MS, TARGET_POST_P95_MS * CI_MARGIN,
+        post_p95_ms,
+        TARGET_POST_P95_MS,
+        TARGET_POST_P95_MS * CI_MARGIN,
     );
     assert!(
         pre_p95_ms < TARGET_PRE_P95_MS * CI_MARGIN,
         "Large repo pre-hook P95 ({:.2}ms) exceeded CI limit ({}ms)",
-        pre_p95_ms, TARGET_PRE_P95_MS * CI_MARGIN,
+        pre_p95_ms,
+        TARGET_PRE_P95_MS * CI_MARGIN,
     );
     assert!(
         post_p95_ms < TARGET_POST_P95_MS * CI_MARGIN,
         "Large repo post-hook P95 ({:.2}ms) exceeded CI limit ({}ms)",
-        post_p95_ms, TARGET_POST_P95_MS * CI_MARGIN,
+        post_p95_ms,
+        TARGET_POST_P95_MS * CI_MARGIN,
     );
 }
 
@@ -567,8 +603,12 @@ fn test_bash_tool_snapshot_benchmark_xlarge() {
         let tool_use_id = format!("xl-{}", i);
 
         let pre_start = Instant::now();
-        let pre_result =
-            bash_tool::handle_bash_tool(HookEvent::PreToolUse, &repo_root, session_id, &tool_use_id);
+        let pre_result = bash_tool::handle_bash_tool(
+            HookEvent::PreToolUse,
+            &repo_root,
+            session_id,
+            &tool_use_id,
+        );
         let pre_elapsed = pre_start.elapsed();
 
         match pre_result {
@@ -602,8 +642,12 @@ fn test_bash_tool_snapshot_benchmark_xlarge() {
         fs::write(&marker, format!("xl iteration {}", i)).expect("failed to write marker");
 
         let post_start = Instant::now();
-        let post_result =
-            bash_tool::handle_bash_tool(HookEvent::PostToolUse, &repo_root, session_id, &tool_use_id);
+        let post_result = bash_tool::handle_bash_tool(
+            HookEvent::PostToolUse,
+            &repo_root,
+            session_id,
+            &tool_use_id,
+        );
         let post_elapsed = post_start.elapsed();
         let _ = fs::remove_file(&marker);
 
@@ -643,11 +687,15 @@ fn test_bash_tool_snapshot_benchmark_xlarge() {
         let post_p95_ms = post_stats.p95.as_secs_f64() * 1000.0;
         println!(
             "\nXLarge repo pre P95: {:.2}ms (target: {}ms, CI limit: {}ms)",
-            pre_p95_ms, TARGET_PRE_P95_MS, TARGET_PRE_P95_MS * CI_MARGIN,
+            pre_p95_ms,
+            TARGET_PRE_P95_MS,
+            TARGET_PRE_P95_MS * CI_MARGIN,
         );
         println!(
             "XLarge repo post P95: {:.2}ms (target: {}ms, CI limit: {}ms)",
-            post_p95_ms, TARGET_POST_P95_MS, TARGET_POST_P95_MS * CI_MARGIN,
+            post_p95_ms,
+            TARGET_POST_P95_MS,
+            TARGET_POST_P95_MS * CI_MARGIN,
         );
         if pre_p95_ms > TARGET_PRE_P95_MS {
             println!(
@@ -658,12 +706,14 @@ fn test_bash_tool_snapshot_benchmark_xlarge() {
         assert!(
             pre_p95_ms < TARGET_PRE_P95_MS * CI_MARGIN,
             "XLarge repo pre-hook P95 ({:.2}ms) exceeded CI limit ({}ms)",
-            pre_p95_ms, TARGET_PRE_P95_MS * CI_MARGIN,
+            pre_p95_ms,
+            TARGET_PRE_P95_MS * CI_MARGIN,
         );
         assert!(
             post_p95_ms < TARGET_POST_P95_MS * CI_MARGIN,
             "XLarge repo post-hook P95 ({:.2}ms) exceeded CI limit ({}ms)",
-            post_p95_ms, TARGET_POST_P95_MS * CI_MARGIN,
+            post_p95_ms,
+            TARGET_POST_P95_MS * CI_MARGIN,
         );
     }
 }

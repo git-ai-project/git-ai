@@ -543,7 +543,9 @@ pub fn snapshot(
             let timeout_ms = walk_timeout.as_millis();
             let msg = format!(
                 "bash_tool: snapshot walk exceeded {}ms limit ({}ms elapsed, {} entries so far); abandoning stat-diff",
-                timeout_ms, elapsed_ms, entries.len()
+                timeout_ms,
+                elapsed_ms,
+                entries.len()
             );
             debug_log(&msg);
             crate::observability::log_message(
