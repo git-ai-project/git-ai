@@ -149,7 +149,7 @@ fn print_json_error(status: &str, message: &str, remote: Option<&str>) {
         status: status.to_string(),
         error: Some(message.to_string()),
     };
-    eprintln!(
+    println!(
         "{}",
         serde_json::to_string(&output).expect("failed to serialize JSON")
     );
