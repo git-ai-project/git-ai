@@ -721,6 +721,10 @@ fn test_bash_tool_gitignore_excludes_directory_patterns() {
 
 #[test]
 fn test_build_gitignore_parses_rules() {
+    // build_gitignore covers git-ai-specific patterns only (defaults,
+    // .git-ai-ignore, linguist-generated).  Standard .gitignore rules are
+    // handled by WalkBuilder with git_ignore(true); they are NOT loaded into
+    // the Gitignore returned here.
     let repo = TestRepo::new();
     let root = repo_root(&repo);
 
@@ -728,15 +732,25 @@ fn test_build_gitignore_parses_rules() {
 
     let gitignore = build_gitignore(&root).expect("build_gitignore should succeed");
 
-    // *.tmp files should be ignored
-    let tmp_match = gitignore.matched(Path::new("data.tmp"), false);
-    assert!(tmp_match.is_ignore(), "*.tmp should match gitignore rules");
+    // git-ai default patterns should be present (*.lock is in DEFAULT_IGNORE_PATTERNS)
+    assert!(
+        gitignore
+            .matched(Path::new("Cargo.lock"), false)
+            .is_ignore(),
+        "Cargo.lock should match git-ai default patterns"
+    );
+
+    // Standard .gitignore rules (*.tmp) are NOT in build_gitignore — the
+    // walker handles those via git_ignore(true).
+    assert!(
+        !gitignore.matched(Path::new("data.tmp"), false).is_ignore(),
+        "*.tmp is in .gitignore but not in build_gitignore; walker handles it"
+    );
 
     // .rs files should not be ignored
-    let rs_match = gitignore.matched(Path::new("main.rs"), false);
     assert!(
-        !rs_match.is_ignore(),
-        "*.rs should not match gitignore rules"
+        !gitignore.matched(Path::new("main.rs"), false).is_ignore(),
+        "*.rs should not match any git-ai default patterns"
     );
 }
 
@@ -954,78 +968,16 @@ fn test_normalize_path_case_folding() {
 // Nested subdirectory .gitignore
 // ===========================================================================
 
-#[test]
-fn test_build_gitignore_nested_subdirectory_rules() {
-    let repo = TestRepo::new();
-    let root = repo_root(&repo);
-
-    // Top-level .gitignore ignores *.log
-    add_and_commit(&repo, ".gitignore", "*.log\n", "top-level gitignore");
-    // Nested .gitignore in src/ ignores *.tmp
-    add_and_commit(&repo, "src/.gitignore", "*.tmp\n", "nested gitignore");
-
-    let gitignore = build_gitignore(&root).expect("build_gitignore should succeed");
-
-    // *.log should be ignored (from top-level)
-    assert!(
-        gitignore.matched(Path::new("debug.log"), false).is_ignore(),
-        "*.log should be ignored by top-level gitignore"
-    );
-    // *.tmp should be ignored (from nested src/.gitignore)
-    assert!(
-        gitignore
-            .matched(Path::new("src/data.tmp"), false)
-            .is_ignore(),
-        "*.tmp should be ignored by nested src/.gitignore"
-    );
-    // *.rs should NOT be ignored
-    assert!(
-        !gitignore
-            .matched(Path::new("src/main.rs"), false)
-            .is_ignore(),
-        "*.rs should not be ignored"
-    );
-}
-
-#[test]
-fn test_build_gitignore_deeply_nested_rules() {
-    let repo = TestRepo::new();
-    let root = repo_root(&repo);
-
-    // Top-level .gitignore ignores *.log
-    add_and_commit(&repo, ".gitignore", "*.log\n", "top-level gitignore");
-    // Depth-2 .gitignore in src/generated/ ignores *.gen
-    fs::create_dir_all(root.join("src/generated")).expect("create nested dir");
-    fs::write(root.join("src/generated/.gitignore"), "*.gen\n").expect("write deep gitignore");
-    add_and_commit(
-        &repo,
-        "src/generated/keep.rs",
-        "fn keep() {}",
-        "add placeholder",
-    );
-
-    let gitignore = build_gitignore(&root).expect("build_gitignore should succeed");
-
-    // *.log should be ignored (from top-level)
-    assert!(
-        gitignore.matched(Path::new("debug.log"), false).is_ignore(),
-        "*.log should be ignored by top-level gitignore"
-    );
-    // *.gen should be ignored (from depth-2 src/generated/.gitignore)
-    assert!(
-        gitignore
-            .matched(Path::new("src/generated/output.gen"), false)
-            .is_ignore(),
-        "*.gen should be ignored by deeply nested gitignore"
-    );
-    // *.rs should NOT be ignored at any depth
-    assert!(
-        !gitignore
-            .matched(Path::new("src/generated/keep.rs"), false)
-            .is_ignore(),
-        "*.rs should not be ignored"
-    );
-}
+// test_build_gitignore_nested_subdirectory_rules and
+// test_build_gitignore_deeply_nested_rules were removed: they tested the old
+// collect_gitignores pre-walk which loaded nested .gitignore files into the
+// Gitignore returned by build_gitignore.  That behavior was removed because
+// the pre-walk could not apply rules during traversal, so gitignored dirs
+// outside the hardcoded skip list were still descended into.  Nested
+// .gitignore support now lives entirely in WalkBuilder (git_ignore(true)),
+// which applies rules correctly during the walk.  The equivalent coverage is
+// provided by test_snapshot_nested_gitignore_excludes_matching_new_files and
+// test_snapshot_walker_prunes_ignored_directories.
 
 #[test]
 fn test_snapshot_walker_prunes_ignored_directories() {
