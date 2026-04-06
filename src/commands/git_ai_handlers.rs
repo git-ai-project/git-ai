@@ -648,8 +648,35 @@ fn handle_checkpoint(args: &[String]) {
     }
 
     // If the working directory is not a git repository, we need to detect repos from file paths
-    // This happens in multi-repo workspaces where the workspace root contains multiple git repos
-    let needs_file_based_repo_detection = repo_result.is_err();
+    // This happens in multi-repo workspaces where the workspace root contains multiple git repos.
+    // We also trigger file-based detection when the CWD *is* a git repo but an edited file lives
+    // in a different git repo — most commonly a linked worktree created with `git worktree add`.
+    // In that case git-ai would otherwise attempt to checkpoint the file against the CWD repo,
+    // which cannot see changes inside the linked worktree's working tree.
+    let needs_file_based_repo_detection = repo_result.is_err()
+        || if let Ok(ref cwd_repo) = repo_result {
+            let edited = agent_run_result.as_ref().and_then(|r| {
+                if r.checkpoint_kind == CheckpointKind::Human {
+                    r.will_edit_filepaths.as_ref()
+                } else {
+                    r.edited_filepaths.as_ref()
+                }
+            });
+            edited
+                .map(|fs| {
+                    fs.iter().any(|f| {
+                        let pb = if std::path::Path::new(f).is_absolute() {
+                            std::path::PathBuf::from(f)
+                        } else {
+                            std::path::Path::new(&repository_working_dir).join(f)
+                        };
+                        !cwd_repo.path_is_in_workdir(&pb)
+                    })
+                })
+                .unwrap_or(false)
+        } else {
+            false
+        };
 
     if needs_file_based_repo_detection {
         // Workspace root is not a git repo - try to detect repositories from edited files

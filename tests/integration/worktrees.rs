@@ -1,13 +1,15 @@
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::GitTestMode;
+use crate::test_utils::fixture_path;
 use git_ai::authorship::attribution_tracker::LineAttribution;
 use git_ai::authorship::authorship_log::PromptRecord;
 use git_ai::authorship::transcript::Message;
-use git_ai::authorship::working_log::AgentId;
+use git_ai::authorship::working_log::{AgentId, CheckpointKind};
 use git_ai::git::repository as GitAiRepository;
 use insta::assert_debug_snapshot;
 use rand::Rng;
 use regex::Regex;
+use serde_json::json;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -441,4 +443,202 @@ crate::worktree_test_wrappers! {
             assert_debug_snapshot!(stats);
         }
     }
+}
+
+// ── Linked-worktree checkpoint routing ──────────────────────────────────────
+//
+// These tests reproduce the bug where an agent whose CWD is the *main* repo
+// writes a file into a *linked* worktree (created with `git worktree add`).
+// Before the fix, git-ai would fail to store any checkpoint because:
+//   1. It opened the main repo (via CWD), and
+//   2. `git status <file>` from the main repo returns nothing for files that
+//      live inside a linked worktree's working tree.
+// After the fix, git-ai detects that the edited file is outside the main
+// repo's boundary and falls back to per-file repository discovery, routing
+// the checkpoint to the linked worktree's isolated storage.
+
+/// Helper: simulate a PostToolUse (AiAgent) Claude Code hook call where the
+/// session CWD is `session_cwd` but the file being written lives in a
+/// *different* directory (`file_path`).  Returns the git-ai stdout+stderr.
+fn simulate_claude_post_tool_use(
+    repo: &crate::repos::test_repo::TestRepo,
+    session_cwd: &Path,
+    file_path: &Path,
+) -> Result<String, String> {
+    let transcript = fixture_path("example-claude-code.jsonl");
+    let hook_input = json!({
+        "cwd": session_cwd.to_string_lossy().to_string(),
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": file_path.to_string_lossy().to_string()
+        },
+        "transcript_path": transcript.to_string_lossy().to_string()
+    })
+    .to_string();
+
+    repo.git_ai_with_stdin(
+        &["checkpoint", "claude", "--hook-input", "stdin"],
+        hook_input.as_bytes(),
+    )
+}
+
+/// Helper: simulate a PreToolUse (Human) Claude Code hook call.
+fn simulate_claude_pre_tool_use(
+    repo: &crate::repos::test_repo::TestRepo,
+    session_cwd: &Path,
+    file_path: &Path,
+) -> Result<String, String> {
+    let transcript = fixture_path("example-claude-code.jsonl");
+    let hook_input = json!({
+        "cwd": session_cwd.to_string_lossy().to_string(),
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": file_path.to_string_lossy().to_string()
+        },
+        "transcript_path": transcript.to_string_lossy().to_string()
+    })
+    .to_string();
+
+    repo.git_ai_with_stdin(
+        &["checkpoint", "claude", "--hook-input", "stdin"],
+        hook_input.as_bytes(),
+    )
+}
+
+#[test]
+fn checkpoint_routes_to_linked_worktree_when_cwd_is_main_repo() {
+    // Setup: main repo with an initial commit so we have a HEAD SHA.
+    let repo = crate::repos::test_repo::TestRepo::new();
+    let mut seed = repo.filename("seed.txt");
+    seed.set_contents(crate::lines!["seed".human()]);
+    repo.stage_all_and_commit("initial").unwrap();
+
+    // Resolve the main repo's root (the TestRepo is already a linked worktree
+    // in worktree_test_wrappers!, but here we use the plain TestRepo whose CWD
+    // is the repo root itself).
+    let main_repo_root = repo.path().to_path_buf();
+
+    // Create a second linked worktree alongside the main working tree.
+    let linked_wt = unique_worktree_path();
+    run_git(&main_repo_root, &["worktree", "add", linked_wt.to_str().unwrap()]);
+
+    // Write a file inside the linked worktree.
+    let wt_file = linked_wt.join("feature.rs");
+    fs::write(
+        &wt_file,
+        "fn feature() {}\nfn feature2() {}\nfn feature3() {}\n",
+    )
+    .expect("write wt file");
+
+    // Simulate PostToolUse hook: CWD = main repo, file = linked worktree.
+    // This is the exact scenario that caused BUG-A.
+    simulate_claude_post_tool_use(&repo, &main_repo_root, &wt_file)
+        .expect("checkpoint should succeed");
+
+    // The checkpoint must land in the *linked worktree's* isolated storage,
+    // not in the main repo's plain working_logs.
+    let wt_repo =
+        GitAiRepository::find_repository_in_path(linked_wt.to_str().unwrap())
+            .expect("find linked worktree repo");
+
+    // Storage must be under {main_repo}/.git/ai/worktrees/ (worktree-isolated).
+    let expected_storage_prefix = main_repo_root.join(".git").join("ai").join("worktrees");
+    assert!(
+        wt_repo.storage.working_logs.starts_with(&expected_storage_prefix),
+        "linked worktree storage should be under .git/ai/worktrees: {}",
+        wt_repo.storage.working_logs.display()
+    );
+
+    let commit_sha = wt_repo
+        .head()
+        .expect("wt repo should have a HEAD")
+        .target()
+        .expect("HEAD should resolve");
+    let wt_working_log = wt_repo
+        .storage
+        .working_log_for_base_commit(&commit_sha)
+        .expect("open worktree working log");
+
+    let checkpoints = wt_working_log
+        .read_all_checkpoints()
+        .expect("read checkpoints");
+
+    assert!(
+        !checkpoints.is_empty(),
+        "expected at least one checkpoint in the linked worktree's working log"
+    );
+
+    let ai_checkpoint = checkpoints
+        .iter()
+        .find(|cp| cp.kind == CheckpointKind::AiAgent)
+        .expect("expected an AiAgent checkpoint for the Write");
+
+    assert_eq!(
+        ai_checkpoint.entries.len(),
+        1,
+        "checkpoint should cover exactly the written file"
+    );
+    assert_eq!(
+        ai_checkpoint.entries[0].file, "feature.rs",
+        "checkpoint entry should use the worktree-relative path"
+    );
+
+    // Cleanup the temporary worktree.
+    run_git(&main_repo_root, &["worktree", "remove", "--force", linked_wt.to_str().unwrap()]);
+}
+
+#[test]
+fn human_checkpoint_routes_to_linked_worktree_when_cwd_is_main_repo() {
+    // Same scenario as above, but for the PreToolUse (Human) hook.
+    let repo = crate::repos::test_repo::TestRepo::new();
+    let mut seed = repo.filename("seed.txt");
+    seed.set_contents(crate::lines!["seed".human()]);
+    repo.stage_all_and_commit("initial").unwrap();
+
+    let main_repo_root = repo.path().to_path_buf();
+
+    let linked_wt = unique_worktree_path();
+    run_git(&main_repo_root, &["worktree", "add", linked_wt.to_str().unwrap()]);
+
+    // Write a file in the worktree before the hook so there's an "uncaptured zone".
+    let wt_file = linked_wt.join("preexisting.rs");
+    fs::write(&wt_file, "fn old() {}\n").expect("write wt file");
+
+    // PreToolUse: informs git-ai that this file is *about to* be edited.
+    simulate_claude_pre_tool_use(&repo, &main_repo_root, &wt_file)
+        .expect("pre-tool-use checkpoint should succeed");
+
+    // The PreToolUse (Human) checkpoint should land in the worktree log.
+    let wt_repo =
+        GitAiRepository::find_repository_in_path(linked_wt.to_str().unwrap())
+            .expect("find linked worktree repo");
+
+    let commit_sha = wt_repo
+        .head()
+        .expect("wt repo should have a HEAD")
+        .target()
+        .expect("HEAD should resolve");
+    let wt_working_log = wt_repo
+        .storage
+        .working_log_for_base_commit(&commit_sha)
+        .expect("open worktree working log");
+
+    let checkpoints = wt_working_log
+        .read_all_checkpoints()
+        .expect("read checkpoints");
+
+    // A Human checkpoint is only stored when there is an uncaptured zone
+    // (i.e., content not yet attributed).  With the pre-existing file content
+    // and no prior AI checkpoint, a Human entry should be recorded.
+    let has_human = checkpoints
+        .iter()
+        .any(|cp| cp.kind == CheckpointKind::Human);
+    assert!(
+        has_human,
+        "expected a Human checkpoint in the linked worktree's working log"
+    );
+
+    run_git(&main_repo_root, &["worktree", "remove", "--force", linked_wt.to_str().unwrap()]);
 }
