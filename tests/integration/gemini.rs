@@ -896,6 +896,73 @@ fn test_gemini_e2e_partial_staging() {
     ]);
 }
 
+#[test]
+fn test_gemini_preset_bash_tool_aftertool_detects_changes() {
+    // Exercises the AfterTool bash-tool path introduced in the bash-support PR:
+    // GeminiPreset with tool_name="shell" should run the stat-diff snapshot
+    // logic and return edited_filepaths for any files changed during the call.
+    use git_ai::authorship::working_log::CheckpointKind;
+
+    let repo = TestRepo::new();
+    let fixture_path_str = fixture_path("gemini-session-simple.json")
+        .to_string_lossy()
+        .to_string();
+    let cwd = repo.canonical_path().to_string_lossy().to_string();
+    let session_id = "gemini-bash-test-session";
+    let tool_use_id = "tool-call-001";
+
+    // Commit an initial file so the repo is non-empty.
+    let file_path = repo.path().join("script.sh");
+    fs::write(&file_path, "#!/bin/sh\necho hello\n").unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+
+    // BeforeTool (pre-hook): takes a pre-snapshot.
+    let pre_hook_input = json!({
+        "session_id": session_id,
+        "tool_use_id": tool_use_id,
+        "cwd": cwd,
+        "hook_event_name": "BeforeTool",
+        "tool_name": "shell",
+        "tool_input": { "command": "echo modified > output.txt" },
+        "transcript_path": fixture_path_str,
+    });
+    let pre_flags = AgentCheckpointFlags {
+        hook_input: Some(pre_hook_input.to_string()),
+    };
+    let pre_result = GeminiPreset.run(pre_flags).expect("BeforeTool should succeed");
+    assert_eq!(pre_result.checkpoint_kind, CheckpointKind::Human);
+
+    // Simulate the bash tool writing a new file.
+    let output_path = repo.path().join("output.txt");
+    fs::write(&output_path, "modified\n").unwrap();
+
+    // AfterTool (post-hook): diffs snapshots to detect the new file.
+    let post_hook_input = json!({
+        "session_id": session_id,
+        "tool_use_id": tool_use_id,
+        "cwd": cwd,
+        "hook_event_name": "AfterTool",
+        "tool_name": "shell",
+        "tool_input": { "command": "echo modified > output.txt" },
+        "transcript_path": fixture_path_str,
+    });
+    let post_flags = AgentCheckpointFlags {
+        hook_input: Some(post_hook_input.to_string()),
+    };
+    let post_result = GeminiPreset.run(post_flags).expect("AfterTool should succeed");
+
+    assert_eq!(post_result.checkpoint_kind, CheckpointKind::AiAgent);
+    assert!(post_result.transcript.is_some(), "should have transcript");
+
+    // The bash diff should have detected output.txt as a new file.
+    let edited = post_result.edited_filepaths.expect("should have edited_filepaths from bash diff");
+    assert!(
+        edited.iter().any(|p| p.contains("output.txt")),
+        "bash diff should report output.txt as changed; got {:?}",
+        edited
+    );
+}
+
 crate::reuse_tests_in_worktree!(
     test_parse_example_gemini_json_with_model,
     test_gemini_parses_user_messages,
@@ -919,4 +986,5 @@ crate::reuse_tests_in_worktree!(
     test_gemini_e2e_multiple_tool_calls,
     test_gemini_e2e_with_resync,
     test_gemini_e2e_partial_staging,
+    test_gemini_preset_bash_tool_aftertool_detects_changes,
 );
