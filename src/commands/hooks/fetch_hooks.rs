@@ -167,13 +167,19 @@ pub fn pull_post_command_hook(
 
     if !exit_status.success() {
         // If pull --rebase hit a conflict, a rebase is paused. The pre-hook
-        // already wrote a RebaseStart; overwrite it with one that carries
-        // the resolved onto_head so `git rebase --continue` has full info.
+        // already wrote a speculative RebaseStart; cancel it first, then write
+        // a new one carrying the resolved onto_head so `git rebase --continue`
+        // has full info.
         let rebase_dir = repository.path().join("rebase-merge");
         let rebase_apply_dir = repository.path().join("rebase-apply");
-        if (rebase_dir.exists() || rebase_apply_dir.exists())
+        if config.is_rebase
+            && (rebase_dir.exists() || rebase_apply_dir.exists())
             && let Some(original_head) = &repository.pre_command_base_commit
         {
+            // Cancel the speculative RebaseStart so we don't end up with two
+            // consecutive RebaseStart events (find_rebase_start_event would
+            // return the stale one with onto_head=None).
+            cancel_speculative_rebase_start(repository);
             debug_log(&format!(
                 "Pull --rebase paused (conflict); logging RebaseStart with original_head={}",
                 original_head
