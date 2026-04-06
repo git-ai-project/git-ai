@@ -30,6 +30,39 @@ fn run_git(cwd: &Path, args: &[&str]) {
     );
 }
 
+fn run_git_stdout(cwd: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("git command should run");
+    assert!(
+        output.status.success(),
+        "git {:?} failed:\nstdout: {}\nstderr: {}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn expected_worktree_storage_prefix(main_repo_root: &Path) -> PathBuf {
+    let git_common_dir = PathBuf::from(run_git_stdout(
+        main_repo_root,
+        &["rev-parse", "--git-common-dir"],
+    ));
+    let git_common_dir = if git_common_dir.is_relative() {
+        main_repo_root.join(git_common_dir)
+    } else {
+        git_common_dir
+    };
+    git_common_dir.join("ai").join("worktrees")
+}
+
+fn canonicalize_for_assert(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
 fn normalize_blame_output(blame_output: &str) -> String {
     let re_sha = Regex::new(r"[0-9a-f]{40}|[0-9a-f]{7,}").expect("valid sha regex");
     let result = re_sha.replace_all(blame_output, "COMMIT_SHA");
@@ -545,21 +578,17 @@ fn checkpoint_routes_to_linked_worktree_when_cwd_is_main_repo() {
     let wt_repo = GitAiRepository::find_repository_in_path(linked_wt.to_str().unwrap())
         .expect("find linked worktree repo");
 
-    // Storage must be under {main_repo}/.git/ai/worktrees/ (worktree-isolated).
-    // Canonicalize to resolve symlinks (e.g. /var/... -> /private/var/... on macOS).
-    let expected_storage_prefix = main_repo_root
-        .canonicalize()
-        .expect("canonical main repo root")
-        .join(".git")
-        .join("ai")
-        .join("worktrees");
+    // Storage must be rooted under the repository's shared git-common-dir.
+    // We ask git for that path directly instead of canonicalizing the repo
+    // root, because Windows canonicalize() uses extended-length path syntax.
+    let expected_storage_prefix =
+        canonicalize_for_assert(&expected_worktree_storage_prefix(&main_repo_root));
+    let actual_storage = canonicalize_for_assert(&wt_repo.storage.working_logs);
     assert!(
-        wt_repo
-            .storage
-            .working_logs
-            .starts_with(&expected_storage_prefix),
-        "linked worktree storage should be under .git/ai/worktrees: {}",
-        wt_repo.storage.working_logs.display()
+        actual_storage.starts_with(&expected_storage_prefix),
+        "linked worktree storage should be under git-common-dir/ai/worktrees:\nexpected prefix: {}\nactual: {}",
+        expected_storage_prefix.display(),
+        actual_storage.display()
     );
 
     let commit_sha = wt_repo
@@ -653,20 +682,17 @@ fn checkpoint_routes_to_nested_linked_worktree_when_cwd_is_main_repo() {
     let wt_repo = GitAiRepository::find_repository_in_path(linked_wt.to_str().unwrap())
         .expect("find nested worktree repo");
 
-    // Canonicalize to resolve symlinks (e.g. /var/... -> /private/var/... on macOS).
-    let expected_storage_prefix = main_repo_root
-        .canonicalize()
-        .expect("canonical main repo root")
-        .join(".git")
-        .join("ai")
-        .join("worktrees");
+    // Storage must be rooted under the repository's shared git-common-dir.
+    // We ask git for that path directly instead of canonicalizing the repo
+    // root, because Windows canonicalize() uses extended-length path syntax.
+    let expected_storage_prefix =
+        canonicalize_for_assert(&expected_worktree_storage_prefix(&main_repo_root));
+    let actual_storage = canonicalize_for_assert(&wt_repo.storage.working_logs);
     assert!(
-        wt_repo
-            .storage
-            .working_logs
-            .starts_with(&expected_storage_prefix),
-        "nested worktree storage should be under .git/ai/worktrees: {}",
-        wt_repo.storage.working_logs.display()
+        actual_storage.starts_with(&expected_storage_prefix),
+        "nested worktree storage should be under git-common-dir/ai/worktrees:\nexpected prefix: {}\nactual: {}",
+        expected_storage_prefix.display(),
+        actual_storage.display()
     );
 
     let commit_sha = wt_repo
