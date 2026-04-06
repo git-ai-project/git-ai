@@ -929,7 +929,9 @@ fn test_gemini_preset_bash_tool_aftertool_detects_changes() {
     let pre_flags = AgentCheckpointFlags {
         hook_input: Some(pre_hook_input.to_string()),
     };
-    let pre_result = GeminiPreset.run(pre_flags).expect("BeforeTool should succeed");
+    let pre_result = GeminiPreset
+        .run(pre_flags)
+        .expect("BeforeTool should succeed");
     assert_eq!(pre_result.checkpoint_kind, CheckpointKind::Human);
 
     // Simulate the bash tool writing a new file.
@@ -949,13 +951,17 @@ fn test_gemini_preset_bash_tool_aftertool_detects_changes() {
     let post_flags = AgentCheckpointFlags {
         hook_input: Some(post_hook_input.to_string()),
     };
-    let post_result = GeminiPreset.run(post_flags).expect("AfterTool should succeed");
+    let post_result = GeminiPreset
+        .run(post_flags)
+        .expect("AfterTool should succeed");
 
     assert_eq!(post_result.checkpoint_kind, CheckpointKind::AiAgent);
     assert!(post_result.transcript.is_some(), "should have transcript");
 
     // The bash diff should have detected output.txt as a new file.
-    let edited = post_result.edited_filepaths.expect("should have edited_filepaths from bash diff");
+    let edited = post_result
+        .edited_filepaths
+        .expect("should have edited_filepaths from bash diff");
     assert!(
         edited.iter().any(|p| p.contains("output.txt")),
         "bash diff should report output.txt as changed; got {:?}",
