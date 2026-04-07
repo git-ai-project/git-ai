@@ -1137,12 +1137,12 @@ fn resolve_cas_messages(conn: &Connection, deferred: &[DeferredPrompt]) {
                                     {
                                         let json_str =
                                             serde_json::to_string(content).unwrap_or_default();
-                                        if let Ok(cas_obj) = serde_json::from_value::<
-                                            CasMessagesObject,
-                                        >(
-                                            content.clone()
-                                        ) && let Ok(messages_json) =
-                                            serde_json::to_string(&cas_obj.messages)
+                                        if let Ok(cas_obj) =
+                                            serde_json::from_value::<CasMessagesObject>(
+                                                content.clone(),
+                                            )
+                                            && let Ok(messages_json) =
+                                                serde_json::to_string(&cas_obj.messages)
                                         {
                                             resolved_messages
                                                 .insert(result.hash.clone(), messages_json);
@@ -1151,8 +1151,8 @@ fn resolve_cas_messages(conn: &Connection, deferred: &[DeferredPrompt]) {
                                             if let Ok(db_mutex) = InternalDatabase::global()
                                                 && let Ok(mut db_guard) = db_mutex.lock()
                                             {
-                                                let _ = db_guard
-                                                    .set_cas_cache(&result.hash, &json_str);
+                                                let _ =
+                                                    db_guard.set_cas_cache(&result.hash, &json_str);
                                             }
                                         } else {
                                             // CAS returned ok + content but it didn't
