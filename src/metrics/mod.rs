@@ -43,6 +43,9 @@ pub use types::{EventValues, METRICS_API_VERSION, MetricEvent, MetricsBatch};
 /// record(values, attrs);
 /// ```
 pub fn record<V: EventValues>(values: V, attrs: EventAttributes) {
+    if attrs.tool == Some(Some("mock_ai".to_string())) {
+        return;
+    }
     let event = MetricEvent::new(&values, attrs.to_sparse());
     // Write directly to observability log
     crate::observability::log_metrics(vec![event]);
