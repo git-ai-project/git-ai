@@ -64,57 +64,29 @@ pub fn log_message(message: &str, level: &str, context: Option<serde_json::Value
 /// Events are batched into envelopes of up to 250 events each.
 /// Events originating from the `mock_ai` test preset are silently
 /// dropped so they never reach telemetry.
-pub fn log_metrics(
-    #[cfg_attr(any(test, feature = "test-support"), allow(unused))] events: Vec<MetricEvent>,
-) {
-    #[cfg(any(test, feature = "test-support"))]
-    return;
+pub fn log_metrics(events: Vec<MetricEvent>) {
+    let events: Vec<MetricEvent> = events
+        .into_iter()
+        .filter(|e| !crate::metrics::is_mock_ai(e))
+        .collect();
+    submit_metric_events(events);
+}
 
-    #[cfg(not(any(test, feature = "test-support")))]
-    {
-        let events: Vec<MetricEvent> = events.into_iter().filter(|e| !is_mock_ai(e)).collect();
-        if events.is_empty() {
-            return;
-        }
-
-        // Split into chunks of MAX_METRICS_PER_ENVELOPE
-        for chunk in events.chunks(MAX_METRICS_PER_ENVELOPE) {
-            let envelope = crate::daemon::TelemetryEnvelope::Metrics {
-                events: chunk.to_vec(),
-            };
-            submit_telemetry_envelope(vec![envelope]);
-        }
+#[cfg(not(any(test, feature = "test-support")))]
+fn submit_metric_events(events: Vec<MetricEvent>) {
+    if events.is_empty() {
+        return;
+    }
+    for chunk in events.chunks(MAX_METRICS_PER_ENVELOPE) {
+        let envelope = crate::daemon::TelemetryEnvelope::Metrics {
+            events: chunk.to_vec(),
+        };
+        submit_telemetry_envelope(vec![envelope]);
     }
 }
 
-/// Returns `true` when the event originates from the `mock_ai` test preset.
-///
-/// Checks both the tool attribute (position 20, set for AgentUsage /
-/// Checkpoint / InstallHooks events) and the `tool_model_pairs` committed
-/// value (position 3, keys like `"mock_ai::unknown"`).
-#[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
-fn is_mock_ai(event: &MetricEvent) -> bool {
-    use crate::metrics::{MOCK_AI_TOOL, attrs::attr_pos, events::committed_pos};
-    use serde_json::Value;
-
-    let tool_pos = attr_pos::TOOL.to_string();
-    if let Some(Value::String(tool)) = event.attrs.get(&tool_pos)
-        && tool == MOCK_AI_TOOL
-    {
-        return true;
-    }
-
-    let pairs_pos = committed_pos::TOOL_MODEL_PAIRS.to_string();
-    if let Some(Value::Array(pairs)) = event.values.get(&pairs_pos)
-        && pairs
-            .iter()
-            .any(|p| matches!(p, Value::String(s) if s.starts_with(MOCK_AI_TOOL)))
-    {
-        return true;
-    }
-
-    false
-}
+#[cfg(any(test, feature = "test-support"))]
+fn submit_metric_events(_events: Vec<MetricEvent>) {}
 
 #[cfg(test)]
 mod tests {
@@ -188,78 +160,5 @@ mod tests {
     #[test]
     fn test_max_metrics_per_envelope() {
         assert_eq!(MAX_METRICS_PER_ENVELOPE, 250);
-    }
-
-    // is_mock_ai tests
-    use crate::metrics::{
-        MOCK_AI_TOOL, attrs::attr_pos, events::committed_pos, types::SparseArray,
-    };
-    use serde_json::Value;
-
-    fn event_with_tool_attr(tool: &str) -> MetricEvent {
-        let mut attrs: SparseArray = SparseArray::new();
-        attrs.insert(attr_pos::TOOL.to_string(), Value::String(tool.to_string()));
-        MetricEvent {
-            timestamp: 0,
-            event_id: 2,
-            values: SparseArray::new(),
-            attrs,
-        }
-    }
-
-    fn event_with_tool_model_pairs(pairs: Vec<&str>) -> MetricEvent {
-        let mut values: SparseArray = SparseArray::new();
-        values.insert(
-            committed_pos::TOOL_MODEL_PAIRS.to_string(),
-            Value::Array(
-                pairs
-                    .into_iter()
-                    .map(|s| Value::String(s.to_string()))
-                    .collect(),
-            ),
-        );
-        MetricEvent {
-            timestamp: 0,
-            event_id: 1,
-            values,
-            attrs: SparseArray::new(),
-        }
-    }
-
-    #[test]
-    fn test_is_mock_ai_true_for_tool_attr() {
-        assert!(super::is_mock_ai(&event_with_tool_attr(MOCK_AI_TOOL)));
-    }
-
-    #[test]
-    fn test_is_mock_ai_false_for_other_tool_attr() {
-        assert!(!super::is_mock_ai(&event_with_tool_attr("claude-code")));
-    }
-
-    #[test]
-    fn test_is_mock_ai_true_for_committed_pairs() {
-        assert!(super::is_mock_ai(&event_with_tool_model_pairs(vec![
-            "all",
-            "mock_ai::unknown",
-        ])));
-    }
-
-    #[test]
-    fn test_is_mock_ai_false_for_other_committed_pairs() {
-        assert!(!super::is_mock_ai(&event_with_tool_model_pairs(vec![
-            "all",
-            "claude-code::claude-sonnet-4-20250514",
-        ])));
-    }
-
-    #[test]
-    fn test_is_mock_ai_false_for_empty_event() {
-        let event = MetricEvent {
-            timestamp: 0,
-            event_id: 1,
-            values: SparseArray::new(),
-            attrs: SparseArray::new(),
-        };
-        assert!(!super::is_mock_ai(&event));
     }
 }
