@@ -207,11 +207,20 @@ fn handle_populate(args: &[String]) {
         }
     };
 
-    // Initialize schema
+    // Initialize schema (CREATE TABLE IF NOT EXISTS — preserves any user-added columns)
     if let Err(e) = conn.execute_batch(PROMPTS_DB_SCHEMA) {
         eprintln!("Failed to initialize schema: {}", e);
         std::process::exit(1);
     }
+
+    // Each populate is a *fresh snapshot* of the current --since window. Clear prior
+    // rows so re-running with a different --since gives an answer that actually reflects
+    // the new window (not the union of every window you've ever queried).
+    // The schema is kept, so any user-added analysis columns (per the prompt-analysis
+    // skill workflow) survive across runs.
+    let _ = conn.execute("DELETE FROM prompts", []);
+    let _ = conn.execute("DELETE FROM pointers", []);
+    let _ = conn.execute("DELETE FROM sqlite_sequence WHERE name='prompts'", []);
 
     // Log filter info
     eprintln!("Fetching prompts...");
@@ -614,15 +623,19 @@ fn reachable_commits(repo: &Repository) -> HashSet<String> {
 
 /// Bulk-fetch committer timestamps for a set of commit SHAs.
 /// Returns map of commit_sha -> unix timestamp. Missing commits are silently dropped.
-/// Pattern: `git log --no-walk --format=%H %ct sha1 sha2 ...` in a single invocation.
+///
+/// Uses `git show -s --format=%H %ct <sha>...` rather than `git log` deliberately:
+/// `git show` with explicit SHAs is a per-object inspection that does NOT walk
+/// history under any circumstance. We pass `-s` to suppress the diff and a custom
+/// format so the output is one line per commit with no extra material.
 fn commit_dates_for(repo: &Repository, commit_shas: &[String]) -> HashMap<String, i64> {
     if commit_shas.is_empty() {
         return HashMap::new();
     }
 
     let mut args = repo.global_args_for_exec();
-    args.push("log".to_string());
-    args.push("--no-walk".to_string());
+    args.push("show".to_string());
+    args.push("-s".to_string());
     args.push("--format=%H %ct".to_string());
     for sha in commit_shas {
         args.push(sha.clone());
