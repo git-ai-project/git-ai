@@ -899,6 +899,9 @@ fn apply_blame_for_side(
         no_output: true,
         use_prompt_hashes_as_names: true,
         newest_commit: Some(newest_commit.unwrap_or(from_commit).to_string()),
+        detect_copies: 1, // -C: trace lines moved within the same commit (e.g. when a
+        // neighbouring comment is deleted in the same hunk, git blame without -C
+        // attributes the unchanged lines to the new commit instead of the originating one)
         ..GitAiBlameOptions::default()
     };
     if matches!(side, LineSide::New) {
