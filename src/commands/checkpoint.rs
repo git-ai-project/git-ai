@@ -626,10 +626,13 @@ fn resolve_live_checkpoint_execution(
             .map(|files| files.is_empty())
             .unwrap_or(true);
         let has_initial_attributions = !working_log.read_initial_attributions().files.is_empty();
+        let has_explicit_ai_agent_context =
+            kind != CheckpointKind::Human && agent_run_result.is_some();
 
         if has_no_ai_edits
             && !has_initial_attributions
             && !Config::get().get_feature_flags().inter_commit_move
+            && !has_explicit_ai_agent_context
         {
             debug_log("No AI edits in pre-commit checkpoint, skipping");
             return Ok(None);

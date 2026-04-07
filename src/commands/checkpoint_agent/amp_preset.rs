@@ -4,7 +4,10 @@ use crate::{
         working_log::{AgentId, CheckpointKind},
     },
     commands::checkpoint_agent::{
-        agent_presets::{AgentCheckpointFlags, AgentCheckpointPreset, AgentRunResult},
+        agent_presets::{
+            AgentCheckpointFlags, AgentCheckpointPreset, AgentRunResult, BashPreHookStrategy,
+            prepare_agent_bash_pre_hook,
+        },
         bash_tool::{self, Agent, BashCheckpointAction, HookEvent, ToolClass},
     },
     error::GitAiError,
@@ -152,19 +155,18 @@ impl AgentCheckpointPreset for AmpPreset {
         };
 
         if is_pre_tool_use {
-            // For bash tools, take a pre-snapshot before the tool executes
-            let mut pre_hook_captured_id = None;
-            if is_bash_tool && let Some(ref cwd) = hook_input.cwd {
-                let repo_root = Path::new(cwd.as_str());
-                pre_hook_captured_id = bash_tool::handle_bash_tool(
-                    HookEvent::PreToolUse,
-                    repo_root,
-                    &agent_id.id,
-                    hook_input.tool_use_id.as_deref().unwrap_or("bash"),
-                )
-                .ok()
-                .and_then(|r| r.captured_checkpoint.map(|info| info.capture_id));
-            }
+            let inflight_agent_metadata =
+                Self::build_agent_metadata(&hook_input, resolved_thread_path.as_deref());
+            let pre_hook_captured_id = prepare_agent_bash_pre_hook(
+                is_bash_tool,
+                hook_input.cwd.as_deref(),
+                &agent_id.id,
+                hook_input.tool_use_id.as_deref().unwrap_or("bash"),
+                &agent_id,
+                inflight_agent_metadata.as_ref(),
+                BashPreHookStrategy::EmitHumanCheckpoint,
+            )?
+            .captured_checkpoint_id();
             return Ok(AgentRunResult {
                 agent_id,
                 agent_metadata: None,
@@ -215,30 +217,8 @@ impl AgentCheckpointPreset for AmpPreset {
             file_paths
         };
 
-        let mut agent_metadata = HashMap::new();
-        if let Some(tool_use_id) = hook_input.tool_use_id.clone() {
-            agent_metadata.insert("tool_use_id".to_string(), tool_use_id);
-        }
-        if let Ok(threads_path) = std::env::var("GIT_AI_AMP_THREADS_PATH")
-            && !threads_path.trim().is_empty()
-        {
-            agent_metadata.insert("__test_amp_threads_path".to_string(), threads_path);
-        }
-        if let Some(path) = resolved_thread_path {
-            agent_metadata.insert(
-                "transcript_path".to_string(),
-                path.to_string_lossy().to_string(),
-            );
-        }
-        if let Some(thread_id) = hook_input.thread_id.or_else(|| {
-            agent_metadata
-                .get("transcript_path")
-                .and_then(|p| Path::new(p).file_stem())
-                .and_then(|s| s.to_str())
-                .map(|s| s.to_string())
-        }) {
-            agent_metadata.insert("thread_id".to_string(), thread_id);
-        }
+        let agent_metadata =
+            Self::build_agent_metadata(&hook_input, resolved_thread_path.as_deref());
 
         let bash_captured_checkpoint_id = bash_result
             .as_ref()
@@ -248,11 +228,7 @@ impl AgentCheckpointPreset for AmpPreset {
 
         Ok(AgentRunResult {
             agent_id,
-            agent_metadata: if agent_metadata.is_empty() {
-                None
-            } else {
-                Some(agent_metadata)
-            },
+            agent_metadata,
             checkpoint_kind: CheckpointKind::AiAgent,
             transcript: Some(transcript),
             repo_working_dir: hook_input.cwd,
@@ -265,6 +241,42 @@ impl AgentCheckpointPreset for AmpPreset {
 }
 
 impl AmpPreset {
+    fn build_agent_metadata(
+        hook_input: &AmpHookInput,
+        resolved_thread_path: Option<&Path>,
+    ) -> Option<HashMap<String, String>> {
+        let mut agent_metadata = HashMap::new();
+        if let Some(tool_use_id) = hook_input.tool_use_id.as_ref() {
+            agent_metadata.insert("tool_use_id".to_string(), tool_use_id.clone());
+        }
+        if let Ok(threads_path) = std::env::var("GIT_AI_AMP_THREADS_PATH")
+            && !threads_path.trim().is_empty()
+        {
+            agent_metadata.insert("__test_amp_threads_path".to_string(), threads_path);
+        }
+        if let Some(path) = resolved_thread_path {
+            agent_metadata.insert(
+                "transcript_path".to_string(),
+                path.to_string_lossy().to_string(),
+            );
+        }
+        if let Some(thread_id) = hook_input.thread_id.clone().or_else(|| {
+            agent_metadata
+                .get("transcript_path")
+                .and_then(|p| Path::new(p).file_stem())
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+        }) {
+            agent_metadata.insert("thread_id".to_string(), thread_id);
+        }
+
+        if agent_metadata.is_empty() {
+            None
+        } else {
+            Some(agent_metadata)
+        }
+    }
+
     /// Get the default Amp threads directory based on platform.
     /// Expected layout: `{threads_dir}/T-THREAD_ID.json`
     pub fn amp_threads_path() -> Result<PathBuf, GitAiError> {
