@@ -320,7 +320,6 @@ fn print_help() {
     eprintln!("    --since <time>        Only include prompts after this time (default: 30d)");
     eprintln!("    --author <name>       Filter by human author (default: current git user)");
     eprintln!("    --all-authors         Include prompts from all authors");
-    eprintln!("    --all-repositories    Include prompts from all repositories");
     eprintln!("    exec \"<SQL>\"          Execute arbitrary SQL on prompts.db");
     eprintln!("    list                  List prompts as TSV");
     eprintln!("    next                  Get next prompt as JSON (iterator pattern)");

@@ -27,9 +27,10 @@ First, determine scope from the user's question:
 |---------------|--------------|
 | "my prompts" or nothing specified | (default - current user, current repo) |
 | "team", "everyone", "all authors" | `--all-authors` |
-| "all projects", "all repos" | `--all-repositories` |
 | specific person's name | `--author "<name>"` |
 | specific time range | `--since <days>` (default: 30) |
+
+Discovery is notes-only — `git-ai prompts` always operates on the current repository (the working directory must be inside a git repo). To analyze multiple repos, run the command separately in each.
 
 Run initialization:
 ```bash
