@@ -626,6 +626,13 @@ fn test_classify_tool_opencode() {
     assert_eq!(classify_tool(Agent::OpenCode, "unknown"), ToolClass::Skip);
 }
 
+#[test]
+fn test_classify_tool_codex() {
+    assert_eq!(classify_tool(Agent::Codex, "Bash"), ToolClass::Bash);
+    assert_eq!(classify_tool(Agent::Codex, "apply_patch"), ToolClass::Skip);
+    assert_eq!(classify_tool(Agent::Codex, "unknown"), ToolClass::Skip);
+}
+
 // ===========================================================================
 // Gitignore Filtering
 // ===========================================================================
@@ -1200,6 +1207,7 @@ fn test_diff_no_gitignore_includes_all_new_files() {
         repo_root: PathBuf::from("/tmp"),
         effective_worktree_wm: None,
         per_file_wm: HashMap::new(),
+        inflight_agent_context: None,
     };
 
     let mut post_entries = HashMap::new();
@@ -1235,6 +1243,7 @@ fn test_diff_no_gitignore_includes_all_new_files() {
         repo_root: PathBuf::from("/tmp"),
         effective_worktree_wm: None,
         per_file_wm: HashMap::new(),
+        inflight_agent_context: None,
     };
 
     let result = diff(&pre, &post);

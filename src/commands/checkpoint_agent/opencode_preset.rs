@@ -4,7 +4,10 @@ use crate::{
         working_log::{AgentId, CheckpointKind},
     },
     commands::checkpoint_agent::{
-        agent_presets::{AgentCheckpointFlags, AgentCheckpointPreset, AgentRunResult},
+        agent_presets::{
+            AgentCheckpointFlags, AgentCheckpointPreset, AgentRunResult, BashPreHookStrategy,
+            prepare_agent_bash_pre_hook,
+        },
         bash_tool::{self, Agent, BashCheckpointAction, HookEvent, ToolClass},
     },
     error::GitAiError,
@@ -219,19 +222,16 @@ impl AgentCheckpointPreset for OpenCodePreset {
 
         // Check if this is a PreToolUse event (human checkpoint)
         if hook_event_name == "PreToolUse" {
-            // For bash tools, take a pre-snapshot before the tool executes
-            let mut pre_hook_captured_id = None;
-            if is_bash_tool {
-                let repo_root = Path::new(&cwd);
-                pre_hook_captured_id = bash_tool::handle_bash_tool(
-                    HookEvent::PreToolUse,
-                    repo_root,
-                    &agent_id.id,
-                    tool_use_id,
-                )
-                .ok()
-                .and_then(|r| r.captured_checkpoint.map(|info| info.capture_id));
-            }
+            let pre_hook_captured_id = prepare_agent_bash_pre_hook(
+                is_bash_tool,
+                Some(&cwd),
+                &agent_id.id,
+                tool_use_id,
+                &agent_id,
+                Some(&agent_metadata),
+                BashPreHookStrategy::EmitHumanCheckpoint,
+            )?
+            .captured_checkpoint_id();
             return Ok(AgentRunResult {
                 agent_id,
                 agent_metadata: None,
