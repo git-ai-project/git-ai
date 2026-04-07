@@ -157,14 +157,19 @@ impl CiContext {
                     .ok();
 
                 let original_commits = if let Some(ref base) = merge_base {
-                    CommitRange::new_infer_refname(
+                    let mut commits = CommitRange::new_infer_refname(
                         &self.repo,
                         base.clone(),
                         head_sha.to_string(),
                         None,
                     )
                     .map(|r| r.all_commits())
-                    .unwrap_or_else(|_| vec![head_sha.to_string()])
+                    .unwrap_or_else(|_| vec![head_sha.to_string()]);
+                    // CommitRange uses `git rev-list` which returns newest-first.
+                    // rewrite_authorship_after_rebase_v2 expects oldest-first (same as
+                    // the local rebase hook which calls .reverse() after rev-list).
+                    commits.reverse();
+                    commits
                 } else {
                     vec![head_sha.to_string()]
                 };
