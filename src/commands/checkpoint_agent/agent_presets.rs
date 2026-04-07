@@ -77,15 +77,22 @@ pub(crate) fn prepare_agent_bash_pre_hook(
 ) -> Result<BashPreHookResult, GitAiError> {
     let captured_checkpoint_id = if is_bash_tool {
         if let Some(cwd) = repo_working_dir {
-            bash_tool::handle_bash_pre_tool_use_with_context(
+            match bash_tool::handle_bash_pre_tool_use_with_context(
                 Path::new(cwd),
                 session_id,
                 tool_use_id,
                 agent_id,
                 agent_metadata,
-            )?
-            .captured_checkpoint
-            .map(|info| info.capture_id)
+            ) {
+                Ok(result) => result.captured_checkpoint.map(|info| info.capture_id),
+                Err(error) => {
+                    crate::utils::debug_log(&format!(
+                        "Bash pre-hook snapshot failed for {} session {}: {}",
+                        agent_id.tool, session_id, error
+                    ));
+                    None
+                }
+            }
         } else {
             None
         }
@@ -105,6 +112,47 @@ pub(crate) fn prepare_agent_bash_pre_hook(
 
 pub trait AgentCheckpointPreset {
     fn run(&self, flags: AgentCheckpointFlags) -> Result<AgentRunResult, GitAiError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_prepare_agent_bash_pre_hook_swallows_snapshot_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing_repo = temp.path().join("missing-repo");
+        let agent_id = AgentId {
+            tool: "codex".to_string(),
+            id: "session-1".to_string(),
+            model: "gpt-5.4".to_string(),
+        };
+
+        let result = prepare_agent_bash_pre_hook(
+            true,
+            Some(missing_repo.to_string_lossy().as_ref()),
+            "session-1",
+            "tool-1",
+            &agent_id,
+            None,
+            BashPreHookStrategy::EmitHumanCheckpoint,
+        )
+        .expect("pre-hook helper should treat snapshot failures as best-effort");
+
+        match result {
+            BashPreHookResult::EmitHumanCheckpoint {
+                captured_checkpoint_id,
+            } => {
+                assert!(
+                    captured_checkpoint_id.is_none(),
+                    "failed pre-hook snapshot should not produce a captured checkpoint"
+                );
+            }
+            BashPreHookResult::SkipCheckpoint { .. } => {
+                panic!("expected EmitHumanCheckpoint result");
+            }
+        }
+    }
 }
 
 // Claude Code to checkpoint preset
