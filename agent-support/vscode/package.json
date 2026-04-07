@@ -90,7 +90,7 @@
     "@vscode/vsce": "3.7.1",
     "eslint": "^9.25.1",
     "ovsx": "0.10.9",
-    "typescript": "^5.8.3"
+    "typescript": "^6.0.2"
   },
   "resolutions": {
     "glob": ">=11.1.0",
