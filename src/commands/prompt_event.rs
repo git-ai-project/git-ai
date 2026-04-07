@@ -19,6 +19,48 @@ pub mod prompt_event_kind {
     pub const THINKING_MESSAGE: &str = "ThinkingMessage";
     pub const TOOL_CALL: &str = "ToolCall";
     pub const FILE_WRITE: &str = "FileWrite";
+    pub const SKILL_INVOCATION: &str = "SkillInvocation";
+    pub const MCP_CALL: &str = "McpCall";
+}
+
+/// Maximum length for `input_text` payloads (HumanMessage/AiMessage only).
+const INPUT_TEXT_MAX_BYTES: usize = 1024;
+
+/// Compute the 16-char content hash always stored on a PromptEvent.
+fn compute_input_hash(content: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    let digest = hasher.finalize();
+    format!("{:x}", digest)[..16].to_string()
+}
+
+/// Truncate text on a UTF-8 boundary, used only for `input_text` payloads.
+fn truncate_for_text(s: &str) -> String {
+    if s.len() <= INPUT_TEXT_MAX_BYTES {
+        return s.to_string();
+    }
+    let safe_end = s.floor_char_boundary(INPUT_TEXT_MAX_BYTES);
+    s[..safe_end].to_string()
+}
+
+/// Parse an ISO-8601 timestamp string into unix milliseconds.
+fn parse_iso_to_unix_ms(ts: &str) -> Option<u64> {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .ok()
+        .map(|dt| dt.timestamp_millis() as u64)
+}
+
+/// Classify a Claude tool_use into the right PromptEvent kind.
+fn kind_for_tool(tool_name: &str) -> &'static str {
+    if tool_name.starts_with("mcp__") {
+        prompt_event_kind::MCP_CALL
+    } else if matches!(tool_name, "Write" | "Edit" | "MultiEdit") {
+        prompt_event_kind::FILE_WRITE
+    } else if tool_name == "Skill" || tool_name == "SlashCommand" {
+        prompt_event_kind::SKILL_INVOCATION
+    } else {
+        prompt_event_kind::TOOL_CALL
+    }
 }
 
 /// Apply parent_id and parent_id_estimated to a PromptEventValues builder.
@@ -40,9 +82,16 @@ struct TranscriptEvent {
     kind: String,
     /// Content used for stable ID generation.
     content_hash_input: String,
-    /// Timestamp of the event, if available.
-    #[allow(dead_code)]
+    /// Wall-clock timestamp of the event, if available.
     timestamp: Option<String>,
+    /// Tool/skill/mcp server name (for tool_use kinds).
+    tool_call_name: Option<String>,
+    /// Model id (for AiMessage/ThinkingMessage).
+    model: Option<String>,
+    /// SHA256[..16] of the normalized payload — always populated.
+    input_hash: String,
+    /// Truncated message text — only set for HumanMessage/AiMessage.
+    input_text: Option<String>,
 }
 
 /// State file for tracking emitted events per session.
@@ -133,10 +182,15 @@ fn parse_claude_transcript(transcript_path: &str) -> Result<Vec<TranscriptEvent>
                         kind: prompt_event_kind::HUMAN_MESSAGE.to_string(),
                         content_hash_input: truncate_for_hash(&text),
                         timestamp,
+                        tool_call_name: None,
+                        model: None,
+                        input_hash: compute_input_hash(&text),
+                        input_text: Some(truncate_for_text(&text)),
                     });
                 }
             }
             Some("assistant") => {
+                let model = entry["message"]["model"].as_str().map(|s| s.to_string());
                 if let Some(content_array) = entry["message"]["content"].as_array() {
                     for item in content_array {
                         match item["type"].as_str() {
@@ -148,6 +202,10 @@ fn parse_claude_transcript(transcript_path: &str) -> Result<Vec<TranscriptEvent>
                                         kind: prompt_event_kind::THINKING_MESSAGE.to_string(),
                                         content_hash_input: truncate_for_hash(thinking),
                                         timestamp: timestamp.clone(),
+                                        tool_call_name: None,
+                                        model: model.clone(),
+                                        input_hash: compute_input_hash(thinking),
+                                        input_text: None,
                                     });
                                 }
                             }
@@ -159,6 +217,10 @@ fn parse_claude_transcript(transcript_path: &str) -> Result<Vec<TranscriptEvent>
                                         kind: prompt_event_kind::AI_MESSAGE.to_string(),
                                         content_hash_input: truncate_for_hash(text),
                                         timestamp: timestamp.clone(),
+                                        tool_call_name: None,
+                                        model: model.clone(),
+                                        input_hash: compute_input_hash(text),
+                                        input_text: Some(truncate_for_text(text)),
                                     });
                                 }
                             }
@@ -166,16 +228,16 @@ fn parse_claude_transcript(transcript_path: &str) -> Result<Vec<TranscriptEvent>
                                 let tool_name =
                                     item["name"].as_str().unwrap_or("unknown").to_string();
                                 let tool_id = item["id"].as_str().unwrap_or("").to_string();
-                                let is_file_write =
-                                    matches!(tool_name.as_str(), "Write" | "Edit" | "MultiEdit");
+                                let kind = kind_for_tool(&tool_name).to_string();
+                                let hash_input = format!("{}:{}", tool_name, tool_id);
                                 events.push(TranscriptEvent {
-                                    kind: if is_file_write {
-                                        prompt_event_kind::FILE_WRITE.to_string()
-                                    } else {
-                                        prompt_event_kind::TOOL_CALL.to_string()
-                                    },
-                                    content_hash_input: format!("{}:{}", tool_name, tool_id),
+                                    kind,
+                                    content_hash_input: hash_input.clone(),
                                     timestamp: timestamp.clone(),
+                                    tool_call_name: Some(tool_name),
+                                    model: model.clone(),
+                                    input_hash: compute_input_hash(&hash_input),
+                                    input_text: None,
                                 });
                             }
                             _ => {}
@@ -281,8 +343,23 @@ fn process_claude_prompt_events(hook_input: &str) -> Result<(), GitAiError> {
 
     for (i, eid, parent_id, parent_estimated) in &new_events {
         let evt = &all_events[*i];
-        let values = PromptEventValues::new().kind(&evt.kind).event_id(eid);
-        let values = apply_parent_id(values, parent_id.clone(), *parent_estimated);
+        let mut values = PromptEventValues::new()
+            .kind(&evt.kind)
+            .event_id(eid)
+            .input_hash(&evt.input_hash);
+        values = apply_parent_id(values, parent_id.clone(), *parent_estimated);
+        if let Some(name) = &evt.tool_call_name {
+            values = values.tool_call_name(name);
+        }
+        if let Some(model) = &evt.model {
+            values = values.model(model);
+        }
+        if let Some(text) = &evt.input_text {
+            values = values.input_text(text);
+        }
+        if let Some(ts) = evt.timestamp.as_deref().and_then(parse_iso_to_unix_ms) {
+            values = values.start_ts(ts);
+        }
 
         let event = MetricEvent::new(&values, attrs.to_sparse());
         metric_events.push(event);
@@ -353,8 +430,21 @@ fn emit_single_event_from_hook(
         (None, false)
     };
 
-    let values = PromptEventValues::new().kind(kind).event_id(&event_id);
-    let values = apply_parent_id(values, parent_id, parent_estimated);
+    let mut values = PromptEventValues::new()
+        .kind(kind)
+        .event_id(&event_id)
+        .input_hash(compute_input_hash(&content_hash_input));
+    values = apply_parent_id(values, parent_id, parent_estimated);
+    if hook_event_name == "UserPromptSubmit"
+        && let Some(prompt) = hook_data["prompt"].as_str()
+    {
+        values = values.input_text(truncate_for_text(prompt));
+    }
+    if matches!(hook_event_name, "PreToolUse" | "PostToolUse" | "AfterTool")
+        && let Some(tool_name) = hook_data["tool_name"].as_str()
+    {
+        values = values.tool_call_name(tool_name);
+    }
 
     let attrs = build_prompt_event_attrs(prompt_id, session_id);
     let metric_event = MetricEvent::new(&values, attrs.to_sparse());
@@ -453,8 +543,14 @@ fn process_generic_prompt_events(agent: &str, hook_input: &str) -> Result<(), Gi
         (None, false)
     };
 
-    let values = PromptEventValues::new().kind(kind).event_id(&event_id);
-    let values = apply_parent_id(values, parent_id, parent_estimated);
+    let mut values = PromptEventValues::new()
+        .kind(kind)
+        .event_id(&event_id)
+        .input_hash(compute_input_hash(&content_hash_input));
+    values = apply_parent_id(values, parent_id, parent_estimated);
+    if tool_name != "unknown" {
+        values = values.tool_call_name(tool_name);
+    }
 
     let attrs = EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
         .tool(agent)

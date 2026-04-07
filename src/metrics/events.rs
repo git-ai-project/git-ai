@@ -668,10 +668,18 @@ impl EventValues for CheckpointValues {
 /// Value positions for "prompt_event" event.
 /// Tracks individual events within a prompt session (messages, tool calls, etc.).
 pub mod prompt_event_pos {
-    pub const KIND: usize = 0; // String - event kind (HumanMessage, AiMessage, ThinkingMessage, ToolCall, FileWrite, etc.)
+    pub const KIND: usize = 0; // String - event kind (HumanMessage, AiMessage, ThinkingMessage, ToolCall, FileWrite, SkillInvocation, McpCall)
     pub const EVENT_ID: usize = 1; // String - content-based stable ID, prefixed with prompt_id
     pub const PARENT_ID: usize = 2; // Option<String> - parent event ID (null for first events)
     pub const PARENT_ID_ESTIMATED: usize = 3; // bool - true if parent_id was estimated (fallback)
+    pub const TOOL_CALL_NAME: usize = 4; // String - tool/skill/mcp server name (null for messages)
+    pub const MODEL: usize = 5; // String - model id (set on AiMessage/ThinkingMessage)
+    pub const ERROR: usize = 6; // bool - true if tool call errored
+    pub const START_TS: usize = 7; // u64 - wall-clock start (unix ms)
+    pub const REPORTED_DURATION_MS: usize = 8; // u64 - agent-reported duration
+    pub const OBSERVED_DURATION_MS: usize = 9; // u64 - hook-observed wall-clock duration
+    pub const INPUT_HASH: usize = 10; // String - sha256[..16] of normalized content (always set)
+    pub const INPUT_TEXT: usize = 11; // String - truncated text, only on HumanMessage/AiMessage (≤1KB)
 }
 
 /// Values for Event ID 5: prompt_event
@@ -686,12 +694,28 @@ pub mod prompt_event_pos {
 /// | 1 | event_id | String |
 /// | 2 | parent_id | `Option<String>` |
 /// | 3 | parent_id_estimated | bool |
+/// | 4 | tool_call_name | String |
+/// | 5 | model | String |
+/// | 6 | error | bool |
+/// | 7 | start_ts | u64 |
+/// | 8 | reported_duration_ms | u64 |
+/// | 9 | observed_duration_ms | u64 |
+/// | 10 | input_hash | String |
+/// | 11 | input_text | String |
 #[derive(Debug, Clone, Default)]
 pub struct PromptEventValues {
     pub kind: PosField<String>,
     pub event_id: PosField<String>,
     pub parent_id: PosField<String>,
     pub parent_id_estimated: PosField<bool>,
+    pub tool_call_name: PosField<String>,
+    pub model: PosField<String>,
+    pub error: PosField<bool>,
+    pub start_ts: PosField<u64>,
+    pub reported_duration_ms: PosField<u64>,
+    pub observed_duration_ms: PosField<u64>,
+    pub input_hash: PosField<String>,
+    pub input_text: PosField<String>,
 }
 
 impl PromptEventValues {
@@ -741,6 +765,94 @@ impl PromptEventValues {
         self.parent_id_estimated = Some(None);
         self
     }
+
+    pub fn tool_call_name(mut self, value: impl Into<String>) -> Self {
+        self.tool_call_name = Some(Some(value.into()));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn tool_call_name_null(mut self) -> Self {
+        self.tool_call_name = Some(None);
+        self
+    }
+
+    pub fn model(mut self, value: impl Into<String>) -> Self {
+        self.model = Some(Some(value.into()));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn model_null(mut self) -> Self {
+        self.model = Some(None);
+        self
+    }
+
+    pub fn error(mut self, value: bool) -> Self {
+        self.error = Some(Some(value));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn error_null(mut self) -> Self {
+        self.error = Some(None);
+        self
+    }
+
+    pub fn start_ts(mut self, value: u64) -> Self {
+        self.start_ts = Some(Some(value));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn start_ts_null(mut self) -> Self {
+        self.start_ts = Some(None);
+        self
+    }
+
+    pub fn reported_duration_ms(mut self, value: u64) -> Self {
+        self.reported_duration_ms = Some(Some(value));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn reported_duration_ms_null(mut self) -> Self {
+        self.reported_duration_ms = Some(None);
+        self
+    }
+
+    pub fn observed_duration_ms(mut self, value: u64) -> Self {
+        self.observed_duration_ms = Some(Some(value));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn observed_duration_ms_null(mut self) -> Self {
+        self.observed_duration_ms = Some(None);
+        self
+    }
+
+    pub fn input_hash(mut self, value: impl Into<String>) -> Self {
+        self.input_hash = Some(Some(value.into()));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn input_hash_null(mut self) -> Self {
+        self.input_hash = Some(None);
+        self
+    }
+
+    pub fn input_text(mut self, value: impl Into<String>) -> Self {
+        self.input_text = Some(Some(value.into()));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn input_text_null(mut self) -> Self {
+        self.input_text = Some(None);
+        self
+    }
 }
 
 impl PosEncoded for PromptEventValues {
@@ -763,6 +875,42 @@ impl PosEncoded for PromptEventValues {
             prompt_event_pos::PARENT_ID_ESTIMATED,
             bool_to_json(&self.parent_id_estimated),
         );
+        sparse_set(
+            &mut map,
+            prompt_event_pos::TOOL_CALL_NAME,
+            string_to_json(&self.tool_call_name),
+        );
+        sparse_set(
+            &mut map,
+            prompt_event_pos::MODEL,
+            string_to_json(&self.model),
+        );
+        sparse_set(&mut map, prompt_event_pos::ERROR, bool_to_json(&self.error));
+        sparse_set(
+            &mut map,
+            prompt_event_pos::START_TS,
+            u64_to_json(&self.start_ts),
+        );
+        sparse_set(
+            &mut map,
+            prompt_event_pos::REPORTED_DURATION_MS,
+            u64_to_json(&self.reported_duration_ms),
+        );
+        sparse_set(
+            &mut map,
+            prompt_event_pos::OBSERVED_DURATION_MS,
+            u64_to_json(&self.observed_duration_ms),
+        );
+        sparse_set(
+            &mut map,
+            prompt_event_pos::INPUT_HASH,
+            string_to_json(&self.input_hash),
+        );
+        sparse_set(
+            &mut map,
+            prompt_event_pos::INPUT_TEXT,
+            string_to_json(&self.input_text),
+        );
 
         map
     }
@@ -773,6 +921,14 @@ impl PosEncoded for PromptEventValues {
             event_id: sparse_get_string(arr, prompt_event_pos::EVENT_ID),
             parent_id: sparse_get_string(arr, prompt_event_pos::PARENT_ID),
             parent_id_estimated: sparse_get_bool(arr, prompt_event_pos::PARENT_ID_ESTIMATED),
+            tool_call_name: sparse_get_string(arr, prompt_event_pos::TOOL_CALL_NAME),
+            model: sparse_get_string(arr, prompt_event_pos::MODEL),
+            error: sparse_get_bool(arr, prompt_event_pos::ERROR),
+            start_ts: sparse_get_u64(arr, prompt_event_pos::START_TS),
+            reported_duration_ms: sparse_get_u64(arr, prompt_event_pos::REPORTED_DURATION_MS),
+            observed_duration_ms: sparse_get_u64(arr, prompt_event_pos::OBSERVED_DURATION_MS),
+            input_hash: sparse_get_string(arr, prompt_event_pos::INPUT_HASH),
+            input_text: sparse_get_string(arr, prompt_event_pos::INPUT_TEXT),
         }
     }
 }
