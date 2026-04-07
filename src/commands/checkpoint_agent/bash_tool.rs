@@ -984,6 +984,18 @@ fn capture_file_contents(repo_root: &Path, file_paths: &[PathBuf]) -> HashMap<St
     let mut contents = HashMap::new();
     for rel_path in file_paths {
         let abs_path = repo_root.join(rel_path);
+        // Skip symlinks to prevent reading files outside the repo
+        match fs::symlink_metadata(&abs_path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                debug_log(&format!(
+                    "Skipping symlink for capture: {}",
+                    rel_path.display()
+                ));
+                continue;
+            }
+            Err(_) => continue,
+            _ => {}
+        }
         let mut file = match fs::File::open(&abs_path) {
             Ok(f) => f,
             Err(e) => {
