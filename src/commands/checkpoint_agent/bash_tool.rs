@@ -858,6 +858,9 @@ pub fn save_snapshot(snapshot: &StatSnapshot, git_dir: &Path) -> Result<(), GitA
 }
 
 /// Load a pre-snapshot from the cache and remove it (consume).
+///
+/// Uses atomic rename-then-read so only one concurrent reader wins the
+/// snapshot.  `rename()` is atomic on the same filesystem (POSIX guarantee).
 pub fn load_and_consume_snapshot(
     git_dir: &Path,
     invocation_key: &str,
@@ -866,19 +869,24 @@ pub fn load_and_consume_snapshot(
     let filename = sanitize_key(invocation_key);
     let path = cache_dir.join(format!("{}.json", filename));
 
-    // Read and then delete atomically: skip the exists() check to avoid a
-    // TOCTOU race where a concurrent post-hook deletes the file between the
-    // check and the read.  NotFound after the read means it was already
-    // consumed; any other error is a real failure.
-    let data = match fs::read(&path) {
-        Ok(d) => d,
+    // Atomic consume: rename first so only one concurrent reader wins.
+    let consumed_path = cache_dir.join(format!("{}.consumed", filename));
+    match fs::rename(&path, &consumed_path) {
+        Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(GitAiError::IoError(e)),
+    }
+
+    let data = match fs::read(&consumed_path) {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = fs::remove_file(&consumed_path);
+            return Err(GitAiError::IoError(e));
+        }
     };
     let snapshot: StatSnapshot = serde_json::from_slice(&data).map_err(GitAiError::JsonError)?;
 
-    // Consume: remove the file after a successful read.
-    let _ = fs::remove_file(&path);
+    let _ = fs::remove_file(&consumed_path);
 
     debug_log(&format!(
         "Loaded pre-snapshot: {} ({} entries)",
@@ -897,7 +905,9 @@ pub fn cleanup_stale_snapshots(git_dir: &Path) -> Result<(), GitAiError> {
         let now = SystemTime::now();
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().is_some_and(|e| e == "json")
+            if path
+                .extension()
+                .is_some_and(|e| e == "json" || e == "consumed")
                 && let Ok(meta) = fs::metadata(&path)
                 && let Ok(modified) = meta.modified()
                 && let Ok(age) = now.duration_since(modified)
