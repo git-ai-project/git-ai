@@ -850,6 +850,7 @@ pub fn update_vscode_chat_hook_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::fs;
     use tempfile::TempDir;
 
@@ -1469,6 +1470,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_claude_config_dir_defaults_to_home_dot_claude() {
         unsafe {
             std::env::remove_var("CLAUDE_CONFIG_DIR");
@@ -1478,6 +1480,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_claude_config_dir_respects_env_var() {
         let custom = "/tmp/my-claude-config";
         unsafe {
@@ -1491,6 +1494,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_claude_config_dir_ignores_empty_env_var() {
         unsafe {
             std::env::set_var("CLAUDE_CONFIG_DIR", "");
