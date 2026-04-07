@@ -1,6 +1,6 @@
 use crate::config::skills_dir_path;
 use crate::error::GitAiError;
-use crate::mdm::utils::write_atomic;
+use crate::mdm::utils::{claude_config_dir, write_atomic};
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
@@ -41,9 +41,8 @@ fn agents_skills_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".agents").join("skills"))
 }
 
-/// Get the ~/.claude/skills directory path
 fn claude_skills_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".claude").join("skills"))
+    Some(claude_config_dir().join("skills"))
 }
 
 /// Get the ~/.cursor/skills directory path

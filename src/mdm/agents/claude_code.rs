@@ -1,7 +1,7 @@
 use crate::error::GitAiError;
 use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerParams};
 use crate::mdm::utils::{
-    MIN_CLAUDE_VERSION, binary_exists, generate_diff, get_binary_version, home_dir,
+    MIN_CLAUDE_VERSION, binary_exists, claude_config_dir, generate_diff, get_binary_version,
     is_git_ai_checkpoint_command, parse_version, to_git_bash_path, version_meets_requirement,
     write_atomic,
 };
@@ -17,7 +17,7 @@ pub struct ClaudeCodeInstaller;
 
 impl ClaudeCodeInstaller {
     fn settings_path() -> PathBuf {
-        home_dir().join(".claude").join("settings.json")
+        claude_config_dir().join("settings.json")
     }
 }
 
@@ -32,7 +32,7 @@ impl HookInstaller for ClaudeCodeInstaller {
 
     fn check_hooks(&self, _params: &HookInstallerParams) -> Result<HookCheckResult, GitAiError> {
         let has_binary = binary_exists("claude");
-        let has_dotfiles = home_dir().join(".claude").exists();
+        let has_dotfiles = claude_config_dir().exists();
 
         if !has_binary && !has_dotfiles {
             return Ok(HookCheckResult {
