@@ -27,12 +27,14 @@ case "$AGENT" in
 
   codex)
     CONFIG="$HOME/.codex/config.toml"
+    HOOKS="$HOME/.codex/hooks.json"
     [ -f "$CONFIG" ] || fail "config.toml not found at $CONFIG"
-    # Codex stores hooks as a TOML array: notify = ["<binary>", "checkpoint", "codex", ...]
-    # so we grep for the word "checkpoint" rather than "checkpoint codex"
-    grep -q 'checkpoint' "$CONFIG" \
-      || fail "checkpoint codex hook not found in $CONFIG"
-    pass "Codex hooks configured in $CONFIG"
+    [ -f "$HOOKS" ] || fail "hooks.json not found at $HOOKS"
+    grep -q 'codex_hooks = true' "$CONFIG" \
+      || fail "codex_hooks feature flag not enabled in $CONFIG"
+    grep -q 'checkpoint codex --hook-input stdin' "$HOOKS" \
+      || fail "checkpoint codex hook not found in $HOOKS"
+    pass "Codex hooks configured in $CONFIG and $HOOKS"
     ;;
 
   gemini)

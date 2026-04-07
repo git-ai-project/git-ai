@@ -909,7 +909,7 @@ fn handle_checkpoint(args: &[String]) {
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| final_working_dir.clone());
 
-    let checkpoint_kind = agent_run_result
+    let mut checkpoint_kind = agent_run_result
         .as_ref()
         .map(|r| r.checkpoint_kind)
         .unwrap_or(CheckpointKind::Human);
@@ -919,18 +919,20 @@ fn handle_checkpoint(args: &[String]) {
     // Override to AI when a non-stale pre-snapshot exists, which is the precise signal
     // that a bash invocation is in flight. This uses existing snapshot lifecycle — no new
     // daemon messages or side-channel files needed.
-    let checkpoint_kind = if checkpoint_kind == CheckpointKind::Human
-        && agent_run_result.is_none()
-        && crate::commands::checkpoint_agent::bash_tool::has_active_bash_inflight(
-            std::path::Path::new(&effective_working_dir),
-        ) {
-        crate::utils::debug_log(
-            "Overriding checkpoint kind to AI: bash tool call in flight (pre-snapshot present)",
-        );
-        CheckpointKind::AiAgent
-    } else {
-        checkpoint_kind
-    };
+    if checkpoint_kind == CheckpointKind::Human && agent_run_result.is_none() {
+        let repo_root = std::path::Path::new(&effective_working_dir);
+
+        if let Some((resolved_kind, resolved_agent_run_result)) =
+            crate::commands::checkpoint_agent::bash_tool::checkpoint_context_from_active_bash(
+                repo_root,
+                &effective_working_dir,
+            )
+        {
+            crate::utils::debug_log("Using active bash context for pre-commit AI checkpoint");
+            checkpoint_kind = resolved_kind;
+            agent_run_result = resolved_agent_run_result;
+        }
+    }
 
     let allow_captured_async =
         checkpoint_request_has_explicit_capture_scope(args, agent_run_result.as_ref());
