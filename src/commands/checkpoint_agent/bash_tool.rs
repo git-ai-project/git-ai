@@ -900,7 +900,15 @@ pub fn cleanup_stale_snapshots(repo_root: &Path) -> Result<(), GitAiError> {
 
 /// Sanitize an invocation key for use as a filename.
 fn sanitize_key(key: &str) -> String {
-    key.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_")
+    key.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
