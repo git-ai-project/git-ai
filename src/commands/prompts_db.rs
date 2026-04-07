@@ -1001,13 +1001,18 @@ fn resolve_cas_messages(conn: &Connection, deferred: &[DeferredPrompt]) {
     };
 
     // Partition deferred prompts: ones whose URL points at our instance go to CAS;
-    // foreign URLs fall through to local SQLite lookup.
+    // foreign URLs fall through to local SQLite lookup. Debug-log every hostname
+    // mismatch so users filing bugs can see which instance a prompt came from.
     let mut cas_indices: Vec<usize> = Vec::new();
     let mut foreign_indices: Vec<usize> = Vec::new();
     for (i, dp) in deferred.iter().enumerate() {
         if dp.messages_url.starts_with(&instance_prefix) {
             cas_indices.push(i);
         } else {
+            debug_log(&format!(
+                "prompts: hostname mismatch id={} url={} expected_prefix={}",
+                dp.id, dp.messages_url, instance_prefix
+            ));
             foreign_indices.push(i);
         }
     }
@@ -1043,6 +1048,17 @@ fn resolve_cas_messages(conn: &Connection, deferred: &[DeferredPrompt]) {
         *skip_reasons
             .entry("wrong hostname (and no body in local sqlite)")
             .or_insert(0) += foreign_skipped;
+        // Per-prompt debug log for every foreign-URL prompt that also missed the
+        // local DB — so users can tell which specific sessions fell through.
+        for &idx in &foreign_indices {
+            if !foreign_resolved.contains(&idx) {
+                let dp = &deferred[idx];
+                debug_log(&format!(
+                    "prompts: unresolved (foreign url + no local body) id={} url={}",
+                    dp.id, dp.messages_url
+                ));
+            }
+        }
     }
 
     // CAS path counters (per-prompt, not per-hash)
@@ -1082,11 +1098,21 @@ fn resolve_cas_messages(conn: &Connection, deferred: &[DeferredPrompt]) {
         if !hashes_needing_fetch.is_empty() {
             let context = ApiContext::new(None);
             if context.auth_token.is_none() {
-                debug_log("prompts: no auth token, skipping CAS API fetch");
+                debug_log(&format!(
+                    "prompts: no auth token, skipping CAS API fetch for {} hashes",
+                    hashes_needing_fetch.len()
+                ));
                 // All not-cached, CAS-eligible prompts are tentatively "not logged in".
+                // Log each affected prompt so debug output shows exactly which ones
+                // would have been fetched if the user were signed in.
                 for hash in &hashes_needing_fetch {
                     if let Some(indices) = hash_to_indices.get(hash) {
                         for &idx in indices {
+                            let dp = &deferred[idx];
+                            debug_log(&format!(
+                                "prompts: auth error (not logged in) id={} hash={} url={}",
+                                dp.id, hash, dp.messages_url
+                            ));
                             cas_initial_failures.insert(idx, "not logged in");
                         }
                     }
@@ -1101,7 +1127,7 @@ fn resolve_cas_messages(conn: &Connection, deferred: &[DeferredPrompt]) {
                     eprint!("\r    fetching {}/{}...", fetched_so_far, fetch_total);
 
                     let hash_refs: Vec<&str> = chunk.iter().map(|s| s.as_str()).collect();
-                    let returned_hashes: HashSet<String> =
+                    let (returned_hashes, batch_network_error): (HashSet<String>, Option<String>) =
                         match client.read_ca_prompt_store(&hash_refs) {
                             Ok(response) => {
                                 let mut returned = HashSet::new();
@@ -1128,32 +1154,68 @@ fn resolve_cas_messages(conn: &Connection, deferred: &[DeferredPrompt]) {
                                                 let _ = db_guard
                                                     .set_cas_cache(&result.hash, &json_str);
                                             }
+                                        } else {
+                                            // CAS returned ok + content but it didn't
+                                            // deserialize into CasMessagesObject — surface
+                                            // every affected prompt for debugging.
+                                            if let Some(indices) = hash_to_indices.get(&result.hash)
+                                            {
+                                                for &idx in indices {
+                                                    let dp = &deferred[idx];
+                                                    debug_log(&format!(
+                                                        "prompts: CAS decode error id={} hash={} url={}",
+                                                        dp.id, result.hash, dp.messages_url
+                                                    ));
+                                                }
+                                            }
                                         }
                                     } else {
                                         let reason = result.error.as_deref().unwrap_or("error");
-                                        debug_log(&format!(
-                                            "prompts: CAS hash {} returned error: {}",
-                                            result.hash, reason
-                                        ));
+                                        if let Some(indices) = hash_to_indices.get(&result.hash) {
+                                            for &idx in indices {
+                                                let dp = &deferred[idx];
+                                                debug_log(&format!(
+                                                    "prompts: CAS not-found id={} hash={} url={} reason=\"{}\"",
+                                                    dp.id, result.hash, dp.messages_url, reason
+                                                ));
+                                            }
+                                        }
                                     }
                                 }
-                                returned
+                                (returned, None)
                             }
-                            Err(e) => {
-                                debug_log(&format!("prompts: CAS batch fetch error: {}", e));
-                                HashSet::new()
-                            }
+                            Err(e) => (HashSet::new(), Some(e.to_string())),
                         };
+
+                    // For batch network errors, log each affected prompt so we can
+                    // tell the user exactly which ones to retry after fixing connectivity.
+                    if let Some(err) = &batch_network_error {
+                        for hash in chunk {
+                            if let Some(indices) = hash_to_indices.get(hash) {
+                                for &idx in indices {
+                                    let dp = &deferred[idx];
+                                    debug_log(&format!(
+                                        "prompts: CAS network error id={} hash={} url={} reason=\"{}\"",
+                                        dp.id, hash, dp.messages_url, err
+                                    ));
+                                }
+                            }
+                        }
+                    }
 
                     // Tag any chunk hash that wasn't returned with the appropriate reason.
                     for hash in chunk {
                         if returned_hashes.contains(hash) {
                             continue;
                         }
+                        let reason = if batch_network_error.is_some() {
+                            "CAS network error"
+                        } else {
+                            "not found in remote prompt store"
+                        };
                         if let Some(indices) = hash_to_indices.get(hash) {
                             for &idx in indices {
-                                cas_initial_failures
-                                    .insert(idx, "not found in remote prompt store");
+                                cas_initial_failures.insert(idx, reason);
                             }
                         }
                     }
@@ -1213,6 +1275,8 @@ fn resolve_cas_messages(conn: &Connection, deferred: &[DeferredPrompt]) {
         prompts_from_local += cas_local_resolved.len();
 
         // Step 5: Tally final skip reasons for CAS-eligible prompts that *still* lack a body.
+        // Every unresolved session gets a per-prompt debug line with its primary failure
+        // reason — this is what we ask users to paste when filing bug reports.
         for &idx in &unresolved_cas_indices {
             if cas_local_resolved.contains(&idx) {
                 continue;
@@ -1222,6 +1286,11 @@ fn resolve_cas_messages(conn: &Connection, deferred: &[DeferredPrompt]) {
                 .copied()
                 .unwrap_or("no body in remote prompt store or local sqlite");
             *skip_reasons.entry(reason).or_insert(0) += 1;
+            let dp = &deferred[idx];
+            debug_log(&format!(
+                "prompts: unresolved id={} url={} reason=\"{}\"",
+                dp.id, dp.messages_url, reason
+            ));
         }
     }
 
