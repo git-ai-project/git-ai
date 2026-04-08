@@ -128,8 +128,11 @@ pub fn write_stats_to_terminal(stats: &CommitStats, print: bool) -> String {
     }
 
     // Calculate total additions for the progress bar
-    // Total = pure human + mixed (AI-edited-by-human) + pure AI
-    let total_additions = stats.human_additions + stats.ai_additions;
+    // Total = (known human + unknown) + mixed (AI-edited-by-human) + pure AI
+    // unknown_additions are unattested lines — treated as human for display until
+    // full KnownHuman attestation pipeline is in place.
+    let display_human = stats.human_additions + stats.unknown_additions;
+    let total_additions = display_human + stats.ai_additions;
 
     // Calculate AI acceptance percentage (capped at 100%)
     // It can go higher because AI can write on top of AI code. This feels reasonable for now
@@ -140,8 +143,8 @@ pub fn write_stats_to_terminal(stats: &CommitStats, print: bool) -> String {
     };
 
     // Create progress bar with three categories
-    // Pure human = human_additions - mixed_additions (overridden lines)
-    let pure_human = stats.human_additions.saturating_sub(stats.mixed_additions);
+    // Pure human = (human_additions + unknown_additions) - mixed_additions (overridden lines)
+    let pure_human = display_human.saturating_sub(stats.mixed_additions);
 
     let pure_human_bars = if total_additions > 0 {
         ((pure_human as f64 / total_additions as f64) * bar_width as f64) as usize
@@ -164,8 +167,8 @@ pub fn write_stats_to_terminal(stats: &CommitStats, print: bool) -> String {
     };
 
     // Ensure human contributions get at least 2 visible blocks if they have more than 1 line
-    let min_human_bars = if stats.human_additions > 1 { 2 } else { 0 };
-    let final_pure_human_bars = if stats.human_additions > 1 {
+    let min_human_bars = if display_human > 1 { 2 } else { 0 };
+    let final_pure_human_bars = if display_human > 1 {
         pure_human_bars.max(min_human_bars)
     } else {
         pure_human_bars
@@ -315,8 +318,8 @@ pub fn write_stats_to_markdown(stats: &CommitStats) -> String {
     // Total = pure human + mixed (AI-edited-by-human) + pure AI (accepted)
     let total_additions = stats.git_diff_added_lines;
 
-    // Pure human additions (not including mixed)
-    let pure_human = stats.human_additions;
+    // Pure human additions: known-human attested + unattested (treated as human until full KnownHuman pipeline)
+    let pure_human = stats.human_additions + stats.unknown_additions;
     // Mixed = AI lines that were edited by human
     let mixed = stats.mixed_additions;
     // Pure AI = AI lines accepted without changes
