@@ -1,5 +1,5 @@
 use crate::authorship::attribution_tracker::LineAttribution;
-use crate::authorship::authorship_log::PromptRecord;
+use crate::authorship::authorship_log::{HumanRecord, PromptRecord};
 use crate::authorship::authorship_log_serialization::generate_short_hash;
 use crate::authorship::working_log::{CHECKPOINT_API_VERSION, Checkpoint, CheckpointKind};
 use crate::error::GitAiError;
@@ -22,6 +22,9 @@ pub struct InitialAttributions {
     /// Optional blob snapshot of the file content represented by INITIAL.
     #[serde(default)]
     pub file_blobs: HashMap<String, String>,
+    /// Known human records: h_<hash> -> HumanRecord
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub humans: std::collections::BTreeMap<String, HumanRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -635,6 +638,7 @@ impl PersistedWorkingLog {
             files: attributions,
             prompts,
             file_blobs: HashMap::new(),
+            humans: std::collections::BTreeMap::new(),
         })
     }
 
@@ -661,6 +665,7 @@ impl PersistedWorkingLog {
             files: filtered,
             prompts,
             file_blobs,
+            humans: std::collections::BTreeMap::new(),
         })
     }
 
@@ -686,6 +691,7 @@ impl PersistedWorkingLog {
             files: filtered_files,
             prompts: initial.prompts,
             file_blobs,
+            humans: initial.humans,
         };
 
         let json = serde_json::to_string_pretty(&initial_data)?;

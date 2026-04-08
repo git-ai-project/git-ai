@@ -215,6 +215,7 @@ fn remove_attributions_for_pathspecs(repository: &Repository, head: &str, pathsp
             files: filtered_files,
             prompts: initial.prompts,
             file_blobs: filtered_blobs,
+            humans: initial.humans,
         });
     }
 

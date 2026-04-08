@@ -1,7 +1,7 @@
 use crate::authorship::attribution_tracker::{
     Attribution, LineAttribution, line_attributions_to_attributions,
 };
-use crate::authorship::authorship_log::{LineRange, PromptRecord};
+use crate::authorship::authorship_log::{HumanRecord, LineRange, PromptRecord};
 use crate::authorship::working_log::CheckpointKind;
 use crate::commands::blame::{GitAiBlameOptions, OLDEST_AI_BLAME_DATE};
 use crate::error::GitAiError;
@@ -24,6 +24,7 @@ pub struct VirtualAttributions {
     // Timestamp to use for attributions
     ts: u128,
     pub blame_start_commit: Option<String>,
+    pub humans: BTreeMap<String, HumanRecord>,
 }
 
 impl VirtualAttributions {
@@ -47,6 +48,7 @@ impl VirtualAttributions {
             prompts: BTreeMap::new(),
             ts,
             blame_start_commit,
+            humans: BTreeMap::new(),
         };
 
         // Process all pathspecs concurrently
@@ -319,6 +321,7 @@ impl VirtualAttributions {
         let mut attributions: HashMap<String, (Vec<Attribution>, Vec<LineAttribution>)> =
             HashMap::new();
         let mut prompts = BTreeMap::new();
+        let mut humans: BTreeMap<String, HumanRecord> = BTreeMap::new();
         let mut file_contents: HashMap<String, String> = HashMap::new();
 
         // Track additions and deletions per session_id for metrics
@@ -332,6 +335,11 @@ impl VirtualAttributions {
                 .entry(prompt_id.clone())
                 .or_insert_with(BTreeMap::new)
                 .insert(String::new(), prompt_record.clone());
+        }
+
+        // Load known human records from INITIAL attributions
+        for (hash, human_record) in &initial_attributions.humans {
+            humans.entry(hash.clone()).or_insert_with(|| human_record.clone());
         }
 
         // Process INITIAL attributions
@@ -390,6 +398,15 @@ impl VirtualAttributions {
                     checkpoint.line_stats.additions;
                 *session_deletions.entry(author_id.clone()).or_insert(0) +=
                     checkpoint.line_stats.deletions;
+            }
+
+            if checkpoint.kind == CheckpointKind::KnownHuman {
+                let hash = crate::authorship::authorship_log_serialization::generate_human_short_hash(
+                    &checkpoint.author,
+                );
+                humans.entry(hash).or_insert_with(|| HumanRecord {
+                    author: checkpoint.author.clone(),
+                });
             }
 
             // Collect attributions from checkpoint entries
@@ -453,6 +470,7 @@ impl VirtualAttributions {
             prompts,
             ts: 0,
             blame_start_commit: None,
+            humans,
         })
     }
 
@@ -471,6 +489,7 @@ impl VirtualAttributions {
         let mut attributions: HashMap<String, (Vec<Attribution>, Vec<LineAttribution>)> =
             HashMap::new();
         let mut prompts = BTreeMap::new();
+        let mut humans: BTreeMap<String, HumanRecord> = BTreeMap::new();
         let mut file_contents: HashMap<String, String> = HashMap::new();
 
         let mut session_additions: HashMap<String, u32> = HashMap::new();
@@ -481,6 +500,11 @@ impl VirtualAttributions {
                 .entry(prompt_id.clone())
                 .or_insert_with(BTreeMap::new)
                 .insert(String::new(), prompt_record.clone());
+        }
+
+        // Load known human records from INITIAL attributions
+        for (hash, human_record) in &initial_attributions.humans {
+            humans.entry(hash.clone()).or_insert_with(|| human_record.clone());
         }
 
         for (file_path, line_attrs) in &initial_attributions.files {
@@ -529,6 +553,15 @@ impl VirtualAttributions {
                     checkpoint.line_stats.additions;
                 *session_deletions.entry(author_id.clone()).or_insert(0) +=
                     checkpoint.line_stats.deletions;
+            }
+
+            if checkpoint.kind == CheckpointKind::KnownHuman {
+                let hash = crate::authorship::authorship_log_serialization::generate_human_short_hash(
+                    &checkpoint.author,
+                );
+                humans.entry(hash).or_insert_with(|| HumanRecord {
+                    author: checkpoint.author.clone(),
+                });
             }
 
             for entry in &checkpoint.entries {
@@ -583,6 +616,7 @@ impl VirtualAttributions {
             prompts,
             ts: 0,
             blame_start_commit: None,
+            humans,
         })
     }
 
@@ -602,6 +636,7 @@ impl VirtualAttributions {
         let mut attributions: HashMap<String, (Vec<Attribution>, Vec<LineAttribution>)> =
             HashMap::new();
         let mut prompts = BTreeMap::new();
+        let mut humans: BTreeMap<String, HumanRecord> = BTreeMap::new();
         let mut file_contents: HashMap<String, String> = HashMap::new();
 
         let mut session_additions: HashMap<String, u32> = HashMap::new();
@@ -612,6 +647,11 @@ impl VirtualAttributions {
                 .entry(prompt_id.clone())
                 .or_insert_with(BTreeMap::new)
                 .insert(String::new(), prompt_record.clone());
+        }
+
+        // Load known human records from INITIAL attributions
+        for (hash, human_record) in &initial_attributions.humans {
+            humans.entry(hash.clone()).or_insert_with(|| human_record.clone());
         }
 
         for (file_path, line_attrs) in &initial_attributions.files {
@@ -660,6 +700,15 @@ impl VirtualAttributions {
                     checkpoint.line_stats.additions;
                 *session_deletions.entry(author_id.clone()).or_insert(0) +=
                     checkpoint.line_stats.deletions;
+            }
+
+            if checkpoint.kind == CheckpointKind::KnownHuman {
+                let hash = crate::authorship::authorship_log_serialization::generate_human_short_hash(
+                    &checkpoint.author,
+                );
+                humans.entry(hash).or_insert_with(|| HumanRecord {
+                    author: checkpoint.author.clone(),
+                });
             }
 
             for entry in &checkpoint.entries {
@@ -721,6 +770,7 @@ impl VirtualAttributions {
             prompts,
             ts: 0,
             blame_start_commit: None,
+            humans,
         })
     }
 
@@ -827,6 +877,7 @@ impl VirtualAttributions {
             prompts: BTreeMap::new(),
             ts,
             blame_start_commit: None,
+            humans: BTreeMap::new(),
         }
     }
 
@@ -846,6 +897,7 @@ impl VirtualAttributions {
             prompts,
             ts,
             blame_start_commit: None,
+            humans: BTreeMap::new(), // TODO(known-human): propagate humans from caller when rebase path is wired (Task 12)
         }
     }
 
@@ -869,6 +921,7 @@ impl VirtualAttributions {
                     .map(|record| (prompt_id.clone(), record.clone()))
             })
             .collect();
+        authorship_log.metadata.humans = self.humans.clone();
 
         // Process each file
         for (file_path, (_, line_attrs)) in &self.attributions {
@@ -880,7 +933,8 @@ impl VirtualAttributions {
             // This avoids expanding every range to individual line numbers.
             let mut author_ranges: HashMap<String, Vec<(u32, u32)>> = HashMap::new();
             for line_attr in line_attrs {
-                // Skip human attributions - we only track AI attributions
+                // Skip the legacy "human" sentinel (CheckpointKind::Human checkpoints that were
+                // never attested). KnownHuman lines use h_-prefixed author IDs and pass through.
                 if line_attr.author_id == CheckpointKind::Human.to_str() {
                     continue;
                 }
@@ -1185,9 +1239,11 @@ impl VirtualAttributions {
                     .map(|record| (prompt_id.clone(), record.clone()))
             })
             .collect();
+        authorship_log.metadata.humans = self.humans.clone();
 
         let mut initial_files: StdHashMap<String, Vec<LineAttribution>> = StdHashMap::new();
         let mut referenced_prompts: HashSet<String> = HashSet::new();
+        let mut initial_humans: BTreeMap<String, HumanRecord> = BTreeMap::new();
 
         // Get committed hunks (in commit coordinates) and unstaged hunks (in working directory coordinates)
         let committed_hunks = collect_committed_hunks(repo, parent_sha, commit_sha, pathspecs)?;
@@ -1321,7 +1377,8 @@ impl VirtualAttributions {
             if !committed_lines_map.is_empty() {
                 // Create attestation entries from committed lines
                 for (author_id, mut lines) in committed_lines_map {
-                    // Skip human attributions - we only track AI attributions in the output
+                    // Skip the legacy "human" sentinel (CheckpointKind::Human checkpoints that were
+                    // never attested). KnownHuman lines use h_-prefixed author IDs and pass through.
                     if author_id == CheckpointKind::Human.to_str() {
                         continue;
                     }
@@ -1384,7 +1441,8 @@ impl VirtualAttributions {
                 // Convert the map into line attributions
                 let mut uncommitted_line_attrs = Vec::new();
                 for (author_id, mut lines) in uncommitted_lines_map {
-                    // Skip human attributions - we only track AI attributions in the output
+                    // Skip the legacy "human" sentinel (CheckpointKind::Human checkpoints that were
+                    // never attested). KnownHuman lines use h_-prefixed author IDs and pass through.
                     if author_id == CheckpointKind::Human.to_str() {
                         continue;
                     }
@@ -1394,6 +1452,15 @@ impl VirtualAttributions {
 
                     if lines.is_empty() {
                         continue;
+                    }
+
+                    // Track h_ hashes for INITIAL humans map
+                    if author_id.starts_with("h_") {
+                        // h_ hash absent from self.humans — foreign cherry-pick or pre-existing
+                        // INITIAL attribution. Intentionally skip: the record is not needed locally.
+                        if let Some(record) = self.humans.get(&author_id) {
+                            initial_humans.insert(author_id.clone(), record.clone());
+                        }
                     }
 
                     // Create ranges from individual lines
@@ -1444,6 +1511,7 @@ impl VirtualAttributions {
             files: initial_files,
             prompts: initial_prompts,
             file_blobs: HashMap::new(),
+            humans: initial_humans,
         };
 
         Ok((authorship_log, initial_attributions))
@@ -1484,6 +1552,7 @@ impl VirtualAttributions {
                     .map(|record| (prompt_id.clone(), record.clone()))
             })
             .collect();
+        authorship_log.metadata.humans = self.humans.clone();
 
         // Get committed hunks only (no need to check working copy)
         let committed_hunks = collect_committed_hunks(repo, parent_sha, commit_sha, pathspecs)?;
@@ -1527,7 +1596,8 @@ impl VirtualAttributions {
             if !committed_lines_map.is_empty() {
                 // Create attestation entries from committed lines
                 for (author_id, mut lines) in committed_lines_map {
-                    // Skip human attributions - we only track AI attributions in the output
+                    // Skip the legacy "human" sentinel (CheckpointKind::Human checkpoints that were
+                    // never attested). KnownHuman lines use h_-prefixed author IDs and pass through.
                     if author_id == CheckpointKind::Human.to_str() {
                         continue;
                     }
@@ -1610,11 +1680,21 @@ impl VirtualAttributions {
         }
 
         let mut initial_prompts = HashMap::new();
-        for prompt_id in referenced_prompts {
-            if let Some(commits) = self.prompts.get(&prompt_id)
+        for prompt_id in &referenced_prompts {
+            if let Some(commits) = self.prompts.get(prompt_id)
                 && let Some(prompt) = commits.values().next()
             {
-                initial_prompts.insert(prompt_id, prompt.clone());
+                initial_prompts.insert(prompt_id.clone(), prompt.clone());
+            }
+        }
+
+        // Collect h_ human records referenced by retained attributions
+        let mut initial_humans: BTreeMap<String, HumanRecord> = BTreeMap::new();
+        for author_id in &referenced_prompts {
+            if author_id.starts_with("h_") {
+                if let Some(record) = self.humans.get(author_id) {
+                    initial_humans.insert(author_id.clone(), record.clone());
+                }
             }
         }
 
@@ -1622,6 +1702,7 @@ impl VirtualAttributions {
             files: initial_files,
             prompts: initial_prompts,
             file_blobs: HashMap::new(),
+            humans: initial_humans,
         }
     }
 
@@ -1688,6 +1769,18 @@ impl VirtualAttributions {
         }
 
         merged_prompts
+    }
+
+    /// Union-merge two human records maps.
+    /// Because records are keyed by content-hash of the author identity, any value
+    /// for a given key is semantically equivalent. Simple `b`-wins extension is safe.
+    fn merge_humans(
+        a: &BTreeMap<String, HumanRecord>,
+        b: &BTreeMap<String, HumanRecord>,
+    ) -> BTreeMap<String, HumanRecord> {
+        let mut result = a.clone();
+        result.extend(b.iter().map(|(k, v)| (k.clone(), v.clone())));
+        result
     }
 
     /// Calculate and update prompt metrics (accepted_lines, overridden_lines, total_additions, total_deletions)
@@ -1818,6 +1911,10 @@ pub fn merge_attributions_favoring_first(
     let merged_prompts =
         VirtualAttributions::merge_prompts_picking_newest(&[&primary.prompts, &secondary.prompts]);
 
+    // Merge humans from both VAs
+    let merged_humans =
+        VirtualAttributions::merge_humans(&primary.humans, &secondary.humans);
+
     let mut merged = VirtualAttributions {
         repo,
         base_commit,
@@ -1826,6 +1923,7 @@ pub fn merge_attributions_favoring_first(
         prompts: merged_prompts,
         ts,
         blame_start_commit: None,
+        humans: merged_humans,
     };
 
     // Get union of all files

@@ -1444,6 +1444,7 @@ fn remove_working_log_attributions_for_pathspecs(
             files: filtered_files,
             prompts: initial.prompts,
             file_blobs: filtered_blobs,
+            humans: initial.humans,
         })?;
     }
 
