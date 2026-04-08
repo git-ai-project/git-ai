@@ -9676,6 +9676,8 @@ fn test_conflict_ai_resolves_timeout_constant() {
     // C3': config.py only (AI-resolved, TIMEOUT = 90 attributed as AI)
     assert_note_base_commit_matches(&repo, &chain[2], "c3_base");
     assert_note_files_exact(&repo, &chain[2], "c3_files", &["config.py"]);
+    // 1 AI line: TIMEOUT = 90 (working-log fallback path must set accepted_lines correctly)
+    assert_accepted_lines_exact(&repo, &chain[2], "c3_accepted_lines", 1);
 
     // blame at chain[2] for config.py: the AI-resolved TIMEOUT line should be AI
     assert_blame_at_commit(
@@ -9916,7 +9918,13 @@ fn test_conflict_ai_resolves_with_added_extra_lines() {
 
 /// Test 3: processor.py — feature (C3) adds 5 AI lines to method2 body,
 /// main also changes method2.  AI resolution rewrites processor.py preserving
-/// 6 human context lines and writing 8 AI lines for the resolved method2.
+/// 2 human context lines and writing 7 lines for the resolved method2 (marked
+/// `.ai()` in set_contents).  However, the content-diff path only carries
+/// attribution for lines whose content exactly matches the original feature commit:
+/// only `def method2(self):`, `result = []`, `for i in range(10):`, and
+/// `result.append(i * 2)` survive the content match — 4 lines.  The newly
+/// introduced lines (`# AI merged`, `label = `, `return result, label`) have no
+/// entry in `original_head_line_to_author` and therefore receive human attribution.
 #[test]
 fn test_conflict_ai_resolves_preserving_human_context_lines() {
     let repo = TestRepo::new();
@@ -10049,7 +10057,10 @@ fn test_conflict_ai_resolves_preserving_human_context_lines() {
         "rebase should conflict on processor.py at C3"
     );
 
-    // AI resolves: 6 human context lines + 8 AI lines for resolved method2
+    // AI resolves: 2 human context lines + 7 lines for resolved method2 (set_contents(.ai()))
+    // NOTE: content-diff only recovers lines matching original C3 content:
+    //   def method2, result = [], for i in range, result.append → 4 AI-attributed lines.
+    //   # AI merged, label = , return result/label → newly introduced, no original match → human.
     let mut conflict_processor = repo.filename("processor.py");
     conflict_processor.set_contents(crate::lines![
         "class Processor:".human(),
@@ -10076,7 +10087,7 @@ fn test_conflict_ai_resolves_preserving_human_context_lines() {
     assert_note_base_commit_matches(&repo, &chain[1], "c2_base");
     assert_note_files_exact(&repo, &chain[1], "c2_files", &["util_b.py"]);
 
-    // C3': processor.py only (AI-resolved: 8 AI lines)
+    // C3': processor.py only (AI-resolved: 4 AI lines via content-diff match)
     assert_note_base_commit_matches(&repo, &chain[2], "c3_base");
     assert_note_files_exact(&repo, &chain[2], "c3_files", &["processor.py"]);
 
@@ -11573,6 +11584,9 @@ fn test_conflict_working_log_is_sole_attribution_source() {
     // C1': config.py only — note MUST exist (working-log fallback fired)
     assert_note_base_commit_matches(&repo, &chain[0], "c1_base");
     assert_note_files_exact(&repo, &chain[0], "c1_files", &["config.py"]);
+    // 1 AI line: TIMEOUT = 45 — accepted_lines must be 1 (not 0).
+    // If build_note_from_conflict_wl hard-codes accepted_lines=0, this assertion fails.
+    assert_accepted_lines_exact(&repo, &chain[0], "c1_accepted_lines", 1);
     // The resolved value (45) must be AI-attributed, not human.
     // This can only be true if build_note_from_conflict_wl contributed the note.
     assert_blame_at_commit(

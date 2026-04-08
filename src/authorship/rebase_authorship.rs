@@ -1443,10 +1443,12 @@ pub fn rewrite_authorship_after_rebase_v2(
     // After the first content-diff, our accumulated attribution state matches the
     // commit chain, so we can use hunk-based transfer for subsequent appearances.
     let mut files_with_synced_state: HashSet<String> = HashSet::new();
-    // Cache the set of active prompt IDs from the previous commit. When this set
-    // is unchanged, the metadata template is unchanged and we skip the serde_json
-    // serialization entirely (saves O(prompts) work per commit in the common case).
-    let mut prev_active_prompt_ids: HashSet<String> = HashSet::new();
+    // Cache the active prompt IDs + their accepted_lines values from the previous commit.
+    // When BOTH the prompt ID set AND the accepted_lines counts are unchanged, the metadata
+    // template is unchanged and we skip the serde_json serialization entirely.
+    // We must include accepted_lines in the key: consecutive commits from the same AI session
+    // share the same prompt IDs but accumulate different accepted_lines values each commit.
+    let mut prev_active_prompt_key: HashMap<String, u32> = HashMap::new();
 
     for (idx, new_commit) in commits_to_process.iter().enumerate() {
         debug_log(&format!(
@@ -1592,23 +1594,24 @@ pub fn rewrite_authorship_after_rebase_v2(
                 commit_hunks,
             );
             apply_prompt_line_metrics_to_prompts(&mut current_prompts, &delta_prompt_metrics);
-            // Collect the IDs of prompts that contributed new AI lines to this commit's diff.
-            // Avoids cloning the full BTreeMap — we pass a HashSet filter to the template builder.
-            let active_prompt_ids: HashSet<String> = delta_prompt_metrics
+            // Collect IDs + accepted_lines for prompts that contributed new AI lines to this
+            // commit's diff.  Avoids cloning the full BTreeMap — we pass a filter to the builder.
+            let active_prompt_key: HashMap<String, u32> = delta_prompt_metrics
                 .iter()
                 .filter(|(_, m)| m.accepted_lines > 0)
-                .map(|(pid, _)| pid.clone())
+                .map(|(pid, m)| (pid.clone(), m.accepted_lines))
                 .collect();
             // Only rebuild the (expensive) serde_json metadata template when the active-prompt
-            // set actually changed.  Consecutive commits from the same AI session typically share
-            // the same active prompt, so this skips the rebuild most of the time.
-            if active_prompt_ids != prev_active_prompt_ids {
+            // set OR accepted_lines values changed.  Consecutive same-session commits share the
+            // same prompt IDs but differ in accepted_lines, so the key includes both.
+            if active_prompt_key != prev_active_prompt_key {
+                let active_ids: HashSet<String> = active_prompt_key.keys().cloned().collect();
                 metadata_json_template_parts = build_metadata_template_parts_filtered(
                     &current_authorship_log.metadata,
                     &current_prompts,
-                    Some(&active_prompt_ids),
+                    Some(&active_ids),
                 );
-                prev_active_prompt_ids = active_prompt_ids;
+                prev_active_prompt_key = active_prompt_key;
             }
             loop_metrics_ms += tmetrics.elapsed().as_micros();
         }
@@ -1663,7 +1666,10 @@ pub fn rewrite_authorship_after_rebase_v2(
         };
         loop_serialize_us += t0.elapsed().as_micros();
         if let Some(authorship_json) = authorship_json {
-            let file_count = changed_files_in_commit
+            // Count AI-attributed files for the debug log.  For content-diff notes the count
+            // comes from the per-file cache; for working-log conflict notes that cache is empty
+            // so fall back to the total changed-file count as an approximation.
+            let file_count_from_cache = changed_files_in_commit
                 .iter()
                 .filter(|f| {
                     cached_file_attestation_text
@@ -1671,6 +1677,11 @@ pub fn rewrite_authorship_after_rebase_v2(
                         .is_some_and(|t| !t.is_empty())
                 })
                 .count();
+            let file_count = if file_count_from_cache > 0 {
+                file_count_from_cache
+            } else {
+                changed_files_in_commit.len()
+            };
             pending_note_entries.push((new_commit.clone(), authorship_json));
             pending_note_debug.push((new_commit.clone(), file_count));
         }
@@ -3972,11 +3983,27 @@ fn build_note_from_conflict_wl(
     }
 
     // Build one FileAttestation per file from the merged line attributions.
+    // Also tally accepted_lines per author_id so the metadata prompts section
+    // reflects the actual AI line count (not the hard-coded zero set above).
+    let mut accepted_per_author: HashMap<String, u32> = HashMap::new();
     for (file_path, line_attrs) in &file_line_attrs {
+        // Tally accepted lines per author from the raw LineAttribution slice.
+        for la in line_attrs {
+            // end_line is exclusive; count = end_line - start_line.
+            *accepted_per_author.entry(la.author_id.clone()).or_insert(0) +=
+                la.end_line - la.start_line;
+        }
         if let Some(file_att) = build_file_attestation_from_line_attributions(file_path, line_attrs)
         {
             authorship_log.attestations.push(file_att);
             has_ai_content = true;
+        }
+    }
+
+    // Patch each prompt's accepted_lines with the actual tally.
+    for (author_id, count) in accepted_per_author {
+        if let Some(record) = authorship_log.metadata.prompts.get_mut(&author_id) {
+            record.accepted_lines = count;
         }
     }
 
