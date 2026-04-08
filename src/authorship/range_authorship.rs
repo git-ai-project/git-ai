@@ -207,12 +207,8 @@ fn create_authorship_log_for_range(
             crate::authorship::authorship_log_serialization::AuthorshipLog {
                 attestations: Vec::new(),
                 metadata: crate::authorship::authorship_log_serialization::AuthorshipMetadata {
-                    schema_version: "3".to_string(),
-                    git_ai_version: Some(
-                        crate::authorship::authorship_log_serialization::GIT_AI_VERSION.to_string(),
-                    ),
                     base_commit_sha: end_sha.to_string(),
-                    prompts: std::collections::BTreeMap::new(),
+                    ..crate::authorship::authorship_log_serialization::AuthorshipMetadata::new()
                 },
             },
         );

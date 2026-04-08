@@ -1,4 +1,4 @@
-use crate::authorship::authorship_log::{Author, LineRange, PromptRecord};
+use crate::authorship::authorship_log::{Author, HumanRecord, LineRange, PromptRecord};
 use crate::authorship::working_log::CheckpointKind;
 use crate::git::repository::Repository;
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,8 @@ pub struct AuthorshipMetadata {
     pub git_ai_version: Option<String>,
     pub base_commit_sha: String,
     pub prompts: BTreeMap<String, PromptRecord>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub humans: BTreeMap<String, HumanRecord>,
 }
 
 impl AuthorshipMetadata {
@@ -36,6 +38,7 @@ impl AuthorshipMetadata {
             git_ai_version: Some(GIT_AI_VERSION.to_string()),
             base_commit_sha: String::new(),
             prompts: BTreeMap::new(),
+            humans: BTreeMap::new(),
         }
     }
 }

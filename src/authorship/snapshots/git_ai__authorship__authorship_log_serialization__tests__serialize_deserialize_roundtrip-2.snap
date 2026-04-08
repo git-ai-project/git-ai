@@ -61,5 +61,6 @@ AuthorshipLogV3 {
         ),
         base_commit_sha: "abc123",
         prompts: {},
+        humans: {},
     },
 }
