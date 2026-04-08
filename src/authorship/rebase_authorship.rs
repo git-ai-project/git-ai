@@ -1474,6 +1474,10 @@ pub fn rewrite_authorship_after_rebase_v2(
     // per-commit fields (total_additions, total_deletions) are always taken from the correct
     // original commit's PromptRecord even when accepted_lines happen to be equal across commits.
     let mut prev_original_commit: Option<String> = None;
+    // Per-commit-delta humans: only h_<hash> entries that appear in the current commit's
+    // changed files, mirroring the same scoping applied to prompts/accepted_lines.
+    let mut prev_delta_humans: BTreeMap<String, crate::authorship::authorship_log::HumanRecord> =
+        BTreeMap::new();
 
     for (idx, new_commit) in commits_to_process.iter().enumerate() {
         debug_log(&format!(
@@ -1626,15 +1630,53 @@ pub fn rewrite_authorship_after_rebase_v2(
                 .filter(|(_, m)| m.accepted_lines > 0)
                 .map(|(pid, m)| (pid.clone(), m.accepted_lines))
                 .collect();
+            // Per-commit-delta humans: h_<hash> entries for KnownHuman-attributed lines in
+            // this commit's changed files.  `current_attributions` only tracks AI-attributed
+            // lines (from note attestations), so we read KnownHuman checkpoints from the
+            // working log stored under this commit's parent SHA instead.  For non-conflict
+            // commits the working log is absent or has no KnownHuman entries → empty map.
+            let delta_humans: BTreeMap<String, crate::authorship::authorship_log::HumanRecord> = {
+                let mut map = BTreeMap::new();
+                if let Some(parent_sha) = commit_parent_shas.get(new_commit) {
+                    if let Ok(wl) = repo.storage.working_log_for_base_commit(parent_sha) {
+                        if let Ok(checkpoints) = wl.read_all_checkpoints() {
+                            for cp in &checkpoints {
+                                if cp.kind
+                                    != crate::authorship::working_log::CheckpointKind::KnownHuman
+                                {
+                                    continue;
+                                }
+                                // Only include if any entry covers a changed file in this commit.
+                                if !cp
+                                    .entries
+                                    .iter()
+                                    .any(|e| changed_files_in_commit.contains(&e.file))
+                                {
+                                    continue;
+                                }
+                                let hash = crate::authorship::authorship_log_serialization::generate_human_short_hash(
+                                    &cp.author,
+                                );
+                                map.entry(hash.clone()).or_insert_with(|| {
+                                    initial_humans.get(&hash).cloned().unwrap_or_else(|| {
+                                        crate::authorship::authorship_log::HumanRecord {
+                                            author: cp.author.clone(),
+                                        }
+                                    })
+                                });
+                            }
+                        }
+                    }
+                }
+                map
+            };
             // Only rebuild the (expensive) serde_json metadata template when the active-prompt
-            // set OR accepted_lines values changed, OR when the original commit changed.
-            // Consecutive same-session commits share the same prompt IDs but differ in
-            // accepted_lines, so the key includes both.  We also track the original commit
-            // because per-commit fields (total_additions, total_deletions) are keyed by the
-            // original SHA and must be refreshed whenever it changes.
+            // set OR accepted_lines values changed, OR when the original commit changed, OR
+            // when per-commit humans changed.
             let current_original_commit = new_to_original.get(new_commit).map(String::as_str);
             if active_prompt_key != prev_active_prompt_key
                 || current_original_commit != prev_original_commit.as_deref()
+                || delta_humans != prev_delta_humans
             {
                 let active_ids: HashSet<String> = active_prompt_key.keys().cloned().collect();
                 metadata_json_template_parts = build_metadata_template_parts_filtered(
@@ -1642,9 +1684,11 @@ pub fn rewrite_authorship_after_rebase_v2(
                     &current_prompts,
                     Some(&active_ids),
                     current_original_commit,
+                    Some(&delta_humans),
                 );
                 prev_active_prompt_key = active_prompt_key;
                 prev_original_commit = current_original_commit.map(str::to_string);
+                prev_delta_humans = delta_humans;
             }
             loop_metrics_ms += tmetrics.elapsed().as_micros();
         }
@@ -3649,7 +3693,7 @@ fn build_metadata_template_parts(
     metadata: &crate::authorship::authorship_log_serialization::AuthorshipMetadata,
     prompts: &BTreeMap<String, BTreeMap<String, crate::authorship::authorship_log::PromptRecord>>,
 ) -> Option<(String, String)> {
-    build_metadata_template_parts_filtered(metadata, prompts, None, None)
+    build_metadata_template_parts_filtered(metadata, prompts, None, None, None)
 }
 
 /// Like `build_metadata_template_parts` but only includes prompts whose IDs are in
@@ -3661,16 +3705,26 @@ fn build_metadata_template_parts(
 /// being serialized. When provided, it is used to select the per-commit `PromptRecord` (so
 /// that `total_additions` / `total_deletions` reflect *this* commit, not an unrelated one
 /// that happens to sort first by SHA).
+///
+/// `delta_humans` overrides `metadata.humans` with per-commit-delta humans (only h_<hash>
+/// entries that appear in this commit's changed files). Passing `None` leaves metadata.humans
+/// unchanged (used for the initial/non-per-commit path).
 fn build_metadata_template_parts_filtered(
     metadata: &crate::authorship::authorship_log_serialization::AuthorshipMetadata,
     prompts: &BTreeMap<String, BTreeMap<String, crate::authorship::authorship_log::PromptRecord>>,
     active_ids: Option<&HashSet<String>>,
     original_commit: Option<&str>,
+    delta_humans: Option<&BTreeMap<String, crate::authorship::authorship_log::HumanRecord>>,
 ) -> Option<(String, String)> {
     let mut template_meta = metadata.clone();
     template_meta.base_commit_sha = "BASE_COMMIT_SHA_PLACEHOLDER".to_string();
     template_meta.prompts =
         flatten_prompts_for_metadata_filtered(prompts, active_ids, original_commit);
+    // Per-commit-delta: scope humans to only those appearing in this commit's changed files.
+    // An empty map serializes to nothing (humans field is skip_serializing_if = is_empty).
+    if let Some(humans) = delta_humans {
+        template_meta.humans = humans.clone();
+    }
     serde_json::to_string_pretty(&template_meta)
         .ok()
         .map(|template| {
@@ -4001,6 +4055,26 @@ fn build_note_from_conflict_wl(
 
     for checkpoint in &checkpoints {
         if checkpoint.kind == CheckpointKind::Human {
+            continue;
+        }
+
+        // KnownHuman checkpoints: record the human identity in metadata.humans and skip
+        // AI-prompt processing.  The AI checkpoint that follows a KnownHuman checkpoint
+        // already carries the h_-attributed line_attributions in its own entries (because
+        // the attribution state is accumulated across checkpoints), so there is no need to
+        // process the KnownHuman checkpoint's entries separately.
+        if checkpoint.kind == CheckpointKind::KnownHuman {
+            let hash =
+                crate::authorship::authorship_log_serialization::generate_human_short_hash(
+                    &checkpoint.author,
+                );
+            authorship_log
+                .metadata
+                .humans
+                .entry(hash)
+                .or_insert_with(|| crate::authorship::authorship_log::HumanRecord {
+                    author: checkpoint.author.clone(),
+                });
             continue;
         }
 

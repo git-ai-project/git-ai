@@ -221,6 +221,14 @@ fn test_ci_squash_merge_mixed_content() {
     )
     .unwrap();
 
+    // Verify metadata.humans contains the known human attribution
+    let merge_log = get_reference_as_authorship_log_v3(&git_ai_repo, &merge_sha).unwrap();
+    assert!(
+        merge_log.metadata.humans.contains_key("h_9e95a89b42f1fb"),
+        "squash note should carry h_9e95a89b42f1fb from human-attributed lines in mixed content"
+    );
+    assert_eq!(merge_log.metadata.humans["h_9e95a89b42f1fb"].author, "Test User");
+
     // Verify mixed authorship is preserved
     file.assert_lines_and_blame(crate::lines![
         "// Base code".human(),
@@ -393,6 +401,14 @@ fn test_ci_squash_merge_with_manual_changes() {
     )
     .unwrap();
 
+    // Verify metadata.humans contains the known human attribution
+    let merge_log = get_reference_as_authorship_log_v3(&git_ai_repo, &merge_sha).unwrap();
+    assert!(
+        merge_log.metadata.humans.contains_key("h_9e95a89b42f1fb"),
+        "squash note should carry h_9e95a89b42f1fb from human-attributed lines in config"
+    );
+    assert_eq!(merge_log.metadata.humans["h_9e95a89b42f1fb"].author, "Test User");
+
     // Verify AI authorship is preserved for AI lines, human for manual additions
     file.assert_lines_and_blame(crate::lines![
         "const config = {".human(),
@@ -474,6 +490,14 @@ fn test_ci_rebase_merge_multiple_commits() {
         false,
     )
     .unwrap();
+
+    // Verify metadata.humans contains the known human attribution
+    let merge_log = get_reference_as_authorship_log_v3(&git_ai_repo, &merge_sha).unwrap();
+    assert!(
+        merge_log.metadata.humans.contains_key("h_9e95a89b42f1fb"),
+        "squash note should carry h_9e95a89b42f1fb from human function lines"
+    );
+    assert_eq!(merge_log.metadata.humans["h_9e95a89b42f1fb"].author, "Test User");
 
     // Verify all authorship is correctly attributed
     file.assert_lines_and_blame(crate::lines![
@@ -977,6 +1001,324 @@ fn test_ci_local_rebase_merge_three_commits() {
     );
 }
 
+/// Standard-human variant of test_ci_squash_merge_basic.
+/// Uses unattributed (checkpoint --) human lines instead of known-human attribution.
+#[test]
+fn test_ci_squash_merge_basic_standard_human() {
+    let repo = direct_test_repo();
+    let mut file = repo.filename("feature.js");
+
+    // Create initial commit on main (rename default branch to main)
+    file.set_contents(crate::lines![
+        "// Original code".unattributed_human(),
+        "function original() {}".unattributed_human()
+    ]);
+    let _base_commit = repo.stage_all_and_commit("Initial commit").unwrap();
+    repo.git(&["branch", "-M", "main"]).unwrap();
+
+    // Create feature branch with AI code
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    file.insert_at(
+        2,
+        crate::lines![
+            "// AI added function".ai(),
+            "function aiFeature() {".ai(),
+            "  return 'ai code';".ai(),
+            "}".ai()
+        ],
+    );
+    let feature_commit = repo.stage_all_and_commit("Add AI feature").unwrap();
+    let feature_sha = feature_commit.commit_sha;
+
+    // Simulate CI squash merge: checkout main, create merge commit
+    repo.git(&["checkout", "main"]).unwrap();
+
+    // Manually create the squashed state (as CI would do)
+    file.set_contents(crate::lines![
+        "// Original code".unattributed_human(),
+        "function original() {}".unattributed_human(),
+        "// AI added function".unattributed_human(),
+        "function aiFeature() {".unattributed_human(),
+        "  return 'ai code';".unattributed_human(),
+        "}".unattributed_human()
+    ]);
+    let merge_commit = repo
+        .stage_all_and_commit("Merge feature via squash")
+        .unwrap();
+    let merge_sha = merge_commit.commit_sha;
+
+    // Get the GitAi repository instance
+    let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("Failed to find repository");
+
+    // Call the CI rewrite function
+    use git_ai::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
+    rewrite_authorship_after_squash_or_rebase(
+        &git_ai_repo,
+        "feature",
+        "main",
+        &feature_sha,
+        &merge_sha,
+        false,
+    )
+    .unwrap();
+
+    // Verify AI authorship is preserved in the merge commit
+    file.assert_lines_and_blame(crate::lines![
+        "// Original code".unattributed_human(),
+        "function original() {}".ai(),
+        "// AI added function".ai(),
+        "function aiFeature() {".ai(),
+        "  return 'ai code';".ai(),
+        "}".ai()
+    ]);
+}
+
+/// Standard-human variant of test_ci_squash_merge_mixed_content.
+/// Uses unattributed (checkpoint --) human lines instead of known-human attribution.
+#[test]
+fn test_ci_squash_merge_mixed_content_standard_human() {
+    let repo = direct_test_repo();
+    let mut file = repo.filename("mixed.js");
+
+    // Create initial commit
+    file.set_contents(crate::lines![
+        "// Base code".unattributed_human(),
+        "const base = 1;".unattributed_human()
+    ]);
+    let _base_commit = repo.stage_all_and_commit("Initial commit").unwrap();
+    repo.git(&["branch", "-M", "main"]).unwrap();
+
+    // Create feature branch with mixed AI and human changes
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+    // Simulate: human adds a comment, AI adds code, human adds more
+    file.insert_at(
+        2,
+        crate::lines![
+            "// Human comment".unattributed_human(),
+            "// AI generated function".ai(),
+            "function aiHelper() {".ai(),
+            "  return true;".ai(),
+            "}".ai(),
+            "// Another human comment".unattributed_human()
+        ],
+    );
+
+    let feature_commit = repo.stage_all_and_commit("Add mixed content").unwrap();
+    let feature_sha = feature_commit.commit_sha;
+
+    // Simulate CI squash merge
+    repo.git(&["checkout", "main"]).unwrap();
+
+    file.set_contents(crate::lines![
+        "// Base code".unattributed_human(),
+        "const base = 1;".unattributed_human(),
+        "// Human comment".unattributed_human(),
+        "// AI generated function".unattributed_human(),
+        "function aiHelper() {".unattributed_human(),
+        "  return true;".unattributed_human(),
+        "}".unattributed_human(),
+        "// Another human comment".unattributed_human()
+    ]);
+
+    let merge_commit = repo
+        .stage_all_and_commit("Merge feature via squash")
+        .unwrap();
+    let merge_sha = merge_commit.commit_sha;
+
+    // Get the GitAi repository instance
+    let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("Failed to find repository");
+
+    // Call the CI rewrite function
+    use git_ai::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
+    rewrite_authorship_after_squash_or_rebase(
+        &git_ai_repo,
+        "feature",
+        "main",
+        &feature_sha,
+        &merge_sha,
+        false,
+    )
+    .unwrap();
+
+    // Verify mixed authorship is preserved
+    file.assert_lines_and_blame(crate::lines![
+        "// Base code".unattributed_human(),
+        "const base = 1;".unattributed_human(),
+        "// Human comment".ai(),
+        "// AI generated function".ai(),
+        "function aiHelper() {".ai(),
+        "  return true;".ai(),
+        "}".ai(),
+        "// Another human comment".unattributed_human()
+    ]);
+}
+
+/// Standard-human variant of test_ci_squash_merge_with_manual_changes.
+/// Uses unattributed (checkpoint --) human lines instead of known-human attribution.
+#[test]
+fn test_ci_squash_merge_with_manual_changes_standard_human() {
+    let repo = direct_test_repo();
+    let mut file = repo.filename("config.js");
+
+    // Create initial commit
+    file.set_contents(crate::lines![
+        "const config = {".unattributed_human(),
+        "  version: 1".unattributed_human(),
+        "};".unattributed_human()
+    ]);
+    let _base_commit = repo.stage_all_and_commit("Initial commit").unwrap();
+    repo.git(&["branch", "-M", "main"]).unwrap();
+
+    // Create feature branch with AI additions
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+    file.set_contents(crate::lines![
+        "const config = {".unattributed_human(),
+        "  version: 1,".unattributed_human(),
+        "  // AI added feature flag".ai(),
+        "  enableAI: true".ai(),
+        "};".unattributed_human()
+    ]);
+
+    let feature_commit = repo.stage_all_and_commit("Add AI config").unwrap();
+    let feature_sha = feature_commit.commit_sha;
+
+    // Simulate CI squash merge with manual adjustment during merge
+    // (e.g., developer manually tweaks formatting or adds extra config)
+    repo.git(&["checkout", "main"]).unwrap();
+
+    file.set_contents(crate::lines![
+        "const config = {".unattributed_human(),
+        "  version: 1,".unattributed_human(),
+        "  // AI added feature flag".unattributed_human(),
+        "  enableAI: true,".unattributed_human(),
+        "  // Manual addition during merge".unattributed_human(),
+        "  production: false".unattributed_human(),
+        "};".unattributed_human()
+    ]);
+
+    let merge_commit = repo
+        .stage_all_and_commit("Merge feature via squash with tweaks")
+        .unwrap();
+    let merge_sha = merge_commit.commit_sha;
+
+    // Get the GitAi repository instance
+    let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("Failed to find repository");
+
+    // Call the CI rewrite function
+    use git_ai::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
+    rewrite_authorship_after_squash_or_rebase(
+        &git_ai_repo,
+        "feature",
+        "main",
+        &feature_sha,
+        &merge_sha,
+        false,
+    )
+    .unwrap();
+
+    // Verify AI authorship is preserved for AI lines, human for manual additions
+    file.assert_lines_and_blame(crate::lines![
+        "const config = {".unattributed_human(),
+        "  version: 1,".unattributed_human(),
+        "  // AI added feature flag".ai(),
+        "  enableAI: true,".ai(),
+        "  // Manual addition during merge".unattributed_human(),
+        "  production: false".unattributed_human(),
+        "};".unattributed_human()
+    ]);
+}
+
+/// Standard-human variant of test_ci_rebase_merge_multiple_commits.
+/// Uses unattributed (checkpoint --) human lines instead of known-human attribution.
+#[test]
+fn test_ci_rebase_merge_multiple_commits_standard_human() {
+    let repo = direct_test_repo();
+    let mut file = repo.filename("app.js");
+
+    // Create initial commit
+    file.set_contents(crate::lines!["// App v1".unattributed_human(), "".unattributed_human()]);
+    let _base_commit = repo.stage_all_and_commit("Initial commit").unwrap();
+    repo.git(&["branch", "-M", "main"]).unwrap();
+
+    // Create feature branch with multiple commits
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+    // First commit: AI adds function
+    file.insert_at(
+        1,
+        crate::lines!["// AI function 1".ai(), "function ai1() { }".ai()],
+    );
+    repo.stage_all_and_commit("Add AI function 1").unwrap();
+
+    // Second commit: AI adds another function
+    file.insert_at(
+        3,
+        crate::lines!["// AI function 2".ai(), "function ai2() { }".ai()],
+    );
+    repo.stage_all_and_commit("Add AI function 2").unwrap();
+
+    // Third commit: Human adds function
+    file.insert_at(
+        5,
+        crate::lines![
+            "// Human function".unattributed_human(),
+            "function human() { }".unattributed_human()
+        ],
+    );
+    let feature_commit = repo.stage_all_and_commit("Add human function").unwrap();
+    let feature_sha = feature_commit.commit_sha;
+
+    // Simulate CI rebase-style merge (all commits squashed into one)
+    repo.git(&["checkout", "main"]).unwrap();
+
+    file.set_contents(crate::lines![
+        "// App v1".unattributed_human(),
+        "// AI function 1".unattributed_human(),
+        "function ai1() { }".unattributed_human(),
+        "// AI function 2".unattributed_human(),
+        "function ai2() { }".unattributed_human(),
+        "// Human function".unattributed_human(),
+        "function human() { }".unattributed_human()
+    ]);
+
+    let merge_commit = repo
+        .stage_all_and_commit("Merge feature branch (squashed)")
+        .unwrap();
+    let merge_sha = merge_commit.commit_sha;
+
+    // Get the GitAi repository instance
+    let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("Failed to find repository");
+
+    // Call the CI rewrite function
+    use git_ai::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
+    rewrite_authorship_after_squash_or_rebase(
+        &git_ai_repo,
+        "feature",
+        "main",
+        &feature_sha,
+        &merge_sha,
+        false,
+    )
+    .unwrap();
+
+    // Verify all authorship is correctly attributed
+    file.assert_lines_and_blame(crate::lines![
+        "// App v1".unattributed_human(),
+        "// AI function 1".ai(),
+        "function ai1() { }".ai(),
+        "// AI function 2".ai(),
+        "function ai2() { }".ai(),
+        "// Human function".unattributed_human(),
+        "function human() { }".unattributed_human()
+    ]);
+}
+
 crate::reuse_tests_in_worktree!(
     test_ci_squash_merge_basic,
     test_ci_squash_merge_multiple_files,
@@ -988,4 +1330,8 @@ crate::reuse_tests_in_worktree!(
     test_ci_rebase_merge_commit_order_pairing,
     test_ci_local_rebase_merge_two_commits,
     test_ci_local_rebase_merge_three_commits,
+    test_ci_squash_merge_basic_standard_human,
+    test_ci_squash_merge_mixed_content_standard_human,
+    test_ci_squash_merge_with_manual_changes_standard_human,
+    test_ci_rebase_merge_multiple_commits_standard_human,
 );
