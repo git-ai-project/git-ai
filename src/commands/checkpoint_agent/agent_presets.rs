@@ -14,7 +14,6 @@ use crate::{
 use chrono::{TimeZone, Utc};
 use dirs;
 use glob::glob;
-use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
@@ -1886,44 +1885,26 @@ impl AgentCheckpointPreset for CursorPreset {
             });
         }
 
-        // Locate Cursor storage
-        let global_db = Self::cursor_global_database_path()?;
-        if !global_db.exists() {
-            return Err(GitAiError::PresetError(format!(
-                "Cursor global state database not found at {:?}. \
-                Make sure Cursor is installed and has been used at least once. \
-                Expected location: {:?}",
-                global_db, global_db,
-            )));
-        }
+        // Read transcript from JSONL file if available
+        let transcript_path = hook_data
+            .get("transcript_path")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
-        // Fetch the composer data and extract transcript (model is now from hook input, not DB)
-        let transcript = match Self::fetch_composer_payload(&global_db, &conversation_id) {
-            Ok(payload) => Self::transcript_data_from_composer_payload(
-                &payload,
-                &global_db,
-                &conversation_id,
-            )?
-            .map(|(transcript, _db_model)| transcript)
-            .unwrap_or_else(|| {
-                // Return empty transcript as default
-                // There's a race condition causing new threads to sometimes not show up.
-                // We refresh and grab all the messages in post-commit so we're ok with returning an empty (placeholder) transcript here and not throwing
-                eprintln!(
-                    "[Warning] Could not extract transcript from Cursor composer. Retrying at commit."
-                );
-                AiTranscript::new()
-            }),
-            Err(GitAiError::PresetError(msg))
-                if msg == "No conversation data found in database" =>
-            {
-                // Gracefully continue when the conversation hasn't been written yet due to Cursor race conditions
-                eprintln!(
-                    "[Warning] No conversation data found in Cursor DB for this thread. Proceeding and will re-sync at commit."
-                );
-                AiTranscript::new()
+        let transcript = if let Some(ref tp) = transcript_path {
+            match Self::transcript_and_model_from_cursor_jsonl(tp) {
+                Ok((transcript, _)) => transcript,
+                Err(e) => {
+                    eprintln!(
+                        "[Warning] Failed to parse Cursor JSONL at {}: {}. Will retry at commit.",
+                        tp, e
+                    );
+                    AiTranscript::new()
+                }
             }
-            Err(e) => return Err(e),
+        } else {
+            eprintln!("[Warning] No transcript_path in Cursor hook input. Will retry at commit.");
+            AiTranscript::new()
         };
 
         let edited_filepaths = if !file_path.is_empty() {
@@ -1938,17 +1919,9 @@ impl AgentCheckpointPreset for CursorPreset {
             model,
         };
 
-        // Store cursor database path in metadata for refetching during post-commit.
-        // This is only needed when GIT_AI_CURSOR_GLOBAL_DB_PATH env var is set (i.e., in tests),
-        // because the env var isn't passed to git hook subprocesses.
-        let agent_metadata = if std::env::var("GIT_AI_CURSOR_GLOBAL_DB_PATH").is_ok() {
-            Some(HashMap::from([(
-                "__test_cursor_db_path".to_string(),
-                global_db.to_string_lossy().to_string(),
-            )]))
-        } else {
-            None
-        };
+        // Store transcript_path in metadata for re-reading at commit time
+        let agent_metadata =
+            transcript_path.map(|tp| HashMap::from([("transcript_path".to_string(), tp)]));
 
         Ok(AgentRunResult {
             agent_id,
@@ -2023,264 +1996,187 @@ impl CursorPreset {
         path.to_string()
     }
 
-    /// Fetch the latest version of a Cursor conversation from the database
-    pub fn fetch_latest_cursor_conversation(
-        conversation_id: &str,
-    ) -> Result<Option<(AiTranscript, String)>, GitAiError> {
-        let global_db = Self::cursor_global_database_path()?;
-        Self::fetch_cursor_conversation_from_db(&global_db, conversation_id)
-    }
-
-    /// Fetch a Cursor conversation from a specific database path
-    pub fn fetch_cursor_conversation_from_db(
-        db_path: &std::path::Path,
-        conversation_id: &str,
-    ) -> Result<Option<(AiTranscript, String)>, GitAiError> {
-        if !db_path.exists() {
-            return Ok(None);
-        }
-
-        // Fetch composer payload
-        let composer_payload = Self::fetch_composer_payload(db_path, conversation_id)?;
-
-        // Extract transcript and model
-        let transcript_data = Self::transcript_data_from_composer_payload(
-            &composer_payload,
-            db_path,
-            conversation_id,
-        )?;
-
-        Ok(transcript_data)
-    }
-
-    // Get the Cursor database path
-    fn cursor_global_database_path() -> Result<PathBuf, GitAiError> {
-        if let Ok(global_db_path) = std::env::var("GIT_AI_CURSOR_GLOBAL_DB_PATH") {
-            return Ok(PathBuf::from(global_db_path));
-        }
-        let user_dir = Self::cursor_user_dir()?;
-        let global_db = user_dir.join("globalStorage").join("state.vscdb");
-        Ok(global_db)
-    }
-
-    fn cursor_user_dir() -> Result<PathBuf, GitAiError> {
-        #[cfg(target_os = "windows")]
-        {
-            // Windows: %APPDATA%\Cursor\User
-            let appdata = env::var("APPDATA")
-                .map_err(|e| GitAiError::Generic(format!("APPDATA not set: {}", e)))?;
-            Ok(Path::new(&appdata).join("Cursor").join("User"))
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            // macOS: ~/Library/Application Support/Cursor/User
-            let home = dirs::home_dir().ok_or_else(|| {
-                GitAiError::Generic("Could not determine home directory".to_string())
-            })?;
-            Ok(home
-                .join("Library")
-                .join("Application Support")
-                .join("Cursor")
-                .join("User"))
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            // Linux: ~/.config/Cursor/User
-            let config_dir = dirs::config_dir().ok_or_else(|| {
-                GitAiError::Generic("Could not determine user config directory".to_string())
-            })?;
-            Ok(config_dir.join("Cursor").join("User"))
-        }
-
-        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-        {
-            Err(GitAiError::PresetError(
-                "Cursor is only supported on Windows and macOS platforms".to_string(),
-            ))
-        }
-    }
-
-    fn open_sqlite_readonly(path: &Path) -> Result<Connection, GitAiError> {
-        Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(|e| GitAiError::Generic(format!("Failed to open {:?}: {}", path, e)))
-    }
-
-    pub fn fetch_composer_payload(
-        global_db_path: &Path,
-        composer_id: &str,
-    ) -> Result<serde_json::Value, GitAiError> {
-        let conn = Self::open_sqlite_readonly(global_db_path)?;
-
-        // Look for the composer data in cursorDiskKV
-        let key_pattern = format!("composerData:{}", composer_id);
-        let mut stmt = conn
-            .prepare("SELECT value FROM cursorDiskKV WHERE key = ?")
-            .map_err(|e| GitAiError::Generic(format!("Query failed: {}", e)))?;
-
-        let mut rows = stmt
-            .query([&key_pattern])
-            .map_err(|e| GitAiError::Generic(format!("Query failed: {}", e)))?;
-
-        if let Ok(Some(row)) = rows.next() {
-            let value_text: String = row
-                .get(0)
-                .map_err(|e| GitAiError::Generic(format!("Failed to read value: {}", e)))?;
-
-            let data = serde_json::from_str::<serde_json::Value>(&value_text)
-                .map_err(|e| GitAiError::Generic(format!("Failed to parse JSON: {}", e)))?;
-
-            return Ok(data);
-        }
-
-        Err(GitAiError::PresetError(
-            "No conversation data found in database".to_string(),
-        ))
-    }
-
-    pub fn transcript_data_from_composer_payload(
-        data: &serde_json::Value,
-        global_db_path: &Path,
-        composer_id: &str,
-    ) -> Result<Option<(AiTranscript, String)>, GitAiError> {
-        // Only support fullConversationHeadersOnly (bubbles format) - the current Cursor format
-        // All conversations since April 2025 use this format exclusively
-        let conv = data
-            .get("fullConversationHeadersOnly")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| {
-                GitAiError::PresetError(
-                    "Conversation uses unsupported legacy format. Only conversations created after April 2025 are supported.".to_string()
-                )
-            })?;
-
+    /// Parse a Cursor JSONL transcript file into a transcript.
+    ///
+    /// Cursor JSONL uses `role` (not `type`) at the top level, has no timestamps
+    /// or model fields in entries, and wraps user text in `<user_query>` tags.
+    /// Tool inputs use `path`/`contents` instead of `file_path`/`content`.
+    pub fn transcript_and_model_from_cursor_jsonl(
+        transcript_path: &str,
+    ) -> Result<(AiTranscript, Option<String>), GitAiError> {
+        let jsonl_content =
+            std::fs::read_to_string(transcript_path).map_err(GitAiError::IoError)?;
         let mut transcript = AiTranscript::new();
-        let mut model = None;
+        let mut plan_states = std::collections::HashMap::new();
 
-        for header in conv.iter() {
-            if let Some(bubble_id) = header.get("bubbleId").and_then(|v| v.as_str())
-                && let Ok(Some(bubble_content)) =
-                    Self::fetch_bubble_content_from_db(global_db_path, composer_id, bubble_id)
-            {
-                // Get bubble created at (ISO 8601 UTC string)
-                let bubble_created_at = bubble_content
-                    .get("createdAt")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
+        for line in jsonl_content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
 
-                // Extract model from bubble (first value wins)
-                if model.is_none()
-                    && let Some(model_info) = bubble_content.get("modelInfo")
-                    && let Some(model_name) = model_info.get("modelName").and_then(|v| v.as_str())
-                {
-                    model = Some(model_name.to_string());
-                }
+            // Skip malformed lines (file may be partially written)
+            let raw_entry: serde_json::Value = match serde_json::from_str(trimmed) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
 
-                // Extract text from bubble
-                if let Some(text) = bubble_content.get("text").and_then(|v| v.as_str()) {
-                    let trimmed = text.trim();
-                    if !trimmed.is_empty() {
-                        let role = header.get("type").and_then(|v| v.as_i64()).unwrap_or(0);
-                        if role == 1 {
-                            transcript.add_message(Message::user(
-                                trimmed.to_string(),
-                                bubble_created_at.clone(),
-                            ));
-                        } else {
-                            transcript.add_message(Message::assistant(
-                                trimmed.to_string(),
-                                bubble_created_at.clone(),
-                            ));
+            match raw_entry["role"].as_str() {
+                Some("user") => {
+                    if let Some(content_array) = raw_entry["message"]["content"].as_array() {
+                        for item in content_array {
+                            if item["type"].as_str() == Some("tool_result") {
+                                continue;
+                            }
+                            if item["type"].as_str() == Some("text")
+                                && let Some(text) = item["text"].as_str()
+                            {
+                                let cleaned = Self::strip_user_query_tags(text);
+                                if !cleaned.is_empty() {
+                                    transcript.add_message(Message::user(cleaned, None));
+                                }
+                            }
                         }
                     }
                 }
+                Some("assistant") => {
+                    if let Some(content_array) = raw_entry["message"]["content"].as_array() {
+                        for item in content_array {
+                            match item["type"].as_str() {
+                                Some("text") => {
+                                    if let Some(text) = item["text"].as_str()
+                                        && !text.trim().is_empty()
+                                    {
+                                        transcript.add_message(Message::assistant(
+                                            text.to_string(),
+                                            None,
+                                        ));
+                                    }
+                                }
+                                Some("thinking") => {
+                                    if let Some(thinking) = item["thinking"].as_str()
+                                        && !thinking.trim().is_empty()
+                                    {
+                                        transcript.add_message(Message::assistant(
+                                            thinking.to_string(),
+                                            None,
+                                        ));
+                                    }
+                                }
+                                Some("tool_use") => {
+                                    if let Some(name) = item["name"].as_str() {
+                                        let input = &item["input"];
+                                        // Normalize tool input: Cursor uses `path` where git-ai uses `file_path`
+                                        let normalized_input =
+                                            Self::normalize_cursor_tool_input(name, input);
 
-                // Handle tool calls and edits
-                if let Some(tool_former_data) = bubble_content.get("toolFormerData") {
-                    let tool_name = tool_former_data
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown");
-                    let raw_args_str = tool_former_data
-                        .get("rawArgs")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("{}");
-                    let raw_args_json = serde_json::from_str::<serde_json::Value>(raw_args_str)
-                        .unwrap_or(serde_json::Value::Null);
-                    match tool_name {
-                        "edit_file" => {
-                            let target_file =
-                                raw_args_json.get("target_file").and_then(|v| v.as_str());
-                            transcript.add_message(Message::tool_use(
-                                tool_name.to_string(),
-                                // Explicitly clear out everything other than target_file (renamed to file_path for consistency in git-ai) (too much data in rawArgs)
-                                serde_json::json!({ "file_path": target_file.unwrap_or("") }),
-                            ));
+                                        // Check for plan file writes
+                                        if let Some(plan_text) = extract_plan_from_tool_use(
+                                            name,
+                                            &normalized_input,
+                                            &mut plan_states,
+                                        ) {
+                                            transcript.add_message(Message::Plan {
+                                                text: plan_text,
+                                                timestamp: None,
+                                            });
+                                        } else {
+                                            // Apply same tool filtering as SQLite path
+                                            Self::add_cursor_tool_message(
+                                                &mut transcript,
+                                                name,
+                                                &normalized_input,
+                                            );
+                                        }
+                                    }
+                                }
+                                _ => continue,
+                            }
                         }
-                        "apply_patch"
-                        | "edit_file_v2_apply_patch"
-                        | "search_replace"
-                        | "edit_file_v2_search_replace"
-                        | "write"
-                        | "MultiEdit" => {
-                            let file_path = raw_args_json.get("file_path").and_then(|v| v.as_str());
-                            transcript.add_message(Message::tool_use(
-                                tool_name.to_string(),
-                                // Explicitly clear out everything other than file_path (too much data in rawArgs)
-                                serde_json::json!({ "file_path": file_path.unwrap_or("") }),
-                            ));
-                        }
-                        "codebase_search" | "grep" | "read_file" | "web_search"
-                        | "run_terminal_cmd" | "glob_file_search" | "todo_write"
-                        | "file_search" | "grep_search" | "list_dir" | "ripgrep" => {
-                            transcript.add_message(Message::tool_use(
-                                tool_name.to_string(),
-                                raw_args_json,
-                            ));
-                        }
-                        _ => {}
                     }
                 }
+                _ => continue,
             }
         }
 
-        if !transcript.messages.is_empty() {
-            Ok(Some((transcript, model.unwrap_or("unknown".to_string()))))
+        // Model is not in Cursor JSONL — it comes from hook input
+        Ok((transcript, None))
+    }
+
+    /// Strip `<user_query>...</user_query>` wrapper tags from Cursor user messages.
+    fn strip_user_query_tags(text: &str) -> String {
+        let trimmed = text.trim();
+        if let Some(inner) = trimmed
+            .strip_prefix("<user_query>")
+            .and_then(|s| s.strip_suffix("</user_query>"))
+        {
+            inner.trim().to_string()
         } else {
-            Ok(None)
+            trimmed.to_string()
         }
     }
 
-    pub fn fetch_bubble_content_from_db(
-        global_db_path: &Path,
-        composer_id: &str,
-        bubble_id: &str,
-    ) -> Result<Option<serde_json::Value>, GitAiError> {
-        let conn = Self::open_sqlite_readonly(global_db_path)?;
-
-        // Look for bubble data in cursorDiskKV with pattern bubbleId:composerId:bubbleId
-        let bubble_pattern = format!("bubbleId:{}:{}", composer_id, bubble_id);
-        let mut stmt = conn
-            .prepare("SELECT value FROM cursorDiskKV WHERE key = ?")
-            .map_err(|e| GitAiError::Generic(format!("Query failed: {}", e)))?;
-
-        let mut rows = stmt
-            .query([&bubble_pattern])
-            .map_err(|e| GitAiError::Generic(format!("Query failed: {}", e)))?;
-
-        if let Ok(Some(row)) = rows.next() {
-            let value_text: String = row
-                .get(0)
-                .map_err(|e| GitAiError::Generic(format!("Failed to read value: {}", e)))?;
-
-            let data = serde_json::from_str::<serde_json::Value>(&value_text)
-                .map_err(|e| GitAiError::Generic(format!("Failed to parse JSON: {}", e)))?;
-
-            return Ok(Some(data));
+    /// Normalize Cursor tool input field names to git-ai conventions.
+    /// Cursor uses `path`/`contents` where git-ai uses `file_path`/`content`.
+    fn normalize_cursor_tool_input(
+        tool_name: &str,
+        input: &serde_json::Value,
+    ) -> serde_json::Value {
+        let mut normalized = input.clone();
+        if let Some(obj) = normalized.as_object_mut() {
+            // Rename `path` → `file_path`
+            if let Some(path_val) = obj.remove("path")
+                && !obj.contains_key("file_path")
+            {
+                obj.insert("file_path".to_string(), path_val);
+            }
+            // For Write tool: rename `contents` → `content`
+            if tool_name == "Write"
+                && let Some(contents_val) = obj.remove("contents")
+                && !obj.contains_key("content")
+            {
+                obj.insert("content".to_string(), contents_val);
+            }
         }
+        normalized
+    }
 
-        Ok(None)
+    /// Add a tool_use message to the transcript. Edit tools store only
+    /// file_path (content is too large); everything else keeps full args.
+    fn add_cursor_tool_message(
+        transcript: &mut AiTranscript,
+        tool_name: &str,
+        normalized_input: &serde_json::Value,
+    ) {
+        match tool_name {
+            // Edit tools: store only file_path (content is too large)
+            "Write"
+            | "Edit"
+            | "StrReplace"
+            | "Delete"
+            | "MultiEdit"
+            | "edit_file"
+            | "apply_patch"
+            | "edit_file_v2_apply_patch"
+            | "search_replace"
+            | "edit_file_v2_search_replace" => {
+                let file_path = normalized_input
+                    .get("file_path")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| normalized_input.get("target_file").and_then(|v| v.as_str()));
+                transcript.add_message(Message::tool_use(
+                    tool_name.to_string(),
+                    serde_json::json!({ "file_path": file_path.unwrap_or("") }),
+                ));
+            }
+            // Everything else: store full args
+            _ => {
+                transcript.add_message(Message::tool_use(
+                    tool_name.to_string(),
+                    normalized_input.clone(),
+                ));
+            }
+        }
     }
 }
 

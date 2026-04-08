@@ -1989,7 +1989,7 @@ fn handle_show_transcript(args: &[String]) {
         eprintln!(
             "  Agents: claude, codex, gemini, continue-cli, github-copilot, cursor, amp, windsurf"
         );
-        eprintln!("  For cursor and amp, provide conversation/thread id instead of path");
+        eprintln!("  For amp, provide conversation/thread id instead of path");
         std::process::exit(1);
     }
 
@@ -2044,12 +2044,8 @@ fn handle_show_transcript(args: &[String]) {
                 }
             }
         }
-        "cursor" => match CursorPreset::fetch_latest_cursor_conversation(path_or_id) {
-            Ok(Some((transcript, model))) => Ok((transcript, Some(model))),
-            Ok(None) => {
-                eprintln!("Error: Conversation not found or database not available");
-                std::process::exit(1);
-            }
+        "cursor" => match CursorPreset::transcript_and_model_from_cursor_jsonl(path_or_id) {
+            Ok((transcript, model)) => Ok((transcript, model)),
             Err(e) => {
                 eprintln!("Error loading Cursor transcript: {}", e);
                 std::process::exit(1);
