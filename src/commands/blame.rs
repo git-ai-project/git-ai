@@ -1097,7 +1097,7 @@ fn overlay_ai_authorship(
                             line_authors.insert(current_line_num, hash.clone());
                         } else if options.return_human_authors_as_human {
                             line_authors
-                                .insert(current_line_num, CheckpointKind::Human.to_str());
+                                .insert(current_line_num, CheckpointKind::Human.to_str().to_string());
                         } else {
                             line_authors.insert(current_line_num, author.username.clone());
                         }

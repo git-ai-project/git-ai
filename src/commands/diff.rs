@@ -972,8 +972,8 @@ fn apply_blame_for_side(
                 // Known human attestation (h_-prefixed hash from KnownHuman checkpoint)
                 Attribution::Human(author_marker.clone())
             } else {
-                // Other markers (e.g. legacy "human" marker)
-                Attribution::Human(author_marker.clone())
+                // Legacy or unrecognized marker (e.g. "human") — treat as unattested
+                Attribution::NoData
             };
             attributions.insert(key.clone(), attribution);
             line_details.insert(
