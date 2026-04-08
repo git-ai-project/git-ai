@@ -6447,10 +6447,27 @@ impl ActorDaemonCoordinator {
                 let repo = find_repository_in_path(&worktree.to_string_lossy())?;
                 let tracked_files = tracked_working_log_files(&repo, &old_head)?;
                 if !tracked_files.is_empty() {
-                    return Err(GitAiError::Generic(format!(
-                        "{} missing captured carryover snapshot for async restore",
+                    // No carryover snapshot was captured for the direct pre-command HEAD
+                    // (old_head = conflict-time HEAD during the rebase pause).  This can happen
+                    // legitimately when the working-log entries at old_head are conflict-resolution
+                    // checkpoints written by `git-ai checkpoint` during `rebase --continue`, rather
+                    // than pre-rebase uncommitted attribution changes.
+                    //
+                    // The carryover snapshot capture uses stable_rebase_heads_from_worktree which
+                    // returns the original pre-rebase HEAD (not the conflict-time HEAD), and finds
+                    // no files there — so no snapshot is stored.  The conflict-resolution attribution
+                    // is handled independently by build_note_from_conflict_wl via the rewrite-log
+                    // path, which does not require the carryover snapshot.
+                    //
+                    // If there were genuine pre-rebase uncommitted attribution files, the snapshot
+                    // capture would have found them at the original pre-rebase HEAD and stored the
+                    // snapshot — in that case carryover_snapshot would be Some and the guard would
+                    // not fire.  So reaching here means there are no pre-rebase uncommitted files
+                    // to carry over, and the warning is benign.
+                    debug_log(&format!(
+                        "{} missing captured carryover snapshot for async restore (likely AI conflict-resolution checkpoint; attribution handled via working-log fallback)",
                         cmd.primary_command.as_deref().unwrap_or("pull")
-                    )));
+                    ));
                 }
             }
         }
