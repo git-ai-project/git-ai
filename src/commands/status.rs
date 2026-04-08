@@ -151,6 +151,7 @@ fn run_status(json: bool) -> Result<(), GitAiError> {
         total_additions,
         total_deletions,
         ai_accepted,
+        0,
         &BTreeMap::new(),
     );
 

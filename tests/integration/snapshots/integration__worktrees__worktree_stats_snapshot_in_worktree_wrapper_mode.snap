@@ -1,10 +1,10 @@
 ---
-source: tests/worktrees.rs
-assertion_line: 346
+source: tests/integration/worktrees.rs
 expression: stats
 ---
 CommitStats {
-    human_additions: 1,
+    human_additions: 0,
+    unknown_additions: 1,
     mixed_additions: 0,
     ai_additions: 2,
     ai_accepted: 2,
