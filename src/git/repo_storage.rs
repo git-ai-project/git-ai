@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 /// Initial attributions data structure stored in the INITIAL file
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -105,24 +106,79 @@ impl RepoStorage {
     pub fn delete_working_log_for_base_commit(&self, sha: &str) -> Result<(), GitAiError> {
         let working_log_dir = self.working_logs.join(sha);
         if working_log_dir.exists() {
-            if cfg!(debug_assertions) {
-                // In debug mode, move to old-{sha} instead of deleting
-                let old_dir = self.working_logs.join(format!("old-{}", sha));
-                // If old-{sha} already exists, remove it first
-                if old_dir.exists() {
-                    fs::remove_dir_all(&old_dir)?;
-                }
-                fs::rename(&working_log_dir, &old_dir)?;
-                debug_log(&format!(
-                    "Debug mode: moved checkpoint directory from {} to old-{}",
-                    sha, sha
-                ));
-            } else {
-                // In non-debug mode, delete as before
-                fs::remove_dir_all(&working_log_dir)?;
+            // Both debug and release: move to old-{sha} for retention
+            let old_dir = self.working_logs.join(format!("old-{}", sha));
+            // If old-{sha} already exists, remove it first
+            if old_dir.exists() {
+                fs::remove_dir_all(&old_dir)?;
+            }
+            fs::rename(&working_log_dir, &old_dir)?;
+
+            // Write a timestamp marker so we know when it was archived
+            let marker = old_dir.join(".archived_at");
+            let now = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or(Duration::ZERO)
+                .as_secs();
+            // Best-effort; don't fail the commit if we can't write the marker
+            let _ = fs::write(&marker, now.to_string());
+
+            debug_log(&format!(
+                "Moved checkpoint directory from {} to old-{}",
+                sha, sha
+            ));
+
+            // In production builds, prune old working logs that have expired.
+            // Debug builds never prune so developers can inspect old state.
+            if !cfg!(debug_assertions) {
+                self.prune_expired_old_working_logs();
             }
         }
         Ok(())
+    }
+
+    /// Number of seconds to retain archived working logs in production builds (7 days).
+    const OLD_WORKING_LOG_RETENTION_SECS: u64 = 7 * 24 * 60 * 60;
+
+    /// Remove archived (`old-*`) working log directories whose `.archived_at`
+    /// timestamp is older than [`OLD_WORKING_LOG_RETENTION_SECS`].
+    /// Errors are intentionally swallowed so pruning never breaks the commit flow.
+    fn prune_expired_old_working_logs(&self) {
+        let now_secs = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO)
+            .as_secs();
+
+        let entries = match fs::read_dir(&self.working_logs) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if !name_str.starts_with("old-") {
+                continue;
+            }
+
+            let dir_path = entry.path();
+            if !dir_path.is_dir() {
+                continue;
+            }
+
+            let marker = dir_path.join(".archived_at");
+            let archived_at = match fs::read_to_string(&marker) {
+                Ok(contents) => contents.trim().parse::<u64>().unwrap_or(0),
+                // No marker means this was created before the retention feature;
+                // treat it as immediately expired so it gets cleaned up.
+                Err(_) => 0,
+            };
+
+            if now_secs.saturating_sub(archived_at) >= Self::OLD_WORKING_LOG_RETENTION_SECS {
+                debug_log(&format!("Pruning expired old working log: {}", name_str));
+                let _ = fs::remove_dir_all(&dir_path);
+            }
+        }
     }
 
     /// Rename a working log directory from one commit SHA to another.
@@ -1134,6 +1190,153 @@ mod tests {
         assert!(
             !working_log.initial_file.exists(),
             "INITIAL should be removed when empty"
+        );
+    }
+
+    #[test]
+    fn test_delete_working_log_archives_to_old_sha() {
+        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
+        let repo_storage =
+            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
+                .unwrap();
+
+        let sha = "abc123";
+        // Create a working log directory with a dummy file
+        let wl_dir = repo_storage.working_logs.join(sha);
+        fs::create_dir_all(&wl_dir).unwrap();
+        fs::write(wl_dir.join("checkpoints.jsonl"), "").unwrap();
+
+        assert!(wl_dir.exists());
+
+        // Delete (archive) it
+        repo_storage
+            .delete_working_log_for_base_commit(sha)
+            .unwrap();
+
+        // Original directory should be gone
+        assert!(!wl_dir.exists());
+
+        // old-{sha} directory should exist
+        let old_dir = repo_storage.working_logs.join(format!("old-{}", sha));
+        assert!(old_dir.exists());
+        assert!(old_dir.is_dir());
+
+        // .archived_at marker should exist and contain a valid unix timestamp
+        let marker = old_dir.join(".archived_at");
+        assert!(marker.exists());
+        let ts: u64 = fs::read_to_string(&marker).unwrap().trim().parse().unwrap();
+        assert!(ts > 0);
+    }
+
+    #[test]
+    fn test_delete_working_log_replaces_existing_old_dir() {
+        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
+        let repo_storage =
+            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
+                .unwrap();
+
+        let sha = "def456";
+
+        // Pre-create an old-{sha} directory with stale content
+        let old_dir = repo_storage.working_logs.join(format!("old-{}", sha));
+        fs::create_dir_all(&old_dir).unwrap();
+        fs::write(old_dir.join("stale.txt"), "stale").unwrap();
+
+        // Create the actual working log
+        let wl_dir = repo_storage.working_logs.join(sha);
+        fs::create_dir_all(&wl_dir).unwrap();
+        fs::write(wl_dir.join("checkpoints.jsonl"), "fresh").unwrap();
+
+        repo_storage
+            .delete_working_log_for_base_commit(sha)
+            .unwrap();
+
+        // old dir should now contain the new content, not the stale file
+        assert!(!old_dir.join("stale.txt").exists());
+        assert!(old_dir.join("checkpoints.jsonl").exists());
+    }
+
+    #[test]
+    fn test_prune_expired_old_working_logs_removes_expired() {
+        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
+        let repo_storage =
+            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
+                .unwrap();
+
+        // Create an old working log with an expired timestamp (8 days ago)
+        let expired_dir = repo_storage.working_logs.join("old-expired111");
+        fs::create_dir_all(&expired_dir).unwrap();
+        let eight_days_ago = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - (8 * 24 * 60 * 60);
+        fs::write(expired_dir.join(".archived_at"), eight_days_ago.to_string()).unwrap();
+
+        // Create an old working log with a fresh timestamp (1 day ago)
+        let fresh_dir = repo_storage.working_logs.join("old-fresh222");
+        fs::create_dir_all(&fresh_dir).unwrap();
+        let one_day_ago = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - (24 * 60 * 60);
+        fs::write(fresh_dir.join(".archived_at"), one_day_ago.to_string()).unwrap();
+
+        // Run pruning
+        repo_storage.prune_expired_old_working_logs();
+
+        // Expired dir should be gone
+        assert!(
+            !expired_dir.exists(),
+            "Expired old working log should be pruned"
+        );
+
+        // Fresh dir should still exist
+        assert!(
+            fresh_dir.exists(),
+            "Fresh old working log should be retained"
+        );
+    }
+
+    #[test]
+    fn test_prune_expired_old_working_logs_removes_missing_marker() {
+        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
+        let repo_storage =
+            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
+                .unwrap();
+
+        // Create an old working log with NO .archived_at marker
+        let no_marker_dir = repo_storage.working_logs.join("old-nomarker");
+        fs::create_dir_all(&no_marker_dir).unwrap();
+
+        repo_storage.prune_expired_old_working_logs();
+
+        // Should be pruned (missing marker treated as timestamp 0 -> expired)
+        assert!(
+            !no_marker_dir.exists(),
+            "Old working log without marker should be pruned"
+        );
+    }
+
+    #[test]
+    fn test_prune_does_not_touch_active_working_logs() {
+        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
+        let repo_storage =
+            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
+                .unwrap();
+
+        // Create a regular (non-old-*) working log directory
+        let active_dir = repo_storage.working_logs.join("abc123active");
+        fs::create_dir_all(&active_dir).unwrap();
+        fs::write(active_dir.join("checkpoints.jsonl"), "data").unwrap();
+
+        repo_storage.prune_expired_old_working_logs();
+
+        // Active working log should be untouched
+        assert!(
+            active_dir.exists(),
+            "Active working logs should not be pruned"
         );
     }
 }
