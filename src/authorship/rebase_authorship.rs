@@ -73,12 +73,11 @@ fn load_rebase_note_cache(
     // for any AI lines that survived the merge.
     let mut new_commits_with_notes = HashSet::new();
     for (commit, blob_oid) in &new_commit_note_blob_oids {
-        if let Some(content) = blob_contents.get(blob_oid) {
-            if let Ok(log) = AuthorshipLog::deserialize_from_string(content) {
-                if !log.attestations.is_empty() {
-                    new_commits_with_notes.insert(commit.clone());
-                }
-            }
+        if let Some(content) = blob_contents.get(blob_oid)
+            && let Ok(log) = AuthorshipLog::deserialize_from_string(content)
+            && !log.attestations.is_empty()
+        {
+            new_commits_with_notes.insert(commit.clone());
         }
     }
 
@@ -1419,10 +1418,10 @@ pub fn rewrite_authorship_after_rebase_v2(
     let commit_parent_shas: HashMap<String, String> = {
         let mut map = HashMap::new();
         for sha in &commits_to_process {
-            if let Ok(commit) = repo.find_commit(sha.clone()) {
-                if let Ok(parent) = commit.parent(0) {
-                    map.insert(sha.clone(), parent.id());
-                }
+            if let Ok(commit) = repo.find_commit(sha.clone())
+                && let Ok(parent) = commit.parent(0)
+            {
+                map.insert(sha.clone(), parent.id());
             }
         }
         map
@@ -1621,7 +1620,7 @@ pub fn rewrite_authorship_after_rebase_v2(
             && changed_files_in_commit.iter().any(|f| {
                 cached_file_attestation_text
                     .get(f.as_str())
-                    .map_or(false, |t| !t.is_empty())
+                    .is_some_and(|t| !t.is_empty())
             });
         // If the slow-path computation produced AI attestations for this commit's changed
         // files, assemble a fresh note from the per-file cache. Otherwise fall back to
@@ -1632,10 +1631,10 @@ pub fn rewrite_authorship_after_rebase_v2(
             // Assemble note from cached per-file text for THIS commit's changed files only.
             let mut output = String::with_capacity(512);
             for file_path in &changed_files_in_commit {
-                if let Some(text) = cached_file_attestation_text.get(file_path.as_str()) {
-                    if !text.is_empty() {
-                        output.push_str(text);
-                    }
+                if let Some(text) = cached_file_attestation_text.get(file_path.as_str())
+                    && !text.is_empty()
+                {
+                    output.push_str(text);
                 }
             }
             output.push_str("---\n");
@@ -1657,12 +1656,7 @@ pub fn rewrite_authorship_after_rebase_v2(
             // during `rebase --continue` conflict resolution), use those line_attributions
             // directly to build the note.
             if let Some(parent_sha) = commit_parent_shas.get(new_commit) {
-                build_note_from_conflict_wl(
-                    repo,
-                    new_commit,
-                    parent_sha,
-                    &changed_files_in_commit,
-                )
+                build_note_from_conflict_wl(repo, new_commit, parent_sha, &changed_files_in_commit)
             } else {
                 None
             }
@@ -1674,7 +1668,7 @@ pub fn rewrite_authorship_after_rebase_v2(
                 .filter(|f| {
                     cached_file_attestation_text
                         .get(f.as_str())
-                        .map_or(false, |t| !t.is_empty())
+                        .is_some_and(|t| !t.is_empty())
                 })
                 .count();
             pending_note_entries.push((new_commit.clone(), authorship_json));
@@ -3640,9 +3634,7 @@ fn flatten_prompts_for_metadata_filtered(
 ) -> BTreeMap<String, crate::authorship::authorship_log::PromptRecord> {
     prompts
         .iter()
-        .filter(|(prompt_id, _)| {
-            active_ids.map_or(true, |ids| ids.contains(prompt_id.as_str()))
-        })
+        .filter(|(prompt_id, _)| active_ids.is_none_or(|ids| ids.contains(prompt_id.as_str())))
         .filter_map(|(prompt_id, commits)| {
             commits
                 .values()
@@ -3981,8 +3973,7 @@ fn build_note_from_conflict_wl(
 
     // Build one FileAttestation per file from the merged line attributions.
     for (file_path, line_attrs) in &file_line_attrs {
-        if let Some(file_att) =
-            build_file_attestation_from_line_attributions(file_path, line_attrs)
+        if let Some(file_att) = build_file_attestation_from_line_attributions(file_path, line_attrs)
         {
             authorship_log.attestations.push(file_att);
             has_ai_content = true;
@@ -3993,9 +3984,7 @@ fn build_note_from_conflict_wl(
         return None;
     }
 
-    authorship_log
-        .serialize_to_string()
-        .ok()
+    authorship_log.serialize_to_string().ok()
 }
 
 fn build_authorship_log_from_state(
@@ -4080,9 +4069,8 @@ fn build_delta_prompt_metrics_from_hunks_and_attrs(
         };
 
         // Build set of new-side line numbers (lines inserted/replaced by this commit).
-        let mut added_line_nums: HashSet<u32> = HashSet::with_capacity(
-            file_hunks.iter().map(|h| h.new_count as usize).sum(),
-        );
+        let mut added_line_nums: HashSet<u32> =
+            HashSet::with_capacity(file_hunks.iter().map(|h| h.new_count as usize).sum());
         for hunk in file_hunks {
             for i in 0..hunk.new_count {
                 added_line_nums.insert(hunk.new_start + i);

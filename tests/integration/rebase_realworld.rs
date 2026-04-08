@@ -8,6 +8,7 @@
 //! IMPORTANT: All attribution reads MUST go through TestRepo helpers:
 //!   - `run_blame_api(repo, sha, file, ctx)` — blame at specific commit via Rust API (newest_commit)
 //!   - `repo.read_authorship_note(sha)` — waits for daemon sync
+//!
 //! Never call git/git-ai directly (racy in daemon mode).
 //!
 //! Four scenario categories (10 tests each):
@@ -68,26 +69,28 @@ fn get_commit_chain(repo: &TestRepo, n: usize) -> Vec<String> {
             } else {
                 format!("HEAD~{}", offset)
             };
-            repo.git(&["rev-parse", &rev])
-                .unwrap()
-                .trim()
-                .to_string()
+            repo.git(&["rev-parse", &rev]).unwrap().trim().to_string()
         })
         .collect()
 }
 
 /// Sum of `accepted_lines` across all prompts in a note string.
 fn total_accepted_lines(note: &str) -> u32 {
-    let log = AuthorshipLog::deserialize_from_string(note)
-        .expect("should parse authorship note");
-    log.metadata.prompts.values().map(|p| p.accepted_lines).sum()
+    let log = AuthorshipLog::deserialize_from_string(note).expect("should parse authorship note");
+    log.metadata
+        .prompts
+        .values()
+        .map(|p| p.accepted_lines)
+        .sum()
 }
 
 /// File paths listed in a note's attestations section.
 fn files_in_note(note: &str) -> Vec<String> {
-    let log = AuthorshipLog::deserialize_from_string(note)
-        .expect("should parse authorship note");
-    log.attestations.iter().map(|a| a.file_path.clone()).collect()
+    let log = AuthorshipLog::deserialize_from_string(note).expect("should parse authorship note");
+    log.attestations
+        .iter()
+        .map(|a| a.file_path.clone())
+        .collect()
 }
 
 /// Assert that `sha`'s note lists EXACTLY the files in `expected` — no extras,
@@ -181,24 +184,37 @@ fn assert_blame_sample_at_commit(
 ) {
     let (line_authors, lines) = run_blame_api(repo, sha, file, ctx);
     for (exp_substr, exp_is_ai) in samples {
-        let found = lines.iter().enumerate()
+        let found = lines
+            .iter()
+            .enumerate()
             .find(|(_, l)| l.contains(exp_substr));
         let (idx, line_text) = found.unwrap_or_else(|| {
             panic!(
                 "{}: line containing {:?} not found in {} at {}\nFile lines:\n{}",
-                ctx, exp_substr, file, sha,
+                ctx,
+                exp_substr,
+                file,
+                sha,
                 lines.join("\n")
             )
         });
         let line_num = (idx + 1) as u32;
-        let author = line_authors.get(&line_num).map(|s| s.as_str()).unwrap_or("Test User");
+        let author = line_authors
+            .get(&line_num)
+            .map(|s| s.as_str())
+            .unwrap_or("Test User");
         let got_ai = is_ai_author(author);
         assert_eq!(
-            got_ai, *exp_is_ai,
+            got_ai,
+            *exp_is_ai,
             "{}: line {} ({:?}) expected {}AI-authored but got author={:?}\nat {} file {}",
-            ctx, line_num, line_text,
+            ctx,
+            line_num,
+            line_text,
             if *exp_is_ai { "" } else { "non-" },
-            author, sha, file
+            author,
+            sha,
+            file
         );
     }
 }
@@ -214,12 +230,7 @@ fn assert_note_base_commit_matches(repo: &TestRepo, sha: &str, ctx: &str) {
 }
 
 /// Assert total accepted_lines in `sha`'s note equals `expected` exactly.
-fn assert_accepted_lines_exact(
-    repo: &TestRepo,
-    sha: &str,
-    ctx: &str,
-    expected: u32,
-) {
+fn assert_accepted_lines_exact(repo: &TestRepo, sha: &str, ctx: &str, expected: u32) {
     let raw = repo
         .read_authorship_note(sha)
         .unwrap_or_else(|| panic!("{}: commit {} has no note", ctx, sha));
@@ -289,9 +300,15 @@ fn assert_blame_at_commit(
     let (line_authors, lines) = run_blame_api(repo, sha, file, ctx);
 
     assert_eq!(
-        lines.len(), expected.len(),
+        lines.len(),
+        expected.len(),
         "{}: file {} at {} has {} lines, expected {}\nLines:\n{}",
-        ctx, file, sha, lines.len(), expected.len(), lines.join("\n")
+        ctx,
+        file,
+        sha,
+        lines.len(),
+        expected.len(),
+        lines.join("\n")
     );
 
     for (i, (line_text, (exp_substr, exp_is_ai))) in lines.iter().zip(expected.iter()).enumerate() {
@@ -299,16 +316,29 @@ fn assert_blame_at_commit(
         assert!(
             line_text.contains(exp_substr),
             "{}: line {} {:?} does not contain {:?}\nat {} file {}",
-            ctx, line_num, line_text, exp_substr, sha, file
+            ctx,
+            line_num,
+            line_text,
+            exp_substr,
+            sha,
+            file
         );
-        let author = line_authors.get(&line_num).map(|s| s.as_str()).unwrap_or("Test User");
+        let author = line_authors
+            .get(&line_num)
+            .map(|s| s.as_str())
+            .unwrap_or("Test User");
         let got_ai = is_ai_author(author);
         assert_eq!(
-            got_ai, *exp_is_ai,
+            got_ai,
+            *exp_is_ai,
             "{}: line {} ({:?}) expected {}AI-authored but got author={:?}\nat {} file {}",
-            ctx, line_num, line_text,
+            ctx,
+            line_num,
+            line_text,
             if *exp_is_ai { "" } else { "non-" },
-            author, sha, file
+            author,
+            sha,
+            file
         );
     }
 }
@@ -393,10 +423,12 @@ fn test_fast_path_python_microservice_5_endpoints() {
         "        return self.db.query('SELECT * FROM products WHERE id = ?', product_id)".ai(),
         "    def list_products(self, category=None):".ai(),
         "        if category:".ai(),
-        "            return self.db.query('SELECT * FROM products WHERE category = ?', category)".ai(),
+        "            return self.db.query('SELECT * FROM products WHERE category = ?', category)"
+            .ai(),
         "        return self.db.query('SELECT * FROM products')".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add product service").unwrap();
+    repo.stage_all_and_commit("feat: add product service")
+        .unwrap();
 
     // C3: orders.py
     let mut f3 = repo.filename("orders.py");
@@ -412,7 +444,8 @@ fn test_fast_path_python_microservice_5_endpoints() {
         "        return self.db.execute('INSERT INTO orders (user_id, total) VALUES (?, ?)', user_id, total)".ai(),
         "    def get_order(self, order_id):".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add order service").unwrap();
+    repo.stage_all_and_commit("feat: add order service")
+        .unwrap();
 
     // C4: payments.py
     let mut f4 = repo.filename("payments.py");
@@ -428,7 +461,8 @@ fn test_fast_path_python_microservice_5_endpoints() {
         "    def refund(self, payment_id):".ai(),
         "        return self.stripe.refund.create(charge=payment_id)".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add payment service").unwrap();
+    repo.stage_all_and_commit("feat: add payment service")
+        .unwrap();
 
     // C5: webhooks.py
     let mut f5 = repo.filename("webhooks.py");
@@ -444,15 +478,41 @@ fn test_fast_path_python_microservice_5_endpoints() {
         "        for hook in hooks:".ai(),
         "            self.http.post(hook['url'], json=payload)".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add webhook service").unwrap();
+    repo.stage_all_and_commit("feat: add webhook service")
+        .unwrap();
 
     // === MAIN BRANCH: 5 human commits on DIFFERENT files ===
     repo.git(&["checkout", &main_branch]).unwrap();
-    write_raw_commit(&repo, "tests/test_base.py", "import unittest\nclass BaseTest(unittest.TestCase): pass\n", "test: add base test class");
-    write_raw_commit(&repo, ".github/ci.yml", "name: CI\non: [push, pull_request]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v3\n      - run: python -m pytest\n", "ci: add github actions workflow");
-    write_raw_commit(&repo, "conftest.py", "import pytest\n\n@pytest.fixture\ndef db():\n    return MockDatabase()\n", "test: add pytest conftest");
-    write_raw_commit(&repo, "Makefile", "test:\n\tpython -m pytest tests/\nlint:\n\tflake8 .\n.PHONY: test lint\n", "build: add Makefile");
-    write_raw_commit(&repo, "setup.cfg", "[metadata]\nname = microservice\nversion = 0.1.0\n[options]\npython_requires = >=3.9\n", "build: add setup.cfg");
+    write_raw_commit(
+        &repo,
+        "tests/test_base.py",
+        "import unittest\nclass BaseTest(unittest.TestCase): pass\n",
+        "test: add base test class",
+    );
+    write_raw_commit(
+        &repo,
+        ".github/ci.yml",
+        "name: CI\non: [push, pull_request]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v3\n      - run: python -m pytest\n",
+        "ci: add github actions workflow",
+    );
+    write_raw_commit(
+        &repo,
+        "conftest.py",
+        "import pytest\n\n@pytest.fixture\ndef db():\n    return MockDatabase()\n",
+        "test: add pytest conftest",
+    );
+    write_raw_commit(
+        &repo,
+        "Makefile",
+        "test:\n\tpython -m pytest tests/\nlint:\n\tflake8 .\n.PHONY: test lint\n",
+        "build: add Makefile",
+    );
+    write_raw_commit(
+        &repo,
+        "setup.cfg",
+        "[metadata]\nname = microservice\nversion = 0.1.0\n[options]\npython_requires = >=3.9\n",
+        "build: add setup.cfg",
+    );
 
     // === REBASE feature onto main ===
     repo.git(&["checkout", "feature"]).unwrap();
@@ -465,133 +525,239 @@ fn test_fast_path_python_microservice_5_endpoints() {
     // sha0 = C1': only users.py
     assert_note_base_commit_matches(&repo, &chain[0], "sha0");
     assert_note_files_exact(&repo, &chain[0], "sha0_files", &["users.py"]);
-    assert_note_no_forbidden_files(&repo, &chain[0], "sha0_no_future",
-        &["products.py", "orders.py", "payments.py", "webhooks.py"]);
-    assert_blame_at_commit(&repo, &chain[0], "users.py", "sha0_blame", &[
-        ("class UserService:", true),
-        ("def __init__(self, db):", true),
-        ("self.db = db", true),
-        ("self.cache = {}", true),
-        ("def get_user(self, user_id):", true),
-        ("if user_id in self.cache:", true),
-        ("return self.cache[user_id]", true),
-        ("SELECT * FROM users WHERE id = ?", true),
-        ("def create_user(self, name, email):", true),
-        ("INSERT INTO users", true),
-    ]);
+    assert_note_no_forbidden_files(
+        &repo,
+        &chain[0],
+        "sha0_no_future",
+        &["products.py", "orders.py", "payments.py", "webhooks.py"],
+    );
+    assert_blame_at_commit(
+        &repo,
+        &chain[0],
+        "users.py",
+        "sha0_blame",
+        &[
+            ("class UserService:", true),
+            ("def __init__(self, db):", true),
+            ("self.db = db", true),
+            ("self.cache = {}", true),
+            ("def get_user(self, user_id):", true),
+            ("if user_id in self.cache:", true),
+            ("return self.cache[user_id]", true),
+            ("SELECT * FROM users WHERE id = ?", true),
+            ("def create_user(self, name, email):", true),
+            ("INSERT INTO users", true),
+        ],
+    );
 
     // sha1 = C2': products.py
     assert_note_base_commit_matches(&repo, &chain[1], "sha1");
     assert_note_files_exact(&repo, &chain[1], "sha1_files", &["products.py"]);
-    assert_note_no_forbidden_files(&repo, &chain[1], "sha1_no_future",
-        &["orders.py", "payments.py", "webhooks.py"]);
-    assert_blame_at_commit(&repo, &chain[1], "products.py", "sha1_blame", &[
-        ("class ProductService:", true),
-        ("def __init__(self, db):", true),
-        ("self.db = db", true),
-        ("self.index = {}", true),
-        ("def get_product(self, product_id):", true),
-        ("SELECT * FROM products WHERE id = ?", true),
-        ("def list_products(self, category=None):", true),
-        ("if category:", true),
-        ("SELECT * FROM products WHERE category = ?", true),
-        ("SELECT * FROM products", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[1], "users.py", "chain1_prior_users_py", &[
-        ("class UserService:", true),
-        ("def get_user(self, user_id):", true),
-    ]);
+    assert_note_no_forbidden_files(
+        &repo,
+        &chain[1],
+        "sha1_no_future",
+        &["orders.py", "payments.py", "webhooks.py"],
+    );
+    assert_blame_at_commit(
+        &repo,
+        &chain[1],
+        "products.py",
+        "sha1_blame",
+        &[
+            ("class ProductService:", true),
+            ("def __init__(self, db):", true),
+            ("self.db = db", true),
+            ("self.index = {}", true),
+            ("def get_product(self, product_id):", true),
+            ("SELECT * FROM products WHERE id = ?", true),
+            ("def list_products(self, category=None):", true),
+            ("if category:", true),
+            ("SELECT * FROM products WHERE category = ?", true),
+            ("SELECT * FROM products", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[1],
+        "users.py",
+        "chain1_prior_users_py",
+        &[
+            ("class UserService:", true),
+            ("def get_user(self, user_id):", true),
+        ],
+    );
 
     // sha2 = C3': orders.py
     assert_note_base_commit_matches(&repo, &chain[2], "sha2");
     assert_note_files_exact(&repo, &chain[2], "sha2_files", &["orders.py"]);
-    assert_note_no_forbidden_files(&repo, &chain[2], "sha2_no_future",
-        &["payments.py", "webhooks.py"]);
-    assert_blame_at_commit(&repo, &chain[2], "orders.py", "sha2_blame", &[
-        ("class OrderService:", true),
-        ("def __init__(self, db, user_svc, product_svc):", true),
-        ("self.db = db", true),
-        ("self.user_svc = user_svc", true),
-        ("self.product_svc = product_svc", true),
-        ("def create_order(self, user_id, items):", true),
-        ("user = self.user_svc.get_user(user_id)", true),
-        ("total = sum", true),
-        ("INSERT INTO orders", true),
-        ("def get_order(self, order_id):", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[2], "users.py", "chain2_prior_users_py", &[
-        ("class UserService:", true),
-        ("def get_user(self, user_id):", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[2], "products.py", "chain2_prior_products_py", &[
-        ("class ProductService:", true),
-        ("def list_products(self, category=None):", true),
-    ]);
+    assert_note_no_forbidden_files(
+        &repo,
+        &chain[2],
+        "sha2_no_future",
+        &["payments.py", "webhooks.py"],
+    );
+    assert_blame_at_commit(
+        &repo,
+        &chain[2],
+        "orders.py",
+        "sha2_blame",
+        &[
+            ("class OrderService:", true),
+            ("def __init__(self, db, user_svc, product_svc):", true),
+            ("self.db = db", true),
+            ("self.user_svc = user_svc", true),
+            ("self.product_svc = product_svc", true),
+            ("def create_order(self, user_id, items):", true),
+            ("user = self.user_svc.get_user(user_id)", true),
+            ("total = sum", true),
+            ("INSERT INTO orders", true),
+            ("def get_order(self, order_id):", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "users.py",
+        "chain2_prior_users_py",
+        &[
+            ("class UserService:", true),
+            ("def get_user(self, user_id):", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "products.py",
+        "chain2_prior_products_py",
+        &[
+            ("class ProductService:", true),
+            ("def list_products(self, category=None):", true),
+        ],
+    );
 
     // sha3 = C4': payments.py
     assert_note_base_commit_matches(&repo, &chain[3], "sha3");
-    assert_note_files_exact(&repo, &chain[3], "sha3_files",
-        &["payments.py"]);
+    assert_note_files_exact(&repo, &chain[3], "sha3_files", &["payments.py"]);
     assert_note_no_forbidden_files(&repo, &chain[3], "sha3_no_future", &["webhooks.py"]);
-    assert_blame_at_commit(&repo, &chain[3], "payments.py", "sha3_blame", &[
-        ("class PaymentService:", true),
-        ("def __init__(self, db, stripe_client):", true),
-        ("self.db = db", true),
-        ("self.stripe = stripe_client", true),
-        ("def charge(self, order_id, amount_cents, card_token):", true),
-        ("stripe.charge.create", true),
-        ("INSERT INTO payments", true),
-        ("return result", true),
-        ("def refund(self, payment_id):", true),
-        ("stripe.refund.create", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "users.py", "chain3_prior_users_py", &[
-        ("class UserService:", true),
-        ("def get_user(self, user_id):", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "products.py", "chain3_prior_products_py", &[
-        ("class ProductService:", true),
-        ("def list_products(self, category=None):", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "orders.py", "chain3_prior_orders_py", &[
-        ("class OrderService:", true),
-        ("def create_order(self, user_id, items):", true),
-    ]);
+    assert_blame_at_commit(
+        &repo,
+        &chain[3],
+        "payments.py",
+        "sha3_blame",
+        &[
+            ("class PaymentService:", true),
+            ("def __init__(self, db, stripe_client):", true),
+            ("self.db = db", true),
+            ("self.stripe = stripe_client", true),
+            (
+                "def charge(self, order_id, amount_cents, card_token):",
+                true,
+            ),
+            ("stripe.charge.create", true),
+            ("INSERT INTO payments", true),
+            ("return result", true),
+            ("def refund(self, payment_id):", true),
+            ("stripe.refund.create", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "users.py",
+        "chain3_prior_users_py",
+        &[
+            ("class UserService:", true),
+            ("def get_user(self, user_id):", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "products.py",
+        "chain3_prior_products_py",
+        &[
+            ("class ProductService:", true),
+            ("def list_products(self, category=None):", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "orders.py",
+        "chain3_prior_orders_py",
+        &[
+            ("class OrderService:", true),
+            ("def create_order(self, user_id, items):", true),
+        ],
+    );
 
     // sha4 = C5': webhooks.py
     assert_note_base_commit_matches(&repo, &chain[4], "sha4");
-    assert_note_files_exact(&repo, &chain[4], "sha4_files",
-        &["webhooks.py"]);
-    assert_blame_at_commit(&repo, &chain[4], "webhooks.py", "sha4_blame", &[
-        ("class WebhookService:", true),
-        ("def __init__(self, db, http_client):", true),
-        ("self.db = db", true),
-        ("self.http = http_client", true),
-        ("def register(self, url, events):", true),
-        ("INSERT INTO webhooks", true),
-        ("def dispatch(self, event, payload):", true),
-        ("SELECT * FROM webhooks", true),
-        ("for hook in hooks:", true),
-        ("self.http.post", true),
-    ]);
+    assert_note_files_exact(&repo, &chain[4], "sha4_files", &["webhooks.py"]);
+    assert_blame_at_commit(
+        &repo,
+        &chain[4],
+        "webhooks.py",
+        "sha4_blame",
+        &[
+            ("class WebhookService:", true),
+            ("def __init__(self, db, http_client):", true),
+            ("self.db = db", true),
+            ("self.http = http_client", true),
+            ("def register(self, url, events):", true),
+            ("INSERT INTO webhooks", true),
+            ("def dispatch(self, event, payload):", true),
+            ("SELECT * FROM webhooks", true),
+            ("for hook in hooks:", true),
+            ("self.http.post", true),
+        ],
+    );
     // Verify C1's file (users.py) still correctly attributed at tip.
-    assert_blame_sample_at_commit(&repo, &chain[4], "users.py", "sha4_users_preserved", &[
-        ("class UserService:", true),
-        ("def get_user(self, user_id):", true),
-        ("def create_user(self, name, email):", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "products.py", "chain4_prior_products_py", &[
-        ("class ProductService:", true),
-        ("def list_products(self, category=None):", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "orders.py", "chain4_prior_orders_py", &[
-        ("class OrderService:", true),
-        ("def create_order(self, user_id, items):", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "payments.py", "chain4_prior_payments_py", &[
-        ("class PaymentService:", true),
-        ("def charge(self, order_id, amount_cents, card_token):", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "users.py",
+        "sha4_users_preserved",
+        &[
+            ("class UserService:", true),
+            ("def get_user(self, user_id):", true),
+            ("def create_user(self, name, email):", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "products.py",
+        "chain4_prior_products_py",
+        &[
+            ("class ProductService:", true),
+            ("def list_products(self, category=None):", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "orders.py",
+        "chain4_prior_orders_py",
+        &[
+            ("class OrderService:", true),
+            ("def create_order(self, user_id, items):", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "payments.py",
+        "chain4_prior_payments_py",
+        &[
+            ("class PaymentService:", true),
+            (
+                "def charge(self, order_id, amount_cents, card_token):",
+                true,
+            ),
+        ],
+    );
 
     assert_accepted_lines_monotonic(&repo, "monotonic", &chain);
 }
@@ -625,7 +791,8 @@ fn test_fast_path_typescript_frontend_5_components() {
         "export default Button;".ai(),
         "".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add Button component").unwrap();
+    repo.stage_all_and_commit("feat: add Button component")
+        .unwrap();
 
     // C2: Input.tsx
     let mut f2 = repo.filename("Input.tsx");
@@ -646,7 +813,8 @@ fn test_fast_path_typescript_frontend_5_components() {
         "  );".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add Input component").unwrap();
+    repo.stage_all_and_commit("feat: add Input component")
+        .unwrap();
 
     // C3: Modal.tsx
     let mut f3 = repo.filename("Modal.tsx");
@@ -669,7 +837,8 @@ fn test_fast_path_typescript_frontend_5_components() {
         "  );".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add Modal component").unwrap();
+    repo.stage_all_and_commit("feat: add Modal component")
+        .unwrap();
 
     // C4: Table.tsx
     let mut f4 = repo.filename("Table.tsx");
@@ -689,7 +858,8 @@ fn test_fast_path_typescript_frontend_5_components() {
         "  );".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add Table component").unwrap();
+    repo.stage_all_and_commit("feat: add Table component")
+        .unwrap();
 
     // C5: Form.tsx
     let mut f5 = repo.filename("Form.tsx");
@@ -711,15 +881,41 @@ fn test_fast_path_typescript_frontend_5_components() {
         "  );".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add Form component").unwrap();
+    repo.stage_all_and_commit("feat: add Form component")
+        .unwrap();
 
     // === MAIN BRANCH: 5 human commits on config files ===
     repo.git(&["checkout", &main_branch]).unwrap();
-    write_raw_commit(&repo, "vite.config.ts", "import { defineConfig } from 'vite';\nexport default defineConfig({ plugins: [] });\n", "build: add vite config");
-    write_raw_commit(&repo, ".eslintrc.json", "{\"extends\": [\"eslint:recommended\", \"plugin:@typescript-eslint/recommended\"]}\n", "lint: add eslint config");
-    write_raw_commit(&repo, "tsconfig.json", "{\"compilerOptions\": {\"target\": \"ES2020\", \"module\": \"ESNext\", \"jsx\": \"react-jsx\", \"strict\": true}}\n", "build: add tsconfig");
-    write_raw_commit(&repo, "package.json", "{\"name\": \"frontend\", \"version\": \"1.0.0\", \"scripts\": {\"dev\": \"vite\", \"build\": \"vite build\"}}\n", "build: add package.json");
-    write_raw_commit(&repo, "tailwind.config.js", "module.exports = { content: ['./src/**/*.{ts,tsx}'], theme: { extend: {} }, plugins: [] };\n", "style: add tailwind config");
+    write_raw_commit(
+        &repo,
+        "vite.config.ts",
+        "import { defineConfig } from 'vite';\nexport default defineConfig({ plugins: [] });\n",
+        "build: add vite config",
+    );
+    write_raw_commit(
+        &repo,
+        ".eslintrc.json",
+        "{\"extends\": [\"eslint:recommended\", \"plugin:@typescript-eslint/recommended\"]}\n",
+        "lint: add eslint config",
+    );
+    write_raw_commit(
+        &repo,
+        "tsconfig.json",
+        "{\"compilerOptions\": {\"target\": \"ES2020\", \"module\": \"ESNext\", \"jsx\": \"react-jsx\", \"strict\": true}}\n",
+        "build: add tsconfig",
+    );
+    write_raw_commit(
+        &repo,
+        "package.json",
+        "{\"name\": \"frontend\", \"version\": \"1.0.0\", \"scripts\": {\"dev\": \"vite\", \"build\": \"vite build\"}}\n",
+        "build: add package.json",
+    );
+    write_raw_commit(
+        &repo,
+        "tailwind.config.js",
+        "module.exports = { content: ['./src/**/*.{ts,tsx}'], theme: { extend: {} }, plugins: [] };\n",
+        "style: add tailwind config",
+    );
 
     // === REBASE feature onto main ===
     repo.git(&["checkout", "feature"]).unwrap();
@@ -731,103 +927,186 @@ fn test_fast_path_typescript_frontend_5_components() {
     // sha0 = C1': only Button.tsx
     assert_note_base_commit_matches(&repo, &chain[0], "sha0");
     assert_note_files_exact(&repo, &chain[0], "sha0_files", &["Button.tsx"]);
-    assert_note_no_forbidden_files(&repo, &chain[0], "sha0_no_future",
-        &["Input.tsx", "Modal.tsx", "Table.tsx", "Form.tsx"]);
-    assert_blame_at_commit(&repo, &chain[0], "Button.tsx", "sha0_blame", &[
-        ("interface ButtonProps {", true),
-        ("label: string;", true),
-        ("onClick: () => void;", true),
-        ("disabled?: boolean;", true),
-        ("variant?: 'primary' | 'secondary' | 'danger';", true),
-        ("}", true),
-        ("export function Button", true),
-        ("const cls =", true),
-        ("return <button", true),
-        ("}", true),
-        ("export default Button;", true),
-    ]);
+    assert_note_no_forbidden_files(
+        &repo,
+        &chain[0],
+        "sha0_no_future",
+        &["Input.tsx", "Modal.tsx", "Table.tsx", "Form.tsx"],
+    );
+    assert_blame_at_commit(
+        &repo,
+        &chain[0],
+        "Button.tsx",
+        "sha0_blame",
+        &[
+            ("interface ButtonProps {", true),
+            ("label: string;", true),
+            ("onClick: () => void;", true),
+            ("disabled?: boolean;", true),
+            ("variant?: 'primary' | 'secondary' | 'danger';", true),
+            ("}", true),
+            ("export function Button", true),
+            ("const cls =", true),
+            ("return <button", true),
+            ("}", true),
+            ("export default Button;", true),
+        ],
+    );
 
     // sha1 = C2': Input.tsx
     assert_note_base_commit_matches(&repo, &chain[1], "sha1");
     assert_note_files_exact(&repo, &chain[1], "sha1_files", &["Input.tsx"]);
-    assert_note_no_forbidden_files(&repo, &chain[1], "sha1_no_future",
-        &["Modal.tsx", "Table.tsx", "Form.tsx"]);
-    assert_blame_sample_at_commit(&repo, &chain[1], "Button.tsx", "chain1_prior_button_tsx", &[
-        ("interface ButtonProps {", true),
-        ("export function Button", true),
-    ]);
+    assert_note_no_forbidden_files(
+        &repo,
+        &chain[1],
+        "sha1_no_future",
+        &["Modal.tsx", "Table.tsx", "Form.tsx"],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[1],
+        "Button.tsx",
+        "chain1_prior_button_tsx",
+        &[
+            ("interface ButtonProps {", true),
+            ("export function Button", true),
+        ],
+    );
 
     // sha2 = C3': Modal.tsx
     assert_note_base_commit_matches(&repo, &chain[2], "sha2");
     assert_note_files_exact(&repo, &chain[2], "sha2_files", &["Modal.tsx"]);
-    assert_note_no_forbidden_files(&repo, &chain[2], "sha2_no_future", &["Table.tsx", "Form.tsx"]);
-    assert_blame_sample_at_commit(&repo, &chain[2], "Button.tsx", "chain2_prior_button_tsx", &[
-        ("interface ButtonProps {", true),
-        ("export function Button", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[2], "Input.tsx", "chain2_prior_input_tsx", &[
-        ("interface InputProps {", true),
-        ("export function Input", true),
-    ]);
+    assert_note_no_forbidden_files(
+        &repo,
+        &chain[2],
+        "sha2_no_future",
+        &["Table.tsx", "Form.tsx"],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "Button.tsx",
+        "chain2_prior_button_tsx",
+        &[
+            ("interface ButtonProps {", true),
+            ("export function Button", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "Input.tsx",
+        "chain2_prior_input_tsx",
+        &[
+            ("interface InputProps {", true),
+            ("export function Input", true),
+        ],
+    );
 
     // sha3 = C4': Table.tsx
     assert_note_base_commit_matches(&repo, &chain[3], "sha3");
-    assert_note_files_exact(&repo, &chain[3], "sha3_files",
-        &["Table.tsx"]);
+    assert_note_files_exact(&repo, &chain[3], "sha3_files", &["Table.tsx"]);
     assert_note_no_forbidden_files(&repo, &chain[3], "sha3_no_future", &["Form.tsx"]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "Button.tsx", "chain3_prior_button_tsx", &[
-        ("interface ButtonProps {", true),
-        ("export function Button", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "Input.tsx", "chain3_prior_input_tsx", &[
-        ("interface InputProps {", true),
-        ("export function Input", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "Modal.tsx", "chain3_prior_modal_tsx", &[
-        ("interface ModalProps {", true),
-        ("export function Modal", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "Button.tsx",
+        "chain3_prior_button_tsx",
+        &[
+            ("interface ButtonProps {", true),
+            ("export function Button", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "Input.tsx",
+        "chain3_prior_input_tsx",
+        &[
+            ("interface InputProps {", true),
+            ("export function Input", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "Modal.tsx",
+        "chain3_prior_modal_tsx",
+        &[
+            ("interface ModalProps {", true),
+            ("export function Modal", true),
+        ],
+    );
 
     // sha4 = C5': Form.tsx
     assert_note_base_commit_matches(&repo, &chain[4], "sha4");
-    assert_note_files_exact(&repo, &chain[4], "sha4_files",
-        &["Form.tsx"]);
-    assert_blame_at_commit(&repo, &chain[4], "Form.tsx", "sha4_blame", &[
-        ("interface FormField", true),
-        ("interface FormProps {", true),
-        ("fields: FormField[];", true),
-        ("onSubmit: (data: Record<string, string>) => void;", true),
-        ("submitLabel?: string;", true),
-        ("}", true),
-        ("export function Form", true),
-        ("const [values, setValues]", true),
-        ("const handleSubmit", true),
-        ("return (", true),
-        ("<form onSubmit={handleSubmit}>", true),
-        ("fields.map", true),
-        ("<button type=\"submit\">", true),
-        ("</form>", true),
-        (");", true),
-        ("}", true),
-    ]);
+    assert_note_files_exact(&repo, &chain[4], "sha4_files", &["Form.tsx"]);
+    assert_blame_at_commit(
+        &repo,
+        &chain[4],
+        "Form.tsx",
+        "sha4_blame",
+        &[
+            ("interface FormField", true),
+            ("interface FormProps {", true),
+            ("fields: FormField[];", true),
+            ("onSubmit: (data: Record<string, string>) => void;", true),
+            ("submitLabel?: string;", true),
+            ("}", true),
+            ("export function Form", true),
+            ("const [values, setValues]", true),
+            ("const handleSubmit", true),
+            ("return (", true),
+            ("<form onSubmit={handleSubmit}>", true),
+            ("fields.map", true),
+            ("<button type=\"submit\">", true),
+            ("</form>", true),
+            (");", true),
+            ("}", true),
+        ],
+    );
     // Verify C1's file (Button.tsx) still correctly attributed at tip.
-    assert_blame_sample_at_commit(&repo, &chain[4], "Button.tsx", "sha4_button_preserved", &[
-        ("interface ButtonProps {", true),
-        ("export function Button", true),
-        ("export default Button;", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "Input.tsx", "chain4_prior_input_tsx", &[
-        ("interface InputProps {", true),
-        ("export function Input", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "Modal.tsx", "chain4_prior_modal_tsx", &[
-        ("interface ModalProps {", true),
-        ("export function Modal", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "Table.tsx", "chain4_prior_table_tsx", &[
-        ("interface TableProps<T> {", true),
-        ("export function Table<T", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "Button.tsx",
+        "sha4_button_preserved",
+        &[
+            ("interface ButtonProps {", true),
+            ("export function Button", true),
+            ("export default Button;", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "Input.tsx",
+        "chain4_prior_input_tsx",
+        &[
+            ("interface InputProps {", true),
+            ("export function Input", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "Modal.tsx",
+        "chain4_prior_modal_tsx",
+        &[
+            ("interface ModalProps {", true),
+            ("export function Modal", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "Table.tsx",
+        "chain4_prior_table_tsx",
+        &[
+            ("interface TableProps<T> {", true),
+            ("export function Table<T", true),
+        ],
+    );
 }
 
 #[test]
@@ -861,7 +1140,8 @@ fn test_fast_path_rust_library_5_modules() {
         "    }".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add parser module").unwrap();
+    repo.stage_all_and_commit("feat: add parser module")
+        .unwrap();
 
     // C2: src/validator.rs
     let mut f2 = repo.filename("src/validator.rs");
@@ -881,7 +1161,8 @@ fn test_fast_path_rust_library_5_modules() {
         "    }".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add validator module").unwrap();
+    repo.stage_all_and_commit("feat: add validator module")
+        .unwrap();
 
     // C3: src/formatter.rs
     let mut f3 = repo.filename("src/formatter.rs");
@@ -901,7 +1182,8 @@ fn test_fast_path_rust_library_5_modules() {
         "    }".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add formatter module").unwrap();
+    repo.stage_all_and_commit("feat: add formatter module")
+        .unwrap();
 
     // C4: src/encoder.rs
     let mut f4 = repo.filename("src/encoder.rs");
@@ -921,7 +1203,8 @@ fn test_fast_path_rust_library_5_modules() {
         "    pub fn finish(self) -> Vec<u8> { self.buffer }".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add encoder module").unwrap();
+    repo.stage_all_and_commit("feat: add encoder module")
+        .unwrap();
 
     // C5: src/decoder.rs
     let mut f5 = repo.filename("src/decoder.rs");
@@ -942,15 +1225,41 @@ fn test_fast_path_rust_library_5_modules() {
         "        self.pos += len; Some(s)".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add decoder module").unwrap();
+    repo.stage_all_and_commit("feat: add decoder module")
+        .unwrap();
 
     // === MAIN BRANCH: 5 human commits on different files ===
     repo.git(&["checkout", &main_branch]).unwrap();
-    write_raw_commit(&repo, "Cargo.toml", "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\nedition = \"2021\"\n", "build: add Cargo.toml");
-    write_raw_commit(&repo, "build.rs", "fn main() { println!(\"cargo:rerun-if-changed=build.rs\"); }\n", "build: add build script");
-    write_raw_commit(&repo, "benches/bench.rs", "use criterion::{criterion_group, criterion_main, Criterion};\nfn bench(_c: &mut Criterion) {}\ncriterion_group!(benches, bench);\ncriterion_main!(benches);\n", "bench: add criterion benchmark stub");
-    write_raw_commit(&repo, "examples/demo.rs", "fn main() { println!(\"demo\"); }\n", "examples: add demo");
-    write_raw_commit(&repo, "tests/integration.rs", "#[test]\nfn integration_placeholder() { assert!(true); }\n", "test: add integration test placeholder");
+    write_raw_commit(
+        &repo,
+        "Cargo.toml",
+        "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        "build: add Cargo.toml",
+    );
+    write_raw_commit(
+        &repo,
+        "build.rs",
+        "fn main() { println!(\"cargo:rerun-if-changed=build.rs\"); }\n",
+        "build: add build script",
+    );
+    write_raw_commit(
+        &repo,
+        "benches/bench.rs",
+        "use criterion::{criterion_group, criterion_main, Criterion};\nfn bench(_c: &mut Criterion) {}\ncriterion_group!(benches, bench);\ncriterion_main!(benches);\n",
+        "bench: add criterion benchmark stub",
+    );
+    write_raw_commit(
+        &repo,
+        "examples/demo.rs",
+        "fn main() { println!(\"demo\"); }\n",
+        "examples: add demo",
+    );
+    write_raw_commit(
+        &repo,
+        "tests/integration.rs",
+        "#[test]\nfn integration_placeholder() { assert!(true); }\n",
+        "test: add integration test placeholder",
+    );
 
     // === REBASE feature onto main ===
     repo.git(&["checkout", "feature"]).unwrap();
@@ -962,123 +1271,218 @@ fn test_fast_path_rust_library_5_modules() {
     // sha0 = C1': only src/parser.rs
     assert_note_base_commit_matches(&repo, &chain[0], "sha0");
     assert_note_files_exact(&repo, &chain[0], "sha0_files", &["src/parser.rs"]);
-    assert_note_no_forbidden_files(&repo, &chain[0], "sha0_no_future",
-        &["src/validator.rs", "src/formatter.rs", "src/encoder.rs", "src/decoder.rs"]);
-    assert_blame_at_commit(&repo, &chain[0], "src/parser.rs", "sha0_blame", &[
-        ("pub struct Parser {", true),
-        ("input: String,", true),
-        ("pos: usize,", true),
-        ("}", true),
-        ("impl Parser {", true),
-        ("pub fn new(input: &str) -> Self {", true),
-        ("Self { input: input.to_string(), pos: 0 }", true),
-        ("}", true),
-        ("pub fn parse_token(&mut self) -> Option<&str> {", true),
-        ("let start = self.pos;", true),
-        ("while self.pos < self.input.len()", true),
-        ("if start == self.pos", true),
-        ("}", true),
-        ("}", true),
-    ]);
+    assert_note_no_forbidden_files(
+        &repo,
+        &chain[0],
+        "sha0_no_future",
+        &[
+            "src/validator.rs",
+            "src/formatter.rs",
+            "src/encoder.rs",
+            "src/decoder.rs",
+        ],
+    );
+    assert_blame_at_commit(
+        &repo,
+        &chain[0],
+        "src/parser.rs",
+        "sha0_blame",
+        &[
+            ("pub struct Parser {", true),
+            ("input: String,", true),
+            ("pos: usize,", true),
+            ("}", true),
+            ("impl Parser {", true),
+            ("pub fn new(input: &str) -> Self {", true),
+            ("Self { input: input.to_string(), pos: 0 }", true),
+            ("}", true),
+            ("pub fn parse_token(&mut self) -> Option<&str> {", true),
+            ("let start = self.pos;", true),
+            ("while self.pos < self.input.len()", true),
+            ("if start == self.pos", true),
+            ("}", true),
+            ("}", true),
+        ],
+    );
 
     // sha1 = C2': validator
     assert_note_base_commit_matches(&repo, &chain[1], "sha1");
     assert_note_files_exact(&repo, &chain[1], "sha1_files", &["src/validator.rs"]);
-    assert_note_no_forbidden_files(&repo, &chain[1], "sha1_no_future",
-        &["src/formatter.rs", "src/encoder.rs", "src/decoder.rs"]);
-    assert_blame_at_commit(&repo, &chain[1], "src/validator.rs", "sha1_blame", &[
-        ("pub struct Validator {", true),
-        ("rules: Vec<Box<dyn Fn(&str) -> bool>>,", true),
-        ("}", true),
-        ("impl Validator {", true),
-        ("pub fn new() -> Self {", true),
-        ("Self { rules: Vec::new() }", true),
-        ("}", true),
-        ("pub fn add_rule(&mut self, rule: impl Fn(&str) -> bool + 'static) {", true),
-        ("self.rules.push(Box::new(rule));", true),
-        ("}", true),
-        ("pub fn validate(&self, input: &str) -> bool {", true),
-        ("self.rules.iter().all(|r| r(input))", true),
-        ("}", true),
-        ("}", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[1], "src/parser.rs", "chain1_prior_parser_rs", &[
-        ("pub struct Parser {", true),
-        ("pub fn parse_token(&mut self) -> Option<&str> {", true),
-    ]);
+    assert_note_no_forbidden_files(
+        &repo,
+        &chain[1],
+        "sha1_no_future",
+        &["src/formatter.rs", "src/encoder.rs", "src/decoder.rs"],
+    );
+    assert_blame_at_commit(
+        &repo,
+        &chain[1],
+        "src/validator.rs",
+        "sha1_blame",
+        &[
+            ("pub struct Validator {", true),
+            ("rules: Vec<Box<dyn Fn(&str) -> bool>>,", true),
+            ("}", true),
+            ("impl Validator {", true),
+            ("pub fn new() -> Self {", true),
+            ("Self { rules: Vec::new() }", true),
+            ("}", true),
+            (
+                "pub fn add_rule(&mut self, rule: impl Fn(&str) -> bool + 'static) {",
+                true,
+            ),
+            ("self.rules.push(Box::new(rule));", true),
+            ("}", true),
+            ("pub fn validate(&self, input: &str) -> bool {", true),
+            ("self.rules.iter().all(|r| r(input))", true),
+            ("}", true),
+            ("}", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[1],
+        "src/parser.rs",
+        "chain1_prior_parser_rs",
+        &[
+            ("pub struct Parser {", true),
+            ("pub fn parse_token(&mut self) -> Option<&str> {", true),
+        ],
+    );
 
     // sha2 = C3': formatter
     assert_note_base_commit_matches(&repo, &chain[2], "sha2");
-    assert_note_files_exact(&repo, &chain[2], "sha2_files",
-        &["src/formatter.rs"]);
-    assert_note_no_forbidden_files(&repo, &chain[2], "sha2_no_future",
-        &["src/encoder.rs", "src/decoder.rs"]);
-    assert_blame_sample_at_commit(&repo, &chain[2], "src/parser.rs", "chain2_prior_parser_rs", &[
-        ("pub struct Parser {", true),
-        ("pub fn parse_token(&mut self) -> Option<&str> {", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[2], "src/validator.rs", "chain2_prior_validator_rs", &[
-        ("pub struct Validator {", true),
-        ("pub fn validate(&self, input: &str) -> bool {", true),
-    ]);
+    assert_note_files_exact(&repo, &chain[2], "sha2_files", &["src/formatter.rs"]);
+    assert_note_no_forbidden_files(
+        &repo,
+        &chain[2],
+        "sha2_no_future",
+        &["src/encoder.rs", "src/decoder.rs"],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "src/parser.rs",
+        "chain2_prior_parser_rs",
+        &[
+            ("pub struct Parser {", true),
+            ("pub fn parse_token(&mut self) -> Option<&str> {", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "src/validator.rs",
+        "chain2_prior_validator_rs",
+        &[
+            ("pub struct Validator {", true),
+            ("pub fn validate(&self, input: &str) -> bool {", true),
+        ],
+    );
 
     // sha3 = C4': encoder
     assert_note_base_commit_matches(&repo, &chain[3], "sha3");
-    assert_note_files_exact(&repo, &chain[3], "sha3_files",
-        &["src/encoder.rs"]);
+    assert_note_files_exact(&repo, &chain[3], "sha3_files", &["src/encoder.rs"]);
     assert_note_no_forbidden_files(&repo, &chain[3], "sha3_no_future", &["src/decoder.rs"]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "src/parser.rs", "chain3_prior_parser_rs", &[
-        ("pub struct Parser {", true),
-        ("pub fn parse_token(&mut self) -> Option<&str> {", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "src/validator.rs", "chain3_prior_validator_rs", &[
-        ("pub struct Validator {", true),
-        ("pub fn validate(&self, input: &str) -> bool {", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "src/formatter.rs", "chain3_prior_formatter_rs", &[
-        ("pub struct Formatter {", true),
-        ("pub fn format(&self, tokens: &[&str]) -> String {", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "src/parser.rs",
+        "chain3_prior_parser_rs",
+        &[
+            ("pub struct Parser {", true),
+            ("pub fn parse_token(&mut self) -> Option<&str> {", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "src/validator.rs",
+        "chain3_prior_validator_rs",
+        &[
+            ("pub struct Validator {", true),
+            ("pub fn validate(&self, input: &str) -> bool {", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "src/formatter.rs",
+        "chain3_prior_formatter_rs",
+        &[
+            ("pub struct Formatter {", true),
+            ("pub fn format(&self, tokens: &[&str]) -> String {", true),
+        ],
+    );
 
     // sha4 = C5': decoder
     assert_note_base_commit_matches(&repo, &chain[4], "sha4");
-    assert_note_files_exact(&repo, &chain[4], "sha4_files",
-        &["src/decoder.rs"]);
-    assert_blame_at_commit(&repo, &chain[4], "src/decoder.rs", "sha4_blame", &[
-        ("pub struct Decoder<'a> {", true),
-        ("data: &'a [u8],", true),
-        ("pos: usize,", true),
-        ("}", true),
-        ("impl<'a> Decoder<'a> {", true),
-        ("pub fn new(data: &'a [u8]) -> Self {", true),
-        ("Self { data, pos: 0 }", true),
-        ("}", true),
-        ("pub fn decode_str(&mut self) -> Option<&'a str> {", true),
-        ("if self.pos + 4 > self.data.len()", true),
-        ("let len = u32::from_le_bytes", true),
-        ("self.pos += 4;", true),
-        ("let s = std::str::from_utf8", true),
-        ("self.pos += len; Some(s)", true),
-        ("}", true),
-    ]);
+    assert_note_files_exact(&repo, &chain[4], "sha4_files", &["src/decoder.rs"]);
+    assert_blame_at_commit(
+        &repo,
+        &chain[4],
+        "src/decoder.rs",
+        "sha4_blame",
+        &[
+            ("pub struct Decoder<'a> {", true),
+            ("data: &'a [u8],", true),
+            ("pos: usize,", true),
+            ("}", true),
+            ("impl<'a> Decoder<'a> {", true),
+            ("pub fn new(data: &'a [u8]) -> Self {", true),
+            ("Self { data, pos: 0 }", true),
+            ("}", true),
+            ("pub fn decode_str(&mut self) -> Option<&'a str> {", true),
+            ("if self.pos + 4 > self.data.len()", true),
+            ("let len = u32::from_le_bytes", true),
+            ("self.pos += 4;", true),
+            ("let s = std::str::from_utf8", true),
+            ("self.pos += len; Some(s)", true),
+            ("}", true),
+        ],
+    );
     // Verify C1's file (src/parser.rs) still correctly attributed at tip.
-    assert_blame_sample_at_commit(&repo, &chain[4], "src/parser.rs", "sha4_parser_preserved", &[
-        ("pub struct Parser {", true),
-        ("pub fn new(input: &str) -> Self {", true),
-        ("pub fn parse_token(&mut self)", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "src/validator.rs", "chain4_prior_validator_rs", &[
-        ("pub struct Validator {", true),
-        ("pub fn validate(&self, input: &str) -> bool {", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "src/formatter.rs", "chain4_prior_formatter_rs", &[
-        ("pub struct Formatter {", true),
-        ("pub fn format(&self, tokens: &[&str]) -> String {", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "src/encoder.rs", "chain4_prior_encoder_rs", &[
-        ("pub struct Encoder {", true),
-        ("pub fn encode_str(&mut self, s: &str) {", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "src/parser.rs",
+        "sha4_parser_preserved",
+        &[
+            ("pub struct Parser {", true),
+            ("pub fn new(input: &str) -> Self {", true),
+            ("pub fn parse_token(&mut self)", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "src/validator.rs",
+        "chain4_prior_validator_rs",
+        &[
+            ("pub struct Validator {", true),
+            ("pub fn validate(&self, input: &str) -> bool {", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "src/formatter.rs",
+        "chain4_prior_formatter_rs",
+        &[
+            ("pub struct Formatter {", true),
+            ("pub fn format(&self, tokens: &[&str]) -> String {", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "src/encoder.rs",
+        "chain4_prior_encoder_rs",
+        &[
+            ("pub struct Encoder {", true),
+            ("pub fn encode_str(&mut self, s: &str) {", true),
+        ],
+    );
 
     assert_accepted_lines_monotonic(&repo, "monotonic", &chain);
 }
@@ -1133,7 +1537,8 @@ fn test_fast_path_go_service_5_handlers() {
         "    writeJSON(w, products)".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add product handler").unwrap();
+    repo.stage_all_and_commit("feat: add product handler")
+        .unwrap();
 
     // C3: handlers/order.go
     let mut f3 = repo.filename("handlers/order.go");
@@ -1154,7 +1559,8 @@ fn test_fast_path_go_service_5_handlers() {
         "    writeJSON(w, order)".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add order handler").unwrap();
+    repo.stage_all_and_commit("feat: add order handler")
+        .unwrap();
 
     // C4: handlers/auth.go
     let mut f4 = repo.filename("handlers/auth.go");
@@ -1191,15 +1597,41 @@ fn test_fast_path_go_service_5_handlers() {
         "    json.NewEncoder(w).Encode(map[string]string{\"status\": \"ok\", \"version\": h.version})".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add health handler").unwrap();
+    repo.stage_all_and_commit("feat: add health handler")
+        .unwrap();
 
     // === MAIN BRANCH: 5 human commits on different files ===
     repo.git(&["checkout", &main_branch]).unwrap();
-    write_raw_commit(&repo, "go.mod", "module example.com/service\n\ngo 1.21\n", "build: add go.mod");
-    write_raw_commit(&repo, "cmd/main.go", "package main\n\nfunc main() {}\n", "build: add cmd/main.go");
-    write_raw_commit(&repo, "Dockerfile", "FROM golang:1.21\nWORKDIR /app\nCOPY . .\nRUN go build -o server cmd/main.go\nCMD [\"./server\"]\n", "build: add Dockerfile");
-    write_raw_commit(&repo, "docker-compose.yml", "version: '3.8'\nservices:\n  app:\n    build: .\n    ports:\n      - '8080:8080'\n", "build: add docker-compose.yml");
-    write_raw_commit(&repo, "Makefile", "build:\n\tgo build ./...\ntest:\n\tgo test ./...\n.PHONY: build test\n", "build: add Makefile");
+    write_raw_commit(
+        &repo,
+        "go.mod",
+        "module example.com/service\n\ngo 1.21\n",
+        "build: add go.mod",
+    );
+    write_raw_commit(
+        &repo,
+        "cmd/main.go",
+        "package main\n\nfunc main() {}\n",
+        "build: add cmd/main.go",
+    );
+    write_raw_commit(
+        &repo,
+        "Dockerfile",
+        "FROM golang:1.21\nWORKDIR /app\nCOPY . .\nRUN go build -o server cmd/main.go\nCMD [\"./server\"]\n",
+        "build: add Dockerfile",
+    );
+    write_raw_commit(
+        &repo,
+        "docker-compose.yml",
+        "version: '3.8'\nservices:\n  app:\n    build: .\n    ports:\n      - '8080:8080'\n",
+        "build: add docker-compose.yml",
+    );
+    write_raw_commit(
+        &repo,
+        "Makefile",
+        "build:\n\tgo build ./...\ntest:\n\tgo test ./...\n.PHONY: build test\n",
+        "build: add Makefile",
+    );
 
     // === REBASE feature onto main ===
     repo.git(&["checkout", "feature"]).unwrap();
@@ -1211,104 +1643,193 @@ fn test_fast_path_go_service_5_handlers() {
     // sha0 = C1': only handlers/user.go
     assert_note_base_commit_matches(&repo, &chain[0], "sha0");
     assert_note_files_exact(&repo, &chain[0], "sha0_files", &["handlers/user.go"]);
-    assert_note_no_forbidden_files(&repo, &chain[0], "sha0_no_future",
-        &["handlers/product.go", "handlers/order.go", "handlers/auth.go", "handlers/health.go"]);
-    assert_blame_at_commit(&repo, &chain[0], "handlers/user.go", "sha0_blame", &[
-        ("package handlers", true),
-        ("", true),
-        ("import \"net/http\"", true),
-        ("", true),
-        ("type UserHandler struct", true),
-        ("", true),
-        ("func NewUserHandler", true),
-        ("", true),
-        ("func (h *UserHandler) GetUser", true),
-        ("id := r.PathValue", true),
-        ("user, err := h.store.Find", true),
-        ("if err != nil", true),
-        ("writeJSON(w, user)", true),
-        ("}", true),
-    ]);
+    assert_note_no_forbidden_files(
+        &repo,
+        &chain[0],
+        "sha0_no_future",
+        &[
+            "handlers/product.go",
+            "handlers/order.go",
+            "handlers/auth.go",
+            "handlers/health.go",
+        ],
+    );
+    assert_blame_at_commit(
+        &repo,
+        &chain[0],
+        "handlers/user.go",
+        "sha0_blame",
+        &[
+            ("package handlers", true),
+            ("", true),
+            ("import \"net/http\"", true),
+            ("", true),
+            ("type UserHandler struct", true),
+            ("", true),
+            ("func NewUserHandler", true),
+            ("", true),
+            ("func (h *UserHandler) GetUser", true),
+            ("id := r.PathValue", true),
+            ("user, err := h.store.Find", true),
+            ("if err != nil", true),
+            ("writeJSON(w, user)", true),
+            ("}", true),
+        ],
+    );
 
     // sha1 = C2': product
     assert_note_base_commit_matches(&repo, &chain[1], "sha1");
-    assert_note_files_exact(&repo, &chain[1], "sha1_files",
-        &["handlers/product.go"]);
-    assert_note_no_forbidden_files(&repo, &chain[1], "sha1_no_future",
-        &["handlers/order.go", "handlers/auth.go", "handlers/health.go"]);
-    assert_blame_sample_at_commit(&repo, &chain[1], "handlers/user.go", "chain1_prior_user_go", &[
-        ("type UserHandler struct", true),
-        ("func (h *UserHandler) GetUser", true),
-    ]);
+    assert_note_files_exact(&repo, &chain[1], "sha1_files", &["handlers/product.go"]);
+    assert_note_no_forbidden_files(
+        &repo,
+        &chain[1],
+        "sha1_no_future",
+        &[
+            "handlers/order.go",
+            "handlers/auth.go",
+            "handlers/health.go",
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[1],
+        "handlers/user.go",
+        "chain1_prior_user_go",
+        &[
+            ("type UserHandler struct", true),
+            ("func (h *UserHandler) GetUser", true),
+        ],
+    );
 
     // sha2 = C3': order
     assert_note_base_commit_matches(&repo, &chain[2], "sha2");
-    assert_note_files_exact(&repo, &chain[2], "sha2_files",
-        &["handlers/order.go"]);
-    assert_note_no_forbidden_files(&repo, &chain[2], "sha2_no_future",
-        &["handlers/auth.go", "handlers/health.go"]);
-    assert_blame_sample_at_commit(&repo, &chain[2], "handlers/user.go", "chain2_prior_user_go", &[
-        ("type UserHandler struct", true),
-        ("func (h *UserHandler) GetUser", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[2], "handlers/product.go", "chain2_prior_product_go", &[
-        ("type ProductHandler struct", true),
-        ("func (h *ProductHandler) ListProducts", true),
-    ]);
+    assert_note_files_exact(&repo, &chain[2], "sha2_files", &["handlers/order.go"]);
+    assert_note_no_forbidden_files(
+        &repo,
+        &chain[2],
+        "sha2_no_future",
+        &["handlers/auth.go", "handlers/health.go"],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "handlers/user.go",
+        "chain2_prior_user_go",
+        &[
+            ("type UserHandler struct", true),
+            ("func (h *UserHandler) GetUser", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "handlers/product.go",
+        "chain2_prior_product_go",
+        &[
+            ("type ProductHandler struct", true),
+            ("func (h *ProductHandler) ListProducts", true),
+        ],
+    );
 
     // sha3 = C4': auth
     assert_note_base_commit_matches(&repo, &chain[3], "sha3");
-    assert_note_files_exact(&repo, &chain[3], "sha3_files",
-        &["handlers/auth.go"]);
+    assert_note_files_exact(&repo, &chain[3], "sha3_files", &["handlers/auth.go"]);
     assert_note_no_forbidden_files(&repo, &chain[3], "sha3_no_future", &["handlers/health.go"]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "handlers/user.go", "chain3_prior_user_go", &[
-        ("type UserHandler struct", true),
-        ("func (h *UserHandler) GetUser", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "handlers/product.go", "chain3_prior_product_go", &[
-        ("type ProductHandler struct", true),
-        ("func (h *ProductHandler) ListProducts", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "handlers/order.go", "chain3_prior_order_go", &[
-        ("type OrderHandler struct", true),
-        ("func (h *OrderHandler) CreateOrder", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "handlers/user.go",
+        "chain3_prior_user_go",
+        &[
+            ("type UserHandler struct", true),
+            ("func (h *UserHandler) GetUser", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "handlers/product.go",
+        "chain3_prior_product_go",
+        &[
+            ("type ProductHandler struct", true),
+            ("func (h *ProductHandler) ListProducts", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "handlers/order.go",
+        "chain3_prior_order_go",
+        &[
+            ("type OrderHandler struct", true),
+            ("func (h *OrderHandler) CreateOrder", true),
+        ],
+    );
 
     // sha4 = C5': health
     assert_note_base_commit_matches(&repo, &chain[4], "sha4");
-    assert_note_files_exact(&repo, &chain[4], "sha4_files",
-        &["handlers/health.go"]);
-    assert_blame_at_commit(&repo, &chain[4], "handlers/health.go", "sha4_blame", &[
-        ("package handlers", true),
-        ("", true),
-        ("import", true),
-        ("", true),
-        ("type HealthHandler struct", true),
-        ("", true),
-        ("func NewHealthHandler", true),
-        ("", true),
-        ("func (h *HealthHandler) Health", true),
-        ("json.NewEncoder(w).Encode", true),
-        ("}", true),
-    ]);
+    assert_note_files_exact(&repo, &chain[4], "sha4_files", &["handlers/health.go"]);
+    assert_blame_at_commit(
+        &repo,
+        &chain[4],
+        "handlers/health.go",
+        "sha4_blame",
+        &[
+            ("package handlers", true),
+            ("", true),
+            ("import", true),
+            ("", true),
+            ("type HealthHandler struct", true),
+            ("", true),
+            ("func NewHealthHandler", true),
+            ("", true),
+            ("func (h *HealthHandler) Health", true),
+            ("json.NewEncoder(w).Encode", true),
+            ("}", true),
+        ],
+    );
     // Verify C1's file (handlers/user.go) still correctly attributed at tip.
-    assert_blame_sample_at_commit(&repo, &chain[4], "handlers/user.go", "sha4_user_preserved", &[
-        ("type UserHandler struct", true),
-        ("func NewUserHandler", true),
-        ("func (h *UserHandler) GetUser", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "handlers/product.go", "chain4_prior_product_go", &[
-        ("type ProductHandler struct", true),
-        ("func (h *ProductHandler) ListProducts", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "handlers/order.go", "chain4_prior_order_go", &[
-        ("type OrderHandler struct", true),
-        ("func (h *OrderHandler) CreateOrder", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "handlers/auth.go", "chain4_prior_auth_go", &[
-        ("type AuthHandler struct", true),
-        ("func (h *AuthHandler) Login", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "handlers/user.go",
+        "sha4_user_preserved",
+        &[
+            ("type UserHandler struct", true),
+            ("func NewUserHandler", true),
+            ("func (h *UserHandler) GetUser", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "handlers/product.go",
+        "chain4_prior_product_go",
+        &[
+            ("type ProductHandler struct", true),
+            ("func (h *ProductHandler) ListProducts", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "handlers/order.go",
+        "chain4_prior_order_go",
+        &[
+            ("type OrderHandler struct", true),
+            ("func (h *OrderHandler) CreateOrder", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "handlers/auth.go",
+        "chain4_prior_auth_go",
+        &[
+            ("type AuthHandler struct", true),
+            ("func (h *AuthHandler) Login", true),
+        ],
+    );
 }
 
 #[test]
@@ -1325,9 +1846,12 @@ fn test_fast_path_mixed_ai_and_human_feature_commits() {
     repo.git(&["checkout", "-b", "feature"]).unwrap();
 
     // C1: human-only commit — config.py (plain string, no .ai())
-    write_raw_commit(&repo, "config.py",
+    write_raw_commit(
+        &repo,
+        "config.py",
         "DATABASE_URL = 'sqlite:///app.db'\nDEBUG = False\nSECRET_KEY = 'changeme'\n",
-        "config: add app config");
+        "config: add app config",
+    );
 
     // C2: AI commit — auth.py
     let mut f2 = repo.filename("auth.py");
@@ -1363,12 +1887,16 @@ fn test_fast_path_mixed_ai_and_human_feature_commits() {
         "        return f(*args, **kwargs)".ai(),
         "    return decorated".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add auth middleware").unwrap();
+    repo.stage_all_and_commit("feat: add auth middleware")
+        .unwrap();
 
     // C4: human-only commit — requirements.txt
-    write_raw_commit(&repo, "requirements.txt",
+    write_raw_commit(
+        &repo,
+        "requirements.txt",
         "flask==3.0.0\nsqlalchemy==2.0.23\nclick==8.1.7\n",
-        "deps: add requirements.txt");
+        "deps: add requirements.txt",
+    );
 
     // C5: AI commit — router.py
     let mut f5 = repo.filename("router.py");
@@ -1389,11 +1917,36 @@ fn test_fast_path_mixed_ai_and_human_feature_commits() {
 
     // === MAIN BRANCH: 5 human commits on different files ===
     repo.git(&["checkout", &main_branch]).unwrap();
-    write_raw_commit(&repo, "tests/test_smoke.py", "def test_smoke(): assert True\n", "test: add smoke test");
-    write_raw_commit(&repo, ".github/workflows/test.yml", "name: Test\non: [push]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{uses: actions/checkout@v3}, {run: pytest}]\n", "ci: add test workflow");
-    write_raw_commit(&repo, "pyproject.toml", "[build-system]\nrequires = ['setuptools']\nbuild-backend = 'setuptools.build_meta'\n", "build: add pyproject.toml");
-    write_raw_commit(&repo, ".gitignore", "__pycache__/\n*.pyc\n.env\nvenv/\n", "git: add .gitignore");
-    write_raw_commit(&repo, "README.rst", "Python App\n==========\n\nInstall and run the app.\n", "docs: add README");
+    write_raw_commit(
+        &repo,
+        "tests/test_smoke.py",
+        "def test_smoke(): assert True\n",
+        "test: add smoke test",
+    );
+    write_raw_commit(
+        &repo,
+        ".github/workflows/test.yml",
+        "name: Test\non: [push]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{uses: actions/checkout@v3}, {run: pytest}]\n",
+        "ci: add test workflow",
+    );
+    write_raw_commit(
+        &repo,
+        "pyproject.toml",
+        "[build-system]\nrequires = ['setuptools']\nbuild-backend = 'setuptools.build_meta'\n",
+        "build: add pyproject.toml",
+    );
+    write_raw_commit(
+        &repo,
+        ".gitignore",
+        "__pycache__/\n*.pyc\n.env\nvenv/\n",
+        "git: add .gitignore",
+    );
+    write_raw_commit(
+        &repo,
+        "README.rst",
+        "Python App\n==========\n\nInstall and run the app.\n",
+        "docs: add README",
+    );
 
     // === REBASE feature onto main ===
     repo.git(&["checkout", "feature"]).unwrap();
@@ -1404,38 +1957,55 @@ fn test_fast_path_mixed_ai_and_human_feature_commits() {
 
     // sha0 = C1': human commit (write_raw_commit — no AI tracking, no note after rebase).
     // Verify no AI files leak in if a note somehow exists.
-    assert_note_no_forbidden_files_if_present(&repo, &chain[0], "sha0_no_ai",
-        &["auth.py", "middleware.py", "router.py"]);
+    assert_note_no_forbidden_files_if_present(
+        &repo,
+        &chain[0],
+        "sha0_no_ai",
+        &["auth.py", "middleware.py", "router.py"],
+    );
 
     // sha1 = C2': note has auth.py only
     assert_note_base_commit_matches(&repo, &chain[1], "sha1");
     assert_note_files_exact(&repo, &chain[1], "sha1_files", &["auth.py"]);
-    assert_note_no_forbidden_files(&repo, &chain[1], "sha1_no_future",
-        &["middleware.py", "router.py"]);
-    assert_blame_at_commit(&repo, &chain[1], "auth.py", "sha1_blame", &[
-        ("import hashlib, secrets", true),
-        ("", true),
-        ("class AuthService:", true),
-        ("def __init__(self, user_store):", true),
-        ("self.user_store = user_store", true),
-        ("def hash_password(self, password):", true),
-        ("salt = secrets.token_hex(16)", true),
-        ("hashed = hashlib.sha256", true),
-        ("return f'{salt}:{hashed}'", true),
-        ("def verify_password(self, password, stored):", true),
-        ("salt, hashed = stored.split(':')", true),
-        ("return hashlib.sha256", true),
-    ]);
+    assert_note_no_forbidden_files(
+        &repo,
+        &chain[1],
+        "sha1_no_future",
+        &["middleware.py", "router.py"],
+    );
+    assert_blame_at_commit(
+        &repo,
+        &chain[1],
+        "auth.py",
+        "sha1_blame",
+        &[
+            ("import hashlib, secrets", true),
+            ("", true),
+            ("class AuthService:", true),
+            ("def __init__(self, user_store):", true),
+            ("self.user_store = user_store", true),
+            ("def hash_password(self, password):", true),
+            ("salt = secrets.token_hex(16)", true),
+            ("hashed = hashlib.sha256", true),
+            ("return f'{salt}:{hashed}'", true),
+            ("def verify_password(self, password, stored):", true),
+            ("salt, hashed = stored.split(':')", true),
+            ("return hashlib.sha256", true),
+        ],
+    );
 
     // sha2 = C3': note has middleware.py
     assert_note_base_commit_matches(&repo, &chain[2], "sha2");
     assert_note_files_exact(&repo, &chain[2], "sha2_files", &["middleware.py"]);
     assert_note_no_forbidden_files(&repo, &chain[2], "sha2_no_future", &["router.py"]);
     // Verify auth.py attribution still intact at this position (not wiped by C3 processing).
-    assert_blame_sample_at_commit(&repo, &chain[2], "auth.py", "sha2_auth_preserved", &[
-        ("class AuthService:", true),
-        ("def hash_password", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "auth.py",
+        "sha2_auth_preserved",
+        &[("class AuthService:", true), ("def hash_password", true)],
+    );
 
     // sha3 = C4': human commit (write_raw_commit — no note expected).
     // Just verify no future AI file leaked into a note if one exists.
@@ -1443,32 +2013,51 @@ fn test_fast_path_mixed_ai_and_human_feature_commits() {
 
     // sha4 = C5': note has router.py
     assert_note_base_commit_matches(&repo, &chain[4], "sha4");
-    assert_note_files_exact(&repo, &chain[4], "sha4_files",
-        &["router.py"]);
-    assert_blame_at_commit(&repo, &chain[4], "router.py", "sha4_blame", &[
-        ("from flask import Blueprint, jsonify, request", true),
-        ("", true),
-        ("api = Blueprint('api', __name__, url_prefix='/api/v1')", true),
-        ("", true),
-        ("@api.route('/health')", true),
-        ("def health():", true),
-        ("return jsonify({'status': 'ok'})", true),
-        ("", true),
-        ("@api.route('/users', methods=['GET'])", true),
-        ("def list_users():", true),
-        ("return jsonify({'users': []})", true),
-    ]);
+    assert_note_files_exact(&repo, &chain[4], "sha4_files", &["router.py"]);
+    assert_blame_at_commit(
+        &repo,
+        &chain[4],
+        "router.py",
+        "sha4_blame",
+        &[
+            ("from flask import Blueprint, jsonify, request", true),
+            ("", true),
+            (
+                "api = Blueprint('api', __name__, url_prefix='/api/v1')",
+                true,
+            ),
+            ("", true),
+            ("@api.route('/health')", true),
+            ("def health():", true),
+            ("return jsonify({'status': 'ok'})", true),
+            ("", true),
+            ("@api.route('/users', methods=['GET'])", true),
+            ("def list_users():", true),
+            ("return jsonify({'users': []})", true),
+        ],
+    );
     // Verify auth.py (C2's file) still correctly attributed at tip — not corrupted by later commits.
-    assert_blame_sample_at_commit(&repo, &chain[4], "auth.py", "sha4_auth_preserved", &[
-        ("class AuthService:", true),
-        ("def hash_password", true),
-        ("def verify_password", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "middleware.py", "chain4_prior_middleware_py", &[
-        ("def require_auth(f):", true),
-        ("def decorated(*args, **kwargs):", true),
-    ]);
-
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "auth.py",
+        "sha4_auth_preserved",
+        &[
+            ("class AuthService:", true),
+            ("def hash_password", true),
+            ("def verify_password", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "middleware.py",
+        "chain4_prior_middleware_py",
+        &[
+            ("def require_auth(f):", true),
+            ("def decorated(*args, **kwargs):", true),
+        ],
+    );
 }
 
 #[test]
@@ -1496,7 +2085,8 @@ fn test_fast_path_10_commits_javascript_utilities() {
         "export function isWeekend(date) { const day = new Date(date).getDay(); return day === 0 || day === 6; }".ai(),
         "export function startOfWeek(date) { const d = new Date(date); d.setDate(d.getDate() - d.getDay()); return d; }".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add date utilities").unwrap();
+    repo.stage_all_and_commit("feat: add date utilities")
+        .unwrap();
 
     // C2: string_utils.js
     let mut fu2 = repo.filename("string_utils.js");
@@ -1510,7 +2100,8 @@ fn test_fast_path_10_commits_javascript_utilities() {
         "export const repeat = (s, n) => Array(n).fill(s).join('');".ai(),
         "export const escapeHtml = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add string utilities").unwrap();
+    repo.stage_all_and_commit("feat: add string utilities")
+        .unwrap();
 
     // C3: array_utils.js
     let mut fu3 = repo.filename("array_utils.js");
@@ -1524,7 +2115,8 @@ fn test_fast_path_10_commits_javascript_utilities() {
         "export const difference = (a, b) => a.filter(x => !b.includes(x));".ai(),
         "export const zip = (...arrays) => arrays[0].map((_,i) => arrays.map(a => a[i]));".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add array utilities").unwrap();
+    repo.stage_all_and_commit("feat: add array utilities")
+        .unwrap();
 
     // C4: object_utils.js
     let mut fu4 = repo.filename("object_utils.js");
@@ -1538,7 +2130,8 @@ fn test_fast_path_10_commits_javascript_utilities() {
         "export const mapValues = (obj, fn) => Object.fromEntries(Object.entries(obj).map(([k,v]) => [k, fn(v, k)]));".ai(),
         "export const filterKeys = (obj, pred) => Object.fromEntries(Object.entries(obj).filter(([k]) => pred(k)));".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add object utilities").unwrap();
+    repo.stage_all_and_commit("feat: add object utilities")
+        .unwrap();
 
     // C5: number_utils.js
     let mut fu5 = repo.filename("number_utils.js");
@@ -1552,7 +2145,8 @@ fn test_fast_path_10_commits_javascript_utilities() {
         "export const gcd = (a,b) => b===0 ? a : gcd(b, a%b);".ai(),
         "export const range = (start, end, step=1) => Array.from({length:Math.ceil((end-start)/step)},(_,i)=>start+i*step);".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add number utilities").unwrap();
+    repo.stage_all_and_commit("feat: add number utilities")
+        .unwrap();
 
     // C6: dom_utils.js
     let mut fu6 = repo.filename("dom_utils.js");
@@ -1566,7 +2160,8 @@ fn test_fast_path_10_commits_javascript_utilities() {
         "export const setStyles = (el, styles) => Object.assign(el.style, styles);".ai(),
         "export const toggleClass = (el, cls, force) => el.classList.toggle(cls, force);".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add dom utilities").unwrap();
+    repo.stage_all_and_commit("feat: add dom utilities")
+        .unwrap();
 
     // C7: fetch_utils.js
     let mut fu7 = repo.filename("fetch_utils.js");
@@ -1580,7 +2175,8 @@ fn test_fast_path_10_commits_javascript_utilities() {
         "export async function downloadBlob(url, filename) { const r = await fetch(url); const b = await r.blob(); const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = filename; a.click(); }".ai(),
         "export const memoFetch = (() => { const cache = {}; return async (url) => cache[url] ?? (cache[url] = await getJSON(url)); })();".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add fetch utilities").unwrap();
+    repo.stage_all_and_commit("feat: add fetch utilities")
+        .unwrap();
 
     // C8: storage_utils.js
     let mut fu8 = repo.filename("storage_utils.js");
@@ -1594,7 +2190,8 @@ fn test_fast_path_10_commits_javascript_utilities() {
         "export const hasStorage = (() => { try { localStorage.setItem('_t','1'); localStorage.removeItem('_t'); return true; } catch { return false; } })();".ai(),
         "export function broadcastStore(key, val) { ls.set(key, val); window.dispatchEvent(new StorageEvent('storage', {key, newValue: JSON.stringify(val)})); }".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add storage utilities").unwrap();
+    repo.stage_all_and_commit("feat: add storage utilities")
+        .unwrap();
 
     // C9: event_utils.js
     let mut fu9 = repo.filename("event_utils.js");
@@ -1608,7 +2205,8 @@ fn test_fast_path_10_commits_javascript_utilities() {
         "export const dispatchCustom = (el, name, detail) => el.dispatchEvent(new CustomEvent(name, {bubbles: true, detail}));".ai(),
         "export function onVisible(el, fn) { const obs = new IntersectionObserver(([e])=>{ if(e.isIntersecting){fn();obs.disconnect();} }); obs.observe(el); return ()=>obs.disconnect(); }".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add event utilities").unwrap();
+    repo.stage_all_and_commit("feat: add event utilities")
+        .unwrap();
 
     // C10: validation_utils.js
     let mut fu10 = repo.filename("validation_utils.js");
@@ -1622,15 +2220,41 @@ fn test_fast_path_10_commits_javascript_utilities() {
         "export const required = msg => v => v!=null && v!=='' ? null : msg ?? 'Required';".ai(),
         "export function validate(value, rules) { for(const r of rules) { const err = r(value); if(err) return err; } return null; }".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add validation utilities").unwrap();
+    repo.stage_all_and_commit("feat: add validation utilities")
+        .unwrap();
 
     // === MAIN BRANCH: 5 human commits on different files ===
     repo.git(&["checkout", &main_branch]).unwrap();
-    write_raw_commit(&repo, "package.json", "{\"name\":\"utils\",\"version\":\"1.0.0\",\"type\":\"module\"}\n", "build: add package.json");
-    write_raw_commit(&repo, ".eslintrc.cjs", "module.exports={env:{browser:true,es2021:true},extends:['eslint:recommended'],parserOptions:{ecmaVersion:'latest',sourceType:'module'}};\n", "lint: add eslint config");
-    write_raw_commit(&repo, "vitest.config.js", "import { defineConfig } from 'vitest/config';\nexport default defineConfig({test:{environment:'jsdom'}});\n", "test: add vitest config");
-    write_raw_commit(&repo, ".prettierrc", "{\"singleQuote\":true,\"semi\":false,\"trailingComma\":\"es5\"}\n", "style: add prettier config");
-    write_raw_commit(&repo, "README.md", "# JS Utilities\n\nA collection of JavaScript utility functions.\n", "docs: add README");
+    write_raw_commit(
+        &repo,
+        "package.json",
+        "{\"name\":\"utils\",\"version\":\"1.0.0\",\"type\":\"module\"}\n",
+        "build: add package.json",
+    );
+    write_raw_commit(
+        &repo,
+        ".eslintrc.cjs",
+        "module.exports={env:{browser:true,es2021:true},extends:['eslint:recommended'],parserOptions:{ecmaVersion:'latest',sourceType:'module'}};\n",
+        "lint: add eslint config",
+    );
+    write_raw_commit(
+        &repo,
+        "vitest.config.js",
+        "import { defineConfig } from 'vitest/config';\nexport default defineConfig({test:{environment:'jsdom'}});\n",
+        "test: add vitest config",
+    );
+    write_raw_commit(
+        &repo,
+        ".prettierrc",
+        "{\"singleQuote\":true,\"semi\":false,\"trailingComma\":\"es5\"}\n",
+        "style: add prettier config",
+    );
+    write_raw_commit(
+        &repo,
+        "README.md",
+        "# JS Utilities\n\nA collection of JavaScript utility functions.\n",
+        "docs: add README",
+    );
 
     // === REBASE feature onto main ===
     repo.git(&["checkout", "feature"]).unwrap();
@@ -1642,259 +2266,537 @@ fn test_fast_path_10_commits_javascript_utilities() {
     // sha0 = C1': only date_utils.js
     assert_note_base_commit_matches(&repo, &chain[0], "sha0");
     assert_note_files_exact(&repo, &chain[0], "sha0_files", &["date_utils.js"]);
-    assert_note_no_forbidden_files(&repo, &chain[0], "sha0_no_future",
-        &["string_utils.js", "array_utils.js", "object_utils.js", "number_utils.js",
-          "dom_utils.js", "fetch_utils.js", "storage_utils.js", "event_utils.js", "validation_utils.js"]);
-    assert_blame_at_commit(&repo, &chain[0], "date_utils.js", "sha0_blame", &[
-        ("export function formatDate", true),
-        ("const d = date instanceof Date", true),
-        ("return fmt.replace", true),
-        ("}", true),
-        ("export function addDays", true),
-        ("export function diffDays", true),
-        ("export function isWeekend", true),
-        ("export function startOfWeek", true),
-    ]);
+    assert_note_no_forbidden_files(
+        &repo,
+        &chain[0],
+        "sha0_no_future",
+        &[
+            "string_utils.js",
+            "array_utils.js",
+            "object_utils.js",
+            "number_utils.js",
+            "dom_utils.js",
+            "fetch_utils.js",
+            "storage_utils.js",
+            "event_utils.js",
+            "validation_utils.js",
+        ],
+    );
+    assert_blame_at_commit(
+        &repo,
+        &chain[0],
+        "date_utils.js",
+        "sha0_blame",
+        &[
+            ("export function formatDate", true),
+            ("const d = date instanceof Date", true),
+            ("return fmt.replace", true),
+            ("}", true),
+            ("export function addDays", true),
+            ("export function diffDays", true),
+            ("export function isWeekend", true),
+            ("export function startOfWeek", true),
+        ],
+    );
 
     // sha1 = C2': string_utils.js
     assert_note_base_commit_matches(&repo, &chain[1], "sha1");
     assert_note_files_exact(&repo, &chain[1], "sha1_files", &["string_utils.js"]);
-    assert_note_no_forbidden_files(&repo, &chain[1], "sha1_no_future",
-        &["array_utils.js", "object_utils.js", "number_utils.js",
-          "dom_utils.js", "fetch_utils.js", "storage_utils.js", "event_utils.js", "validation_utils.js"]);
-    assert_blame_sample_at_commit(&repo, &chain[1], "date_utils.js", "chain1_prior_date_utils.js", &[
-        ("export function formatDate", true),
-        ("export function addDays", true),
-    ]);
+    assert_note_no_forbidden_files(
+        &repo,
+        &chain[1],
+        "sha1_no_future",
+        &[
+            "array_utils.js",
+            "object_utils.js",
+            "number_utils.js",
+            "dom_utils.js",
+            "fetch_utils.js",
+            "storage_utils.js",
+            "event_utils.js",
+            "validation_utils.js",
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[1],
+        "date_utils.js",
+        "chain1_prior_date_utils.js",
+        &[
+            ("export function formatDate", true),
+            ("export function addDays", true),
+        ],
+    );
 
     // sha2 = C3': array_utils.js
     assert_note_base_commit_matches(&repo, &chain[2], "sha2");
-    assert_note_files_exact(&repo, &chain[2], "sha2_files",
-        &["array_utils.js"]);
-    assert_blame_sample_at_commit(&repo, &chain[2], "date_utils.js", "chain2_prior_date_utils.js", &[
-        ("export function formatDate", true),
-        ("export function addDays", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[2], "string_utils.js", "chain2_prior_string_utils.js", &[
-        ("export const capitalize", true),
-        ("export const slugify", true),
-    ]);
+    assert_note_files_exact(&repo, &chain[2], "sha2_files", &["array_utils.js"]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "date_utils.js",
+        "chain2_prior_date_utils.js",
+        &[
+            ("export function formatDate", true),
+            ("export function addDays", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "string_utils.js",
+        "chain2_prior_string_utils.js",
+        &[
+            ("export const capitalize", true),
+            ("export const slugify", true),
+        ],
+    );
 
     // sha3 = C4': object_utils.js
     assert_note_base_commit_matches(&repo, &chain[3], "sha3");
-    assert_note_files_exact(&repo, &chain[3], "sha3_files",
-        &["object_utils.js"]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "date_utils.js", "chain3_prior_date_utils.js", &[
-        ("export function formatDate", true),
-        ("export function addDays", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "string_utils.js", "chain3_prior_string_utils.js", &[
-        ("export const capitalize", true),
-        ("export const slugify", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "array_utils.js", "chain3_prior_array_utils.js", &[
-        ("export const unique", true),
-        ("export const flatten", true),
-    ]);
+    assert_note_files_exact(&repo, &chain[3], "sha3_files", &["object_utils.js"]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "date_utils.js",
+        "chain3_prior_date_utils.js",
+        &[
+            ("export function formatDate", true),
+            ("export function addDays", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "string_utils.js",
+        "chain3_prior_string_utils.js",
+        &[
+            ("export const capitalize", true),
+            ("export const slugify", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "array_utils.js",
+        "chain3_prior_array_utils.js",
+        &[
+            ("export const unique", true),
+            ("export const flatten", true),
+        ],
+    );
 
     // sha4 = C5': number_utils.js
     assert_note_base_commit_matches(&repo, &chain[4], "sha4");
-    assert_note_files_exact(&repo, &chain[4], "sha4_files",
-        &["number_utils.js"]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "date_utils.js", "chain4_prior_date_utils.js", &[
-        ("export function formatDate", true),
-        ("export function addDays", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "string_utils.js", "chain4_prior_string_utils.js", &[
-        ("export const capitalize", true),
-        ("export const slugify", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "array_utils.js", "chain4_prior_array_utils.js", &[
-        ("export const unique", true),
-        ("export const flatten", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "object_utils.js", "chain4_prior_object_utils.js", &[
-        ("export const pick", true),
-        ("export const deepClone", true),
-    ]);
+    assert_note_files_exact(&repo, &chain[4], "sha4_files", &["number_utils.js"]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "date_utils.js",
+        "chain4_prior_date_utils.js",
+        &[
+            ("export function formatDate", true),
+            ("export function addDays", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "string_utils.js",
+        "chain4_prior_string_utils.js",
+        &[
+            ("export const capitalize", true),
+            ("export const slugify", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "array_utils.js",
+        "chain4_prior_array_utils.js",
+        &[
+            ("export const unique", true),
+            ("export const flatten", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "object_utils.js",
+        "chain4_prior_object_utils.js",
+        &[
+            ("export const pick", true),
+            ("export const deepClone", true),
+        ],
+    );
 
     // sha5 = C6': dom_utils.js
     assert_note_base_commit_matches(&repo, &chain[5], "sha5");
-    assert_note_files_exact(&repo, &chain[5], "sha5_files",
-        &["dom_utils.js"]);
-    assert_blame_sample_at_commit(&repo, &chain[5], "date_utils.js", "chain5_prior_date_utils.js", &[
-        ("export function formatDate", true),
-        ("export function addDays", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[5], "string_utils.js", "chain5_prior_string_utils.js", &[
-        ("export const capitalize", true),
-        ("export const slugify", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[5], "array_utils.js", "chain5_prior_array_utils.js", &[
-        ("export const unique", true),
-        ("export const flatten", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[5], "object_utils.js", "chain5_prior_object_utils.js", &[
-        ("export const pick", true),
-        ("export const deepClone", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[5], "number_utils.js", "chain5_prior_number_utils.js", &[
-        ("export const clamp", true),
-        ("export const lerp", true),
-    ]);
+    assert_note_files_exact(&repo, &chain[5], "sha5_files", &["dom_utils.js"]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[5],
+        "date_utils.js",
+        "chain5_prior_date_utils.js",
+        &[
+            ("export function formatDate", true),
+            ("export function addDays", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[5],
+        "string_utils.js",
+        "chain5_prior_string_utils.js",
+        &[
+            ("export const capitalize", true),
+            ("export const slugify", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[5],
+        "array_utils.js",
+        "chain5_prior_array_utils.js",
+        &[
+            ("export const unique", true),
+            ("export const flatten", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[5],
+        "object_utils.js",
+        "chain5_prior_object_utils.js",
+        &[
+            ("export const pick", true),
+            ("export const deepClone", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[5],
+        "number_utils.js",
+        "chain5_prior_number_utils.js",
+        &[("export const clamp", true), ("export const lerp", true)],
+    );
 
     // sha6 = C7': fetch_utils.js
     assert_note_base_commit_matches(&repo, &chain[6], "sha6");
-    assert_note_files_exact(&repo, &chain[6], "sha6_files",
-        &["fetch_utils.js"]);
-    assert_blame_sample_at_commit(&repo, &chain[6], "date_utils.js", "chain6_prior_date_utils.js", &[
-        ("export function formatDate", true),
-        ("export function addDays", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[6], "string_utils.js", "chain6_prior_string_utils.js", &[
-        ("export const capitalize", true),
-        ("export const slugify", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[6], "array_utils.js", "chain6_prior_array_utils.js", &[
-        ("export const unique", true),
-        ("export const flatten", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[6], "object_utils.js", "chain6_prior_object_utils.js", &[
-        ("export const pick", true),
-        ("export const deepClone", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[6], "number_utils.js", "chain6_prior_number_utils.js", &[
-        ("export const clamp", true),
-        ("export const lerp", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[6], "dom_utils.js", "chain6_prior_dom_utils.js", &[
-        ("export const $ = sel", true),
-        ("export const $$ = sel", true),
-    ]);
+    assert_note_files_exact(&repo, &chain[6], "sha6_files", &["fetch_utils.js"]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[6],
+        "date_utils.js",
+        "chain6_prior_date_utils.js",
+        &[
+            ("export function formatDate", true),
+            ("export function addDays", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[6],
+        "string_utils.js",
+        "chain6_prior_string_utils.js",
+        &[
+            ("export const capitalize", true),
+            ("export const slugify", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[6],
+        "array_utils.js",
+        "chain6_prior_array_utils.js",
+        &[
+            ("export const unique", true),
+            ("export const flatten", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[6],
+        "object_utils.js",
+        "chain6_prior_object_utils.js",
+        &[
+            ("export const pick", true),
+            ("export const deepClone", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[6],
+        "number_utils.js",
+        "chain6_prior_number_utils.js",
+        &[("export const clamp", true), ("export const lerp", true)],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[6],
+        "dom_utils.js",
+        "chain6_prior_dom_utils.js",
+        &[
+            ("export const $ = sel", true),
+            ("export const $$ = sel", true),
+        ],
+    );
 
     // sha7 = C8': storage_utils.js
     assert_note_base_commit_matches(&repo, &chain[7], "sha7");
-    assert_note_files_exact(&repo, &chain[7], "sha7_files",
-        &["storage_utils.js"]);
-    assert_blame_sample_at_commit(&repo, &chain[7], "date_utils.js", "chain7_prior_date_utils.js", &[
-        ("export function formatDate", true),
-        ("export function addDays", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[7], "string_utils.js", "chain7_prior_string_utils.js", &[
-        ("export const capitalize", true),
-        ("export const slugify", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[7], "array_utils.js", "chain7_prior_array_utils.js", &[
-        ("export const unique", true),
-        ("export const flatten", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[7], "object_utils.js", "chain7_prior_object_utils.js", &[
-        ("export const pick", true),
-        ("export const deepClone", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[7], "number_utils.js", "chain7_prior_number_utils.js", &[
-        ("export const clamp", true),
-        ("export const lerp", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[7], "dom_utils.js", "chain7_prior_dom_utils.js", &[
-        ("export const $ = sel", true),
-        ("export const $$ = sel", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[7], "fetch_utils.js", "chain7_prior_fetch_utils.js", &[
-        ("export async function getJSON", true),
-        ("export async function postJSON", true),
-    ]);
+    assert_note_files_exact(&repo, &chain[7], "sha7_files", &["storage_utils.js"]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[7],
+        "date_utils.js",
+        "chain7_prior_date_utils.js",
+        &[
+            ("export function formatDate", true),
+            ("export function addDays", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[7],
+        "string_utils.js",
+        "chain7_prior_string_utils.js",
+        &[
+            ("export const capitalize", true),
+            ("export const slugify", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[7],
+        "array_utils.js",
+        "chain7_prior_array_utils.js",
+        &[
+            ("export const unique", true),
+            ("export const flatten", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[7],
+        "object_utils.js",
+        "chain7_prior_object_utils.js",
+        &[
+            ("export const pick", true),
+            ("export const deepClone", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[7],
+        "number_utils.js",
+        "chain7_prior_number_utils.js",
+        &[("export const clamp", true), ("export const lerp", true)],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[7],
+        "dom_utils.js",
+        "chain7_prior_dom_utils.js",
+        &[
+            ("export const $ = sel", true),
+            ("export const $$ = sel", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[7],
+        "fetch_utils.js",
+        "chain7_prior_fetch_utils.js",
+        &[
+            ("export async function getJSON", true),
+            ("export async function postJSON", true),
+        ],
+    );
 
     // sha8 = C9': event_utils.js
     assert_note_base_commit_matches(&repo, &chain[8], "sha8");
-    assert_note_files_exact(&repo, &chain[8], "sha8_files",
-        &["event_utils.js"]);
+    assert_note_files_exact(&repo, &chain[8], "sha8_files", &["event_utils.js"]);
     assert_note_no_forbidden_files(&repo, &chain[8], "sha8_no_future", &["validation_utils.js"]);
-    assert_blame_sample_at_commit(&repo, &chain[8], "date_utils.js", "chain8_prior_date_utils.js", &[
-        ("export function formatDate", true),
-        ("export function addDays", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[8], "string_utils.js", "chain8_prior_string_utils.js", &[
-        ("export const capitalize", true),
-        ("export const slugify", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[8], "array_utils.js", "chain8_prior_array_utils.js", &[
-        ("export const unique", true),
-        ("export const flatten", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[8], "object_utils.js", "chain8_prior_object_utils.js", &[
-        ("export const pick", true),
-        ("export const deepClone", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[8], "number_utils.js", "chain8_prior_number_utils.js", &[
-        ("export const clamp", true),
-        ("export const lerp", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[8], "dom_utils.js", "chain8_prior_dom_utils.js", &[
-        ("export const $ = sel", true),
-        ("export const $$ = sel", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[8], "fetch_utils.js", "chain8_prior_fetch_utils.js", &[
-        ("export async function getJSON", true),
-        ("export async function postJSON", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[8], "storage_utils.js", "chain8_prior_storage_utils.js", &[
-        ("export const ls = {", true),
-        ("export const ss = {", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[8],
+        "date_utils.js",
+        "chain8_prior_date_utils.js",
+        &[
+            ("export function formatDate", true),
+            ("export function addDays", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[8],
+        "string_utils.js",
+        "chain8_prior_string_utils.js",
+        &[
+            ("export const capitalize", true),
+            ("export const slugify", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[8],
+        "array_utils.js",
+        "chain8_prior_array_utils.js",
+        &[
+            ("export const unique", true),
+            ("export const flatten", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[8],
+        "object_utils.js",
+        "chain8_prior_object_utils.js",
+        &[
+            ("export const pick", true),
+            ("export const deepClone", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[8],
+        "number_utils.js",
+        "chain8_prior_number_utils.js",
+        &[("export const clamp", true), ("export const lerp", true)],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[8],
+        "dom_utils.js",
+        "chain8_prior_dom_utils.js",
+        &[
+            ("export const $ = sel", true),
+            ("export const $$ = sel", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[8],
+        "fetch_utils.js",
+        "chain8_prior_fetch_utils.js",
+        &[
+            ("export async function getJSON", true),
+            ("export async function postJSON", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[8],
+        "storage_utils.js",
+        "chain8_prior_storage_utils.js",
+        &[("export const ls = {", true), ("export const ss = {", true)],
+    );
 
     // sha9 = C10': validation_utils.js
     assert_note_base_commit_matches(&repo, &chain[9], "sha9");
-    assert_note_files_exact(&repo, &chain[9], "sha9_files",
-        &["validation_utils.js"]);
-    assert_blame_at_commit(&repo, &chain[9], "validation_utils.js", "sha9_blame", &[
-        ("isEmail", true),
-        ("isURL", true),
-        ("isPhone", true),
-        ("isUUID", true),
-        ("minLength", true),
-        ("maxLength", true),
-        ("required", true),
-        ("validate", true),
-    ]);
+    assert_note_files_exact(&repo, &chain[9], "sha9_files", &["validation_utils.js"]);
+    assert_blame_at_commit(
+        &repo,
+        &chain[9],
+        "validation_utils.js",
+        "sha9_blame",
+        &[
+            ("isEmail", true),
+            ("isURL", true),
+            ("isPhone", true),
+            ("isUUID", true),
+            ("minLength", true),
+            ("maxLength", true),
+            ("required", true),
+            ("validate", true),
+        ],
+    );
     // Verify C1's file (date_utils.js) still correctly attributed at tip.
-    assert_blame_sample_at_commit(&repo, &chain[9], "date_utils.js", "sha9_date_preserved", &[
-        ("export function formatDate", true),
-        ("export function addDays", true),
-        ("export function isWeekend", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[9], "string_utils.js", "chain9_prior_string_utils.js", &[
-        ("export const capitalize", true),
-        ("export const slugify", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[9], "array_utils.js", "chain9_prior_array_utils.js", &[
-        ("export const unique", true),
-        ("export const flatten", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[9], "object_utils.js", "chain9_prior_object_utils.js", &[
-        ("export const pick", true),
-        ("export const deepClone", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[9], "number_utils.js", "chain9_prior_number_utils.js", &[
-        ("export const clamp", true),
-        ("export const lerp", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[9], "dom_utils.js", "chain9_prior_dom_utils.js", &[
-        ("export const $ = sel", true),
-        ("export const $$ = sel", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[9], "fetch_utils.js", "chain9_prior_fetch_utils.js", &[
-        ("export async function getJSON", true),
-        ("export async function postJSON", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[9], "storage_utils.js", "chain9_prior_storage_utils.js", &[
-        ("export const ls = {", true),
-        ("export const ss = {", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[9], "event_utils.js", "chain9_prior_event_utils.js", &[
-        ("export function debounce", true),
-        ("export function throttle", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[9],
+        "date_utils.js",
+        "sha9_date_preserved",
+        &[
+            ("export function formatDate", true),
+            ("export function addDays", true),
+            ("export function isWeekend", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[9],
+        "string_utils.js",
+        "chain9_prior_string_utils.js",
+        &[
+            ("export const capitalize", true),
+            ("export const slugify", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[9],
+        "array_utils.js",
+        "chain9_prior_array_utils.js",
+        &[
+            ("export const unique", true),
+            ("export const flatten", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[9],
+        "object_utils.js",
+        "chain9_prior_object_utils.js",
+        &[
+            ("export const pick", true),
+            ("export const deepClone", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[9],
+        "number_utils.js",
+        "chain9_prior_number_utils.js",
+        &[("export const clamp", true), ("export const lerp", true)],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[9],
+        "dom_utils.js",
+        "chain9_prior_dom_utils.js",
+        &[
+            ("export const $ = sel", true),
+            ("export const $$ = sel", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[9],
+        "fetch_utils.js",
+        "chain9_prior_fetch_utils.js",
+        &[
+            ("export async function getJSON", true),
+            ("export async function postJSON", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[9],
+        "storage_utils.js",
+        "chain9_prior_storage_utils.js",
+        &[("export const ls = {", true), ("export const ss = {", true)],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[9],
+        "event_utils.js",
+        "chain9_prior_event_utils.js",
+        &[
+            ("export function debounce", true),
+            ("export function throttle", true),
+        ],
+    );
 
     assert_accepted_lines_monotonic(&repo, "monotonic", &chain);
 }
@@ -1926,7 +2828,8 @@ fn test_fast_path_nested_directory_structure() {
         "    items = Item.query.paginate(page=page, per_page=per_page)".ai(),
         "    return jsonify({'items': [i.to_dict() for i in items], 'total': items.total})".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add API endpoints").unwrap();
+    repo.stage_all_and_commit("feat: add API endpoints")
+        .unwrap();
 
     // C2: src/models/user.py
     let mut f2 = repo.filename("src/models/user.py");
@@ -1957,7 +2860,8 @@ fn test_fast_path_nested_directory_structure() {
         "SECRET_KEY = 'dev-secret'".ai(),
         "".ai(),
         "def create_token(user_id: int, expires_in: int = 3600) -> str:".ai(),
-        "    payload = {'sub': user_id, 'exp': datetime.utcnow() + timedelta(seconds=expires_in)}".ai(),
+        "    payload = {'sub': user_id, 'exp': datetime.utcnow() + timedelta(seconds=expires_in)}"
+            .ai(),
         "    return jwt.encode(payload, SECRET_KEY, algorithm='HS256')".ai(),
     ]);
     repo.stage_all_and_commit("feat: add auth service").unwrap();
@@ -1978,7 +2882,8 @@ fn test_fast_path_nested_directory_structure() {
         "    def list_active(self) -> List[User]:".ai(),
         "        return self.session.query(User).filter_by(is_active=True).all()".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add user repository").unwrap();
+    repo.stage_all_and_commit("feat: add user repository")
+        .unwrap();
 
     // C5: src/middleware/logging.py
     let mut f5 = repo.filename("src/middleware/logging.py");
@@ -1998,15 +2903,41 @@ fn test_fast_path_nested_directory_structure() {
         "        logger.info('%s %s %s %.1fms', request.method, request.path, response.status_code, elapsed)".ai(),
         "        return response".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add request logging middleware").unwrap();
+    repo.stage_all_and_commit("feat: add request logging middleware")
+        .unwrap();
 
     // === MAIN BRANCH: 5 human commits in tests/, docs/, .github/, scripts/, . ===
     repo.git(&["checkout", &main_branch]).unwrap();
-    write_raw_commit(&repo, "tests/conftest.py", "import pytest\n\n@pytest.fixture\ndef client(app):\n    return app.test_client()\n", "test: add pytest conftest");
-    write_raw_commit(&repo, "docs/architecture.md", "# Architecture\n\nThis is a Flask-based API.\n", "docs: add architecture overview");
-    write_raw_commit(&repo, ".github/workflows/lint.yml", "name: Lint\non: [push]\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps: [{uses: actions/checkout@v3}, {run: flake8 src/}]\n", "ci: add lint workflow");
-    write_raw_commit(&repo, "scripts/seed_db.py", "#!/usr/bin/env python3\nprint('Seeding database...')\n", "scripts: add db seed script");
-    write_raw_commit(&repo, "alembic.ini", "[alembic]\nscript_location = migrations\nsqlalchemy.url = sqlite:///app.db\n", "db: add alembic config");
+    write_raw_commit(
+        &repo,
+        "tests/conftest.py",
+        "import pytest\n\n@pytest.fixture\ndef client(app):\n    return app.test_client()\n",
+        "test: add pytest conftest",
+    );
+    write_raw_commit(
+        &repo,
+        "docs/architecture.md",
+        "# Architecture\n\nThis is a Flask-based API.\n",
+        "docs: add architecture overview",
+    );
+    write_raw_commit(
+        &repo,
+        ".github/workflows/lint.yml",
+        "name: Lint\non: [push]\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps: [{uses: actions/checkout@v3}, {run: flake8 src/}]\n",
+        "ci: add lint workflow",
+    );
+    write_raw_commit(
+        &repo,
+        "scripts/seed_db.py",
+        "#!/usr/bin/env python3\nprint('Seeding database...')\n",
+        "scripts: add db seed script",
+    );
+    write_raw_commit(
+        &repo,
+        "alembic.ini",
+        "[alembic]\nscript_location = migrations\nsqlalchemy.url = sqlite:///app.db\n",
+        "db: add alembic config",
+    );
 
     // === REBASE feature onto main ===
     repo.git(&["checkout", "feature"]).unwrap();
@@ -2018,119 +2949,218 @@ fn test_fast_path_nested_directory_structure() {
     // sha0 = C1': only src/api/endpoints.py
     assert_note_base_commit_matches(&repo, &chain[0], "sha0");
     assert_note_files_exact(&repo, &chain[0], "sha0_files", &["src/api/endpoints.py"]);
-    assert_note_no_forbidden_files(&repo, &chain[0], "sha0_no_future",
-        &["src/models/user.py", "src/services/auth.py",
-          "src/repositories/user_repo.py", "src/middleware/logging.py"]);
-    assert_blame_at_commit(&repo, &chain[0], "src/api/endpoints.py", "sha0_blame", &[
-        ("from flask import Blueprint, jsonify, request", true),
-        ("", true),
-        ("bp = Blueprint('api', __name__)", true),
-        ("", true),
-        ("@bp.route('/items', methods=['GET'])", true),
-        ("def list_items():", true),
-        ("page = request.args.get('page'", true),
-        ("per_page = request.args.get('per_page'", true),
-        ("items = Item.query.paginate", true),
-        ("return jsonify", true),
-    ]);
+    assert_note_no_forbidden_files(
+        &repo,
+        &chain[0],
+        "sha0_no_future",
+        &[
+            "src/models/user.py",
+            "src/services/auth.py",
+            "src/repositories/user_repo.py",
+            "src/middleware/logging.py",
+        ],
+    );
+    assert_blame_at_commit(
+        &repo,
+        &chain[0],
+        "src/api/endpoints.py",
+        "sha0_blame",
+        &[
+            ("from flask import Blueprint, jsonify, request", true),
+            ("", true),
+            ("bp = Blueprint('api', __name__)", true),
+            ("", true),
+            ("@bp.route('/items', methods=['GET'])", true),
+            ("def list_items():", true),
+            ("page = request.args.get('page'", true),
+            ("per_page = request.args.get('per_page'", true),
+            ("items = Item.query.paginate", true),
+            ("return jsonify", true),
+        ],
+    );
 
     // sha1 = C2': src/models/user.py
     assert_note_base_commit_matches(&repo, &chain[1], "sha1");
-    assert_note_files_exact(&repo, &chain[1], "sha1_files",
-        &["src/models/user.py"]);
-    assert_note_no_forbidden_files(&repo, &chain[1], "sha1_no_future",
-        &["src/services/auth.py", "src/repositories/user_repo.py", "src/middleware/logging.py"]);
-    assert_blame_at_commit(&repo, &chain[1], "src/models/user.py", "sha1_blame", &[
-        ("from dataclasses import dataclass, field", true),
-        ("from datetime import datetime", true),
-        ("from typing import Optional", true),
-        ("", true),
-        ("@dataclass", true),
-        ("class User:", true),
-        ("id: int", true),
-        ("email: str", true),
-        ("name: str", true),
-        ("created_at: datetime", true),
-        ("is_active: bool = True", true),
-        ("role: str = 'user'", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[1], "src/api/endpoints.py", "chain1_prior_endpoints.py", &[
-        ("bp = Blueprint('api', __name__)", true),
-        ("def list_items():", true),
-    ]);
+    assert_note_files_exact(&repo, &chain[1], "sha1_files", &["src/models/user.py"]);
+    assert_note_no_forbidden_files(
+        &repo,
+        &chain[1],
+        "sha1_no_future",
+        &[
+            "src/services/auth.py",
+            "src/repositories/user_repo.py",
+            "src/middleware/logging.py",
+        ],
+    );
+    assert_blame_at_commit(
+        &repo,
+        &chain[1],
+        "src/models/user.py",
+        "sha1_blame",
+        &[
+            ("from dataclasses import dataclass, field", true),
+            ("from datetime import datetime", true),
+            ("from typing import Optional", true),
+            ("", true),
+            ("@dataclass", true),
+            ("class User:", true),
+            ("id: int", true),
+            ("email: str", true),
+            ("name: str", true),
+            ("created_at: datetime", true),
+            ("is_active: bool = True", true),
+            ("role: str = 'user'", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[1],
+        "src/api/endpoints.py",
+        "chain1_prior_endpoints.py",
+        &[
+            ("bp = Blueprint('api', __name__)", true),
+            ("def list_items():", true),
+        ],
+    );
 
     // sha2 = C3': src/services/auth.py
     assert_note_base_commit_matches(&repo, &chain[2], "sha2");
-    assert_note_files_exact(&repo, &chain[2], "sha2_files",
-        &["src/services/auth.py"]);
-    assert_note_no_forbidden_files(&repo, &chain[2], "sha2_no_future",
-        &["src/repositories/user_repo.py", "src/middleware/logging.py"]);
-    assert_blame_sample_at_commit(&repo, &chain[2], "src/api/endpoints.py", "chain2_prior_endpoints.py", &[
-        ("bp = Blueprint('api', __name__)", true),
-        ("def list_items():", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[2], "src/models/user.py", "chain2_prior_user.py", &[
-        ("class User:", true),
-        ("email: str", true),
-    ]);
+    assert_note_files_exact(&repo, &chain[2], "sha2_files", &["src/services/auth.py"]);
+    assert_note_no_forbidden_files(
+        &repo,
+        &chain[2],
+        "sha2_no_future",
+        &["src/repositories/user_repo.py", "src/middleware/logging.py"],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "src/api/endpoints.py",
+        "chain2_prior_endpoints.py",
+        &[
+            ("bp = Blueprint('api', __name__)", true),
+            ("def list_items():", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "src/models/user.py",
+        "chain2_prior_user.py",
+        &[("class User:", true), ("email: str", true)],
+    );
 
     // sha3 = C4': src/repositories/user_repo.py
     assert_note_base_commit_matches(&repo, &chain[3], "sha3");
-    assert_note_files_exact(&repo, &chain[3], "sha3_files",
-        &["src/repositories/user_repo.py"]);
-    assert_note_no_forbidden_files(&repo, &chain[3], "sha3_no_future",
-        &["src/middleware/logging.py"]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "src/api/endpoints.py", "chain3_prior_endpoints.py", &[
-        ("bp = Blueprint('api', __name__)", true),
-        ("def list_items():", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "src/models/user.py", "chain3_prior_user.py", &[
-        ("class User:", true),
-        ("email: str", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "src/services/auth.py", "chain3_prior_auth.py", &[
-        ("def create_token(user_id: int", true),
-        ("SECRET_KEY = 'dev-secret'", true),
-    ]);
+    assert_note_files_exact(
+        &repo,
+        &chain[3],
+        "sha3_files",
+        &["src/repositories/user_repo.py"],
+    );
+    assert_note_no_forbidden_files(
+        &repo,
+        &chain[3],
+        "sha3_no_future",
+        &["src/middleware/logging.py"],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "src/api/endpoints.py",
+        "chain3_prior_endpoints.py",
+        &[
+            ("bp = Blueprint('api', __name__)", true),
+            ("def list_items():", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "src/models/user.py",
+        "chain3_prior_user.py",
+        &[("class User:", true), ("email: str", true)],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "src/services/auth.py",
+        "chain3_prior_auth.py",
+        &[
+            ("def create_token(user_id: int", true),
+            ("SECRET_KEY = 'dev-secret'", true),
+        ],
+    );
 
     // sha4 = C5': src/middleware/logging.py
     assert_note_base_commit_matches(&repo, &chain[4], "sha4");
-    assert_note_files_exact(&repo, &chain[4], "sha4_files",
-        &["src/middleware/logging.py"]);
-    assert_blame_at_commit(&repo, &chain[4], "src/middleware/logging.py", "sha4_blame", &[
-        ("import time, logging", true),
-        ("from flask import request, g", true),
-        ("", true),
-        ("logger = logging.getLogger(__name__)", true),
-        ("", true),
-        ("def log_requests(app):", true),
-        ("@app.before_request", true),
-        ("def before():", true),
-        ("g.start_time = time.time()", true),
-        ("@app.after_request", true),
-        ("def after(response):", true),
-        ("elapsed = (time.time()", true),
-        ("logger.info", true),
-        ("return response", true),
-    ]);
+    assert_note_files_exact(
+        &repo,
+        &chain[4],
+        "sha4_files",
+        &["src/middleware/logging.py"],
+    );
+    assert_blame_at_commit(
+        &repo,
+        &chain[4],
+        "src/middleware/logging.py",
+        "sha4_blame",
+        &[
+            ("import time, logging", true),
+            ("from flask import request, g", true),
+            ("", true),
+            ("logger = logging.getLogger(__name__)", true),
+            ("", true),
+            ("def log_requests(app):", true),
+            ("@app.before_request", true),
+            ("def before():", true),
+            ("g.start_time = time.time()", true),
+            ("@app.after_request", true),
+            ("def after(response):", true),
+            ("elapsed = (time.time()", true),
+            ("logger.info", true),
+            ("return response", true),
+        ],
+    );
     // Verify C1's file (src/api/endpoints.py) still correctly attributed at tip.
-    assert_blame_sample_at_commit(&repo, &chain[4], "src/api/endpoints.py", "sha4_endpoints_preserved", &[
-        ("bp = Blueprint('api', __name__)", true),
-        ("def list_items():", true),
-        ("return jsonify", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "src/models/user.py", "chain4_prior_user.py", &[
-        ("class User:", true),
-        ("email: str", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "src/services/auth.py", "chain4_prior_auth.py", &[
-        ("def create_token(user_id: int", true),
-        ("SECRET_KEY = 'dev-secret'", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "src/repositories/user_repo.py", "chain4_prior_user_repo.py", &[
-        ("class UserRepository:", true),
-        ("def find_by_id(self, user_id: int)", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "src/api/endpoints.py",
+        "sha4_endpoints_preserved",
+        &[
+            ("bp = Blueprint('api', __name__)", true),
+            ("def list_items():", true),
+            ("return jsonify", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "src/models/user.py",
+        "chain4_prior_user.py",
+        &[("class User:", true), ("email: str", true)],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "src/services/auth.py",
+        "chain4_prior_auth.py",
+        &[
+            ("def create_token(user_id: int", true),
+            ("SECRET_KEY = 'dev-secret'", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "src/repositories/user_repo.py",
+        "chain4_prior_user_repo.py",
+        &[
+            ("class UserRepository:", true),
+            ("def find_by_id(self, user_id: int)", true),
+        ],
+    );
 }
 
 #[test]
@@ -2158,7 +3188,8 @@ fn test_fast_path_single_file_grows_across_commits() {
         "        return self.db.get(key)".ai(),
         "    def store(self, key, value): self.db.set(key, value); self.cache.set(key, value)".ai(),
     ]);
-    repo.stage_all_and_commit("feat: initial DataService").unwrap();
+    repo.stage_all_and_commit("feat: initial DataService")
+        .unwrap();
 
     // C2: appends 6 AI lines (2 more methods)
     svc.set_contents(crate::lines![
@@ -2174,10 +3205,12 @@ fn test_fast_path_single_file_grows_across_commits() {
         "        self.cache.delete(key)".ai(),
         "        self.db.delete(key)".ai(),
         "    def exists(self, key): return self.cache.has(key) or self.db.has(key)".ai(),
-        "    def keys(self, prefix=''): return [k for k in self.db.list() if k.startswith(prefix)]".ai(),
+        "    def keys(self, prefix=''): return [k for k in self.db.list() if k.startswith(prefix)]"
+            .ai(),
         "    def flush(self): self.cache.clear()".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add delete and exists methods").unwrap();
+    repo.stage_all_and_commit("feat: add delete and exists methods")
+        .unwrap();
 
     // C3: appends 6 AI lines (2 more methods)
     svc.set_contents(crate::lines![
@@ -2202,7 +3235,8 @@ fn test_fast_path_single_file_grows_across_commits() {
         "    def ttl_set(self, key, value, ttl): self.db.set_ex(key, value, ttl); self.cache.set(key, value)".ai(),
         "    def size(self): return self.db.dbsize()".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add batch and TTL methods").unwrap();
+    repo.stage_all_and_commit("feat: add batch and TTL methods")
+        .unwrap();
 
     // C4: appends 6 AI lines (2 more methods)
     svc.set_contents(crate::lines![
@@ -2233,7 +3267,8 @@ fn test_fast_path_single_file_grows_across_commits() {
         "    def backup(self, path): self.db.bgsave(); return self.db.dump(path)".ai(),
         "    def restore(self, path): self.db.restore_dump(path)".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add watch, transaction, backup methods").unwrap();
+    repo.stage_all_and_commit("feat: add watch, transaction, backup methods")
+        .unwrap();
 
     // C5: appends 6 AI lines (final methods)
     svc.set_contents(crate::lines![
@@ -2270,15 +3305,41 @@ fn test_fast_path_single_file_grows_across_commits() {
         "        self.db.close()".ai(),
         "    def __repr__(self): return f'DataService(db={self.db}, cache={self.cache})'".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add stats, ping, close methods").unwrap();
+    repo.stage_all_and_commit("feat: add stats, ping, close methods")
+        .unwrap();
 
     // === MAIN BRANCH: 5 human commits on different files ===
     repo.git(&["checkout", &main_branch]).unwrap();
-    write_raw_commit(&repo, "tests/test_service.py", "def test_placeholder(): pass\n", "test: add service test placeholder");
-    write_raw_commit(&repo, "docker/Dockerfile.dev", "FROM python:3.11-slim\nWORKDIR /app\nCOPY requirements.txt .\nRUN pip install -r requirements.txt\n", "build: add dev Dockerfile");
-    write_raw_commit(&repo, ".env.example", "DATABASE_URL=redis://localhost:6379/0\nCACHE_URL=memcached://localhost:11211\n", "config: add .env.example");
-    write_raw_commit(&repo, "CHANGELOG.md", "# Changelog\n\n## [Unreleased]\n\n### Added\n- DataService class\n", "docs: add CHANGELOG");
-    write_raw_commit(&repo, "setup.py", "from setuptools import setup\nsetup(name='dataservice', version='0.1.0')\n", "build: add setup.py");
+    write_raw_commit(
+        &repo,
+        "tests/test_service.py",
+        "def test_placeholder(): pass\n",
+        "test: add service test placeholder",
+    );
+    write_raw_commit(
+        &repo,
+        "docker/Dockerfile.dev",
+        "FROM python:3.11-slim\nWORKDIR /app\nCOPY requirements.txt .\nRUN pip install -r requirements.txt\n",
+        "build: add dev Dockerfile",
+    );
+    write_raw_commit(
+        &repo,
+        ".env.example",
+        "DATABASE_URL=redis://localhost:6379/0\nCACHE_URL=memcached://localhost:11211\n",
+        "config: add .env.example",
+    );
+    write_raw_commit(
+        &repo,
+        "CHANGELOG.md",
+        "# Changelog\n\n## [Unreleased]\n\n### Added\n- DataService class\n",
+        "docs: add CHANGELOG",
+    );
+    write_raw_commit(
+        &repo,
+        "setup.py",
+        "from setuptools import setup\nsetup(name='dataservice', version='0.1.0')\n",
+        "build: add setup.py",
+    );
 
     // === REBASE feature onto main ===
     repo.git(&["checkout", "feature"]).unwrap();
@@ -2290,60 +3351,102 @@ fn test_fast_path_single_file_grows_across_commits() {
     // sha0 = C1': service.py with ~8 AI lines (per-commit-delta: C1's lines only)
     assert_note_base_commit_matches(&repo, &chain[0], "sha0");
     assert_note_files_exact(&repo, &chain[0], "sha0_files", &["service.py"]);
-    assert_blame_at_commit(&repo, &chain[0], "service.py", "sha0_blame", &[
-        ("class DataService:", true),
-        ("def __init__(self, db, cache):", true),
-        ("self.db = db", true),
-        ("self.cache = cache", true),
-        ("def fetch(self, key):", true),
-        ("if v := self.cache.get(key): return v", true),
-        ("return self.db.get(key)", true),
-        ("def store(self, key, value):", true),
-    ]);
+    assert_blame_at_commit(
+        &repo,
+        &chain[0],
+        "service.py",
+        "sha0_blame",
+        &[
+            ("class DataService:", true),
+            ("def __init__(self, db, cache):", true),
+            ("self.db = db", true),
+            ("self.cache = cache", true),
+            ("def fetch(self, key):", true),
+            ("if v := self.cache.get(key): return v", true),
+            ("return self.db.get(key)", true),
+            ("def store(self, key, value):", true),
+        ],
+    );
 
     // sha1 = C2': service.py (C2's delta only; fast-path remaps original note)
     assert_note_base_commit_matches(&repo, &chain[1], "sha1");
     assert_note_files_exact(&repo, &chain[1], "sha1_files", &["service.py"]);
     // C1 lines must still be AI-attributed at sha1.
-    assert_blame_sample_at_commit(&repo, &chain[1], "service.py", "sha1_c1_preserved", &[
-        ("class DataService:", true),
-        ("def fetch(self, key):", true),
-        ("def store(self, key, value):", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[1],
+        "service.py",
+        "sha1_c1_preserved",
+        &[
+            ("class DataService:", true),
+            ("def fetch(self, key):", true),
+            ("def store(self, key, value):", true),
+        ],
+    );
 
     // sha2 = C3': service.py (C3's delta only; fast-path remaps original note)
     assert_note_base_commit_matches(&repo, &chain[2], "sha2");
     assert_note_files_exact(&repo, &chain[2], "sha2_files", &["service.py"]);
     // C2 lines must still be AI-attributed at sha2.
-    assert_blame_sample_at_commit(&repo, &chain[2], "service.py", "sha2_c2_preserved", &[
-        ("def delete(self, key):", true),
-        ("def exists(self, key):", true),
-        ("def flush(self):", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "service.py",
+        "sha2_c2_preserved",
+        &[
+            ("def delete(self, key):", true),
+            ("def exists(self, key):", true),
+            ("def flush(self):", true),
+        ],
+    );
     // C1 lines must also still be AI-attributed at sha2.
-    assert_blame_sample_at_commit(&repo, &chain[2], "service.py", "chain2_prior_c1_service.py", &[
-        ("class DataService:", true),
-        ("def fetch(self, key):", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "service.py",
+        "chain2_prior_c1_service.py",
+        &[
+            ("class DataService:", true),
+            ("def fetch(self, key):", true),
+        ],
+    );
 
     // sha3 = C4': service.py (C4's delta only; fast-path remaps original note)
     assert_note_base_commit_matches(&repo, &chain[3], "sha3");
     assert_note_files_exact(&repo, &chain[3], "sha3_files", &["service.py"]);
     // C3 lines must still be AI-attributed at sha3.
-    assert_blame_sample_at_commit(&repo, &chain[3], "service.py", "sha3_c3_preserved", &[
-        ("def fetch_many(self, keys):", true),
-        ("def store_many(self, items):", true),
-        ("def ttl_set(self, key, value, ttl):", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "service.py",
+        "sha3_c3_preserved",
+        &[
+            ("def fetch_many(self, keys):", true),
+            ("def store_many(self, items):", true),
+            ("def ttl_set(self, key, value, ttl):", true),
+        ],
+    );
     // C1 and C2 lines must also still be AI-attributed at sha3.
-    assert_blame_sample_at_commit(&repo, &chain[3], "service.py", "chain3_prior_c1_service.py", &[
-        ("class DataService:", true),
-        ("def fetch(self, key):", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "service.py", "chain3_prior_c2_service.py", &[
-        ("def delete(self, key):", true),
-        ("def exists(self, key):", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "service.py",
+        "chain3_prior_c1_service.py",
+        &[
+            ("class DataService:", true),
+            ("def fetch(self, key):", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "service.py",
+        "chain3_prior_c2_service.py",
+        &[
+            ("def delete(self, key):", true),
+            ("def exists(self, key):", true),
+        ],
+    );
 
     // sha4 = C5': service.py (C5's delta only; fast-path remaps original note)
     assert_note_base_commit_matches(&repo, &chain[4], "sha4");
@@ -2386,7 +3489,8 @@ fn test_fast_path_feature_deletes_file_then_recreates() {
         "    with open(path, 'w', newline='') as f:".ai(),
         "        w = csv.DictWriter(f, fieldnames=fields); w.writeheader(); w.writerows(rows)".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add temp_module and util_a").unwrap();
+    repo.stage_all_and_commit("feat: add temp_module and util_a")
+        .unwrap();
 
     // C2: adds util_b.py (AI, 8 lines)
     let mut ub = repo.filename("util_b.py");
@@ -2404,12 +3508,14 @@ fn test_fast_path_feature_deletes_file_then_recreates() {
         "    for p in paths: result.update(load_json(p))".ai(),
         "    return result".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add util_b json utilities").unwrap();
+    repo.stage_all_and_commit("feat: add util_b json utilities")
+        .unwrap();
 
     // C3: DELETES temp_module.py (human commit) + adds util_c.py (AI, 6 lines)
     repo.git(&["rm", "temp_module.py"]).unwrap();
     // Stage the deletion and commit (bypassing git-ai to make it a plain human commit)
-    repo.git_og(&["commit", "-m", "refactor: remove temp_module"]).unwrap();
+    repo.git_og(&["commit", "-m", "refactor: remove temp_module"])
+        .unwrap();
     // Now add util_c.py via AI
     let mut uc = repo.filename("util_c.py");
     uc.set_contents(crate::lines![
@@ -2422,7 +3528,8 @@ fn test_fast_path_feature_deletes_file_then_recreates() {
         "    import hmac".ai(),
         "    return hmac.new(key.encode(), data.encode(), hashlib.sha256).hexdigest()".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add util_c crypto utilities").unwrap();
+    repo.stage_all_and_commit("feat: add util_c crypto utilities")
+        .unwrap();
 
     // C4: adds util_d.py (AI, 8 lines)
     let mut ud = repo.filename("util_d.py");
@@ -2441,7 +3548,8 @@ fn test_fast_path_feature_deletes_file_then_recreates() {
         "    def wrapper(*args): return cache.setdefault(args, fn(*args))".ai(),
         "    return wrapper".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add util_d retry and memoize").unwrap();
+    repo.stage_all_and_commit("feat: add util_d retry and memoize")
+        .unwrap();
 
     // C5: adds util_e.py (AI, 6 lines)
     let mut ue = repo.filename("util_e.py");
@@ -2456,15 +3564,41 @@ fn test_fast_path_feature_deletes_file_then_recreates() {
         "        return r".ai(),
         "    return wrapper".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add util_e timing utilities").unwrap();
+    repo.stage_all_and_commit("feat: add util_e timing utilities")
+        .unwrap();
 
     // === MAIN BRANCH: 5 human commits on different files ===
     repo.git(&["checkout", &main_branch]).unwrap();
-    write_raw_commit(&repo, "tests/test_utils.py", "def test_placeholder(): pass\n", "test: add utils test placeholder");
-    write_raw_commit(&repo, "pyproject.toml", "[build-system]\nrequires=['setuptools']\nbuild-backend='setuptools.build_meta'\n", "build: add pyproject.toml");
-    write_raw_commit(&repo, ".flake8", "[flake8]\nmax-line-length=120\nexclude=.git,__pycache__\n", "lint: add flake8 config");
-    write_raw_commit(&repo, "MANIFEST.in", "include *.py\ninclude *.md\n", "build: add MANIFEST.in");
-    write_raw_commit(&repo, "tox.ini", "[tox]\nenvlist = py311\n[testenv]\ncommands = pytest\n", "test: add tox config");
+    write_raw_commit(
+        &repo,
+        "tests/test_utils.py",
+        "def test_placeholder(): pass\n",
+        "test: add utils test placeholder",
+    );
+    write_raw_commit(
+        &repo,
+        "pyproject.toml",
+        "[build-system]\nrequires=['setuptools']\nbuild-backend='setuptools.build_meta'\n",
+        "build: add pyproject.toml",
+    );
+    write_raw_commit(
+        &repo,
+        ".flake8",
+        "[flake8]\nmax-line-length=120\nexclude=.git,__pycache__\n",
+        "lint: add flake8 config",
+    );
+    write_raw_commit(
+        &repo,
+        "MANIFEST.in",
+        "include *.py\ninclude *.md\n",
+        "build: add MANIFEST.in",
+    );
+    write_raw_commit(
+        &repo,
+        "tox.ini",
+        "[tox]\nenvlist = py311\n[testenv]\ncommands = pytest\n",
+        "test: add tox config",
+    );
 
     // === REBASE feature onto main ===
     repo.git(&["checkout", "feature"]).unwrap();
@@ -2482,103 +3616,198 @@ fn test_fast_path_feature_deletes_file_then_recreates() {
     // slow-path content-diff has no reference data for temp_module.py → only util_a.py attributed.
     assert_note_base_commit_matches(&repo, &chain[0], "sha0");
     assert_note_files_exact(&repo, &chain[0], "sha0_files", &["util_a.py"]);
-    assert_note_no_forbidden_files(&repo, &chain[0], "sha0_no_future",
-        &["util_b.py", "util_c.py", "util_d.py", "util_e.py"]);
+    assert_note_no_forbidden_files(
+        &repo,
+        &chain[0],
+        "sha0_no_future",
+        &["util_b.py", "util_c.py", "util_d.py", "util_e.py"],
+    );
 
     // sha1 = C2': util_b.py
     assert_note_base_commit_matches(&repo, &chain[1], "sha1");
-    assert_note_files_exact(&repo, &chain[1], "sha1_files",
-        &["util_b.py"]);
-    assert_note_no_forbidden_files(&repo, &chain[1], "sha1_no_future",
-        &["util_c.py", "util_d.py", "util_e.py"]);
-    assert_blame_sample_at_commit(&repo, &chain[1], "temp_module.py", "chain1_prior_temp_module.py", &[
-        ("class TempProcessor:", false),
-        ("def process(self, data):", false),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[1], "util_a.py", "chain1_prior_util_a.py", &[
-        ("def parse_csv(path):", true),
-        ("def write_csv(path, rows, fields):", true),
-    ]);
+    assert_note_files_exact(&repo, &chain[1], "sha1_files", &["util_b.py"]);
+    assert_note_no_forbidden_files(
+        &repo,
+        &chain[1],
+        "sha1_no_future",
+        &["util_c.py", "util_d.py", "util_e.py"],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[1],
+        "temp_module.py",
+        "chain1_prior_temp_module.py",
+        &[
+            ("class TempProcessor:", false),
+            ("def process(self, data):", false),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[1],
+        "util_a.py",
+        "chain1_prior_util_a.py",
+        &[
+            ("def parse_csv(path):", true),
+            ("def write_csv(path, rows, fields):", true),
+        ],
+    );
 
     // sha2 = C3_rm': human deletion commit — no AI content so no note expected.
-    assert_note_no_forbidden_files_if_present(&repo, &chain[2], "sha2_no_temp", &["temp_module.py"]);
-    assert_note_no_forbidden_files_if_present(&repo, &chain[2], "sha2_no_future",
-        &["util_c.py", "util_d.py", "util_e.py"]);
-    assert_blame_sample_at_commit(&repo, &chain[2], "util_a.py", "chain2_prior_util_a.py", &[
-        ("def parse_csv(path):", true),
-        ("def write_csv(path, rows, fields):", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[2], "util_b.py", "chain2_prior_util_b.py", &[
-        ("def load_json(path):", true),
-        ("def save_json(path, data", true),
-    ]);
+    assert_note_no_forbidden_files_if_present(
+        &repo,
+        &chain[2],
+        "sha2_no_temp",
+        &["temp_module.py"],
+    );
+    assert_note_no_forbidden_files_if_present(
+        &repo,
+        &chain[2],
+        "sha2_no_future",
+        &["util_c.py", "util_d.py", "util_e.py"],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "util_a.py",
+        "chain2_prior_util_a.py",
+        &[
+            ("def parse_csv(path):", true),
+            ("def write_csv(path, rows, fields):", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "util_b.py",
+        "chain2_prior_util_b.py",
+        &[
+            ("def load_json(path):", true),
+            ("def save_json(path, data", true),
+        ],
+    );
 
     // sha3 = C3_util_c': util_c.py
     assert_note_base_commit_matches(&repo, &chain[3], "sha3");
-    assert_note_files_exact(&repo, &chain[3], "sha3_files",
-        &["util_c.py"]);
-    assert_note_no_forbidden_files(&repo, &chain[3], "sha3_no_temp_or_future",
-        &["temp_module.py", "util_d.py", "util_e.py"]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "util_a.py", "chain3_prior_util_a.py", &[
-        ("def parse_csv(path):", true),
-        ("def write_csv(path, rows, fields):", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "util_b.py", "chain3_prior_util_b.py", &[
-        ("def load_json(path):", true),
-        ("def save_json(path, data", true),
-    ]);
+    assert_note_files_exact(&repo, &chain[3], "sha3_files", &["util_c.py"]);
+    assert_note_no_forbidden_files(
+        &repo,
+        &chain[3],
+        "sha3_no_temp_or_future",
+        &["temp_module.py", "util_d.py", "util_e.py"],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "util_a.py",
+        "chain3_prior_util_a.py",
+        &[
+            ("def parse_csv(path):", true),
+            ("def write_csv(path, rows, fields):", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "util_b.py",
+        "chain3_prior_util_b.py",
+        &[
+            ("def load_json(path):", true),
+            ("def save_json(path, data", true),
+        ],
+    );
 
     // sha4 = C4': util_d.py
     assert_note_base_commit_matches(&repo, &chain[4], "sha4");
-    assert_note_files_exact(&repo, &chain[4], "sha4_files",
-        &["util_d.py"]);
+    assert_note_files_exact(&repo, &chain[4], "sha4_files", &["util_d.py"]);
     assert_note_no_forbidden_files(&repo, &chain[4], "sha4_no_future", &["util_e.py"]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "util_a.py", "chain4_prior_util_a.py", &[
-        ("def parse_csv(path):", true),
-        ("def write_csv(path, rows, fields):", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "util_b.py", "chain4_prior_util_b.py", &[
-        ("def load_json(path):", true),
-        ("def save_json(path, data", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "util_c.py", "chain4_prior_util_c.py", &[
-        ("def md5(data):", true),
-        ("def sha256(data):", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "util_a.py",
+        "chain4_prior_util_a.py",
+        &[
+            ("def parse_csv(path):", true),
+            ("def write_csv(path, rows, fields):", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "util_b.py",
+        "chain4_prior_util_b.py",
+        &[
+            ("def load_json(path):", true),
+            ("def save_json(path, data", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "util_c.py",
+        "chain4_prior_util_c.py",
+        &[("def md5(data):", true), ("def sha256(data):", true)],
+    );
 
     // sha5 = C5': util_e.py
     assert_note_base_commit_matches(&repo, &chain[5], "sha5");
-    assert_note_files_exact(&repo, &chain[5], "sha5_files",
-        &["util_e.py"]);
-    assert_blame_at_commit(&repo, &chain[5], "util_e.py", "sha5_blame", &[
-        ("import time, functools", true),
-        ("", true),
-        ("def timed(fn):", true),
-        ("@functools.wraps(fn)", true),
-        ("def wrapper(*a, **kw):", true),
-        ("t = time.perf_counter()", true),
-        ("print(f'{fn.__name__}", true),
-        ("return r", true),
-        ("return wrapper", true),
-    ]);
+    assert_note_files_exact(&repo, &chain[5], "sha5_files", &["util_e.py"]);
+    assert_blame_at_commit(
+        &repo,
+        &chain[5],
+        "util_e.py",
+        "sha5_blame",
+        &[
+            ("import time, functools", true),
+            ("", true),
+            ("def timed(fn):", true),
+            ("@functools.wraps(fn)", true),
+            ("def wrapper(*a, **kw):", true),
+            ("t = time.perf_counter()", true),
+            ("print(f'{fn.__name__}", true),
+            ("return r", true),
+            ("return wrapper", true),
+        ],
+    );
     // Verify C2's file (util_b.py) still correctly attributed at tip.
-    assert_blame_sample_at_commit(&repo, &chain[5], "util_b.py", "sha5_util_b_preserved", &[
-        ("def load_json(path):", true),
-        ("def save_json(path, data", true),
-        ("def merge_json_files(paths):", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[5], "util_a.py", "chain5_prior_util_a.py", &[
-        ("def parse_csv(path):", true),
-        ("def write_csv(path, rows, fields):", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[5], "util_c.py", "chain5_prior_util_c.py", &[
-        ("def md5(data):", true),
-        ("def sha256(data):", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[5], "util_d.py", "chain5_prior_util_d.py", &[
-        ("def retry(fn: Callable", true),
-        ("def memoize(fn: Callable", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[5],
+        "util_b.py",
+        "sha5_util_b_preserved",
+        &[
+            ("def load_json(path):", true),
+            ("def save_json(path, data", true),
+            ("def merge_json_files(paths):", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[5],
+        "util_a.py",
+        "chain5_prior_util_a.py",
+        &[
+            ("def parse_csv(path):", true),
+            ("def write_csv(path, rows, fields):", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[5],
+        "util_c.py",
+        "chain5_prior_util_c.py",
+        &[("def md5(data):", true), ("def sha256(data):", true)],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[5],
+        "util_d.py",
+        "chain5_prior_util_d.py",
+        &[
+            ("def retry(fn: Callable", true),
+            ("def memoize(fn: Callable", true),
+        ],
+    );
 
     // Note: accepted_lines is NOT monotonic here because chain[2] is a human deletion commit
     // (removes temp_module.py) which has 0 accepted lines, breaking the monotonic property.
@@ -2620,7 +3849,8 @@ fn test_fast_path_multi_file_commits_2_files_each() {
         "    stock: int = 0".ai(),
         "    class Config: from_attributes = True".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add models and schemas").unwrap();
+    repo.stage_all_and_commit("feat: add models and schemas")
+        .unwrap();
 
     // C2: views.py (8 AI lines) + serializers.py (6 AI lines)
     let mut v2 = repo.filename("views.py");
@@ -2645,7 +3875,8 @@ fn test_fast_path_multi_file_commits_2_files_each() {
         "        fields = ['id', 'name', 'price', 'stock', 'created_at']".ai(),
         "        read_only_fields = ['id', 'created_at']".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add views and serializers").unwrap();
+    repo.stage_all_and_commit("feat: add views and serializers")
+        .unwrap();
 
     // C3: urls.py (6 AI lines) + permissions.py (8 AI lines)
     let mut u3 = repo.filename("urls.py");
@@ -2672,7 +3903,8 @@ fn test_fast_path_multi_file_commits_2_files_each() {
         "    message = 'Staff access required.'".ai(),
         "    def has_permission(self, request, view): return bool(request.user and request.user.is_staff)".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add urls and permissions").unwrap();
+    repo.stage_all_and_commit("feat: add urls and permissions")
+        .unwrap();
 
     // C4: signals.py (8 AI lines) + tasks.py (6 AI lines)
     let mut sg4 = repo.filename("signals.py");
@@ -2700,7 +3932,8 @@ fn test_fast_path_multi_file_commits_2_files_each() {
         "    # sync with external warehouse system".ai(),
         "    return {'product': p.name, 'stock': p.stock}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add signals and tasks").unwrap();
+    repo.stage_all_and_commit("feat: add signals and tasks")
+        .unwrap();
 
     // C5: middleware.py (8 AI lines) + decorators.py (6 AI lines)
     let mut mw5 = repo.filename("middleware.py");
@@ -2728,15 +3961,41 @@ fn test_fast_path_multi_file_commits_2_files_each() {
         "        return view_fn(request, *a, **kw)".ai(),
         "    return wrapper".ai(),
     ]);
-    repo.stage_all_and_commit("feat: add middleware and decorators").unwrap();
+    repo.stage_all_and_commit("feat: add middleware and decorators")
+        .unwrap();
 
     // === MAIN BRANCH: 5 human commits on different files ===
     repo.git(&["checkout", &main_branch]).unwrap();
-    write_raw_commit(&repo, "settings.py", "DEBUG = True\nINSTALLED_APPS = ['django.contrib.admin']\n", "config: add Django settings");
-    write_raw_commit(&repo, "requirements.txt", "django==4.2\ndjangorestframework==3.14\ncelery==5.3\npydantic==2.0\n", "deps: add requirements.txt");
-    write_raw_commit(&repo, "Dockerfile", "FROM python:3.11\nWORKDIR /app\nCOPY requirements.txt .\nRUN pip install -r requirements.txt\n", "build: add Dockerfile");
-    write_raw_commit(&repo, "docker-compose.yml", "version: '3.9'\nservices:\n  web:\n    build: .\n    ports: ['8000:8000']\n  worker:\n    build: .\n    command: celery -A app worker\n", "build: add docker-compose.yml");
-    write_raw_commit(&repo, ".env.example", "SECRET_KEY=change-me\nDEBUG=1\nDATABASE_URL=postgresql://localhost/app\n", "config: add .env.example");
+    write_raw_commit(
+        &repo,
+        "settings.py",
+        "DEBUG = True\nINSTALLED_APPS = ['django.contrib.admin']\n",
+        "config: add Django settings",
+    );
+    write_raw_commit(
+        &repo,
+        "requirements.txt",
+        "django==4.2\ndjangorestframework==3.14\ncelery==5.3\npydantic==2.0\n",
+        "deps: add requirements.txt",
+    );
+    write_raw_commit(
+        &repo,
+        "Dockerfile",
+        "FROM python:3.11\nWORKDIR /app\nCOPY requirements.txt .\nRUN pip install -r requirements.txt\n",
+        "build: add Dockerfile",
+    );
+    write_raw_commit(
+        &repo,
+        "docker-compose.yml",
+        "version: '3.9'\nservices:\n  web:\n    build: .\n    ports: ['8000:8000']\n  worker:\n    build: .\n    command: celery -A app worker\n",
+        "build: add docker-compose.yml",
+    );
+    write_raw_commit(
+        &repo,
+        ".env.example",
+        "SECRET_KEY=change-me\nDEBUG=1\nDATABASE_URL=postgresql://localhost/app\n",
+        "config: add .env.example",
+    );
 
     // === REBASE feature onto main ===
     repo.git(&["checkout", "feature"]).unwrap();
@@ -2748,161 +4007,350 @@ fn test_fast_path_multi_file_commits_2_files_each() {
     // sha0 = C1': {models.py, schemas.py}
     assert_note_base_commit_matches(&repo, &chain[0], "sha0");
     assert_note_files_exact(&repo, &chain[0], "sha0_files", &["models.py", "schemas.py"]);
-    assert_note_no_forbidden_files(&repo, &chain[0], "sha0_no_future",
-        &["views.py", "serializers.py", "urls.py", "permissions.py",
-          "signals.py", "tasks.py", "middleware.py", "decorators.py"]);
-    assert_blame_at_commit(&repo, &chain[0], "models.py", "sha0_blame_models", &[
-        ("from django.db import models", true),
-        ("", true),
-        ("class Product(models.Model):", true),
-        ("name = models.CharField", true),
-        ("price = models.DecimalField", true),
-        ("stock = models.IntegerField", true),
-        ("created_at = models.DateTimeField", true),
-        ("class Meta: ordering", true),
-    ]);
-    assert_blame_at_commit(&repo, &chain[0], "schemas.py", "sha0_blame_schemas", &[
-        ("from pydantic import BaseModel, condecimal", true),
-        ("from decimal import Decimal", true),
-        ("", true),
-        ("class ProductSchema(BaseModel):", true),
-        ("name: str", true),
-        ("price: condecimal", true),
-        ("stock: int = 0", true),
-        ("class Config: from_attributes = True", true),
-    ]);
+    assert_note_no_forbidden_files(
+        &repo,
+        &chain[0],
+        "sha0_no_future",
+        &[
+            "views.py",
+            "serializers.py",
+            "urls.py",
+            "permissions.py",
+            "signals.py",
+            "tasks.py",
+            "middleware.py",
+            "decorators.py",
+        ],
+    );
+    assert_blame_at_commit(
+        &repo,
+        &chain[0],
+        "models.py",
+        "sha0_blame_models",
+        &[
+            ("from django.db import models", true),
+            ("", true),
+            ("class Product(models.Model):", true),
+            ("name = models.CharField", true),
+            ("price = models.DecimalField", true),
+            ("stock = models.IntegerField", true),
+            ("created_at = models.DateTimeField", true),
+            ("class Meta: ordering", true),
+        ],
+    );
+    assert_blame_at_commit(
+        &repo,
+        &chain[0],
+        "schemas.py",
+        "sha0_blame_schemas",
+        &[
+            ("from pydantic import BaseModel, condecimal", true),
+            ("from decimal import Decimal", true),
+            ("", true),
+            ("class ProductSchema(BaseModel):", true),
+            ("name: str", true),
+            ("price: condecimal", true),
+            ("stock: int = 0", true),
+            ("class Config: from_attributes = True", true),
+        ],
+    );
 
     // sha1 = C2': views.py + serializers.py
     assert_note_base_commit_matches(&repo, &chain[1], "sha1");
-    assert_note_files_exact(&repo, &chain[1], "sha1_files",
-        &["views.py", "serializers.py"]);
-    assert_note_no_forbidden_files(&repo, &chain[1], "sha1_no_future",
-        &["urls.py", "permissions.py", "signals.py", "tasks.py", "middleware.py", "decorators.py"]);
-    assert_blame_sample_at_commit(&repo, &chain[1], "models.py", "chain1_prior_models.py", &[
-        ("class Product(models.Model):", true),
-        ("name = models.CharField", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[1], "schemas.py", "chain1_prior_schemas.py", &[
-        ("class ProductSchema(BaseModel):", true),
-        ("price: condecimal", true),
-    ]);
+    assert_note_files_exact(
+        &repo,
+        &chain[1],
+        "sha1_files",
+        &["views.py", "serializers.py"],
+    );
+    assert_note_no_forbidden_files(
+        &repo,
+        &chain[1],
+        "sha1_no_future",
+        &[
+            "urls.py",
+            "permissions.py",
+            "signals.py",
+            "tasks.py",
+            "middleware.py",
+            "decorators.py",
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[1],
+        "models.py",
+        "chain1_prior_models.py",
+        &[
+            ("class Product(models.Model):", true),
+            ("name = models.CharField", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[1],
+        "schemas.py",
+        "chain1_prior_schemas.py",
+        &[
+            ("class ProductSchema(BaseModel):", true),
+            ("price: condecimal", true),
+        ],
+    );
 
     // sha2 = C3': urls.py + permissions.py
     assert_note_base_commit_matches(&repo, &chain[2], "sha2");
-    assert_note_files_exact(&repo, &chain[2], "sha2_files",
-        &["urls.py", "permissions.py"]);
-    assert_note_no_forbidden_files(&repo, &chain[2], "sha2_no_future",
-        &["signals.py", "tasks.py", "middleware.py", "decorators.py"]);
-    assert_blame_sample_at_commit(&repo, &chain[2], "models.py", "chain2_prior_models.py", &[
-        ("class Product(models.Model):", true),
-        ("name = models.CharField", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[2], "schemas.py", "chain2_prior_schemas.py", &[
-        ("class ProductSchema(BaseModel):", true),
-        ("price: condecimal", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[2], "views.py", "chain2_prior_views.py", &[
-        ("@api_view(['GET'])", true),
-        ("def product_list(request):", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[2], "serializers.py", "chain2_prior_serializers.py", &[
-        ("class ProductSerializer(serializers.ModelSerializer):", true),
-        ("model = Product", true),
-    ]);
+    assert_note_files_exact(
+        &repo,
+        &chain[2],
+        "sha2_files",
+        &["urls.py", "permissions.py"],
+    );
+    assert_note_no_forbidden_files(
+        &repo,
+        &chain[2],
+        "sha2_no_future",
+        &["signals.py", "tasks.py", "middleware.py", "decorators.py"],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "models.py",
+        "chain2_prior_models.py",
+        &[
+            ("class Product(models.Model):", true),
+            ("name = models.CharField", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "schemas.py",
+        "chain2_prior_schemas.py",
+        &[
+            ("class ProductSchema(BaseModel):", true),
+            ("price: condecimal", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "views.py",
+        "chain2_prior_views.py",
+        &[
+            ("@api_view(['GET'])", true),
+            ("def product_list(request):", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "serializers.py",
+        "chain2_prior_serializers.py",
+        &[
+            (
+                "class ProductSerializer(serializers.ModelSerializer):",
+                true,
+            ),
+            ("model = Product", true),
+        ],
+    );
 
     // sha3 = C4': signals.py + tasks.py
     assert_note_base_commit_matches(&repo, &chain[3], "sha3");
-    assert_note_files_exact(&repo, &chain[3], "sha3_files",
-        &["signals.py", "tasks.py"]);
-    assert_note_no_forbidden_files(&repo, &chain[3], "sha3_no_future",
-        &["middleware.py", "decorators.py"]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "models.py", "chain3_prior_models.py", &[
-        ("class Product(models.Model):", true),
-        ("name = models.CharField", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "schemas.py", "chain3_prior_schemas.py", &[
-        ("class ProductSchema(BaseModel):", true),
-        ("price: condecimal", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "views.py", "chain3_prior_views.py", &[
-        ("@api_view(['GET'])", true),
-        ("def product_list(request):", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "serializers.py", "chain3_prior_serializers.py", &[
-        ("class ProductSerializer(serializers.ModelSerializer):", true),
-        ("model = Product", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "urls.py", "chain3_prior_urls.py", &[
-        ("app_name = 'shop'", true),
-        ("urlpatterns = [", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "permissions.py", "chain3_prior_permissions.py", &[
-        ("class IsOwnerOrReadOnly(BasePermission):", true),
-        ("class IsStaff(BasePermission):", true),
-    ]);
+    assert_note_files_exact(&repo, &chain[3], "sha3_files", &["signals.py", "tasks.py"]);
+    assert_note_no_forbidden_files(
+        &repo,
+        &chain[3],
+        "sha3_no_future",
+        &["middleware.py", "decorators.py"],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "models.py",
+        "chain3_prior_models.py",
+        &[
+            ("class Product(models.Model):", true),
+            ("name = models.CharField", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "schemas.py",
+        "chain3_prior_schemas.py",
+        &[
+            ("class ProductSchema(BaseModel):", true),
+            ("price: condecimal", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "views.py",
+        "chain3_prior_views.py",
+        &[
+            ("@api_view(['GET'])", true),
+            ("def product_list(request):", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "serializers.py",
+        "chain3_prior_serializers.py",
+        &[
+            (
+                "class ProductSerializer(serializers.ModelSerializer):",
+                true,
+            ),
+            ("model = Product", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "urls.py",
+        "chain3_prior_urls.py",
+        &[("app_name = 'shop'", true), ("urlpatterns = [", true)],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "permissions.py",
+        "chain3_prior_permissions.py",
+        &[
+            ("class IsOwnerOrReadOnly(BasePermission):", true),
+            ("class IsStaff(BasePermission):", true),
+        ],
+    );
 
     // sha4 = C5': middleware.py + decorators.py
     assert_note_base_commit_matches(&repo, &chain[4], "sha4");
-    assert_note_files_exact(&repo, &chain[4], "sha4_files",
-        &["middleware.py", "decorators.py"]);
-    assert_blame_at_commit(&repo, &chain[4], "middleware.py", "sha4_blame_mw", &[
-        ("import time", true),
-        ("from django.utils.deprecation import MiddlewareMixin", true),
-        ("", true),
-        ("class RequestTimingMiddleware(MiddlewareMixin):", true),
-        ("def process_request(self, request):", true),
-        ("request._start_time = time.monotonic()", true),
-        ("def process_response(self, request, response):", true),
-        ("elapsed = (time.monotonic()", true),
-        ("response['X-Response-Time']", true),
-        ("return response", true),
-    ]);
-    assert_blame_at_commit(&repo, &chain[4], "decorators.py", "sha4_blame_dec", &[
-        ("from functools import wraps", true),
-        ("from django.http import JsonResponse", true),
-        ("", true),
-        ("def require_json(view_fn):", true),
-        ("@wraps(view_fn)", true),
-        ("def wrapper(request, *a, **kw):", true),
-        ("if request.content_type", true),
-        ("return view_fn(request", true),
-        ("return wrapper", true),
-    ]);
+    assert_note_files_exact(
+        &repo,
+        &chain[4],
+        "sha4_files",
+        &["middleware.py", "decorators.py"],
+    );
+    assert_blame_at_commit(
+        &repo,
+        &chain[4],
+        "middleware.py",
+        "sha4_blame_mw",
+        &[
+            ("import time", true),
+            ("from django.utils.deprecation import MiddlewareMixin", true),
+            ("", true),
+            ("class RequestTimingMiddleware(MiddlewareMixin):", true),
+            ("def process_request(self, request):", true),
+            ("request._start_time = time.monotonic()", true),
+            ("def process_response(self, request, response):", true),
+            ("elapsed = (time.monotonic()", true),
+            ("response['X-Response-Time']", true),
+            ("return response", true),
+        ],
+    );
+    assert_blame_at_commit(
+        &repo,
+        &chain[4],
+        "decorators.py",
+        "sha4_blame_dec",
+        &[
+            ("from functools import wraps", true),
+            ("from django.http import JsonResponse", true),
+            ("", true),
+            ("def require_json(view_fn):", true),
+            ("@wraps(view_fn)", true),
+            ("def wrapper(request, *a, **kw):", true),
+            ("if request.content_type", true),
+            ("return view_fn(request", true),
+            ("return wrapper", true),
+        ],
+    );
     // Verify C1's files (models.py and schemas.py) still correctly attributed at tip.
-    assert_blame_sample_at_commit(&repo, &chain[4], "models.py", "sha4_models_preserved", &[
-        ("class Product(models.Model):", true),
-        ("name = models.CharField", true),
-        ("class Meta: ordering", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "schemas.py", "sha4_schemas_preserved", &[
-        ("class ProductSchema(BaseModel):", true),
-        ("price: condecimal", true),
-        ("class Config: from_attributes = True", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "views.py", "chain4_prior_views.py", &[
-        ("@api_view(['GET'])", true),
-        ("def product_list(request):", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "serializers.py", "chain4_prior_serializers.py", &[
-        ("class ProductSerializer(serializers.ModelSerializer):", true),
-        ("model = Product", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "urls.py", "chain4_prior_urls.py", &[
-        ("app_name = 'shop'", true),
-        ("urlpatterns = [", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "permissions.py", "chain4_prior_permissions.py", &[
-        ("class IsOwnerOrReadOnly(BasePermission):", true),
-        ("class IsStaff(BasePermission):", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "signals.py", "chain4_prior_signals.py", &[
-        ("@receiver(post_save, sender=Product)", true),
-        ("@receiver(pre_delete, sender=Product)", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "tasks.py", "chain4_prior_tasks.py", &[
-        ("@shared_task", true),
-        ("def sync_inventory(product_id):", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "models.py",
+        "sha4_models_preserved",
+        &[
+            ("class Product(models.Model):", true),
+            ("name = models.CharField", true),
+            ("class Meta: ordering", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "schemas.py",
+        "sha4_schemas_preserved",
+        &[
+            ("class ProductSchema(BaseModel):", true),
+            ("price: condecimal", true),
+            ("class Config: from_attributes = True", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "views.py",
+        "chain4_prior_views.py",
+        &[
+            ("@api_view(['GET'])", true),
+            ("def product_list(request):", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "serializers.py",
+        "chain4_prior_serializers.py",
+        &[
+            (
+                "class ProductSerializer(serializers.ModelSerializer):",
+                true,
+            ),
+            ("model = Product", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "urls.py",
+        "chain4_prior_urls.py",
+        &[("app_name = 'shop'", true), ("urlpatterns = [", true)],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "permissions.py",
+        "chain4_prior_permissions.py",
+        &[
+            ("class IsOwnerOrReadOnly(BasePermission):", true),
+            ("class IsStaff(BasePermission):", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "signals.py",
+        "chain4_prior_signals.py",
+        &[
+            ("@receiver(post_save, sender=Product)", true),
+            ("@receiver(pre_delete, sender=Product)", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "tasks.py",
+        "chain4_prior_tasks.py",
+        &[
+            ("@shared_task", true),
+            ("def sync_inventory(product_id):", true),
+        ],
+    );
 
     assert_accepted_lines_monotonic(&repo, "monotonic_multi", &chain);
 }
@@ -2926,7 +4374,12 @@ fn test_slow_path_python_utils_main_prepends_feature_appends() {
     let repo = TestRepo::new();
 
     // Initial: utils.py with trailing newline so 3-way merge works cleanly.
-    write_raw_commit(&repo, "utils.py", "def base_util(): pass\n", "Initial commit");
+    write_raw_commit(
+        &repo,
+        "utils.py",
+        "def base_util(): pass\n",
+        "Initial commit",
+    );
     let main_branch = repo.current_branch();
 
     // Main: prepend module header (changes blob → forces slow path on feature commits)
@@ -2937,13 +4390,37 @@ fn test_slow_path_python_utils_main_prepends_feature_appends() {
         "main: prepend module header to utils.py",
     );
     // 4 more human commits on different files
-    write_raw_commit(&repo, "constants.py", "MAX_RETRIES = 3\nTIMEOUT = 30\n", "main: add constants");
-    write_raw_commit(&repo, "exceptions.py", "class AppError(Exception): pass\nclass ValidationError(AppError): pass\n", "main: add exceptions");
-    write_raw_commit(&repo, "config.py", "import os\nDATABASE_URL = os.getenv('DATABASE_URL', 'sqlite:///app.db')\n", "main: add config");
-    write_raw_commit(&repo, "setup.cfg", "[metadata]\nname = myapp\nversion = 0.1\n", "main: add setup.cfg");
+    write_raw_commit(
+        &repo,
+        "constants.py",
+        "MAX_RETRIES = 3\nTIMEOUT = 30\n",
+        "main: add constants",
+    );
+    write_raw_commit(
+        &repo,
+        "exceptions.py",
+        "class AppError(Exception): pass\nclass ValidationError(AppError): pass\n",
+        "main: add exceptions",
+    );
+    write_raw_commit(
+        &repo,
+        "config.py",
+        "import os\nDATABASE_URL = os.getenv('DATABASE_URL', 'sqlite:///app.db')\n",
+        "main: add config",
+    );
+    write_raw_commit(
+        &repo,
+        "setup.cfg",
+        "[metadata]\nname = myapp\nversion = 0.1\n",
+        "main: add setup.cfg",
+    );
 
     // Feature branch starts from BEFORE main's prepend (base = initial commit)
-    let base_sha = repo.git(&["rev-parse", "HEAD~5"]).unwrap().trim().to_string();
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~5"])
+        .unwrap()
+        .trim()
+        .to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
 
     // C1: append 8 AI lines (validate_email + sanitize_input) to utils.py
@@ -2959,7 +4436,8 @@ fn test_slow_path_python_utils_main_prepends_feature_appends() {
         "def sanitize_input(text: str) -> str:".ai(),
         "    return text.strip().replace('<', '&lt;').replace('>', '&gt;')".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C1 add validate_email and sanitize_input").unwrap();
+    repo.stage_all_and_commit("feat: C1 add validate_email and sanitize_input")
+        .unwrap();
 
     // C2: append 8 more AI lines (normalize + truncate)
     utils.set_contents(crate::lines![
@@ -2982,7 +4460,8 @@ fn test_slow_path_python_utils_main_prepends_feature_appends() {
         "    return text if len(text) <= max_len else text[:max_len - len(suffix)] + suffix".ai(),
         "".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C2 add normalize_phone and truncate_text").unwrap();
+    repo.stage_all_and_commit("feat: C2 add normalize_phone and truncate_text")
+        .unwrap();
 
     // C3: append 8 more AI lines (parse_date + format_currency)
     utils.set_contents(crate::lines![
@@ -3012,7 +4491,8 @@ fn test_slow_path_python_utils_main_prepends_feature_appends() {
         "    return f'{symbol}{amount:,.2f}'".ai(),
         "".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C3 add parse_date and format_currency").unwrap();
+    repo.stage_all_and_commit("feat: C3 add parse_date and format_currency")
+        .unwrap();
 
     // C4: append 8 more AI lines (generate_slug + deep_merge)
     utils.set_contents(crate::lines![
@@ -3051,7 +4531,8 @@ fn test_slow_path_python_utils_main_prepends_feature_appends() {
         "        result[k] = deep_merge(base[k], v) if isinstance(v, dict) and isinstance(base.get(k), dict) else v".ai(),
         "    return result".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C4 add generate_slug and deep_merge").unwrap();
+    repo.stage_all_and_commit("feat: C4 add generate_slug and deep_merge")
+        .unwrap();
 
     // C5: append 8 more AI lines (retry_with_backoff + chunk_list)
     utils.set_contents(crate::lines![
@@ -3101,7 +4582,8 @@ fn test_slow_path_python_utils_main_prepends_feature_appends() {
         "def chunk_list(lst: list, size: int) -> list:".ai(),
         "    return [lst[i:i+size] for i in range(0, len(lst), size)]".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C5 add retry_with_backoff and chunk_list").unwrap();
+    repo.stage_all_and_commit("feat: C5 add retry_with_backoff and chunk_list")
+        .unwrap();
 
     // Rebase feature onto main (non-conflicting: prepend + append)
     repo.git(&["rebase", &main_branch]).unwrap();
@@ -3115,56 +4597,74 @@ fn test_slow_path_python_utils_main_prepends_feature_appends() {
 
     // sha0 blame: first 3 lines human (# utils module, import logging, blank),
     // then def base_util (human), then 8 AI lines
-    assert_blame_at_commit(&repo, &chain[0], "utils.py", "sha0_blame", &[
-        ("# utils module", false),
-        ("import logging", false),
-        ("", false),
-        ("def base_util(): pass", false),
-        ("", true),
-        ("def validate_email(email: str) -> bool:", true),
-        ("import re", true),
-        ("pattern = r'^", true),
-        ("return bool(re.match(pattern, email))", true),
-        ("", true),
-        ("def sanitize_input(text: str) -> str:", true),
-        ("return text.strip()", true),
-    ]);
+    assert_blame_at_commit(
+        &repo,
+        &chain[0],
+        "utils.py",
+        "sha0_blame",
+        &[
+            ("# utils module", false),
+            ("import logging", false),
+            ("", false),
+            ("def base_util(): pass", false),
+            ("", true),
+            ("def validate_email(email: str) -> bool:", true),
+            ("import re", true),
+            ("pattern = r'^", true),
+            ("return bool(re.match(pattern, email))", true),
+            ("", true),
+            ("def sanitize_input(text: str) -> str:", true),
+            ("return text.strip()", true),
+        ],
+    );
 
     // sha1 = C2': 9 accepted_lines (per-commit delta)
     assert_note_base_commit_matches(&repo, &chain[1], "sha1");
     assert_note_files_exact(&repo, &chain[1], "sha1_files", &["utils.py"]);
     assert_accepted_lines_exact(&repo, &chain[1], "sha1_lines", 9);
-    assert_blame_sample_at_commit(&repo, &chain[1], "utils.py", "sha1_blame_new", &[
-        ("def normalize_phone", true),
-        ("def truncate_text", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[1],
+        "utils.py",
+        "sha1_blame_new",
+        &[("def normalize_phone", true), ("def truncate_text", true)],
+    );
 
     // sha2 = C3': 7 accepted_lines (per-commit delta)
     assert_note_base_commit_matches(&repo, &chain[2], "sha2");
     assert_note_files_exact(&repo, &chain[2], "sha2_files", &["utils.py"]);
     assert_accepted_lines_exact(&repo, &chain[2], "sha2_lines", 7);
-    assert_blame_sample_at_commit(&repo, &chain[2], "utils.py", "sha2_blame_new", &[
-        ("def parse_date", true),
-        ("def format_currency", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "utils.py",
+        "sha2_blame_new",
+        &[("def parse_date", true), ("def format_currency", true)],
+    );
 
     // sha3 = C4': 10 accepted_lines (per-commit delta)
     assert_note_base_commit_matches(&repo, &chain[3], "sha3");
     assert_note_files_exact(&repo, &chain[3], "sha3_files", &["utils.py"]);
     assert_accepted_lines_exact(&repo, &chain[3], "sha3_lines", 10);
-    assert_blame_sample_at_commit(&repo, &chain[3], "utils.py", "sha3_blame_new", &[
-        ("def generate_slug", true),
-        ("def deep_merge", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "utils.py",
+        "sha3_blame_new",
+        &[("def generate_slug", true), ("def deep_merge", true)],
+    );
 
     // sha4 = C5': 12 accepted_lines (per-commit delta)
     assert_note_base_commit_matches(&repo, &chain[4], "sha4");
     assert_note_files_exact(&repo, &chain[4], "sha4_files", &["utils.py"]);
     assert_accepted_lines_exact(&repo, &chain[4], "sha4_lines", 12);
-    assert_blame_sample_at_commit(&repo, &chain[4], "utils.py", "sha4_blame_new", &[
-        ("def retry_with_backoff", true),
-        ("def chunk_list", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "utils.py",
+        "sha4_blame_new",
+        &[("def retry_with_backoff", true), ("def chunk_list", true)],
+    );
 
     // Per-commit-delta: each commit reports only its own new AI lines, not cumulative.
     // Monotonic growth is NOT expected with this model.
@@ -3188,13 +4688,37 @@ fn test_slow_path_rust_lib_rs_main_prepends_feature_adds_impls() {
         "//! Library crate\n#![deny(warnings)]\n\npub mod types;\n",
         "main: prepend crate docs and deny(warnings)",
     );
-    write_raw_commit(&repo, "src/error.rs", "pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;\n", "main: add error types");
-    write_raw_commit(&repo, "build.rs", "fn main() { println!(\"cargo:rerun-if-changed=build.rs\"); }\n", "main: add build script");
-    write_raw_commit(&repo, "Cargo.toml", "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\nedition = \"2021\"\n", "main: add Cargo.toml");
-    write_raw_commit(&repo, "README.md", "# mylib\n\nA Rust library.\n", "main: add README");
+    write_raw_commit(
+        &repo,
+        "src/error.rs",
+        "pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;\n",
+        "main: add error types",
+    );
+    write_raw_commit(
+        &repo,
+        "build.rs",
+        "fn main() { println!(\"cargo:rerun-if-changed=build.rs\"); }\n",
+        "main: add build script",
+    );
+    write_raw_commit(
+        &repo,
+        "Cargo.toml",
+        "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        "main: add Cargo.toml",
+    );
+    write_raw_commit(
+        &repo,
+        "README.md",
+        "# mylib\n\nA Rust library.\n",
+        "main: add README",
+    );
 
     // Feature branch from initial commit (before main's prepend)
-    let base_sha = repo.git(&["rev-parse", "HEAD~5"]).unwrap().trim().to_string();
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~5"])
+        .unwrap()
+        .trim()
+        .to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
 
     // C1: append impl Block to lib.rs + create mod_a.rs
@@ -3215,7 +4739,8 @@ fn test_slow_path_rust_lib_rs_main_prepends_feature_adds_impls() {
     mod_a.set_contents(crate::lines![
         "pub fn encode_base64(input: &[u8]) -> String {".ai(),
         "    use std::fmt::Write;".ai(),
-        "    let alphabet = b\"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\";".ai(),
+        "    let alphabet = b\"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\";"
+            .ai(),
         "    let mut out = String::new();".ai(),
         "    for chunk in input.chunks(3) {".ai(),
         "        let _ = write!(out, \"{}\", alphabet[(chunk[0] >> 2) as usize] as char);".ai(),
@@ -3223,7 +4748,8 @@ fn test_slow_path_rust_lib_rs_main_prepends_feature_adds_impls() {
         "    out".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C1 add Cache impl + mod_a").unwrap();
+    repo.stage_all_and_commit("feat: C1 add Cache impl + mod_a")
+        .unwrap();
 
     // C2: append Config impl to lib.rs + create mod_b.rs
     lib.set_contents(crate::lines![
@@ -3259,7 +4785,8 @@ fn test_slow_path_rust_lib_rs_main_prepends_feature_adds_impls() {
         "    pub fn elapsed_ms(&self) -> u128 { self.elapsed().as_millis() }".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C2 add Config impl + mod_b").unwrap();
+    repo.stage_all_and_commit("feat: C2 add Config impl + mod_b")
+        .unwrap();
 
     // C3: append Pool impl to lib.rs + create mod_c.rs
     lib.set_contents(crate::lines![
@@ -3304,7 +4831,8 @@ fn test_slow_path_rust_lib_rs_main_prepends_feature_adds_impls() {
         "    last".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C3 add Pool impl + mod_c").unwrap();
+    repo.stage_all_and_commit("feat: C3 add Pool impl + mod_c")
+        .unwrap();
 
     // C4: append Event impl to lib.rs + create mod_d.rs
     lib.set_contents(crate::lines![
@@ -3343,7 +4871,8 @@ fn test_slow_path_rust_lib_rs_main_prepends_feature_adds_impls() {
         "    T::deserialize(&bytes)".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C4 add Event impl + mod_d").unwrap();
+    repo.stage_all_and_commit("feat: C4 add Event impl + mod_d")
+        .unwrap();
 
     // C5: append Metrics impl to lib.rs + create mod_e.rs
     lib.set_contents(crate::lines![
@@ -3377,7 +4906,8 @@ fn test_slow_path_rust_lib_rs_main_prepends_feature_adds_impls() {
         "pub fn approx_eq(a: f64, b: f64, eps: f64) -> bool { (a - b).abs() < eps }".ai(),
         "pub fn percent(part: f64, total: f64) -> f64 { if total == 0.0 { 0.0 } else { part / total * 100.0 } }".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C5 add Metrics impl + mod_e").unwrap();
+    repo.stage_all_and_commit("feat: C5 add Metrics impl + mod_e")
+        .unwrap();
 
     // Rebase onto main (non-conflicting: prepend + append)
     repo.git(&["rebase", &main_branch]).unwrap();
@@ -3386,96 +4916,239 @@ fn test_slow_path_rust_lib_rs_main_prepends_feature_adds_impls() {
 
     // sha0 = C1': {src/lib.rs, src/mod_a.rs}
     assert_note_base_commit_matches(&repo, &chain[0], "sha0");
-    assert_note_files_exact(&repo, &chain[0], "sha0_files", &["src/lib.rs", "src/mod_a.rs"]);
-    assert_note_no_forbidden_files(&repo, &chain[0], "sha0_no_future",
-        &["mod_b.rs", "mod_c.rs", "mod_d.rs", "mod_e.rs"]);
+    assert_note_files_exact(
+        &repo,
+        &chain[0],
+        "sha0_files",
+        &["src/lib.rs", "src/mod_a.rs"],
+    );
+    assert_note_no_forbidden_files(
+        &repo,
+        &chain[0],
+        "sha0_no_future",
+        &["mod_b.rs", "mod_c.rs", "mod_d.rs", "mod_e.rs"],
+    );
 
     // sha1 = C2': {src/lib.rs, src/mod_b.rs}
     assert_note_base_commit_matches(&repo, &chain[1], "sha1");
-    assert_note_files_exact(&repo, &chain[1], "sha1_files",
-        &["src/lib.rs", "src/mod_b.rs"]);
-    assert_note_no_forbidden_files(&repo, &chain[1], "sha1_no_future",
-        &["mod_c.rs", "mod_d.rs", "mod_e.rs"]);
-    assert_blame_sample_at_commit(&repo, &chain[1], "src/lib.rs", "sha1_blame_new", &[
-        ("pub struct Config {", false),
-        ("impl Default for Config", false),
-        ("impl Config {", false),
-    ]);
+    assert_note_files_exact(
+        &repo,
+        &chain[1],
+        "sha1_files",
+        &["src/lib.rs", "src/mod_b.rs"],
+    );
+    assert_note_no_forbidden_files(
+        &repo,
+        &chain[1],
+        "sha1_no_future",
+        &["mod_c.rs", "mod_d.rs", "mod_e.rs"],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[1],
+        "src/lib.rs",
+        "sha1_blame_new",
+        &[
+            ("pub struct Config {", false),
+            ("impl Default for Config", false),
+            ("impl Config {", false),
+        ],
+    );
     // mod_a.rs (from C1) is a prior file at chain[1] — fast path, verify attribution intact
-    assert_blame_sample_at_commit(&repo, &chain[1], "src/mod_a.rs", "chain1_prior_mod_a_rs", &[
-        ("pub fn encode_base64(input: &[u8]) -> String {", true),
-        ("let alphabet = b\"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\";", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[1],
+        "src/mod_a.rs",
+        "chain1_prior_mod_a_rs",
+        &[
+            ("pub fn encode_base64(input: &[u8]) -> String {", true),
+            (
+                "let alphabet = b\"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\";",
+                true,
+            ),
+        ],
+    );
 
     // sha2 = C3': {src/lib.rs, src/mod_c.rs}
     assert_note_base_commit_matches(&repo, &chain[2], "sha2");
-    assert_note_files_exact(&repo, &chain[2], "sha2_files",
-        &["src/lib.rs", "src/mod_c.rs"]);
-    assert_note_no_forbidden_files(&repo, &chain[2], "sha2_no_future",
-        &["mod_d.rs", "mod_e.rs"]);
-    assert_blame_sample_at_commit(&repo, &chain[2], "src/lib.rs", "sha2_blame_new", &[
-        ("pub struct Pool<T>", true),
-        ("impl<T> Pool<T>", false),
-    ]);
+    assert_note_files_exact(
+        &repo,
+        &chain[2],
+        "sha2_files",
+        &["src/lib.rs", "src/mod_c.rs"],
+    );
+    assert_note_no_forbidden_files(
+        &repo,
+        &chain[2],
+        "sha2_no_future",
+        &["mod_d.rs", "mod_e.rs"],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "src/lib.rs",
+        "sha2_blame_new",
+        &[("pub struct Pool<T>", true), ("impl<T> Pool<T>", false)],
+    );
     // mod_a.rs and mod_b.rs (from C1-C2) are prior files at chain[2]
-    assert_blame_sample_at_commit(&repo, &chain[2], "src/mod_a.rs", "chain2_prior_mod_a_rs", &[
-        ("pub fn encode_base64(input: &[u8]) -> String {", true),
-        ("let alphabet = b\"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\";", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[2], "src/mod_b.rs", "chain2_prior_mod_b_rs", &[
-        ("pub struct Timer { start: Instant }", true),
-        ("pub fn elapsed_ms(&self) -> u128 { self.elapsed().as_millis() }", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "src/mod_a.rs",
+        "chain2_prior_mod_a_rs",
+        &[
+            ("pub fn encode_base64(input: &[u8]) -> String {", true),
+            (
+                "let alphabet = b\"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\";",
+                true,
+            ),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "src/mod_b.rs",
+        "chain2_prior_mod_b_rs",
+        &[
+            ("pub struct Timer { start: Instant }", true),
+            (
+                "pub fn elapsed_ms(&self) -> u128 { self.elapsed().as_millis() }",
+                true,
+            ),
+        ],
+    );
 
     // sha3 = C4': {src/lib.rs, src/mod_d.rs}
     assert_note_base_commit_matches(&repo, &chain[3], "sha3");
-    assert_note_files_exact(&repo, &chain[3], "sha3_files",
-        &["src/lib.rs", "src/mod_d.rs"]);
+    assert_note_files_exact(
+        &repo,
+        &chain[3],
+        "sha3_files",
+        &["src/lib.rs", "src/mod_d.rs"],
+    );
     assert_note_no_forbidden_files(&repo, &chain[3], "sha3_no_future", &["mod_e.rs"]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "src/lib.rs", "sha3_blame_new", &[
-        ("pub enum Event", true),
-        ("impl std::fmt::Display for Event", false),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "src/lib.rs",
+        "sha3_blame_new",
+        &[
+            ("pub enum Event", true),
+            ("impl std::fmt::Display for Event", false),
+        ],
+    );
     // mod_a.rs, mod_b.rs, and mod_c.rs (from C1-C3) are prior files at chain[3]
-    assert_blame_sample_at_commit(&repo, &chain[3], "src/mod_a.rs", "chain3_prior_mod_a_rs", &[
-        ("pub fn encode_base64(input: &[u8]) -> String {", true),
-        ("let alphabet = b\"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\";", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "src/mod_b.rs", "chain3_prior_mod_b_rs", &[
-        ("pub struct Timer { start: Instant }", true),
-        ("pub fn elapsed_ms(&self) -> u128 { self.elapsed().as_millis() }", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "src/mod_c.rs", "chain3_prior_mod_c_rs", &[
-        ("pub fn retry<T, E, F: Fn() -> Result<T, E>>(f: F, attempts: usize) -> Result<T, E> {", true),
-        ("if last.is_ok() { return last; }", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "src/mod_a.rs",
+        "chain3_prior_mod_a_rs",
+        &[
+            ("pub fn encode_base64(input: &[u8]) -> String {", true),
+            (
+                "let alphabet = b\"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\";",
+                true,
+            ),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "src/mod_b.rs",
+        "chain3_prior_mod_b_rs",
+        &[
+            ("pub struct Timer { start: Instant }", true),
+            (
+                "pub fn elapsed_ms(&self) -> u128 { self.elapsed().as_millis() }",
+                true,
+            ),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "src/mod_c.rs",
+        "chain3_prior_mod_c_rs",
+        &[
+            (
+                "pub fn retry<T, E, F: Fn() -> Result<T, E>>(f: F, attempts: usize) -> Result<T, E> {",
+                true,
+            ),
+            ("if last.is_ok() { return last; }", true),
+        ],
+    );
 
     // sha4 = C5': {src/lib.rs, src/mod_e.rs}
     assert_note_base_commit_matches(&repo, &chain[4], "sha4");
-    assert_note_files_exact(&repo, &chain[4], "sha4_files",
-        &["src/lib.rs", "src/mod_e.rs"]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "src/lib.rs", "sha4_blame_new", &[
-        ("pub struct Metrics {", true),
-        ("impl Metrics {", true),
-    ]);
+    assert_note_files_exact(
+        &repo,
+        &chain[4],
+        "sha4_files",
+        &["src/lib.rs", "src/mod_e.rs"],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "src/lib.rs",
+        "sha4_blame_new",
+        &[("pub struct Metrics {", true), ("impl Metrics {", true)],
+    );
     // mod_a.rs, mod_b.rs, mod_c.rs, and mod_d.rs (from C1-C4) are prior files at chain[4]
-    assert_blame_sample_at_commit(&repo, &chain[4], "src/mod_a.rs", "chain4_prior_mod_a_rs", &[
-        ("pub fn encode_base64(input: &[u8]) -> String {", true),
-        ("let alphabet = b\"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\";", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "src/mod_b.rs", "chain4_prior_mod_b_rs", &[
-        ("pub struct Timer { start: Instant }", true),
-        ("pub fn elapsed_ms(&self) -> u128 { self.elapsed().as_millis() }", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "src/mod_c.rs", "chain4_prior_mod_c_rs", &[
-        ("pub fn retry<T, E, F: Fn() -> Result<T, E>>(f: F, attempts: usize) -> Result<T, E> {", true),
-        ("if last.is_ok() { return last; }", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "src/mod_d.rs", "chain4_prior_mod_d_rs", &[
-        ("pub trait Serialize { fn serialize(&self) -> Vec<u8>; }", true),
-        ("pub fn round_trip<T: Serialize + Deserialize>(val: &T) -> Option<T> {", true),
-    ]);
-
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "src/mod_a.rs",
+        "chain4_prior_mod_a_rs",
+        &[
+            ("pub fn encode_base64(input: &[u8]) -> String {", true),
+            (
+                "let alphabet = b\"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\";",
+                true,
+            ),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "src/mod_b.rs",
+        "chain4_prior_mod_b_rs",
+        &[
+            ("pub struct Timer { start: Instant }", true),
+            (
+                "pub fn elapsed_ms(&self) -> u128 { self.elapsed().as_millis() }",
+                true,
+            ),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "src/mod_c.rs",
+        "chain4_prior_mod_c_rs",
+        &[
+            (
+                "pub fn retry<T, E, F: Fn() -> Result<T, E>>(f: F, attempts: usize) -> Result<T, E> {",
+                true,
+            ),
+            ("if last.is_ok() { return last; }", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "src/mod_d.rs",
+        "chain4_prior_mod_d_rs",
+        &[
+            (
+                "pub trait Serialize { fn serialize(&self) -> Vec<u8>; }",
+                true,
+            ),
+            (
+                "pub fn round_trip<T: Serialize + Deserialize>(val: &T) -> Option<T> {",
+                true,
+            ),
+        ],
+    );
 }
 
 /// Test 3: TypeScript routes.ts — upstream prepends a comment, feature appends
@@ -3500,13 +5173,37 @@ fn test_slow_path_typescript_routes_main_prepends_feature_adds_handlers() {
         "// Auto-generated routes\nimport express from 'express';\n",
         "main: prepend auto-generated comment",
     );
-    write_raw_commit(&repo, "src/middleware.ts", "export const logger = (req: any, res: any, next: any) => { console.log(req.method, req.path); next(); };\n", "main: add logger middleware");
-    write_raw_commit(&repo, "src/types.ts", "export interface User { id: number; email: string; name: string; }\nexport interface ApiResponse<T> { data: T; status: number; }\n", "main: add shared types");
-    write_raw_commit(&repo, "tsconfig.json", "{\"compilerOptions\":{\"target\":\"ES2020\",\"module\":\"commonjs\",\"strict\":true,\"outDir\":\"dist\"},\"include\":[\"src\"]}\n", "main: add tsconfig");
-    write_raw_commit(&repo, "package.json", "{\"name\":\"api\",\"version\":\"1.0.0\",\"scripts\":{\"build\":\"tsc\",\"start\":\"node dist/index.js\"}}\n", "main: add package.json");
+    write_raw_commit(
+        &repo,
+        "src/middleware.ts",
+        "export const logger = (req: any, res: any, next: any) => { console.log(req.method, req.path); next(); };\n",
+        "main: add logger middleware",
+    );
+    write_raw_commit(
+        &repo,
+        "src/types.ts",
+        "export interface User { id: number; email: string; name: string; }\nexport interface ApiResponse<T> { data: T; status: number; }\n",
+        "main: add shared types",
+    );
+    write_raw_commit(
+        &repo,
+        "tsconfig.json",
+        "{\"compilerOptions\":{\"target\":\"ES2020\",\"module\":\"commonjs\",\"strict\":true,\"outDir\":\"dist\"},\"include\":[\"src\"]}\n",
+        "main: add tsconfig",
+    );
+    write_raw_commit(
+        &repo,
+        "package.json",
+        "{\"name\":\"api\",\"version\":\"1.0.0\",\"scripts\":{\"build\":\"tsc\",\"start\":\"node dist/index.js\"}}\n",
+        "main: add package.json",
+    );
 
     // Feature branch from before main's prepend
-    let base_sha = repo.git(&["rev-parse", "HEAD~5"]).unwrap().trim().to_string();
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~5"])
+        .unwrap()
+        .trim()
+        .to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
 
     // C1: append /users GET handler (8 AI lines)
@@ -3525,7 +5222,8 @@ fn test_slow_path_typescript_routes_main_prepends_feature_adds_handlers() {
         "  }".ai(),
         "});".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C1 add GET /users route").unwrap();
+    repo.stage_all_and_commit("feat: C1 add GET /users route")
+        .unwrap();
 
     // C2: append /users POST handler (8 AI lines)
     routes.set_contents(crate::lines![
@@ -3544,12 +5242,14 @@ fn test_slow_path_typescript_routes_main_prepends_feature_adds_handlers() {
         "".ai(),
         "router.post('/users', async (req, res) => {".ai(),
         "  const { email, name } = req.body;".ai(),
-        "  if (!email || !name) return res.status(400).json({ error: 'email and name required' });".ai(),
+        "  if (!email || !name) return res.status(400).json({ error: 'email and name required' });"
+            .ai(),
         "  const user = await UserService.create({ email, name });".ai(),
         "  res.status(201).json({ data: user, status: 201 });".ai(),
         "});".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C2 add POST /users route").unwrap();
+    repo.stage_all_and_commit("feat: C2 add POST /users route")
+        .unwrap();
 
     // C3: append /users/:id GET handler (8 AI lines)
     routes.set_contents(crate::lines![
@@ -3575,7 +5275,8 @@ fn test_slow_path_typescript_routes_main_prepends_feature_adds_handlers() {
         "  res.json({ data: user, status: 200 });".ai(),
         "});".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C3 add GET /users/:id route").unwrap();
+    repo.stage_all_and_commit("feat: C3 add GET /users/:id route")
+        .unwrap();
 
     // C4: append /users/:id PUT handler (8 AI lines)
     routes.set_contents(crate::lines![
@@ -3595,7 +5296,8 @@ fn test_slow_path_typescript_routes_main_prepends_feature_adds_handlers() {
         "  res.json({ data: user, status: 200 });".ai(),
         "});".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C4 add PUT /users/:id route").unwrap();
+    repo.stage_all_and_commit("feat: C4 add PUT /users/:id route")
+        .unwrap();
 
     // C5: append /users/:id DELETE handler (8 AI lines) + export
     routes.set_contents(crate::lines![
@@ -3617,7 +5319,8 @@ fn test_slow_path_typescript_routes_main_prepends_feature_adds_handlers() {
         "".ai(),
         "export default router;".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C5 add DELETE /users/:id + export").unwrap();
+    repo.stage_all_and_commit("feat: C5 add DELETE /users/:id + export")
+        .unwrap();
 
     // Rebase onto main (non-conflicting)
     repo.git(&["rebase", &main_branch]).unwrap();
@@ -3629,46 +5332,76 @@ fn test_slow_path_typescript_routes_main_prepends_feature_adds_handlers() {
     // then AI lines start
     assert_note_base_commit_matches(&repo, &chain[0], "sha0");
     assert_note_files_exact(&repo, &chain[0], "sha0_files", &["src/routes.ts"]);
-    assert_blame_sample_at_commit(&repo, &chain[0], "src/routes.ts", "sha0_blame", &[
-        ("// Auto-generated routes", false),
-        ("import express from 'express';", false),
-        ("const router = express.Router();", true),
-        ("router.get('/users'", false),
-        ("try {", false),
-        ("const users = await UserService.findAll()", false),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[0],
+        "src/routes.ts",
+        "sha0_blame",
+        &[
+            ("// Auto-generated routes", false),
+            ("import express from 'express';", false),
+            ("const router = express.Router();", true),
+            ("router.get('/users'", false),
+            ("try {", false),
+            ("const users = await UserService.findAll()", false),
+        ],
+    );
 
     // sha1 = C2': only C2's delta
     assert_note_base_commit_matches(&repo, &chain[1], "sha1");
     assert_note_files_exact(&repo, &chain[1], "sha1_files", &["src/routes.ts"]);
-    assert_blame_sample_at_commit(&repo, &chain[1], "src/routes.ts", "sha1_blame_new", &[
-        ("router.post('/users'", false),
-        ("email and name required", false),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[1],
+        "src/routes.ts",
+        "sha1_blame_new",
+        &[
+            ("router.post('/users'", false),
+            ("email and name required", false),
+        ],
+    );
 
     // sha2 = C3': only C3's delta
     assert_note_base_commit_matches(&repo, &chain[2], "sha2");
     assert_note_files_exact(&repo, &chain[2], "sha2_files", &["src/routes.ts"]);
-    assert_blame_sample_at_commit(&repo, &chain[2], "src/routes.ts", "sha2_blame_new", &[
-        ("router.get('/users/:id'", false),
-        ("UserService.findById", false),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "src/routes.ts",
+        "sha2_blame_new",
+        &[
+            ("router.get('/users/:id'", false),
+            ("UserService.findById", false),
+        ],
+    );
 
     // sha3 = C4': only C4's delta
     assert_note_base_commit_matches(&repo, &chain[3], "sha3");
     assert_note_files_exact(&repo, &chain[3], "sha3_files", &["src/routes.ts"]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "src/routes.ts", "sha3_blame_new", &[
-        ("router.put('/users/:id'", false),
-        ("UserService.update", false),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "src/routes.ts",
+        "sha3_blame_new",
+        &[
+            ("router.put('/users/:id'", false),
+            ("UserService.update", false),
+        ],
+    );
 
     // sha4 = C5': only C5's delta
     assert_note_base_commit_matches(&repo, &chain[4], "sha4");
     assert_note_files_exact(&repo, &chain[4], "sha4_files", &["src/routes.ts"]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "src/routes.ts", "sha4_blame_new", &[
-        ("router.delete('/users/:id'", true),
-        ("export default router", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "src/routes.ts",
+        "sha4_blame_new",
+        &[
+            ("router.delete('/users/:id'", true),
+            ("export default router", true),
+        ],
+    );
 }
 
 /// Test 4: TOML config file — upstream prepends production header, feature
@@ -3694,13 +5427,37 @@ fn test_slow_path_config_file_both_add_different_sections() {
         "# Production config\n\n[server]\nhost = \"localhost\"\nport = 8080\n",
         "main: prepend production config header",
     );
-    write_raw_commit(&repo, ".env.production", "APP_ENV=production\nLOG_LEVEL=warn\n", "main: add production env");
-    write_raw_commit(&repo, "docker-compose.prod.yml", "version: '3.9'\nservices:\n  app:\n    image: myapp:latest\n    ports: ['80:8080']\n", "main: add prod docker-compose");
-    write_raw_commit(&repo, "nginx.conf", "server { listen 80; location / { proxy_pass http://app:8080; } }\n", "main: add nginx config");
-    write_raw_commit(&repo, "Makefile", "deploy:\n\tdocker-compose -f docker-compose.prod.yml up -d\n", "main: add Makefile");
+    write_raw_commit(
+        &repo,
+        ".env.production",
+        "APP_ENV=production\nLOG_LEVEL=warn\n",
+        "main: add production env",
+    );
+    write_raw_commit(
+        &repo,
+        "docker-compose.prod.yml",
+        "version: '3.9'\nservices:\n  app:\n    image: myapp:latest\n    ports: ['80:8080']\n",
+        "main: add prod docker-compose",
+    );
+    write_raw_commit(
+        &repo,
+        "nginx.conf",
+        "server { listen 80; location / { proxy_pass http://app:8080; } }\n",
+        "main: add nginx config",
+    );
+    write_raw_commit(
+        &repo,
+        "Makefile",
+        "deploy:\n\tdocker-compose -f docker-compose.prod.yml up -d\n",
+        "main: add Makefile",
+    );
 
     // Feature branch from before main's prepend
-    let base_sha = repo.git(&["rev-parse", "HEAD~5"]).unwrap().trim().to_string();
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~5"])
+        .unwrap()
+        .trim()
+        .to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
 
     // C1: append [database] section (8 AI lines)
@@ -3719,7 +5476,8 @@ fn test_slow_path_config_file_both_add_different_sections() {
         "max_lifetime = 1800".ai(),
         "ssl_mode = \"require\"".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C1 add [database] config section").unwrap();
+    repo.stage_all_and_commit("feat: C1 add [database] config section")
+        .unwrap();
 
     // C2: append [cache] section (8 AI lines)
     cfg.set_contents(crate::lines![
@@ -3746,7 +5504,8 @@ fn test_slow_path_config_file_both_add_different_sections() {
         "key_prefix = \"app:\"".ai(),
         "serializer = \"json\"".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C2 add [cache] config section").unwrap();
+    repo.stage_all_and_commit("feat: C2 add [cache] config section")
+        .unwrap();
 
     // C3: append [metrics] section (8 AI lines)
     cfg.set_contents(crate::lines![
@@ -3774,7 +5533,8 @@ fn test_slow_path_config_file_both_add_different_sections() {
         "exporter = \"prometheus\"".ai(),
         "histogram_buckets = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C3 add [metrics] config section").unwrap();
+    repo.stage_all_and_commit("feat: C3 add [metrics] config section")
+        .unwrap();
 
     // C4: append [auth] section (8 AI lines)
     cfg.set_contents(crate::lines![
@@ -3804,7 +5564,8 @@ fn test_slow_path_config_file_both_add_different_sections() {
         "audience = [\"web\", \"mobile\"]".ai(),
         "allow_anonymous = false".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C4 add [auth] config section").unwrap();
+    repo.stage_all_and_commit("feat: C4 add [auth] config section")
+        .unwrap();
 
     // C5: append [notifications] section (8 AI lines)
     cfg.set_contents(crate::lines![
@@ -3835,7 +5596,8 @@ fn test_slow_path_config_file_both_add_different_sections() {
         "queue_name = \"notifications\"".ai(),
         "retry_attempts = 3".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C5 add [notifications] config section").unwrap();
+    repo.stage_all_and_commit("feat: C5 add [notifications] config section")
+        .unwrap();
 
     // Rebase onto main (non-conflicting)
     repo.git(&["rebase", &main_branch]).unwrap();
@@ -3849,38 +5611,62 @@ fn test_slow_path_config_file_both_add_different_sections() {
     // sha1 = C2': [cache] section only
     assert_note_base_commit_matches(&repo, &chain[1], "sha1");
     assert_note_files_exact(&repo, &chain[1], "sha1_files", &["config.toml"]);
-    assert_blame_sample_at_commit(&repo, &chain[1], "config.toml", "sha1_blame_new", &[
-        ("[cache]", true),
-        ("backend = \"redis\"", true),
-        ("eviction_policy", false),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[1],
+        "config.toml",
+        "sha1_blame_new",
+        &[
+            ("[cache]", true),
+            ("backend = \"redis\"", true),
+            ("eviction_policy", false),
+        ],
+    );
 
     // sha2 = C3': [metrics] section only
     assert_note_base_commit_matches(&repo, &chain[2], "sha2");
     assert_note_files_exact(&repo, &chain[2], "sha2_files", &["config.toml"]);
-    assert_blame_sample_at_commit(&repo, &chain[2], "config.toml", "sha2_blame_new", &[
-        ("[metrics]", true),
-        ("exporter = \"prometheus\"", false),
-        ("histogram_buckets", false),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "config.toml",
+        "sha2_blame_new",
+        &[
+            ("[metrics]", true),
+            ("exporter = \"prometheus\"", false),
+            ("histogram_buckets", false),
+        ],
+    );
 
     // sha3 = C4': [auth] section only
     assert_note_base_commit_matches(&repo, &chain[3], "sha3");
     assert_note_files_exact(&repo, &chain[3], "sha3_files", &["config.toml"]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "config.toml", "sha3_blame_new", &[
-        ("[auth]", true),
-        ("provider = \"jwt\"", true),
-        ("allow_anonymous = false", false),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "config.toml",
+        "sha3_blame_new",
+        &[
+            ("[auth]", true),
+            ("provider = \"jwt\"", true),
+            ("allow_anonymous = false", false),
+        ],
+    );
 
     // sha4 = C5': [notifications] section only
     assert_note_base_commit_matches(&repo, &chain[4], "sha4");
     assert_note_files_exact(&repo, &chain[4], "sha4_files", &["config.toml"]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "config.toml", "sha4_blame_new", &[
-        ("[notifications]", true),
-        ("email_driver = \"smtp\"", true),
-        ("retry_attempts = 3", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "config.toml",
+        "sha4_blame_new",
+        &[
+            ("[notifications]", true),
+            ("email_driver = \"smtp\"", true),
+            ("retry_attempts = 3", true),
+        ],
+    );
 }
 
 /// Test 5: 10-commit feature branch, all appending to src/engine.rs.
@@ -3901,13 +5687,37 @@ fn test_slow_path_growing_shared_file_10_commits() {
         "// Copyright 2024 MyOrg\n// Licensed under MIT License\n// See LICENSE file for details\n\n// Engine core\n",
         "main: prepend license header to engine.rs",
     );
-    write_raw_commit(&repo, "src/error.rs", "#[derive(Debug)]\npub enum EngineError { NotFound, InvalidInput, Timeout }\n", "main: add engine errors");
-    write_raw_commit(&repo, "src/config.rs", "pub struct EngineConfig { pub workers: usize, pub stack_size: usize }\nimpl Default for EngineConfig { fn default() -> Self { Self { workers: 4, stack_size: 2 * 1024 * 1024 } } }\n", "main: add engine config");
-    write_raw_commit(&repo, "benches/engine_bench.rs", "fn main() { /* bench placeholder */ }\n", "main: add bench placeholder");
-    write_raw_commit(&repo, "tests/engine_test.rs", "#[test]\nfn smoke_test() { assert!(true); }\n", "main: add smoke test");
+    write_raw_commit(
+        &repo,
+        "src/error.rs",
+        "#[derive(Debug)]\npub enum EngineError { NotFound, InvalidInput, Timeout }\n",
+        "main: add engine errors",
+    );
+    write_raw_commit(
+        &repo,
+        "src/config.rs",
+        "pub struct EngineConfig { pub workers: usize, pub stack_size: usize }\nimpl Default for EngineConfig { fn default() -> Self { Self { workers: 4, stack_size: 2 * 1024 * 1024 } } }\n",
+        "main: add engine config",
+    );
+    write_raw_commit(
+        &repo,
+        "benches/engine_bench.rs",
+        "fn main() { /* bench placeholder */ }\n",
+        "main: add bench placeholder",
+    );
+    write_raw_commit(
+        &repo,
+        "tests/engine_test.rs",
+        "#[test]\nfn smoke_test() { assert!(true); }\n",
+        "main: add smoke test",
+    );
 
     // Feature branch from before main's prepend
-    let base_sha = repo.git(&["rev-parse", "HEAD~5"]).unwrap().trim().to_string();
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~5"])
+        .unwrap()
+        .trim()
+        .to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
 
     // C1: append 8 AI lines to engine.rs
@@ -3924,7 +5734,8 @@ fn test_slow_path_growing_shared_file_10_commits() {
         "    pub fn start(&mut self) { self.running = true; }".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C1 add Engine struct").unwrap();
+    repo.stage_all_and_commit("feat: C1 add Engine struct")
+        .unwrap();
 
     // C2: append 8 more AI lines
     eng.set_contents(crate::lines![
@@ -3944,7 +5755,8 @@ fn test_slow_path_growing_shared_file_10_commits() {
         "    pub fn size(&self) -> usize { self.payload.len() }".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C2 add Task struct").unwrap();
+    repo.stage_all_and_commit("feat: C2 add Task struct")
+        .unwrap();
 
     // C3: append 8 more AI lines
     eng.set_contents(crate::lines![
@@ -3965,7 +5777,8 @@ fn test_slow_path_growing_shared_file_10_commits() {
         "    pub fn is_empty(&self) -> bool { self.tasks.is_empty() }".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C3 add Queue struct").unwrap();
+    repo.stage_all_and_commit("feat: C3 add Queue struct")
+        .unwrap();
 
     // C4: append 8 more AI lines
     eng.set_contents(crate::lines![
@@ -3989,7 +5802,8 @@ fn test_slow_path_growing_shared_file_10_commits() {
         "    }".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C4 add Worker struct").unwrap();
+    repo.stage_all_and_commit("feat: C4 add Worker struct")
+        .unwrap();
 
     // C5: append 8 more AI lines
     eng.set_contents(crate::lines![
@@ -4014,7 +5828,8 @@ fn test_slow_path_growing_shared_file_10_commits() {
         "    pub fn worker_count(&self) -> usize { self.workers.len() }".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C5 add Scheduler struct").unwrap();
+    repo.stage_all_and_commit("feat: C5 add Scheduler struct")
+        .unwrap();
 
     // C6: append 8 more AI lines
     eng.set_contents(crate::lines![
@@ -4040,7 +5855,8 @@ fn test_slow_path_growing_shared_file_10_commits() {
         "    pub fn record_fail(&mut self) { self.tasks_failed += 1; }".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C6 add Metrics struct").unwrap();
+    repo.stage_all_and_commit("feat: C6 add Metrics struct")
+        .unwrap();
 
     // C7: append 8 more AI lines
     eng.set_contents(crate::lines![
@@ -4064,7 +5880,8 @@ fn test_slow_path_growing_shared_file_10_commits() {
         "    pub fn refill(&mut self) { self.tokens = (self.tokens + self.refill_rate).min(self.capacity); }".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C7 add RateLimit struct").unwrap();
+    repo.stage_all_and_commit("feat: C7 add RateLimit struct")
+        .unwrap();
 
     // C8: append 8 more AI lines
     eng.set_contents(crate::lines![
@@ -4089,7 +5906,8 @@ fn test_slow_path_growing_shared_file_10_commits() {
         "    pub fn record_failure(&mut self) { self.failures += 1; if self.failures >= self.threshold { self.state = BreakState::Open; } }".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C8 add CircuitBreaker").unwrap();
+    repo.stage_all_and_commit("feat: C8 add CircuitBreaker")
+        .unwrap();
 
     // C9: append 8 more AI lines
     eng.set_contents(crate::lines![
@@ -4114,7 +5932,8 @@ fn test_slow_path_growing_shared_file_10_commits() {
         "    pub fn healthy_count(&self) -> usize { self.checks.iter().filter(|f| f()).count() }".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C9 add HealthCheck struct").unwrap();
+    repo.stage_all_and_commit("feat: C9 add HealthCheck struct")
+        .unwrap();
 
     // C10: append 8 more AI lines
     eng.set_contents(crate::lines![
@@ -4135,13 +5954,15 @@ fn test_slow_path_growing_shared_file_10_commits() {
         "}".ai(),
         "impl Tracer {".ai(),
         "    pub fn new() -> Self { Self { spans: Vec::new() } }".ai(),
-        "    pub fn record(&mut self, name: impl Into<String>, duration: std::time::Duration) {".ai(),
+        "    pub fn record(&mut self, name: impl Into<String>, duration: std::time::Duration) {"
+            .ai(),
         "        self.spans.push((name.into(), duration));".ai(),
         "    }".ai(),
         "    pub fn spans(&self) -> &[(String, std::time::Duration)] { &self.spans }".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C10 add Tracer struct").unwrap();
+    repo.stage_all_and_commit("feat: C10 add Tracer struct")
+        .unwrap();
 
     // Rebase onto main (non-conflicting)
     repo.git(&["rebase", &main_branch]).unwrap();
@@ -4154,67 +5975,105 @@ fn test_slow_path_growing_shared_file_10_commits() {
 
     assert_note_base_commit_matches(&repo, &chain[1], "sha1");
     assert_note_files_exact(&repo, &chain[1], "sha1_files", &["src/engine.rs"]);
-    assert_blame_sample_at_commit(&repo, &chain[1], "src/engine.rs", "sha1_blame_new", &[
-        ("pub struct Task {", true),
-        ("impl Task {", false),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[1],
+        "src/engine.rs",
+        "sha1_blame_new",
+        &[("pub struct Task {", true), ("impl Task {", false)],
+    );
 
     assert_note_base_commit_matches(&repo, &chain[2], "sha2");
     assert_note_files_exact(&repo, &chain[2], "sha2_files", &["src/engine.rs"]);
-    assert_blame_sample_at_commit(&repo, &chain[2], "src/engine.rs", "sha2_blame_new", &[
-        ("pub struct Queue {", true),
-        ("impl Queue {", false),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "src/engine.rs",
+        "sha2_blame_new",
+        &[("pub struct Queue {", true), ("impl Queue {", false)],
+    );
 
     assert_note_base_commit_matches(&repo, &chain[3], "sha3");
     assert_note_files_exact(&repo, &chain[3], "sha3_files", &["src/engine.rs"]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "src/engine.rs", "sha3_blame_new", &[
-        ("pub struct Worker {", false),
-        ("impl Worker {", false),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "src/engine.rs",
+        "sha3_blame_new",
+        &[("pub struct Worker {", false), ("impl Worker {", false)],
+    );
 
     assert_note_base_commit_matches(&repo, &chain[4], "sha4");
     assert_note_files_exact(&repo, &chain[4], "sha4_files", &["src/engine.rs"]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "src/engine.rs", "sha4_blame_new", &[
-        ("pub struct Scheduler {", true),
-        ("impl Scheduler {", false),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "src/engine.rs",
+        "sha4_blame_new",
+        &[
+            ("pub struct Scheduler {", true),
+            ("impl Scheduler {", false),
+        ],
+    );
 
     assert_note_base_commit_matches(&repo, &chain[5], "sha5");
     assert_note_files_exact(&repo, &chain[5], "sha5_files", &["src/engine.rs"]);
-    assert_blame_sample_at_commit(&repo, &chain[5], "src/engine.rs", "sha5_blame_new", &[
-        ("pub struct Metrics {", false),
-        ("impl Metrics {", false),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[5],
+        "src/engine.rs",
+        "sha5_blame_new",
+        &[("pub struct Metrics {", false), ("impl Metrics {", false)],
+    );
 
     assert_note_base_commit_matches(&repo, &chain[6], "sha6");
     assert_note_files_exact(&repo, &chain[6], "sha6_files", &["src/engine.rs"]);
-    assert_blame_sample_at_commit(&repo, &chain[6], "src/engine.rs", "sha6_blame_new", &[
-        ("pub struct RateLimit {", false),
-        ("impl RateLimit {", false),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[6],
+        "src/engine.rs",
+        "sha6_blame_new",
+        &[
+            ("pub struct RateLimit {", false),
+            ("impl RateLimit {", false),
+        ],
+    );
 
     assert_note_base_commit_matches(&repo, &chain[7], "sha7");
     assert_note_files_exact(&repo, &chain[7], "sha7_files", &["src/engine.rs"]);
-    assert_blame_sample_at_commit(&repo, &chain[7], "src/engine.rs", "sha7_blame_new", &[
-        ("pub struct CircuitBreaker {", false),
-        ("pub enum BreakState {", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[7],
+        "src/engine.rs",
+        "sha7_blame_new",
+        &[
+            ("pub struct CircuitBreaker {", false),
+            ("pub enum BreakState {", true),
+        ],
+    );
 
     assert_note_base_commit_matches(&repo, &chain[8], "sha8");
     assert_note_files_exact(&repo, &chain[8], "sha8_files", &["src/engine.rs"]);
-    assert_blame_sample_at_commit(&repo, &chain[8], "src/engine.rs", "sha8_blame_new", &[
-        ("pub struct HealthCheck {", false),
-        ("impl HealthCheck {", false),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[8],
+        "src/engine.rs",
+        "sha8_blame_new",
+        &[
+            ("pub struct HealthCheck {", false),
+            ("impl HealthCheck {", false),
+        ],
+    );
 
     assert_note_base_commit_matches(&repo, &chain[9], "sha9");
     assert_note_files_exact(&repo, &chain[9], "sha9_files", &["src/engine.rs"]);
-    assert_blame_sample_at_commit(&repo, &chain[9], "src/engine.rs", "sha9_blame_new", &[
-        ("pub struct Tracer {", true),
-        ("impl Tracer {", true),
-    ]);
-
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[9],
+        "src/engine.rs",
+        "sha9_blame_new",
+        &[("pub struct Tracer {", true), ("impl Tracer {", true)],
+    );
 }
 
 /// Test 6: Two shared files (models.py + services.py), both prepended by main.
@@ -4225,8 +6084,18 @@ fn test_slow_path_multiple_shared_files_both_modified() {
     let repo = TestRepo::new();
 
     // Initial: both shared files with trailing newline
-    write_raw_commit(&repo, "models.py", "class BaseModel: pass\n", "Initial commit: models.py");
-    write_raw_commit(&repo, "services.py", "class BaseService: pass\n", "Initial commit: services.py");
+    write_raw_commit(
+        &repo,
+        "models.py",
+        "class BaseModel: pass\n",
+        "Initial commit: models.py",
+    );
+    write_raw_commit(
+        &repo,
+        "services.py",
+        "class BaseService: pass\n",
+        "Initial commit: services.py",
+    );
     let main_branch = repo.current_branch();
 
     // Main: prepend headers to BOTH files (two separate commits, then 3 more human commits)
@@ -4242,12 +6111,31 @@ fn test_slow_path_multiple_shared_files_both_modified() {
         "# Business services\nfrom typing import Any\n\nclass BaseService: pass\n",
         "main: prepend header to services.py",
     );
-    write_raw_commit(&repo, "exceptions.py", "class NotFound(Exception): pass\nclass Conflict(Exception): pass\n", "main: add exceptions");
-    write_raw_commit(&repo, "validators.py", "def validate_not_empty(val, name):\n    if not val: raise ValueError(f'{name} must not be empty')\n", "main: add validators");
-    write_raw_commit(&repo, "constants.py", "DEFAULT_PAGE_SIZE = 20\nMAX_PAGE_SIZE = 100\n", "main: add constants");
+    write_raw_commit(
+        &repo,
+        "exceptions.py",
+        "class NotFound(Exception): pass\nclass Conflict(Exception): pass\n",
+        "main: add exceptions",
+    );
+    write_raw_commit(
+        &repo,
+        "validators.py",
+        "def validate_not_empty(val, name):\n    if not val: raise ValueError(f'{name} must not be empty')\n",
+        "main: add validators",
+    );
+    write_raw_commit(
+        &repo,
+        "constants.py",
+        "DEFAULT_PAGE_SIZE = 20\nMAX_PAGE_SIZE = 100\n",
+        "main: add constants",
+    );
 
     // Feature branch from before main's two prepend commits (HEAD~5)
-    let base_sha = repo.git(&["rev-parse", "HEAD~5"]).unwrap().trim().to_string();
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~5"])
+        .unwrap()
+        .trim()
+        .to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
 
     // C1: append 6 AI lines to BOTH models.py AND services.py (12 total)
@@ -4273,7 +6161,8 @@ fn test_slow_path_multiple_shared_files_both_modified() {
         "    def deactivate(self, user_id: int): self.repo.update(user_id, active=False)".ai(),
         "    def exists(self, email: str) -> bool: return self.repo.find_by_email(email) is not None".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C1 add User model + UserService").unwrap();
+    repo.stage_all_and_commit("feat: C1 add User model + UserService")
+        .unwrap();
 
     // C2: append 6 more AI lines to both files
     models.set_contents(crate::lines![
@@ -4309,7 +6198,8 @@ fn test_slow_path_multiple_shared_files_both_modified() {
         "    def get_price(self, pid: int) -> float: return self.repo.find(pid).price".ai(),
         "    def set_price(self, pid: int, price: float): self.repo.update(pid, price=price)".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C2 add Product model + ProductService").unwrap();
+    repo.stage_all_and_commit("feat: C2 add Product model + ProductService")
+        .unwrap();
 
     // C3: append 6 more AI lines to both files
     models.set_contents(crate::lines![
@@ -4346,7 +6236,8 @@ fn test_slow_path_multiple_shared_files_both_modified() {
         "    def cancel(self, oid: int): self.repo.update(oid, status='cancelled')".ai(),
         "    def complete(self, oid: int): self.repo.update(oid, status='completed')".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C3 add Order model + OrderService").unwrap();
+    repo.stage_all_and_commit("feat: C3 add Order model + OrderService")
+        .unwrap();
 
     // C4: append 6 more AI lines to both files
     models.set_contents(crate::lines![
@@ -4357,7 +6248,8 @@ fn test_slow_path_multiple_shared_files_both_modified() {
         "@dataclass".ai(),
         "class Product: id: int; name: str; price: float; stock: int = 0".ai(),
         "@dataclass".ai(),
-        "class Order: id: int; user_id: int; items: list; total: float; status: str = 'pending'".ai(),
+        "class Order: id: int; user_id: int; items: list; total: float; status: str = 'pending'"
+            .ai(),
         "".ai(),
         "@dataclass".ai(),
         "class Address:".ai(),
@@ -4381,7 +6273,8 @@ fn test_slow_path_multiple_shared_files_both_modified() {
         "    def delete(self, aid: int): self.repo.delete(aid)".ai(),
         "    def set_default(self, uid: int, aid: int): self.repo.update_all({'is_default': False}, user_id=uid); self.repo.update(aid, is_default=True)".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C4 add Address model + AddressService").unwrap();
+    repo.stage_all_and_commit("feat: C4 add Address model + AddressService")
+        .unwrap();
 
     // C5: append 6 more AI lines to both files
     models.set_contents(crate::lines![
@@ -4392,7 +6285,8 @@ fn test_slow_path_multiple_shared_files_both_modified() {
         "@dataclass".ai(),
         "class Product: id: int; name: str; price: float; stock: int = 0".ai(),
         "@dataclass".ai(),
-        "class Order: id: int; user_id: int; items: list; total: float; status: str = 'pending'".ai(),
+        "class Order: id: int; user_id: int; items: list; total: float; status: str = 'pending'"
+            .ai(),
         "@dataclass".ai(),
         "class Address: id: int; user_id: int; street: str; city: str; country: str = 'US'".ai(),
         "".ai(),
@@ -4420,7 +6314,8 @@ fn test_slow_path_multiple_shared_files_both_modified() {
         "    def delete(self, rid: int): self.repo.delete(rid)".ai(),
         "    def update_comment(self, rid: int, comment: str): self.repo.update(rid, comment=comment)".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C5 add Review model + ReviewService").unwrap();
+    repo.stage_all_and_commit("feat: C5 add Review model + ReviewService")
+        .unwrap();
 
     // Rebase onto main (non-conflicting)
     repo.git(&["rebase", &main_branch]).unwrap();
@@ -4429,59 +6324,110 @@ fn test_slow_path_multiple_shared_files_both_modified() {
 
     // sha0 = C1': {models.py, services.py} ~12 accepted lines
     assert_note_base_commit_matches(&repo, &chain[0], "sha0");
-    assert_note_files_exact(&repo, &chain[0], "sha0_files", &["models.py", "services.py"]);
+    assert_note_files_exact(
+        &repo,
+        &chain[0],
+        "sha0_files",
+        &["models.py", "services.py"],
+    );
     // sha1 = C2': {models.py, services.py} ~12 accepted lines (only C2's delta)
     // C2 added Product model to models.py and ProductService to services.py
     assert_note_base_commit_matches(&repo, &chain[1], "sha1");
-    assert_note_files_exact(&repo, &chain[1], "sha1_files", &["models.py", "services.py"]);
-    assert_blame_sample_at_commit(&repo, &chain[1], "models.py", "sha1_models_product", &[
-        ("class Product:", false),
-        ("price: float", false),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[1], "services.py", "sha1_services_product", &[
-        ("class ProductService:", false),
-        ("def list_in_stock", false),
-    ]);
+    assert_note_files_exact(
+        &repo,
+        &chain[1],
+        "sha1_files",
+        &["models.py", "services.py"],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[1],
+        "models.py",
+        "sha1_models_product",
+        &[("class Product:", false), ("price: float", false)],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[1],
+        "services.py",
+        "sha1_services_product",
+        &[
+            ("class ProductService:", false),
+            ("def list_in_stock", false),
+        ],
+    );
 
     // sha2 = C3': {models.py, services.py} ~12 accepted lines (only C3's delta)
     // C3 added Order model to models.py and OrderService to services.py
     assert_note_base_commit_matches(&repo, &chain[2], "sha2");
-    assert_note_files_exact(&repo, &chain[2], "sha2_files", &["models.py", "services.py"]);
-    assert_blame_sample_at_commit(&repo, &chain[2], "models.py", "sha2_models_order", &[
-        ("class Order:", false),
-        ("status: str = 'pending'", false),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[2], "services.py", "sha2_services_order", &[
-        ("class OrderService:", false),
-        ("def cancel", false),
-    ]);
+    assert_note_files_exact(
+        &repo,
+        &chain[2],
+        "sha2_files",
+        &["models.py", "services.py"],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "models.py",
+        "sha2_models_order",
+        &[("class Order:", false), ("status: str = 'pending'", false)],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "services.py",
+        "sha2_services_order",
+        &[("class OrderService:", false), ("def cancel", false)],
+    );
 
     // sha3 = C4': ~12 accepted lines (only C4's delta)
     // C4 added Address model to models.py and AddressService to services.py
     assert_note_base_commit_matches(&repo, &chain[3], "sha3");
-    assert_note_files_exact(&repo, &chain[3], "sha3_files", &["models.py", "services.py"]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "models.py", "sha3_models_address", &[
-        ("class Address:", false),
-        ("country: str = 'US'", false),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "services.py", "sha3_services_address", &[
-        ("class AddressService:", false),
-        ("def get_by_user", false),
-    ]);
+    assert_note_files_exact(
+        &repo,
+        &chain[3],
+        "sha3_files",
+        &["models.py", "services.py"],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "models.py",
+        "sha3_models_address",
+        &[("class Address:", false), ("country: str = 'US'", false)],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "services.py",
+        "sha3_services_address",
+        &[("class AddressService:", false), ("def get_by_user", false)],
+    );
 
     // sha4 = C5': ~12 accepted lines (only C5's delta)
     // C5 added Review model to models.py and ReviewService to services.py
     assert_note_base_commit_matches(&repo, &chain[4], "sha4");
-    assert_note_files_exact(&repo, &chain[4], "sha4_files", &["models.py", "services.py"]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "models.py", "sha4_models_review", &[
-        ("class Review:", true),
-        ("rating: int", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "services.py", "sha4_services_review", &[
-        ("class ReviewService:", true),
-        ("def average_rating", true),
-    ]);
-
+    assert_note_files_exact(
+        &repo,
+        &chain[4],
+        "sha4_files",
+        &["models.py", "services.py"],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "models.py",
+        "sha4_models_review",
+        &[("class Review:", true), ("rating: int", true)],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "services.py",
+        "sha4_services_review",
+        &[("class ReviewService:", true), ("def average_rating", true)],
+    );
 }
 
 /// Test 7: Mixed — core.rs is shared (slow path), plus unique files in C2 and C4.
@@ -4491,7 +6437,12 @@ fn test_slow_path_mixed_unique_and_shared_files() {
     let repo = TestRepo::new();
 
     // Initial: core.rs with trailing newline
-    write_raw_commit(&repo, "core.rs", "// Core module\npub fn init() {}\n", "Initial commit");
+    write_raw_commit(
+        &repo,
+        "core.rs",
+        "// Core module\npub fn init() {}\n",
+        "Initial commit",
+    );
     let main_branch = repo.current_branch();
 
     // Main: prepend module-level docs to core.rs (forces slow path)
@@ -4502,12 +6453,31 @@ fn test_slow_path_mixed_unique_and_shared_files() {
         "main: prepend module docs to core.rs",
     );
     write_raw_commit(&repo, "lib.rs", "pub mod core;\n", "main: add lib.rs");
-    write_raw_commit(&repo, "Cargo.toml", "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n", "main: add Cargo.toml");
-    write_raw_commit(&repo, "benches/bench.rs", "fn main() {}\n", "main: add bench stub");
-    write_raw_commit(&repo, "examples/usage.rs", "fn main() { println!(\"example\"); }\n", "main: add usage example");
+    write_raw_commit(
+        &repo,
+        "Cargo.toml",
+        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n",
+        "main: add Cargo.toml",
+    );
+    write_raw_commit(
+        &repo,
+        "benches/bench.rs",
+        "fn main() {}\n",
+        "main: add bench stub",
+    );
+    write_raw_commit(
+        &repo,
+        "examples/usage.rs",
+        "fn main() { println!(\"example\"); }\n",
+        "main: add usage example",
+    );
 
     // Feature from before main's prepend
-    let base_sha = repo.git(&["rev-parse", "HEAD~5"]).unwrap().trim().to_string();
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~5"])
+        .unwrap()
+        .trim()
+        .to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
 
     // C1: append 8 AI lines to core.rs only (no unique file)
@@ -4523,10 +6493,12 @@ fn test_slow_path_mixed_unique_and_shared_files() {
         "impl Context {".ai(),
         "    pub fn new() -> Self { Self { debug: false, log_level: 2 } }".ai(),
         "    pub fn with_debug(mut self) -> Self { self.debug = true; self }".ai(),
-        "    pub fn log(&self, msg: &str) { if self.debug { eprintln!(\"[debug] {}\", msg); } }".ai(),
+        "    pub fn log(&self, msg: &str) { if self.debug { eprintln!(\"[debug] {}\", msg); } }"
+            .ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C1 add Context struct to core.rs").unwrap();
+    repo.stage_all_and_commit("feat: C1 add Context struct to core.rs")
+        .unwrap();
 
     // C2: append 6 AI lines to core.rs + create module_b.rs (6 AI lines)
     core.set_contents(crate::lines![
@@ -4554,7 +6526,8 @@ fn test_slow_path_mixed_unique_and_shared_files() {
         "    hash".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C2 add Registry to core.rs + module_b.rs").unwrap();
+    repo.stage_all_and_commit("feat: C2 add Registry to core.rs + module_b.rs")
+        .unwrap();
 
     // C3: append 6 AI lines to core.rs only (no unique file)
     core.set_contents(crate::lines![
@@ -4574,7 +6547,8 @@ fn test_slow_path_mixed_unique_and_shared_files() {
         "    pub fn emit(&self, event: &str) { for h in &self.handlers { h(event); } }".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C3 add EventBus to core.rs").unwrap();
+    repo.stage_all_and_commit("feat: C3 add EventBus to core.rs")
+        .unwrap();
 
     // C4: append 6 AI lines to core.rs + create module_d.rs (6 AI lines)
     core.set_contents(crate::lines![
@@ -4602,7 +6576,8 @@ fn test_slow_path_mixed_unique_and_shared_files() {
         "    pub fn len(&self) -> usize { self.data.len() }".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C4 add Pipeline to core.rs + module_d.rs").unwrap();
+    repo.stage_all_and_commit("feat: C4 add Pipeline to core.rs + module_d.rs")
+        .unwrap();
 
     // C5: append 6 AI lines to core.rs only
     core.set_contents(crate::lines![
@@ -4622,7 +6597,8 @@ fn test_slow_path_mixed_unique_and_shared_files() {
         "    pub fn is_registered<T: 'static>(&self) -> bool { self.services.contains_key(&std::any::TypeId::of::<T>()) }".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C5 add ServiceLocator to core.rs").unwrap();
+    repo.stage_all_and_commit("feat: C5 add ServiceLocator to core.rs")
+        .unwrap();
 
     // Rebase onto main (non-conflicting)
     repo.git(&["rebase", &main_branch]).unwrap();
@@ -4632,68 +6608,114 @@ fn test_slow_path_mixed_unique_and_shared_files() {
     // sha0 = C1': {core.rs} only, no module_b or module_d
     assert_note_base_commit_matches(&repo, &chain[0], "sha0");
     assert_note_files_exact(&repo, &chain[0], "sha0_files", &["core.rs"]);
-    assert_note_no_forbidden_files(&repo, &chain[0], "sha0_no_future",
-        &["module_b.rs", "module_d.rs"]);
+    assert_note_no_forbidden_files(
+        &repo,
+        &chain[0],
+        "sha0_no_future",
+        &["module_b.rs", "module_d.rs"],
+    );
 
     // sha1 = C2': {core.rs, module_b.rs}, no module_d
     // C2 added Registry struct to core.rs
     assert_note_base_commit_matches(&repo, &chain[1], "sha1");
     assert_note_files_exact(&repo, &chain[1], "sha1_files", &["core.rs", "module_b.rs"]);
     assert_note_no_forbidden_files(&repo, &chain[1], "sha1_no_future", &["module_d.rs"]);
-    assert_blame_sample_at_commit(&repo, &chain[1], "core.rs", "sha1_core_registry", &[
-        ("pub struct Registry", true),
-        ("pub fn register", false),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[1],
+        "core.rs",
+        "sha1_core_registry",
+        &[("pub struct Registry", true), ("pub fn register", false)],
+    );
 
     // sha2 = C3': {core.rs} — C3 only changes core.rs
     // C3 added EventBus to core.rs
     assert_note_base_commit_matches(&repo, &chain[2], "sha2");
     assert_note_files_exact(&repo, &chain[2], "sha2_files", &["core.rs"]);
     assert_note_no_forbidden_files(&repo, &chain[2], "sha2_no_future", &["module_d.rs"]);
-    assert_blame_sample_at_commit(&repo, &chain[2], "core.rs", "sha2_core_eventbus", &[
-        ("pub struct EventBus", true),
-        ("pub fn emit", false),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "core.rs",
+        "sha2_core_eventbus",
+        &[("pub struct EventBus", true), ("pub fn emit", false)],
+    );
     // module_b.rs (from C2) is a prior file at chain[2] — fast path, verify attribution intact
-    assert_blame_sample_at_commit(&repo, &chain[2], "module_b.rs", "chain2_prior_module_b_rs", &[
-        ("pub fn hash_fnv1a(input: &[u8]) -> u64 {", true),
-        ("hash = hash.wrapping_mul(1099511628211);", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "module_b.rs",
+        "chain2_prior_module_b_rs",
+        &[
+            ("pub fn hash_fnv1a(input: &[u8]) -> u64 {", true),
+            ("hash = hash.wrapping_mul(1099511628211);", true),
+        ],
+    );
 
     // sha3 = C4': {core.rs, module_d.rs}
     // C4 added Pipeline to core.rs + created module_d.rs
     assert_note_base_commit_matches(&repo, &chain[3], "sha3");
-    assert_note_files_exact(&repo, &chain[3], "sha3_files",
-        &["core.rs", "module_d.rs"]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "core.rs", "sha3_core_pipeline", &[
-        ("pub struct Pipeline", true),
-        ("pub fn run", false),
-    ]);
+    assert_note_files_exact(&repo, &chain[3], "sha3_files", &["core.rs", "module_d.rs"]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "core.rs",
+        "sha3_core_pipeline",
+        &[("pub struct Pipeline", true), ("pub fn run", false)],
+    );
     // module_b.rs (from C2) is a prior file at chain[3]
-    assert_blame_sample_at_commit(&repo, &chain[3], "module_b.rs", "chain3_prior_module_b_rs", &[
-        ("pub fn hash_fnv1a(input: &[u8]) -> u64 {", true),
-        ("hash = hash.wrapping_mul(1099511628211);", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "module_b.rs",
+        "chain3_prior_module_b_rs",
+        &[
+            ("pub fn hash_fnv1a(input: &[u8]) -> u64 {", true),
+            ("hash = hash.wrapping_mul(1099511628211);", true),
+        ],
+    );
 
     // sha4 = C5': {core.rs}
     // C5 added ServiceLocator to core.rs only
     assert_note_base_commit_matches(&repo, &chain[4], "sha4");
-    assert_note_files_exact(&repo, &chain[4], "sha4_files",
-        &["core.rs"]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "core.rs", "sha4_core_servicelocator", &[
-        ("pub struct ServiceLocator", true),
-        ("pub fn resolve", true),
-    ]);
+    assert_note_files_exact(&repo, &chain[4], "sha4_files", &["core.rs"]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "core.rs",
+        "sha4_core_servicelocator",
+        &[
+            ("pub struct ServiceLocator", true),
+            ("pub fn resolve", true),
+        ],
+    );
     // module_b.rs (from C2) and module_d.rs (from C4) are prior files at chain[4]
-    assert_blame_sample_at_commit(&repo, &chain[4], "module_b.rs", "chain4_prior_module_b_rs", &[
-        ("pub fn hash_fnv1a(input: &[u8]) -> u64 {", true),
-        ("hash = hash.wrapping_mul(1099511628211);", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "module_d.rs", "chain4_prior_module_d_rs", &[
-        ("pub struct LruCache<K, V> { cap: usize, data: std::collections::HashMap<K, V> }", true),
-        ("pub fn put(&mut self, key: K, val: V) { if self.data.len() >= self.cap { return; } self.data.insert(key, val); }", true),
-    ]);
-
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "module_b.rs",
+        "chain4_prior_module_b_rs",
+        &[
+            ("pub fn hash_fnv1a(input: &[u8]) -> u64 {", true),
+            ("hash = hash.wrapping_mul(1099511628211);", true),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "module_d.rs",
+        "chain4_prior_module_d_rs",
+        &[
+            (
+                "pub struct LruCache<K, V> { cap: usize, data: std::collections::HashMap<K, V> }",
+                true,
+            ),
+            (
+                "pub fn put(&mut self, key: K, val: V) { if self.data.len() >= self.cap { return; } self.data.insert(key, val); }",
+                true,
+            ),
+        ],
+    );
 }
 
 /// Test 8: Feature has human commits intermixed with AI commits.
@@ -4715,13 +6737,37 @@ fn test_slow_path_feature_has_human_commits_intermixed() {
         "from flask import Flask, request, jsonify\nfrom functools import wraps\n\n# API module\n",
         "main: prepend imports to api.py",
     );
-    write_raw_commit(&repo, "wsgi.py", "from api import app\nif __name__ == '__main__': app.run()\n", "main: add wsgi.py");
-    write_raw_commit(&repo, "gunicorn.conf.py", "bind = '0.0.0.0:8000'\nworkers = 4\ntimeout = 30\n", "main: add gunicorn config");
-    write_raw_commit(&repo, ".flake8", "[flake8]\nmax-line-length = 120\n", "main: add flake8 config");
-    write_raw_commit(&repo, "pytest.ini", "[pytest]\ntestpaths = tests\naddopts = -v\n", "main: add pytest config");
+    write_raw_commit(
+        &repo,
+        "wsgi.py",
+        "from api import app\nif __name__ == '__main__': app.run()\n",
+        "main: add wsgi.py",
+    );
+    write_raw_commit(
+        &repo,
+        "gunicorn.conf.py",
+        "bind = '0.0.0.0:8000'\nworkers = 4\ntimeout = 30\n",
+        "main: add gunicorn config",
+    );
+    write_raw_commit(
+        &repo,
+        ".flake8",
+        "[flake8]\nmax-line-length = 120\n",
+        "main: add flake8 config",
+    );
+    write_raw_commit(
+        &repo,
+        "pytest.ini",
+        "[pytest]\ntestpaths = tests\naddopts = -v\n",
+        "main: add pytest config",
+    );
 
     // Feature branch from before main's prepend
-    let base_sha = repo.git(&["rev-parse", "HEAD~5"]).unwrap().trim().to_string();
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~5"])
+        .unwrap()
+        .trim()
+        .to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
 
     // C1: HUMAN only — adds config.py (plain write, no AI)
@@ -4750,7 +6796,8 @@ fn test_slow_path_feature_has_human_commits_intermixed() {
         "@app.route('/health')".ai(),
         "def health(): return jsonify({'status': 'ok', 'version': '1.0'})".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C2 add Flask app and /health endpoint").unwrap();
+    repo.stage_all_and_commit("feat: C2 add Flask app and /health endpoint")
+        .unwrap();
 
     // C3: AI — appends 10 more AI lines to api.py
     api.set_contents(crate::lines![
@@ -4781,7 +6828,8 @@ fn test_slow_path_feature_has_human_commits_intermixed() {
         "    data = request.get_json()".ai(),
         "    return jsonify({'created': data}), 201".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C3 add /users GET and POST endpoints").unwrap();
+    repo.stage_all_and_commit("feat: C3 add /users GET and POST endpoints")
+        .unwrap();
 
     // C4: HUMAN only — adds requirements.txt (no AI)
     write_raw_commit(
@@ -4827,7 +6875,8 @@ fn test_slow_path_feature_has_human_commits_intermixed() {
         "@app.errorhandler(404)".ai(),
         "def not_found(e): return jsonify({'error': 'not found'}), 404".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C5 add /users/:id GET and DELETE endpoints").unwrap();
+    repo.stage_all_and_commit("feat: C5 add /users/:id GET and DELETE endpoints")
+        .unwrap();
 
     // Rebase onto main (non-conflicting)
     repo.git(&["rebase", &main_branch]).unwrap();
@@ -4843,11 +6892,17 @@ fn test_slow_path_feature_has_human_commits_intermixed() {
     assert_note_files_exact(&repo, &chain[1], "sha1_files", &["api.py"]);
     assert_accepted_lines_exact(&repo, &chain[1], "sha1_lines", 12);
     // C2 introduced Flask app + /health endpoint — verify they are AI at sha1.
-    assert_blame_sample_at_commit(&repo, &chain[1], "api.py", "sha1_blame", &[
-        ("app = Flask(__name__)", true),
-        ("def require_auth", true),
-        ("def health", false),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[1],
+        "api.py",
+        "sha1_blame",
+        &[
+            ("app = Flask(__name__)", true),
+            ("def require_auth", true),
+            ("def health", false),
+        ],
+    );
 
     // sha2 = C3' (second AI commit): api.py with 6 accepted lines (per-commit delta).
     // C3 introduced /users routes, but C5 later simplified some of those lines.
@@ -4858,25 +6913,38 @@ fn test_slow_path_feature_has_human_commits_intermixed() {
     assert_accepted_lines_exact(&repo, &chain[2], "sha2_lines", 6);
     // C3 introduced /users GET and POST routes. Some lines show as human because
     // C5 later modified them (content mismatch prevents attribution transfer).
-    assert_blame_sample_at_commit(&repo, &chain[2], "api.py", "sha2_blame", &[
-        ("def list_users", false),
-        ("def create_user", false),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "api.py",
+        "sha2_blame",
+        &[("def list_users", false), ("def create_user", false)],
+    );
 
     // sha3 = C4' (human-only commit: requirements.txt via write_raw_commit, no note expected).
-    assert_note_no_forbidden_files_if_present(&repo, &chain[3], "sha3_no_future",
-        &["config.py", "requirements.txt"]);
+    assert_note_no_forbidden_files_if_present(
+        &repo,
+        &chain[3],
+        "sha3_no_future",
+        &["config.py", "requirements.txt"],
+    );
 
     // sha4 = C5' (third AI commit): api.py with 14 accepted lines (C5's delta only)
     assert_note_base_commit_matches(&repo, &chain[4], "sha4");
     assert_note_files_exact(&repo, &chain[4], "sha4_files", &["api.py"]);
     assert_accepted_lines_exact(&repo, &chain[4], "sha4_lines", 14);
     // C5 introduced /users/:id GET and DELETE — verify they are AI at sha4.
-    assert_blame_sample_at_commit(&repo, &chain[4], "api.py", "sha4_blame", &[
-        ("def get_user", true),
-        ("def delete_user", true),
-        ("def not_found", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "api.py",
+        "sha4_blame",
+        &[
+            ("def get_user", true),
+            ("def delete_user", true),
+            ("def not_found", true),
+        ],
+    );
 
     // Per-commit-delta: each commit's accepted_lines reflects only its own new AI lines.
     // Chain values [12, 6, 14] reflect different per-commit contribution sizes.
@@ -4928,13 +6996,37 @@ fn test_slow_path_large_function_blocks_line_offset() {
         ),
         "main: prepend 20-line license header to processor.rs",
     );
-    write_raw_commit(&repo, "error.rs", "#[derive(Debug)] pub enum ProcessError { Io(std::io::Error), Invalid(String) }\n", "main: add error types");
-    write_raw_commit(&repo, "types.rs", "pub type Bytes = Vec<u8>;\npub type Result<T> = std::result::Result<T, crate::error::ProcessError>;\n", "main: add common types");
-    write_raw_commit(&repo, "tests/smoke.rs", "#[test] fn smoke() { assert!(true); }\n", "main: add smoke test");
-    write_raw_commit(&repo, "Cargo.toml", "[package]\nname = \"processor\"\nversion = \"0.1.0\"\n", "main: add Cargo.toml");
+    write_raw_commit(
+        &repo,
+        "error.rs",
+        "#[derive(Debug)] pub enum ProcessError { Io(std::io::Error), Invalid(String) }\n",
+        "main: add error types",
+    );
+    write_raw_commit(
+        &repo,
+        "types.rs",
+        "pub type Bytes = Vec<u8>;\npub type Result<T> = std::result::Result<T, crate::error::ProcessError>;\n",
+        "main: add common types",
+    );
+    write_raw_commit(
+        &repo,
+        "tests/smoke.rs",
+        "#[test] fn smoke() { assert!(true); }\n",
+        "main: add smoke test",
+    );
+    write_raw_commit(
+        &repo,
+        "Cargo.toml",
+        "[package]\nname = \"processor\"\nversion = \"0.1.0\"\n",
+        "main: add Cargo.toml",
+    );
 
     // Feature branch from before main's prepend
-    let base_sha = repo.git(&["rev-parse", "HEAD~5"]).unwrap().trim().to_string();
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~5"])
+        .unwrap()
+        .trim()
+        .to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
 
     // C1: add 15-AI-line function process_batch to processor.rs
@@ -4961,7 +7053,8 @@ fn test_slow_path_large_function_blocks_line_offset() {
         "    Ok(out)".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C1 add process_batch function").unwrap();
+    repo.stage_all_and_commit("feat: C1 add process_batch function")
+        .unwrap();
 
     // C2: add 15-AI-line function validate_input
     proc.set_contents(crate::lines![
@@ -4987,7 +7080,8 @@ fn test_slow_path_large_function_blocks_line_offset() {
         "    Ok(())".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C2 add validate_input function").unwrap();
+    repo.stage_all_and_commit("feat: C2 add validate_input function")
+        .unwrap();
 
     // C3: add 15-AI-line function chunk_data
     proc.set_contents(crate::lines![
@@ -5017,7 +7111,8 @@ fn test_slow_path_large_function_blocks_line_offset() {
         "    chunks".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C3 add chunk_data function").unwrap();
+    repo.stage_all_and_commit("feat: C3 add chunk_data function")
+        .unwrap();
 
     // C4: add 15-AI-line function compress
     proc.set_contents(crate::lines![
@@ -5049,7 +7144,8 @@ fn test_slow_path_large_function_blocks_line_offset() {
         "    result".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C4 add run_length_encode function").unwrap();
+    repo.stage_all_and_commit("feat: C4 add run_length_encode function")
+        .unwrap();
 
     // C5: add 15-AI-line function transform_pipeline
     proc.set_contents(crate::lines![
@@ -5089,7 +7185,8 @@ fn test_slow_path_large_function_blocks_line_offset() {
         "    map".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C5 add transform_pipeline and helpers").unwrap();
+    repo.stage_all_and_commit("feat: C5 add transform_pipeline and helpers")
+        .unwrap();
 
     // Rebase onto main (non-conflicting)
     repo.git(&["rebase", &main_branch]).unwrap();
@@ -5102,14 +7199,20 @@ fn test_slow_path_large_function_blocks_line_offset() {
 
     // sha0 blame: 20 license lines (human) + 1 "// Processor module" (human) + 1 "use std::io;" (human)
     // then the blank + function (AI lines) start
-    assert_blame_sample_at_commit(&repo, &chain[0], "processor.rs", "sha0_blame_offset", &[
-        ("// Copyright 2024 MyOrg", false),
-        ("// Redistribution", false),
-        ("// THIS SOFTWARE IS PROVIDED", false),
-        ("// Processor module", false),
-        ("use std::io;", false),
-        ("pub fn process_batch", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[0],
+        "processor.rs",
+        "sha0_blame_offset",
+        &[
+            ("// Copyright 2024 MyOrg", false),
+            ("// Redistribution", false),
+            ("// THIS SOFTWARE IS PROVIDED", false),
+            ("// Processor module", false),
+            ("use std::io;", false),
+            ("pub fn process_batch", true),
+        ],
+    );
 
     // sha1 = C2': C2 added validate_input function.
     // The 20-line license header prepend shifts ALL feature lines by 20.
@@ -5122,36 +7225,57 @@ fn test_slow_path_large_function_blocks_line_offset() {
     // Only lines whose content also exists in the final feature tip (C5) are
     // attributable via the hunk-based content-map lookup; lines that C3/C4/C5
     // later rewrote are no longer in the content map and show as human.
-    assert_blame_sample_at_commit(&repo, &chain[1], "processor.rs", "sha1_blame_offset", &[
-        ("// Copyright 2024 MyOrg", false),  // license header (human) — not AI
-        ("// Processor module", false),      // original human header
-        ("use std::io;", false),             // original human line
-        ("pub fn process_batch", true),      // C1 AI line, offset +20 correctly applied
-        ("pub fn validate_input", true),     // C2 AI line — function sig survived to tip
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[1],
+        "processor.rs",
+        "sha1_blame_offset",
+        &[
+            ("// Copyright 2024 MyOrg", false), // license header (human) — not AI
+            ("// Processor module", false),     // original human header
+            ("use std::io;", false),            // original human line
+            ("pub fn process_batch", true),     // C1 AI line, offset +20 correctly applied
+            ("pub fn validate_input", true),    // C2 AI line — function sig survived to tip
+        ],
+    );
 
     // sha2 = C3': C3 added chunk_data function
     assert_note_base_commit_matches(&repo, &chain[2], "sha2");
-    assert_blame_sample_at_commit(&repo, &chain[2], "processor.rs", "sha2_chunk_data", &[
-        ("pub fn chunk_data", false),
-        ("chunk_size == 0", false),
-        ("chunks.push", false),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "processor.rs",
+        "sha2_chunk_data",
+        &[
+            ("pub fn chunk_data", false),
+            ("chunk_size == 0", false),
+            ("chunks.push", false),
+        ],
+    );
 
     // sha3 = C4': C4 added run_length_encode function
     assert_note_base_commit_matches(&repo, &chain[3], "sha3");
-    assert_blame_sample_at_commit(&repo, &chain[3], "processor.rs", "sha3_rle", &[
-        ("pub fn run_length_encode", true),
-        ("result.push", false),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "processor.rs",
+        "sha3_rle",
+        &[("pub fn run_length_encode", true), ("result.push", false)],
+    );
 
     // sha4 = C5': C5 added transform_pipeline and helpers
     assert_note_base_commit_matches(&repo, &chain[4], "sha4");
-    assert_blame_sample_at_commit(&repo, &chain[4], "processor.rs", "sha4_transform", &[
-        ("pub fn transform_pipeline", true),
-        ("pub fn hexdump", true),
-        ("pub fn count_bytes", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "processor.rs",
+        "sha4_transform",
+        &[
+            ("pub fn transform_pipeline", true),
+            ("pub fn hexdump", true),
+            ("pub fn count_bytes", true),
+        ],
+    );
 }
 
 /// Test 10: Shared file grows AND each commit adds a unique helper file.
@@ -5177,13 +7301,37 @@ fn test_slow_path_file_grows_then_unique_files_each_commit() {
         "'use strict';\n\nexport const VERSION = '1.0';\n",
         "main: prepend use strict to shared_util.js",
     );
-    write_raw_commit(&repo, "package.json", "{\"name\":\"helpers\",\"version\":\"1.0.0\",\"type\":\"module\"}\n", "main: add package.json");
-    write_raw_commit(&repo, ".eslintrc.json", "{\"env\":{\"es2022\":true},\"extends\":[\"eslint:recommended\"]}\n", "main: add eslint config");
-    write_raw_commit(&repo, "vitest.config.js", "export default {test:{environment:'node'}};\n", "main: add vitest config");
-    write_raw_commit(&repo, "README.md", "# Helpers\n\nA collection of JavaScript helper modules.\n", "main: add README");
+    write_raw_commit(
+        &repo,
+        "package.json",
+        "{\"name\":\"helpers\",\"version\":\"1.0.0\",\"type\":\"module\"}\n",
+        "main: add package.json",
+    );
+    write_raw_commit(
+        &repo,
+        ".eslintrc.json",
+        "{\"env\":{\"es2022\":true},\"extends\":[\"eslint:recommended\"]}\n",
+        "main: add eslint config",
+    );
+    write_raw_commit(
+        &repo,
+        "vitest.config.js",
+        "export default {test:{environment:'node'}};\n",
+        "main: add vitest config",
+    );
+    write_raw_commit(
+        &repo,
+        "README.md",
+        "# Helpers\n\nA collection of JavaScript helper modules.\n",
+        "main: add README",
+    );
 
     // Feature branch from before main's prepend
-    let base_sha = repo.git(&["rev-parse", "HEAD~5"]).unwrap().trim().to_string();
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~5"])
+        .unwrap()
+        .trim()
+        .to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
 
     // C1: append 8 AI lines to shared_util.js + create helpers/date.js (6 AI lines)
@@ -5212,7 +7360,8 @@ fn test_slow_path_file_grows_then_unique_files_each_commit() {
         "export const isWeekend = d => d.getDay() === 0 || d.getDay() === 6;".ai(),
         "export const diffMs = (a, b) => Math.abs(new Date(a) - new Date(b));".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C1 grow shared_util.js + helpers/date.js").unwrap();
+    repo.stage_all_and_commit("feat: C1 grow shared_util.js + helpers/date.js")
+        .unwrap();
 
     // C2: append 8 more AI lines to shared_util.js + create helpers/string.js (6 AI lines)
     shared.set_contents(crate::lines![
@@ -5242,7 +7391,8 @@ fn test_slow_path_file_grows_then_unique_files_each_commit() {
         "export const slugify = s => s.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');".ai(),
         "export const words = s => s.trim().split(/\\s+/).filter(Boolean);".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C2 grow shared_util.js + helpers/string.js").unwrap();
+    repo.stage_all_and_commit("feat: C2 grow shared_util.js + helpers/string.js")
+        .unwrap();
 
     // C3: append 8 more AI lines to shared_util.js + create helpers/array.js (6 AI lines)
     shared.set_contents(crate::lines![
@@ -5273,7 +7423,8 @@ fn test_slow_path_file_grows_then_unique_files_each_commit() {
         "export const zip = (...arrays) => arrays[0].map((_,i) => arrays.map(a=>a[i]));".ai(),
         "export const intersection = (a, b) => a.filter(x => b.includes(x));".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C3 grow shared_util.js + helpers/array.js").unwrap();
+    repo.stage_all_and_commit("feat: C3 grow shared_util.js + helpers/array.js")
+        .unwrap();
 
     // C4: append 8 more AI lines to shared_util.js + create helpers/object.js (6 AI lines)
     shared.set_contents(crate::lines![
@@ -5303,7 +7454,8 @@ fn test_slow_path_file_grows_then_unique_files_each_commit() {
         "export const mapValues = (obj, fn) => Object.fromEntries(Object.entries(obj).map(([k,v])=>[k,fn(v,k)]));".ai(),
         "export const fromEntries = Object.fromEntries;".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C4 grow shared_util.js + helpers/object.js").unwrap();
+    repo.stage_all_and_commit("feat: C4 grow shared_util.js + helpers/object.js")
+        .unwrap();
 
     // C5: append 8 more AI lines to shared_util.js + create helpers/number.js (6 AI lines)
     shared.set_contents(crate::lines![
@@ -5338,7 +7490,8 @@ fn test_slow_path_file_grows_then_unique_files_each_commit() {
         "export const gcd = (a, b) => b === 0 ? a : gcd(b, a % b);".ai(),
         "export const formatBytes = n => { const u=['B','KB','MB','GB']; let i=0; while(n>=1024&&i<3){n/=1024;i++;} return `${n.toFixed(1)}${u[i]}`; };".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C5 grow shared_util.js + helpers/number.js").unwrap();
+    repo.stage_all_and_commit("feat: C5 grow shared_util.js + helpers/number.js")
+        .unwrap();
 
     // Rebase onto main (non-conflicting)
     repo.git(&["rebase", &main_branch]).unwrap();
@@ -5347,104 +7500,266 @@ fn test_slow_path_file_grows_then_unique_files_each_commit() {
 
     // sha0 = C1': {shared_util.js, helpers/date.js}; no future helpers
     assert_note_base_commit_matches(&repo, &chain[0], "sha0");
-    assert_note_files_exact(&repo, &chain[0], "sha0_files",
-        &["shared_util.js", "helpers/date.js"]);
-    assert_note_no_forbidden_files(&repo, &chain[0], "sha0_no_future",
-        &["helpers/string.js", "helpers/array.js", "helpers/object.js", "helpers/number.js"]);
+    assert_note_files_exact(
+        &repo,
+        &chain[0],
+        "sha0_files",
+        &["shared_util.js", "helpers/date.js"],
+    );
+    assert_note_no_forbidden_files(
+        &repo,
+        &chain[0],
+        "sha0_no_future",
+        &[
+            "helpers/string.js",
+            "helpers/array.js",
+            "helpers/object.js",
+            "helpers/number.js",
+        ],
+    );
 
     // sha1 = C2': {shared_util.js, helpers/string.js}; no future helpers
     // C2 added curry/partial/flip/tap/negate to shared_util.js
     assert_note_base_commit_matches(&repo, &chain[1], "sha1");
-    assert_note_files_exact(&repo, &chain[1], "sha1_files",
-        &["shared_util.js", "helpers/string.js"]);
-    assert_note_no_forbidden_files(&repo, &chain[1], "sha1_no_future",
-        &["helpers/array.js", "helpers/object.js", "helpers/number.js"]);
-    assert_blame_sample_at_commit(&repo, &chain[1], "shared_util.js", "sha1_shared_curry", &[
-        ("export function curry", false),
-        ("export function partial", false),
-        ("export const negate", false),
-    ]);
+    assert_note_files_exact(
+        &repo,
+        &chain[1],
+        "sha1_files",
+        &["shared_util.js", "helpers/string.js"],
+    );
+    assert_note_no_forbidden_files(
+        &repo,
+        &chain[1],
+        "sha1_no_future",
+        &["helpers/array.js", "helpers/object.js", "helpers/number.js"],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[1],
+        "shared_util.js",
+        "sha1_shared_curry",
+        &[
+            ("export function curry", false),
+            ("export function partial", false),
+            ("export const negate", false),
+        ],
+    );
     // helpers/date.js (from C1) is a prior file at chain[1] — fast path, verify attribution intact
-    assert_blame_sample_at_commit(&repo, &chain[1], "helpers/date.js", "chain1_prior_date_js", &[
-        ("export const now = () => new Date();", true),
-        ("export const formatISO = d => d.toISOString().slice(0, 10);", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[1],
+        "helpers/date.js",
+        "chain1_prior_date_js",
+        &[
+            ("export const now = () => new Date();", true),
+            (
+                "export const formatISO = d => d.toISOString().slice(0, 10);",
+                true,
+            ),
+        ],
+    );
 
     // sha2 = C3': {shared_util.js, helpers/array.js}; no object or number yet
     // C3 added debounce/throttle/trampoline/juxt/when to shared_util.js
     assert_note_base_commit_matches(&repo, &chain[2], "sha2");
-    assert_note_files_exact(&repo, &chain[2], "sha2_files",
-        &["shared_util.js", "helpers/array.js"]);
-    assert_note_no_forbidden_files(&repo, &chain[2], "sha2_no_future",
-        &["helpers/object.js", "helpers/number.js"]);
-    assert_blame_sample_at_commit(&repo, &chain[2], "shared_util.js", "sha2_shared_debounce", &[
-        ("export function debounce", false),
-        ("export function throttle", false),
-        ("export function trampoline", false),
-    ]);
+    assert_note_files_exact(
+        &repo,
+        &chain[2],
+        "sha2_files",
+        &["shared_util.js", "helpers/array.js"],
+    );
+    assert_note_no_forbidden_files(
+        &repo,
+        &chain[2],
+        "sha2_no_future",
+        &["helpers/object.js", "helpers/number.js"],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "shared_util.js",
+        "sha2_shared_debounce",
+        &[
+            ("export function debounce", false),
+            ("export function throttle", false),
+            ("export function trampoline", false),
+        ],
+    );
     // helpers/date.js (from C1) and helpers/string.js (from C2) are prior files at chain[2]
-    assert_blame_sample_at_commit(&repo, &chain[2], "helpers/date.js", "chain2_prior_date_js", &[
-        ("export const now = () => new Date();", true),
-        ("export const formatISO = d => d.toISOString().slice(0, 10);", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[2], "helpers/string.js", "chain2_prior_string_js", &[
-        ("export const capitalize = s => s.charAt(0).toUpperCase() + s.slice(1);", true),
-        ("export const slugify = s => s.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "helpers/date.js",
+        "chain2_prior_date_js",
+        &[
+            ("export const now = () => new Date();", true),
+            (
+                "export const formatISO = d => d.toISOString().slice(0, 10);",
+                true,
+            ),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[2],
+        "helpers/string.js",
+        "chain2_prior_string_js",
+        &[
+            (
+                "export const capitalize = s => s.charAt(0).toUpperCase() + s.slice(1);",
+                true,
+            ),
+            (
+                "export const slugify = s => s.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');",
+                true,
+            ),
+        ],
+    );
 
     // sha3 = C4': {shared_util.js, helpers/object.js}; no number yet
     // C4 added EventEmitter/sleep/retry/withTimeout/deferred to shared_util.js
     assert_note_base_commit_matches(&repo, &chain[3], "sha3");
-    assert_note_files_exact(&repo, &chain[3], "sha3_files",
-        &["shared_util.js", "helpers/object.js"]);
+    assert_note_files_exact(
+        &repo,
+        &chain[3],
+        "sha3_files",
+        &["shared_util.js", "helpers/object.js"],
+    );
     assert_note_no_forbidden_files(&repo, &chain[3], "sha3_no_future", &["helpers/number.js"]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "shared_util.js", "sha3_shared_eventemitter", &[
-        ("export class EventEmitter", false),
-        ("export const sleep", true),
-        ("export async function retry", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "shared_util.js",
+        "sha3_shared_eventemitter",
+        &[
+            ("export class EventEmitter", false),
+            ("export const sleep", true),
+            ("export async function retry", true),
+        ],
+    );
     // helpers/date.js (C1), helpers/string.js (C2), and helpers/array.js (C3) are prior files at chain[3]
-    assert_blame_sample_at_commit(&repo, &chain[3], "helpers/date.js", "chain3_prior_date_js", &[
-        ("export const now = () => new Date();", true),
-        ("export const formatISO = d => d.toISOString().slice(0, 10);", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "helpers/string.js", "chain3_prior_string_js", &[
-        ("export const capitalize = s => s.charAt(0).toUpperCase() + s.slice(1);", true),
-        ("export const slugify = s => s.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[3], "helpers/array.js", "chain3_prior_array_js", &[
-        ("export const unique = arr => [...new Set(arr)];", true),
-        ("export const chunk = (arr, n) => Array.from({length: Math.ceil(arr.length/n)}, (_,i) => arr.slice(i*n, i*n+n));", true),
-    ]);
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "helpers/date.js",
+        "chain3_prior_date_js",
+        &[
+            ("export const now = () => new Date();", true),
+            (
+                "export const formatISO = d => d.toISOString().slice(0, 10);",
+                true,
+            ),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "helpers/string.js",
+        "chain3_prior_string_js",
+        &[
+            (
+                "export const capitalize = s => s.charAt(0).toUpperCase() + s.slice(1);",
+                true,
+            ),
+            (
+                "export const slugify = s => s.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');",
+                true,
+            ),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[3],
+        "helpers/array.js",
+        "chain3_prior_array_js",
+        &[
+            ("export const unique = arr => [...new Set(arr)];", true),
+            (
+                "export const chunk = (arr, n) => Array.from({length: Math.ceil(arr.length/n)}, (_,i) => arr.slice(i*n, i*n+n));",
+                true,
+            ),
+        ],
+    );
 
     // sha4 = C5': {shared_util.js, helpers/number.js}
     // C5 added deepEqual to shared_util.js
     assert_note_base_commit_matches(&repo, &chain[4], "sha4");
-    assert_note_files_exact(&repo, &chain[4], "sha4_files",
-        &["shared_util.js", "helpers/number.js"]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "shared_util.js", "sha4_shared_deepequal", &[
-        ("export function deepEqual", true),
-        ("if (Array.isArray(a))", true),
-        ("return false;", true),
-    ]);
+    assert_note_files_exact(
+        &repo,
+        &chain[4],
+        "sha4_files",
+        &["shared_util.js", "helpers/number.js"],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "shared_util.js",
+        "sha4_shared_deepequal",
+        &[
+            ("export function deepEqual", true),
+            ("if (Array.isArray(a))", true),
+            ("return false;", true),
+        ],
+    );
     // helpers/date.js (C1), string.js (C2), array.js (C3), and object.js (C4) are prior files at chain[4]
-    assert_blame_sample_at_commit(&repo, &chain[4], "helpers/date.js", "chain4_prior_date_js", &[
-        ("export const now = () => new Date();", true),
-        ("export const formatISO = d => d.toISOString().slice(0, 10);", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "helpers/string.js", "chain4_prior_string_js", &[
-        ("export const capitalize = s => s.charAt(0).toUpperCase() + s.slice(1);", true),
-        ("export const slugify = s => s.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "helpers/array.js", "chain4_prior_array_js", &[
-        ("export const unique = arr => [...new Set(arr)];", true),
-        ("export const chunk = (arr, n) => Array.from({length: Math.ceil(arr.length/n)}, (_,i) => arr.slice(i*n, i*n+n));", true),
-    ]);
-    assert_blame_sample_at_commit(&repo, &chain[4], "helpers/object.js", "chain4_prior_object_js", &[
-        ("export const pick = (obj, keys) => Object.fromEntries(keys.map(k=>[k,obj[k]]));", true),
-        ("export const deepClone = obj => JSON.parse(JSON.stringify(obj));", true),
-    ]);
-
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "helpers/date.js",
+        "chain4_prior_date_js",
+        &[
+            ("export const now = () => new Date();", true),
+            (
+                "export const formatISO = d => d.toISOString().slice(0, 10);",
+                true,
+            ),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "helpers/string.js",
+        "chain4_prior_string_js",
+        &[
+            (
+                "export const capitalize = s => s.charAt(0).toUpperCase() + s.slice(1);",
+                true,
+            ),
+            (
+                "export const slugify = s => s.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');",
+                true,
+            ),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "helpers/array.js",
+        "chain4_prior_array_js",
+        &[
+            ("export const unique = arr => [...new Set(arr)];", true),
+            (
+                "export const chunk = (arr, n) => Array.from({length: Math.ceil(arr.length/n)}, (_,i) => arr.slice(i*n, i*n+n));",
+                true,
+            ),
+        ],
+    );
+    assert_blame_sample_at_commit(
+        &repo,
+        &chain[4],
+        "helpers/object.js",
+        "chain4_prior_object_js",
+        &[
+            (
+                "export const pick = (obj, keys) => Object.fromEntries(keys.map(k=>[k,obj[k]]));",
+                true,
+            ),
+            (
+                "export const deepClone = obj => JSON.parse(JSON.stringify(obj));",
+                true,
+            ),
+        ],
+    );
 }
 
 // ============================================================================
@@ -5478,13 +7793,37 @@ fn test_human_conflict_python_auth_c1_conflicts_rest_accumulate() {
         "# authentication module — production\n",
         "main: update auth.py header",
     );
-    write_raw_commit(&repo, "middleware.py", "class AuthMiddleware: pass\n", "main: add middleware");
-    write_raw_commit(&repo, "permissions.py", "class IsAuthenticated: pass\n", "main: add permissions");
-    write_raw_commit(&repo, "tokens.py", "import secrets\ndef generate_token(): return secrets.token_hex(32)\n", "main: add tokens");
-    write_raw_commit(&repo, "urls.py", "from django.urls import path\nurlpatterns = []\n", "main: add urls");
+    write_raw_commit(
+        &repo,
+        "middleware.py",
+        "class AuthMiddleware: pass\n",
+        "main: add middleware",
+    );
+    write_raw_commit(
+        &repo,
+        "permissions.py",
+        "class IsAuthenticated: pass\n",
+        "main: add permissions",
+    );
+    write_raw_commit(
+        &repo,
+        "tokens.py",
+        "import secrets\ndef generate_token(): return secrets.token_hex(32)\n",
+        "main: add tokens",
+    );
+    write_raw_commit(
+        &repo,
+        "urls.py",
+        "from django.urls import path\nurlpatterns = []\n",
+        "main: add urls",
+    );
 
     // Feature branch from initial commit (before main's auth.py edit)
-    let base_sha = repo.git(&["rev-parse", "HEAD~5"]).unwrap().trim().to_string();
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~5"])
+        .unwrap()
+        .trim()
+        .to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
 
     // C1: AI adds login/logout to auth.py — WILL CONFLICT with main's header change
@@ -5500,7 +7839,8 @@ fn test_human_conflict_python_auth_c1_conflicts_rest_accumulate() {
         "    \"\"\"Invalidate the given session.\"\"\"".ai(),
         "    pass".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C1 add login and logout to auth.py").unwrap();
+    repo.stage_all_and_commit("feat: C1 add login and logout to auth.py")
+        .unwrap();
 
     // C2: AI creates models.py
     let mut models = repo.filename("models.py");
@@ -5514,7 +7854,8 @@ fn test_human_conflict_python_auth_c1_conflicts_rest_accumulate() {
         "    email: str".ai(),
         "    is_active: bool = True".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C2 add User model").unwrap();
+    repo.stage_all_and_commit("feat: C2 add User model")
+        .unwrap();
 
     // C3: AI creates views.py
     let mut views = repo.filename("views.py");
@@ -5529,7 +7870,8 @@ fn test_human_conflict_python_auth_c1_conflicts_rest_accumulate() {
         "    logout(request.session['id'])".ai(),
         "    return {'ok': True}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C3 add login/logout views").unwrap();
+    repo.stage_all_and_commit("feat: C3 add login/logout views")
+        .unwrap();
 
     // C4: AI creates serializers.py
     let mut serializers = repo.filename("serializers.py");
@@ -5543,7 +7885,8 @@ fn test_human_conflict_python_auth_c1_conflicts_rest_accumulate() {
         "    def deserialize(self, data: dict):".ai(),
         "        return data".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C4 add UserSerializer").unwrap();
+    repo.stage_all_and_commit("feat: C4 add UserSerializer")
+        .unwrap();
 
     // C5: AI creates signals.py
     let mut signals = repo.filename("signals.py");
@@ -5559,12 +7902,16 @@ fn test_human_conflict_python_auth_c1_conflicts_rest_accumulate() {
         "def emit_login(user) -> None:".ai(),
         "    for h in _handlers: h(user)".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C5 add login signal emitter").unwrap();
+    repo.stage_all_and_commit("feat: C5 add login signal emitter")
+        .unwrap();
 
     // Rebase onto main — C1 will conflict on auth.py
     repo.git(&["checkout", "feature"]).unwrap();
     let rebase_result = repo.git(&["rebase", &main_branch]);
-    assert!(rebase_result.is_err(), "C1 rebase should conflict on auth.py");
+    assert!(
+        rebase_result.is_err(),
+        "C1 rebase should conflict on auth.py"
+    );
 
     // Human resolves: keep both header variants merged manually (no checkpoint)
     fs::write(
@@ -5572,7 +7919,8 @@ fn test_human_conflict_python_auth_c1_conflicts_rest_accumulate() {
         "# authentication module — production\n\ndef login(username: str, password: str) -> bool:\n    return username == 'admin' and password == 'secret'\n\ndef logout(session_id: str) -> None:\n    pass\n",
     ).unwrap();
     repo.git(&["add", "auth.py"]).unwrap();
-    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None).unwrap();
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .unwrap();
 
     // Collect rebased chain [C1', C2', C3', C4', C5']
     let chain = get_commit_chain(&repo, 5);
@@ -5610,13 +7958,37 @@ fn test_human_conflict_rust_lib_c2_conflicts_surroundings_ok() {
     let main_branch = repo.current_branch();
 
     // Main: changes the mod declaration → conflicts with feature C2's edit
-    write_raw_commit(&repo, "src/lib.rs", "pub mod parser;\npub mod types;\n", "main: add types mod");
+    write_raw_commit(
+        &repo,
+        "src/lib.rs",
+        "pub mod parser;\npub mod types;\n",
+        "main: add types mod",
+    );
     write_raw_commit(&repo, "src/main.rs", "fn main() {}\n", "main: add main.rs");
-    write_raw_commit(&repo, "Cargo.toml", "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\nedition = \"2021\"\n", "main: add Cargo.toml");
-    write_raw_commit(&repo, "README.md", "# mylib\nA Rust library.\n", "main: add README");
-    write_raw_commit(&repo, ".github/workflows/ci.yml", "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{uses: actions/checkout@v3}]\n", "main: add CI workflow");
+    write_raw_commit(
+        &repo,
+        "Cargo.toml",
+        "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        "main: add Cargo.toml",
+    );
+    write_raw_commit(
+        &repo,
+        "README.md",
+        "# mylib\nA Rust library.\n",
+        "main: add README",
+    );
+    write_raw_commit(
+        &repo,
+        ".github/workflows/ci.yml",
+        "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{uses: actions/checkout@v3}]\n",
+        "main: add CI workflow",
+    );
 
-    let base_sha = repo.git(&["rev-parse", "HEAD~5"]).unwrap().trim().to_string();
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~5"])
+        .unwrap()
+        .trim()
+        .to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
 
     // C1: AI adds parser/tokenize to a separate file
@@ -5635,7 +8007,8 @@ fn test_human_conflict_rust_lib_c2_conflicts_surroundings_ok() {
     // C2: AI edits lib.rs to export tokenizer — WILL CONFLICT with main's mod change
     let mut lib = repo.filename("src/lib.rs");
     lib.replace_at(0, "pub mod tokenizer;".ai());
-    repo.stage_all_and_commit("feat: C2 export tokenizer in lib.rs").unwrap();
+    repo.stage_all_and_commit("feat: C2 export tokenizer in lib.rs")
+        .unwrap();
 
     // C3: AI adds helpers.rs
     let mut helpers = repo.filename("src/helpers.rs");
@@ -5677,19 +8050,25 @@ fn test_human_conflict_rust_lib_c2_conflicts_surroundings_ok() {
         "    }".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C5 add error Display impl").unwrap();
+    repo.stage_all_and_commit("feat: C5 add error Display impl")
+        .unwrap();
 
     repo.git(&["checkout", "feature"]).unwrap();
     let rebase_result = repo.git(&["rebase", &main_branch]);
-    assert!(rebase_result.is_err(), "rebase should conflict on src/lib.rs at C2");
+    assert!(
+        rebase_result.is_err(),
+        "rebase should conflict on src/lib.rs at C2"
+    );
 
     // Human resolves by keeping both mods
     fs::write(
         repo.path().join("src/lib.rs"),
         "pub mod parser;\npub mod types;\npub mod tokenizer;\n",
-    ).unwrap();
+    )
+    .unwrap();
     repo.git(&["add", "src/lib.rs"]).unwrap();
-    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None).unwrap();
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .unwrap();
 
     let chain = get_commit_chain(&repo, 5);
 
@@ -5721,7 +8100,12 @@ fn test_human_conflict_rust_lib_c2_conflicts_surroundings_ok() {
 fn test_human_conflict_typescript_api_c3_conflicts_accumulation_intact() {
     let repo = TestRepo::new();
 
-    write_raw_commit(&repo, "src/api.ts", "// api module\nexport {};\n", "Initial commit");
+    write_raw_commit(
+        &repo,
+        "src/api.ts",
+        "// api module\nexport {};\n",
+        "Initial commit",
+    );
     let main_branch = repo.current_branch();
 
     // Main: replaces the export line in api.ts — conflicts with feature's C3 which also replaces it
@@ -5731,12 +8115,36 @@ fn test_human_conflict_typescript_api_c3_conflicts_accumulation_intact() {
         "// api module\nexport { version };\n",
         "main: export version",
     );
-    write_raw_commit(&repo, "src/server.ts", "import express from 'express';\nconst app = express();\napp.listen(3000);\n", "main: add server");
-    write_raw_commit(&repo, "src/config.ts", "export const PORT = parseInt(process.env.PORT ?? '3000', 10);\n", "main: add config");
-    write_raw_commit(&repo, "src/logger.ts", "export const log = (msg: string) => console.log(`[LOG] ${msg}`);\n", "main: add logger");
-    write_raw_commit(&repo, "tsconfig.json", "{\"compilerOptions\":{\"target\":\"ES2020\",\"module\":\"commonjs\",\"strict\":true}}\n", "main: add tsconfig");
+    write_raw_commit(
+        &repo,
+        "src/server.ts",
+        "import express from 'express';\nconst app = express();\napp.listen(3000);\n",
+        "main: add server",
+    );
+    write_raw_commit(
+        &repo,
+        "src/config.ts",
+        "export const PORT = parseInt(process.env.PORT ?? '3000', 10);\n",
+        "main: add config",
+    );
+    write_raw_commit(
+        &repo,
+        "src/logger.ts",
+        "export const log = (msg: string) => console.log(`[LOG] ${msg}`);\n",
+        "main: add logger",
+    );
+    write_raw_commit(
+        &repo,
+        "tsconfig.json",
+        "{\"compilerOptions\":{\"target\":\"ES2020\",\"module\":\"commonjs\",\"strict\":true}}\n",
+        "main: add tsconfig",
+    );
 
-    let base_sha = repo.git(&["rev-parse", "HEAD~5"]).unwrap().trim().to_string();
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~5"])
+        .unwrap()
+        .trim()
+        .to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
 
     // C1: AI creates dto.ts
@@ -5766,12 +8174,14 @@ fn test_human_conflict_typescript_api_c3_conflicts_accumulation_intact() {
         "export const updateUser = (id: number, dto: UpdateUserDto) => { const u = users.get(id); if (u) Object.assign(u, dto); return u; };".ai(),
         "export const deleteUser = (id: number) => users.delete(id);".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C2 add user service").unwrap();
+    repo.stage_all_and_commit("feat: C2 add user service")
+        .unwrap();
 
     // C3: AI edits api.ts to add route handlers — WILL CONFLICT with main's express import
     let mut api = repo.filename("src/api.ts");
     api.replace_at(1, "import { createUser, getUser } from './service';".ai());
-    repo.stage_all_and_commit("feat: C3 add route imports to api.ts").unwrap();
+    repo.stage_all_and_commit("feat: C3 add route imports to api.ts")
+        .unwrap();
 
     // C4: AI creates middleware.ts
     let mut mw = repo.filename("src/middleware.ts");
@@ -5783,7 +8193,8 @@ fn test_human_conflict_typescript_api_c3_conflicts_accumulation_intact() {
         "  res.status(500).json({ error: err.message });".ai(),
         "};".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C4 add error middleware").unwrap();
+    repo.stage_all_and_commit("feat: C4 add error middleware")
+        .unwrap();
 
     // C5: AI creates validators.ts
     let mut validators = repo.filename("src/validators.ts");
@@ -5793,19 +8204,25 @@ fn test_human_conflict_typescript_api_c3_conflicts_accumulation_intact() {
         "export const isPositiveInt = (n: number) => Number.isInteger(n) && n > 0;".ai(),
         "export const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n));".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C5 add validators").unwrap();
+    repo.stage_all_and_commit("feat: C5 add validators")
+        .unwrap();
 
     repo.git(&["checkout", "feature"]).unwrap();
     let rebase_result = repo.git(&["rebase", &main_branch]);
-    assert!(rebase_result.is_err(), "rebase should conflict on src/api.ts at C3");
+    assert!(
+        rebase_result.is_err(),
+        "rebase should conflict on src/api.ts at C3"
+    );
 
     // Human resolves: keep both the export and the new import
     fs::write(
         repo.path().join("src/api.ts"),
         "// api module\nexport { version };\nimport { createUser, getUser } from './service';\n",
-    ).unwrap();
+    )
+    .unwrap();
     repo.git(&["add", "src/api.ts"]).unwrap();
-    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None).unwrap();
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .unwrap();
 
     let chain = get_commit_chain(&repo, 5);
 
@@ -5837,7 +8254,12 @@ fn test_human_conflict_typescript_api_c3_conflicts_accumulation_intact() {
 fn test_human_conflict_python_models_c5_last_commit_conflicts() {
     let repo = TestRepo::new();
 
-    write_raw_commit(&repo, "models.py", "class User:\n    pass\n", "Initial commit");
+    write_raw_commit(
+        &repo,
+        "models.py",
+        "class User:\n    pass\n",
+        "Initial commit",
+    );
     let main_branch = repo.current_branch();
 
     // Main: adds a class attribute to models.py — conflicts with C5's edit
@@ -5847,12 +8269,31 @@ fn test_human_conflict_python_models_c5_last_commit_conflicts() {
         "class User:\n    table_name = 'users'\n    pass\n",
         "main: add table_name attribute",
     );
-    write_raw_commit(&repo, "db.py", "import sqlite3\nconn = sqlite3.connect(':memory:')\n", "main: add db");
-    write_raw_commit(&repo, "migrations/__init__.py", "", "main: add migrations package");
-    write_raw_commit(&repo, "schema.sql", "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);\n", "main: add schema");
+    write_raw_commit(
+        &repo,
+        "db.py",
+        "import sqlite3\nconn = sqlite3.connect(':memory:')\n",
+        "main: add db",
+    );
+    write_raw_commit(
+        &repo,
+        "migrations/__init__.py",
+        "",
+        "main: add migrations package",
+    );
+    write_raw_commit(
+        &repo,
+        "schema.sql",
+        "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);\n",
+        "main: add schema",
+    );
     write_raw_commit(&repo, "seeds.py", "def seed(): pass\n", "main: add seeds");
 
-    let base_sha = repo.git(&["rev-parse", "HEAD~5"]).unwrap().trim().to_string();
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~5"])
+        .unwrap()
+        .trim()
+        .to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
 
     // C1: AI creates repository.py
@@ -5867,7 +8308,8 @@ fn test_human_conflict_python_models_c5_last_commit_conflicts() {
         "    def find(self, id: int) -> Optional[User]: return next((u for u in self._store if u.id == id), None)".ai(),
         "    def all(self) -> List[User]: return list(self._store)".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C1 add UserRepository").unwrap();
+    repo.stage_all_and_commit("feat: C1 add UserRepository")
+        .unwrap();
 
     // C2: AI creates query_builder.py
     let mut qb = repo.filename("query_builder.py");
@@ -5879,7 +8321,8 @@ fn test_human_conflict_python_models_c5_last_commit_conflicts() {
         "        clauses = ' AND '.join(f\"{k}='{v}'\" for d in self._filters for k, v in d.items())".ai(),
         "        return f'SELECT * FROM {self.table}' + (f' WHERE {clauses}' if clauses else '')".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C2 add QueryBuilder").unwrap();
+    repo.stage_all_and_commit("feat: C2 add QueryBuilder")
+        .unwrap();
 
     // C3: AI creates validators.py
     let mut val = repo.filename("validators.py");
@@ -5891,7 +8334,8 @@ fn test_human_conflict_python_models_c5_last_commit_conflicts() {
         "    if len(data.get('password', '')) < 8: errors.append('password min 8 chars')".ai(),
         "    return errors".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C3 add validate_user").unwrap();
+    repo.stage_all_and_commit("feat: C3 add validate_user")
+        .unwrap();
 
     // C4: AI creates events.py
     let mut events = repo.filename("events.py");
@@ -5901,16 +8345,24 @@ fn test_human_conflict_python_models_c5_last_commit_conflicts() {
         "def subscribe(event: str, fn: Callable): _subs.setdefault(event, []).append(fn)".ai(),
         "def publish(event: str, **data): [fn(**data) for fn in _subs.get(event, [])]".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C4 add event pub/sub").unwrap();
+    repo.stage_all_and_commit("feat: C4 add event pub/sub")
+        .unwrap();
 
     // C5: AI edits models.py to add validator — WILL CONFLICT with main's table_name
     let mut models = repo.filename("models.py");
-    models.replace_at(1, "    def validate(self): return bool(getattr(self, 'name', None))".ai());
-    repo.stage_all_and_commit("feat: C5 add validate method to User").unwrap();
+    models.replace_at(
+        1,
+        "    def validate(self): return bool(getattr(self, 'name', None))".ai(),
+    );
+    repo.stage_all_and_commit("feat: C5 add validate method to User")
+        .unwrap();
 
     repo.git(&["checkout", "feature"]).unwrap();
     let rebase_result = repo.git(&["rebase", &main_branch]);
-    assert!(rebase_result.is_err(), "rebase should conflict on models.py at C5");
+    assert!(
+        rebase_result.is_err(),
+        "rebase should conflict on models.py at C5"
+    );
 
     // Human resolves by keeping all three lines
     fs::write(
@@ -5918,7 +8370,8 @@ fn test_human_conflict_python_models_c5_last_commit_conflicts() {
         "class User:\n    table_name = 'users'\n    def validate(self): return bool(getattr(self, 'name', None))\n    pass\n",
     ).unwrap();
     repo.git(&["add", "models.py"]).unwrap();
-    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None).unwrap();
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .unwrap();
 
     let chain = get_commit_chain(&repo, 5);
 
@@ -5950,7 +8403,12 @@ fn test_human_conflict_python_models_c5_last_commit_conflicts() {
 fn test_human_conflict_rust_config_c2_loses_attribution_rest_accumulate() {
     let repo = TestRepo::new();
 
-    write_raw_commit(&repo, "src/config.rs", "pub const MAX_CONN: u32 = 10;\n", "Initial commit");
+    write_raw_commit(
+        &repo,
+        "src/config.rs",
+        "pub const MAX_CONN: u32 = 10;\n",
+        "Initial commit",
+    );
     let main_branch = repo.current_branch();
 
     // Main: adds another constant → conflicts with feature's C2 edit
@@ -5960,20 +8418,43 @@ fn test_human_conflict_rust_config_c2_loses_attribution_rest_accumulate() {
         "pub const MAX_CONN: u32 = 10;\npub const TIMEOUT_MS: u64 = 5000;\n",
         "main: add TIMEOUT_MS constant",
     );
-    write_raw_commit(&repo, "src/pool.rs", "pub struct Pool { size: u32 }\nimpl Pool { pub fn new(size: u32) -> Self { Pool { size } } }\n", "main: add connection pool");
-    write_raw_commit(&repo, "src/metrics.rs", "pub fn record_latency(ms: u64) { eprintln!(\"latency: {}ms\", ms); }\n", "main: add metrics");
-    write_raw_commit(&repo, "src/health.rs", "pub fn is_healthy() -> bool { true }\n", "main: add health check");
-    write_raw_commit(&repo, "src/shutdown.rs", "pub fn graceful_shutdown() { eprintln!(\"shutting down\"); }\n", "main: add shutdown handler");
+    write_raw_commit(
+        &repo,
+        "src/pool.rs",
+        "pub struct Pool { size: u32 }\nimpl Pool { pub fn new(size: u32) -> Self { Pool { size } } }\n",
+        "main: add connection pool",
+    );
+    write_raw_commit(
+        &repo,
+        "src/metrics.rs",
+        "pub fn record_latency(ms: u64) { eprintln!(\"latency: {}ms\", ms); }\n",
+        "main: add metrics",
+    );
+    write_raw_commit(
+        &repo,
+        "src/health.rs",
+        "pub fn is_healthy() -> bool { true }\n",
+        "main: add health check",
+    );
+    write_raw_commit(
+        &repo,
+        "src/shutdown.rs",
+        "pub fn graceful_shutdown() { eprintln!(\"shutting down\"); }\n",
+        "main: add shutdown handler",
+    );
 
-    let base_sha = repo.git(&["rev-parse", "HEAD~5"]).unwrap().trim().to_string();
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~5"])
+        .unwrap()
+        .trim()
+        .to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
 
     // C1: AI creates a separate file (no conflict — config.rs not touched)
     let mut defaults = repo.filename("src/defaults.rs");
-    defaults.set_contents(crate::lines![
-        "pub const DEFAULT_POOL_SIZE: u32 = 5;".ai(),
-    ]);
-    repo.stage_all_and_commit("feat: C1 add defaults.rs").unwrap();
+    defaults.set_contents(crate::lines!["pub const DEFAULT_POOL_SIZE: u32 = 5;".ai(),]);
+    repo.stage_all_and_commit("feat: C1 add defaults.rs")
+        .unwrap();
 
     // C2: AI edits config.rs to add IDLE_TIMEOUT — WILL CONFLICT with main's TIMEOUT_MS
     let mut config = repo.filename("src/config.rs");
@@ -5981,7 +8462,8 @@ fn test_human_conflict_rust_config_c2_loses_attribution_rest_accumulate() {
         "pub const MAX_CONN: u32 = 10;",
         "pub const IDLE_TIMEOUT_MS: u64 = 30_000;".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C2 add IDLE_TIMEOUT_MS to config").unwrap();
+    repo.stage_all_and_commit("feat: C2 add IDLE_TIMEOUT_MS to config")
+        .unwrap();
 
     // C3: AI creates cache.rs
     let mut cache = repo.filename("src/cache.rs");
@@ -5994,7 +8476,8 @@ fn test_human_conflict_rust_config_c2_loses_attribution_rest_accumulate() {
         "    pub fn set(&mut self, k: K, v: V) { self.0.insert(k, v); }".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C3 add Cache struct").unwrap();
+    repo.stage_all_and_commit("feat: C3 add Cache struct")
+        .unwrap();
 
     // C4: AI creates retry.rs
     let mut retry = repo.filename("src/retry.rs");
@@ -6009,7 +8492,8 @@ fn test_human_conflict_rust_config_c2_loses_attribution_rest_accumulate() {
         "    last".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C4 add retry helper").unwrap();
+    repo.stage_all_and_commit("feat: C4 add retry helper")
+        .unwrap();
 
     // C5: AI creates timeout.rs
     let mut timeout_file = repo.filename("src/timeout.rs");
@@ -6022,11 +8506,15 @@ fn test_human_conflict_rust_config_c2_loses_attribution_rest_accumulate() {
         "    if start.elapsed() <= duration { Some(result) } else { None }".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C5 add timeout runner").unwrap();
+    repo.stage_all_and_commit("feat: C5 add timeout runner")
+        .unwrap();
 
     repo.git(&["checkout", "feature"]).unwrap();
     let rebase_result = repo.git(&["rebase", &main_branch]);
-    assert!(rebase_result.is_err(), "rebase should conflict on src/config.rs at C2");
+    assert!(
+        rebase_result.is_err(),
+        "rebase should conflict on src/config.rs at C2"
+    );
 
     // Human resolves: keep all constants
     fs::write(
@@ -6034,7 +8522,8 @@ fn test_human_conflict_rust_config_c2_loses_attribution_rest_accumulate() {
         "pub const MAX_CONN: u32 = 10;\npub const TIMEOUT_MS: u64 = 5000;\npub const IDLE_TIMEOUT_MS: u64 = 30_000;\n",
     ).unwrap();
     repo.git(&["add", "src/config.rs"]).unwrap();
-    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None).unwrap();
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .unwrap();
 
     let chain = get_commit_chain(&repo, 5);
 
@@ -6068,7 +8557,12 @@ fn test_human_conflict_rust_config_c2_loses_attribution_rest_accumulate() {
 fn test_human_conflict_typescript_store_ai_created_file_conflict() {
     let repo = TestRepo::new();
 
-    write_raw_commit(&repo, "src/store.ts", "export const store = {};\n", "Initial commit");
+    write_raw_commit(
+        &repo,
+        "src/store.ts",
+        "export const store = {};\n",
+        "Initial commit",
+    );
     let main_branch = repo.current_branch();
 
     // Main: modifies store.ts initial export → conflict with feature C1
@@ -6078,19 +8572,45 @@ fn test_human_conflict_typescript_store_ai_created_file_conflict() {
         "import { createStore } from 'redux';\nexport const store = createStore(() => ({}));\n",
         "main: convert store to redux",
     );
-    write_raw_commit(&repo, "src/index.ts", "export { store } from './store';\n", "main: re-export store");
-    write_raw_commit(&repo, "src/types.ts", "export type RootState = ReturnType<typeof import('./store').store.getState>;\n", "main: add RootState type");
-    write_raw_commit(&repo, "src/constants.ts", "export const ACTIONS = { INCREMENT: 'INCREMENT', DECREMENT: 'DECREMENT' } as const;\n", "main: add action constants");
-    write_raw_commit(&repo, "package.json", "{\"name\":\"app\",\"version\":\"1.0.0\",\"dependencies\":{\"redux\":\"^4.0.0\"}}\n", "main: add package.json");
+    write_raw_commit(
+        &repo,
+        "src/index.ts",
+        "export { store } from './store';\n",
+        "main: re-export store",
+    );
+    write_raw_commit(
+        &repo,
+        "src/types.ts",
+        "export type RootState = ReturnType<typeof import('./store').store.getState>;\n",
+        "main: add RootState type",
+    );
+    write_raw_commit(
+        &repo,
+        "src/constants.ts",
+        "export const ACTIONS = { INCREMENT: 'INCREMENT', DECREMENT: 'DECREMENT' } as const;\n",
+        "main: add action constants",
+    );
+    write_raw_commit(
+        &repo,
+        "package.json",
+        "{\"name\":\"app\",\"version\":\"1.0.0\",\"dependencies\":{\"redux\":\"^4.0.0\"}}\n",
+        "main: add package.json",
+    );
 
-    let base_sha = repo.git(&["rev-parse", "HEAD~5"]).unwrap().trim().to_string();
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~5"])
+        .unwrap()
+        .trim()
+        .to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
 
     // C1: AI writes store.ts from scratch via fs::write + checkpoint
     let store_content = "import { configureStore } from '@reduxjs/toolkit';\nimport { counterSlice } from './reducers';\nexport const store = configureStore({ reducer: { counter: counterSlice.reducer } });\nexport type AppDispatch = typeof store.dispatch;\n";
     fs::write(repo.path().join("src/store.ts"), store_content).unwrap();
-    repo.git_ai(&["checkpoint", "mock_ai", "src/store.ts"]).unwrap();
-    repo.stage_all_and_commit("feat: C1 AI rewrites store with redux toolkit").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "src/store.ts"])
+        .unwrap();
+    repo.stage_all_and_commit("feat: C1 AI rewrites store with redux toolkit")
+        .unwrap();
 
     // C2: AI creates actions.ts
     let mut actions = repo.filename("src/actions.ts");
@@ -6100,7 +8620,8 @@ fn test_human_conflict_typescript_store_ai_created_file_conflict() {
         "export const reset = () => ({ type: 'RESET' as const });".ai(),
         "export type Action = ReturnType<typeof increment | typeof decrement | typeof reset>;".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C2 add action creators").unwrap();
+    repo.stage_all_and_commit("feat: C2 add action creators")
+        .unwrap();
 
     // C3: AI creates selectors.ts
     let mut selectors = repo.filename("src/selectors.ts");
@@ -6126,7 +8647,8 @@ fn test_human_conflict_typescript_store_ai_created_file_conflict() {
         "  },".ai(),
         "});".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C4 add counter reducer").unwrap();
+    repo.stage_all_and_commit("feat: C4 add counter reducer")
+        .unwrap();
 
     // C5: AI creates hooks.ts
     let mut hooks = repo.filename("src/hooks.ts");
@@ -6137,11 +8659,15 @@ fn test_human_conflict_typescript_store_ai_created_file_conflict() {
         "export const useAppDispatch = () => useDispatch<AppDispatch>();".ai(),
         "export const useAppSelector: TypedUseSelectorHook<RootState> = useSelector;".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C5 add typed hooks").unwrap();
+    repo.stage_all_and_commit("feat: C5 add typed hooks")
+        .unwrap();
 
     repo.git(&["checkout", "feature"]).unwrap();
     let rebase_result = repo.git(&["rebase", &main_branch]);
-    assert!(rebase_result.is_err(), "rebase should conflict on src/store.ts at C1");
+    assert!(
+        rebase_result.is_err(),
+        "rebase should conflict on src/store.ts at C1"
+    );
 
     // Human resolves by writing a merged store file
     fs::write(
@@ -6149,7 +8675,8 @@ fn test_human_conflict_typescript_store_ai_created_file_conflict() {
         "import { createStore } from 'redux';\nimport { configureStore } from '@reduxjs/toolkit';\nexport const store = configureStore({ reducer: {} });\nexport type AppDispatch = typeof store.dispatch;\n",
     ).unwrap();
     repo.git(&["add", "src/store.ts"]).unwrap();
-    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None).unwrap();
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .unwrap();
 
     let chain = get_commit_chain(&repo, 5);
 
@@ -6181,7 +8708,12 @@ fn test_human_conflict_typescript_store_ai_created_file_conflict() {
 fn test_human_conflict_rust_server_c4_human_resolved_c5_accumulates() {
     let repo = TestRepo::new();
 
-    write_raw_commit(&repo, "src/server.rs", "pub fn start() {}\n", "Initial commit");
+    write_raw_commit(
+        &repo,
+        "src/server.rs",
+        "pub fn start() {}\n",
+        "Initial commit",
+    );
     let main_branch = repo.current_branch();
 
     // Main: adds a use statement that conflicts with feature C4's edit
@@ -6191,12 +8723,36 @@ fn test_human_conflict_rust_server_c4_human_resolved_c5_accumulates() {
         "use std::net::TcpListener;\npub fn start() {}\n",
         "main: add TcpListener import",
     );
-    write_raw_commit(&repo, "src/router.rs", "pub struct Router;\nimpl Router { pub fn new() -> Self { Router } }\n", "main: add router");
-    write_raw_commit(&repo, "src/response.rs", "pub struct Response { pub status: u16, pub body: String }\n", "main: add Response type");
-    write_raw_commit(&repo, "src/request.rs", "pub struct Request { pub path: String, pub method: String }\n", "main: add Request type");
-    write_raw_commit(&repo, "src/middleware.rs", "pub trait Middleware { fn handle(&self, req: &str) -> String; }\n", "main: add Middleware trait");
+    write_raw_commit(
+        &repo,
+        "src/router.rs",
+        "pub struct Router;\nimpl Router { pub fn new() -> Self { Router } }\n",
+        "main: add router",
+    );
+    write_raw_commit(
+        &repo,
+        "src/response.rs",
+        "pub struct Response { pub status: u16, pub body: String }\n",
+        "main: add Response type",
+    );
+    write_raw_commit(
+        &repo,
+        "src/request.rs",
+        "pub struct Request { pub path: String, pub method: String }\n",
+        "main: add Request type",
+    );
+    write_raw_commit(
+        &repo,
+        "src/middleware.rs",
+        "pub trait Middleware { fn handle(&self, req: &str) -> String; }\n",
+        "main: add Middleware trait",
+    );
 
-    let base_sha = repo.git(&["rev-parse", "HEAD~5"]).unwrap().trim().to_string();
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~5"])
+        .unwrap()
+        .trim()
+        .to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
 
     // C1: AI creates src/handler.rs
@@ -6210,7 +8766,8 @@ fn test_human_conflict_rust_server_c4_human_resolved_c5_accumulates() {
         "    format!(\"POST {} body={}\", path, body)".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C1 add GET/POST handlers").unwrap();
+    repo.stage_all_and_commit("feat: C1 add GET/POST handlers")
+        .unwrap();
 
     // C2: AI creates src/router_ext.rs
     let mut router_ext = repo.filename("src/router_ext.rs");
@@ -6235,12 +8792,17 @@ fn test_human_conflict_rust_server_c4_human_resolved_c5_accumulates() {
         "    if p.exists() { std::fs::read(p).ok() } else { None }".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C3 add static file server").unwrap();
+    repo.stage_all_and_commit("feat: C3 add static file server")
+        .unwrap();
 
     // C4: AI edits server.rs to add bind — WILL CONFLICT with main's use std::net::TcpListener
     let mut server = repo.filename("src/server.rs");
-    server.replace_at(0, "pub fn start() { let _l = std::net::TcpListener::bind(\"0.0.0.0:8080\"); }".ai());
-    repo.stage_all_and_commit("feat: C4 add bind in server start").unwrap();
+    server.replace_at(
+        0,
+        "pub fn start() { let _l = std::net::TcpListener::bind(\"0.0.0.0:8080\"); }".ai(),
+    );
+    repo.stage_all_and_commit("feat: C4 add bind in server start")
+        .unwrap();
 
     // C5: AI creates src/tls.rs
     let mut tls = repo.filename("src/tls.rs");
@@ -6256,11 +8818,15 @@ fn test_human_conflict_rust_server_c4_human_resolved_c5_accumulates() {
         "    }".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C5 add TLS config struct").unwrap();
+    repo.stage_all_and_commit("feat: C5 add TLS config struct")
+        .unwrap();
 
     repo.git(&["checkout", "feature"]).unwrap();
     let rebase_result = repo.git(&["rebase", &main_branch]);
-    assert!(rebase_result.is_err(), "rebase should conflict on src/server.rs at C4");
+    assert!(
+        rebase_result.is_err(),
+        "rebase should conflict on src/server.rs at C4"
+    );
 
     // Human resolves by combining import and function body
     fs::write(
@@ -6268,7 +8834,8 @@ fn test_human_conflict_rust_server_c4_human_resolved_c5_accumulates() {
         "use std::net::TcpListener;\npub fn start() { let _l = TcpListener::bind(\"0.0.0.0:8080\"); }\n",
     ).unwrap();
     repo.git(&["add", "src/server.rs"]).unwrap();
-    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None).unwrap();
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .unwrap();
 
     let chain = get_commit_chain(&repo, 5);
 
@@ -6288,7 +8855,12 @@ fn test_human_conflict_rust_server_c4_human_resolved_c5_accumulates() {
     // to `TcpListener` in the resolution — the line content differs from the original AI
     // line so the content-diff transfer produces no AI attribution.  No note is expected.
     // (If a note does exist it must not claim server.rs as AI.)
-    assert_note_no_forbidden_files_if_present(&repo, &chain[3], "c4_no_server_rs", &["src/server.rs"]);
+    assert_note_no_forbidden_files_if_present(
+        &repo,
+        &chain[3],
+        "c4_no_server_rs",
+        &["src/server.rs"],
+    );
 
     // C5': tls.rs only
     assert_note_base_commit_matches(&repo, &chain[4], "c5_base");
@@ -6317,12 +8889,36 @@ fn test_human_conflict_python_pipeline_mixed_baseline_c3_conflict() {
         "class Pipeline:\n    def __init__(self): self.stages = []\n    def run(self, data): return data\n    def validate(self, data): return bool(data)\n",
         "main: add Pipeline.validate",
     );
-    write_raw_commit(&repo, "source.py", "class FileSource:\n    def __init__(self, path): self.path = path\n    def read(self): return open(self.path).read()\n", "main: add FileSource");
-    write_raw_commit(&repo, "registry.py", "_registry = {}\ndef register(name, cls): _registry[name] = cls\ndef get(name): return _registry.get(name)\n", "main: add component registry");
-    write_raw_commit(&repo, "executor.py", "from concurrent.futures import ThreadPoolExecutor\nexec_pool = ThreadPoolExecutor(max_workers=4)\n", "main: add thread pool executor");
-    write_raw_commit(&repo, "scheduler.py", "import sched, time\ns = sched.scheduler(time.time, time.sleep)\ndef schedule(delay, fn): s.enter(delay, 1, fn)\n", "main: add scheduler");
+    write_raw_commit(
+        &repo,
+        "source.py",
+        "class FileSource:\n    def __init__(self, path): self.path = path\n    def read(self): return open(self.path).read()\n",
+        "main: add FileSource",
+    );
+    write_raw_commit(
+        &repo,
+        "registry.py",
+        "_registry = {}\ndef register(name, cls): _registry[name] = cls\ndef get(name): return _registry.get(name)\n",
+        "main: add component registry",
+    );
+    write_raw_commit(
+        &repo,
+        "executor.py",
+        "from concurrent.futures import ThreadPoolExecutor\nexec_pool = ThreadPoolExecutor(max_workers=4)\n",
+        "main: add thread pool executor",
+    );
+    write_raw_commit(
+        &repo,
+        "scheduler.py",
+        "import sched, time\ns = sched.scheduler(time.time, time.sleep)\ndef schedule(delay, fn): s.enter(delay, 1, fn)\n",
+        "main: add scheduler",
+    );
 
-    let base_sha = repo.git(&["rev-parse", "HEAD~5"]).unwrap().trim().to_string();
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~5"])
+        .unwrap()
+        .trim()
+        .to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
 
     // C1: Feature creates source.py (different name on feature branch — no conflict)
@@ -6333,7 +8929,8 @@ fn test_human_conflict_python_pipeline_mixed_baseline_c3_conflict() {
         "    def read(self): return next(self.gen, None)".ai(),
         "    def read_all(self): return list(self.gen)".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C1 add StreamSource").unwrap();
+    repo.stage_all_and_commit("feat: C1 add StreamSource")
+        .unwrap();
 
     // C2: AI creates filter.py
     let mut filter_file = repo.filename("filter.py");
@@ -6346,12 +8943,17 @@ fn test_human_conflict_python_pipeline_mixed_baseline_c3_conflict() {
         "    def apply(self, data: list) -> list: return [x for x in data if self.pred(x)]".ai(),
         "    def negate(self) -> 'Filter': return Filter(lambda x: not self.pred(x))".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C2 add Filter class").unwrap();
+    repo.stage_all_and_commit("feat: C2 add Filter class")
+        .unwrap();
 
     // C3: AI edits pipeline.py to add a filter step — WILL CONFLICT with main's validate
     let mut pipeline = repo.filename("pipeline.py");
-    pipeline.replace_at(2, "    def add_filter(self, f): self.stages.append(f); return self".ai());
-    repo.stage_all_and_commit("feat: C3 add Pipeline.add_filter").unwrap();
+    pipeline.replace_at(
+        2,
+        "    def add_filter(self, f): self.stages.append(f); return self".ai(),
+    );
+    repo.stage_all_and_commit("feat: C3 add Pipeline.add_filter")
+        .unwrap();
 
     // C4: AI creates transform.py
     let mut transform = repo.filename("transform.py");
@@ -6367,7 +8969,8 @@ fn test_human_conflict_python_pipeline_mixed_baseline_c3_conflict() {
         "    def __init__(self, fn): self.fn = fn".ai(),
         "    def apply(self, data): return [y for x in data for y in self.fn(x)]".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C4 add Transform classes").unwrap();
+    repo.stage_all_and_commit("feat: C4 add Transform classes")
+        .unwrap();
 
     // C5: AI creates sink.py
     let mut sink = repo.filename("sink.py");
@@ -6383,11 +8986,15 @@ fn test_human_conflict_python_pipeline_mixed_baseline_c3_conflict() {
         "    def write(self, item): print(item)".ai(),
         "    def flush(self) -> List: return []".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C5 add Sink classes").unwrap();
+    repo.stage_all_and_commit("feat: C5 add Sink classes")
+        .unwrap();
 
     repo.git(&["checkout", "feature"]).unwrap();
     let rebase_result = repo.git(&["rebase", &main_branch]);
-    assert!(rebase_result.is_err(), "rebase should conflict on pipeline.py at C3");
+    assert!(
+        rebase_result.is_err(),
+        "rebase should conflict on pipeline.py at C3"
+    );
 
     // Human resolves by keeping both methods
     fs::write(
@@ -6395,7 +9002,8 @@ fn test_human_conflict_python_pipeline_mixed_baseline_c3_conflict() {
         "class Pipeline:\n    def __init__(self): self.stages = []\n    def run(self, data): return data\n    def validate(self, data): return bool(data)\n    def add_filter(self, f): self.stages.append(f); return self\n",
     ).unwrap();
     repo.git(&["add", "pipeline.py"]).unwrap();
-    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None).unwrap();
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .unwrap();
 
     let chain = get_commit_chain(&repo, 5);
 
@@ -6428,7 +9036,12 @@ fn test_human_conflict_python_pipeline_mixed_baseline_c3_conflict() {
 fn test_human_conflict_typescript_component_ai_created_c2_conflict() {
     let repo = TestRepo::new();
 
-    write_raw_commit(&repo, "src/Component.tsx", "export const Component = () => null;\n", "Initial commit");
+    write_raw_commit(
+        &repo,
+        "src/Component.tsx",
+        "export const Component = () => null;\n",
+        "Initial commit",
+    );
     let main_branch = repo.current_branch();
 
     // Main: adds a CSS import to Component.tsx → conflict with feature C2's rewrite
@@ -6438,12 +9051,36 @@ fn test_human_conflict_typescript_component_ai_created_c2_conflict() {
         "import './Component.css';\nexport const Component = () => null;\n",
         "main: add CSS import to Component",
     );
-    write_raw_commit(&repo, "src/Component.css", ".component { display: flex; }\n", "main: add component styles");
-    write_raw_commit(&repo, "src/App.tsx", "import { Component } from './Component';\nexport const App = () => <Component />;\n", "main: add App");
-    write_raw_commit(&repo, "src/index.tsx", "import React from 'react';\nimport ReactDOM from 'react-dom';\nimport { App } from './App';\nReactDOM.render(<App />, document.getElementById('root'));\n", "main: add entry point");
-    write_raw_commit(&repo, "src/theme.ts", "export const theme = { primary: '#007bff', secondary: '#6c757d' };\n", "main: add theme");
+    write_raw_commit(
+        &repo,
+        "src/Component.css",
+        ".component { display: flex; }\n",
+        "main: add component styles",
+    );
+    write_raw_commit(
+        &repo,
+        "src/App.tsx",
+        "import { Component } from './Component';\nexport const App = () => <Component />;\n",
+        "main: add App",
+    );
+    write_raw_commit(
+        &repo,
+        "src/index.tsx",
+        "import React from 'react';\nimport ReactDOM from 'react-dom';\nimport { App } from './App';\nReactDOM.render(<App />, document.getElementById('root'));\n",
+        "main: add entry point",
+    );
+    write_raw_commit(
+        &repo,
+        "src/theme.ts",
+        "export const theme = { primary: '#007bff', secondary: '#6c757d' };\n",
+        "main: add theme",
+    );
 
-    let base_sha = repo.git(&["rev-parse", "HEAD~5"]).unwrap().trim().to_string();
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~5"])
+        .unwrap()
+        .trim()
+        .to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
 
     // C1: AI creates hooks.ts
@@ -6459,13 +9096,16 @@ fn test_human_conflict_typescript_component_ai_created_c2_conflict() {
         "  return { count, increment, decrement, reset };".ai(),
         "};".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C1 add useCounter hook").unwrap();
+    repo.stage_all_and_commit("feat: C1 add useCounter hook")
+        .unwrap();
 
     // C2: AI rewrites Component.tsx via fs::write + checkpoint — WILL CONFLICT
     let component_content = "import React from 'react';\nimport { useCounter } from './useCounter';\n\nexport const Component: React.FC = () => {\n  const { count, increment, decrement, reset } = useCounter();\n  return <div><button onClick={decrement}>-</button><span>{count}</span><button onClick={increment}>+</button><button onClick={reset}>reset</button></div>;\n};\n";
     fs::write(repo.path().join("src/Component.tsx"), component_content).unwrap();
-    repo.git_ai(&["checkpoint", "mock_ai", "src/Component.tsx"]).unwrap();
-    repo.stage_all_and_commit("feat: C2 AI rewrites Component with useCounter").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "src/Component.tsx"])
+        .unwrap();
+    repo.stage_all_and_commit("feat: C2 AI rewrites Component with useCounter")
+        .unwrap();
 
     // C3: AI creates context.ts
     let mut context = repo.filename("src/context.ts");
@@ -6474,7 +9114,8 @@ fn test_human_conflict_typescript_component_ai_created_c2_conflict() {
         "export interface AppContextValue { theme: string; locale: string; }".ai(),
         "export const AppContext = React.createContext<AppContextValue>({ theme: 'light', locale: 'en' });".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C3 add AppContext").unwrap();
+    repo.stage_all_and_commit("feat: C3 add AppContext")
+        .unwrap();
 
     // C4: AI creates provider.tsx
     let mut provider = repo.filename("src/provider.tsx");
@@ -6487,7 +9128,8 @@ fn test_human_conflict_typescript_component_ai_created_c2_conflict() {
         "  return <AppContext.Provider value={{ theme, locale: 'en' }}>{children}</AppContext.Provider>;".ai(),
         "};".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C4 add AppProvider").unwrap();
+    repo.stage_all_and_commit("feat: C4 add AppProvider")
+        .unwrap();
 
     // C5: AI creates types.ts
     let mut types_file = repo.filename("src/types.ts");
@@ -6497,11 +9139,15 @@ fn test_human_conflict_typescript_component_ai_created_c2_conflict() {
         "export interface UserPrefs { theme: Theme; locale: Locale; }".ai(),
         "export type Handler<T = void> = (e: React.SyntheticEvent) => T;".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C5 add shared types").unwrap();
+    repo.stage_all_and_commit("feat: C5 add shared types")
+        .unwrap();
 
     repo.git(&["checkout", "feature"]).unwrap();
     let rebase_result = repo.git(&["rebase", &main_branch]);
-    assert!(rebase_result.is_err(), "rebase should conflict on src/Component.tsx at C2");
+    assert!(
+        rebase_result.is_err(),
+        "rebase should conflict on src/Component.tsx at C2"
+    );
 
     // Human resolves: keep both CSS import and the new component body
     fs::write(
@@ -6509,7 +9155,8 @@ fn test_human_conflict_typescript_component_ai_created_c2_conflict() {
         "import './Component.css';\nimport React from 'react';\nimport { useCounter } from './useCounter';\n\nexport const Component: React.FC = () => {\n  const { count, increment, decrement } = useCounter();\n  return <div>{count}</div>;\n};\n",
     ).unwrap();
     repo.git(&["add", "src/Component.tsx"]).unwrap();
-    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None).unwrap();
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .unwrap();
 
     let chain = get_commit_chain(&repo, 5);
 
@@ -6542,7 +9189,12 @@ fn test_human_conflict_typescript_component_ai_created_c2_conflict() {
 fn test_human_conflict_rust_7_commit_chain_c4_conflict_surroundings_intact() {
     let repo = TestRepo::new();
 
-    write_raw_commit(&repo, "src/shared.rs", "pub fn identity<T>(x: T) -> T { x }\n", "Initial commit");
+    write_raw_commit(
+        &repo,
+        "src/shared.rs",
+        "pub fn identity<T>(x: T) -> T { x }\n",
+        "Initial commit",
+    );
     let main_branch = repo.current_branch();
 
     // Main: adds a constant and a function to shared.rs → conflict with feature C4 edit
@@ -6552,12 +9204,36 @@ fn test_human_conflict_rust_7_commit_chain_c4_conflict_surroundings_intact() {
         "pub const VERSION: &str = \"1.0\";\npub fn identity<T>(x: T) -> T { x }\n",
         "main: add VERSION constant to shared.rs",
     );
-    write_raw_commit(&repo, "src/log.rs", "pub fn log(msg: &str) { eprintln!(\"{}\", msg); }\n", "main: add log");
-    write_raw_commit(&repo, "src/env.rs", "pub fn env_or(key: &str, default: &str) -> String { std::env::var(key).unwrap_or_else(|_| default.to_string()) }\n", "main: add env helper");
-    write_raw_commit(&repo, "src/fs_utils.rs", "pub fn read_to_string(path: &str) -> std::io::Result<String> { std::fs::read_to_string(path) }\n", "main: add fs_utils");
-    write_raw_commit(&repo, "src/assert_utils.rs", "pub fn assert_non_empty(s: &str) { assert!(!s.is_empty(), \"expected non-empty string\"); }\n", "main: add assert_utils");
+    write_raw_commit(
+        &repo,
+        "src/log.rs",
+        "pub fn log(msg: &str) { eprintln!(\"{}\", msg); }\n",
+        "main: add log",
+    );
+    write_raw_commit(
+        &repo,
+        "src/env.rs",
+        "pub fn env_or(key: &str, default: &str) -> String { std::env::var(key).unwrap_or_else(|_| default.to_string()) }\n",
+        "main: add env helper",
+    );
+    write_raw_commit(
+        &repo,
+        "src/fs_utils.rs",
+        "pub fn read_to_string(path: &str) -> std::io::Result<String> { std::fs::read_to_string(path) }\n",
+        "main: add fs_utils",
+    );
+    write_raw_commit(
+        &repo,
+        "src/assert_utils.rs",
+        "pub fn assert_non_empty(s: &str) { assert!(!s.is_empty(), \"expected non-empty string\"); }\n",
+        "main: add assert_utils",
+    );
 
-    let base_sha = repo.git(&["rev-parse", "HEAD~5"]).unwrap().trim().to_string();
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~5"])
+        .unwrap()
+        .trim()
+        .to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
 
     // C1: AI creates src/vec_utils.rs
@@ -6579,11 +9255,13 @@ fn test_human_conflict_rust_7_commit_chain_c4_conflict_surroundings_intact() {
         "pub fn or_default<T: Default>(opt: Option<T>) -> T {".ai(),
         "    opt.unwrap_or_default()".ai(),
         "}".ai(),
-        "pub fn map_or_none<T, U, F: FnOnce(T) -> Option<U>>(opt: Option<T>, f: F) -> Option<U> {".ai(),
+        "pub fn map_or_none<T, U, F: FnOnce(T) -> Option<U>>(opt: Option<T>, f: F) -> Option<U> {"
+            .ai(),
         "    opt.and_then(f)".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C2 add option_utils").unwrap();
+    repo.stage_all_and_commit("feat: C2 add option_utils")
+        .unwrap();
 
     // C3: AI creates src/result_utils.rs
     let mut result_utils = repo.filename("src/result_utils.rs");
@@ -6591,16 +9269,19 @@ fn test_human_conflict_rust_7_commit_chain_c4_conflict_surroundings_intact() {
         "pub fn ok_or_log<T, E: std::fmt::Display>(r: Result<T, E>, ctx: &str) -> Option<T> {".ai(),
         "    r.map_err(|e| eprintln!(\"{}: {}\", ctx, e)).ok()".ai(),
         "}".ai(),
-        "pub fn map_err_string<T, E: std::fmt::Display>(r: Result<T, E>) -> Result<T, String> {".ai(),
+        "pub fn map_err_string<T, E: std::fmt::Display>(r: Result<T, E>) -> Result<T, String> {"
+            .ai(),
         "    r.map_err(|e| e.to_string())".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C3 add result_utils").unwrap();
+    repo.stage_all_and_commit("feat: C3 add result_utils")
+        .unwrap();
 
     // C4: AI edits shared.rs to add a clamp function — WILL CONFLICT with main's VERSION
     let mut shared = repo.filename("src/shared.rs");
     shared.replace_at(0, "pub fn clamp<T: PartialOrd>(x: T, lo: T, hi: T) -> T { if x < lo { lo } else if x > hi { hi } else { x } }".ai());
-    repo.stage_all_and_commit("feat: C4 add clamp to shared.rs").unwrap();
+    repo.stage_all_and_commit("feat: C4 add clamp to shared.rs")
+        .unwrap();
 
     // C5: AI creates src/math.rs
     let mut math = repo.filename("src/math.rs");
@@ -6610,7 +9291,8 @@ fn test_human_conflict_rust_7_commit_chain_c4_conflict_surroundings_intact() {
         "pub fn is_prime(n: u64) -> bool { if n < 2 { return false; } (2..=(n as f64).sqrt() as u64).all(|i| n % i != 0) }".ai(),
         "pub fn factorial(n: u64) -> u64 { (1..=n).product() }".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C5 add math utils").unwrap();
+    repo.stage_all_and_commit("feat: C5 add math utils")
+        .unwrap();
 
     // C6: AI creates src/string_utils.rs
     let mut str_utils = repo.filename("src/string_utils.rs");
@@ -6626,7 +9308,8 @@ fn test_human_conflict_rust_7_commit_chain_c4_conflict_surroundings_intact() {
         "    s.split('_').enumerate().map(|(i, w)| if i == 0 { w.to_string() } else { capitalize(w) }).collect()".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C6 add string_utils").unwrap();
+    repo.stage_all_and_commit("feat: C6 add string_utils")
+        .unwrap();
 
     // C7: AI creates src/io_utils.rs
     let mut io_utils = repo.filename("src/io_utils.rs");
@@ -6647,7 +9330,10 @@ fn test_human_conflict_rust_7_commit_chain_c4_conflict_surroundings_intact() {
 
     repo.git(&["checkout", "feature"]).unwrap();
     let rebase_result = repo.git(&["rebase", &main_branch]);
-    assert!(rebase_result.is_err(), "rebase should conflict on src/shared.rs at C4");
+    assert!(
+        rebase_result.is_err(),
+        "rebase should conflict on src/shared.rs at C4"
+    );
 
     // Human resolves: keep VERSION constant and add clamp function
     fs::write(
@@ -6655,7 +9341,8 @@ fn test_human_conflict_rust_7_commit_chain_c4_conflict_surroundings_intact() {
         "pub const VERSION: &str = \"1.0\";\npub fn identity<T>(x: T) -> T { x }\npub fn clamp<T: PartialOrd>(x: T, lo: T, hi: T) -> T { if x < lo { lo } else if x > hi { hi } else { x } }\n",
     ).unwrap();
     repo.git(&["add", "src/shared.rs"]).unwrap();
-    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None).unwrap();
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .unwrap();
 
     let chain = get_commit_chain(&repo, 7);
 
@@ -6702,18 +9389,26 @@ fn test_human_conflict_resolves_all_ai_lines_replaced() {
 
     // Main: change result to 1 (forces slow path on feature)
     write_raw_commit(&repo, "compute.py", "result = 1\n", "main: set result=1");
-    write_raw_commit(&repo, "main_extra.py", "# main extra\n", "main: add extra file");
+    write_raw_commit(
+        &repo,
+        "main_extra.py",
+        "# main extra\n",
+        "main: add extra file",
+    );
 
     // Feature from base
-    let base_sha = repo.git(&["rev-parse", "HEAD~2"]).unwrap().trim().to_string();
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~2"])
+        .unwrap()
+        .trim()
+        .to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
 
     // C1: AI sets result=2 — WILL CONFLICT with main's result=1 (base=0)
     let mut compute = repo.filename("compute.py");
-    compute.set_contents(crate::lines![
-        "result = 2".ai(),
-    ]);
-    repo.stage_all_and_commit("feat: C1 AI sets result=2").unwrap();
+    compute.set_contents(crate::lines!["result = 2".ai(),]);
+    repo.stage_all_and_commit("feat: C1 AI sets result=2")
+        .unwrap();
 
     // C2: AI adds a separate file (unrelated to conflict)
     let mut module_b = repo.filename("module_b.py");
@@ -6736,7 +9431,10 @@ fn test_human_conflict_resolves_all_ai_lines_replaced() {
     // Rebase: C1 conflicts on compute.py
     repo.git(&["checkout", "feature"]).unwrap();
     let rebase_result = repo.git(&["rebase", &main_branch]);
-    assert!(rebase_result.is_err(), "rebase should conflict on compute.py at C1");
+    assert!(
+        rebase_result.is_err(),
+        "rebase should conflict on compute.py at C1"
+    );
 
     // Human resolves by writing COMPLETELY DIFFERENT content — no AI lines survive.
     // Base had result=0, feature had result=2, main had result=1.
@@ -6746,7 +9444,8 @@ fn test_human_conflict_resolves_all_ai_lines_replaced() {
     fs::write(
         repo.path().join("compute.py"),
         "# human resolved\nresult = 42\n",
-    ).unwrap();
+    )
+    .unwrap();
     repo.git(&["add", "compute.py"]).unwrap();
     repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
         .expect("rebase --continue should succeed after C1 resolution");
@@ -6763,30 +9462,45 @@ fn test_human_conflict_resolves_all_ai_lines_replaced() {
     );
 
     // Blame at C1': both lines are human
-    assert_blame_at_commit(&repo, &chain[0], "compute.py", "c1_blame", &[
-        ("# human resolved", false),
-        ("result = 42", false),
-    ]);
+    assert_blame_at_commit(
+        &repo,
+        &chain[0],
+        "compute.py",
+        "c1_blame",
+        &[("# human resolved", false), ("result = 42", false)],
+    );
 
     // C2': module_b.py — AI, untouched by conflict — note must exist with correct attribution
     assert_note_base_commit_matches(&repo, &chain[1], "c2");
     assert_note_files_exact(&repo, &chain[1], "c2_files", &["module_b.py"]);
     assert_note_no_forbidden_files(&repo, &chain[1], "c2_no_compute", &["compute.py"]);
-    assert_blame_at_commit(&repo, &chain[1], "module_b.py", "c2_blame", &[
-        ("class ModuleB:", true),
-        ("def run(self): return 'b'", true),
-        ("def name(self): return 'module_b'", true),
-    ]);
+    assert_blame_at_commit(
+        &repo,
+        &chain[1],
+        "module_b.py",
+        "c2_blame",
+        &[
+            ("class ModuleB:", true),
+            ("def run(self): return 'b'", true),
+            ("def name(self): return 'module_b'", true),
+        ],
+    );
 
     // C3': module_c.py — AI, untouched by conflict
     assert_note_base_commit_matches(&repo, &chain[2], "c3");
     assert_note_files_exact(&repo, &chain[2], "c3_files", &["module_c.py"]);
     assert_note_no_forbidden_files(&repo, &chain[2], "c3_no_compute", &["compute.py"]);
-    assert_blame_at_commit(&repo, &chain[2], "module_c.py", "c3_blame", &[
-        ("class ModuleC:", true),
-        ("def run(self): return 'c'", true),
-        ("def name(self): return 'module_c'", true),
-    ]);
+    assert_blame_at_commit(
+        &repo,
+        &chain[2],
+        "module_c.py",
+        "c3_blame",
+        &[
+            ("class ModuleC:", true),
+            ("def run(self): return 'c'", true),
+            ("def name(self): return 'module_c'", true),
+        ],
+    );
 }
 
 // ============================================================================
@@ -6825,13 +9539,37 @@ fn test_conflict_ai_resolves_timeout_constant() {
         "class Config:\n    TIMEOUT = 120\n    HOST = 'localhost'\n    PORT = 8080\n",
         "main: increase TIMEOUT to 120",
     );
-    write_raw_commit(&repo, "logging_config.py", "import logging\nlogging.basicConfig(level=logging.INFO)\n", "main: add logging config");
-    write_raw_commit(&repo, "constants.py", "MAX_CONNECTIONS = 100\nDEFAULT_PAGE_SIZE = 20\n", "main: add constants");
-    write_raw_commit(&repo, "exceptions.py", "class AppError(Exception): pass\nclass ValidationError(AppError): pass\n", "main: add exceptions");
-    write_raw_commit(&repo, "utils.py", "def flatten(lst): return [x for sub in lst for x in sub]\n", "main: add utils");
+    write_raw_commit(
+        &repo,
+        "logging_config.py",
+        "import logging\nlogging.basicConfig(level=logging.INFO)\n",
+        "main: add logging config",
+    );
+    write_raw_commit(
+        &repo,
+        "constants.py",
+        "MAX_CONNECTIONS = 100\nDEFAULT_PAGE_SIZE = 20\n",
+        "main: add constants",
+    );
+    write_raw_commit(
+        &repo,
+        "exceptions.py",
+        "class AppError(Exception): pass\nclass ValidationError(AppError): pass\n",
+        "main: add exceptions",
+    );
+    write_raw_commit(
+        &repo,
+        "utils.py",
+        "def flatten(lst): return [x for sub in lst for x in sub]\n",
+        "main: add utils",
+    );
 
     // Feature branch from base (before main's TIMEOUT change)
-    let base_sha = repo.git(&["rev-parse", "HEAD~5"]).unwrap().trim().to_string();
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~5"])
+        .unwrap()
+        .trim()
+        .to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
 
     // C1: AI creates users.py (8 AI lines)
@@ -6846,7 +9584,8 @@ fn test_conflict_ai_resolves_timeout_constant() {
         "        return self.db.execute('INSERT INTO users VALUES (?, ?)', name, email)".ai(),
         "    def delete_user(self, uid):".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C1 add user service").unwrap();
+    repo.stage_all_and_commit("feat: C1 add user service")
+        .unwrap();
 
     // C2: AI creates products.py (8 AI lines)
     let mut products = repo.filename("products.py");
@@ -6860,7 +9599,8 @@ fn test_conflict_ai_resolves_timeout_constant() {
         "        return self.db.query('SELECT * FROM products')".ai(),
         "    def update_price(self, pid, price):".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C2 add product service").unwrap();
+    repo.stage_all_and_commit("feat: C2 add product service")
+        .unwrap();
 
     // C3: AI changes TIMEOUT to 60 in config.py — WILL CONFLICT with main's 120
     let mut config = repo.filename("config.py");
@@ -6870,7 +9610,8 @@ fn test_conflict_ai_resolves_timeout_constant() {
         "    HOST = 'localhost'".human(),
         "    PORT = 8080".human(),
     ]);
-    repo.stage_all_and_commit("feat: C3 AI tunes TIMEOUT to 60").unwrap();
+    repo.stage_all_and_commit("feat: C3 AI tunes TIMEOUT to 60")
+        .unwrap();
 
     // C4: AI creates orders.py (8 AI lines)
     let mut orders = repo.filename("orders.py");
@@ -6884,7 +9625,8 @@ fn test_conflict_ai_resolves_timeout_constant() {
         "    def get_order(self, oid):".ai(),
         "        return self.db.query('SELECT * FROM orders WHERE id=?', oid)".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C4 add order service").unwrap();
+    repo.stage_all_and_commit("feat: C4 add order service")
+        .unwrap();
 
     // C5: AI creates payments.py (8 AI lines)
     let mut payments = repo.filename("payments.py");
@@ -6898,12 +9640,16 @@ fn test_conflict_ai_resolves_timeout_constant() {
         "        self.db.execute('INSERT INTO payments VALUES (?, ?)', oid, r['id'])".ai(),
         "    def refund(self, pid):".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C5 add payment service").unwrap();
+    repo.stage_all_and_commit("feat: C5 add payment service")
+        .unwrap();
 
     // Rebase onto main — C3 will conflict on config.py
     repo.git(&["checkout", "feature"]).unwrap();
     let rebase_result = repo.git(&["rebase", &main_branch]);
-    assert!(rebase_result.is_err(), "rebase should conflict on config.py at C3");
+    assert!(
+        rebase_result.is_err(),
+        "rebase should conflict on config.py at C3"
+    );
 
     // AI resolves: sets TIMEOUT = 90 as .ai(), surrounding lines as .human()
     let mut conflict_config = repo.filename("config.py");
@@ -6914,7 +9660,8 @@ fn test_conflict_ai_resolves_timeout_constant() {
         "    PORT = 8080".human(),
     ]);
     // set_contents already ran git add -A + checkpoint
-    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None).unwrap();
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .unwrap();
 
     let chain = get_commit_chain(&repo, 5);
 
@@ -6931,12 +9678,18 @@ fn test_conflict_ai_resolves_timeout_constant() {
     assert_note_files_exact(&repo, &chain[2], "c3_files", &["config.py"]);
 
     // blame at chain[2] for config.py: the AI-resolved TIMEOUT line should be AI
-    assert_blame_at_commit(&repo, &chain[2], "config.py", "c3_blame_config", &[
-        ("class Config:", false),
-        ("TIMEOUT = 90", true),
-        ("HOST = 'localhost'", false),
-        ("PORT = 8080", false),
-    ]);
+    assert_blame_at_commit(
+        &repo,
+        &chain[2],
+        "config.py",
+        "c3_blame_config",
+        &[
+            ("class Config:", false),
+            ("TIMEOUT = 90", true),
+            ("HOST = 'localhost'", false),
+            ("PORT = 8080", false),
+        ],
+    );
 
     // C4': orders.py only
     assert_note_base_commit_matches(&repo, &chain[3], "c4_base");
@@ -6970,13 +9723,37 @@ fn test_conflict_ai_resolves_with_added_extra_lines() {
         "pub fn compute(data: &[f64]) -> f64 {\n    data.iter().sum::<f64>() / data.len() as f64\n}\n",
         "main: implement compute as mean",
     );
-    write_raw_commit(&repo, "src/main.rs", "fn main() { println!(\"hello\"); }\n", "main: add main");
-    write_raw_commit(&repo, "Cargo.toml", "[package]\nname = \"compute\"\nversion = \"0.1.0\"\nedition = \"2021\"\n", "main: add Cargo.toml");
-    write_raw_commit(&repo, "src/tests.rs", "#[cfg(test)]\nmod tests { #[test] fn it_works() {} }\n", "main: add tests");
-    write_raw_commit(&repo, "README.md", "# compute\nA compute library.\n", "main: add README");
+    write_raw_commit(
+        &repo,
+        "src/main.rs",
+        "fn main() { println!(\"hello\"); }\n",
+        "main: add main",
+    );
+    write_raw_commit(
+        &repo,
+        "Cargo.toml",
+        "[package]\nname = \"compute\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        "main: add Cargo.toml",
+    );
+    write_raw_commit(
+        &repo,
+        "src/tests.rs",
+        "#[cfg(test)]\nmod tests { #[test] fn it_works() {} }\n",
+        "main: add tests",
+    );
+    write_raw_commit(
+        &repo,
+        "README.md",
+        "# compute\nA compute library.\n",
+        "main: add README",
+    );
 
     // Feature branch from base
-    let base_sha = repo.git(&["rev-parse", "HEAD~5"]).unwrap().trim().to_string();
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~5"])
+        .unwrap()
+        .trim()
+        .to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
 
     // C1: AI creates types.rs (8 AI lines)
@@ -6991,7 +9768,8 @@ fn test_conflict_ai_resolves_with_added_extra_lines() {
         "impl DataPoint {".ai(),
         "    pub fn new(value: f64, weight: f64) -> Self { Self { value, weight } }".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C1 add DataPoint type").unwrap();
+    repo.stage_all_and_commit("feat: C1 add DataPoint type")
+        .unwrap();
 
     // C2: AI implements compute.rs with 10 AI lines — WILL CONFLICT with main's implementation
     let mut compute = repo.filename("src/compute.rs");
@@ -7007,7 +9785,8 @@ fn test_conflict_ai_resolves_with_added_extra_lines() {
         "}".ai(),
         "".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C2 AI implements compute as std-dev").unwrap();
+    repo.stage_all_and_commit("feat: C2 AI implements compute as std-dev")
+        .unwrap();
 
     // C3: AI creates validator.rs (8 AI lines)
     let mut validator = repo.filename("src/validator.rs");
@@ -7021,7 +9800,8 @@ fn test_conflict_ai_resolves_with_added_extra_lines() {
         "".ai(),
         "pub fn normalize(data: &mut Vec<f64>) { let m = data.iter().cloned().fold(f64::NEG_INFINITY, f64::max); data.iter_mut().for_each(|x| *x /= m); }".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C3 add data validator").unwrap();
+    repo.stage_all_and_commit("feat: C3 add data validator")
+        .unwrap();
 
     // C4: AI creates encoder.rs (8 AI lines)
     let mut encoder = repo.filename("src/encoder.rs");
@@ -7033,7 +9813,8 @@ fn test_conflict_ai_resolves_with_added_extra_lines() {
         "}".ai(),
         "".ai(),
         "pub fn decode(bytes: &[u8]) -> Vec<f64> {".ai(),
-        "    bytes.chunks_exact(8).map(|c| f64::from_le_bytes(c.try_into().unwrap())).collect()".ai(),
+        "    bytes.chunks_exact(8).map(|c| f64::from_le_bytes(c.try_into().unwrap())).collect()"
+            .ai(),
     ]);
     repo.stage_all_and_commit("feat: C4 add encoder").unwrap();
 
@@ -7049,12 +9830,16 @@ fn test_conflict_ai_resolves_with_added_extra_lines() {
         "impl Decoder {".ai(),
         "    pub fn new() -> Self { Self { buffer: Vec::new() } }".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C5 add decoder struct").unwrap();
+    repo.stage_all_and_commit("feat: C5 add decoder struct")
+        .unwrap();
 
     // Rebase onto main — C2 will conflict on src/compute.rs
     repo.git(&["checkout", "feature"]).unwrap();
     let rebase_result = repo.git(&["rebase", &main_branch]);
-    assert!(rebase_result.is_err(), "rebase should conflict on src/compute.rs at C2");
+    assert!(
+        rebase_result.is_err(),
+        "rebase should conflict on src/compute.rs at C2"
+    );
 
     // AI resolves: writes a 15-line merged implementation (all .ai())
     let mut conflict_compute = repo.filename("src/compute.rs");
@@ -7075,7 +9860,8 @@ fn test_conflict_ai_resolves_with_added_extra_lines() {
         "}".ai(),
         "".ai(),
     ]);
-    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None).unwrap();
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .unwrap();
 
     let chain = get_commit_chain(&repo, 5);
 
@@ -7092,22 +9878,28 @@ fn test_conflict_ai_resolves_with_added_extra_lines() {
     // 3-line version), so git-blame traces them to the main branch commit (no note → human).
     // Lines 2-7 are NEW content added by C2' and match original C2's AI lines → AI.
     // Lines 8-13 are new content added only in the conflict resolution → no AI attribution.
-    assert_blame_at_commit(&repo, &chain[1], "src/compute.rs", "c2_blame_compute", &[
-        ("pub fn compute", false),  // unchanged from parent, traces to main branch commit (human)
-        ("is_empty", true),         // new in C2', matches original C2 AI content → AI
-        ("let n =", true),
-        ("let mean =", true),
-        ("variance = data", true),
-        (".map(|x|", true),
-        (".sum::<f64>", true),
-        ("let std_dev", false),     // new in conflict resolution only, no original attribution
-        ("weighted mean", false),
-        ("weighted_sum", false),
-        ("weight_total:", false),
-        ("weighted_mean =", false),
-        ("std_dev * 0.5", false),
-        ("}", false),               // unchanged from parent ("}" line), traces to main branch (human)
-    ]);
+    assert_blame_at_commit(
+        &repo,
+        &chain[1],
+        "src/compute.rs",
+        "c2_blame_compute",
+        &[
+            ("pub fn compute", false), // unchanged from parent, traces to main branch commit (human)
+            ("is_empty", true),        // new in C2', matches original C2 AI content → AI
+            ("let n =", true),
+            ("let mean =", true),
+            ("variance = data", true),
+            (".map(|x|", true),
+            (".sum::<f64>", true),
+            ("let std_dev", false), // new in conflict resolution only, no original attribution
+            ("weighted mean", false),
+            ("weighted_sum", false),
+            ("weight_total:", false),
+            ("weighted_mean =", false),
+            ("std_dev * 0.5", false),
+            ("}", false), // unchanged from parent ("}" line), traces to main branch (human)
+        ],
+    );
 
     // C3': validator.rs only
     assert_note_base_commit_matches(&repo, &chain[2], "c3_base");
@@ -7145,13 +9937,37 @@ fn test_conflict_ai_resolves_preserving_human_context_lines() {
         "class Processor:\n    def method1(self): return 'method1'\n    def method2(self): return 'human-method2'\n    def method3(self): return 'method3'\n",
         "main: implement method2",
     );
-    write_raw_commit(&repo, "runner.py", "from processor import Processor\np = Processor()\np.method1()\n", "main: add runner");
-    write_raw_commit(&repo, "tests/test_processor.py", "from processor import Processor\ndef test_method1(): assert Processor().method1() == 'method1'\n", "main: add tests");
-    write_raw_commit(&repo, "setup.py", "from setuptools import setup\nsetup(name='processor', version='0.1.0')\n", "main: add setup.py");
-    write_raw_commit(&repo, "pyproject.toml", "[build-system]\nrequires = ['setuptools']\n", "main: add pyproject.toml");
+    write_raw_commit(
+        &repo,
+        "runner.py",
+        "from processor import Processor\np = Processor()\np.method1()\n",
+        "main: add runner",
+    );
+    write_raw_commit(
+        &repo,
+        "tests/test_processor.py",
+        "from processor import Processor\ndef test_method1(): assert Processor().method1() == 'method1'\n",
+        "main: add tests",
+    );
+    write_raw_commit(
+        &repo,
+        "setup.py",
+        "from setuptools import setup\nsetup(name='processor', version='0.1.0')\n",
+        "main: add setup.py",
+    );
+    write_raw_commit(
+        &repo,
+        "pyproject.toml",
+        "[build-system]\nrequires = ['setuptools']\n",
+        "main: add pyproject.toml",
+    );
 
     // Feature branch from base
-    let base_sha = repo.git(&["rev-parse", "HEAD~5"]).unwrap().trim().to_string();
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~5"])
+        .unwrap()
+        .trim()
+        .to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
 
     // C1: AI creates util_a.py (8 AI lines)
@@ -7194,7 +10010,8 @@ fn test_conflict_ai_resolves_preserving_human_context_lines() {
         "        return result".ai(),
         "    def method3(self): return 'method3'".human(),
     ]);
-    repo.stage_all_and_commit("feat: C3 AI implements method2").unwrap();
+    repo.stage_all_and_commit("feat: C3 AI implements method2")
+        .unwrap();
 
     // C4: AI creates util_d.py (8 AI lines)
     let mut util_d = repo.filename("util_d.py");
@@ -7227,7 +10044,10 @@ fn test_conflict_ai_resolves_preserving_human_context_lines() {
     // Rebase — C3 will conflict on processor.py
     repo.git(&["checkout", "feature"]).unwrap();
     let rebase_result = repo.git(&["rebase", &main_branch]);
-    assert!(rebase_result.is_err(), "rebase should conflict on processor.py at C3");
+    assert!(
+        rebase_result.is_err(),
+        "rebase should conflict on processor.py at C3"
+    );
 
     // AI resolves: 6 human context lines + 8 AI lines for resolved method2
     let mut conflict_processor = repo.filename("processor.py");
@@ -7243,7 +10063,8 @@ fn test_conflict_ai_resolves_preserving_human_context_lines() {
         "        return result, label".ai(),
         "    def method3(self): return 'method3'".human(),
     ]);
-    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None).unwrap();
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .unwrap();
 
     let chain = get_commit_chain(&repo, 5);
 
@@ -7260,18 +10081,24 @@ fn test_conflict_ai_resolves_preserving_human_context_lines() {
     assert_note_files_exact(&repo, &chain[2], "c3_files", &["processor.py"]);
 
     // blame at chain[2] for processor.py: human lines not AI, AI lines are AI
-    assert_blame_at_commit(&repo, &chain[2], "processor.py", "c3_blame_processor", &[
-        ("class Processor:", false),
-        ("def method1", false),
-        ("def method2", true),
-        ("AI merged", false),
-        ("result = []", true),
-        ("for i in range", true),
-        ("result.append", true),
-        ("label = ", false),
-        ("return result, label", false),
-        ("def method3", false),
-    ]);
+    assert_blame_at_commit(
+        &repo,
+        &chain[2],
+        "processor.py",
+        "c3_blame_processor",
+        &[
+            ("class Processor:", false),
+            ("def method1", false),
+            ("def method2", true),
+            ("AI merged", false),
+            ("result = []", true),
+            ("for i in range", true),
+            ("result.append", true),
+            ("label = ", false),
+            ("return result, label", false),
+            ("def method3", false),
+        ],
+    );
 
     // C4': util_d.py only
     assert_note_base_commit_matches(&repo, &chain[3], "c4_base");
@@ -7305,13 +10132,37 @@ fn test_conflict_ai_resolves_on_first_commit() {
         "VERSION = \"1.5\"\nCODENAME = \"beta\"\n",
         "main: bump version to 1.5",
     );
-    write_raw_commit(&repo, "CHANGELOG.md", "## 1.5\n- Performance improvements\n", "main: add changelog");
-    write_raw_commit(&repo, "CONTRIBUTORS.md", "# Contributors\n- Alice\n- Bob\n", "main: add contributors");
-    write_raw_commit(&repo, "LICENSE", "MIT License\nCopyright 2024\n", "main: add license");
-    write_raw_commit(&repo, "docs/index.md", "# Docs\nWelcome to the docs.\n", "main: add docs");
+    write_raw_commit(
+        &repo,
+        "CHANGELOG.md",
+        "## 1.5\n- Performance improvements\n",
+        "main: add changelog",
+    );
+    write_raw_commit(
+        &repo,
+        "CONTRIBUTORS.md",
+        "# Contributors\n- Alice\n- Bob\n",
+        "main: add contributors",
+    );
+    write_raw_commit(
+        &repo,
+        "LICENSE",
+        "MIT License\nCopyright 2024\n",
+        "main: add license",
+    );
+    write_raw_commit(
+        &repo,
+        "docs/index.md",
+        "# Docs\nWelcome to the docs.\n",
+        "main: add docs",
+    );
 
     // Feature branch from base
-    let base_sha = repo.git(&["rev-parse", "HEAD~5"]).unwrap().trim().to_string();
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~5"])
+        .unwrap()
+        .trim()
+        .to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
 
     // C1: AI changes VERSION to "2.0" — WILL CONFLICT
@@ -7320,7 +10171,8 @@ fn test_conflict_ai_resolves_on_first_commit() {
         "VERSION = \"2.0\"".ai(),
         "CODENAME = \"alpha\"".human(),
     ]);
-    repo.stage_all_and_commit("feat: C1 bump version to 2.0").unwrap();
+    repo.stage_all_and_commit("feat: C1 bump version to 2.0")
+        .unwrap();
 
     // C2: AI creates changelog.py (8 AI lines)
     let mut changelog = repo.filename("changelog.py");
@@ -7334,7 +10186,8 @@ fn test_conflict_ai_resolves_on_first_commit() {
         "        self.changes = changes".ai(),
         "    def render(self) -> str: return f'{self.version} ({self.date}): {len(self.changes)} changes'".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C2 add changelog model").unwrap();
+    repo.stage_all_and_commit("feat: C2 add changelog model")
+        .unwrap();
 
     // C3: AI creates release_notes.py (8 AI lines)
     let mut release_notes = repo.filename("release_notes.py");
@@ -7348,7 +10201,8 @@ fn test_conflict_ai_resolves_on_first_commit() {
         "        for change in e.get('changes', []):".ai(),
         "            lines.append(f'- {change}')".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C3 add release notes formatter").unwrap();
+    repo.stage_all_and_commit("feat: C3 add release notes formatter")
+        .unwrap();
 
     // C4: AI creates deprecations.py (8 AI lines)
     let mut deprecations = repo.filename("deprecations.py");
@@ -7362,7 +10216,8 @@ fn test_conflict_ai_resolves_on_first_commit() {
         "        def wrapper(*args, **kwargs):".ai(),
         "            warnings.warn(f'{func.__name__} is deprecated: {reason}', DeprecationWarning, stacklevel=2)".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C4 add deprecation decorator").unwrap();
+    repo.stage_all_and_commit("feat: C4 add deprecation decorator")
+        .unwrap();
 
     // C5: AI creates migration_guide.py (8 AI lines)
     let mut migration_guide = repo.filename("migration_guide.py");
@@ -7376,12 +10231,16 @@ fn test_conflict_ai_resolves_on_first_commit() {
         "    'Monitor error rates after deployment',".ai(),
         "]".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C5 add migration guide").unwrap();
+    repo.stage_all_and_commit("feat: C5 add migration guide")
+        .unwrap();
 
     // Rebase — C1 will conflict immediately on version.py
     repo.git(&["checkout", "feature"]).unwrap();
     let rebase_result = repo.git(&["rebase", &main_branch]);
-    assert!(rebase_result.is_err(), "rebase should conflict on version.py at C1");
+    assert!(
+        rebase_result.is_err(),
+        "rebase should conflict on version.py at C1"
+    );
 
     // AI resolves: VERSION = "2.1" as .ai(), CODENAME as .human()
     let mut conflict_version = repo.filename("version.py");
@@ -7389,7 +10248,8 @@ fn test_conflict_ai_resolves_on_first_commit() {
         "VERSION = \"2.1\"".ai(),
         "CODENAME = \"beta\"".human(),
     ]);
-    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None).unwrap();
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .unwrap();
 
     let chain = get_commit_chain(&repo, 5);
 
@@ -7398,10 +10258,13 @@ fn test_conflict_ai_resolves_on_first_commit() {
     assert_note_files_exact(&repo, &chain[0], "c1_files", &["version.py"]);
 
     // blame at chain[0] for version.py: VERSION line is AI, CODENAME is human
-    assert_blame_at_commit(&repo, &chain[0], "version.py", "c1_blame_version", &[
-        ("VERSION = \"2.1\"", true),
-        ("CODENAME = \"beta\"", false),
-    ]);
+    assert_blame_at_commit(
+        &repo,
+        &chain[0],
+        "version.py",
+        "c1_blame_version",
+        &[("VERSION = \"2.1\"", true), ("CODENAME = \"beta\"", false)],
+    );
 
     // C2': changelog.py only
     assert_note_base_commit_matches(&repo, &chain[1], "c2_base");
@@ -7443,13 +10306,37 @@ fn test_conflict_ai_resolves_on_last_commit() {
         "pub const MAX_CONNECTIONS: u32 = 50;\npub const SCHEMA_VERSION: u32 = 1;\n",
         "main: increase max_connections to 50",
     );
-    write_raw_commit(&repo, "src/migration.rs", "pub fn run_migrations() {}\n", "main: add migration runner");
-    write_raw_commit(&repo, "src/connection.rs", "pub struct Connection { id: u32 }\n", "main: add Connection type");
-    write_raw_commit(&repo, "src/pool.rs", "pub struct Pool { size: u32 }\n", "main: add Pool struct");
-    write_raw_commit(&repo, "Cargo.toml", "[package]\nname = \"schema\"\nversion = \"0.1.0\"\nedition = \"2021\"\n", "main: add Cargo.toml");
+    write_raw_commit(
+        &repo,
+        "src/migration.rs",
+        "pub fn run_migrations() {}\n",
+        "main: add migration runner",
+    );
+    write_raw_commit(
+        &repo,
+        "src/connection.rs",
+        "pub struct Connection { id: u32 }\n",
+        "main: add Connection type",
+    );
+    write_raw_commit(
+        &repo,
+        "src/pool.rs",
+        "pub struct Pool { size: u32 }\n",
+        "main: add Pool struct",
+    );
+    write_raw_commit(
+        &repo,
+        "Cargo.toml",
+        "[package]\nname = \"schema\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        "main: add Cargo.toml",
+    );
 
     // Feature branch from base
-    let base_sha = repo.git(&["rev-parse", "HEAD~5"]).unwrap().trim().to_string();
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~5"])
+        .unwrap()
+        .trim()
+        .to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
 
     // C1: AI creates model_a.rs (10 AI lines)
@@ -7498,7 +10385,8 @@ fn test_conflict_ai_resolves_on_last_commit() {
         "    fn default() -> Self { Status::Pending }".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C3 add Status enum").unwrap();
+    repo.stage_all_and_commit("feat: C3 add Status enum")
+        .unwrap();
 
     // C4: AI creates model_d.rs (10 AI lines)
     let mut model_d = repo.filename("src/model_d.rs");
@@ -7522,12 +10410,16 @@ fn test_conflict_ai_resolves_on_last_commit() {
         "pub const MAX_CONNECTIONS: u32 = 100;".ai(),
         "pub const SCHEMA_VERSION: u32 = 1;".human(),
     ]);
-    repo.stage_all_and_commit("feat: C5 AI tunes MAX_CONNECTIONS to 100").unwrap();
+    repo.stage_all_and_commit("feat: C5 AI tunes MAX_CONNECTIONS to 100")
+        .unwrap();
 
     // Rebase — C5 will conflict on src/schema.rs
     repo.git(&["checkout", "feature"]).unwrap();
     let rebase_result = repo.git(&["rebase", &main_branch]);
-    assert!(rebase_result.is_err(), "rebase should conflict on src/schema.rs at C5");
+    assert!(
+        rebase_result.is_err(),
+        "rebase should conflict on src/schema.rs at C5"
+    );
 
     // AI resolves: picks 75 as a compromise, as .ai()
     let mut conflict_schema = repo.filename("src/schema.rs");
@@ -7535,7 +10427,8 @@ fn test_conflict_ai_resolves_on_last_commit() {
         "pub const MAX_CONNECTIONS: u32 = 75;".ai(),
         "pub const SCHEMA_VERSION: u32 = 1;".human(),
     ]);
-    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None).unwrap();
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .unwrap();
 
     let chain = get_commit_chain(&repo, 5);
 
@@ -7560,10 +10453,16 @@ fn test_conflict_ai_resolves_on_last_commit() {
     assert_note_files_exact(&repo, &chain[4], "c5_files", &["src/schema.rs"]);
 
     // blame at chain[4] for schema.rs: MAX_CONNECTIONS line is AI, SCHEMA_VERSION is human
-    assert_blame_at_commit(&repo, &chain[4], "src/schema.rs", "c5_blame_schema", &[
-        ("MAX_CONNECTIONS: u32 = 75", true),
-        ("SCHEMA_VERSION: u32 = 1", false),
-    ]);
+    assert_blame_at_commit(
+        &repo,
+        &chain[4],
+        "src/schema.rs",
+        "c5_blame_schema",
+        &[
+            ("MAX_CONNECTIONS: u32 = 75", true),
+            ("SCHEMA_VERSION: u32 = 1", false),
+        ],
+    );
 }
 
 /// Test 6: config.py AND settings.py both conflict in C3.
@@ -7574,19 +10473,58 @@ fn test_conflict_ai_resolves_multiple_files_in_same_commit() {
     let repo = TestRepo::new();
 
     // Initial: BOTH files exist at the shared base so C3's edits will conflict with main
-    write_raw_commit(&repo, "config.py", "DEBUG = False\nSECRET_KEY = 'changeme'\n", "Initial: config");
-    write_raw_commit(&repo, "settings.py", "DATABASE_URL = 'sqlite:///dev.db'\nCACHE_BACKEND = 'locmem'\n", "Initial: settings");
+    write_raw_commit(
+        &repo,
+        "config.py",
+        "DEBUG = False\nSECRET_KEY = 'changeme'\n",
+        "Initial: config",
+    );
+    write_raw_commit(
+        &repo,
+        "settings.py",
+        "DATABASE_URL = 'sqlite:///dev.db'\nCACHE_BACKEND = 'locmem'\n",
+        "Initial: settings",
+    );
     let main_branch = repo.current_branch();
 
     // Main: changes the same lines in both files → will conflict with feature's C3
-    write_raw_commit(&repo, "config.py", "DEBUG = True\nSECRET_KEY = 'changeme'\n", "main: enable DEBUG");
-    write_raw_commit(&repo, "settings.py", "DATABASE_URL = 'postgres://localhost/main_db'\nCACHE_BACKEND = 'redis'\n", "main: update settings");
-    write_raw_commit(&repo, "wsgi.py", "from app import create_app\napplication = create_app()\n", "main: add wsgi");
-    write_raw_commit(&repo, "asgi.py", "from app import create_app\napplication = create_app()\n", "main: add asgi");
-    write_raw_commit(&repo, "manage.py", "#!/usr/bin/env python\nimport sys\nif __name__ == '__main__': pass\n", "main: add manage.py");
+    write_raw_commit(
+        &repo,
+        "config.py",
+        "DEBUG = True\nSECRET_KEY = 'changeme'\n",
+        "main: enable DEBUG",
+    );
+    write_raw_commit(
+        &repo,
+        "settings.py",
+        "DATABASE_URL = 'postgres://localhost/main_db'\nCACHE_BACKEND = 'redis'\n",
+        "main: update settings",
+    );
+    write_raw_commit(
+        &repo,
+        "wsgi.py",
+        "from app import create_app\napplication = create_app()\n",
+        "main: add wsgi",
+    );
+    write_raw_commit(
+        &repo,
+        "asgi.py",
+        "from app import create_app\napplication = create_app()\n",
+        "main: add asgi",
+    );
+    write_raw_commit(
+        &repo,
+        "manage.py",
+        "#!/usr/bin/env python\nimport sys\nif __name__ == '__main__': pass\n",
+        "main: add manage.py",
+    );
 
     // Feature branch from the shared base (HEAD~5 = after both initial commits)
-    let base_sha = repo.git(&["rev-parse", "HEAD~5"]).unwrap().trim().to_string();
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~5"])
+        .unwrap()
+        .trim()
+        .to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
 
     // C1: AI creates auth.py (8 AI lines)
@@ -7615,7 +10553,8 @@ fn test_conflict_ai_resolves_multiple_files_in_same_commit() {
         "            return start_response(status, headers)".ai(),
         "        return self.app(environ, custom_start)".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C2 add CORS middleware").unwrap();
+    repo.stage_all_and_commit("feat: C2 add CORS middleware")
+        .unwrap();
 
     // C3: AI changes config.py AND settings.py — BOTH WILL CONFLICT
     let mut config = repo.filename("config.py");
@@ -7628,7 +10567,8 @@ fn test_conflict_ai_resolves_multiple_files_in_same_commit() {
         "DATABASE_URL = 'postgres://localhost/feature_db'".ai(),
         "CACHE_BACKEND = 'locmem'".human(),
     ]);
-    repo.stage_all_and_commit("feat: C3 AI tunes config and settings").unwrap();
+    repo.stage_all_and_commit("feat: C3 AI tunes config and settings")
+        .unwrap();
 
     // C4: AI creates permissions.py (8 AI lines)
     let mut permissions = repo.filename("permissions.py");
@@ -7642,7 +10582,8 @@ fn test_conflict_ai_resolves_multiple_files_in_same_commit() {
         "    return required in user_perms".ai(),
         "".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C4 add permissions").unwrap();
+    repo.stage_all_and_commit("feat: C4 add permissions")
+        .unwrap();
 
     // C5: AI creates serializers.py (8 AI lines)
     let mut serializers = repo.filename("serializers.py");
@@ -7656,7 +10597,8 @@ fn test_conflict_ai_resolves_multiple_files_in_same_commit() {
         "    def loads(s: str): return json.loads(s)".ai(),
         "".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C5 add JSON serializer").unwrap();
+    repo.stage_all_and_commit("feat: C5 add JSON serializer")
+        .unwrap();
 
     // Rebase — C3 will conflict on config.py (and possibly settings.py)
     repo.git(&["checkout", "feature"]).unwrap();
@@ -7675,7 +10617,8 @@ fn test_conflict_ai_resolves_multiple_files_in_same_commit() {
         "DATABASE_URL = 'postgres://localhost/feature_db'".ai(),
         "CACHE_BACKEND = 'redis'".human(),
     ]);
-    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None).unwrap();
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .unwrap();
 
     let chain = get_commit_chain(&repo, 5);
 
@@ -7692,16 +10635,28 @@ fn test_conflict_ai_resolves_multiple_files_in_same_commit() {
     assert_note_files_exact(&repo, &chain[2], "c3_files", &["config.py", "settings.py"]);
 
     // blame for config.py: DEBUG is human (unchanged), SECRET_KEY is AI
-    assert_blame_at_commit(&repo, &chain[2], "config.py", "c3_blame_config", &[
-        ("DEBUG = True", false),
-        ("SECRET_KEY = 'ai-generated-secret-key-v2'", true),
-    ]);
+    assert_blame_at_commit(
+        &repo,
+        &chain[2],
+        "config.py",
+        "c3_blame_config",
+        &[
+            ("DEBUG = True", false),
+            ("SECRET_KEY = 'ai-generated-secret-key-v2'", true),
+        ],
+    );
 
     // blame for settings.py: DATABASE_URL is AI, CACHE_BACKEND is human
-    assert_blame_at_commit(&repo, &chain[2], "settings.py", "c3_blame_settings", &[
-        ("DATABASE_URL = 'postgres://localhost/feature_db'", true),
-        ("CACHE_BACKEND = 'redis'", false),
-    ]);
+    assert_blame_at_commit(
+        &repo,
+        &chain[2],
+        "settings.py",
+        "c3_blame_settings",
+        &[
+            ("DATABASE_URL = 'postgres://localhost/feature_db'", true),
+            ("CACHE_BACKEND = 'redis'", false),
+        ],
+    );
 
     // C4': permissions.py only
     assert_note_base_commit_matches(&repo, &chain[3], "c4_base");
@@ -7735,13 +10690,37 @@ fn test_conflict_ai_resolves_then_more_ai_builds_on_result() {
         "class Dispatcher:\n    def process(self, msg): return msg.strip()\n",
         "main: implement process() simply",
     );
-    write_raw_commit(&repo, "config.py", "WORKERS = 4\nQUEUE_SIZE = 100\n", "main: add config");
-    write_raw_commit(&repo, "queue.py", "import queue\nQ = queue.Queue()\n", "main: add queue");
-    write_raw_commit(&repo, "worker.py", "class Worker:\n    def __init__(self, q): self.q = q\n", "main: add worker");
-    write_raw_commit(&repo, "monitor.py", "class Monitor:\n    def check(self): return 'ok'\n", "main: add monitor");
+    write_raw_commit(
+        &repo,
+        "config.py",
+        "WORKERS = 4\nQUEUE_SIZE = 100\n",
+        "main: add config",
+    );
+    write_raw_commit(
+        &repo,
+        "queue.py",
+        "import queue\nQ = queue.Queue()\n",
+        "main: add queue",
+    );
+    write_raw_commit(
+        &repo,
+        "worker.py",
+        "class Worker:\n    def __init__(self, q): self.q = q\n",
+        "main: add worker",
+    );
+    write_raw_commit(
+        &repo,
+        "monitor.py",
+        "class Monitor:\n    def check(self): return 'ok'\n",
+        "main: add monitor",
+    );
 
     // Feature branch from base
-    let base_sha = repo.git(&["rev-parse", "HEAD~5"]).unwrap().trim().to_string();
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~5"])
+        .unwrap()
+        .trim()
+        .to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
 
     // C1: AI creates base_handler.py (8 AI lines)
@@ -7756,7 +10735,8 @@ fn test_conflict_ai_resolves_then_more_ai_builds_on_result() {
         "    def handle(self, msg): raise NotImplementedError".ai(),
         "".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C1 add BaseHandler").unwrap();
+    repo.stage_all_and_commit("feat: C1 add BaseHandler")
+        .unwrap();
 
     // C2: AI adds process() to dispatcher.py — WILL CONFLICT
     let mut dispatcher_c2 = repo.filename("dispatcher.py");
@@ -7769,7 +10749,8 @@ fn test_conflict_ai_resolves_then_more_ai_builds_on_result() {
         "        return {'cmd': tokens[0], 'args': tokens[1:]}".ai(),
         "    pass".human(),
     ]);
-    repo.stage_all_and_commit("feat: C2 AI adds process() to Dispatcher").unwrap();
+    repo.stage_all_and_commit("feat: C2 AI adds process() to Dispatcher")
+        .unwrap();
 
     // C3: AI creates router.py (does NOT touch dispatcher.py — no conflict)
     let mut router = repo.filename("router.py");
@@ -7783,7 +10764,8 @@ fn test_conflict_ai_resolves_then_more_ai_builds_on_result() {
         "    def run(self, msg): return self.dispatcher.dispatch(msg)".ai(),
         "".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C3 AI adds Router").unwrap();
+    repo.stage_all_and_commit("feat: C3 AI adds Router")
+        .unwrap();
 
     // C4: AI creates middleware.py (new file, no conflict)
     let mut mw = repo.filename("middleware.py");
@@ -7796,7 +10778,8 @@ fn test_conflict_ai_resolves_then_more_ai_builds_on_result() {
         "        return msg".ai(),
         "".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C4 AI adds Middleware").unwrap();
+    repo.stage_all_and_commit("feat: C4 AI adds Middleware")
+        .unwrap();
 
     // C5: AI creates event_bus.py (new file, no conflict)
     let mut bus = repo.filename("event_bus.py");
@@ -7808,12 +10791,16 @@ fn test_conflict_ai_resolves_then_more_ai_builds_on_result() {
         "        for fn in self.handlers.get(event, []): fn(*args)".ai(),
         "".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C5 AI adds EventBus").unwrap();
+    repo.stage_all_and_commit("feat: C5 AI adds EventBus")
+        .unwrap();
 
     // Rebase — C2 will conflict on dispatcher.py
     repo.git(&["checkout", "feature"]).unwrap();
     let rebase_result = repo.git(&["rebase", &main_branch]);
-    assert!(rebase_result.is_err(), "rebase should conflict on dispatcher.py at C2");
+    assert!(
+        rebase_result.is_err(),
+        "rebase should conflict on dispatcher.py at C2"
+    );
 
     // AI resolves C2: 12-line process() implementation (all .ai() except class line)
     let mut conflict_dispatcher = repo.filename("dispatcher.py");
@@ -7831,7 +10818,8 @@ fn test_conflict_ai_resolves_then_more_ai_builds_on_result() {
         "    def __repr__(self): return f'Dispatcher()'".ai(),
         "    pass".human(),
     ]);
-    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None).unwrap();
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .unwrap();
 
     let chain = get_commit_chain(&repo, 5);
 
@@ -7879,13 +10867,37 @@ fn test_conflict_ai_resolves_rust_struct_fields() {
         "pub struct User {\n    pub id: u64,\n    pub name: String,\n    pub email: String,\n    pub created_at: u64,\n}\n",
         "main: add email and created_at to User",
     );
-    write_raw_commit(&repo, "src/db.rs", "pub struct Db { url: String }\n", "main: add Db");
-    write_raw_commit(&repo, "src/repo.rs", "use crate::models::User;\npub struct UserRepo;\n", "main: add UserRepo");
-    write_raw_commit(&repo, "src/service.rs", "pub struct UserService;\n", "main: add UserService");
-    write_raw_commit(&repo, "Cargo.toml", "[package]\nname = \"models\"\nversion = \"0.1.0\"\nedition = \"2021\"\n", "main: add Cargo.toml");
+    write_raw_commit(
+        &repo,
+        "src/db.rs",
+        "pub struct Db { url: String }\n",
+        "main: add Db",
+    );
+    write_raw_commit(
+        &repo,
+        "src/repo.rs",
+        "use crate::models::User;\npub struct UserRepo;\n",
+        "main: add UserRepo",
+    );
+    write_raw_commit(
+        &repo,
+        "src/service.rs",
+        "pub struct UserService;\n",
+        "main: add UserService",
+    );
+    write_raw_commit(
+        &repo,
+        "Cargo.toml",
+        "[package]\nname = \"models\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        "main: add Cargo.toml",
+    );
 
     // Feature branch from base
-    let base_sha = repo.git(&["rev-parse", "HEAD~5"]).unwrap().trim().to_string();
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~5"])
+        .unwrap()
+        .trim()
+        .to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
 
     // C1: AI creates traits.rs (8 AI lines)
@@ -7900,7 +10912,8 @@ fn test_conflict_ai_resolves_rust_struct_fields() {
         "    fn save(&self) -> Result<(), String>;".ai(),
         "    fn delete(&self) -> Result<(), String>;".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C1 add Entity and Persistable traits").unwrap();
+    repo.stage_all_and_commit("feat: C1 add Entity and Persistable traits")
+        .unwrap();
 
     // C2: AI creates impls.rs (8 AI lines)
     let mut impls = repo.filename("src/impls.rs");
@@ -7914,7 +10927,8 @@ fn test_conflict_ai_resolves_rust_struct_fields() {
         "}".ai(),
         "".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C2 impl Entity for User").unwrap();
+    repo.stage_all_and_commit("feat: C2 impl Entity for User")
+        .unwrap();
 
     // C3: AI adds 4 new fields to User struct — WILL CONFLICT with main's email/created_at
     let mut models = repo.filename("src/models.rs");
@@ -7928,7 +10942,8 @@ fn test_conflict_ai_resolves_rust_struct_fields() {
         "    pub metadata: std::collections::HashMap<String, String>,".ai(),
         "}".human(),
     ]);
-    repo.stage_all_and_commit("feat: C3 AI adds active/role/score/metadata fields").unwrap();
+    repo.stage_all_and_commit("feat: C3 AI adds active/role/score/metadata fields")
+        .unwrap();
 
     // C4: AI creates errors.rs (8 AI lines)
     let mut errors = repo.filename("src/errors.rs");
@@ -7942,7 +10957,8 @@ fn test_conflict_ai_resolves_rust_struct_fields() {
         "".ai(),
         "impl std::fmt::Display for ModelError { fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { write!(f, \"{:?}\", self) } }".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C4 add ModelError").unwrap();
+    repo.stage_all_and_commit("feat: C4 add ModelError")
+        .unwrap();
 
     // C5: AI creates utils.rs (8 AI lines)
     let mut utils = repo.filename("src/utils.rs");
@@ -7956,12 +10972,16 @@ fn test_conflict_ai_resolves_rust_struct_fields() {
         "        .to_string()".ai(),
         "}".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C5 add slugify utility").unwrap();
+    repo.stage_all_and_commit("feat: C5 add slugify utility")
+        .unwrap();
 
     // Rebase — C3 will conflict on src/models.rs
     repo.git(&["checkout", "feature"]).unwrap();
     let rebase_result = repo.git(&["rebase", &main_branch]);
-    assert!(rebase_result.is_err(), "rebase should conflict on src/models.rs at C3");
+    assert!(
+        rebase_result.is_err(),
+        "rebase should conflict on src/models.rs at C3"
+    );
 
     // AI resolves: merges ALL fields — original 2 + 4 feature + 2 main = 8 fields (all .ai() in struct body)
     let mut conflict_models = repo.filename("src/models.rs");
@@ -7977,7 +10997,8 @@ fn test_conflict_ai_resolves_rust_struct_fields() {
         "    pub metadata: std::collections::HashMap<String, String>,".ai(),
         "}".human(),
     ]);
-    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None).unwrap();
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .unwrap();
 
     let chain = get_commit_chain(&repo, 5);
 
@@ -7994,18 +11015,24 @@ fn test_conflict_ai_resolves_rust_struct_fields() {
     assert_note_files_exact(&repo, &chain[2], "c3_files", &["src/models.rs"]);
 
     // blame for models.rs: struct keyword is human, equal fields carry AI attribution, new fields are human
-    assert_blame_at_commit(&repo, &chain[2], "src/models.rs", "c3_blame_models", &[
-        ("pub struct User {", false),
-        ("pub id: u64,", false),
-        ("pub name: String,", false),
-        ("pub email: String,", false),
-        ("pub created_at: u64,", false),
-        ("pub active: bool,", true),
-        ("pub role: String,", true),
-        ("pub score: f64,", true),
-        ("pub metadata:", true),
-        ("}", false),
-    ]);
+    assert_blame_at_commit(
+        &repo,
+        &chain[2],
+        "src/models.rs",
+        "c3_blame_models",
+        &[
+            ("pub struct User {", false),
+            ("pub id: u64,", false),
+            ("pub name: String,", false),
+            ("pub email: String,", false),
+            ("pub created_at: u64,", false),
+            ("pub active: bool,", true),
+            ("pub role: String,", true),
+            ("pub score: f64,", true),
+            ("pub metadata:", true),
+            ("}", false),
+        ],
+    );
 
     // C4': errors.rs only
     assert_note_base_commit_matches(&repo, &chain[3], "c4_base");
@@ -8040,13 +11067,37 @@ fn test_conflict_ai_resolves_complex_function_with_error_handling() {
         "def process_payment(amount, card):\n    if amount <= 0:\n        raise ValueError('amount must be positive')\n    return {'status': 'ok', 'amount': amount}\n",
         "main: implement process_payment",
     );
-    write_raw_commit(&repo, "tests/test_service.py", "from service import process_payment\ndef test_basic(): assert process_payment(10, '4111')['status'] == 'ok'\n", "main: add service tests");
-    write_raw_commit(&repo, "requirements.txt", "stripe==5.0.0\nrequests==2.31.0\n", "main: add requirements");
-    write_raw_commit(&repo, ".env.example", "STRIPE_KEY=sk_test_xxx\nDATABASE_URL=sqlite:///dev.db\n", "main: add .env.example");
-    write_raw_commit(&repo, "Makefile", "test:\n\tpython -m pytest\nlint:\n\tflake8 .\n.PHONY: test lint\n", "main: add Makefile");
+    write_raw_commit(
+        &repo,
+        "tests/test_service.py",
+        "from service import process_payment\ndef test_basic(): assert process_payment(10, '4111')['status'] == 'ok'\n",
+        "main: add service tests",
+    );
+    write_raw_commit(
+        &repo,
+        "requirements.txt",
+        "stripe==5.0.0\nrequests==2.31.0\n",
+        "main: add requirements",
+    );
+    write_raw_commit(
+        &repo,
+        ".env.example",
+        "STRIPE_KEY=sk_test_xxx\nDATABASE_URL=sqlite:///dev.db\n",
+        "main: add .env.example",
+    );
+    write_raw_commit(
+        &repo,
+        "Makefile",
+        "test:\n\tpython -m pytest\nlint:\n\tflake8 .\n.PHONY: test lint\n",
+        "main: add Makefile",
+    );
 
     // Feature branch from base
-    let base_sha = repo.git(&["rev-parse", "HEAD~5"]).unwrap().trim().to_string();
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~5"])
+        .unwrap()
+        .trim()
+        .to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
 
     // C1: AI creates models.py (8 AI lines)
@@ -8061,7 +11112,8 @@ fn test_conflict_ai_resolves_complex_function_with_error_handling() {
         "    amount: float".ai(),
         "    error: str = ''".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C1 add PaymentResult model").unwrap();
+    repo.stage_all_and_commit("feat: C1 add PaymentResult model")
+        .unwrap();
 
     // C2: AI creates validators.py (8 AI lines)
     let mut validators = repo.filename("validators.py");
@@ -8075,7 +11127,8 @@ fn test_conflict_ai_resolves_complex_function_with_error_handling() {
         "    return isinstance(amount, (int, float)) and 0 < amount <= 1_000_000".ai(),
         "".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C2 add payment validators").unwrap();
+    repo.stage_all_and_commit("feat: C2 add payment validators")
+        .unwrap();
 
     // C3: AI creates exceptions.py (8 AI lines)
     let mut exceptions = repo.filename("exceptions.py");
@@ -8089,7 +11142,8 @@ fn test_conflict_ai_resolves_complex_function_with_error_handling() {
         "    def __init__(self): super().__init__('Card declined', 402)".ai(),
         "".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C3 add payment exceptions").unwrap();
+    repo.stage_all_and_commit("feat: C3 add payment exceptions")
+        .unwrap();
 
     // C4: AI implements process_payment with 20 lines — WILL CONFLICT
     let mut service = repo.filename("service.py");
@@ -8111,7 +11165,8 @@ fn test_conflict_ai_resolves_complex_function_with_error_handling() {
         "    return {'status': 'ok', 'transaction_id': transaction_id, 'amount': amount}".ai(),
         "    # end process_payment".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C4 AI implements process_payment").unwrap();
+    repo.stage_all_and_commit("feat: C4 AI implements process_payment")
+        .unwrap();
 
     // C5: AI creates utils.py (8 AI lines)
     let mut utils = repo.filename("utils.py");
@@ -8125,12 +11180,16 @@ fn test_conflict_ai_resolves_complex_function_with_error_handling() {
         "".ai(),
         "def generate_receipt(result: dict) -> str: return f\"Receipt: {result['transaction_id']} {result['amount']}\"".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C5 add payment utils").unwrap();
+    repo.stage_all_and_commit("feat: C5 add payment utils")
+        .unwrap();
 
     // Rebase — C4 will conflict on service.py
     repo.git(&["checkout", "feature"]).unwrap();
     let rebase_result = repo.git(&["rebase", &main_branch]);
-    assert!(rebase_result.is_err(), "rebase should conflict on service.py at C4");
+    assert!(
+        rebase_result.is_err(),
+        "rebase should conflict on service.py at C4"
+    );
 
     // AI resolves: 25-line merged implementation (all .ai() except function signature line)
     let mut conflict_service = repo.filename("service.py");
@@ -8161,7 +11220,8 @@ fn test_conflict_ai_resolves_complex_function_with_error_handling() {
         "    # AI merged: combined validation + result model".ai(),
         "    # end process_payment".ai(),
     ]);
-    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None).unwrap();
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .unwrap();
 
     let chain = get_commit_chain(&repo, 5);
 
@@ -8182,33 +11242,39 @@ fn test_conflict_ai_resolves_complex_function_with_error_handling() {
     assert_note_files_exact(&repo, &chain[3], "c4_files", &["service.py"]);
 
     // blame at chain[3] for service.py: only Equal lines carry AI; new/changed lines get false
-    assert_blame_at_commit(&repo, &chain[3], "service.py", "c4_blame_service", &[
-        ("def process_payment", false),
-        ("validate_amount, validate_card", true),
-        ("PaymentError, CardDeclinedError", true),
-        ("PaymentResult", false),
-        ("import logging", true),
-        ("logger = logging", true),
-        ("Processing:", false),
-        ("if amount <= 0:", false),
-        ("must be positive", false),
-        ("if not validate_amount", true),
-        ("Amount out of range", false),
-        ("if not validate_card", true),
-        ("Invalid card number", false),
-        ("startswith('0000')", true),
-        ("CardDeclinedError()", true),
-        ("transaction_id = ", false),
-        ("Payment OK:", false),
-        ("result = PaymentResult(", false),
-        ("status='ok',", false),
-        ("transaction_id=transaction_id,", false),
-        ("amount=amount,", false),
-        (")", false),
-        ("return {", false),
-        ("AI merged", false),
-        ("end process_payment", true),
-    ]);
+    assert_blame_at_commit(
+        &repo,
+        &chain[3],
+        "service.py",
+        "c4_blame_service",
+        &[
+            ("def process_payment", false),
+            ("validate_amount, validate_card", true),
+            ("PaymentError, CardDeclinedError", true),
+            ("PaymentResult", false),
+            ("import logging", true),
+            ("logger = logging", true),
+            ("Processing:", false),
+            ("if amount <= 0:", false),
+            ("must be positive", false),
+            ("if not validate_amount", true),
+            ("Amount out of range", false),
+            ("if not validate_card", true),
+            ("Invalid card number", false),
+            ("startswith('0000')", true),
+            ("CardDeclinedError()", true),
+            ("transaction_id = ", false),
+            ("Payment OK:", false),
+            ("result = PaymentResult(", false),
+            ("status='ok',", false),
+            ("transaction_id=transaction_id,", false),
+            ("amount=amount,", false),
+            (")", false),
+            ("return {", false),
+            ("AI merged", false),
+            ("end process_payment", true),
+        ],
+    );
 
     // C5': utils.py only
     assert_note_base_commit_matches(&repo, &chain[4], "c5_base");
@@ -8227,18 +11293,52 @@ fn test_conflict_mixed_ai_and_human_resolve_different_commits() {
     // clearly conflicting changes. Using numbers avoids trailing-newline ambiguity
     // in git's merge and ensures non-empty rebased commits after resolution.
     write_raw_commit(&repo, "config_a.py", "FLAG_A = 0\n", "Initial commit");
-    write_raw_commit(&repo, "config_b.py", "FLAG_B = 0\nBATCH = 10\n", "Initial config_b");
+    write_raw_commit(
+        &repo,
+        "config_b.py",
+        "FLAG_B = 0\nBATCH = 10\n",
+        "Initial config_b",
+    );
     let main_branch = repo.current_branch();
 
     // Main commits (human): set FLAG_A=1, FLAG_B=1/BATCH=50, then 3 more files
-    write_raw_commit(&repo, "config_a.py", "FLAG_A = 1\n", "main: set flag_a to 1");
-    write_raw_commit(&repo, "config_b.py", "FLAG_B = 1\nBATCH = 50\n", "main: set flag_b and batch 50");
-    write_raw_commit(&repo, "app.py", "print('app started')\n", "main: add app entry point");
-    write_raw_commit(&repo, "db.py", "class Database: pass\n", "main: add database class");
-    write_raw_commit(&repo, "cache.py", "class Cache: pass\n", "main: add cache class");
+    write_raw_commit(
+        &repo,
+        "config_a.py",
+        "FLAG_A = 1\n",
+        "main: set flag_a to 1",
+    );
+    write_raw_commit(
+        &repo,
+        "config_b.py",
+        "FLAG_B = 1\nBATCH = 50\n",
+        "main: set flag_b and batch 50",
+    );
+    write_raw_commit(
+        &repo,
+        "app.py",
+        "print('app started')\n",
+        "main: add app entry point",
+    );
+    write_raw_commit(
+        &repo,
+        "db.py",
+        "class Database: pass\n",
+        "main: add database class",
+    );
+    write_raw_commit(
+        &repo,
+        "cache.py",
+        "class Cache: pass\n",
+        "main: add cache class",
+    );
 
     // Feature branch from base (5 commits before main HEAD = the "Initial config_b" commit)
-    let base_sha = repo.git(&["rev-parse", "HEAD~5"]).unwrap().trim().to_string();
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~5"])
+        .unwrap()
+        .trim()
+        .to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
 
     // C1: AI creates module_a.py (10 AI lines)
@@ -8259,10 +11359,9 @@ fn test_conflict_mixed_ai_and_human_resolve_different_commits() {
 
     // C2: AI changes FLAG_A to 2 — WILL CONFLICT with main's 1 (base=0, feature=2, main=1 → conflict)
     let mut config_a = repo.filename("config_a.py");
-    config_a.set_contents(crate::lines![
-        "FLAG_A = 2".ai(),
-    ]);
-    repo.stage_all_and_commit("feat: C2 AI sets FLAG_A=2").unwrap();
+    config_a.set_contents(crate::lines!["FLAG_A = 2".ai(),]);
+    repo.stage_all_and_commit("feat: C2 AI sets FLAG_A=2")
+        .unwrap();
 
     // C3: AI creates module_c.py (10 AI lines)
     let mut module_c = repo.filename("module_c.py");
@@ -8284,11 +11383,9 @@ fn test_conflict_mixed_ai_and_human_resolve_different_commits() {
     // FLAG_B: base=0, feature=1, main=1 → auto-merged (same)
     // BATCH: base=10, feature=200, main=50 → conflict
     let mut config_b = repo.filename("config_b.py");
-    config_b.set_contents(crate::lines![
-        "FLAG_B = 1".ai(),
-        "BATCH = 200".ai(),
-    ]);
-    repo.stage_all_and_commit("feat: C4 AI sets BATCH=200").unwrap();
+    config_b.set_contents(crate::lines!["FLAG_B = 1".ai(), "BATCH = 200".ai(),]);
+    repo.stage_all_and_commit("feat: C4 AI sets BATCH=200")
+        .unwrap();
 
     // C5: AI creates module_e.py (10 AI lines)
     let mut module_e = repo.filename("module_e.py");
@@ -8309,26 +11406,29 @@ fn test_conflict_mixed_ai_and_human_resolve_different_commits() {
     // Rebase — C2 will conflict first on config_a.py (feature=2 vs main=1, base=0)
     repo.git(&["checkout", "feature"]).unwrap();
     let rebase_result = repo.git(&["rebase", &main_branch]);
-    assert!(rebase_result.is_err(), "rebase should conflict on config_a.py at C2");
+    assert!(
+        rebase_result.is_err(),
+        "rebase should conflict on config_a.py at C2"
+    );
 
     // AI resolves C2: keeps feature's value (FLAG_A = 2) → C2' is non-empty since parent has 1.
     // Use set_contents_no_stage to avoid accidentally staging config_b.py, then stage only config_a.py.
     let mut conflict_config_a = repo.filename("config_a.py");
-    conflict_config_a.set_contents_no_stage(crate::lines![
-        "FLAG_A = 2".ai(),
-    ]);
+    conflict_config_a.set_contents_no_stage(crate::lines!["FLAG_A = 2".ai(),]);
     repo.git(&["add", "config_a.py"]).unwrap();
-    let continue_result = repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None);
+    let continue_result =
+        repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None);
     // C4 should now conflict on BATCH (200 vs 50, base=10)
-    assert!(continue_result.is_err(), "rebase should conflict on config_b.py at C4");
+    assert!(
+        continue_result.is_err(),
+        "rebase should conflict on config_b.py at C4"
+    );
 
     // Human resolves C4: compromise value BATCH=75 → C4' is non-empty (parent has BATCH=50)
-    fs::write(
-        repo.path().join("config_b.py"),
-        "FLAG_B = 1\nBATCH = 75\n",
-    ).unwrap();
+    fs::write(repo.path().join("config_b.py"), "FLAG_B = 1\nBATCH = 75\n").unwrap();
     repo.git(&["add", "config_b.py"]).unwrap();
-    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None).unwrap();
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .unwrap();
 
     let chain = get_commit_chain(&repo, 5);
 
@@ -8343,9 +11443,13 @@ fn test_conflict_mixed_ai_and_human_resolve_different_commits() {
     assert_note_files_exact(&repo, &chain[1], "c2_files", &["config_a.py"]);
 
     // blame at chain[1]: git blame says C2' introduced "FLAG_A = 2" (parent had FLAG_A=1) → AI
-    assert_blame_at_commit(&repo, &chain[1], "config_a.py", "c2_blame_config_a", &[
-        ("FLAG_A = 2", true),
-    ]);
+    assert_blame_at_commit(
+        &repo,
+        &chain[1],
+        "config_a.py",
+        "c2_blame_config_a",
+        &[("FLAG_A = 2", true)],
+    );
 
     // C3': module_c.py only
     assert_note_base_commit_matches(&repo, &chain[2], "c3_base");
@@ -8361,10 +11465,16 @@ fn test_conflict_mixed_ai_and_human_resolve_different_commits() {
     assert_note_base_commit_matches(&repo, &chain[3], "c4_base");
     assert_note_files_exact(&repo, &chain[3], "c4_files", &["config_b.py"]);
 
-    assert_blame_at_commit(&repo, &chain[3], "config_b.py", "c4_blame_config_b", &[
-        ("FLAG_B = 1", false),   // traced to main branch commit (FLAG_B=1 was set by main)
-        ("BATCH = 75", false),   // C4' introduced, but no AI attribution (Replace in resolution)
-    ]);
+    assert_blame_at_commit(
+        &repo,
+        &chain[3],
+        "config_b.py",
+        "c4_blame_config_b",
+        &[
+            ("FLAG_B = 1", false), // traced to main branch commit (FLAG_B=1 was set by main)
+            ("BATCH = 75", false), // C4' introduced, but no AI attribution (Replace in resolution)
+        ],
+    );
 
     // C5': module_e.py only
     assert_note_base_commit_matches(&repo, &chain[4], "c5_base");
@@ -8391,26 +11501,46 @@ fn test_conflict_mixed_ai_and_human_resolve_different_commits() {
 fn test_conflict_working_log_is_sole_attribution_source() {
     let repo = TestRepo::new();
 
-    write_raw_commit(&repo, "config.py", "TIMEOUT = 10\nRETRIES = 3\n", "Initial commit");
+    write_raw_commit(
+        &repo,
+        "config.py",
+        "TIMEOUT = 10\nRETRIES = 3\n",
+        "Initial commit",
+    );
     let main_branch = repo.current_branch();
 
     // Main: changes TIMEOUT → will conflict
-    write_raw_commit(&repo, "config.py", "TIMEOUT = 60\nRETRIES = 3\n",
-        "main: increase timeout to 60");
-    write_raw_commit(&repo, "logging.py", "import logging\nlogging.basicConfig(level=logging.INFO)\n",
-        "main: add logging config");
-    write_raw_commit(&repo, "metrics.py", "class Metrics:\n    pass\n", "main: add metrics stub");
+    write_raw_commit(
+        &repo,
+        "config.py",
+        "TIMEOUT = 60\nRETRIES = 3\n",
+        "main: increase timeout to 60",
+    );
+    write_raw_commit(
+        &repo,
+        "logging.py",
+        "import logging\nlogging.basicConfig(level=logging.INFO)\n",
+        "main: add logging config",
+    );
+    write_raw_commit(
+        &repo,
+        "metrics.py",
+        "class Metrics:\n    pass\n",
+        "main: add metrics stub",
+    );
 
-    let base_sha = repo.git(&["rev-parse", "HEAD~3"]).unwrap().trim().to_string();
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~3"])
+        .unwrap()
+        .trim()
+        .to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
 
     // C1: AI sets TIMEOUT = 30 — WILL CONFLICT with main's = 60
     let mut cfg = repo.filename("config.py");
-    cfg.set_contents(crate::lines![
-        "TIMEOUT = 30".ai(),
-        "RETRIES = 3",
-    ]);
-    repo.stage_all_and_commit("feat: C1 AI sets TIMEOUT=30").unwrap();
+    cfg.set_contents(crate::lines!["TIMEOUT = 30".ai(), "RETRIES = 3",]);
+    repo.stage_all_and_commit("feat: C1 AI sets TIMEOUT=30")
+        .unwrap();
 
     // C2: AI adds a helper (conflict-free)
     let mut helper = repo.filename("helpers.py");
@@ -8421,20 +11551,22 @@ fn test_conflict_working_log_is_sole_attribution_source() {
         "        except Exception:".ai(),
         "            if i == n - 1: raise".ai(),
     ]);
-    repo.stage_all_and_commit("feat: C2 add retry helper").unwrap();
+    repo.stage_all_and_commit("feat: C2 add retry helper")
+        .unwrap();
 
     // Rebase — C1 conflicts on config.py
     repo.git(&["checkout", "feature"]).unwrap();
     let rebase_result = repo.git(&["rebase", &main_branch]);
-    assert!(rebase_result.is_err(), "rebase should conflict on config.py at C1");
+    assert!(
+        rebase_result.is_err(),
+        "rebase should conflict on config.py at C1"
+    );
 
     // AI resolves: picks 45 as a compromise.  Content differs from original (30) → content-diff
     // cannot carry attribution.  ONLY the working-log checkpoint can produce the note.
-    cfg.set_contents(crate::lines![
-        "TIMEOUT = 45".ai(),
-        "RETRIES = 3",
-    ]);
-    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None).unwrap();
+    cfg.set_contents(crate::lines!["TIMEOUT = 45".ai(), "RETRIES = 3",]);
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .unwrap();
 
     let chain = get_commit_chain(&repo, 2);
 
@@ -8443,10 +11575,13 @@ fn test_conflict_working_log_is_sole_attribution_source() {
     assert_note_files_exact(&repo, &chain[0], "c1_files", &["config.py"]);
     // The resolved value (45) must be AI-attributed, not human.
     // This can only be true if build_note_from_conflict_wl contributed the note.
-    assert_blame_at_commit(&repo, &chain[0], "config.py", "c1_blame", &[
-        ("TIMEOUT = 45", true),
-        ("RETRIES = 3", false),
-    ]);
+    assert_blame_at_commit(
+        &repo,
+        &chain[0],
+        "config.py",
+        "c1_blame",
+        &[("TIMEOUT = 45", true), ("RETRIES = 3", false)],
+    );
 
     // C2': helpers.py only (unaffected by conflict)
     assert_note_base_commit_matches(&repo, &chain[1], "c2_base");
@@ -8468,25 +11603,46 @@ fn test_conflict_working_log_is_sole_attribution_source() {
 fn test_conflict_content_diff_wins_over_working_log() {
     let repo = TestRepo::new();
 
-    write_raw_commit(&repo, "settings.py", "MAX_RETRIES = 3\nTIMEOUT = 10\n", "Initial commit");
+    write_raw_commit(
+        &repo,
+        "settings.py",
+        "MAX_RETRIES = 3\nTIMEOUT = 10\n",
+        "Initial commit",
+    );
     let main_branch = repo.current_branch();
 
     // Main: changes MAX_RETRIES → will conflict
-    write_raw_commit(&repo, "settings.py", "MAX_RETRIES = 10\nTIMEOUT = 10\n",
-        "main: bump max retries");
-    write_raw_commit(&repo, "app.py", "from settings import MAX_RETRIES\n", "main: import settings");
-    write_raw_commit(&repo, "server.py", "import http.server\n", "main: add server stub");
+    write_raw_commit(
+        &repo,
+        "settings.py",
+        "MAX_RETRIES = 10\nTIMEOUT = 10\n",
+        "main: bump max retries",
+    );
+    write_raw_commit(
+        &repo,
+        "app.py",
+        "from settings import MAX_RETRIES\n",
+        "main: import settings",
+    );
+    write_raw_commit(
+        &repo,
+        "server.py",
+        "import http.server\n",
+        "main: add server stub",
+    );
 
-    let base_sha = repo.git(&["rev-parse", "HEAD~3"]).unwrap().trim().to_string();
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~3"])
+        .unwrap()
+        .trim()
+        .to_string();
     repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
 
     // C1: AI sets MAX_RETRIES = 5 — WILL CONFLICT with main's = 10
     let mut sett = repo.filename("settings.py");
-    sett.set_contents(crate::lines![
-        "MAX_RETRIES = 5".ai(),
-        "TIMEOUT = 10",
-    ]);
-    repo.stage_all_and_commit("feat: C1 AI sets MAX_RETRIES=5").unwrap();
+    sett.set_contents(crate::lines!["MAX_RETRIES = 5".ai(), "TIMEOUT = 10",]);
+    repo.stage_all_and_commit("feat: C1 AI sets MAX_RETRIES=5")
+        .unwrap();
 
     // C2: AI adds a validator (conflict-free)
     let mut validator = repo.filename("validator.py");
@@ -8499,27 +11655,31 @@ fn test_conflict_content_diff_wins_over_working_log() {
     // Rebase — C1 conflicts on settings.py
     repo.git(&["checkout", "feature"]).unwrap();
     let rebase_result = repo.git(&["rebase", &main_branch]);
-    assert!(rebase_result.is_err(), "rebase should conflict on settings.py at C1");
+    assert!(
+        rebase_result.is_err(),
+        "rebase should conflict on settings.py at C1"
+    );
 
     // AI resolves by keeping the ORIGINAL AI value exactly.
     // Content-diff: original `= 5` == resolved `= 5` → Equal → attribution carried.
     // Also creates a working-log checkpoint via set_contents.
     // The content-diff path fires first (commit_has_attestations=true) and wins.
-    sett.set_contents(crate::lines![
-        "MAX_RETRIES = 5".ai(),
-        "TIMEOUT = 10",
-    ]);
-    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None).unwrap();
+    sett.set_contents(crate::lines!["MAX_RETRIES = 5".ai(), "TIMEOUT = 10",]);
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .unwrap();
 
     let chain = get_commit_chain(&repo, 2);
 
     // C1': settings.py — note exists because content-diff matched MAX_RETRIES = 5
     assert_note_base_commit_matches(&repo, &chain[0], "c1_base");
     assert_note_files_exact(&repo, &chain[0], "c1_files", &["settings.py"]);
-    assert_blame_at_commit(&repo, &chain[0], "settings.py", "c1_blame", &[
-        ("MAX_RETRIES = 5", true),
-        ("TIMEOUT = 10", false),
-    ]);
+    assert_blame_at_commit(
+        &repo,
+        &chain[0],
+        "settings.py",
+        "c1_blame",
+        &[("MAX_RETRIES = 5", true), ("TIMEOUT = 10", false)],
+    );
     assert_accepted_lines_exact(&repo, &chain[0], "c1_accepted", 1);
 
     // C2': validator.py only
