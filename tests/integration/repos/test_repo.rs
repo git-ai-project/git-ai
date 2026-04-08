@@ -2348,7 +2348,14 @@ impl TestRepo {
             };
             Ok(combined)
         } else {
-            Err(stderr)
+            let combined = if stdout.is_empty() {
+                stderr
+            } else if stderr.is_empty() {
+                stdout
+            } else {
+                format!("{}{}", stderr, stdout)
+            };
+            Err(combined)
         }
     }
 
@@ -2398,7 +2405,17 @@ impl TestRepo {
             };
             Ok(combined)
         } else {
-            Err(stderr)
+            // Combine stdout and stderr so callers can find structured
+            // output (e.g. JSON errors) that the command wrote to stdout
+            // before exiting with a non-zero status.
+            let combined = if stdout.is_empty() {
+                stderr
+            } else if stderr.is_empty() {
+                stdout
+            } else {
+                format!("{}{}", stderr, stdout)
+            };
+            Err(combined)
         }
     }
 
@@ -2459,7 +2476,14 @@ impl TestRepo {
             };
             Ok(combined)
         } else {
-            Err(stderr)
+            let combined = if stdout.is_empty() {
+                stderr
+            } else if stderr.is_empty() {
+                stdout
+            } else {
+                format!("{}{}", stderr, stdout)
+            };
+            Err(combined)
         }
     }
 
