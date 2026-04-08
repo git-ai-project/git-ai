@@ -3989,9 +3989,9 @@ fn build_note_from_conflict_wl(
     for (file_path, line_attrs) in &file_line_attrs {
         // Tally accepted lines per author from the raw LineAttribution slice.
         for la in line_attrs {
-            // end_line is exclusive; count = end_line - start_line.
+            // end_line is inclusive (1-indexed); count = end_line - start_line + 1.
             *accepted_per_author.entry(la.author_id.clone()).or_insert(0) +=
-                la.end_line - la.start_line;
+                la.end_line - la.start_line + 1;
         }
         if let Some(file_att) = build_file_attestation_from_line_attributions(file_path, line_attrs)
         {
