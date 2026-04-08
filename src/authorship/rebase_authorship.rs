@@ -1444,6 +1444,10 @@ pub fn rewrite_authorship_after_rebase_v2(
     // After the first content-diff, our accumulated attribution state matches the
     // commit chain, so we can use hunk-based transfer for subsequent appearances.
     let mut files_with_synced_state: HashSet<String> = HashSet::new();
+    // Cache the set of active prompt IDs from the previous commit. When this set
+    // is unchanged, the metadata template is unchanged and we skip the serde_json
+    // serialization entirely (saves O(prompts) work per commit in the common case).
+    let mut prev_active_prompt_ids: HashSet<String> = HashSet::new();
 
     for (idx, new_commit) in commits_to_process.iter().enumerate() {
         debug_log(&format!(
@@ -1589,18 +1593,24 @@ pub fn rewrite_authorship_after_rebase_v2(
                 commit_hunks,
             );
             apply_prompt_line_metrics_to_prompts(&mut current_prompts, &delta_prompt_metrics);
-            // Only include prompts that contributed new AI lines to this commit's diff.
-            let active_prompts_for_commit: BTreeMap<String, BTreeMap<String, crate::authorship::authorship_log::PromptRecord>> = current_prompts
+            // Collect the IDs of prompts that contributed new AI lines to this commit's diff.
+            // Avoids cloning the full BTreeMap — we pass a HashSet filter to the template builder.
+            let active_prompt_ids: HashSet<String> = delta_prompt_metrics
                 .iter()
-                .filter(|(pid, _)| {
-                    delta_prompt_metrics
-                        .get(pid.as_str())
-                        .map_or(false, |m| m.accepted_lines > 0)
-                })
-                .map(|(k, v)| (k.clone(), v.clone()))
+                .filter(|(_, m)| m.accepted_lines > 0)
+                .map(|(pid, _)| pid.clone())
                 .collect();
-            metadata_json_template_parts =
-                build_metadata_template_parts(&current_authorship_log.metadata, &active_prompts_for_commit);
+            // Only rebuild the (expensive) serde_json metadata template when the active-prompt
+            // set actually changed.  Consecutive commits from the same AI session typically share
+            // the same active prompt, so this skips the rebuild most of the time.
+            if active_prompt_ids != prev_active_prompt_ids {
+                metadata_json_template_parts = build_metadata_template_parts_filtered(
+                    &current_authorship_log.metadata,
+                    &current_prompts,
+                    Some(&active_prompt_ids),
+                );
+                prev_active_prompt_ids = active_prompt_ids;
+            }
             loop_metrics_ms += tmetrics.elapsed().as_micros();
         }
 
@@ -3592,9 +3602,21 @@ fn build_metadata_template_parts(
     metadata: &crate::authorship::authorship_log_serialization::AuthorshipMetadata,
     prompts: &BTreeMap<String, BTreeMap<String, crate::authorship::authorship_log::PromptRecord>>,
 ) -> Option<(String, String)> {
+    build_metadata_template_parts_filtered(metadata, prompts, None)
+}
+
+/// Like `build_metadata_template_parts` but only includes prompts whose IDs are in
+/// `active_ids`. Passing `None` includes all prompts (same as the unfiltered variant).
+/// This avoids cloning the entire prompts map per commit — callers pass a `HashSet<&str>`
+/// built from `delta_prompt_metrics` instead of pre-filtering and cloning the map.
+fn build_metadata_template_parts_filtered(
+    metadata: &crate::authorship::authorship_log_serialization::AuthorshipMetadata,
+    prompts: &BTreeMap<String, BTreeMap<String, crate::authorship::authorship_log::PromptRecord>>,
+    active_ids: Option<&HashSet<String>>,
+) -> Option<(String, String)> {
     let mut template_meta = metadata.clone();
     template_meta.base_commit_sha = "BASE_COMMIT_SHA_PLACEHOLDER".to_string();
-    template_meta.prompts = flatten_prompts_for_metadata(prompts);
+    template_meta.prompts = flatten_prompts_for_metadata_filtered(prompts, active_ids);
     serde_json::to_string_pretty(&template_meta)
         .ok()
         .map(|template| {
@@ -3609,8 +3631,18 @@ fn build_metadata_template_parts(
 fn flatten_prompts_for_metadata(
     prompts: &BTreeMap<String, BTreeMap<String, crate::authorship::authorship_log::PromptRecord>>,
 ) -> BTreeMap<String, crate::authorship::authorship_log::PromptRecord> {
+    flatten_prompts_for_metadata_filtered(prompts, None)
+}
+
+fn flatten_prompts_for_metadata_filtered(
+    prompts: &BTreeMap<String, BTreeMap<String, crate::authorship::authorship_log::PromptRecord>>,
+    active_ids: Option<&HashSet<String>>,
+) -> BTreeMap<String, crate::authorship::authorship_log::PromptRecord> {
     prompts
         .iter()
+        .filter(|(prompt_id, _)| {
+            active_ids.map_or(true, |ids| ids.contains(prompt_id.as_str()))
+        })
         .filter_map(|(prompt_id, commits)| {
             commits
                 .values()
@@ -3817,13 +3849,15 @@ fn diff_based_line_attribution_transfer(
     let old_lines: Vec<&str> = old_content.lines().collect();
     let new_lines: Vec<&str> = new_content.lines().collect();
 
-    // Build a lookup from 0-indexed line index → author_id for old content
-    let mut old_line_author: Vec<Option<&str>> = vec![None; old_lines.len()];
+    // Build a sparse lookup from 0-indexed line position → author_id for old content.
+    // Using a HashMap instead of a full-size Vec avoids allocating O(file_size) memory
+    // when only a small fraction of lines carry AI attribution.
+    let mut old_line_author: HashMap<usize, &str> = HashMap::new();
     for attr in old_line_attrs {
         for line_num in attr.start_line..=attr.end_line {
             let idx = (line_num as usize).saturating_sub(1);
-            if idx < old_line_author.len() {
-                old_line_author[idx] = Some(&attr.author_id);
+            if idx < old_lines.len() {
+                old_line_author.insert(idx, &attr.author_id);
             }
         }
     }
@@ -3831,7 +3865,7 @@ fn diff_based_line_attribution_transfer(
     let diff_ops = capture_diff_slices(&old_lines, &new_lines);
 
     let mut new_line_attrs: Vec<crate::authorship::attribution_tracker::LineAttribution> =
-        Vec::with_capacity(new_lines.len());
+        Vec::with_capacity(old_line_author.len());
 
     for op in &diff_ops {
         match op {
@@ -3844,7 +3878,7 @@ fn diff_based_line_attribution_transfer(
                 for i in 0..*len {
                     let old_idx = old_index + i;
                     let new_line_num = (new_index + i + 1) as u32;
-                    if let Some(Some(author_id)) = old_line_author.get(old_idx) {
+                    if let Some(author_id) = old_line_author.get(&old_idx) {
                         new_line_attrs.push(
                             crate::authorship::attribution_tracker::LineAttribution {
                                 start_line: new_line_num,

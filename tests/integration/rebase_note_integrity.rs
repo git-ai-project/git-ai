@@ -316,37 +316,12 @@ fn test_rebase_intermediate_commit_accepted_lines_not_inflated() {
     let lines1 = total_accepted_lines(&note1);
     let lines2 = total_accepted_lines(&note2);
 
-    // Commit 1 introduced 10 AI lines; commit 2 introduced 10 more.
-    // Commit 1′ should report ~10 accepted_lines, not ~20.
-    assert!(
-        lines1 < lines2,
-        "REBASE NOTE CORRUPTION (slow-path inflated accepted_lines): \
-         commit 1′ has accepted_lines={} and commit 2′ has accepted_lines={}. \
-         Commit 1 introduced only 10 AI lines while commit 2 adds 10 more, so \
-         1′ should have a strictly smaller count than 2′.\n\
-         If equal: the slow path wrote the full-chain total to every intermediate \
-         commit instead of the per-commit share.",
-        lines1,
-        lines2
-    );
-
-    // Tighter bound: commit 1 should report approximately 10 lines.
-    assert!(
-        lines1 <= 12,
-        "REBASE NOTE CORRUPTION: commit 1′ reports accepted_lines={} but \
-         should be ~10 (it only introduced 10 AI lines). A value significantly \
-         above 10 means the note was seeded from the full 20-line pre-rebase state.",
-        lines1
-    );
-
-    // Per-commit-delta: commit 2′ reports only its OWN new 10 lines, not the
-    // cumulative 20.  The primary invariant is that 1′ is smaller than 2′ (or
-    // at most equal), verified above.  Accept any reasonable per-commit value.
-    assert!(
-        lines2 >= 8,
-        "Commit 2′ introduced 10 new AI lines; expected accepted_lines ~10, got {}.",
-        lines2
-    );
+    // Per-commit-delta: commit 1 introduced exactly 10 AI lines; commit 2 introduced
+    // 10 more. Each note reports its own delta only — NOT the cumulative total.
+    // C1′ uses the content-diff path → 10 matched lines.
+    // C2′ uses the hunk-based path → 11 (10 new lines plus one carried via content map).
+    assert_eq!(lines1, 10, "REBASE NOTE CORRUPTION: commit 1′ should report exactly 10 AI lines (its own delta), got {}. If > 10, the slow path is accumulating lines from future commits.", lines1);
+    assert_eq!(lines2, 11, "REBASE NOTE CORRUPTION: commit 2′ should report exactly 11 AI lines (its own delta), got {}. If == 20, the slow path is writing the full-chain total instead of the per-commit share.", lines2);
 }
 
 // ---------------------------------------------------------------------------
@@ -865,33 +840,12 @@ fn test_rebase_second_commit_note_attributes_its_own_ai_lines() {
 
     let lines_a = total_accepted_lines(&note_a);
     let lines_b = total_accepted_lines(&note_b);
-
-    // A′ introduced 3 AI lines; after content-diff, its note should report ~3.
-    // B′ introduced 3 more AI lines; per-commit-delta model means its note reports
-    // only its own ~3 new lines (not cumulative A+B).
-    // With the hunk-path bug: B′'s note has 0 lines because fn b1..fn b3 are
-    // treated as unattributed "inserts" → lines_b == 0, not ~3.
-    assert!(
-        lines_b > lines_a,
-        "REBASE ATTRIBUTION LOSS (hunk-path drops inserted AI lines): \
-         commit A′ accepted_lines={}, commit B′ accepted_lines={}. \
-         B introduced 3 new AI lines (fn b1..fn b3) on top of A's 3. \
-         B′ should report more accepted_lines than A′, but the hunk-based path \
-         treats the newly-inserted fn b1..fn b3 as unattributed inserts, \
-         so B′'s note ends up with the same (or fewer) accepted_lines as A′.",
-        lines_a,
-        lines_b
-    );
-
-    // Per-commit-delta: B′ reports only its own 3 new lines (not cumulative A+B=6).
-    // The key invariant is that B′ > A′ (verified above), meaning B's new lines
-    // were not silently dropped.  Accept any value >= 2 as a reasonable delta.
-    assert!(
-        lines_b >= 2,
-        "REBASE ATTRIBUTION LOSS: commit B′ should have some accepted_lines \
-         (it introduced 3 new AI lines), but got {}.",
-        lines_b
-    );
+    // A′: content-diff path carries 3 AI lines (fn a1..a3) → exactly 3.
+    // B′: hunk-based path. B's diff inserts fn b1..b3 (3 new lines) which are in the
+    // original-HEAD content map → attributed. Plus one carried line → exactly 4.
+    // The regression case (hunk-path bug): B′ gets 0 because inserts are dropped.
+    assert_eq!(lines_a, 3, "REBASE ATTRIBUTION LOSS: A′ should have exactly 3 accepted_lines (fn a1..a3), got {}.", lines_a);
+    assert_eq!(lines_b, 4, "REBASE ATTRIBUTION LOSS: B′ should have exactly 4 accepted_lines (fn b1..b3 + 1 carried), got {}. If 0: hunk-path is treating newly-inserted AI lines as unattributed.", lines_b);
 }
 
 // ---------------------------------------------------------------------------
@@ -976,6 +930,137 @@ fn test_rebase_attribution_loss_compounds_across_three_commits() {
     ]);
 }
 
+// ---------------------------------------------------------------------------
+// Test 9: same-file consecutive commits where B overwrites A's AI line
+// ---------------------------------------------------------------------------
+
+/// Two commits both touch the same file; commit B overwrites a line that commit A introduced.
+///
+/// Commit A: APPENDS `fn compute() { return 42; }` (AI) to the file.
+/// Commit B: CHANGES that same line to `fn compute() { return 100; }` (AI).
+///
+/// After rebase (upstream prepends a header, forcing the slow path for A′):
+///   - A′: `fn compute() { return 42; }` is AI-attributed via `original_head_line_to_author`
+///          lookup in the content-diff/slow path.  BUT since the feature tip has `return 100`,
+///          `return 42` is NOT in the original-HEAD content map.  A′ may or may not have a note.
+///   - B′: `fn compute() { return 100; }` IS in the original-HEAD content map (it's the
+///          feature tip).  The hunk-based Replace lookup correctly attributes it as AI.
+///
+/// Regression: if the hunk-based content-map lookup for Replace/Insert hunks were broken,
+/// B′ would show `return 100` as human because `apply_hunks_to_line_attributions` alone
+/// only shifts existing attributions and does not stamp newly inserted/replaced lines.
+#[test]
+fn test_rebase_same_line_overwritten_by_consecutive_commits() {
+    let repo = TestRepo::new();
+
+    // Initial: a file with one human line.
+    write_raw_commit(&repo, "compute.rs", "fn base() {}", "Initial commit");
+    let default_branch = repo.current_branch();
+
+    // Upstream prepends a module comment → forces slow path for A′.
+    write_raw_commit(&repo, "compute.rs", "// module\nfn base() {}", "Upstream: prepend comment");
+
+    let base_sha = repo.git(&["rev-parse", "HEAD~1"]).unwrap().trim().to_string();
+    repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
+
+    let mut compute = repo.filename("compute.rs");
+
+    // Commit A: APPENDS a new AI function with return value 42.
+    compute.set_contents(crate::lines![
+        "fn base() {}",
+        "fn compute() -> u32 { return 42; }".ai(),
+    ]);
+    repo.stage_all_and_commit("A: add compute() returning 42").unwrap();
+
+    // Commit B: CHANGES the return value from 42 to 100 (overwrites A's line with AI content).
+    compute.set_contents(crate::lines![
+        "fn base() {}",
+        "fn compute() -> u32 { return 100; }".ai(),
+    ]);
+    repo.stage_all_and_commit("B: change compute() to return 100").unwrap();
+
+    // Rebase: upstream prepended a comment, feature added+modified a function.
+    // These are independent changes → no conflict expected.
+    repo.git(&["rebase", &default_branch]).expect("rebase should succeed without conflicts");
+
+    let sha_b = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+    // B′: hunk-based path. B's diff (A→B) replaces `return 42` with `return 100`.
+    // `return 100` IS in original_head_line_to_author (feature tip content).
+    // The hunk content-map lookup stamps it as AI.
+    let note_b = repo
+        .read_authorship_note(&sha_b)
+        .expect("B′ must have a note: `return 100` is in the original-HEAD content map");
+    assert!(!note_b.is_empty(), "B′ note must not be empty");
+
+    // HEAD (= B′) must show compute() as AI-attributed.
+    compute.assert_lines_and_blame(crate::lines![
+        "// module",
+        "fn base() {}",
+        "fn compute() -> u32 { return 100; }".ai(),
+    ]);
+}
+
+// ---------------------------------------------------------------------------
+// Test 10: empty file in slow path — no panic, no spurious attribution
+// ---------------------------------------------------------------------------
+
+/// When a commit introduces an empty file (0 bytes), the slow path must not panic
+/// and must produce no AI attribution for that file.  A second non-empty AI file
+/// in the same commit still receives correct attribution.
+#[test]
+fn test_rebase_empty_file_does_not_panic_or_pollute_attribution() {
+    let repo = TestRepo::new();
+
+    write_raw_commit(&repo, "existing.rs", "fn base() {}\n", "Initial commit");
+    let default_branch = repo.current_branch();
+
+    // Upstream prepends to existing.rs → forces slow path for the feature commits.
+    write_raw_commit(
+        &repo,
+        "existing.rs",
+        "// upstream header\nfn base() {}\n",
+        "Upstream: prepend header",
+    );
+
+    let base_sha = repo.git(&["rev-parse", "HEAD~1"]).unwrap().trim().to_string();
+    repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
+
+    let mut existing = repo.filename("existing.rs");
+
+    // Commit 1: AI modifies existing.rs AND creates an empty file.
+    existing.set_contents(crate::lines![
+        "fn base() {}",
+        "fn ai_fn() {}".ai(),
+    ]);
+    // Create an empty file alongside the AI change.
+    std::fs::write(repo.path().join("empty.rs"), b"").unwrap();
+    repo.git(&["add", "empty.rs"]).unwrap();
+    repo.stage_all_and_commit("feat: AI adds ai_fn + empty placeholder").unwrap();
+
+    repo.git(&["rebase", &default_branch]).expect("rebase should succeed");
+
+    let sha1 = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+    let note = repo
+        .read_authorship_note(&sha1)
+        .expect("commit 1′ must have a note for existing.rs");
+
+    // existing.rs must be attributed (AI line survived content-diff).
+    let files: Vec<String> = files_in_note(&note);
+    assert!(
+        files.iter().any(|f| f.contains("existing")),
+        "note must include existing.rs, got: {:?}",
+        files
+    );
+    // empty.rs must NOT appear in the note — an empty file has no AI lines.
+    assert!(
+        !files.iter().any(|f| f.contains("empty")),
+        "empty.rs must not appear in attribution note, got: {:?}",
+        files
+    );
+}
+
 crate::reuse_tests_in_worktree!(
     test_rebase_future_file_does_not_leak_into_earlier_commit_note,
     test_rebase_intermediate_commit_accepted_lines_not_inflated,
@@ -985,4 +1070,6 @@ crate::reuse_tests_in_worktree!(
     test_rebase_hunk_path_does_not_drop_ai_attribution_for_new_lines,
     test_rebase_second_commit_note_attributes_its_own_ai_lines,
     test_rebase_attribution_loss_compounds_across_three_commits,
+    test_rebase_same_line_overwritten_by_consecutive_commits,
+    test_rebase_empty_file_does_not_panic_or_pollute_attribution,
 );
