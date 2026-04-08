@@ -968,7 +968,11 @@ fn apply_blame_for_side(
                     .or_default()
                     .push(*line);
                 Attribution::Ai(tool)
+            } else if author_marker.starts_with("h_") {
+                // Known human attestation (h_-prefixed hash from KnownHuman checkpoint)
+                Attribution::Human(author_marker.clone())
             } else {
+                // Other markers (e.g. legacy "human" marker)
                 Attribution::Human(author_marker.clone())
             };
             attributions.insert(key.clone(), attribution);
