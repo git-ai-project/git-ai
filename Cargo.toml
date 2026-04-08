@@ -13,7 +13,7 @@ sha2 = "0.10"
 imara-diff = "0.2"
 chrono = { version = "0.4.44", default-features = false, features = ["serde", "clock", "std"] }
 humantime = "2.3"
-indicatif = "0.17"
+indicatif = "0.18"
 smol = "2.0"
 futures = "0.3"
 tokio = { version = "1.45", features = ["rt-multi-thread", "sync", "time", "macros"] }
