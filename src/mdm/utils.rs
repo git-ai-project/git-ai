@@ -371,6 +371,17 @@ pub fn home_dir() -> PathBuf {
     }
 }
 
+/// Claude config directory, respecting the CLAUDE_CONFIG_DIR env var.
+/// Falls back to ~/.claude when unset.
+pub fn claude_config_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("CLAUDE_CONFIG_DIR")
+        && !dir.is_empty()
+    {
+        return PathBuf::from(dir);
+    }
+    home_dir().join(".claude")
+}
+
 /// Write data to a file atomically (write to temp, then rename)
 /// If the path is a symlink, writes to the target file (preserving the symlink)
 pub fn write_atomic(path: &Path, data: &[u8]) -> Result<(), GitAiError> {
@@ -839,6 +850,7 @@ pub fn update_vscode_chat_hook_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::fs;
     use tempfile::TempDir;
 
@@ -1455,5 +1467,42 @@ mod tests {
         let path = PathBuf::from("/usr/local/bin/git");
         let result = to_windows_git_bash_style_path(&path);
         assert_eq!(result, "/usr/local/bin/git");
+    }
+
+    #[test]
+    #[serial]
+    fn test_claude_config_dir_defaults_to_home_dot_claude() {
+        unsafe {
+            std::env::remove_var("CLAUDE_CONFIG_DIR");
+        }
+        let dir = claude_config_dir();
+        assert_eq!(dir, home_dir().join(".claude"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_claude_config_dir_respects_env_var() {
+        let custom = "/tmp/my-claude-config";
+        unsafe {
+            std::env::set_var("CLAUDE_CONFIG_DIR", custom);
+        }
+        let dir = claude_config_dir();
+        unsafe {
+            std::env::remove_var("CLAUDE_CONFIG_DIR");
+        }
+        assert_eq!(dir, PathBuf::from(custom));
+    }
+
+    #[test]
+    #[serial]
+    fn test_claude_config_dir_ignores_empty_env_var() {
+        unsafe {
+            std::env::set_var("CLAUDE_CONFIG_DIR", "");
+        }
+        let dir = claude_config_dir();
+        unsafe {
+            std::env::remove_var("CLAUDE_CONFIG_DIR");
+        }
+        assert_eq!(dir, home_dir().join(".claude"));
     }
 }
