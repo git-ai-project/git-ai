@@ -315,7 +315,7 @@ pub fn write_stats_to_markdown(stats: &CommitStats) -> String {
     }
 
     // Calculate total additions for the progress bar
-    // Total = pure human + mixed (AI-edited-by-human) + pure AI (accepted)
+    // Total = (known human + unknown) + mixed (AI-edited-by-human) + pure AI (accepted)
     let total_additions = stats.git_diff_added_lines;
 
     // Pure human additions: known-human attested + unattested (treated as human until full KnownHuman pipeline)
@@ -503,7 +503,9 @@ pub fn stats_from_authorship_log(
 
     // TODO: Mixed additions come from prompt overrides and can exceed the final diff when we
     // compute ai_accepted from diff/blame. Cap to remaining added lines until we improve mixed tracking.
-    let max_mixed = git_diff_added_lines.saturating_sub(commit_stats.ai_accepted);
+    let max_mixed = git_diff_added_lines
+        .saturating_sub(commit_stats.ai_accepted)
+        .saturating_sub(known_human_accepted);
     if commit_stats.mixed_additions > max_mixed {
         commit_stats.mixed_additions = max_mixed;
     }
@@ -618,11 +620,14 @@ fn accepted_lines_from_attestations(
         for entry in &file_attestation.entries {
             // KnownHuman entries (h_ prefix): count as known-human-attested lines.
             if entry.hash.starts_with("h_") {
-                known_human_accepted += entry
+                let accepted = entry
                     .line_ranges
                     .iter()
                     .map(|line_range| line_range_overlap_len(line_range, added_lines))
                     .sum::<u32>();
+                if accepted > 0 {
+                    known_human_accepted += accepted;
+                }
                 continue;
             }
 
@@ -1034,6 +1039,8 @@ mod tests {
         let stats = stats_for_commit_stats(tmp_repo.gitai_repo(), &head_sha, &[]).unwrap();
 
         // Verify the stats
+        // trigger_checkpoint_with_author produces KnownHuman checkpoints (post Task 9),
+        // so human-written lines have h_-prefixed attestation entries → human_additions.
         assert_eq!(stats.human_additions, 2, "Human added 2 lines");
         assert_eq!(stats.ai_additions, 2, "AI added 2 lines");
         assert_eq!(stats.ai_accepted, 2, "AI lines were accepted");
