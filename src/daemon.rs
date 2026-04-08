@@ -2393,19 +2393,41 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
     if base_commit.trim().is_empty() || target_commit.trim().is_empty() {
         return Ok(());
     }
-    let dirty_files = if let Some(snapshot) = carryover_snapshot {
-        snapshot.clone()
+
+    // Resolve the repo working directory once — needed for bash snapshot checks below.
+    let repo_workdir = repo
+        .workdir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let repo_root = std::path::Path::new(&repo_workdir);
+
+    let committed_diff_base = if base_commit == "initial" {
+        None
     } else {
-        committed_file_snapshot_between_commits(
-            repo,
-            if base_commit == "initial" {
-                None
-            } else {
-                Some(base_commit.as_str())
-            },
-            &target_commit,
-        )?
+        Some(base_commit.as_str())
     };
+
+    let dirty_files = if let Some(snapshot) = carryover_snapshot {
+        let mut dirty = snapshot.clone();
+        // The carryover snapshot only tracks files already in the working log at
+        // checkpoint time.  When a bash tool is in-flight at commit time, files
+        // edited *after* the last checkpoint (e.g. modified between PostToolUse A
+        // and the final commit) are absent from the snapshot.  Supplement with the
+        // full committed diff so those files also receive attribution.
+        if crate::commands::checkpoint_agent::bash_tool::has_active_bash_inflight(repo_root) {
+            if let Ok(full_diff) =
+                committed_file_snapshot_between_commits(repo, committed_diff_base, &target_commit)
+            {
+                for (path, content) in full_diff {
+                    dirty.entry(path).or_insert(content);
+                }
+            }
+        }
+        dirty
+    } else {
+        committed_file_snapshot_between_commits(repo, committed_diff_base, &target_commit)?
+    };
+
     let changed_files = commit_replay_files_from_snapshot(&dirty_files);
     if changed_files.is_empty() {
         return Ok(());
@@ -2416,12 +2438,50 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
     if changed_files.is_empty() {
         return Ok(());
     }
-    let replay_agent_result = build_human_replay_agent_result(changed_files, dirty_files);
+
+    // Mirror the wrapper-mode pre-commit hook: if a bash tool is in-flight when
+    // the commit lands, attribute the committed files to that AI agent rather than
+    // writing a synthetic Human checkpoint.  Bash snapshot files are written at
+    // PreToolUse time and live for 300 s, so they are always present on disk when
+    // the daemon processes the trace2 commit event (typically < 1 s later).
+    let (checkpoint_kind, replay_agent_result) =
+        match crate::commands::checkpoint_agent::bash_tool::checkpoint_context_from_active_bash(
+            repo_root,
+            &repo_workdir,
+        ) {
+            Some((kind, Some(ai_result))) => {
+                // Bash in flight with full context — attribute committed files to the AI agent.
+                // AiAgent checkpoints use `edited_filepaths` (not `will_edit_filepaths`) for the
+                // explicit path list, matching how `explicit_capture_target_paths` dispatches.
+                let result = AgentRunResult {
+                    edited_filepaths: Some(changed_files),
+                    dirty_files: Some(dirty_files),
+                    will_edit_filepaths: None,
+                    ..ai_result
+                };
+                (kind, result)
+            }
+            Some((kind, None)) => {
+                // Bash in flight but no context details — use AI kind with daemon agent_id.
+                let result = AgentRunResult {
+                    edited_filepaths: Some(changed_files),
+                    dirty_files: Some(dirty_files),
+                    will_edit_filepaths: None,
+                    checkpoint_kind: kind,
+                    ..build_human_replay_agent_result(vec![], HashMap::new())
+                };
+                (kind, result)
+            }
+            None => {
+                let result = build_human_replay_agent_result(changed_files, dirty_files);
+                (CheckpointKind::Human, result)
+            }
+        };
 
     crate::commands::checkpoint::run_with_base_commit_override_with_policy(
         repo,
         author,
-        CheckpointKind::Human,
+        checkpoint_kind,
         true,
         Some(replay_agent_result),
         base_commit != "initial",
