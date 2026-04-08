@@ -605,6 +605,12 @@ fn accepted_lines_from_attestations(
         };
 
         for entry in &file_attestation.entries {
+            // Skip KnownHuman entries (h_ prefix). These are human-attested lines that
+            // should count as human additions, not AI accepted.
+            if entry.hash.starts_with("h_") {
+                continue;
+            }
+
             let accepted = entry
                 .line_ranges
                 .iter()
