@@ -213,26 +213,21 @@ fn assert_note_base_commit_matches(repo: &TestRepo, sha: &str, ctx: &str) {
     );
 }
 
-/// Assert total accepted_lines in `sha`'s note equals `expected` (±`tolerance`).
-fn assert_accepted_lines_approx(
+/// Assert total accepted_lines in `sha`'s note equals `expected` exactly.
+fn assert_accepted_lines_exact(
     repo: &TestRepo,
     sha: &str,
     ctx: &str,
     expected: u32,
-    tolerance: u32,
 ) {
     let raw = repo
         .read_authorship_note(sha)
         .unwrap_or_else(|| panic!("{}: commit {} has no note", ctx, sha));
     let actual = total_accepted_lines(&raw);
-    assert!(
-        actual >= expected.saturating_sub(tolerance) && actual <= expected + tolerance,
-        "{}: accepted_lines at {} = {} but expected {} ±{}\n(Note: this detects inflated/deflated stats.)",
-        ctx,
-        sha,
-        actual,
-        expected,
-        tolerance
+    assert_eq!(
+        actual, expected,
+        "{}: accepted_lines at {} = {} but expected exactly {}",
+        ctx, sha, actual, expected
     );
 }
 
@@ -3116,7 +3111,7 @@ fn test_slow_path_python_utils_main_prepends_feature_appends() {
     // sha0 = C1': note has utils.py only; accepted_lines ~8
     assert_note_base_commit_matches(&repo, &chain[0], "sha0");
     assert_note_files_exact(&repo, &chain[0], "sha0_files", &["utils.py"]);
-    assert_accepted_lines_approx(&repo, &chain[0], "sha0_lines", 8, 3);
+    assert_accepted_lines_exact(&repo, &chain[0], "sha0_lines", 8);
 
     // sha0 blame: first 3 lines human (# utils module, import logging, blank),
     // then def base_util (human), then 8 AI lines
@@ -3135,37 +3130,37 @@ fn test_slow_path_python_utils_main_prepends_feature_appends() {
         ("return text.strip()", true),
     ]);
 
-    // sha1 = C2': accepted_lines ~9 (per-commit delta)
+    // sha1 = C2': 9 accepted_lines (per-commit delta)
     assert_note_base_commit_matches(&repo, &chain[1], "sha1");
     assert_note_files_exact(&repo, &chain[1], "sha1_files", &["utils.py"]);
-    assert_accepted_lines_approx(&repo, &chain[1], "sha1_lines", 9, 4);
+    assert_accepted_lines_exact(&repo, &chain[1], "sha1_lines", 9);
     assert_blame_sample_at_commit(&repo, &chain[1], "utils.py", "sha1_blame_new", &[
         ("def normalize_phone", true),
         ("def truncate_text", true),
     ]);
 
-    // sha2 = C3': accepted_lines ~7 (per-commit delta)
+    // sha2 = C3': 7 accepted_lines (per-commit delta)
     assert_note_base_commit_matches(&repo, &chain[2], "sha2");
     assert_note_files_exact(&repo, &chain[2], "sha2_files", &["utils.py"]);
-    assert_accepted_lines_approx(&repo, &chain[2], "sha2_lines", 7, 4);
+    assert_accepted_lines_exact(&repo, &chain[2], "sha2_lines", 7);
     assert_blame_sample_at_commit(&repo, &chain[2], "utils.py", "sha2_blame_new", &[
         ("def parse_date", true),
         ("def format_currency", true),
     ]);
 
-    // sha3 = C4': accepted_lines ~10 (per-commit delta)
+    // sha3 = C4': 10 accepted_lines (per-commit delta)
     assert_note_base_commit_matches(&repo, &chain[3], "sha3");
     assert_note_files_exact(&repo, &chain[3], "sha3_files", &["utils.py"]);
-    assert_accepted_lines_approx(&repo, &chain[3], "sha3_lines", 10, 4);
+    assert_accepted_lines_exact(&repo, &chain[3], "sha3_lines", 10);
     assert_blame_sample_at_commit(&repo, &chain[3], "utils.py", "sha3_blame_new", &[
         ("def generate_slug", true),
         ("def deep_merge", true),
     ]);
 
-    // sha4 = C5': accepted_lines ~10 (per-commit delta)
+    // sha4 = C5': 12 accepted_lines (per-commit delta)
     assert_note_base_commit_matches(&repo, &chain[4], "sha4");
     assert_note_files_exact(&repo, &chain[4], "sha4_files", &["utils.py"]);
-    assert_accepted_lines_approx(&repo, &chain[4], "sha4_lines", 10, 4);
+    assert_accepted_lines_exact(&repo, &chain[4], "sha4_lines", 12);
     assert_blame_sample_at_commit(&repo, &chain[4], "utils.py", "sha4_blame_new", &[
         ("def retry_with_backoff", true),
         ("def chunk_list", true),
@@ -4846,7 +4841,7 @@ fn test_slow_path_feature_has_human_commits_intermixed() {
     // sha1 = C2' (first AI commit): api.py with ~10 accepted lines
     assert_note_base_commit_matches(&repo, &chain[1], "sha1");
     assert_note_files_exact(&repo, &chain[1], "sha1_files", &["api.py"]);
-    assert_accepted_lines_approx(&repo, &chain[1], "sha1_lines", 10, 4);
+    assert_accepted_lines_exact(&repo, &chain[1], "sha1_lines", 12);
     // C2 introduced Flask app + /health endpoint — verify they are AI at sha1.
     assert_blame_sample_at_commit(&repo, &chain[1], "api.py", "sha1_blame", &[
         ("app = Flask(__name__)", true),
@@ -4854,13 +4849,13 @@ fn test_slow_path_feature_has_human_commits_intermixed() {
         ("def health", false),
     ]);
 
-    // sha2 = C3' (second AI commit): api.py with some accepted lines.
-    // Per-commit-delta: C3 introduced /users routes, but C5 later simplified some of those
-    // lines. The hunk-based content map only carries attribution for lines whose content
+    // sha2 = C3' (second AI commit): api.py with 6 accepted lines (per-commit delta).
+    // C3 introduced /users routes, but C5 later simplified some of those lines.
+    // The hunk-based content map only carries attribution for lines whose content
     // matches the original HEAD, so lines modified by C5 don't carry AI attribution here.
     assert_note_base_commit_matches(&repo, &chain[2], "sha2");
     assert_note_files_exact(&repo, &chain[2], "sha2_files", &["api.py"]);
-    assert_accepted_lines_approx(&repo, &chain[2], "sha2_lines", 6, 4);
+    assert_accepted_lines_exact(&repo, &chain[2], "sha2_lines", 6);
     // C3 introduced /users GET and POST routes. Some lines show as human because
     // C5 later modified them (content mismatch prevents attribution transfer).
     assert_blame_sample_at_commit(&repo, &chain[2], "api.py", "sha2_blame", &[
@@ -4872,10 +4867,10 @@ fn test_slow_path_feature_has_human_commits_intermixed() {
     assert_note_no_forbidden_files_if_present(&repo, &chain[3], "sha3_no_future",
         &["config.py", "requirements.txt"]);
 
-    // sha4 = C5' (third AI commit): api.py with ~12 accepted lines (C5's delta only)
+    // sha4 = C5' (third AI commit): api.py with 14 accepted lines (C5's delta only)
     assert_note_base_commit_matches(&repo, &chain[4], "sha4");
     assert_note_files_exact(&repo, &chain[4], "sha4_files", &["api.py"]);
-    assert_accepted_lines_approx(&repo, &chain[4], "sha4_lines", 12, 5);
+    assert_accepted_lines_exact(&repo, &chain[4], "sha4_lines", 14);
     // C5 introduced /users/:id GET and DELETE — verify they are AI at sha4.
     assert_blame_sample_at_commit(&repo, &chain[4], "api.py", "sha4_blame", &[
         ("def get_user", true),
@@ -4884,8 +4879,7 @@ fn test_slow_path_feature_has_human_commits_intermixed() {
     ]);
 
     // Per-commit-delta: each commit's accepted_lines reflects only its own new AI lines.
-    // Chain values like [12, 6, 14] are expected — monotonic growth is NOT guaranteed
-    // when each commit contributes a different number of new lines.
+    // Chain values [12, 6, 14] reflect different per-commit contribution sizes.
 }
 
 /// Test 9: Large function blocks with 20-line license header prepended.
@@ -5117,13 +5111,23 @@ fn test_slow_path_large_function_blocks_line_offset() {
         ("pub fn process_batch", true),
     ]);
 
-    // sha1 = C2': C2 added validate_input function
+    // sha1 = C2': C2 added validate_input function.
+    // The 20-line license header prepend shifts ALL feature lines by 20.
+    // assert_blame_sample_at_commit verifies key lines across the intermediate commit,
+    // confirming the line-offset accounting is correct after the upstream prepend.
     assert_note_base_commit_matches(&repo, &chain[1], "sha1");
     assert_note_files_exact(&repo, &chain[1], "sha1_files", &["processor.rs"]);
-    assert_blame_sample_at_commit(&repo, &chain[1], "processor.rs", "sha1_validate_input", &[
-        ("pub fn validate_input", true),
-        ("data is empty", false),
-        ("null byte", false),
+    // The 20-line license header shifts ALL feature lines by +20. We check that
+    // known-AI lines in the intermediate commit C2′ are correctly attributed.
+    // Only lines whose content also exists in the final feature tip (C5) are
+    // attributable via the hunk-based content-map lookup; lines that C3/C4/C5
+    // later rewrote are no longer in the content map and show as human.
+    assert_blame_sample_at_commit(&repo, &chain[1], "processor.rs", "sha1_blame_offset", &[
+        ("// Copyright 2024 MyOrg", false),  // license header (human) — not AI
+        ("// Processor module", false),      // original human header
+        ("use std::io;", false),             // original human line
+        ("pub fn process_batch", true),      // C1 AI line, offset +20 correctly applied
+        ("pub fn validate_input", true),     // C2 AI line — function sig survived to tip
     ]);
 
     // sha2 = C3': C3 added chunk_data function
@@ -8368,7 +8372,163 @@ fn test_conflict_mixed_ai_and_human_resolve_different_commits() {
 }
 
 // ============================================================================
-// END Category 4: AI Conflict Resolution
+// Category 5: Path-specific correctness tests
+// ============================================================================
+
+/// Verify that the working-log fallback path is the **sole** source of attribution
+/// when an AI conflict resolution writes *different* content than the original commit.
+///
+/// Scenario:
+///   - C1 writes `TIMEOUT = 30` as an AI line.
+///   - Main changes the same constant to `TIMEOUT = 60` → rebase conflict.
+///   - AI resolves by setting `TIMEOUT = 45` (a compromise — different from both sides).
+///   - `set_contents` records a working-log checkpoint for the resolved value.
+///   - Content-diff compares original (`= 30`) with resolved (`= 45`) → Replace → no match.
+///   - The working-log fallback must fire and attribute `= 45` as AI.
+///
+/// Regression: if `build_note_from_conflict_wl` were removed, C1' would have no note.
+#[test]
+fn test_conflict_working_log_is_sole_attribution_source() {
+    let repo = TestRepo::new();
+
+    write_raw_commit(&repo, "config.py", "TIMEOUT = 10\nRETRIES = 3\n", "Initial commit");
+    let main_branch = repo.current_branch();
+
+    // Main: changes TIMEOUT → will conflict
+    write_raw_commit(&repo, "config.py", "TIMEOUT = 60\nRETRIES = 3\n",
+        "main: increase timeout to 60");
+    write_raw_commit(&repo, "logging.py", "import logging\nlogging.basicConfig(level=logging.INFO)\n",
+        "main: add logging config");
+    write_raw_commit(&repo, "metrics.py", "class Metrics:\n    pass\n", "main: add metrics stub");
+
+    let base_sha = repo.git(&["rev-parse", "HEAD~3"]).unwrap().trim().to_string();
+    repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
+
+    // C1: AI sets TIMEOUT = 30 — WILL CONFLICT with main's = 60
+    let mut cfg = repo.filename("config.py");
+    cfg.set_contents(crate::lines![
+        "TIMEOUT = 30".ai(),
+        "RETRIES = 3",
+    ]);
+    repo.stage_all_and_commit("feat: C1 AI sets TIMEOUT=30").unwrap();
+
+    // C2: AI adds a helper (conflict-free)
+    let mut helper = repo.filename("helpers.py");
+    helper.set_contents(crate::lines![
+        "def retry(fn, n=3):".ai(),
+        "    for i in range(n):".ai(),
+        "        try: return fn()".ai(),
+        "        except Exception:".ai(),
+        "            if i == n - 1: raise".ai(),
+    ]);
+    repo.stage_all_and_commit("feat: C2 add retry helper").unwrap();
+
+    // Rebase — C1 conflicts on config.py
+    repo.git(&["checkout", "feature"]).unwrap();
+    let rebase_result = repo.git(&["rebase", &main_branch]);
+    assert!(rebase_result.is_err(), "rebase should conflict on config.py at C1");
+
+    // AI resolves: picks 45 as a compromise.  Content differs from original (30) → content-diff
+    // cannot carry attribution.  ONLY the working-log checkpoint can produce the note.
+    cfg.set_contents(crate::lines![
+        "TIMEOUT = 45".ai(),
+        "RETRIES = 3",
+    ]);
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None).unwrap();
+
+    let chain = get_commit_chain(&repo, 2);
+
+    // C1': config.py only — note MUST exist (working-log fallback fired)
+    assert_note_base_commit_matches(&repo, &chain[0], "c1_base");
+    assert_note_files_exact(&repo, &chain[0], "c1_files", &["config.py"]);
+    // The resolved value (45) must be AI-attributed, not human.
+    // This can only be true if build_note_from_conflict_wl contributed the note.
+    assert_blame_at_commit(&repo, &chain[0], "config.py", "c1_blame", &[
+        ("TIMEOUT = 45", true),
+        ("RETRIES = 3", false),
+    ]);
+
+    // C2': helpers.py only (unaffected by conflict)
+    assert_note_base_commit_matches(&repo, &chain[1], "c2_base");
+    assert_note_files_exact(&repo, &chain[1], "c2_files", &["helpers.py"]);
+}
+
+/// Verify that the content-diff path wins when it produces AI attribution, even when
+/// a working-log checkpoint also exists for the same commit.
+///
+/// Scenario:
+///   - C1 writes `MAX_RETRIES = 5` as an AI line.
+///   - Main changes the same constant to `MAX_RETRIES = 10` → conflict.
+///   - AI resolves by keeping the ORIGINAL value exactly: `MAX_RETRIES = 5`.
+///   - `set_contents` records a working-log checkpoint.
+///   - Content-diff sees `MAX_RETRIES = 5` (original) == `MAX_RETRIES = 5` (resolved) → Equal.
+///   - `commit_has_attestations = true` → content-diff path wins; working-log is not consulted.
+///   - Result: C1' note attributes `MAX_RETRIES = 5` as AI regardless of path.
+#[test]
+fn test_conflict_content_diff_wins_over_working_log() {
+    let repo = TestRepo::new();
+
+    write_raw_commit(&repo, "settings.py", "MAX_RETRIES = 3\nTIMEOUT = 10\n", "Initial commit");
+    let main_branch = repo.current_branch();
+
+    // Main: changes MAX_RETRIES → will conflict
+    write_raw_commit(&repo, "settings.py", "MAX_RETRIES = 10\nTIMEOUT = 10\n",
+        "main: bump max retries");
+    write_raw_commit(&repo, "app.py", "from settings import MAX_RETRIES\n", "main: import settings");
+    write_raw_commit(&repo, "server.py", "import http.server\n", "main: add server stub");
+
+    let base_sha = repo.git(&["rev-parse", "HEAD~3"]).unwrap().trim().to_string();
+    repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
+
+    // C1: AI sets MAX_RETRIES = 5 — WILL CONFLICT with main's = 10
+    let mut sett = repo.filename("settings.py");
+    sett.set_contents(crate::lines![
+        "MAX_RETRIES = 5".ai(),
+        "TIMEOUT = 10",
+    ]);
+    repo.stage_all_and_commit("feat: C1 AI sets MAX_RETRIES=5").unwrap();
+
+    // C2: AI adds a validator (conflict-free)
+    let mut validator = repo.filename("validator.py");
+    validator.set_contents(crate::lines![
+        "def validate_retries(n: int) -> bool:".ai(),
+        "    return isinstance(n, int) and 1 <= n <= 100".ai(),
+    ]);
+    repo.stage_all_and_commit("feat: C2 add validator").unwrap();
+
+    // Rebase — C1 conflicts on settings.py
+    repo.git(&["checkout", "feature"]).unwrap();
+    let rebase_result = repo.git(&["rebase", &main_branch]);
+    assert!(rebase_result.is_err(), "rebase should conflict on settings.py at C1");
+
+    // AI resolves by keeping the ORIGINAL AI value exactly.
+    // Content-diff: original `= 5` == resolved `= 5` → Equal → attribution carried.
+    // Also creates a working-log checkpoint via set_contents.
+    // The content-diff path fires first (commit_has_attestations=true) and wins.
+    sett.set_contents(crate::lines![
+        "MAX_RETRIES = 5".ai(),
+        "TIMEOUT = 10",
+    ]);
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None).unwrap();
+
+    let chain = get_commit_chain(&repo, 2);
+
+    // C1': settings.py — note exists because content-diff matched MAX_RETRIES = 5
+    assert_note_base_commit_matches(&repo, &chain[0], "c1_base");
+    assert_note_files_exact(&repo, &chain[0], "c1_files", &["settings.py"]);
+    assert_blame_at_commit(&repo, &chain[0], "settings.py", "c1_blame", &[
+        ("MAX_RETRIES = 5", true),
+        ("TIMEOUT = 10", false),
+    ]);
+    assert_accepted_lines_exact(&repo, &chain[0], "c1_accepted", 1);
+
+    // C2': validator.py only
+    assert_note_base_commit_matches(&repo, &chain[1], "c2_base");
+    assert_note_files_exact(&repo, &chain[1], "c2_files", &["validator.py"]);
+}
+
+// ============================================================================
+// END Category 5: Path-specific correctness tests
 // ============================================================================
 
 crate::reuse_tests_in_worktree!(
@@ -8417,4 +8577,7 @@ crate::reuse_tests_in_worktree!(
     test_conflict_ai_resolves_rust_struct_fields,
     test_conflict_ai_resolves_complex_function_with_error_handling,
     test_conflict_mixed_ai_and_human_resolve_different_commits,
+    // Category 5: Path-specific correctness
+    test_conflict_working_log_is_sole_attribution_source,
+    test_conflict_content_diff_wins_over_working_log,
 );
