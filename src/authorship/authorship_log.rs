@@ -187,6 +187,13 @@ impl fmt::Display for LineRange {
     }
 }
 
+/// Identity record for a known human author attested by an IDE extension
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HumanRecord {
+    /// Git committer identity: "Alice Smith <alice@example.com>"
+    pub author: String,
+}
+
 /// Prompt session details stored in the top-level prompts map keyed by short hash (agent_id + tool)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PromptRecord {
