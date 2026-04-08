@@ -1835,7 +1835,7 @@ fn handle_show_transcript(args: &[String]) {
         eprintln!(
             "  Agents: claude, codex, gemini, continue-cli, github-copilot, cursor, amp, windsurf"
         );
-        eprintln!("  For cursor and amp, provide conversation/thread id instead of path");
+        eprintln!("  For amp, provide conversation/thread id instead of path");
         std::process::exit(1);
     }
 
