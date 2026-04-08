@@ -2135,6 +2135,7 @@ pub fn restore_stashed_va(
         if let Err(e) = working_log.write_initial_attributions_with_contents(
             initial_attributions.files,
             initial_attributions.prompts,
+            initial_attributions.humans,
             initial_file_contents,
         ) {
             debug_log(&format!("Failed to write INITIAL attributions: {}", e));

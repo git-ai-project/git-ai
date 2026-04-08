@@ -305,6 +305,8 @@ pub(crate) fn restore_stash_attributions(
         .into_iter()
         .collect();
 
+    let initial_humans = authorship_log.metadata.humans.clone();
+
     // Write INITIAL attributions to working log
     if !initial_files.is_empty() || !initial_prompts.is_empty() {
         let working_log = repo.storage.working_log_for_base_commit(head_sha)?;
@@ -313,6 +315,7 @@ pub(crate) fn restore_stash_attributions(
         working_log.write_initial_attributions_with_contents(
             initial_files.clone(),
             initial_prompts.clone(),
+            initial_humans,
             initial_file_contents,
         )?;
 

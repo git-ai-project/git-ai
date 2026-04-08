@@ -384,6 +384,7 @@ pub fn prepare_working_log_after_squash(
         working_log.write_initial_attributions_with_contents(
             initial_attributions.files,
             initial_attributions.prompts,
+            initial_attributions.humans,
             initial_file_contents,
         )?;
     }
@@ -459,6 +460,7 @@ pub fn prepare_working_log_after_squash_from_final_state(
         working_log.write_initial_attributions_with_contents(
             initial_attributions.files,
             initial_attributions.prompts,
+            initial_attributions.humans,
             initial_file_contents,
         )?;
     }
@@ -530,6 +532,7 @@ pub fn restore_virtual_attribution_carryover(
     working_log.write_initial_attributions_with_contents(
         initial_attributions.files,
         initial_attributions.prompts,
+        initial_attributions.humans,
         final_state,
     )?;
     Ok(())
@@ -2842,6 +2845,7 @@ pub fn rewrite_authorship_after_commit_amend_with_snapshot(
         new_working_log.write_initial_attributions_with_contents(
             initial_attributions.files,
             initial_attributions.prompts,
+            initial_attributions.humans,
             initial_file_contents,
         )?;
     }
@@ -3098,6 +3102,7 @@ pub fn reconstruct_working_log_after_reset(
         new_working_log.write_initial_attributions_with_contents(
             initial_attributions.files,
             initial_attributions.prompts,
+            initial_attributions.humans,
             final_state,
         )?;
     }

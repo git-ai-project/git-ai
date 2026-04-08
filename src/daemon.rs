@@ -1793,6 +1793,7 @@ fn restore_recent_working_log_snapshot(
         .write_initial_attributions_with_contents(
             snapshot.files.clone(),
             snapshot.prompts.clone(),
+            std::collections::BTreeMap::new(),
             snapshot.file_contents.clone(),
         )?;
     Ok(working_log_has_tracked_state_for_base(repo, base_commit))

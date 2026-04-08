@@ -647,6 +647,7 @@ impl PersistedWorkingLog {
         &self,
         attributions: HashMap<String, Vec<LineAttribution>>,
         prompts: HashMap<String, PromptRecord>,
+        humans: std::collections::BTreeMap<String, HumanRecord>,
         file_contents: HashMap<String, String>,
     ) -> Result<(), GitAiError> {
         let filtered: HashMap<String, Vec<LineAttribution>> = attributions
@@ -665,7 +666,7 @@ impl PersistedWorkingLog {
             files: filtered,
             prompts,
             file_blobs,
-            humans: std::collections::BTreeMap::new(),
+            humans,
         })
     }
 
@@ -1151,7 +1152,12 @@ mod tests {
         contents.insert("src/test.rs".to_string(), "fn main() {}\n".to_string());
 
         working_log
-            .write_initial_attributions_with_contents(attributions, HashMap::new(), contents)
+            .write_initial_attributions_with_contents(
+                attributions,
+                HashMap::new(),
+                std::collections::BTreeMap::new(),
+                contents,
+            )
             .expect("write INITIAL with contents");
 
         let initial = working_log.read_initial_attributions();
