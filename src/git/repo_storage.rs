@@ -1280,7 +1280,7 @@ mod tests {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
             .as_secs()
-            - (1 * 24 * 60 * 60);
+            - (24 * 60 * 60);
         fs::write(fresh_dir.join(".archived_at"), one_day_ago.to_string()).unwrap();
 
         // Run pruning
