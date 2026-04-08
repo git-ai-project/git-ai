@@ -504,7 +504,7 @@ impl TmpRepo {
         checkpoint(
             &self.repo_gitai,
             author,
-            CheckpointKind::Human,
+            CheckpointKind::KnownHuman,
             true,
             agent_run_result,
             false,
