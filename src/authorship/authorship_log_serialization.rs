@@ -136,19 +136,14 @@ impl AuthorshipLog {
     }
 
     pub fn get_or_create_file(&mut self, file: &str) -> &mut FileAttestation {
-        // Check if file already exists
-        let exists = self.attestations.iter().any(|f| f.file_path == file);
-
-        if !exists {
+        // Single scan: find existing index or push and return last element.
+        if let Some(idx) = self.attestations.iter().position(|f| f.file_path == file) {
+            &mut self.attestations[idx]
+        } else {
             self.attestations
                 .push(FileAttestation::new(file.to_string()));
+            self.attestations.last_mut().unwrap()
         }
-
-        // Now get the reference
-        self.attestations
-            .iter_mut()
-            .find(|f| f.file_path == file)
-            .unwrap()
     }
 
     /// Serialize to the new text format

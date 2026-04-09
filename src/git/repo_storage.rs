@@ -335,35 +335,16 @@ impl PersistedWorkingLog {
                 .to_string();
         }
 
-        // If we couldn't match yet, try canonicalizing both repo_workdir and the input path
-        // On Windows, this uses the canonical_workdir that was pre-computed
-        #[cfg(windows)]
-        let canonical_workdir = &self.canonical_workdir;
-
-        #[cfg(not(windows))]
-        let canonical_workdir = match self.repo_workdir.canonicalize() {
-            Ok(p) => p,
-            Err(_) => self.repo_workdir.clone(),
-        };
-
+        // If we couldn't match yet, try canonicalizing both paths.
+        // Use the pre-computed canonical_workdir to avoid per-call canonicalize() overhead.
         let canonical_path = match path.canonicalize() {
             Ok(p) => p,
             Err(_) => path.to_path_buf(),
         };
 
-        #[cfg(windows)]
-        if canonical_path.starts_with(canonical_workdir) {
+        if canonical_path.starts_with(&self.canonical_workdir) {
             return canonical_path
-                .strip_prefix(canonical_workdir)
-                .unwrap()
-                .to_string_lossy()
-                .to_string();
-        }
-
-        #[cfg(not(windows))]
-        if canonical_path.starts_with(&canonical_workdir) {
-            return canonical_path
-                .strip_prefix(&canonical_workdir)
+                .strip_prefix(&self.canonical_workdir)
                 .unwrap()
                 .to_string_lossy()
                 .to_string();
@@ -391,9 +372,6 @@ impl PersistedWorkingLog {
 
     /* append checkpoint */
     pub fn append_checkpoint(&self, checkpoint: &Checkpoint) -> Result<(), GitAiError> {
-        // Read existing checkpoints
-        let mut checkpoints = self.read_all_checkpoints().unwrap_or_default();
-
         // Create a copy, potentially without transcript to reduce storage size.
         // Transcripts are refetched in update_prompts_to_latest() before post-commit
         // using tool-specific sources (transcript_path for Claude, cursor_db_path for Cursor, etc.)
@@ -439,15 +417,17 @@ impl PersistedWorkingLog {
             storage_checkpoint.transcript = None;
         }
 
-        // Add the new checkpoint
-        checkpoints.push(storage_checkpoint);
+        // True JSONL append: serialize checkpoint as a single line and append to file
+        let checkpoints_file = self.dir.join("checkpoints.jsonl");
+        let json_line = serde_json::to_string(&storage_checkpoint)?;
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&checkpoints_file)?;
+        writeln!(file, "{}", json_line)?;
 
-        // Prune char-level attributions from older checkpoints for the same files
-        // Only the most recent checkpoint per file needs char-level precision
-        self.prune_old_char_attributions(&mut checkpoints);
-
-        // Write all checkpoints back
-        self.write_all_checkpoints(&checkpoints)
+        Ok(())
     }
 
     pub fn read_all_checkpoints(&self) -> Result<Vec<Checkpoint>, GitAiError> {
@@ -480,51 +460,64 @@ impl PersistedWorkingLog {
             checkpoints.push(checkpoint);
         }
 
-        // Migrate 7-char prompt hashes to 16-char hashes
-        // Step 1: Build mapping from old 7-char hash to new 16-char hash
-        let mut old_to_new_hash: HashMap<String, String> = HashMap::new();
+        // Migrate 7-char prompt hashes to 16-char hashes (only if not already migrated)
+        let migrated_marker = self.dir.join(".migrated");
+        if !migrated_marker.exists() {
+            // Step 1: Build mapping from old 7-char hash to new 16-char hash
+            let mut old_to_new_hash: HashMap<String, String> = HashMap::new();
 
-        for checkpoint in &checkpoints {
-            if let Some(agent_id) = &checkpoint.agent_id {
-                let new_hash = generate_short_hash(&agent_id.id, &agent_id.tool);
-                let old_hash = new_hash[..7].to_string();
-                old_to_new_hash.insert(old_hash, new_hash);
+            for checkpoint in &checkpoints {
+                if let Some(agent_id) = &checkpoint.agent_id {
+                    let new_hash = generate_short_hash(&agent_id.id, &agent_id.tool);
+                    let old_hash = new_hash[..7].to_string();
+                    old_to_new_hash.insert(old_hash, new_hash);
+                }
+            }
+
+            if !old_to_new_hash.is_empty() {
+                // Step 2: Replace 7-char author_ids in all checkpoints' attributions and line_attributions
+                for checkpoint in &mut checkpoints {
+                    for entry in &mut checkpoint.entries {
+                        // Replace author_ids in attributions
+                        for attr in &mut entry.attributions {
+                            if attr.author_id.len() == 7
+                                && let Some(new_hash) = old_to_new_hash.get(&attr.author_id)
+                            {
+                                attr.author_id = new_hash.clone();
+                            }
+                        }
+
+                        // Replace author_ids in line_attributions
+                        for line_attr in &mut entry.line_attributions {
+                            if line_attr.author_id.len() == 7
+                                && let Some(new_hash) = old_to_new_hash.get(&line_attr.author_id)
+                            {
+                                line_attr.author_id = new_hash.clone();
+                            }
+                            // Also migrate the overrode field if it contains a 7-char hash
+                            if let Some(ref overrode_id) = line_attr.overrode
+                                && overrode_id.len() == 7
+                                && let Some(new_hash) = old_to_new_hash.get(overrode_id)
+                            {
+                                line_attr.overrode = Some(new_hash.clone());
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Prune char-level attributions from older checkpoints during read
+            self.prune_old_char_attributions(&mut checkpoints);
+
+            // Write migrated+pruned data and mark as migrated
+            if let Err(e) = self.write_all_checkpoints(&checkpoints) {
+                debug_log(&format!("Failed to write migrated checkpoints: {}", e));
+            } else {
+                let _ = fs::write(&migrated_marker, "");
             }
         }
 
-        // Step 2: Replace 7-char author_ids in all checkpoints' attributions and line_attributions
-        let mut migrated_checkpoints = Vec::new();
-        for mut checkpoint in checkpoints {
-            for entry in &mut checkpoint.entries {
-                // Replace author_ids in attributions
-                for attr in &mut entry.attributions {
-                    if attr.author_id.len() == 7
-                        && let Some(new_hash) = old_to_new_hash.get(&attr.author_id)
-                    {
-                        attr.author_id = new_hash.clone();
-                    }
-                }
-
-                // Replace author_ids in line_attributions
-                for line_attr in &mut entry.line_attributions {
-                    if line_attr.author_id.len() == 7
-                        && let Some(new_hash) = old_to_new_hash.get(&line_attr.author_id)
-                    {
-                        line_attr.author_id = new_hash.clone();
-                    }
-                    // Also migrate the overrode field if it contains a 7-char hash
-                    if let Some(ref overrode_id) = line_attr.overrode
-                        && overrode_id.len() == 7
-                        && let Some(new_hash) = old_to_new_hash.get(overrode_id)
-                    {
-                        line_attr.overrode = Some(new_hash.clone());
-                    }
-                }
-            }
-            migrated_checkpoints.push(checkpoint);
-        }
-
-        Ok(migrated_checkpoints)
+        Ok(checkpoints)
     }
 
     /// Remove char-level attributions from all but the most recent checkpoint per file.

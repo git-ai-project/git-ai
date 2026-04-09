@@ -893,7 +893,7 @@ fn execute_resolved_checkpoint(
         for (entry, file_stat) in entries.iter().zip(file_stats.iter()) {
             let values = crate::metrics::CheckpointValues::new()
                 .checkpoint_ts(checkpoint.timestamp)
-                .kind(checkpoint.kind.to_str().to_string())
+                .kind(checkpoint.kind.as_str().to_string())
                 .file_path(entry.file.clone())
                 .lines_added(file_stat.additions)
                 .lines_deleted(file_stat.deletions)
@@ -926,7 +926,7 @@ fn execute_resolved_checkpoint(
         if files_with_entries == total_uncommitted_files {
             eprintln!(
                 "{} {} changed {} file(s) that have changed since the last {}",
-                kind.to_str(),
+                kind.as_str(),
                 log_author,
                 files_with_entries,
                 label
@@ -934,7 +934,7 @@ fn execute_resolved_checkpoint(
         } else {
             eprintln!(
                 "{} {} changed {} of the {} file(s) that have changed since the last {} ({} already checkpointed)",
-                kind.to_str(),
+                kind.as_str(),
                 log_author,
                 files_with_entries,
                 total_uncommitted_files,
@@ -1315,28 +1315,32 @@ fn get_all_tracked_files(
         initial_read_start.elapsed()
     ));
 
+    // Read checkpoints once, derive both tracked_files and has_ai_checkpoints from the single read
     let checkpoints_read_start = Instant::now();
-    if let Ok(working_log_data) = working_log.read_all_checkpoints() {
-        for checkpoint in &working_log_data {
-            for entry in &checkpoint.entries {
-                // Normalize path separators to forward slashes
-                let normalized_path = normalize_to_posix(&entry.file);
-                // Filter out paths outside the repository to prevent git command failures
-                if !is_path_in_repo(&normalized_path) {
-                    debug_log(&format!(
-                        "Skipping checkpoint file outside repository: {}",
-                        normalized_path
-                    ));
-                    continue;
-                }
-                if should_ignore_file_with_matcher(&normalized_path, ignore_matcher) {
-                    continue;
-                }
-                if !files.contains(&normalized_path) {
-                    // Check if it's a text file before adding
-                    if is_text_file(working_log, &normalized_path) {
-                        files.insert(normalized_path);
-                    }
+    let working_log_data = working_log.read_all_checkpoints().unwrap_or_default();
+    let mut has_ai_checkpoints = false;
+    for checkpoint in &working_log_data {
+        if checkpoint.kind == CheckpointKind::AiAgent || checkpoint.kind == CheckpointKind::AiTab {
+            has_ai_checkpoints = true;
+        }
+        for entry in &checkpoint.entries {
+            // Normalize path separators to forward slashes
+            let normalized_path = normalize_to_posix(&entry.file);
+            // Filter out paths outside the repository to prevent git command failures
+            if !is_path_in_repo(&normalized_path) {
+                debug_log(&format!(
+                    "Skipping checkpoint file outside repository: {}",
+                    normalized_path
+                ));
+                continue;
+            }
+            if should_ignore_file_with_matcher(&normalized_path, ignore_matcher) {
+                continue;
+            }
+            if !files.contains(&normalized_path) {
+                // Check if it's a text file before adding
+                if is_text_file(working_log, &normalized_path) {
+                    files.insert(normalized_path);
                 }
             }
         }
@@ -1345,14 +1349,6 @@ fn get_all_tracked_files(
         "[BENCHMARK]   Reading checkpoints in get_all_tracked_files took {:?}",
         checkpoints_read_start.elapsed()
     ));
-
-    let has_ai_checkpoints = if let Ok(working_log_data) = working_log.read_all_checkpoints() {
-        working_log_data.iter().any(|checkpoint| {
-            checkpoint.kind == CheckpointKind::AiAgent || checkpoint.kind == CheckpointKind::AiTab
-        })
-    } else {
-        false
-    };
 
     let status_files_start = Instant::now();
     let mut results_for_tracked_files = if is_pre_commit && !has_ai_checkpoints {
@@ -1523,11 +1519,11 @@ fn working_log_entry_has_non_human_attribution(entry: &WorkingLogEntry) -> bool 
     entry
         .line_attributions
         .iter()
-        .any(|attr| attr.author_id != CheckpointKind::Human.to_str())
+        .any(|attr| attr.author_id != CheckpointKind::Human.as_str())
         || entry
             .attributions
             .iter()
-            .any(|attr| attr.author_id != CheckpointKind::Human.to_str())
+            .any(|attr| attr.author_id != CheckpointKind::Human.as_str())
 }
 
 fn build_previous_file_state_maps(
@@ -1678,7 +1674,7 @@ fn get_checkpoint_entry_for_file(
             let total_lines = previous_content.lines().count() as u32;
             let mut line_authors: HashMap<u32, String> = HashMap::new();
             for line_num in 1..=total_lines {
-                line_authors.insert(line_num, CheckpointKind::Human.to_str());
+                line_authors.insert(line_num, CheckpointKind::Human.as_str().to_string());
             }
             let prompt_records: HashMap<String, PromptRecord> = HashMap::new();
             Some((line_authors, prompt_records))
@@ -1700,7 +1696,7 @@ fn get_checkpoint_entry_for_file(
                 }
 
                 // Skip human-authored lines - they should remain human
-                if author == CheckpointKind::Human.to_str() {
+                if author == CheckpointKind::Human.as_str() {
                     continue;
                 }
 
@@ -1834,10 +1830,10 @@ async fn get_checkpoint_entries(
                     &result.agent_id.tool,
                 )
             })
-            .unwrap_or_else(|| kind.to_str())
+            .unwrap_or_else(|| kind.as_str().to_string())
     } else {
         // For human checkpoints, use checkpoint kind string
-        kind.to_str()
+        kind.as_str().to_string()
     };
 
     // Get HEAD commit info for git operations
@@ -1994,7 +1990,7 @@ fn make_entry_for_file(
     let filled_in_prev_attributions = tracker.attribute_unattributed_ranges(
         previous_content,
         previous_attributions,
-        &CheckpointKind::Human.to_str(),
+        CheckpointKind::Human.as_str(),
         ts - 1,
     );
     debug_log(&format!(
@@ -2019,7 +2015,7 @@ fn make_entry_for_file(
     ));
 
     // TODO Consider discarding any "uncontentious" attributions for the human author. Any human attributions that do not share a line with any other author's attributions can be discarded.
-    // let filtered_attributions = crate::authorship::attribution_tracker::discard_uncontentious_attributions_for_author(&new_attributions, &CheckpointKind::Human.to_str());
+    // let filtered_attributions = crate::authorship::attribution_tracker::discard_uncontentious_attributions_for_author(&new_attributions, &CheckpointKind::Human.as_str());
 
     let line_attr_start = Instant::now();
     let line_attributions =

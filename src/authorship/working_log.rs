@@ -1,6 +1,7 @@
 use crate::authorship::attribution_tracker::{Attribution, LineAttribution};
 use crate::authorship::authorship_log_serialization::GIT_AI_VERSION;
 use crate::authorship::transcript::AiTranscript;
+use crate::utils::debug_log;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -55,7 +56,7 @@ pub enum CheckpointKind {
 
 impl fmt::Display for CheckpointKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.to_str())
+        write!(f, "{}", self.as_str())
     }
 }
 
@@ -67,16 +68,21 @@ impl CheckpointKind {
             "human" => CheckpointKind::Human,
             "ai_agent" => CheckpointKind::AiAgent,
             "ai_tab" => CheckpointKind::AiTab,
-            _ => panic!("Invalid checkpoint kind: {}", s),
+            _ => {
+                debug_log(&format!(
+                    "Unknown checkpoint kind '{}', defaulting to Human",
+                    s
+                ));
+                CheckpointKind::Human
+            }
         }
     }
 
-    #[allow(clippy::wrong_self_convention)]
-    pub fn to_str(&self) -> String {
+    pub fn as_str(&self) -> &'static str {
         match self {
-            CheckpointKind::Human => "human".to_string(),
-            CheckpointKind::AiAgent => "ai_agent".to_string(),
-            CheckpointKind::AiTab => "ai_tab".to_string(),
+            CheckpointKind::Human => "human",
+            CheckpointKind::AiAgent => "ai_agent",
+            CheckpointKind::AiTab => "ai_tab",
         }
     }
 
