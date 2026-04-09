@@ -51,7 +51,9 @@ pub fn find_claude_code_conversation(repo_path: &Path) -> Option<PathBuf> {
 /// Lines that cannot be parsed are silently skipped so that partial/corrupted
 /// files do not abort the entire operation.
 pub fn parse_claude_code_jsonl(path: &Path) -> Result<ConversationLog, GitAiError> {
-    let content = fs::read_to_string(path).map_err(GitAiError::IoError)?;
+    // Canonicalize the path to resolve symlinks and relative components before reading.
+    let canonical = path.canonicalize().map_err(GitAiError::IoError)?;
+    let content = fs::read_to_string(&canonical).map_err(GitAiError::IoError)?;
     let mut exchanges: Vec<ConversationExchange> = Vec::new();
 
     for line in content.lines() {
