@@ -232,50 +232,6 @@ pub fn is_in_background_agent() -> bool {
     })
 }
 
-/// Detect the current shell and its version.
-/// Aidan touched this line
-/// Returns a tuple of `(shell_name, version)`. On Unix, the shell is read from
-/// the `SHELL` environment variable; on Windows, PowerShell is preferred and
-/// `ComSpec` is used as a fallback. The version is obtained by invoking the
-/// shell with `--version` and taking the first line of output. Either field
-/// falls back to `"unknown"` if detection fails.
-pub fn detect_shell() -> (String, String) {
-    let shell_path = if cfg!(windows) {
-        std::env::var("PSModulePath")
-            .ok()
-            .map(|_| "pwsh".to_string())
-            .or_else(|| std::env::var("ComSpec").ok())
-            .unwrap_or_else(|| "cmd".to_string())
-    } else {
-        std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string())
-    };
-
-    let shell_name = std::path::Path::new(&shell_path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("unknown")
-        .to_string();
-
-    let version = Command::new(&shell_path)
-        .arg("--version")
-        .stdin(Stdio::null())
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .next()
-                    .map(|l| l.trim().to_string())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| "unknown".to_string());
-
-    (shell_name, version)
-}
-
 /// A cross-platform exclusive file lock.
 ///
 /// Holds an exclusive advisory lock (Unix) or exclusive-access file handle (Windows)
