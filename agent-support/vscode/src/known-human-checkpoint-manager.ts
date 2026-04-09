@@ -6,13 +6,13 @@ import { getGitRepoRoot } from "./utils/git-api";
 
 /**
  * Fires a `git-ai checkpoint known_human --hook-input stdin` whenever a
- * document is saved. Debounces per repo root over a 300ms window so that
+ * document is saved. Debounces per repo root over a 500ms window so that
  * bulk saves (e.g. "Save All") are batched into one checkpoint call.
  *
  * Skips non-file-scheme documents and .vscode/ internal files.
  */
 export class KnownHumanCheckpointManager {
-  private readonly debounceMs = 300;
+  private readonly debounceMs = 500;
 
   // per repo root: pending debounce timer
   private pendingTimers = new Map<string, NodeJS.Timeout>();

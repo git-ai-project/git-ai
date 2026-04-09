@@ -15,7 +15,7 @@ import java.util.concurrent.TimeUnit
 
 /**
  * Listens for IDE-initiated document saves (isFromRefresh=false) and fires a
- * known_human checkpoint after a 300ms debounce window.
+ * known_human checkpoint after a 500ms debounce window.
  *
  * Filters out JetBrains-internal paths (e.g. .idea/, .sandbox/) to avoid noise.
  */
@@ -27,7 +27,7 @@ class DocumentSaveListener(
 
     private val logger = Logger.getInstance(DocumentSaveListener::class.java)
 
-    private val debounceMs = 300L
+    private val debounceMs = 500L
 
     // Per workspace root: debounce future
     private val pendingFutures = ConcurrentHashMap<String, ScheduledFuture<*>>()
