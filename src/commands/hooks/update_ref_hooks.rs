@@ -69,10 +69,15 @@ pub fn post_update_ref_hook(
     }
 
     if is_ancestor(repository, &old_target, &new_target) {
-        if affects_checked_out_branch {
-            let _ = repository
+        if affects_checked_out_branch
+            && let Err(e) = repository
                 .storage
-                .rename_working_log(&old_target, &new_target);
+                .rename_working_log(&old_target, &new_target)
+        {
+            tracing::debug!(
+                "Failed to rename working log {} -> {}: {}",
+                &old_target, &new_target, e
+            );
         }
         return;
     }
