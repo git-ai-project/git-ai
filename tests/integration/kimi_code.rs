@@ -496,6 +496,212 @@ fn test_kimi_code_e2e_with_transcript() {
     );
 }
 
+// ============================================================================
+// Bash tool processing tests
+// ============================================================================
+
+#[test]
+fn test_kimi_code_bash_pre_tool_use_takes_snapshot() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("hello.txt");
+    fs::write(&file_path, "initial\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    let hook_input = json!({
+        "session_id": "kimi-bash-session",
+        "cwd": repo.canonical_path().to_string_lossy().to_string(),
+        "model": "moonshot-v1-128k",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Shell",
+        "tool_call_id": "tool-call-001",
+        "tool_input": {
+            "command": "echo hello"
+        }
+    })
+    .to_string();
+
+    let result = KimiCodePreset
+        .run(AgentCheckpointFlags {
+            hook_input: Some(hook_input),
+        })
+        .expect("Should succeed");
+
+    assert_eq!(result.checkpoint_kind, CheckpointKind::Human);
+    assert!(
+        result.will_edit_filepaths.is_none(),
+        "Bash tool PreToolUse should not have will_edit_filepaths from tool_input"
+    );
+}
+
+#[test]
+fn test_kimi_code_bash_post_tool_use_diffs_changed_files() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("hello.txt");
+    fs::write(&file_path, "initial\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    // Pre-hook to take snapshot
+    let pre_hook_input = json!({
+        "session_id": "kimi-bash-diff-session",
+        "cwd": repo.canonical_path().to_string_lossy().to_string(),
+        "model": "moonshot-v1-128k",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Shell",
+        "tool_call_id": "tool-call-002",
+        "tool_input": { "command": "sed -i '' 's/initial/modified/' hello.txt" }
+    })
+    .to_string();
+
+    let _ = KimiCodePreset.run(AgentCheckpointFlags {
+        hook_input: Some(pre_hook_input),
+    });
+
+    // Simulate file change by bash tool
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    fs::write(&file_path, "modified\n").unwrap();
+
+    // Post-hook to diff
+    let post_hook_input = json!({
+        "session_id": "kimi-bash-diff-session",
+        "cwd": repo.canonical_path().to_string_lossy().to_string(),
+        "model": "moonshot-v1-128k",
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Shell",
+        "tool_call_id": "tool-call-002",
+        "tool_input": { "command": "sed -i '' 's/initial/modified/' hello.txt" }
+    })
+    .to_string();
+
+    let result = KimiCodePreset
+        .run(AgentCheckpointFlags {
+            hook_input: Some(post_hook_input),
+        })
+        .expect("Should succeed");
+
+    assert_eq!(result.checkpoint_kind, CheckpointKind::AiAgent);
+    // edited_filepaths should contain hello.txt (detected via stat-diff)
+    if let Some(paths) = &result.edited_filepaths {
+        assert!(
+            paths.iter().any(|p| p.contains("hello.txt")),
+            "Should detect hello.txt as changed; got {:?}",
+            paths
+        );
+    }
+}
+
+#[test]
+fn test_kimi_code_non_bash_tool_uses_file_path() {
+    let hook_input = json!({
+        "session_id": "kimi-edit-session",
+        "cwd": "/tmp/test",
+        "model": "moonshot-v1-128k",
+        "hook_event_name": "PostToolUse",
+        "tool_name": "edit",
+        "tool_input": {
+            "file_path": "/tmp/test/src/main.rs"
+        }
+    })
+    .to_string();
+
+    let result = KimiCodePreset
+        .run(AgentCheckpointFlags {
+            hook_input: Some(hook_input),
+        })
+        .expect("Should succeed");
+
+    assert_eq!(result.checkpoint_kind, CheckpointKind::AiAgent);
+    assert_eq!(
+        result.edited_filepaths,
+        Some(vec!["/tmp/test/src/main.rs".to_string()])
+    );
+}
+
+// ============================================================================
+// Session transcript tests
+// ============================================================================
+
+#[test]
+fn test_kimi_code_transcript_from_context_jsonl() {
+    let jsonl = r#"{"role": "_system_prompt", "content": "You are Kimi Code CLI"}
+{"role": "_checkpoint", "id": "cp1"}
+{"role": "user", "content": "Add a hello function"}
+{"role": "_usage", "token_count": 100}
+{"role": "assistant", "content": [{"type": "think", "text": ""}, {"type": "text", "text": "I'll add a hello function."}], "tool_calls": [{"id": "tool_abc", "type": "function", "function": {"name": "WriteFile", "arguments": "{\"path\": \"hello.rs\", \"content\": \"fn hello() {}\"}"}}]}
+{"role": "tool", "content": "File written", "tool_call_id": "tool_abc"}
+{"role": "assistant", "content": [{"type": "text", "text": "Done!"}]}"#;
+
+    let transcript = KimiCodePreset::transcript_from_context_jsonl(jsonl);
+    let messages = transcript.messages();
+
+    // Should have: 1 user, 1 assistant text, 1 tool_use, 1 assistant text = 4 messages
+    assert_eq!(messages.len(), 4, "Expected 4 messages, got {:?}", messages);
+
+    assert!(matches!(&messages[0], Message::User { text, .. } if text == "Add a hello function"));
+    assert!(
+        matches!(&messages[1], Message::Assistant { text, .. } if text == "I'll add a hello function.")
+    );
+    assert!(matches!(&messages[2], Message::ToolUse { name, .. } if name == "WriteFile"));
+    assert!(matches!(&messages[3], Message::Assistant { text, .. } if text == "Done!"));
+}
+
+#[test]
+fn test_kimi_code_session_transcript_from_disk() {
+    use std::io::Write;
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    // Create a fake session directory structure
+    let session_id = "test-kimi-session-abc";
+    let hash_dir = temp_dir.path().join("sessions").join("fakehash123");
+    let session_dir = hash_dir.join(session_id);
+    fs::create_dir_all(&session_dir).unwrap();
+
+    let context_jsonl = r#"{"role": "user", "content": "Hello"}
+{"role": "assistant", "content": [{"type": "text", "text": "Hi there!"}]}"#;
+
+    let context_path = session_dir.join("context.jsonl");
+    let mut f = fs::File::create(&context_path).unwrap();
+    f.write_all(context_jsonl.as_bytes()).unwrap();
+
+    // Point KIMI_SHARE_DIR to our temp directory
+    let prev = std::env::var_os("KIMI_SHARE_DIR");
+    unsafe {
+        std::env::set_var("KIMI_SHARE_DIR", temp_dir.path());
+    }
+
+    let hook_input = json!({
+        "session_id": session_id,
+        "cwd": "/tmp/test",
+        "model": "moonshot-v1-128k",
+        "hook_event_name": "PostToolUse",
+        "tool_input": {
+            "file_path": "/tmp/test/src/main.rs"
+        }
+    })
+    .to_string();
+
+    let result = KimiCodePreset
+        .run(AgentCheckpointFlags {
+            hook_input: Some(hook_input),
+        })
+        .expect("Should succeed");
+
+    // Restore env
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var("KIMI_SHARE_DIR", v),
+            None => std::env::remove_var("KIMI_SHARE_DIR"),
+        }
+    }
+
+    assert!(result.transcript.is_some(), "Should resolve transcript from session file");
+    let transcript = result.transcript.unwrap();
+    assert_eq!(transcript.messages().len(), 2);
+    assert!(matches!(&transcript.messages()[0], Message::User { text, .. } if text == "Hello"));
+    assert!(
+        matches!(&transcript.messages()[1], Message::Assistant { text, .. } if text == "Hi there!")
+    );
+}
+
 reuse_tests_in_worktree!(
     test_kimi_code_preset_ai_checkpoint,
     test_kimi_code_preset_human_checkpoint,
@@ -511,4 +717,9 @@ reuse_tests_in_worktree!(
     test_kimi_code_e2e_checkpoint_and_commit,
     test_kimi_code_e2e_human_then_ai_checkpoint,
     test_kimi_code_e2e_with_transcript,
+    test_kimi_code_bash_pre_tool_use_takes_snapshot,
+    test_kimi_code_bash_post_tool_use_diffs_changed_files,
+    test_kimi_code_non_bash_tool_uses_file_path,
+    test_kimi_code_transcript_from_context_jsonl,
+    test_kimi_code_session_transcript_from_disk,
 );
