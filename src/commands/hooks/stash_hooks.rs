@@ -188,10 +188,9 @@ pub(crate) fn save_stash_authorship_log(
             .collect()
     };
 
-    // If there are no attributions, just clean up working log for filtered files
+    // If there are no attributions, nothing to save or clean up
     if filtered_files.is_empty() {
         tracing::debug!("No attributions to save for stash");
-        delete_working_log_for_files(repo, head_sha, &filtered_files)?;
         return Ok(());
     }
 
@@ -457,10 +456,7 @@ pub(crate) fn extract_stash_pathspecs(parsed_args: &ParsedGitInvocation) -> Vec<
 
 /// Check if a stash option consumes the next value
 fn stash_option_consumes_value(arg: &str) -> bool {
-    matches!(
-        arg,
-        "-m" | "--message" | "--pathspec-from-file" | "--pathspec-file-nul"
-    )
+    matches!(arg, "-m" | "--message" | "--pathspec-from-file")
 }
 
 /// Check if a file path matches any of the given pathspecs

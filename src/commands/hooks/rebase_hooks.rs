@@ -175,7 +175,11 @@ fn has_active_rebase_start_event(repository: &Repository) -> bool {
         Ok(events) => events,
         Err(_) => return false,
     };
+    has_active_rebase_start_event_from(&events)
+}
 
+/// Check pre-read events for an active rebase Start (not followed by Complete or Abort).
+fn has_active_rebase_start_event_from(events: &[RewriteLogEvent]) -> bool {
     // Events are newest-first
     // If we find Complete or Abort before Start, there's no active rebase
     // If we find Start before Complete/Abort, there's an active rebase
@@ -199,12 +203,22 @@ fn find_rebase_start_event(
     repository: &Repository,
 ) -> Option<crate::git::rewrite_log::RebaseStartEvent> {
     let events = repository.storage.read_rewrite_events().ok()?;
+    find_rebase_start_event_from(&events)
+}
 
+/// Find the most recent Rebase Start event from pre-read events.
+fn find_rebase_start_event_from(
+    events: &[RewriteLogEvent],
+) -> Option<crate::git::rewrite_log::RebaseStartEvent> {
     // Find the most recent Start event (events are newest-first)
+    // If we encounter a Complete or Abort before a Start, there's no active rebase
     for event in events {
         match event {
+            RewriteLogEvent::RebaseComplete { .. } | RewriteLogEvent::RebaseAbort { .. } => {
+                return None;
+            }
             RewriteLogEvent::RebaseStart { rebase_start } => {
-                return Some(rebase_start);
+                return Some(rebase_start.clone());
             }
             _ => continue,
         }
