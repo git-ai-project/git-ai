@@ -2473,7 +2473,64 @@ impl GithubCopilotPreset {
         // No merging of session-level detected_edited_filepaths - this prevents cross-contamination
         // when multiple tool calls fire in rapid succession.
 
+        // Classify tool for bash vs file edit handling
+        let tool_class = Self::classify_copilot_tool(tool_name);
+        let is_bash_tool = tool_class == ToolClass::Bash;
+
+        let tool_use_id = hook_data
+            .get("tool_use_id")
+            .or_else(|| hook_data.get("toolUseId"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+
+        let agent_id = AgentId {
+            tool: "github-copilot".to_string(),
+            id: chat_session_id.clone(),
+            model: detected_model
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+        };
+
+        let agent_metadata = if let Some(path) = transcript_path.as_ref() {
+            HashMap::from([
+                ("transcript_path".to_string(), path.clone()),
+                ("chat_session_path".to_string(), path.clone()),
+            ])
+        } else {
+            HashMap::new()
+        };
+
         if hook_event_name == "PreToolUse" {
+            // Handle bash tool PreToolUse (take snapshot)
+            let pre_hook_captured_id = prepare_agent_bash_pre_hook(
+                is_bash_tool,
+                Some(&cwd),
+                &chat_session_id,
+                tool_use_id,
+                &agent_id,
+                Some(&agent_metadata),
+                BashPreHookStrategy::SnapshotOnly,
+            )?
+            .captured_checkpoint_id();
+
+            if is_bash_tool {
+                // For bash tools, PreToolUse creates a snapshot but no Human checkpoint
+                return Ok(AgentRunResult {
+                    agent_id: AgentId {
+                        tool: "human".to_string(),
+                        id: "human".to_string(),
+                        model: "human".to_string(),
+                    },
+                    agent_metadata: None,
+                    checkpoint_kind: CheckpointKind::Human,
+                    transcript: None,
+                    repo_working_dir: Some(cwd),
+                    edited_filepaths: None,
+                    will_edit_filepaths: None,
+                    dirty_files: None,
+                    captured_checkpoint_id: pre_hook_captured_id,
+                });
+            }
             // For create_file PreToolUse, synthesize dirty_files with empty content to explicitly
             // mark the file as not existing yet (rather than letting it fall back to disk read,
             // which could capture content from a concurrent tool call).
@@ -2532,24 +2589,55 @@ impl GithubCopilotPreset {
             });
         }
 
+        // PostToolUse: Handle bash tools via snapshot diff
+        let bash_result = if is_bash_tool {
+            let repo_root = Path::new(&cwd);
+            Some(bash_tool::handle_bash_tool(
+                HookEvent::PostToolUse,
+                repo_root,
+                &chat_session_id,
+                tool_use_id,
+            ))
+        } else {
+            None
+        };
+
+        let final_edited_filepaths = if is_bash_tool {
+            match bash_result.as_ref().unwrap().as_ref().map(|r| &r.action) {
+                Ok(BashCheckpointAction::Checkpoint(paths)) => Some(paths.clone()),
+                Ok(BashCheckpointAction::NoChanges) => None,
+                Ok(BashCheckpointAction::Fallback) => None,
+                Ok(BashCheckpointAction::TakePreSnapshot) => {
+                    // This shouldn't happen in PostToolUse, but handle it gracefully
+                    None
+                }
+                Err(_) => {
+                    eprintln!("[Warning] Bash tool snapshot diff failed, skipping checkpoint");
+                    None
+                }
+            }
+        } else {
+            Some(extracted_paths)
+        };
+
+        let bash_captured_checkpoint_id = bash_result
+            .as_ref()
+            .and_then(|r| r.as_ref().ok())
+            .and_then(|r| r.captured_checkpoint.as_ref())
+            .map(|info| info.capture_id.clone());
+
         let transcript_path = transcript_path.ok_or_else(|| {
             GitAiError::PresetError(
                 "transcript_path not found in hook_input for PostToolUse".to_string(),
             )
         })?;
 
-        let agent_id = AgentId {
-            tool: "github-copilot".to_string(),
-            id: chat_session_id,
-            model: detected_model.unwrap_or_else(|| "unknown".to_string()),
-        };
-
-        let agent_metadata = HashMap::from([
+        let final_agent_metadata = HashMap::from([
             ("transcript_path".to_string(), transcript_path.clone()),
             ("chat_session_path".to_string(), transcript_path),
         ]);
 
-        if extracted_paths.is_empty() {
+        if final_edited_filepaths.is_none() || final_edited_filepaths.as_ref().unwrap().is_empty() {
             return Err(GitAiError::PresetError(format!(
                 "No editable file paths found in VS Code PostToolUse hook input (tool_name: {}). Skipping checkpoint.",
                 tool_name
@@ -2558,14 +2646,14 @@ impl GithubCopilotPreset {
 
         Ok(AgentRunResult {
             agent_id,
-            agent_metadata: Some(agent_metadata),
+            agent_metadata: Some(final_agent_metadata),
             checkpoint_kind: CheckpointKind::AiAgent,
             transcript,
             repo_working_dir: Some(cwd),
-            edited_filepaths: Some(extracted_paths),
+            edited_filepaths: final_edited_filepaths,
             will_edit_filepaths: None,
             dirty_files,
-            captured_checkpoint_id: None,
+            captured_checkpoint_id: bash_captured_checkpoint_id,
         })
     }
 
@@ -2865,9 +2953,14 @@ impl GithubCopilotPreset {
     fn is_supported_vscode_edit_tool_name(tool_name: &str) -> bool {
         let lower = tool_name.to_ascii_lowercase();
 
+        // Explicit bash/terminal tools that should be tracked (handled via bash_tool flow)
+        let bash_tools = ["run_in_terminal"];
+        if bash_tools.iter().any(|name| lower == *name) {
+            return true;
+        }
+
         let non_edit_keywords = [
             "find", "search", "read", "grep", "glob", "list", "ls", "fetch", "web", "open", "todo",
-            "terminal", "run", "execute",
         ];
         if non_edit_keywords.iter().any(|kw| lower.contains(kw)) {
             return false;
@@ -2894,6 +2987,24 @@ impl GithubCopilotPreset {
         }
 
         lower.contains("edit") || lower.contains("write") || lower.contains("replace")
+    }
+
+    /// Classify GitHub Copilot tool for bash vs file edit handling
+    fn classify_copilot_tool(tool_name: &str) -> ToolClass {
+        let lower = tool_name.to_ascii_lowercase();
+        match lower.as_str() {
+            "run_in_terminal" => ToolClass::Bash,
+            "create_file"
+            | "replace_string_in_file"
+            | "apply_patch"
+            | "delete_file"
+            | "rename_file"
+            | "move_file" => ToolClass::FileEdit,
+            _ if lower.contains("edit") || lower.contains("write") || lower.contains("replace") => {
+                ToolClass::FileEdit
+            }
+            _ => ToolClass::Skip,
+        }
     }
 
     fn collect_apply_patch_paths_from_text(raw: &str, out: &mut Vec<String>) {

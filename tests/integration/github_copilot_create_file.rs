@@ -115,7 +115,12 @@ fn test_create_file_rapid_multi_file_no_contamination() {
         "call_UMZRrEf033UfgZS7RpSWXDhr__vscode-1775710747676",
     ];
 
-    for (i, ((filename, content), tool_use_id)) in files.iter().zip(contents.iter()).zip(tool_use_ids.iter()).enumerate() {
+    for (i, ((filename, content), tool_use_id)) in files
+        .iter()
+        .zip(contents.iter())
+        .zip(tool_use_ids.iter())
+        .enumerate()
+    {
         let file_path = repo.path().join(filename);
 
         // Create the actual file first

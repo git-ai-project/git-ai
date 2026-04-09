@@ -52,6 +52,7 @@ mod git_repository_comprehensive;
 mod github_copilot;
 mod github_copilot_create_file;
 mod github_copilot_integration;
+mod github_copilot_tools;
 mod github_integration;
 mod gix_config_tests;
 mod graphite;
