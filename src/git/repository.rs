@@ -3153,11 +3153,13 @@ pub fn exec_git_with_profile(
     args: &[String],
     profile: InternalGitProfile,
 ) -> Result<Output, GitAiError> {
-    let effective_args =
-        args_with_internal_git_profile(&args_with_disabled_hooks_if_needed(args), profile);
     let output = exec_git_allow_nonzero_with_profile(args, profile)?;
 
     if !output.status.success() {
+        // Compute effective_args only on the error path to avoid the allocation
+        // cost on every successful invocation.
+        let effective_args =
+            args_with_internal_git_profile(&args_with_disabled_hooks_if_needed(args), profile);
         let code = output.status.code();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         return Err(GitAiError::GitCliError {

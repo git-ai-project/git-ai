@@ -287,16 +287,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
             return;
         }
         if let Some(pending) = self.state.pending.get_mut(root_sid) {
-            for change in incoming {
-                let duplicate = pending.captured_ref_changes.iter().any(|existing| {
-                    existing.reference == change.reference
-                        && existing.old == change.old
-                        && existing.new == change.new
-                });
-                if !duplicate {
-                    pending.captured_ref_changes.push(change);
-                }
-            }
+            merge_ref_changes_dedup(&mut pending.captured_ref_changes, incoming);
         }
     }
 
@@ -775,16 +766,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
             if payload_carryover_snapshot_id.is_some() {
                 deferred.carryover_snapshot_id = payload_carryover_snapshot_id;
             }
-            for change in payload_ref_changes {
-                let duplicate = deferred.captured_ref_changes.iter().any(|existing| {
-                    existing.reference == change.reference
-                        && existing.old == change.old
-                        && existing.new == change.new
-                });
-                if !duplicate {
-                    deferred.captured_ref_changes.push(change);
-                }
-            }
+            merge_ref_changes_dedup(&mut deferred.captured_ref_changes, payload_ref_changes);
             trace_debug_lifecycle(&format!(
                 "trace normalizer deferred exit sid={} code={} (start not seen yet)",
                 root_sid, exit_code
@@ -898,6 +880,10 @@ impl<B: GitBackend> TraceNormalizer<B> {
             }
         }
 
+        // TODO(H11): Extract worktree_head_reflog_delta (blocking I/O) into
+        // tokio::task::spawn_blocking and run it before acquiring the normalizer
+        // lock. This requires making finalize_root_exit async or splitting the
+        // pre-read phase out of the ingest_payload call chain.
         if may_mutate_refs
             && let (Some(worktree), Some(start), Some(end)) = (
                 pending.worktree.as_deref(),
@@ -906,16 +892,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
             )
         {
             let head_changes = worktree_head_reflog_delta(worktree, start, end)?;
-            for change in head_changes {
-                let duplicate = ref_changes.iter().any(|existing| {
-                    existing.reference == change.reference
-                        && existing.old == change.old
-                        && existing.new == change.new
-                });
-                if !duplicate {
-                    ref_changes.push(change);
-                }
-            }
+            merge_ref_changes_dedup(&mut ref_changes, head_changes);
         }
 
         let mut family_key = pending.family_key.clone();
@@ -1055,6 +1032,34 @@ fn is_valid_oid(value: &str) -> bool {
 
 fn is_zero_oid(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.chars().all(|c| c == '0')
+}
+
+/// Build a `HashSet` of `(reference, old, new)` tuples for O(1) duplicate
+/// checking when merging ref changes.
+fn ref_change_dedup_set(changes: &[RefChange]) -> HashSet<(String, String, String)> {
+    changes
+        .iter()
+        .map(|c| (c.reference.clone(), c.old.clone(), c.new.clone()))
+        .collect()
+}
+
+/// Merge `incoming` ref changes into `target`, skipping duplicates.
+/// Uses a `HashSet` for O(1) lookup instead of linear scans.
+fn merge_ref_changes_dedup(target: &mut Vec<RefChange>, incoming: Vec<RefChange>) {
+    if incoming.is_empty() {
+        return;
+    }
+    let mut seen = ref_change_dedup_set(target);
+    for change in incoming {
+        let key = (
+            change.reference.clone(),
+            change.old.clone(),
+            change.new.clone(),
+        );
+        if seen.insert(key) {
+            target.push(change);
+        }
+    }
 }
 
 fn worktree_head_reflog_delta(

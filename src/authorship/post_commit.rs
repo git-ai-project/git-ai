@@ -42,11 +42,11 @@ fn checkpoint_entry_requires_post_processing(
     entry
         .line_attributions
         .iter()
-        .any(|attr| attr.author_id != CheckpointKind::Human.to_str() || attr.overrode.is_some())
+        .any(|attr| attr.author_id != CheckpointKind::Human.as_str() || attr.overrode.is_some())
         || entry
             .attributions
             .iter()
-            .any(|attr| attr.author_id != CheckpointKind::Human.to_str())
+            .any(|attr| attr.author_id != CheckpointKind::Human.as_str())
 }
 
 pub fn post_commit(

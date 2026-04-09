@@ -677,7 +677,7 @@ impl VirtualAttributions {
                         entry
                             .attributions
                             .iter()
-                            .filter(|attr| attr.author_id != CheckpointKind::Human.to_str())
+                            .filter(|attr| attr.author_id != CheckpointKind::Human.as_str())
                             .cloned()
                             .collect()
                     };
@@ -881,7 +881,7 @@ impl VirtualAttributions {
             let mut author_ranges: HashMap<String, Vec<(u32, u32)>> = HashMap::new();
             for line_attr in line_attrs {
                 // Skip human attributions - we only track AI attributions
-                if line_attr.author_id == CheckpointKind::Human.to_str() {
+                if line_attr.author_id == CheckpointKind::Human.as_str() {
                     continue;
                 }
 
@@ -1322,7 +1322,7 @@ impl VirtualAttributions {
                 // Create attestation entries from committed lines
                 for (author_id, mut lines) in committed_lines_map {
                     // Skip human attributions - we only track AI attributions in the output
-                    if author_id == CheckpointKind::Human.to_str() {
+                    if author_id == CheckpointKind::Human.as_str() {
                         continue;
                     }
 
@@ -1385,7 +1385,7 @@ impl VirtualAttributions {
                 let mut uncommitted_line_attrs = Vec::new();
                 for (author_id, mut lines) in uncommitted_lines_map {
                     // Skip human attributions - we only track AI attributions in the output
-                    if author_id == CheckpointKind::Human.to_str() {
+                    if author_id == CheckpointKind::Human.as_str() {
                         continue;
                     }
 
@@ -1528,7 +1528,7 @@ impl VirtualAttributions {
                 // Create attestation entries from committed lines
                 for (author_id, mut lines) in committed_lines_map {
                     // Skip human attributions - we only track AI attributions in the output
-                    if author_id == CheckpointKind::Human.to_str() {
+                    if author_id == CheckpointKind::Human.as_str() {
                         continue;
                     }
 
@@ -1597,7 +1597,7 @@ impl VirtualAttributions {
         for (file_path, (_, line_attrs)) in &self.attributions {
             let filtered: Vec<LineAttribution> = line_attrs
                 .iter()
-                .filter(|attr| attr.author_id != CheckpointKind::Human.to_str())
+                .filter(|attr| attr.author_id != CheckpointKind::Human.as_str())
                 .cloned()
                 .collect();
             if filtered.is_empty() {
@@ -1710,7 +1710,7 @@ impl VirtualAttributions {
         for (_char_attrs, line_attrs) in attributions.values() {
             for line_attr in line_attrs {
                 // Skip human attributions - we only track AI prompt metrics
-                if line_attr.author_id == CheckpointKind::Human.to_str() {
+                if line_attr.author_id == CheckpointKind::Human.as_str() {
                     continue;
                 }
 
@@ -2289,7 +2289,7 @@ fn compute_attributions_for_file(
             let mut line_attributions = Vec::new();
             for (line, author) in blames {
                 // Skip human-only lines as they don't need tracking
-                if author == CheckpointKind::Human.to_str() {
+                if author == CheckpointKind::Human.as_str() {
                     continue;
                 }
                 line_attributions.push(LineAttribution {

@@ -303,16 +303,11 @@ impl AttributionTracker {
         &self,
         old_content: &str,
         new_content: &str,
+        old_lines: &[LineMetadata],
+        new_lines: &[LineMetadata],
         is_ai_checkpoint: bool,
     ) -> Result<DiffComputation, GitAiError> {
         let compute_start = Instant::now();
-        let line_metadata_start = Instant::now();
-        let old_lines = collect_line_metadata(old_content);
-        let new_lines = collect_line_metadata(new_content);
-        debug_log(&format!(
-            "[BENCHMARK] collect_line_metadata (old/new) took {:?}",
-            line_metadata_start.elapsed()
-        ));
 
         let capture_start = Instant::now();
         let old_line_slices: Vec<&str> = old_lines
@@ -341,8 +336,8 @@ impl AttributionTracker {
                 if !pending_changed.is_empty() {
                     self.process_changed_hunk(
                         &pending_changed,
-                        &old_lines,
-                        &new_lines,
+                        old_lines,
+                        new_lines,
                         old_content,
                         new_content,
                         &mut computation,
@@ -351,7 +346,7 @@ impl AttributionTracker {
                     pending_changed.clear();
                 }
 
-                self.push_equal_lines(op, &old_lines, old_content, &mut computation.diffs)?;
+                self.push_equal_lines(op, old_lines, old_content, &mut computation.diffs)?;
             } else {
                 pending_changed.push(op);
             }
@@ -360,8 +355,8 @@ impl AttributionTracker {
         if !pending_changed.is_empty() {
             self.process_changed_hunk(
                 &pending_changed,
-                &old_lines,
-                &new_lines,
+                old_lines,
+                new_lines,
                 old_content,
                 new_content,
                 &mut computation,
@@ -497,7 +492,12 @@ impl AttributionTracker {
         Ok(())
     }
 
-    /// Attribute all unattributed ranges to the given author
+    /// Attribute all unattributed ranges to the given author.
+    ///
+    /// Uses a sweep-line algorithm: sort existing attributions by start position,
+    /// then iterate through gaps between consecutive attributions to find
+    /// unattributed ranges. Complexity: O(n log n) for the sort + O(n) for the scan,
+    /// where n is the number of attributions.
     pub fn attribute_unattributed_ranges(
         &self,
         content: &str,
@@ -505,37 +505,42 @@ impl AttributionTracker {
         author: &str,
         ts: u128,
     ) -> Vec<Attribution> {
-        let mut attributions = prev_attributions.to_vec();
-        let mut range_start: Option<usize> = None;
+        if content.is_empty() {
+            return prev_attributions.to_vec();
+        }
 
-        // Find all unattributed character ranges on UTF-8 boundaries.
-        for (idx, ch) in content.char_indices() {
-            let end = idx + ch.len_utf8();
-            let covered = attributions.iter().any(|a| a.overlaps(idx, end));
+        let content_len = content.len();
 
-            if covered {
-                if let Some(start) = range_start.take()
-                    && start < idx
-                {
-                    attributions.push(Attribution::new(start, idx, author.to_string(), ts));
-                }
-            } else if range_start.is_none() {
-                range_start = Some(idx);
+        // Sort attributions by start position for sweep-line scan
+        let mut sorted: Vec<&Attribution> = prev_attributions.iter().collect();
+        sorted.sort_by_key(|a| a.start);
+
+        let mut result = prev_attributions.to_vec();
+
+        // Walk sorted attributions and emit Human attribution for each gap
+        let mut cursor = 0usize;
+        for attr in &sorted {
+            if attr.start > cursor {
+                // There is a gap from cursor..attr.start -- attribute it
+                result.push(Attribution::new(cursor, attr.start, author.to_string(), ts));
+            }
+            // Advance cursor past the end of this attribution (handle overlaps)
+            if attr.end > cursor {
+                cursor = attr.end;
             }
         }
 
-        if let Some(start) = range_start.take()
-            && start < content.len()
-        {
-            attributions.push(Attribution::new(
-                start,
-                content.len(),
+        // Handle trailing gap after last attribution
+        if cursor < content_len {
+            result.push(Attribution::new(
+                cursor,
+                content_len,
                 author.to_string(),
                 ts,
             ));
         }
 
-        attributions
+        result
     }
 
     /// Update attributions from old content to new content
@@ -581,8 +586,18 @@ impl AttributionTracker {
             .then(|| sort_attributions_for_transform(old_attributions));
         let old_attributions = sorted_old_storage.as_deref().unwrap_or(old_attributions);
 
+        // Compute line metadata once, reuse for both compute_diffs and detect_moves
+        let old_lines = collect_line_metadata(old_content);
+        let new_lines = collect_line_metadata(new_content);
+
         // Phase 1: Compute diff
-        let diff_result = self.compute_diffs(old_content, new_content, is_ai_checkpoint)?;
+        let diff_result = self.compute_diffs(
+            old_content,
+            new_content,
+            &old_lines,
+            &new_lines,
+            is_ai_checkpoint,
+        )?;
 
         // Phase 2: Build deletion and insertion catalogs
         let (deletions, insertions) = self.build_diff_catalog(&diff_result.diffs);
@@ -596,7 +611,14 @@ impl AttributionTracker {
         {
             Vec::new()
         } else {
-            self.detect_moves(old_content, new_content, &deletions, &insertions)
+            self.detect_moves(
+                old_content,
+                new_content,
+                &old_lines,
+                &new_lines,
+                &deletions,
+                &insertions,
+            )
         };
 
         // Phase 4: Transform attributions through the diff
@@ -697,8 +719,10 @@ impl AttributionTracker {
     /// Detect move operations between deletions and insertions
     fn detect_moves(
         &self,
-        old_content: &str,
-        new_content: &str,
+        _old_content: &str,
+        _new_content: &str,
+        old_lines: &[LineMetadata],
+        new_lines: &[LineMetadata],
         deletions: &[Deletion],
         insertions: &[Insertion],
     ) -> Vec<MoveMapping> {
@@ -706,9 +730,6 @@ impl AttributionTracker {
         if threshold == 0 || deletions.is_empty() || insertions.is_empty() {
             return Vec::new();
         }
-
-        let old_lines = collect_line_metadata(old_content);
-        let new_lines = collect_line_metadata(new_content);
 
         let old_line_map: HashMap<usize, LineMetadata> = old_lines
             .iter()
@@ -2036,7 +2057,7 @@ pub fn attributions_to_line_attributions_for_checkpoint(
 
     for line_num in 1..=line_count {
         let Some((line_start, line_end)) = boundaries.get_line_range(line_num) else {
-            line_authors.push(Some((CheckpointKind::Human.to_str(), None)));
+            line_authors.push(Some((CheckpointKind::Human.as_str().to_string(), None)));
             continue;
         };
 
@@ -2072,7 +2093,7 @@ pub fn attributions_to_line_attributions_for_checkpoint(
 
     // Strip away all human lines (only AI lines need to be retained)
     merged_line_authors.retain(|line_attr| {
-        line_attr.author_id != CheckpointKind::Human.to_str() || line_attr.overrode.is_some()
+        line_attr.author_id != CheckpointKind::Human.as_str() || line_attr.overrode.is_some()
     });
     merged_line_authors
 }
@@ -2118,7 +2139,7 @@ fn find_dominant_author_for_line_candidates(
         // Zero-length attributions are deletion markers - they indicate the author
         // deleted content at this position, so they should influence line attribution
         let is_deletion_marker = attribution.start == attribution.end;
-        let is_ai_author = attribution.author_id != CheckpointKind::Human.to_str();
+        let is_ai_author = attribution.author_id != CheckpointKind::Human.as_str();
         let include_ai_whitespace = is_ai_checkpoint && is_ai_author;
         if has_non_whitespace || is_line_empty || is_deletion_marker || include_ai_whitespace {
             candidate_attrs.push(attribution);
@@ -2129,7 +2150,7 @@ fn find_dominant_author_for_line_candidates(
     }
 
     if candidate_attrs.is_empty() {
-        return (CheckpointKind::Human.to_str(), None);
+        return (CheckpointKind::Human.as_str().to_string(), None);
     }
 
     // Choose the author with the latest timestamp (keep first match on ties).
@@ -2143,7 +2164,7 @@ fn find_dominant_author_for_line_candidates(
     let mut last_ai_edit: Option<&Attribution> = None;
     let mut last_human_edit: Option<&Attribution> = None;
     for attr in &candidate_attrs {
-        if attr.author_id == CheckpointKind::Human.to_str() {
+        if attr.author_id == CheckpointKind::Human.as_str() {
             last_human_edit = Some(attr);
         } else {
             last_ai_edit = Some(attr);
@@ -2618,8 +2639,10 @@ mod tests {
         let new = "# My Application\n\nimport os\nimport sys\n\ndef setup():\n    print(\"Setting up\")\n\ndef main():\n    setup()\n    print(\"Running main\")\n\ndef cleanup():\n    print(\"Cleaning up\")\n\nif __name__ == \"__main__\":\n    main()\n";
 
         let human_attrs = vec![Attribution::new(0, old.len(), "human".into(), TEST_TS)];
+        let old_lines = collect_line_metadata(old);
+        let new_lines = collect_line_metadata(new);
         let diff_ops: Vec<_> = tracker
-            .compute_diffs(old, new, false)
+            .compute_diffs(old, new, &old_lines, &new_lines, false)
             .unwrap()
             .diffs
             .iter()

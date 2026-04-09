@@ -1359,7 +1359,7 @@ pub fn rewrite_authorship_after_rebase_v2(
                 let lines: Vec<&str> = content.lines().collect();
                 for attr in line_attrs {
                     if attr.author_id
-                        != crate::authorship::working_log::CheckpointKind::Human.to_str()
+                        != crate::authorship::working_log::CheckpointKind::Human.as_str()
                     {
                         for line_num in attr.start_line..=attr.end_line {
                             if let Some(line_content) =
@@ -3700,7 +3700,7 @@ fn build_file_attestation_from_line_attributions(
 ) -> Option<crate::authorship::authorship_log_serialization::FileAttestation> {
     let mut by_author: HashMap<String, Vec<(u32, u32)>> = HashMap::new();
     for line_attr in line_attrs {
-        if line_attr.author_id == crate::authorship::working_log::CheckpointKind::Human.to_str() {
+        if line_attr.author_id == crate::authorship::working_log::CheckpointKind::Human.as_str() {
             continue;
         }
         by_author
@@ -3778,7 +3778,7 @@ fn serialize_attestation_from_line_attrs(
         return None;
     }
 
-    let human_id = crate::authorship::working_log::CheckpointKind::Human.to_str();
+    let human_id = crate::authorship::working_log::CheckpointKind::Human.as_str();
 
     // Collect runs of (author_id, start, end) merging adjacent lines
     let mut runs: Vec<(&str, u32, u32)> = Vec::new();
@@ -4118,7 +4118,7 @@ fn build_delta_prompt_metrics_from_hunks_and_attrs(
     changed_files: &HashSet<String>,
     commit_hunks: Option<&HashMap<String, Vec<DiffHunk>>>,
 ) -> HashMap<String, PromptLineMetrics> {
-    let human_id = crate::authorship::working_log::CheckpointKind::Human.to_str();
+    let human_id = crate::authorship::working_log::CheckpointKind::Human.as_str();
     let mut metrics: HashMap<String, PromptLineMetrics> = HashMap::new();
 
     for file_path in changed_files {
@@ -4173,7 +4173,7 @@ fn add_prompt_line_metrics_for_line_attributions(
     metrics: &mut HashMap<String, PromptLineMetrics>,
     line_attrs: &[crate::authorship::attribution_tracker::LineAttribution],
 ) {
-    let human_id = crate::authorship::working_log::CheckpointKind::Human.to_str();
+    let human_id = crate::authorship::working_log::CheckpointKind::Human.as_str();
     for line_attr in line_attrs {
         let line_count = line_attr
             .end_line
@@ -4214,7 +4214,7 @@ fn subtract_prompt_line_metrics_for_line_attributions(
     metrics: &mut HashMap<String, PromptLineMetrics>,
     line_attrs: &[crate::authorship::attribution_tracker::LineAttribution],
 ) {
-    let human_id = crate::authorship::working_log::CheckpointKind::Human.to_str();
+    let human_id = crate::authorship::working_log::CheckpointKind::Human.as_str();
     for line_attr in line_attrs {
         let line_count = line_attr
             .end_line

@@ -1094,7 +1094,7 @@ fn overlay_ai_authorship(
                         if options.return_human_authors_as_human {
                             line_authors.insert(
                                 current_line_num,
-                                CheckpointKind::Human.to_str().to_string(),
+                                CheckpointKind::Human.as_str().to_string(),
                             );
                         } else {
                             line_authors.insert(current_line_num, author.username.clone());
@@ -1104,7 +1104,7 @@ fn overlay_ai_authorship(
                     // Has authorship log but no attribution found = human-authored
                     if options.return_human_authors_as_human {
                         line_authors
-                            .insert(current_line_num, CheckpointKind::Human.to_str().to_string());
+                            .insert(current_line_num, CheckpointKind::Human.as_str().to_string());
                     } else {
                         line_authors.insert(current_line_num, hunk.original_author.clone());
                     }
@@ -1180,7 +1180,7 @@ fn overlay_ai_authorship(
                     // User wants explicit distinction - mark as Unknown
                     line_authors.insert(line_num, "Unknown".to_string());
                 } else if options.return_human_authors_as_human {
-                    line_authors.insert(line_num, CheckpointKind::Human.to_str().to_string());
+                    line_authors.insert(line_num, CheckpointKind::Human.as_str().to_string());
                 } else {
                     line_authors.insert(line_num, hunk.original_author.clone());
                 }
