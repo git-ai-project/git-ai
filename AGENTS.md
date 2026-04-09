@@ -234,3 +234,81 @@ Uses `insta` crate. Snapshots live in `tests/snapshots/` and `tests/repos/snapsh
 - **Snapshot tests can cascade**: Changing attribution logic can invalidate many snapshots at once. Use `cargo insta review` rather than manually editing `.snap` files.
 
 - **SQLite WAL files**: Test DB paths are placed as siblings to the repo directory (not inside `.git/`) to prevent WAL/SHM files from interfering with git operations.
+
+## Writing Attribution Tests
+
+When writing tests that verify AI vs human attribution:
+
+### Required: Use Line-Level Blame Verification
+
+**NEVER** just check that an authorship note exists or that `attestations.is_empty()` is false. This only proves the system created a note -- it does NOT verify correct line-level attribution.
+
+**ALWAYS** use `assert_lines_and_blame()` to verify attribution at specific lines:
+
+```rust
+use crate::repos::test_file::{ExpectedLineExt, TestFile};
+
+// After committing, verify each line's attribution:
+let file = TestFile::from_existing_file(repo.path().join("code.rs"), &repo);
+file.assert_lines_and_blame(lines![
+    "fn main() {".human(),
+    "    println!(\"AI wrote this\");".ai(),
+    "}".human(),
+]);
+```
+
+### Required: Direct File Writes + Explicit Checkpoints
+
+**Do NOT** use `set_contents()` for attribution tests. It creates an unrealistic two-phase write (stub content -> human checkpoint -> real content -> AI checkpoint) that can mask bugs in the checkpoint-to-commit pipeline.
+
+**Instead**, write file contents directly and run explicit checkpoints:
+
+```rust
+let path = repo.path().join("code.rs");
+
+// 1. Write human content
+fs::write(&path, "fn main() {\n    // human code\n}\n").unwrap();
+repo.git_ai(&["checkpoint", "--", "code.rs"]).unwrap();
+
+// 2. AI modifies the file
+fs::write(&path, "fn main() {\n    // human code\n    println!(\"AI\");\n}\n").unwrap();
+repo.git_ai(&["checkpoint", "mock_ai", "--", "code.rs"]).unwrap();
+
+// 3. Commit and verify
+repo.stage_all_and_commit("add feature").unwrap();
+let file = TestFile::from_existing_file(path, &repo);
+file.assert_lines_and_blame(lines![
+    "fn main() {".human(),
+    "    // human code".human(),
+    "    println!(\"AI\");".ai(),
+    "}".human(),
+]);
+```
+
+### Whitespace Attribution Rule
+
+- Human whitespace changes **preserve** existing attribution
+- AI whitespace changes **are attributed to AI**
+
+Account for this in tests involving formatting or whitespace-only edits.
+
+### Test Intermediate States
+
+Always verify attribution at intermediate commits, not just the final state. Bugs like the intermediate commit corruption in rebase logic can only be caught by checking each step:
+
+```rust
+let commit1 = repo.stage_all_and_commit("step 1").unwrap();
+// verify blame after commit 1
+let commit2 = repo.stage_all_and_commit("step 2").unwrap();
+// verify blame after commit 2 -- don't skip this
+```
+
+### Key Test Helpers Reference
+
+| Helper | Location | Purpose |
+|--------|----------|---------|
+| `assert_lines_and_blame()` | `tests/integration/repos/test_file.rs` | Core line-level blame assertion |
+| `assert_committed_lines()` | same | Filters uncommitted lines first |
+| `.ai()` / `.human()` | `ExpectedLineExt` trait | Mark expected authorship |
+| `lines![]` macro | `tests/integration/repos/test_file.rs` | Create `Vec<ExpectedLine>` |
+| `TestFile::from_existing_file()` | same | Reconstruct expectations from blame |
