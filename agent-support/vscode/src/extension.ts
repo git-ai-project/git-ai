@@ -9,6 +9,7 @@ import { AITabEditManager } from "./ai-tab-edit-manager";
 import { Config } from "./utils/config";
 import { BlameLensManager, registerBlameLensCommands } from "./blame-lens-manager";
 import { initBinaryResolver } from "./utils/binary-path";
+import { KnownHumanCheckpointManager } from "./known-human-checkpoint-manager";
 
 function getDistinctId(): string {
   try {
@@ -43,6 +44,17 @@ export function activate(context: vscode.ExtensionContext) {
   });
 
   const aiEditManager = new AIEditManager(context);
+
+  const knownHumanManager = new KnownHumanCheckpointManager(
+    vscode.version,
+    context.extension.packageJSON.version,
+  );
+  context.subscriptions.push(
+    vscode.workspace.onDidSaveTextDocument((doc) => {
+      knownHumanManager.handleSaveEvent(doc);
+    }),
+    { dispose: () => knownHumanManager.dispose() },
+  );
 
   // Initialize and activate blame lens manager
   registerBlameLensCommands(context);
