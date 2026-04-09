@@ -26,6 +26,13 @@ const DAEMON_SOCKET_IO_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(not(any(test, feature = "test-support")))]
 const DAEMON_TELEMETRY_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
+// TODO(H14): Replace this global `Mutex<Option<DaemonTelemetryHandle>>` with a
+// bounded `tokio::sync::mpsc::Sender` (capacity ~4096). Spawn a dedicated
+// sender task in `init_daemon_telemetry_handle` that owns the socket and drains
+// the channel. Callers would use `try_send` (non-blocking) and increment a drop
+// counter on `SendError::Full`. This eliminates the mutex contention risk where
+// a slow daemon response blocks all callers.
+
 /// Global handle to the daemon control socket for telemetry submission.
 static DAEMON_TELEMETRY_HANDLE: OnceLock<Mutex<Option<DaemonTelemetryHandle>>> = OnceLock::new();
 
