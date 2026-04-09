@@ -7,6 +7,7 @@ use crate::commands::checkpoint_agent::agent_presets::{
 };
 use crate::commands::checkpoint_agent::amp_preset::AmpPreset;
 use crate::commands::checkpoint_agent::opencode_preset::OpenCodePreset;
+use crate::commands::checkpoint_agent::pi_preset::PiPreset;
 use crate::error::GitAiError;
 use crate::git::refs::{get_authorship, grep_ai_notes};
 use crate::git::repository::Repository;
@@ -178,6 +179,7 @@ pub fn update_prompt_from_tool(
         "droid" => update_droid_prompt(agent_metadata, current_model),
         "amp" => update_amp_prompt(external_thread_id, agent_metadata, current_model),
         "opencode" => update_opencode_prompt(external_thread_id, agent_metadata, current_model),
+        "pi" => update_pi_prompt(agent_metadata, current_model),
         "windsurf" => update_windsurf_prompt(agent_metadata, current_model),
         _ => {
             debug_log(&format!("Unknown tool: {}", tool));
@@ -587,6 +589,40 @@ fn update_opencode_prompt(
             );
             PromptUpdateResult::Failed(e)
         }
+    }
+}
+
+/// Update Pi prompt from session JSONL file
+fn update_pi_prompt(
+    metadata: Option<&HashMap<String, String>>,
+    current_model: &str,
+) -> PromptUpdateResult {
+    if let Some(session_path) = metadata
+        .and_then(|m| m.get("session_path"))
+        .filter(|path| !path.trim().is_empty())
+    {
+        match PiPreset::transcript_and_model_from_pi_session(session_path) {
+            Ok((transcript, model)) => PromptUpdateResult::Updated(
+                transcript,
+                model.unwrap_or_else(|| current_model.to_string()),
+            ),
+            Err(e) => {
+                debug_log(&format!(
+                    "Failed to parse Pi session JSONL from {}: {}",
+                    session_path, e
+                ));
+                log_error(
+                    &e,
+                    Some(serde_json::json!({
+                        "agent_tool": "pi",
+                        "operation": "transcript_and_model_from_pi_session"
+                    })),
+                );
+                PromptUpdateResult::Failed(e)
+            }
+        }
+    } else {
+        PromptUpdateResult::Unchanged
     }
 }
 
