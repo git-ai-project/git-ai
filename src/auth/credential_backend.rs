@@ -136,14 +136,27 @@ impl CredentialBackend for FileBackend {
             fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {}", e))?;
         }
 
-        fs::write(&self.path, value)
-            .map_err(|e| format!("Failed to write credentials file: {}", e))?;
-
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600))
-                .map_err(|e| format!("Failed to set file permissions: {}", e))?;
+            // Create (or truncate) the file with mode 0o600 atomically so there
+            // is no window where it exists with default (world-readable) permissions.
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&self.path)
+                .map_err(|e| format!("Failed to write credentials file: {}", e))?;
+            file.write_all(value.as_bytes())
+                .map_err(|e| format!("Failed to write credentials file: {}", e))?;
+        }
+
+        #[cfg(not(unix))]
+        {
+            fs::write(&self.path, value)
+                .map_err(|e| format!("Failed to write credentials file: {}", e))?;
         }
 
         #[cfg(windows)]
@@ -183,7 +196,7 @@ pub use mock::*;
 #[cfg(test)]
 mod mock {
     use super::CredentialBackend;
-    use std::cell::RefCell;
+    use std::sync::Mutex;
 
     /// Configurable failure modes for MockBackend
     #[derive(Clone, Debug)]
@@ -193,46 +206,48 @@ mod mock {
         Clear(String),
     }
 
-    /// Mock backend for testing - stores in memory, can simulate failures
+    /// Mock backend for testing - stores in memory, can simulate failures.
+    /// Uses `std::sync::Mutex` instead of `RefCell` so that `Send + Sync`
+    /// is derived automatically without `unsafe impl`.
     pub struct MockBackend {
-        storage: RefCell<Option<String>>,
-        failure: RefCell<Option<MockFailure>>,
+        storage: Mutex<Option<String>>,
+        failure: Mutex<Option<MockFailure>>,
     }
 
     impl MockBackend {
         pub fn new() -> Self {
             Self {
-                storage: RefCell::new(None),
-                failure: RefCell::new(None),
+                storage: Mutex::new(None),
+                failure: Mutex::new(None),
             }
         }
 
         /// Configure to fail on store with given error message
         pub fn fail_store(self, msg: &str) -> Self {
-            *self.failure.borrow_mut() = Some(MockFailure::Store(msg.to_string()));
+            *self.failure.lock().unwrap() = Some(MockFailure::Store(msg.to_string()));
             self
         }
 
         /// Configure to fail on load with given error message
         pub fn fail_load(self, msg: &str) -> Self {
-            *self.failure.borrow_mut() = Some(MockFailure::Load(msg.to_string()));
+            *self.failure.lock().unwrap() = Some(MockFailure::Load(msg.to_string()));
             self
         }
 
         /// Configure to fail on clear with given error message
         pub fn fail_clear(self, msg: &str) -> Self {
-            *self.failure.borrow_mut() = Some(MockFailure::Clear(msg.to_string()));
+            *self.failure.lock().unwrap() = Some(MockFailure::Clear(msg.to_string()));
             self
         }
 
         /// Check if storage contains a value
         pub fn has_value(&self) -> bool {
-            self.storage.borrow().is_some()
+            self.storage.lock().unwrap().is_some()
         }
 
         /// Get the stored value (for test assertions)
         pub fn get_value(&self) -> Option<String> {
-            self.storage.borrow().clone()
+            self.storage.lock().unwrap().clone()
         }
     }
 
@@ -242,32 +257,27 @@ mod mock {
         }
     }
 
-    // MockBackend is not Send+Sync due to RefCell, but that's fine for single-threaded tests
-    // We implement the trait without the Send+Sync bounds for the mock
-    unsafe impl Send for MockBackend {}
-    unsafe impl Sync for MockBackend {}
-
     impl CredentialBackend for MockBackend {
         fn store(&self, value: &str) -> Result<(), String> {
-            if let Some(MockFailure::Store(msg)) = self.failure.borrow().as_ref() {
+            if let Some(MockFailure::Store(msg)) = self.failure.lock().unwrap().as_ref() {
                 return Err(msg.clone());
             }
-            *self.storage.borrow_mut() = Some(value.to_string());
+            *self.storage.lock().unwrap() = Some(value.to_string());
             Ok(())
         }
 
         fn load(&self) -> Result<Option<String>, String> {
-            if let Some(MockFailure::Load(msg)) = self.failure.borrow().as_ref() {
+            if let Some(MockFailure::Load(msg)) = self.failure.lock().unwrap().as_ref() {
                 return Err(msg.clone());
             }
-            Ok(self.storage.borrow().clone())
+            Ok(self.storage.lock().unwrap().clone())
         }
 
         fn clear(&self) -> Result<(), String> {
-            if let Some(MockFailure::Clear(msg)) = self.failure.borrow().as_ref() {
+            if let Some(MockFailure::Clear(msg)) = self.failure.lock().unwrap().as_ref() {
                 return Err(msg.clone());
             }
-            *self.storage.borrow_mut() = None;
+            *self.storage.lock().unwrap() = None;
             Ok(())
         }
 

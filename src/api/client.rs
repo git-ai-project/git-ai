@@ -79,7 +79,7 @@ fn resolve_git_identity() -> Option<String> {
 }
 
 /// API client context with optional authentication
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ApiContext {
     /// Base URL for the API (e.g., `https://app.com`)
     pub base_url: String,
@@ -91,6 +91,21 @@ pub struct ApiContext {
     pub author_identity: Option<String>,
     /// Request timeout in seconds
     pub timeout_secs: Option<u64>,
+}
+
+impl std::fmt::Debug for ApiContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApiContext")
+            .field("base_url", &self.base_url)
+            .field(
+                "auth_token",
+                &self.auth_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("author_identity", &self.author_identity)
+            .field("timeout_secs", &self.timeout_secs)
+            .finish()
+    }
 }
 
 impl ApiContext {
