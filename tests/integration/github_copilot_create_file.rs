@@ -2,10 +2,10 @@ use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
 use serde_json::json;
 
-// Helper to create a fake but valid-looking Copilot session transcript path
+// Helper to create a realistic Copilot transcript path matching actual VS Code format
 fn fake_copilot_transcript_path(repo: &TestRepo) -> String {
     repo.path()
-        .join(".vscode/workspaceStorage/abc123/github.copilot-chat/transcripts/copilot_session_test.jsonl")
+        .join("Library/Application Support/Code/User/workspaceStorage/abc123def456/GitHub.copilot-chat/transcripts/session-test-uuid.jsonl")
         .to_str()
         .unwrap()
         .to_string()
@@ -77,6 +77,9 @@ fn test_create_file_pre_tool_use_empty_dirty_files() {
     ])
     .unwrap();
 
+    // Sync daemon to ensure checkpoint is processed before commit
+    repo.sync_daemon();
+
     // Commit
     repo.stage_all_and_commit("Create new file").unwrap();
 
@@ -110,6 +113,10 @@ fn test_create_file_rapid_multi_file_no_contamination() {
     for (i, (filename, content)) in files.iter().zip(contents.iter()).enumerate() {
         let file_path = repo.path().join(filename);
 
+        // Create the actual file first
+        let mut test_file = repo.filename(filename);
+        test_file.set_contents(crate::lines![content.trim()]);
+
         // PreToolUse - should only include THIS file, not previous files from session
         let pre_hook = json!({
             "timestamp": format!("2026-04-09T17:36:0{}.100Z", i),
@@ -132,10 +139,6 @@ fn test_create_file_rapid_multi_file_no_contamination() {
             &pre_hook.to_string(),
         ])
         .unwrap();
-
-        // Create the actual file
-        let mut test_file = repo.filename(filename);
-        test_file.set_contents(crate::lines![content.trim()]);
 
         // PostToolUse
         let post_hook = json!({
@@ -161,6 +164,9 @@ fn test_create_file_rapid_multi_file_no_contamination() {
         ])
         .unwrap();
     }
+
+    // Sync daemon to ensure all checkpoints are processed before commit
+    repo.sync_daemon();
 
     // Commit all files
     repo.stage_all_and_commit("Create multiple files").unwrap();
@@ -192,8 +198,34 @@ fn test_create_file_ignores_transcript_session_files() {
 
     // The hook payload should ONLY reference new.py in tool_input
     // (transcript might have existing.py in session history, but we ignore that now)
-    let hook_input = json!({
+    let pre_hook_input = json!({
         "timestamp": "2026-04-09T17:36:05.881Z",
+        "hook_event_name": "PreToolUse",
+        "session_id": "session-with-history",
+        "transcript_path": fake_copilot_transcript_path(&repo),
+        "tool_name": "create_file",
+        "tool_input": {
+            "filePath": new_file_path.to_str().unwrap(),
+            "content": "print(\"new file\")\n"
+        },
+        "tool_use_id": "call_new_file",
+        "cwd": repo.path().to_str().unwrap()
+    });
+
+    // Create the new file
+    let mut new_file = repo.filename("new.py");
+    new_file.set_contents(crate::lines!["print(\"new file\")"]);
+
+    repo.git_ai(&[
+        "checkpoint",
+        "github-copilot",
+        "--hook-input",
+        &pre_hook_input.to_string(),
+    ])
+    .unwrap();
+
+    let post_hook_input = json!({
+        "timestamp": "2026-04-09T17:36:05.970Z",
         "hook_event_name": "PostToolUse",
         "session_id": "session-with-history",
         "transcript_path": fake_copilot_transcript_path(&repo),
@@ -207,17 +239,16 @@ fn test_create_file_ignores_transcript_session_files() {
         "cwd": repo.path().to_str().unwrap()
     });
 
-    // Create the new file
-    let mut new_file = repo.filename("new.py");
-    new_file.set_contents(crate::lines!["print(\"new file\")"]);
-
     repo.git_ai(&[
         "checkpoint",
         "github-copilot",
         "--hook-input",
-        &hook_input.to_string(),
+        &post_hook_input.to_string(),
     ])
     .unwrap();
+
+    // Sync daemon to ensure checkpoint is processed before commit
+    repo.sync_daemon();
 
     repo.stage_all_and_commit("Create new file").unwrap();
 
@@ -248,8 +279,31 @@ fn test_create_file_uses_payload_content_not_disk() {
     let mut file = repo.filename("test.py");
     file.set_contents(crate::lines!["print(\"from payload\")"]);
 
-    // Hook payload has the correct content
-    let hook_input = json!({
+    // PreToolUse hook
+    let pre_hook_input = json!({
+        "timestamp": "2026-04-09T17:36:05.881Z",
+        "hook_event_name": "PreToolUse",
+        "session_id": "test-session",
+        "transcript_path": fake_copilot_transcript_path(&repo),
+        "tool_name": "create_file",
+        "tool_input": {
+            "filePath": file_path.to_str().unwrap(),
+            "content": expected_content
+        },
+        "tool_use_id": "call_test",
+        "cwd": repo.path().to_str().unwrap()
+    });
+
+    repo.git_ai(&[
+        "checkpoint",
+        "github-copilot",
+        "--hook-input",
+        &pre_hook_input.to_string(),
+    ])
+    .unwrap();
+
+    // PostToolUse hook - checkpoint uses content from payload
+    let post_hook_input = json!({
         "timestamp": "2026-04-09T17:36:05.970Z",
         "hook_event_name": "PostToolUse",
         "session_id": "test-session",
@@ -264,14 +318,16 @@ fn test_create_file_uses_payload_content_not_disk() {
         "cwd": repo.path().to_str().unwrap()
     });
 
-    // Checkpoint uses content from payload (dirty_files synthesized from tool_input)
     repo.git_ai(&[
         "checkpoint",
         "github-copilot",
         "--hook-input",
-        &hook_input.to_string(),
+        &post_hook_input.to_string(),
     ])
     .unwrap();
+
+    // Sync daemon to ensure checkpoint is processed before commit
+    repo.sync_daemon();
 
     repo.stage_all_and_commit("Create file").unwrap();
 
@@ -293,8 +349,34 @@ fn test_create_file_ignores_top_level_edited_filepaths() {
     let new_file_path = repo.path().join("new.py");
     let old_file_path = repo.path().join("old.py");
 
-    // Hook payload with stale edited_filepaths at top level (shouldn't be used)
-    let hook_input = json!({
+    let mut new_file = repo.filename("new.py");
+    new_file.set_contents(crate::lines!["print(\"new\")"]);
+
+    // PreToolUse hook
+    let pre_hook_input = json!({
+        "timestamp": "2026-04-09T17:36:05.881Z",
+        "hook_event_name": "PreToolUse",
+        "session_id": "test-session",
+        "transcript_path": fake_copilot_transcript_path(&repo),
+        "tool_name": "create_file",
+        "tool_input": {
+            "filePath": new_file_path.to_str().unwrap(),
+            "content": "print(\"new\")\n"
+        },
+        "tool_use_id": "call_test",
+        "cwd": repo.path().to_str().unwrap()
+    });
+
+    repo.git_ai(&[
+        "checkpoint",
+        "github-copilot",
+        "--hook-input",
+        &pre_hook_input.to_string(),
+    ])
+    .unwrap();
+
+    // PostToolUse hook with stale edited_filepaths at top level (shouldn't be used)
+    let post_hook_input = json!({
         "timestamp": "2026-04-09T17:36:05.970Z",
         "hook_event_name": "PostToolUse",
         "session_id": "test-session",
@@ -311,16 +393,16 @@ fn test_create_file_ignores_top_level_edited_filepaths() {
         "edited_filepaths": [old_file_path.to_str().unwrap()],
     });
 
-    let mut new_file = repo.filename("new.py");
-    new_file.set_contents(crate::lines!["print(\"new\")"]);
-
     repo.git_ai(&[
         "checkpoint",
         "github-copilot",
         "--hook-input",
-        &hook_input.to_string(),
+        &post_hook_input.to_string(),
     ])
     .unwrap();
+
+    // Sync daemon to ensure checkpoint is processed before commit
+    repo.sync_daemon();
 
     repo.stage_all_and_commit("Create new file").unwrap();
 

@@ -2374,11 +2374,6 @@ impl GithubCopilotPreset {
             .to_string();
 
         let dirty_files = Self::dirty_files_from_hook_data(hook_data);
-        let dirty_files = if dirty_files.is_none() {
-            Self::synthesize_create_file_dirty_files(hook_data, &cwd).or(dirty_files)
-        } else {
-            dirty_files
-        };
         let chat_session_id = hook_data
             .get("chat_session_id")
             .and_then(|v| v.as_str())
@@ -2590,52 +2585,6 @@ impl GithubCopilotPreset {
                     })
                     .collect::<HashMap<String, String>>()
             })
-    }
-
-    /// For `create_file` PostToolUse events, synthesize dirty_files from
-    /// `tool_input.content` so the checkpoint captures the file content
-    /// even if there is a timing window between the hook firing and the
-    /// file being fully written to disk.
-    fn synthesize_create_file_dirty_files(
-        hook_data: &serde_json::Value,
-        cwd: &str,
-    ) -> Option<HashMap<String, String>> {
-        let hook_event_name = hook_data
-            .get("hook_event_name")
-            .or_else(|| hook_data.get("hookEventName"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if hook_event_name != "PostToolUse" {
-            return None;
-        }
-
-        let tool_name = hook_data
-            .get("tool_name")
-            .or_else(|| hook_data.get("toolName"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if tool_name != "create_file" {
-            return None;
-        }
-
-        let tool_input = hook_data
-            .get("tool_input")
-            .or_else(|| hook_data.get("toolInput"))?;
-
-        let raw_path = tool_input
-            .get("filePath")
-            .or_else(|| tool_input.get("file_path"))
-            .and_then(|v| v.as_str())?;
-        let content = tool_input.get("content").and_then(|v| v.as_str())?;
-
-        if raw_path.is_empty() {
-            return None;
-        }
-
-        let normalized_path = Self::normalize_hook_path(raw_path, cwd)?;
-        let mut map = HashMap::new();
-        map.insert(normalized_path, content.to_string());
-        Some(map)
     }
 
     fn is_likely_copilot_native_hook(transcript_path: Option<&str>) -> bool {
