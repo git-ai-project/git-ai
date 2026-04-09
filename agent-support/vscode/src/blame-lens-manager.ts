@@ -371,6 +371,12 @@ export class BlameLensManager {
     // Re-firing for the same document (e.g. VS Code activation event) must not
     // clear decorations that were just applied.
     if (newDocumentUri !== this.currentDocumentUri) {
+      // Clear any pending document change timer from the previous document
+      if (this.documentChangeTimer) {
+        clearTimeout(this.documentChangeTimer);
+        this.documentChangeTimer = null;
+      }
+
       const previousEditor = vscode.window.visibleTextEditors.find(
         e => e.document.uri.toString() === this.currentDocumentUri
       );
@@ -774,7 +780,7 @@ export class BlameLensManager {
     }
     // Use filtered colors length (falls back to full palette if empty)
     const colorCount = this.filteredColors.length || this.HUNK_COLORS.length;
-    return Math.abs(hash) % colorCount;
+    return (hash >>> 0) % colorCount;
   }
 
   /**
