@@ -1232,4 +1232,26 @@ mod tests {
             "Unix paths should be preserved unchanged"
         );
     }
+
+    /// Regression test for #1039: install_hooks_at should succeed even when
+    /// the parent directory does not yet exist.
+    #[test]
+    fn test_install_hooks_creates_missing_parent_dir() {
+        let temp_dir = TempDir::new().unwrap();
+        // Point to a settings.json inside a directory that does NOT exist yet
+        let settings_path = temp_dir.path().join("missing_dir").join("settings.json");
+        assert!(!settings_path.parent().unwrap().exists());
+
+        let result =
+            ClaudeCodeInstaller::install_hooks_at(&settings_path, &params(), false).unwrap();
+
+        assert!(result.is_some(), "should report changes for fresh install");
+        assert!(settings_path.exists(), "settings.json should be created");
+
+        let content: Value =
+            serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).expect("valid JSON");
+        let hooks = content.get("hooks").expect("hooks key should exist");
+        assert!(hooks.get("PreToolUse").is_some());
+        assert!(hooks.get("PostToolUse").is_some());
+    }
 }
