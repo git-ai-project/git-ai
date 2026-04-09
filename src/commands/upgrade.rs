@@ -996,6 +996,17 @@ pub fn check_for_update_available() -> Result<DaemonUpdateCheckResult, String> {
     let cache_release = matches!(action, UpgradeAction::UpgradeAvailable);
     persist_update_state(channel, cache_release.then_some(&release));
 
+    log_message(
+        "checked_for_update",
+        "info",
+        Some(serde_json::json!({
+            "current_version": current_version,
+            "api_base_url": api_base_url,
+            "channel": channel.as_str(),
+            "result": action.to_string()
+        })),
+    );
+
     if action == UpgradeAction::UpgradeAvailable && !config.auto_updates_disabled() {
         Ok(DaemonUpdateCheckResult::UpdateReady)
     } else {
