@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 # Change 'pick' to 'squash' for all commits except the very first one (in non-comment lines).
 awk '
   /^#/ { print; next }

@@ -280,7 +280,8 @@ INSTALL_DIR="$HOME/.git-ai/bin"
 mkdir -p "$INSTALL_DIR"
 
 # Download and install
-TMP_FILE="${INSTALL_DIR}/git-ai.tmp.$$"
+TMP_FILE=$(mktemp "${INSTALL_DIR}/git-ai.tmp.XXXXXX")
+trap 'rm -f "$TMP_FILE"' EXIT
 if [ -n "${GIT_AI_LOCAL_BINARY:-}" ]; then
     echo "Using local git-ai binary (release: ${RELEASE_TAG})..."
     if [ ! -f "$GIT_AI_LOCAL_BINARY" ]; then
@@ -355,7 +356,8 @@ CONFIG_JSON_PATH="$CONFIG_DIR/config.json"
 mkdir -p "$CONFIG_DIR"
 
 if [ ! -f "$CONFIG_JSON_PATH" ]; then
-    TMP_CFG="$CONFIG_JSON_PATH.tmp.$$"
+    TMP_CFG=$(mktemp "$CONFIG_JSON_PATH.tmp.XXXXXX")
+    trap 'rm -f "$TMP_FILE" "$TMP_CFG"' EXIT
     cat >"$TMP_CFG" <<EOF
 {
   "git_path": "${STD_GIT_PATH}",

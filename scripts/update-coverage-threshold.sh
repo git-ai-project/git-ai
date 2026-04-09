@@ -9,7 +9,7 @@
 # 3. Rounds down to nearest multiple of 5
 # 4. Updates the threshold in .github/workflows/coverage.yml
 
-set -e
+set -euo pipefail
 
 echo "Running coverage analysis..."
 cargo llvm-cov test --ignore-filename-regex='tests/.*|benches/.*|examples/.*' --lcov --output-path /tmp/coverage-temp.lcov -- --skip performance_regression

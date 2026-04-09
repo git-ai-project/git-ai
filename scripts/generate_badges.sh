@@ -28,12 +28,12 @@ for ((i = 0; i < count; i++)); do
 
   # Read PNG dimensions and compute icon width to preserve aspect ratio
   read png_w png_h < <(python3 -c "
-import struct, zlib
-with open('$png','rb') as f:
+import struct, sys
+with open(sys.argv[1],'rb') as f:
     f.read(16)
     w, h = struct.unpack('>II', f.read(8))
     print(w, h)
-")
+" "$png")
   # Per-icon padding overrides
   icon_padding=${padding}
   icon_y_offset=0

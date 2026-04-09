@@ -37,7 +37,7 @@ if [ -z "$REAL_GIT" ]; then
 fi
 
 # ── Daemon home directory ────────────────────────────────────────────────────
-DAEMON_HOME="${RUNNER_TEMP:-/tmp}/git-ai-daemon-$$"
+DAEMON_HOME=$(mktemp -d "${RUNNER_TEMP:-/tmp}/git-ai-daemon-XXXXXX")
 mkdir -p "$DAEMON_HOME/.git-ai"
 
 # ── Write daemon config ──────────────────────────────────────────────────────

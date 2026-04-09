@@ -3,7 +3,7 @@
 # This script cleans up GitHub repositories created by integration tests.
 # It searches for repositories matching the pattern 'git-ai-test-*' and deletes them.
 
-set -e
+set -euo pipefail
 
 echo "🔍 Checking GitHub CLI availability..."
 if ! command -v gh &> /dev/null; then
@@ -43,9 +43,9 @@ REPO_COUNT=$(echo "$REPOS" | wc -l)
 
 echo "Found $REPO_COUNT test repositories:"
 echo ""
-echo "$REPOS" | while read -r repo; do
+while read -r repo; do
     echo "  - $GITHUB_USER/$repo"
-done
+done <<< "$REPOS"
 echo ""
 
 # Ask for confirmation
@@ -65,7 +65,7 @@ echo ""
 DELETED=0
 FAILED=0
 
-echo "$REPOS" | while read -r repo; do
+while read -r repo; do
     FULL_REPO="$GITHUB_USER/$repo"
     echo -n "  Deleting $FULL_REPO... "
 
@@ -76,7 +76,7 @@ echo "$REPOS" | while read -r repo; do
         echo "❌"
         FAILED=$((FAILED + 1))
     fi
-done
+done <<< "$REPOS"
 
 echo ""
 echo "✅ Cleanup complete"

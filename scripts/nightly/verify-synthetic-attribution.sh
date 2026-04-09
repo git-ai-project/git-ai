@@ -71,14 +71,14 @@ fi
 pass "Authorship note contains parseable JSON metadata"
 
 # ── 3. Schema version ─────────────────────────────────────────────────────────
-SCHEMA=$(python3 -c "import json; d=json.load(open('$META_JSON')); print(d.get('schema_version','MISSING'))")
+SCHEMA=$(python3 -c "import json, sys; d=json.load(open(sys.argv[1])); print(d.get('schema_version','MISSING'))" "$META_JSON")
 [ "$SCHEMA" = "authorship/3.0.0" ] \
   || fail "Wrong schema_version: '$SCHEMA' (expected 'authorship/3.0.0')"
 
 pass "schema_version = $SCHEMA"
 
 # ── 4. Prompts non-empty ──────────────────────────────────────────────────────
-PROMPT_COUNT=$(python3 -c "import json; d=json.load(open('$META_JSON')); print(len(d.get('prompts', {})))")
+PROMPT_COUNT=$(python3 -c "import json, sys; d=json.load(open(sys.argv[1])); print(len(d.get('prompts', {})))" "$META_JSON")
 [ "$PROMPT_COUNT" -gt 0 ] \
   || fail "No prompt sessions in authorship note — synthetic checkpoint data was not stored (check git-ai checkpoint pipeline)"
 
@@ -86,11 +86,11 @@ pass "$PROMPT_COUNT prompt session(s) recorded"
 
 # ── 5. Transcript messages captured ───────────────────────────────────────────
 MSG_COUNT=$(python3 -c "
-import json
-d = json.load(open('$META_JSON'))
+import json, sys
+d = json.load(open(sys.argv[1]))
 total = sum(len(r.get('messages', [])) for r in d.get('prompts', {}).values())
 print(total)
-")
+" "$META_JSON")
 if [ "$MSG_COUNT" -gt 0 ]; then
   pass "Transcript captured: $MSG_COUNT message(s) recorded across all prompt sessions"
 else
@@ -105,7 +105,7 @@ echo "$STATS_RAW" | grep -v '^\[DEBUG\]' > "$STATS_OUT" || true
 
 AI_ADDS=$(python3 -c "
 import json, sys
-with open('$STATS_OUT') as f:
+with open(sys.argv[1]) as f:
     content = f.read().strip()
 if not content:
     print(0)
@@ -121,7 +121,7 @@ for i, line in enumerate(lines):
         except json.JSONDecodeError:
             continue
 print(0)
-" 2>/dev/null || echo "0")
+" "$STATS_OUT" 2>/dev/null || echo "0")
 
 [ "$AI_ADDS" -gt 0 ] \
   || fail "git-ai stats HEAD reports ai_additions=0 — AI work not tracked in stats (checkpoint data may not have been linked to this commit)"

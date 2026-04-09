@@ -1,9 +1,10 @@
 #!/bin/bash
+set -euo pipefail
 
 echo "=== Human Checkpoint Example ==="
 echo '{
   "type": "human",
-  "repo_working_dir": "'$(pwd)'",
+  "repo_working_dir": "'$(pwd)'"
 }' | cargo run -- checkpoint agent-v1 --hook-input stdin
 
 echo -e "\n=== AI Agent Checkpoint Example ==="
