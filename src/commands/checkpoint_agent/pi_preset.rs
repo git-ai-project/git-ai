@@ -300,8 +300,7 @@ impl PiPreset {
     }
 
     fn is_bash_tool(tool_name: &str) -> bool {
-        bash_tool::classify_tool(bash_tool::Agent::Pi, tool_name)
-            == bash_tool::ToolClass::Bash
+        bash_tool::classify_tool(bash_tool::Agent::Pi, tool_name) == bash_tool::ToolClass::Bash
     }
 
     fn validate_tool_name(tool_name: &str) -> Result<(), GitAiError> {
@@ -608,9 +607,11 @@ mod tests {
             })
             .expect_err("unknown tool_name should fail");
 
-        assert!(error
-            .to_string()
-            .contains("Unsupported Pi tool_name: unknown_tool"));
+        assert!(
+            error
+                .to_string()
+                .contains("Unsupported Pi tool_name: unknown_tool")
+        );
     }
 
     #[test]
@@ -632,9 +633,11 @@ mod tests {
             })
             .expect_err("bash tool with edit event should fail");
 
-        assert!(error
-            .to_string()
-            .contains("before_edit/after_edit events cannot be used with bash"));
+        assert!(
+            error
+                .to_string()
+                .contains("before_edit/after_edit events cannot be used with bash")
+        );
     }
 
     #[test]
@@ -655,9 +658,11 @@ mod tests {
             })
             .expect_err("edit tool with command event should fail");
 
-        assert!(error
-            .to_string()
-            .contains("before_command/after_command events require a bash tool"));
+        assert!(
+            error
+                .to_string()
+                .contains("before_command/after_command events require a bash tool")
+        );
     }
 
     #[test]
