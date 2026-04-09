@@ -121,8 +121,16 @@ pub fn post_cherry_pick_hook(
     }
 
     // Cherry-pick is done (completed or aborted)
-    // Try to find the original head from the rewrite log
-    let original_head = find_cherry_pick_start_event_original_head(repository);
+    // Read rewrite events once and reuse for both original_head and source_commits lookups
+    let events = match repository.storage.read_rewrite_events() {
+        Ok(events) => events,
+        Err(e) => {
+            debug_log(&format!("Failed to read rewrite events: {}", e));
+            return;
+        }
+    };
+
+    let original_head = find_cherry_pick_start_event_original_head_from(&events);
 
     debug_log(&format!("Original head from log: {:?}", original_head));
 
@@ -146,11 +154,12 @@ pub fn post_cherry_pick_hook(
     // Cherry-pick completed successfully!
     debug_log("✓ Cherry-pick completed successfully");
     if let Some(original_head) = original_head {
+        let source_commits = find_cherry_pick_start_event_source_commits_from(&events);
         debug_log(&format!(
             "Processing completed cherry-pick from {}",
             original_head
         ));
-        process_completed_cherry_pick(repository, &original_head, parsed_args);
+        process_completed_cherry_pick(repository, &original_head, source_commits, parsed_args);
     } else {
         debug_log("⚠ Cherry-pick completed but couldn't determine original head");
     }
@@ -162,7 +171,11 @@ fn has_active_cherry_pick_start_event(repository: &Repository) -> bool {
         Ok(events) => events,
         Err(_) => return false,
     };
+    has_active_cherry_pick_start_event_from(&events)
+}
 
+/// Check pre-read events for an active cherry-pick Start (not followed by Complete or Abort).
+fn has_active_cherry_pick_start_event_from(events: &[RewriteLogEvent]) -> bool {
     // Events are newest-first
     // If we find Complete or Abort before Start, there's no active cherry-pick
     // If we find Start before Complete/Abort, there's an active cherry-pick
@@ -185,9 +198,14 @@ fn has_active_cherry_pick_start_event(repository: &Repository) -> bool {
 /// Find the original head from the most recent CherryPick Start event in the log.
 /// Stops at Complete/Abort events so orphaned Start events from a prior aborted
 /// cherry-pick are not mistakenly returned.
+#[allow(dead_code)]
 fn find_cherry_pick_start_event_original_head(repository: &Repository) -> Option<String> {
     let events = repository.storage.read_rewrite_events().ok()?;
+    find_cherry_pick_start_event_original_head_from(&events)
+}
 
+/// Find the original head from pre-read events.
+fn find_cherry_pick_start_event_original_head_from(events: &[RewriteLogEvent]) -> Option<String> {
     // Events are newest-first; stop at Complete/Abort before finding a Start.
     for event in events {
         match event {
@@ -208,9 +226,16 @@ fn find_cherry_pick_start_event_original_head(repository: &Repository) -> Option
 /// Find the source commits from the most recent CherryPick Start event in the log.
 /// Stops at Complete/Abort events so orphaned Start events from a prior aborted
 /// cherry-pick are not mistakenly returned.
+#[allow(dead_code)]
 fn find_cherry_pick_start_event_source_commits(repository: &Repository) -> Option<Vec<String>> {
     let events = repository.storage.read_rewrite_events().ok()?;
+    find_cherry_pick_start_event_source_commits_from(&events)
+}
 
+/// Find the source commits from pre-read events.
+fn find_cherry_pick_start_event_source_commits_from(
+    events: &[RewriteLogEvent],
+) -> Option<Vec<String>> {
     // Events are newest-first; stop at Complete/Abort before finding a Start.
     for event in events {
         match event {
@@ -405,6 +430,7 @@ fn handle_cherry_pick_skip(repository: &mut Repository) {
 fn process_completed_cherry_pick(
     repository: &mut Repository,
     original_head: &str,
+    source_commits: Option<Vec<String>>,
     parsed_args: &ParsedGitInvocation,
 ) {
     debug_log(&format!(
@@ -436,8 +462,8 @@ fn process_completed_cherry_pick(
         return;
     }
 
-    // Get source commits from the Start event
-    let source_commits = match find_cherry_pick_start_event_source_commits(repository) {
+    // Get source commits (passed from caller which already read events)
+    let source_commits = match source_commits {
         Some(commits) => {
             debug_log(&format!("Source commits from log: {:?}", commits));
             commits

@@ -145,7 +145,7 @@ pub fn post_reset_hook(
     }
 
     // Log reset event
-    let _ =
+    if let Err(e) =
         repository
             .storage
             .append_rewrite_event(crate::git::rewrite_log::RewriteLogEvent::Reset {
@@ -156,15 +156,24 @@ pub fn post_reset_hook(
                     new_head_sha.to_string(),
                     old_head_sha.to_string(),
                 ),
-            });
+            })
+    {
+        debug_log(&format!("Failed to append reset rewrite event: {}", e));
+    }
 }
 
 /// Handle --hard reset: delete working log since all uncommitted work is discarded
 fn handle_reset_hard(repository: &Repository, old_head_sha: &str, _target_commit_sha: &str) {
     // Delete working log for old HEAD - all uncommitted work is gone
-    let _ = repository
+    if let Err(e) = repository
         .storage
-        .delete_working_log_for_base_commit(old_head_sha);
+        .delete_working_log_for_base_commit(old_head_sha)
+    {
+        debug_log(&format!(
+            "Failed to delete working log for {}: {}",
+            old_head_sha, e
+        ));
+    }
 
     debug_log(&format!(
         "Reset --hard: deleted working log for {}",
@@ -214,9 +223,15 @@ fn handle_reset_preserve_working_dir(
         // Fall back to re-keying the working log so uncommitted state is preserved even when
         // we cannot derive a safe commit mapping.
         debug_log("Reset to non-ancestor commit, migrating working log");
-        let _ = repository
+        if let Err(e) = repository
             .storage
-            .rename_working_log(old_head_sha, target_commit_sha);
+            .rename_working_log(old_head_sha, target_commit_sha)
+        {
+            debug_log(&format!(
+                "Failed to rename working log {} -> {}: {}",
+                old_head_sha, target_commit_sha, e
+            ));
+        }
         return;
     }
 
@@ -366,16 +381,25 @@ fn handle_reset_pathspec_preserve_working_dir(
             return;
         }
     };
-    let _ = head_working_log.reset_working_log();
+    if let Err(e) = head_working_log.reset_working_log() {
+        debug_log(&format!("Failed to reset working log: {}", e));
+    }
     for checkpoint in merged_checkpoints {
-        let _ = head_working_log.append_checkpoint(&checkpoint);
+        if let Err(e) = head_working_log.append_checkpoint(&checkpoint) {
+            debug_log(&format!("Failed to append checkpoint: {}", e));
+        }
     }
 
     // Clean up the temporary working log for target_commit_sha (unless it's the same as HEAD)
-    if target_commit_sha != new_head_sha {
-        let _ = repository
+    if target_commit_sha != new_head_sha
+        && let Err(e) = repository
             .storage
-            .delete_working_log_for_base_commit(target_commit_sha);
+            .delete_working_log_for_base_commit(target_commit_sha)
+    {
+        debug_log(&format!(
+            "Failed to delete working log for {}: {}",
+            target_commit_sha, e
+        ));
     }
 
     debug_log(&format!(

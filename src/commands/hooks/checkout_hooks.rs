@@ -137,9 +137,15 @@ pub fn post_checkout_hook(
             "Force checkout detected, deleting working log for {}",
             &old_head
         ));
-        let _ = repository
+        if let Err(e) = repository
             .storage
-            .delete_working_log_for_base_commit(&old_head);
+            .delete_working_log_for_base_commit(&old_head)
+        {
+            debug_log(&format!(
+                "Failed to delete working log for {}: {}",
+                &old_head, e
+            ));
+        }
         return;
     }
 
@@ -173,9 +179,15 @@ pub fn post_checkout_hook(
 
         if let Some(stashed_va) = stashed_va {
             debug_log("Restoring VA after checkout --merge");
-            let _ = repository
+            if let Err(e) = repository
                 .storage
-                .delete_working_log_for_base_commit(&old_head);
+                .delete_working_log_for_base_commit(&old_head)
+            {
+                debug_log(&format!(
+                    "Failed to delete working log for {}: {}",
+                    &old_head, e
+                ));
+            }
             restore_stashed_va(repository, &old_head, &new_head, stashed_va);
             return;
         }
@@ -188,7 +200,12 @@ pub fn post_checkout_hook(
         "Checkout changed HEAD: {} -> {}",
         &old_head, &new_head
     ));
-    let _ = repository.storage.rename_working_log(&old_head, &new_head);
+    if let Err(e) = repository.storage.rename_working_log(&old_head, &new_head) {
+        debug_log(&format!(
+            "Failed to rename working log {} -> {}: {}",
+            &old_head, &new_head, e
+        ));
+    }
 }
 
 /// Remove attributions for specific files from working log (pathspec checkout case).
@@ -211,11 +228,13 @@ fn remove_attributions_for_pathspecs(repository: &Repository, head: &str, pathsp
             .collect();
         let mut filtered_blobs = initial.file_blobs;
         filtered_blobs.retain(|file, _| !matches_any_pathspec(file, pathspecs));
-        let _ = working_log.write_initial(crate::git::repo_storage::InitialAttributions {
+        if let Err(e) = working_log.write_initial(crate::git::repo_storage::InitialAttributions {
             files: filtered_files,
             prompts: initial.prompts,
             file_blobs: filtered_blobs,
-        });
+        }) {
+            debug_log(&format!("Failed to write filtered INITIAL: {}", e));
+        }
     }
 
     // Filter checkpoints
@@ -229,7 +248,9 @@ fn remove_attributions_for_pathspecs(repository: &Repository, head: &str, pathsp
             })
             .filter(|cp| !cp.entries.is_empty())
             .collect();
-        let _ = working_log.write_all_checkpoints(&filtered);
+        if let Err(e) = working_log.write_all_checkpoints(&filtered) {
+            debug_log(&format!("Failed to write filtered checkpoints: {}", e));
+        }
     }
 }
 

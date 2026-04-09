@@ -64,22 +64,22 @@ pub fn commit_post_command_hook(
     let new_sha = repository.head().ok().and_then(|h| h.target().ok());
 
     // empty repo, commit did not land
-    if new_sha.is_none() {
+    let Some(new_sha) = new_sha else {
         return;
-    }
+    };
 
     let commit_author = get_commit_default_author(repository, &parsed_args.command_args);
     if parsed_args.has_command_flag("--amend") {
-        if let (Some(orig), Some(sha)) = (original_commit.clone(), new_sha.clone()) {
+        if let Some(orig) = original_commit.clone() {
             repository.handle_rewrite_log_event(
-                RewriteLogEvent::commit_amend(orig, sha),
+                RewriteLogEvent::commit_amend(orig, new_sha),
                 commit_author,
                 supress_output,
                 true,
             );
         } else {
             repository.handle_rewrite_log_event(
-                RewriteLogEvent::commit(original_commit, new_sha.unwrap()),
+                RewriteLogEvent::commit(original_commit, new_sha),
                 commit_author,
                 supress_output,
                 true,
@@ -87,7 +87,7 @@ pub fn commit_post_command_hook(
         }
     } else {
         repository.handle_rewrite_log_event(
-            RewriteLogEvent::commit(original_commit, new_sha.unwrap()),
+            RewriteLogEvent::commit(original_commit, new_sha),
             commit_author,
             supress_output,
             true,

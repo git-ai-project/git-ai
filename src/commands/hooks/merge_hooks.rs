@@ -17,12 +17,24 @@ pub fn post_merge_hook(
         && exit_status.success()
         && !is_dry_run(&parsed_args.command_args)
     {
-        let base_branch = repository.head().unwrap().name().unwrap().to_string();
-        let base_head = repository.head().unwrap().target().unwrap().to_string();
+        let head_ref = match repository.head() {
+            Ok(h) => h,
+            Err(_) => return,
+        };
+        let base_branch = match head_ref.name() {
+            Some(n) => n.to_string(),
+            None => return,
+        };
+        let base_head = match head_ref.target() {
+            Ok(t) => t.to_string(),
+            Err(_) => return,
+        };
 
         let commit_author = get_commit_default_author(repository, &parsed_args.command_args);
 
-        let source_branch = parsed_args.pos_command(0).unwrap();
+        let Some(source_branch) = parsed_args.pos_command(0) else {
+            return;
+        };
 
         let source_head_sha = match repository
             .revparse_single(source_branch.as_str())

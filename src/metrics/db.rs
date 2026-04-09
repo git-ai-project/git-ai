@@ -284,7 +284,9 @@ impl MetricsDatabase {
             .optional()?;
 
         let should_emit = existing_ts
-            .map(|prev_ts| now_ts.saturating_sub(prev_ts as u64) >= min_interval_secs)
+            .map(|prev_ts| {
+                now_ts.saturating_sub(u64::try_from(prev_ts).unwrap_or(0)) >= min_interval_secs
+            })
             .unwrap_or(true);
 
         if should_emit {

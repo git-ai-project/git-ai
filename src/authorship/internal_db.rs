@@ -270,10 +270,14 @@ pub struct CasSyncRecord {
     pub attempts: u32,
 }
 
+/// One-time guard for the dummy database warning
+static DUMMY_DB_WARNING: std::sync::Once = std::sync::Once::new();
+
 /// Database wrapper for internal git-ai storage
 pub struct InternalDatabase {
     conn: Connection,
     _db_path: PathBuf,
+    is_dummy: bool,
 }
 
 impl InternalDatabase {
@@ -298,6 +302,7 @@ impl InternalDatabase {
                     Mutex::new(InternalDatabase {
                         conn,
                         _db_path: temp_path,
+                        is_dummy: true,
                     })
                 }
             }
@@ -344,6 +349,7 @@ impl InternalDatabase {
         let mut db = Self {
             conn,
             _db_path: db_path,
+            is_dummy: false,
         };
         db.initialize_schema()?;
 
@@ -497,8 +503,21 @@ impl InternalDatabase {
         Ok(())
     }
 
+    /// Emit a one-time warning if this is a dummy database
+    fn warn_if_dummy(&self) {
+        if self.is_dummy {
+            DUMMY_DB_WARNING.call_once(|| {
+                eprintln!(
+                    "[Warning] git-ai internal database failed to initialize; \
+                     prompt data will not be persisted this session"
+                );
+            });
+        }
+    }
+
     /// Upsert a prompt record
     pub fn upsert_prompt(&mut self, record: &PromptDbRecord) -> Result<(), GitAiError> {
+        self.warn_if_dummy();
         let messages_json = serde_json::to_string(&record.messages)?;
         let metadata_json = record
             .agent_metadata
@@ -550,6 +569,7 @@ impl InternalDatabase {
 
     /// Batch upsert multiple prompts (for post-commit)
     pub fn batch_upsert_prompts(&mut self, records: &[PromptDbRecord]) -> Result<(), GitAiError> {
+        self.warn_if_dummy();
         if records.is_empty() {
             return Ok(());
         }
@@ -1097,6 +1117,7 @@ mod tests {
         let mut db = InternalDatabase {
             conn,
             _db_path: db_path.clone(),
+            is_dummy: false,
         };
         db.initialize_schema().unwrap();
 
@@ -1183,6 +1204,7 @@ mod tests {
         let mut db = InternalDatabase {
             conn,
             _db_path: db_path,
+            is_dummy: false,
         };
         db.initialize_schema().unwrap();
 

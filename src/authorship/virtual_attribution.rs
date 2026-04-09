@@ -6,6 +6,7 @@ use crate::authorship::working_log::CheckpointKind;
 use crate::commands::blame::{GitAiBlameOptions, OLDEST_AI_BLAME_DATE};
 use crate::error::GitAiError;
 use crate::git::repository::Repository;
+use crate::utils::debug_log;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -340,7 +341,17 @@ impl VirtualAttributions {
             if let Ok(workdir) = repo.workdir() {
                 let abs_path = workdir.join(file_path);
                 let file_content = if abs_path.exists() {
-                    std::fs::read_to_string(&abs_path).unwrap_or_default()
+                    match std::fs::read_to_string(&abs_path) {
+                        Ok(content) => content,
+                        Err(e) => {
+                            debug_log(&format!(
+                                "Warning: failed to read file {}: {}",
+                                abs_path.display(),
+                                e
+                            ));
+                            continue;
+                        }
+                    }
                 } else {
                     String::new()
                 };
@@ -404,7 +415,17 @@ impl VirtualAttributions {
                 if let Ok(workdir) = repo.workdir() {
                     let abs_path = workdir.join(&entry.file);
                     let file_content = if abs_path.exists() {
-                        std::fs::read_to_string(&abs_path).unwrap_or_default()
+                        match std::fs::read_to_string(&abs_path) {
+                            Ok(content) => content,
+                            Err(e) => {
+                                debug_log(&format!(
+                                    "Warning: failed to read file {}: {}",
+                                    abs_path.display(),
+                                    e
+                                ));
+                                continue;
+                            }
+                        }
                     } else {
                         String::new()
                     };

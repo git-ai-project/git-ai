@@ -1236,10 +1236,13 @@ impl Repository {
         supress_output: bool,
         apply_side_effects: bool,
     ) {
-        let log = self
-            .storage
-            .append_rewrite_event(rewrite_log_event.clone())
-            .expect("Error writing .git/ai/rewrite_log");
+        let log = match self.storage.append_rewrite_event(rewrite_log_event.clone()) {
+            Ok(log) => log,
+            Err(e) => {
+                debug_log(&format!("Error writing .git/ai/rewrite_log: {}", e));
+                return;
+            }
+        };
 
         if apply_side_effects
             && let Err(error) = rewrite_authorship_if_needed(

@@ -96,9 +96,15 @@ pub fn post_switch_hook(
             "Force switch detected, deleting working log for {}",
             &old_head
         ));
-        let _ = repository
+        if let Err(e) = repository
             .storage
-            .delete_working_log_for_base_commit(&old_head);
+            .delete_working_log_for_base_commit(&old_head)
+        {
+            debug_log(&format!(
+                "Failed to delete working log for {}: {}",
+                &old_head, e
+            ));
+        }
         return;
     }
 
@@ -127,9 +133,15 @@ pub fn post_switch_hook(
 
         if let Some(stashed_va) = stashed_va {
             debug_log("Restoring VA after switch --merge");
-            let _ = repository
+            if let Err(e) = repository
                 .storage
-                .delete_working_log_for_base_commit(&old_head);
+                .delete_working_log_for_base_commit(&old_head)
+            {
+                debug_log(&format!(
+                    "Failed to delete working log for {}: {}",
+                    &old_head, e
+                ));
+            }
             restore_stashed_va(repository, &old_head, &new_head, stashed_va);
             return;
         }
@@ -142,7 +154,12 @@ pub fn post_switch_hook(
         "Switch changed HEAD: {} -> {}",
         &old_head, &new_head
     ));
-    let _ = repository.storage.rename_working_log(&old_head, &new_head);
+    if let Err(e) = repository.storage.rename_working_log(&old_head, &new_head) {
+        debug_log(&format!(
+            "Failed to rename working log {} -> {}: {}",
+            &old_head, &new_head, e
+        ));
+    }
 }
 
 /// Check if switch uses force flag (--discard-changes, -f, --force).
