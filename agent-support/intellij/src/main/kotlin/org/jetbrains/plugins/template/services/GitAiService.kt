@@ -4,6 +4,7 @@ import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
 import com.intellij.openapi.diagnostic.thisLogger
 import org.jetbrains.plugins.template.model.AgentV1Input
+import org.jetbrains.plugins.template.model.KnownHumanInput
 import java.io.File
 import java.util.concurrent.TimeUnit
 
@@ -343,6 +344,71 @@ class GitAiService {
         } catch (e: Exception) {
             logger.warn("Failed to create checkpoint: ${e.message}", e)
             TelemetryService.getInstance().captureError(e, mapOf("context" to "checkpoint_creation"))
+            false
+        }
+    }
+
+    /**
+     * Creates a known_human checkpoint by calling git-ai checkpoint known_human command.
+     *
+     * @param input The checkpoint data to send via stdin
+     * @param workingDirectory The working directory (git repo root) for the command
+     * @return true if checkpoint was created successfully
+     */
+    fun checkpointKnownHuman(input: KnownHumanInput, workingDirectory: String): Boolean {
+        if (!checkAvailable()) {
+            logger.warn("Skipping known_human checkpoint - git-ai not available")
+            return false
+        }
+
+        val gitAiPath = resolvedGitAiPath
+        if (gitAiPath == null) {
+            logger.warn("Skipping known_human checkpoint - git-ai path not resolved")
+            return false
+        }
+
+        return try {
+            val jsonInput = input.toJson()
+            logger.info("Creating known_human checkpoint for ${input.editedFilepaths}")
+            logger.info("known_human checkpoint input: $jsonInput")
+
+            val command = listOf(gitAiPath, "checkpoint", "known_human", "--hook-input", "stdin")
+            val process = ProcessBuilder(command)
+                .directory(File(workingDirectory))
+                .redirectErrorStream(false)
+                .start()
+
+            process.outputStream.bufferedWriter().use { writer ->
+                writer.write(jsonInput)
+            }
+
+            val completed = process.waitFor(30, TimeUnit.SECONDS)
+            if (!completed) {
+                process.destroyForcibly()
+                logger.warn("git-ai known_human checkpoint timed out")
+                return false
+            }
+
+            val output = process.inputStream.bufferedReader().readText().trim()
+            val errorOutput = process.errorStream.bufferedReader().readText().trim()
+            val exitCode = process.exitValue()
+
+            if (exitCode != 0) {
+                logger.warn("""
+                    git-ai known_human checkpoint failed
+                    Command: ${command.joinToString(" ")}
+                    Exit code: $exitCode
+                    Stdout: $output
+                    Stderr: $errorOutput
+                """.trimIndent())
+                return false
+            }
+
+            logger.info("known_human checkpoint created successfully")
+            if (output.isNotEmpty()) logger.info("git-ai output: $output")
+            true
+        } catch (e: Exception) {
+            logger.warn("Failed to create known_human checkpoint: ${e.message}", e)
             false
         }
     }

@@ -4,6 +4,36 @@ import com.google.gson.GsonBuilder
 import com.google.gson.JsonObject
 
 /**
+ * Input data for git-ai checkpoint known_human command sent via stdin.
+ */
+data class KnownHumanInput(
+    val editor: String,
+    val editorVersion: String,
+    val extensionVersion: String,
+    val cwd: String?,
+    val editedFilepaths: List<String>,
+    val dirtyFiles: Map<String, String>
+) {
+    fun toJson(): String {
+        val json = JsonObject()
+        json.addProperty("editor", editor)
+        json.addProperty("editor_version", editorVersion)
+        json.addProperty("extension_version", extensionVersion)
+        cwd?.let { json.addProperty("cwd", it) }
+
+        val pathsArray = com.google.gson.JsonArray()
+        editedFilepaths.forEach { pathsArray.add(it) }
+        json.add("edited_filepaths", pathsArray)
+
+        val filesObj = JsonObject()
+        dirtyFiles.forEach { (path, content) -> filesObj.addProperty(path, content) }
+        json.add("dirty_files", filesObj)
+
+        return GsonBuilder().create().toJson(json)
+    }
+}
+
+/**
  * Input data for git-ai checkpoint agent-v1 command sent via stdin.
  * Uses a sealed class to represent the two types: human (before edit) and ai_agent (after edit).
  */
