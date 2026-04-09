@@ -175,6 +175,12 @@ fn handle_run(args: &[String]) -> Result<(), String> {
             e
         )
     })?;
+    // Must run before building the tokio runtime: env::remove_var/set_var are
+    // not thread-safe on POSIX, and Builder::new_multi_thread().build() spawns
+    // worker threads immediately.
+    crate::daemon::sanitize_git_env_for_daemon();
+    crate::daemon::disable_trace2_for_daemon_process();
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
