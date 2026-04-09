@@ -2374,6 +2374,11 @@ impl GithubCopilotPreset {
             .to_string();
 
         let dirty_files = Self::dirty_files_from_hook_data(hook_data);
+        let dirty_files = if dirty_files.is_none() {
+            Self::synthesize_create_file_dirty_files(hook_data, &cwd).or(dirty_files)
+        } else {
+            dirty_files
+        };
         let chat_session_id = hook_data
             .get("chat_session_id")
             .and_then(|v| v.as_str())
@@ -2405,30 +2410,13 @@ impl GithubCopilotPreset {
             .get("tool_response")
             .or_else(|| hook_data.get("toolResponse"));
 
-        let mut extracted_paths =
+        // Extract file paths ONLY from tool_input and tool_response. This ensures strict tool-call
+        // scoping: we capture exactly which file(s) THIS tool invocation operated on, not session-
+        // level history. Do NOT merge hook_data.edited_filepaths/will_edit_filepaths as those may
+        // contain stale session-level data from previous tool calls, causing cross-contamination
+        // in rapid multi-file operations.
+        let extracted_paths =
             Self::extract_filepaths_from_vscode_hook_payload(tool_input, tool_response, &cwd);
-
-        let top_level_paths = hook_data
-            .get("edited_filepaths")
-            .and_then(|v| v.as_array())
-            .or_else(|| {
-                hook_data
-                    .get("will_edit_filepaths")
-                    .and_then(|v| v.as_array())
-            })
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str())
-                    .filter_map(|path| Self::normalize_hook_path(path, &cwd))
-                    .collect::<Vec<String>>()
-            })
-            .unwrap_or_default();
-
-        for path in top_level_paths {
-            if !extracted_paths.contains(&path) {
-                extracted_paths.push(path);
-            }
-        }
 
         let transcript_path = Self::transcript_path_from_hook_data(hook_data).map(str::to_string);
 
@@ -2441,11 +2429,15 @@ impl GithubCopilotPreset {
             ));
         }
 
-        let (transcript, mut detected_model, detected_edited_filepaths) = if let Some(path) =
-            transcript_path.as_deref()
-        {
+        // Load transcript and model from session JSON. Transcript parsing is ONLY used for:
+        // 1. Transcript content (conversation messages for display)
+        // 2. Model detection (fallback if not in chat_sessions)
+        // File paths are NEVER sourced from transcript - only from hook payload (tool_input)
+        // to ensure we capture exactly what THIS tool call edited, not session-level history.
+        let (transcript, mut detected_model) = if let Some(path) = transcript_path.as_deref() {
+            // Parse transcript but discard the detected_edited_filepaths (3rd return value)
             GithubCopilotPreset::transcript_and_model_from_copilot_session_json(path)
-                .map(|(t, m, f)| (Some(t), m, f))
+                .map(|(t, m, _)| (Some(t), m))
                 .unwrap_or_else(|e| {
                     eprintln!(
                         "[Warning] Failed to parse GitHub Copilot chat session JSON from {} (will update transcript at commit): {}",
@@ -2459,10 +2451,10 @@ impl GithubCopilotPreset {
                             "note": "JSON exists but invalid"
                         })),
                     );
-                    (None, None, None)
+                    (None, None)
                 })
         } else {
-            (None, None, None)
+            (None, None)
         };
 
         if let Some(path) = transcript_path.as_deref()
@@ -2482,20 +2474,45 @@ impl GithubCopilotPreset {
             )));
         }
 
-        let detected_edited_filepaths = detected_edited_filepaths.map(|paths| {
-            paths
-                .into_iter()
-                .filter_map(|path| Self::normalize_hook_path(&path, &cwd))
-                .collect::<Vec<String>>()
-        });
-
-        for path in detected_edited_filepaths.unwrap_or_default() {
-            if !extracted_paths.contains(&path) {
-                extracted_paths.push(path);
-            }
-        }
+        // extracted_paths now contains ONLY files from this tool call's hook payload (tool_input/tool_response).
+        // No merging of session-level detected_edited_filepaths - this prevents cross-contamination
+        // when multiple tool calls fire in rapid succession.
 
         if hook_event_name == "PreToolUse" {
+            // For create_file PreToolUse, synthesize dirty_files with empty content to explicitly
+            // mark the file as not existing yet (rather than letting it fall back to disk read,
+            // which could capture content from a concurrent tool call).
+            if tool_name == "create_file" {
+                let mut empty_dirty_files = HashMap::new();
+                for path in &extracted_paths {
+                    empty_dirty_files.insert(path.clone(), String::new());
+                }
+                // Override dirty_files with our synthesized empty content
+                let dirty_files = Some(empty_dirty_files);
+
+                if extracted_paths.is_empty() {
+                    return Err(GitAiError::PresetError(
+                        "No file path found in create_file PreToolUse tool_input".to_string(),
+                    ));
+                }
+
+                return Ok(AgentRunResult {
+                    agent_id: AgentId {
+                        tool: "human".to_string(),
+                        id: "human".to_string(),
+                        model: "human".to_string(),
+                    },
+                    agent_metadata: None,
+                    checkpoint_kind: CheckpointKind::Human,
+                    transcript: None,
+                    repo_working_dir: Some(cwd),
+                    edited_filepaths: None,
+                    will_edit_filepaths: Some(extracted_paths),
+                    dirty_files,
+                    captured_checkpoint_id: None,
+                });
+            }
+
             if extracted_paths.is_empty() {
                 return Err(GitAiError::PresetError(format!(
                     "No editable file paths found in VS Code hook input (tool_name: {}). Skipping checkpoint.",
@@ -2573,6 +2590,52 @@ impl GithubCopilotPreset {
                     })
                     .collect::<HashMap<String, String>>()
             })
+    }
+
+    /// For `create_file` PostToolUse events, synthesize dirty_files from
+    /// `tool_input.content` so the checkpoint captures the file content
+    /// even if there is a timing window between the hook firing and the
+    /// file being fully written to disk.
+    fn synthesize_create_file_dirty_files(
+        hook_data: &serde_json::Value,
+        cwd: &str,
+    ) -> Option<HashMap<String, String>> {
+        let hook_event_name = hook_data
+            .get("hook_event_name")
+            .or_else(|| hook_data.get("hookEventName"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if hook_event_name != "PostToolUse" {
+            return None;
+        }
+
+        let tool_name = hook_data
+            .get("tool_name")
+            .or_else(|| hook_data.get("toolName"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if tool_name != "create_file" {
+            return None;
+        }
+
+        let tool_input = hook_data
+            .get("tool_input")
+            .or_else(|| hook_data.get("toolInput"))?;
+
+        let raw_path = tool_input
+            .get("filePath")
+            .or_else(|| tool_input.get("file_path"))
+            .and_then(|v| v.as_str())?;
+        let content = tool_input.get("content").and_then(|v| v.as_str())?;
+
+        if raw_path.is_empty() {
+            return None;
+        }
+
+        let normalized_path = Self::normalize_hook_path(raw_path, cwd)?;
+        let mut map = HashMap::new();
+        map.insert(normalized_path, content.to_string());
+        Some(map)
     }
 
     fn is_likely_copilot_native_hook(transcript_path: Option<&str>) -> bool {

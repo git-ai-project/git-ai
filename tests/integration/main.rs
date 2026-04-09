@@ -50,6 +50,7 @@ mod git_alias_resolution;
 mod git_cli_arg_parsing;
 mod git_repository_comprehensive;
 mod github_copilot;
+mod github_copilot_create_file;
 mod github_copilot_integration;
 mod github_integration;
 mod gix_config_tests;
