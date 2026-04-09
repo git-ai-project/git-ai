@@ -386,26 +386,55 @@ pub fn claude_config_dir() -> PathBuf {
 /// If the path is a symlink, writes to the target file (preserving the symlink)
 pub fn write_atomic(path: &Path, data: &[u8]) -> Result<(), GitAiError> {
     let target_path = if path.is_symlink() {
-        fs::canonicalize(path)?
+        fs::canonicalize(path).map_err(|e| {
+            GitAiError::Generic(format!(
+                "Failed to resolve symlink {}: {}",
+                path.display(),
+                e
+            ))
+        })?
     } else {
         path.to_path_buf()
     };
 
+    // Ensure parent directory exists before writing. This guards against
+    // environments (e.g. nushell) where the parent may not yet exist when
+    // write_atomic is reached. See #1039.
+    ensure_parent_dir(&target_path)?;
+
     let tmp_path = target_path.with_extension("tmp");
     {
-        let mut file = fs::File::create(&tmp_path)?;
+        let mut file = fs::File::create(&tmp_path).map_err(|e| {
+            GitAiError::Generic(format!(
+                "Failed to create temp file {}: {}",
+                tmp_path.display(),
+                e
+            ))
+        })?;
         file.write_all(data)?;
         file.sync_all()?;
     }
-    fs::rename(&tmp_path, &target_path)?;
+    fs::rename(&tmp_path, &target_path).map_err(|e| {
+        GitAiError::Generic(format!(
+            "Failed to rename {} to {}: {}",
+            tmp_path.display(),
+            target_path.display(),
+            e
+        ))
+    })?;
     Ok(())
 }
 
 /// Ensure parent directory exists
-#[allow(dead_code)]
 pub fn ensure_parent_dir(path: &Path) -> Result<(), GitAiError> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        fs::create_dir_all(parent).map_err(|e| {
+            GitAiError::Generic(format!(
+                "Failed to create directory {}: {}",
+                parent.display(),
+                e
+            ))
+        })?;
     }
     Ok(())
 }
@@ -1504,5 +1533,50 @@ mod tests {
             std::env::remove_var("CLAUDE_CONFIG_DIR");
         }
         assert_eq!(dir, home_dir().join(".claude"));
+    }
+
+    /// Regression test for #1039: write_atomic should create parent directories
+    /// if they do not exist, preventing "No such file or directory" errors.
+    #[test]
+    fn test_write_atomic_creates_parent_dirs() {
+        let temp_dir = TempDir::new().unwrap();
+        // Path whose parent directory does NOT yet exist
+        let file_path = temp_dir
+            .path()
+            .join("nonexistent")
+            .join("subdir")
+            .join("test.json");
+        assert!(!file_path.parent().unwrap().exists());
+
+        write_atomic(&file_path, b"{\"key\": \"value\"}").unwrap();
+
+        assert!(file_path.exists());
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, "{\"key\": \"value\"}");
+    }
+
+    /// Regression test for #1039: ensure_parent_dir handles nested missing dirs.
+    #[test]
+    fn test_ensure_parent_dir_creates_nested() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir
+            .path()
+            .join("a")
+            .join("b")
+            .join("c")
+            .join("file.txt");
+        assert!(!temp_dir.path().join("a").exists());
+
+        ensure_parent_dir(&file_path).unwrap();
+
+        assert!(file_path.parent().unwrap().exists());
+    }
+
+    /// Regression test for #1039: ensure_parent_dir is a no-op for root-level paths.
+    #[test]
+    fn test_ensure_parent_dir_no_parent() {
+        // A path with no parent component should not error
+        let path = Path::new("standalone_file.txt");
+        ensure_parent_dir(path).unwrap();
     }
 }

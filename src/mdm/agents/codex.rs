@@ -1214,4 +1214,38 @@ codex_hooks = true
             );
         });
     }
+
+    /// Regression test for #1039: install_hooks should succeed even when
+    /// ~/.codex/ directory does not yet exist.
+    #[test]
+    #[serial]
+    fn test_install_hooks_creates_missing_codex_dir() {
+        with_temp_home(|home| {
+            // Ensure ~/.codex/ does NOT exist
+            let codex_dir = home.join(".codex");
+            assert!(!codex_dir.exists());
+
+            let installer = CodexInstaller;
+            let params = HookInstallerParams {
+                binary_path: test_binary_path(),
+            };
+
+            let result = installer.install_hooks(&params, false).unwrap();
+            assert!(result.is_some(), "should report changes for fresh install");
+
+            // Both config.toml and hooks.json should be created
+            let config_path = codex_dir.join("config.toml");
+            let hooks_path = codex_dir.join("hooks.json");
+            assert!(config_path.exists(), "config.toml should be created");
+            assert!(hooks_path.exists(), "hooks.json should be created");
+
+            // Verify hooks.json has the expected structure
+            let hooks_json: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
+            assert!(
+                CodexInstaller::hooks_have_codex_commands(&hooks_json, false),
+                "hooks.json should contain git-ai codex commands"
+            );
+        });
+    }
 }
