@@ -65,7 +65,7 @@ export class KnownHumanCheckpointManager {
     console.log("[git-ai] KnownHumanCheckpointManager: Save queued for", filePath);
   }
 
-  private executeCheckpoint(repoRoot: string): void {
+  private async executeCheckpoint(repoRoot: string): Promise<void> {
     this.pendingTimers.delete(repoRoot);
 
     const paths = this.pendingPaths.get(repoRoot);
@@ -81,9 +81,21 @@ export class KnownHumanCheckpointManager {
       const doc = vscode.workspace.textDocuments.find(
         (d) => d.uri.fsPath === absolutePath && d.uri.scheme === "file"
       );
-      // Use open document buffer if available (handles codespaces/remote lag);
-      // fall back to reading from the saved document directly.
-      const content = doc ? doc.getText() : null;
+
+      let content: string | null = null;
+      if (doc) {
+        // Use open document buffer if available (handles codespaces/remote lag)
+        content = doc.getText();
+      } else {
+        // Fall back to reading from disk if document was closed within debounce window
+        try {
+          const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(absolutePath));
+          content = Buffer.from(bytes).toString("utf-8");
+        } catch (err) {
+          console.error("[git-ai] KnownHumanCheckpointManager: Failed to read file", absolutePath, err);
+        }
+      }
+
       if (content !== null) {
         dirtyFiles[absolutePath] = content;
       }
