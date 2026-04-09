@@ -2534,7 +2534,7 @@ impl GithubCopilotPreset {
             // For create_file PreToolUse, synthesize dirty_files with empty content to explicitly
             // mark the file as not existing yet (rather than letting it fall back to disk read,
             // which could capture content from a concurrent tool call).
-            if tool_name == "create_file" {
+            if tool_name.eq_ignore_ascii_case("create_file") {
                 let mut empty_dirty_files = HashMap::new();
                 for path in &extracted_paths {
                     empty_dirty_files.insert(path.clone(), String::new());
