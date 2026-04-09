@@ -8,8 +8,8 @@ const GIT_AI_BIN = '__GIT_AI_BINARY_PATH__';
 // Optional user-owned override file. Managed installer never writes it.
 const OVERRIDE_CONFIG_PATH = join(homedir(), '.pi', 'agent', 'git-ai.override.json');
 
-type CanonicalToolName = 'edit' | 'write' | 'replace' | 'rename';
-type HookEventName = 'before_edit' | 'after_edit';
+type CanonicalToolName = 'edit' | 'write' | 'replace' | 'rename' | 'bash';
+type HookEventName = 'before_edit' | 'after_edit' | 'before_command' | 'after_command';
 
 type ToolOverridePolicy = {
   kind: 'mutating';
@@ -38,7 +38,7 @@ const DEFAULT_TOOL_POLICIES: Record<string, ToolOverridePolicy> = {
 };
 
 function isCanonicalToolName(value: unknown): value is CanonicalToolName {
-  return value === 'edit' || value === 'write' || value === 'replace' || value === 'rename';
+  return value === 'edit' || value === 'write' || value === 'replace' || value === 'rename' || value === 'bash';
 }
 
 function isStringArray(value: unknown): value is string[] {
@@ -119,7 +119,8 @@ type CheckpointPayload = {
   model: string;
   tool_name: CanonicalToolName;
   tool_name_raw: string;
-  dirty_files: Record<string, string>;
+  tool_use_id?: string;
+  dirty_files?: Record<string, string>;
   will_edit_filepaths?: string[];
   edited_filepaths?: string[];
   tool_input?: unknown;
@@ -147,9 +148,8 @@ async function readLatestAssistantModel(sessionPath: string): Promise<string> {
   for (const line of lines) {
     const entry = JSON.parse(line);
     if (entry?.type !== 'message' || entry?.message?.role !== 'assistant') continue;
-    const provider = typeof entry.message.provider === 'string' ? entry.message.provider : '';
     const model = typeof entry.message.model === 'string' ? entry.message.model : '';
-    latestModel = provider ? `${provider}/${model}` : model;
+    if (model) latestModel = model;
   }
 
   return latestModel;
@@ -257,12 +257,33 @@ async function runCheckpoint(payload: CheckpointPayload): Promise<void> {
 
 export default function (pi: ExtensionAPI) {
   const pendingCalls = new Map<string, MutatingCall[]>();
+  const pendingBashCalls = new Set<string>();
   const toolConfigPromise = buildToolConfig();
 
   pi.on('tool_call', async (event, ctx) => {
     const sessionPath = ctx.sessionManager.getSessionFile();
     if (!sessionPath) return;
 
+    // Bash tool path — snapshot system handles filesystem diffing
+    if (event.toolName === 'bash') {
+      const sessionId = await readSessionId(sessionPath).catch(() => undefined);
+      if (!sessionId) return;
+      const model = await readLatestAssistantModel(sessionPath).catch(() => '');
+      pendingBashCalls.add(event.toolCallId);
+      await runCheckpoint({
+        hook_event_name: 'before_command',
+        session_id: sessionId,
+        session_path: sessionPath,
+        cwd: ctx.cwd,
+        model,
+        tool_name: 'bash',
+        tool_name_raw: event.toolName,
+        tool_use_id: event.toolCallId,
+      });
+      return;
+    }
+
+    // File-edit tool path (existing logic)
     const mutatingCalls = extractMutatingCalls(
       ctx.cwd,
       event.toolName,
@@ -294,6 +315,29 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on('tool_result', async (event, ctx) => {
+    // Bash tool result path
+    if (pendingBashCalls.has(event.toolCallId)) {
+      pendingBashCalls.delete(event.toolCallId);
+      if (event.isError) return;
+      const sessionPath = ctx.sessionManager.getSessionFile();
+      if (!sessionPath) return;
+      const sessionId = await readSessionId(sessionPath).catch(() => undefined);
+      if (!sessionId) return;
+      const model = await readLatestAssistantModel(sessionPath).catch(() => '');
+      await runCheckpoint({
+        hook_event_name: 'after_command',
+        session_id: sessionId,
+        session_path: sessionPath,
+        cwd: ctx.cwd,
+        model,
+        tool_name: 'bash',
+        tool_name_raw: 'bash',
+        tool_use_id: event.toolCallId,
+      });
+      return;
+    }
+
+    // File-edit tool result path (existing logic)
     if (event.isError) {
       pendingCalls.delete(event.toolCallId);
       return;

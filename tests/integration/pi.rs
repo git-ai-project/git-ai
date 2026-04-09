@@ -155,7 +155,7 @@ fn test_pi_after_edit_checkpoint_via_cli_creates_ai_checkpoint() {
     assert_eq!(checkpoints[0].kind, CheckpointKind::AiAgent);
     assert_eq!(
         checkpoints[0].agent_id.as_ref().unwrap().model,
-        "anthropic/claude-sonnet-4-5"
+        "claude-sonnet-4-5"
     );
     assert!(
         checkpoints[0].transcript.is_none(),
@@ -227,7 +227,7 @@ fn test_pi_post_commit_resyncs_latest_session_transcript() {
         .expect("expected a prompt record");
 
     assert_eq!(prompt_record.agent_id.tool, "pi");
-    assert_eq!(prompt_record.agent_id.model, "openai/gpt-5");
+    assert_eq!(prompt_record.agent_id.model, "gpt-5");
     assert!(prompt_record.messages.iter().any(|message| matches!(
         message,
         Message::Assistant { text, .. }
