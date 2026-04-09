@@ -184,12 +184,16 @@ fn test_multi_commit_squash_merge_single_parent() {
     main_file.set_contents(crate::lines!["main work"]);
     repo.stage_all_and_commit("advance main").unwrap();
 
-    // Squash merge feature (produces single-parent commit)
+    // Squash merge feature (produces single-parent commit).
+    // Use git directly — the squash has no AI attribution so no hook note is written,
+    // and stage_all_and_commit would panic asserting the note exists.
     repo.git(&["merge", "--squash", "feature"]).unwrap();
+    repo.git(&["commit", "-m", "squash feature"]).unwrap();
     let merge_sha = repo
-        .stage_all_and_commit("squash feature")
+        .git_og(&["rev-parse", "HEAD"])
         .unwrap()
-        .commit_sha;
+        .trim()
+        .to_string();
 
     // Verify it's actually a single-parent commit
     let git_repo = git2::Repository::open(repo.path()).unwrap();

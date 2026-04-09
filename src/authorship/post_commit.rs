@@ -225,6 +225,23 @@ pub fn post_commit_with_final_state(
         .serialize_to_string()
         .map_err(|_| GitAiError::Generic("Failed to serialize authorship log".to_string()))?;
 
+    // Issue #211: if the squash merge was processed (INITIAL file written by
+    // `prepare_working_log_after_squash`) but found no AI-attributed content, and the
+    // user made no further IDE edits after the squash, there is nothing meaningful to
+    // record.  Skip writing a spurious empty authorship note in this case.
+    //
+    // The distinguishing signal is `working_log.initial_file.exists()`: the squash hook
+    // always writes an INITIAL file (possibly empty).  Regular commits never have one.
+    if authorship_log.attestations.is_empty()
+        && authorship_log.metadata.prompts.is_empty()
+        && parent_working_log.is_empty()
+        && working_log.initial_file.exists()
+        && initial_attributions_for_pathspecs.files.is_empty()
+    {
+        repo_storage.delete_working_log_for_base_commit(&parent_sha)?;
+        return Ok((commit_sha, authorship_log));
+    }
+
     notes_add(repo, &commit_sha, &authorship_json)?;
 
     // Compute stats once (needed for both metrics and terminal output), unless preflight

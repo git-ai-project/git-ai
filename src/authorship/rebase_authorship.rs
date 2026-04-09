@@ -374,11 +374,14 @@ pub fn prepare_working_log_after_squash(
     // later user edits.
     let initial_attributions = merged_va.to_initial_working_log_only();
 
-    // Step 6: Write INITIAL file
+    // Step 6: Write INITIAL file.
+    // Always obtain the working log so we can write INITIAL even when empty —
+    // the empty INITIAL signals to `post_commit` that squash processing ran but
+    // found no AI-attributed content (issue #211).
+    let working_log = repo
+        .storage
+        .working_log_for_base_commit(target_branch_head_sha)?;
     if !initial_attributions.files.is_empty() {
-        let working_log = repo
-            .storage
-            .working_log_for_base_commit(target_branch_head_sha)?;
         let initial_file_contents =
             merged_va.snapshot_contents_for_files(initial_attributions.files.keys());
         working_log.write_initial_attributions_with_contents(
@@ -386,6 +389,10 @@ pub fn prepare_working_log_after_squash(
             initial_attributions.prompts,
             initial_file_contents,
         )?;
+    } else {
+        // No AI content in the squash — write an empty INITIAL so `post_commit`
+        // knows not to record a spurious empty authorship note.
+        working_log.write_squash_processed_initial()?;
     }
 
     Ok(())
@@ -450,10 +457,10 @@ pub fn prepare_working_log_after_squash_from_final_state(
     let merged_va = merge_attributions_favoring_first(target_va, source_va, squash_files)?;
     let initial_attributions = merged_va.to_initial_working_log_only();
 
+    let working_log = repo
+        .storage
+        .working_log_for_base_commit(target_branch_head_sha)?;
     if !initial_attributions.files.is_empty() {
-        let working_log = repo
-            .storage
-            .working_log_for_base_commit(target_branch_head_sha)?;
         let initial_file_contents =
             merged_va.snapshot_contents_for_files(initial_attributions.files.keys());
         working_log.write_initial_attributions_with_contents(
@@ -461,6 +468,8 @@ pub fn prepare_working_log_after_squash_from_final_state(
             initial_attributions.prompts,
             initial_file_contents,
         )?;
+    } else {
+        working_log.write_squash_processed_initial()?;
     }
 
     Ok(())

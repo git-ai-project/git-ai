@@ -664,6 +664,18 @@ impl PersistedWorkingLog {
         })
     }
 
+    /// Write an empty INITIAL file to mark that a squash merge was processed but
+    /// contained no AI-attributed content.  `post_commit` uses `initial_file.exists()`
+    /// to distinguish this case (squash with nothing to record) from a regular commit
+    /// (no INITIAL file at all), avoiding a spurious empty authorship note (issue #211).
+    pub fn write_squash_processed_initial(&self) -> Result<(), GitAiError> {
+        let empty = InitialAttributions::default();
+        let json = serde_json::to_string(&empty)
+            .map_err(|e| GitAiError::Generic(format!("Failed to serialize empty INITIAL: {}", e)))?;
+        fs::write(&self.initial_file, json)?;
+        Ok(())
+    }
+
     /// Write a fully-formed INITIAL state, preserving any persisted blob references.
     pub fn write_initial(&self, initial: InitialAttributions) -> Result<(), GitAiError> {
         let filtered_files: HashMap<String, Vec<LineAttribution>> = initial

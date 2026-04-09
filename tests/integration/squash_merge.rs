@@ -1,6 +1,8 @@
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
+use git_ai::git::refs::get_reference_as_authorship_log_v3;
+use git_ai::git::repository as GitAiRepository;
 use std::collections::HashMap;
 
 fn deterministic_commit_env(timestamp: &'static str) -> [(&'static str, &'static str); 2] {
@@ -468,6 +470,90 @@ fn test_squash_rebase_preserves_interleaved_attribution() {
         "    def set(self, k, v):".ai(),
         "        self.data[k] = v".ai(),
     ]);
+}
+
+/// Regression test for issue #211: the squash merge hook should NOT write an empty
+/// authorship log when the source commits have no authorship notes (i.e. they were
+/// created without git-ai installed).
+#[test]
+fn test_squash_hook_no_notes_no_authorship_created() {
+    let repo = TestRepo::new();
+    let mut file = repo.filename("main.txt");
+
+    file.set_contents(crate::lines!["line 1", "line 2"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    let main_branch = repo.current_branch();
+
+    // Create feature branch commits using git_og (bypasses hooks → no authorship notes),
+    // simulating an engineer who made commits without git-ai installed.
+    repo.git_og(&["checkout", "-b", "feature"]).unwrap();
+    file.set_contents(crate::lines!["line 1", "line 2", "line 3"]);
+    repo.git_og(&["add", "-A"]).unwrap();
+    repo.git_og(&["commit", "-m", "Add line 3"]).unwrap();
+    file.set_contents(crate::lines!["line 1", "line 2", "line 3", "line 4"]);
+    repo.git_og(&["add", "-A"]).unwrap();
+    repo.git_og(&["commit", "-m", "Add line 4"]).unwrap();
+
+    // Squash merge via wrapper (triggers prepare_working_log_after_squash hook)
+    repo.git(&["checkout", &main_branch]).unwrap();
+    repo.git(&["merge", "--squash", "feature"]).unwrap();
+
+    // Use git directly for the commit so the test isn't coupled to the
+    // harness assumption that every commit produces an authorship note.
+    repo.git(&["commit", "-m", "Squashed feature"]).unwrap();
+    let squash_sha = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("Failed to find repository");
+
+    // Desired behavior (issue #211): no note should be written when source commits
+    // have no authorship notes at all.
+    assert!(
+        get_reference_as_authorship_log_v3(&git_ai_repo, &squash_sha).is_err(),
+        "Expected no authorship log when source commits have no notes (issue #211)"
+    );
+}
+
+/// Per issue #211: when source commits are human-only (no AI attribution), the squash
+/// merge hook should NOT write a note — there is nothing meaningful to record regardless
+/// of whether the source commits themselves had notes.
+#[test]
+fn test_squash_hook_human_only_notes_no_authorship_created() {
+    let repo = TestRepo::new();
+    let mut file = repo.filename("main.txt");
+
+    file.set_contents(crate::lines!["line 1", "line 2"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    let main_branch = repo.current_branch();
+
+    // Create feature branch commits via wrapper — notes ARE written (human-only, no AI lines)
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    file.set_contents(crate::lines!["line 1", "line 2", "line 3"]);
+    repo.stage_all_and_commit("Add line 3").unwrap();
+
+    // Squash merge via wrapper — triggers prepare_working_log_after_squash
+    repo.git(&["checkout", &main_branch]).unwrap();
+    repo.git(&["merge", "--squash", "feature"]).unwrap();
+    // Use git directly to avoid TestRepo harness asserting that a note must exist
+    repo.git(&["commit", "-m", "Squashed feature"]).unwrap();
+    let squash_sha = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("Failed to find repository");
+
+    // No note should be written: no AI attribution in the working log (issue #211)
+    assert!(
+        get_reference_as_authorship_log_v3(&git_ai_repo, &squash_sha).is_err(),
+        "Expected no authorship log when squashed commits have no AI attribution (issue #211)"
+    );
 }
 
 crate::reuse_tests_in_worktree!(
