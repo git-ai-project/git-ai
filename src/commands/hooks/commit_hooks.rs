@@ -116,8 +116,11 @@ fn maybe_spawn_synopsis_background(commit_sha: &str) {
         return;
     }
 
-    // Find this binary's own path so we can re-invoke `git-ai synopsis generate`.
-    let exe = match std::env::current_exe() {
+    // Use current_git_ai_exe() instead of current_exe() to resolve through
+    // symlinks. When the current exe is the git shim (e.g. ~/.local/bin/git),
+    // current_exe() would spawn `git synopsis generate` which re-enters
+    // handle_git() instead of handle_git_ai().
+    let exe = match crate::utils::current_git_ai_exe() {
         Ok(p) => p,
         Err(_) => return,
     };
@@ -136,6 +139,12 @@ fn maybe_spawn_synopsis_background(commit_sha: &str) {
         // Move the child into its own process group so it doesn't receive
         // signals from the terminal session that owns the parent.
         cmd.process_group(0);
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(crate::utils::CREATE_NO_WINDOW | crate::utils::CREATE_NEW_PROCESS_GROUP);
     }
 
     match cmd.spawn() {
