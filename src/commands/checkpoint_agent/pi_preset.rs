@@ -261,7 +261,8 @@ impl AgentCheckpointPreset for PiPreset {
             };
 
         let final_model = parsed_model
-            .filter(|model| !model.trim().is_empty())
+            .map(|model| Self::strip_provider_prefix(model.trim()))
+            .filter(|model| !model.is_empty())
             .or_else(|| {
                 if model_from_hook.is_empty() {
                     None
