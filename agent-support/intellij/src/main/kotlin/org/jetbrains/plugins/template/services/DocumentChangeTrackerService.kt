@@ -46,7 +46,7 @@ class DocumentChangeTrackerService : Disposable {
 
         val editorVersion = ApplicationInfo.getInstance().fullVersion
         val extensionVersion = com.intellij.ide.plugins.PluginManagerCore
-            .getPlugin(PluginId.getId("com.usegitai.plugins.jetbrains"))
+            .getPlugin(PluginId.findId("com.usegitai.plugins.jetbrains"))
             ?.version ?: "unknown"
         val saveListener = DocumentSaveListener(scheduler, editorVersion, extensionVersion)
         ApplicationManager.getApplication().messageBus.connect(this)
