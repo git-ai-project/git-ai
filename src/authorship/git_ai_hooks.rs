@@ -18,6 +18,7 @@ struct RepoHookContext {
     repo_name: String,
     branch: String,
     is_default_branch: bool,
+    workdir: String,
 }
 
 /// Dispatch configured `git_ai_hooks.post_notes_updated` shell commands.
@@ -25,7 +26,7 @@ struct RepoHookContext {
 /// The hook input is always passed through stdin as a JSON array of 1..N note entries.
 /// Commands are started in parallel, and we wait up to 3 seconds for completion before
 /// detaching and continuing so git-ai does not block.
-pub fn post_notes_updated(repo: &Repository, notes: &[(String, String)]) {
+pub fn post_notes_updated(repo: &Repository, notes: &[(String, String)], trigger: &str) {
     if notes.is_empty() {
         return;
     }
@@ -43,6 +44,8 @@ pub fn post_notes_updated(repo: &Repository, notes: &[(String, String)]) {
     let repo_name = context.repo_name;
     let branch = context.branch;
     let is_default_branch = context.is_default_branch;
+    let workdir = context.workdir;
+    let trigger = trigger.to_string();
     let payload = notes
         .iter()
         .map(|(commit_sha, note_content)| {
@@ -53,6 +56,8 @@ pub fn post_notes_updated(repo: &Repository, notes: &[(String, String)]) {
                 "branch": branch.as_str(),
                 "is_default_branch": is_default_branch,
                 "note_content": note_content,
+                "trigger": trigger.as_str(),
+                "workdir": workdir.as_str(),
             })
         })
         .collect::<Vec<_>>();
@@ -105,9 +110,9 @@ pub fn post_notes_updated(repo: &Repository, notes: &[(String, String)]) {
     wait_for_hooks_or_detach(running_children);
 }
 
-pub fn post_notes_updated_single(repo: &Repository, commit_sha: &str, note_content: &str) {
+pub fn post_notes_updated_single(repo: &Repository, commit_sha: &str, note_content: &str, trigger: &str) {
     let note_batch = vec![(commit_sha.to_string(), note_content.to_string())];
-    post_notes_updated(repo, &note_batch);
+    post_notes_updated(repo, &note_batch, trigger);
 }
 
 fn wait_for_hooks_or_detach(mut children: Vec<(String, Child)>) {
@@ -250,5 +255,10 @@ fn build_repo_hook_context(repo: &Repository) -> RepoHookContext {
         repo_name,
         branch: branch.clone(),
         is_default_branch: branch == default_branch,
+        workdir: repo
+            .workdir()
+            .ok()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default(),
     }
 }
