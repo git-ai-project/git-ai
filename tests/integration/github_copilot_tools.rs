@@ -112,21 +112,19 @@ fn test_replace_string_in_file_basic() {
 fn test_run_in_terminal_bash_checkpoint() {
     let repo = TestRepo::new();
 
-    // Create initial file
-    let mut script = repo.filename("example.py");
-    script.set_contents(crate::lines![
-        "import argparse",
-        "",
-        "def main():",
-        "    parser = argparse.ArgumentParser(description=\"Test CLI\")",
-        "    parser.add_argument(\"--name\", default=\"World\")",
-        "    args = parser.parse_args()",
-        "    print(f\"Hello, {args.name}!\")",
-        "",
-        "if __name__ == \"__main__\":",
-        "    main()"
-    ]);
-    repo.stage_all_and_commit("Initial script").unwrap();
+    // Create initial file with raw I/O — do NOT use set_contents/filename helpers
+    // as they fire real checkpoints that corrupt the bash snapshot state.
+    std::fs::write(
+        repo.path().join("example.py"),
+        "import argparse\n\ndef main():\n    parser = argparse.ArgumentParser(description=\"Test CLI\")\n    parser.add_argument(\"--name\", default=\"World\")\n    args = parser.parse_args()\n    print(f\"Hello, {args.name}!\")\n\nif __name__ == \"__main__\":\n    main()\n",
+    )
+    .unwrap();
+    repo.git(&["add", "example.py"]).unwrap();
+    repo.git(&["commit", "-m", "Initial script"]).unwrap();
+
+    // Wait for the daemon's watermark grace window (2s) to expire so the
+    // pre-snapshot is not filtered to empty.
+    std::thread::sleep(std::time::Duration::from_secs(3));
 
     let session_id = "b4a517c6-b9f0-4787-af3a-7c002539b448";
 
@@ -155,9 +153,9 @@ fn test_run_in_terminal_bash_checkpoint() {
     ])
     .unwrap();
 
-    // Simulate the command creating/modifying a file (like creating output.txt)
-    let mut output = repo.filename("output.txt");
-    output.set_contents(crate::lines!["Hello, World!"]);
+    // Simulate the bash command writing a file directly to disk — raw I/O only,
+    // no set_contents/filename helpers between Pre and PostToolUse.
+    std::fs::write(repo.path().join("output.txt"), "Hello, World!").unwrap();
 
     // PostToolUse hook
     let post_hook_input = json!({
@@ -188,10 +186,14 @@ fn test_run_in_terminal_bash_checkpoint() {
     // Sync daemon before assertions
     repo.sync_daemon();
 
-    repo.stage_all_and_commit("Add output file from command")
+    repo.git(&["add", "output.txt"]).unwrap();
+    repo.git(&["commit", "-m", "Add output file from command"])
         .unwrap();
 
+    repo.sync_daemon();
+
     // File created by bash command should be attributed to AI
+    let mut output = repo.filename("output.txt");
     output.assert_lines_and_blame(crate::lines!["Hello, World!".ai()]);
 }
 
@@ -200,10 +202,10 @@ fn test_run_in_terminal_bash_checkpoint() {
 fn test_run_in_terminal_no_changes() {
     let repo = TestRepo::new();
 
-    // Create initial file
-    let mut script = repo.filename("test.py");
-    script.set_contents(crate::lines!["print('test')"]);
-    repo.stage_all_and_commit("Initial commit").unwrap();
+    // Create initial file with raw I/O
+    std::fs::write(repo.path().join("test.py"), "print('test')\n").unwrap();
+    repo.git(&["add", "test.py"]).unwrap();
+    repo.git(&["commit", "-m", "Initial commit"]).unwrap();
 
     let session_id = "c3f5a7b8-9d0e-1f2a-3b4c-5d6e7f8a9b0c";
 

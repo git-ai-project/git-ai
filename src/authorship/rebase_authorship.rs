@@ -1643,35 +1643,32 @@ pub fn rewrite_authorship_after_rebase_v2(
             // commits the working log is absent or has no KnownHuman entries → empty map.
             let delta_humans: BTreeMap<String, crate::authorship::authorship_log::HumanRecord> = {
                 let mut map = BTreeMap::new();
-                if let Some(parent_sha) = commit_parent_shas.get(new_commit) {
-                    if let Ok(wl) = repo.storage.working_log_for_base_commit(parent_sha) {
-                        if let Ok(checkpoints) = wl.read_all_checkpoints() {
-                            for cp in &checkpoints {
-                                if cp.kind
-                                    != crate::authorship::working_log::CheckpointKind::KnownHuman
-                                {
-                                    continue;
-                                }
-                                // Only include if any entry covers a changed file in this commit.
-                                if !cp
-                                    .entries
-                                    .iter()
-                                    .any(|e| changed_files_in_commit.contains(&e.file))
-                                {
-                                    continue;
-                                }
-                                let hash = crate::authorship::authorship_log_serialization::generate_human_short_hash(
-                                    &cp.author,
-                                );
-                                map.entry(hash.clone()).or_insert_with(|| {
-                                    initial_humans.get(&hash).cloned().unwrap_or_else(|| {
-                                        crate::authorship::authorship_log::HumanRecord {
-                                            author: cp.author.clone(),
-                                        }
-                                    })
-                                });
-                            }
+                if let Some(parent_sha) = commit_parent_shas.get(new_commit)
+                    && let Ok(wl) = repo.storage.working_log_for_base_commit(parent_sha)
+                    && let Ok(checkpoints) = wl.read_all_checkpoints()
+                {
+                    for cp in &checkpoints {
+                        if cp.kind != crate::authorship::working_log::CheckpointKind::KnownHuman {
+                            continue;
                         }
+                        // Only include if any entry covers a changed file in this commit.
+                        if !cp
+                            .entries
+                            .iter()
+                            .any(|e| changed_files_in_commit.contains(&e.file))
+                        {
+                            continue;
+                        }
+                        let hash = crate::authorship::authorship_log_serialization::generate_human_short_hash(
+                            &cp.author,
+                        );
+                        map.entry(hash.clone()).or_insert_with(|| {
+                            initial_humans.get(&hash).cloned().unwrap_or_else(|| {
+                                crate::authorship::authorship_log::HumanRecord {
+                                    author: cp.author.clone(),
+                                }
+                            })
+                        });
                     }
                 }
                 map

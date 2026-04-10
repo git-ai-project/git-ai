@@ -870,24 +870,23 @@ fn execute_resolved_checkpoint(
                 checkpoint.agent_id = Some(agent_run.agent_id.clone());
                 checkpoint.agent_metadata = agent_run.agent_metadata.clone();
             }
-        } else if kind == CheckpointKind::KnownHuman {
-            if let Some(agent_run) = &agent_run_result {
-                if let Some(meta) = &agent_run.agent_metadata {
-                    let editor = meta.get("kh_editor").cloned().unwrap_or_default();
-                    let editor_version = meta.get("kh_editor_version").cloned().unwrap_or_default();
-                    let extension_version = meta
-                        .get("kh_extension_version")
-                        .cloned()
-                        .unwrap_or_default();
-                    if !editor.is_empty() {
-                        use crate::authorship::working_log::KnownHumanMetadata;
-                        checkpoint.known_human_metadata = Some(KnownHumanMetadata {
-                            editor,
-                            editor_version,
-                            extension_version,
-                        });
-                    }
-                }
+        } else if kind == CheckpointKind::KnownHuman
+            && let Some(agent_run) = &agent_run_result
+            && let Some(meta) = &agent_run.agent_metadata
+        {
+            let editor = meta.get("kh_editor").cloned().unwrap_or_default();
+            let editor_version = meta.get("kh_editor_version").cloned().unwrap_or_default();
+            let extension_version = meta
+                .get("kh_extension_version")
+                .cloned()
+                .unwrap_or_default();
+            if !editor.is_empty() {
+                use crate::authorship::working_log::KnownHumanMetadata;
+                checkpoint.known_human_metadata = Some(KnownHumanMetadata {
+                    editor,
+                    editor_version,
+                    extension_version,
+                });
             }
         }
         debug_log(&format!(

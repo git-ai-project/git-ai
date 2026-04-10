@@ -1700,10 +1700,10 @@ impl VirtualAttributions {
         // Collect h_ human records referenced by retained attributions
         let mut initial_humans: BTreeMap<String, HumanRecord> = BTreeMap::new();
         for author_id in &referenced_prompts {
-            if author_id.starts_with("h_") {
-                if let Some(record) = self.humans.get(author_id) {
-                    initial_humans.insert(author_id.clone(), record.clone());
-                }
+            if author_id.starts_with("h_")
+                && let Some(record) = self.humans.get(author_id)
+            {
+                initial_humans.insert(author_id.clone(), record.clone());
             }
         }
 
