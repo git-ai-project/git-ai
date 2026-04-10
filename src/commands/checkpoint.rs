@@ -183,7 +183,7 @@ pub fn explicit_capture_target_paths(
     agent_run_result: Option<&AgentRunResult>,
 ) -> Option<(PreparedPathRole, Vec<String>)> {
     let result = agent_run_result?;
-    let (role, paths) = if kind == CheckpointKind::Human {
+    let (role, paths) = if kind == CheckpointKind::Human || kind == CheckpointKind::KnownHuman {
         (
             PreparedPathRole::WillEdit,
             result.will_edit_filepaths.as_ref()?,
@@ -2322,6 +2322,24 @@ mod tests {
         assert_eq!(
             explicit_capture_target_paths(CheckpointKind::AiAgent, Some(&agent_run_result)),
             None
+        );
+    }
+
+    #[test]
+    fn test_explicit_capture_target_paths_known_human_uses_will_edit_filepaths() {
+        // KnownHuman checkpoints carry will_edit_filepaths (like Human), not edited_filepaths.
+        // Regression: previously KnownHuman fell into the else branch and read
+        // edited_filepaths (None), silently disabling pathspec optimisation.
+        let agent_run_result = test_agent_run_result(
+            CheckpointKind::KnownHuman,
+            None,
+            Some(vec!["src/foo.rs"]),
+            None,
+        );
+
+        assert_eq!(
+            explicit_capture_target_paths(CheckpointKind::KnownHuman, Some(&agent_run_result)),
+            Some((PreparedPathRole::WillEdit, vec!["src/foo.rs".to_string()]))
         );
     }
 
