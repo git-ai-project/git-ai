@@ -825,6 +825,13 @@ impl VirtualAttributions {
         //   2. current working directory    (for files with no AI checkpoints)
         //   3. blame_va.file_contents       (fallback – preserves previous behaviour for
         //                                    files that were deleted from the worktree)
+
+        // Save session prompt IDs before the merge consumes checkpoint_va.  These are
+        // prompts from the *current* amend/commit session and must be kept in
+        // metadata.prompts even if no lines landed (non-landing prompts).
+        let checkpoint_prompt_ids: std::collections::HashSet<String> =
+            checkpoint_va.prompts.keys().cloned().collect();
+
         let mut final_state = checkpoint_va.file_contents.clone();
         if let Ok(workdir) = repo.workdir() {
             for pathspec in pathspecs {
@@ -841,7 +848,24 @@ impl VirtualAttributions {
                 .entry(file.clone())
                 .or_insert_with(|| content.clone());
         }
-        let merged_va = merge_attributions_favoring_first(checkpoint_va, blame_va, final_state)?;
+        let mut merged_va =
+            merge_attributions_favoring_first(checkpoint_va, blame_va, final_state)?;
+
+        // Prune blame-history prompts whose lines were deleted (e.g. because the user
+        // deleted an AI-authored line during an amend).  We keep:
+        //   • any prompt that came from the current session (checkpoint_prompt_ids), and
+        //   • any prompt that still has at least one live attribution in the merged VA.
+        // This avoids leaking PromptRecords from earlier commits into the amended note
+        // while preserving intentional non-landing prompts from the current session.
+        let referenced_in_merged: std::collections::HashSet<String> = merged_va
+            .attributions
+            .values()
+            .flat_map(|(_, line_attrs)| line_attrs.iter())
+            .map(|la| la.author_id.clone())
+            .collect();
+        merged_va.prompts.retain(|id, _| {
+            checkpoint_prompt_ids.contains(id) || referenced_in_merged.contains(id)
+        });
 
         Ok(merged_va)
     }
@@ -873,17 +897,41 @@ impl VirtualAttributions {
             final_state_snapshot,
         )?;
 
-        if checkpoint_va.attributions.is_empty() {
-            return Ok(blame_va);
-        }
+        // Save session prompt IDs before the merge consumes checkpoint_va.
+        let checkpoint_prompt_ids: std::collections::HashSet<String> =
+            checkpoint_va.prompts.keys().cloned().collect();
 
+        // Priority for `final_state` per file:
+        //   1. checkpoint_va.file_contents  (working-log snapshot entries)
+        //   2. final_state_snapshot         (post-command snapshot – the amended content)
+        //   3. blame_va.file_contents       (fallback for files removed from worktree)
         let mut final_state = checkpoint_va.file_contents.clone();
+        for (file, content) in final_state_snapshot {
+            final_state
+                .entry(file.clone())
+                .or_insert_with(|| content.clone());
+        }
         for (file, content) in &blame_va.file_contents {
             final_state
                 .entry(file.clone())
                 .or_insert_with(|| content.clone());
         }
-        merge_attributions_favoring_first(checkpoint_va, blame_va, final_state)
+        let mut merged_va =
+            merge_attributions_favoring_first(checkpoint_va, blame_va, final_state)?;
+
+        // Prune blame-history prompts whose lines were deleted.  Same logic as
+        // `from_working_log_for_commit`.
+        let referenced_in_merged: std::collections::HashSet<String> = merged_va
+            .attributions
+            .values()
+            .flat_map(|(_, line_attrs)| line_attrs.iter())
+            .map(|la| la.author_id.clone())
+            .collect();
+        merged_va.prompts.retain(|id, _| {
+            checkpoint_prompt_ids.contains(id) || referenced_in_merged.contains(id)
+        });
+
+        Ok(merged_va)
     }
 
     /// Create VirtualAttributions from raw components (used for transformations)
@@ -1012,10 +1060,6 @@ impl VirtualAttributions {
                 file_attestation.add_entry(entry);
             }
         }
-
-        // Remove prompt/human records that have no corresponding attestation (e.g. from
-        // historical blame when an AI line was deleted before the commit was finalized).
-        authorship_log.prune_unreferenced_metadata();
 
         Ok(authorship_log)
     }
@@ -1542,10 +1586,6 @@ impl VirtualAttributions {
             file_blobs: HashMap::new(),
             humans: initial_humans,
         };
-
-        // Remove prompt/human records that have no corresponding attestation (e.g. from
-        // historical blame when an AI line was deleted before the commit was finalized).
-        authorship_log.prune_unreferenced_metadata();
 
         Ok((authorship_log, initial_attributions))
     }
