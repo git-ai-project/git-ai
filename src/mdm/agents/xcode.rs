@@ -98,6 +98,11 @@ mod tests {
         let params = HookInstallerParams {
             binary_path: std::path::PathBuf::from("/usr/local/bin/git-ai"),
         };
-        assert!(XcodeInstaller.install_hooks(&params, false).unwrap().is_none());
+        assert!(
+            XcodeInstaller
+                .install_hooks(&params, false)
+                .unwrap()
+                .is_none()
+        );
     }
 }
