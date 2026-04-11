@@ -138,12 +138,7 @@ fn notepad_exe_path() -> Option<std::path::PathBuf> {
                 .join("notepad++.exe")
         }),
     ];
-    for c in candidates.into_iter().flatten() {
-        if c.exists() {
-            return Some(c);
-        }
-    }
-    None
+    candidates.into_iter().flatten().find(|c| c.exists())
 }
 
 #[cfg(windows)]
@@ -244,16 +239,15 @@ fn uninstall_plugin_windows() -> UninstallResult {
             message: "Notepad++: Could not determine plugin directory".to_string(),
         };
     };
-    if let Some(dir) = dest.parent() {
-        if dir.exists() {
-            if std::fs::remove_dir_all(dir).is_ok() {
-                return UninstallResult {
-                    changed: true,
-                    diff: None,
-                    message: "Notepad++: Plugin removed".to_string(),
-                };
-            }
-        }
+    if let Some(dir) = dest.parent()
+        && dir.exists()
+        && std::fs::remove_dir_all(dir).is_ok()
+    {
+        return UninstallResult {
+            changed: true,
+            diff: None,
+            message: "Notepad++: Plugin removed".to_string(),
+        };
     }
     UninstallResult {
         changed: false,
