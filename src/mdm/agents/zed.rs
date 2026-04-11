@@ -150,8 +150,12 @@ impl ZedInstaller {
             String::new()
         };
 
-        // If the script path is already referenced, assume already configured.
-        if original.contains(&script_path.display().to_string()) {
+        // If the script path is already referenced, or if the user already has a
+        // "formatter" key, skip injection to avoid clobbering their config or
+        // producing invalid JSON with duplicate keys.
+        if original.contains(&script_path.display().to_string())
+            || original.contains("\"formatter\"")
+        {
             return Ok(None);
         }
 
@@ -255,13 +259,21 @@ fn remove_formatter_block(content: &str, script_path_str: &str) -> String {
             //   "format_on_save": "on" <- next line after block close
             //
             // Pop already-emitted lines back to the "formatter" line.
+            // Only remove lines that are part of our injected block: lines
+            // containing "external" (our wrapper key), lines that are only
+            // whitespace/commas, and the "formatter" line — but ONLY if it
+            // contains "\"formatter\"" with no other content that would
+            // indicate it is a different key (e.g. "default_formatter").
             while out
                 .last()
                 .map(|l: &String| {
-                    l.contains("\"formatter\"")
-                        || l.contains("\"external\"")
-                        || l.trim().is_empty()
-                        || l.trim() == ","
+                    l.contains("\"external\"") || l.trim().is_empty() || l.trim() == "," || {
+                        // Remove the "formatter" line only if it matches
+                        // exactly our injected pattern and not an unrelated
+                        // key like "default_formatter".
+                        let trimmed = l.trim().trim_start_matches('"');
+                        trimmed.starts_with("formatter\"")
+                    }
                 })
                 .unwrap_or(false)
             {

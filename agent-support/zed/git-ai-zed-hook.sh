@@ -73,9 +73,9 @@ MY_TOKEN="$$-$(date +%s%N 2>/dev/null || date +%s)"
 
 # Build the JSON payload now (synchronously, before backgrounding)
 # so we capture the exact content at save time.
-ESCAPED_FILE_PATH="$(printf '%s' "$FILE_PATH" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null || printf '"%s"' "$FILE_PATH")"
+ESCAPED_FILE_PATH="$(printf '%s' "$FILE_PATH" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null || { _v="$(printf '%s' "$FILE_PATH" | sed 's/\\/\\\\/g; s/"/\\"/g')"; printf '"%s"' "$_v"; })"
 ESCAPED_CONTENT="$(printf '%s' "$CONTENT" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null || printf '""')"
-ESCAPED_REPO="$(printf '%s' "$REPO_ROOT" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null || printf '"%s"' "$REPO_ROOT")"
+ESCAPED_REPO="$(printf '%s' "$REPO_ROOT" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null || { _v="$(printf '%s' "$REPO_ROOT" | sed 's/\\/\\\\/g; s/"/\\"/g')"; printf '"%s"' "$_v"; })"
 
 HOOK_INPUT="{\"editor\":\"zed\",\"editor_version\":\"unknown\",\"extension_version\":\"1.0.0\",\"cwd\":$ESCAPED_REPO,\"edited_filepaths\":[$ESCAPED_FILE_PATH],\"dirty_files\":{$ESCAPED_FILE_PATH:$ESCAPED_CONTENT}}"
 
