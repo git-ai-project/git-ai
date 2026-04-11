@@ -4413,3 +4413,274 @@ impl AgentCheckpointPreset for FirebenderPreset {
         })
     }
 }
+
+// Kimi Code (Moonshot AI) to checkpoint preset
+pub struct KimiCodePreset;
+
+impl AgentCheckpointPreset for KimiCodePreset {
+    fn run(&self, flags: AgentCheckpointFlags) -> Result<AgentRunResult, GitAiError> {
+        let stdin_json = flags.hook_input.ok_or_else(|| {
+            GitAiError::PresetError("hook_input is required for Kimi Code preset".to_string())
+        })?;
+
+        let hook_data: serde_json::Value = serde_json::from_str(&stdin_json)
+            .map_err(|e| GitAiError::PresetError(format!("Invalid JSON in hook_input: {}", e)))?;
+
+        let session_id = hook_data
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                GitAiError::PresetError("session_id not found in hook_input".to_string())
+            })?;
+
+        let cwd = hook_data
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| GitAiError::PresetError("cwd not found in hook_input".to_string()))?;
+
+        let model = hook_data
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| Self::read_default_model().unwrap_or_else(|| "unknown".to_string()));
+
+        let agent_id = AgentId {
+            tool: "kimi-code".to_string(),
+            id: session_id.to_string(),
+            model,
+        };
+
+        // Classify tool for bash detection
+        let tool_name = hook_data
+            .get("tool_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let is_bash_tool =
+            bash_tool::classify_tool(bash_tool::Agent::KimiCode, tool_name) == ToolClass::Bash;
+
+        let tool_call_id = hook_data
+            .get("tool_call_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("bash");
+
+        // Extract file_path from tool_input if present
+        let file_path_as_vec = hook_data
+            .get("tool_input")
+            .and_then(|ti| ti.get("file_path"))
+            .and_then(|v| v.as_str())
+            .map(|path| vec![path.to_string()]);
+
+        // Check if this is a PreToolUse event (human checkpoint)
+        let hook_event_name = hook_data.get("hook_event_name").and_then(|v| v.as_str());
+
+        if hook_event_name == Some("PreToolUse") {
+            let pre_hook_captured_id = prepare_agent_bash_pre_hook(
+                is_bash_tool,
+                Some(cwd),
+                session_id,
+                tool_call_id,
+                &agent_id,
+                None,
+                BashPreHookStrategy::EmitHumanCheckpoint,
+            )?
+            .captured_checkpoint_id();
+            return Ok(AgentRunResult {
+                agent_id,
+                agent_metadata: None,
+                checkpoint_kind: CheckpointKind::Human,
+                transcript: None,
+                repo_working_dir: Some(cwd.to_string()),
+                edited_filepaths: None,
+                will_edit_filepaths: file_path_as_vec,
+                dirty_files: None,
+                captured_checkpoint_id: pre_hook_captured_id,
+            });
+        }
+
+        // Resolve transcript: prefer inline, fall back to session file on disk
+        let transcript = hook_data
+            .get("transcript")
+            .and_then(|v| serde_json::from_value::<AiTranscript>(v.clone()).ok())
+            .or_else(|| {
+                Self::resolve_session_transcript(session_id)
+                    .map_err(|e| {
+                        crate::utils::debug_log(&format!(
+                            "Kimi session transcript resolution failed: {}",
+                            e
+                        ));
+                    })
+                    .ok()
+                    .flatten()
+            });
+
+        // PostToolUse: for bash tools, diff snapshots to detect changed files
+        let bash_result = if is_bash_tool {
+            Some(bash_tool::handle_bash_tool(
+                HookEvent::PostToolUse,
+                Path::new(cwd),
+                session_id,
+                tool_call_id,
+            ))
+        } else {
+            None
+        };
+        let edited_filepaths = if is_bash_tool {
+            match bash_result
+                .as_ref()
+                .and_then(|r| r.as_ref().ok())
+                .map(|r| &r.action)
+            {
+                Some(BashCheckpointAction::Checkpoint(paths)) => Some(paths.clone()),
+                Some(BashCheckpointAction::NoChanges)
+                | Some(BashCheckpointAction::TakePreSnapshot)
+                | Some(BashCheckpointAction::Fallback)
+                | None => None,
+            }
+        } else {
+            file_path_as_vec
+        };
+        let bash_captured_checkpoint_id = bash_result
+            .as_ref()
+            .and_then(|r| r.as_ref().ok())
+            .and_then(|r| r.captured_checkpoint.as_ref())
+            .map(|info| info.capture_id.clone());
+
+        Ok(AgentRunResult {
+            agent_id,
+            agent_metadata: None,
+            checkpoint_kind: CheckpointKind::AiAgent,
+            transcript,
+            repo_working_dir: Some(cwd.to_string()),
+            edited_filepaths,
+            will_edit_filepaths: None,
+            dirty_files: None,
+            captured_checkpoint_id: bash_captured_checkpoint_id,
+        })
+    }
+}
+
+impl KimiCodePreset {
+    /// Read default_model from ~/.kimi/config.toml.
+    fn read_default_model() -> Option<String> {
+        let config_path = dirs::home_dir()?.join(".kimi").join("config.toml");
+        let content = std::fs::read_to_string(config_path).ok()?;
+        let parsed: toml::Value = toml::from_str(&content).ok()?;
+        parsed
+            .get("default_model")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+    }
+
+    /// Resolve the path to a Kimi Code session's context.jsonl file.
+    /// Session layout: <base>/sessions/<work-dir-hash>/<session_id>/context.jsonl
+    /// We scan work-dir-hash dirs rather than computing the hash to avoid an extra dependency.
+    fn resolve_session_path(session_id: &str) -> Option<PathBuf> {
+        let base = std::env::var("KIMI_SHARE_DIR")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".kimi"));
+
+        let sessions_dir = base.join("sessions");
+        if !sessions_dir.is_dir() {
+            return None;
+        }
+
+        let entries = std::fs::read_dir(&sessions_dir).ok()?;
+        for entry in entries.flatten() {
+            let context_path = entry.path().join(session_id).join("context.jsonl");
+            if context_path.exists() {
+                return Some(context_path);
+            }
+        }
+
+        None
+    }
+
+    /// Read a Kimi Code session's context.jsonl and build an AiTranscript.
+    fn resolve_session_transcript(session_id: &str) -> Result<Option<AiTranscript>, GitAiError> {
+        let context_path = match Self::resolve_session_path(session_id) {
+            Some(path) => path,
+            None => return Ok(None),
+        };
+
+        let content = std::fs::read_to_string(&context_path)
+            .map_err(|e| GitAiError::Generic(format!("Failed to read Kimi session: {}", e)))?;
+
+        Ok(Some(Self::transcript_from_context_jsonl(&content)))
+    }
+
+    /// Parse context.jsonl content into an AiTranscript.
+    /// Format: each line is a JSON object with a "role" field.
+    /// Roles: "user", "assistant", "tool", "_system_prompt", "_checkpoint", "_usage"
+    pub fn transcript_from_context_jsonl(content: &str) -> AiTranscript {
+        let mut transcript = AiTranscript::new();
+
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Ok(obj) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let role = obj.get("role").and_then(|v| v.as_str()).unwrap_or("");
+
+            match role {
+                "user" => {
+                    if let Some(text) = obj.get("content").and_then(|v| v.as_str())
+                        && !text.trim().is_empty()
+                    {
+                        transcript.add_message(Message::User {
+                            text: text.to_string(),
+                            timestamp: None,
+                        });
+                    }
+                }
+                "assistant" => {
+                    // content is an array of {type, text} parts
+                    if let Some(parts) = obj.get("content").and_then(|v| v.as_array()) {
+                        for part in parts {
+                            let part_type = part.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                            let text = part.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                            if part_type == "text" && !text.trim().is_empty() {
+                                transcript.add_message(Message::Assistant {
+                                    text: text.to_string(),
+                                    timestamp: None,
+                                });
+                            }
+                        }
+                    }
+                    // tool_calls array
+                    if let Some(tool_calls) = obj.get("tool_calls").and_then(|v| v.as_array()) {
+                        for tc in tool_calls {
+                            if let Some(func) = tc.get("function") {
+                                let name = func
+                                    .get("name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let input = func
+                                    .get("arguments")
+                                    .and_then(|v| v.as_str())
+                                    .and_then(|s| serde_json::from_str(s).ok())
+                                    .unwrap_or(serde_json::Value::Null);
+                                if !name.is_empty() {
+                                    transcript.add_message(Message::ToolUse {
+                                        name,
+                                        input,
+                                        timestamp: None,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {} // skip _system_prompt, _checkpoint, _usage, tool results
+            }
+        }
+
+        transcript
+    }
+}

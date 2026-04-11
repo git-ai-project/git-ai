@@ -462,6 +462,11 @@ pub fn classify_tool(agent: Agent, tool_name: &str) -> ToolClass {
             "Bash" => ToolClass::Bash,
             _ => ToolClass::Skip,
         },
+        Agent::KimiCode => match tool_name {
+            "Shell" | "Bash" => ToolClass::Bash,
+            "WriteFile" | "StrReplaceFile" => ToolClass::FileEdit,
+            _ => ToolClass::Skip,
+        },
     }
 }
 
@@ -476,6 +481,7 @@ pub enum Agent {
     OpenCode,
     Firebender,
     Codex,
+    KimiCode,
 }
 
 // ---------------------------------------------------------------------------
@@ -1907,6 +1913,19 @@ mod tests {
         assert_eq!(classify_tool(Agent::OpenCode, "edit"), ToolClass::FileEdit);
         assert_eq!(classify_tool(Agent::OpenCode, "bash"), ToolClass::Bash);
         assert_eq!(classify_tool(Agent::OpenCode, "shell"), ToolClass::Bash);
+
+        // KimiCode
+        assert_eq!(classify_tool(Agent::KimiCode, "Shell"), ToolClass::Bash);
+        assert_eq!(classify_tool(Agent::KimiCode, "Bash"), ToolClass::Bash);
+        assert_eq!(
+            classify_tool(Agent::KimiCode, "WriteFile"),
+            ToolClass::FileEdit
+        );
+        assert_eq!(
+            classify_tool(Agent::KimiCode, "StrReplaceFile"),
+            ToolClass::FileEdit
+        );
+        assert_eq!(classify_tool(Agent::KimiCode, "unknown"), ToolClass::Skip);
     }
 
     #[test]

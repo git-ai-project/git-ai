@@ -64,6 +64,7 @@ mod internal_machine_commands;
 mod internal_spawn_safety;
 mod jetbrains_download;
 mod jetbrains_ide_types;
+mod kimi_code;
 mod merge_rebase;
 mod multi_repo_workspace;
 mod non_utf8_files;
