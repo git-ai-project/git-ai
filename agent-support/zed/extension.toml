@@ -1,0 +1,7 @@
+[extension]
+id = "git-ai"
+name = "git-ai"
+version = "1.0.0"
+description = "Known-human authorship tracking for git-ai"
+authors = ["git-ai"]
+repository = "https://github.com/git-ai-project/git-ai"
