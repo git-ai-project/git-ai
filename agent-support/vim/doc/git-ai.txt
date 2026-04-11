@@ -1,0 +1,29 @@
+*git-ai.txt*  Known-human authorship tracking for git-ai
+
+INTRODUCTION                                    *git-ai*
+
+This plugin fires `git-ai checkpoint known_human` whenever you save a file
+in a git repository. This lets git-ai correctly attribute your edits as
+human-authored lines after an AI coding session.
+
+CONFIGURATION                                   *git-ai-config*
+
+Disable the plugin:
+>
+    let g:git_ai_enabled = 0
+<
+
+INSTALLATION                                    *git-ai-install*
+
+Native packages (Vim 8+):
+>
+    mkdir -p ~/.vim/pack/git-ai/start/git-ai
+    cp -r /path/to/agent-support/vim/* ~/.vim/pack/git-ai/start/git-ai/
+<
+
+vim-plug:
+>
+    Plug 'git-ai-project/git-ai', {'rtp': 'agent-support/vim'}
+<
+
+vim: ft=help
