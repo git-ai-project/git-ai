@@ -13,9 +13,14 @@
 
 local M = {}
 
+local uv = vim.uv or vim.loop  -- vim.uv available since Neovim 0.9
+
 --- Per-repo-root state
 local timers = {}   -- [repo_root] -> uv.timer
 local pending = {}  -- [repo_root] -> { [path] = content }
+
+--- Cache for find_repo_root results to avoid blocking systemlist calls per save.
+local _repo_root_cache = {}  -- [dir] -> root_string or false
 
 --- Resolve the git-ai binary path.
 local function git_ai_bin()
@@ -37,10 +42,13 @@ end
 local function find_repo_root(file)
   local dir = vim.fn.fnamemodify(file, ':h')
   if dir == '' then return nil end
+  if _repo_root_cache[dir] ~= nil then
+    return _repo_root_cache[dir] or nil  -- false means "no repo"
+  end
   local result = vim.fn.systemlist({'git', '-C', dir, 'rev-parse', '--show-toplevel'})
-  if vim.v.shell_error ~= 0 or #result == 0 then return nil end
-  local root = result[1]
-  return (root and root ~= '') and root or nil
+  local root = (vim.v.shell_error == 0 and #result > 0 and result[1] ~= '') and result[1] or false
+  _repo_root_cache[dir] = root
+  return root or nil
 end
 
 --- Fire the checkpoint for `root` with all accumulated pending files.
@@ -52,9 +60,12 @@ local function fire(root)
   local paths = {}
   for p in pairs(files) do table.insert(paths, p) end
 
+  local v = vim.version()
+  local editor_version = string.format('%d.%d.%d', v.major, v.minor, v.patch)
+
   local payload = vim.json.encode({
     editor            = 'neovim',
-    editor_version    = tostring(vim.version()),
+    editor_version    = editor_version,
     extension_version = '1.0.0',
     cwd               = root,
     edited_filepaths  = paths,
@@ -62,15 +73,18 @@ local function fire(root)
   })
 
   local bin = git_ai_bin()
-  local stdin_pipe = vim.loop.new_pipe(false)
-  local handle, _ = vim.loop.spawn(bin, {
+  local stdin_pipe = uv.new_pipe(false)
+  local handle
+  handle = uv.spawn(bin, {
     args  = {'checkpoint', 'known_human', '--hook-input', 'stdin'},
     stdio = {stdin_pipe, nil, nil},
     cwd   = root,
   }, function(code, _)
+    handle:close()
+    stdin_pipe:close()
     if code ~= 0 then
       vim.schedule(function()
-        vim.notify('[git-ai] checkpoint known_human exited with code ' .. code, vim.log.levels.DEBUG)
+        vim.notify('[git-ai] checkpoint known_human exited with code ' .. tostring(code), vim.log.levels.DEBUG)
       end)
     end
   end)
@@ -81,9 +95,7 @@ local function fire(root)
   end
 
   stdin_pipe:write(payload, function()
-    stdin_pipe:shutdown(function()
-      stdin_pipe:close()
-    end)
+    stdin_pipe:shutdown(function() end)
   end)
 end
 
@@ -113,7 +125,7 @@ local function on_save(args)
     -- Reuse the same timer object
     timers[root]:start(500, 0, vim.schedule_wrap(function() fire(root) end))
   else
-    local t = vim.loop.new_timer()
+    local t = uv.new_timer()
     timers[root] = t
     t:start(500, 0, vim.schedule_wrap(function() fire(root) end))
   end
