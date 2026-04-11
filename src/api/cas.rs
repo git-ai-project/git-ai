@@ -69,6 +69,17 @@ impl ApiClient {
         &self,
         hashes: &[&str],
     ) -> Result<CAPromptStoreReadResponse, GitAiError> {
+        // Validate all hashes are hex-only before building the URL to prevent
+        // injection via crafted hash values in the query string.
+        for hash in hashes {
+            if !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(GitAiError::Generic(format!(
+                    "CAS hash contains non-hex characters: {}",
+                    hash
+                )));
+            }
+        }
+
         let query = hashes.join(",");
         let endpoint = format!("/worker/cas/?hashes={}", query);
         let response = self.context().get(&endpoint)?;
