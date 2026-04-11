@@ -2878,6 +2878,83 @@ fn test_diff_json_output_includes_human_id_in_hunks() {
     }
 }
 
+#[test]
+fn test_diff_json_humans_map_complete_across_multiple_commits() {
+    let repo = TestRepo::new();
+
+    // Create base commit
+    write_lines(&repo, "multi_human.txt", &["line1"]);
+    checkpoint_human(&repo);
+    let _base = commit_after_staging_all(&repo, "base");
+
+    // Commit 1: First human author
+    write_lines(
+        &repo,
+        "multi_human.txt",
+        &["line1", "human_a_1", "human_a_2"],
+    );
+    checkpoint_known_human(&repo, "multi_human.txt");
+    let _commit1 = commit_after_staging_all(&repo, "first human");
+
+    // Commit 2: Second human author (creates a different h_ ID)
+    write_lines(
+        &repo,
+        "multi_human.txt",
+        &["line1", "human_a_1", "human_a_2", "human_b_1", "human_b_2"],
+    );
+    checkpoint_known_human(&repo, "multi_human.txt");
+    let commit2 = commit_after_staging_all(&repo, "second human");
+
+    // Get JSON diff for commit2 (which includes lines from both human checkpoints)
+    let diff = diff_json(&repo, &["diff", &commit2.commit_sha, "--json"]);
+
+    // Extract all human_ids from all hunks
+    let hunks = diff["hunks"].as_array().expect("hunks should be array");
+    let mut human_ids_in_hunks: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+
+    for hunk in hunks {
+        if let Some(human_id) = hunk.get("human_id").and_then(|v| v.as_str()) {
+            human_ids_in_hunks.insert(human_id.to_string());
+        }
+    }
+
+    // Get the top-level humans map
+    let humans = diff["humans"].as_object().expect("should have humans map");
+
+    // Critical assertion: every human_id in hunks MUST be resolvable via the humans map
+    for human_id in &human_ids_in_hunks {
+        assert!(
+            humans.contains_key(human_id),
+            "human_id '{}' appears in hunks but is missing from top-level humans map. \
+             Hunks reference {} unique human_ids but humans map only contains {} entries: {:?}",
+            human_id,
+            human_ids_in_hunks.len(),
+            humans.len(),
+            humans.keys().collect::<Vec<_>>()
+        );
+
+        // Also verify the author field is present and non-empty
+        let author = humans[human_id]["author"]
+            .as_str()
+            .expect("author should be string");
+        assert!(!author.is_empty(), "author name should not be empty");
+    }
+
+    // We should have collected at least one human across the commits
+    assert!(
+        !human_ids_in_hunks.is_empty(),
+        "Should have at least one human_id across multiple commits"
+    );
+
+    // Verify humans map contains exactly the humans referenced by hunks (no orphans)
+    assert_eq!(
+        humans.len(),
+        human_ids_in_hunks.len(),
+        "humans map should contain exactly the humans referenced in hunks, no more, no less"
+    );
+}
+
 crate::reuse_tests_in_worktree!(
     test_diff_single_commit,
     test_diff_commit_range,
@@ -2920,4 +2997,5 @@ crate::reuse_tests_in_worktree!(
     test_diff_json_commit_author_is_full_ident,
     test_diff_visual_output_shows_human_author_name_not_id,
     test_diff_json_output_includes_human_id_in_hunks,
+    test_diff_json_humans_map_complete_across_multiple_commits,
 );
