@@ -834,7 +834,10 @@ mod tests {
         let cwd = PathBuf::from("/home/testuser/projects/my-repo");
         let args = argv(&["git", "init"]);
         let result = backend.init_target(&args, Some(&cwd)).unwrap();
-        assert!(result.is_absolute(), "result must be absolute when cwd_hint is provided");
+        assert!(
+            result.is_absolute(),
+            "result must be absolute when cwd_hint is provided"
+        );
         assert!(
             result.starts_with("/home/testuser/projects/my-repo"),
             "result should be rooted at the cwd"
