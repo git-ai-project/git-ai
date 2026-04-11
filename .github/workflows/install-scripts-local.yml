@@ -99,8 +99,10 @@ jobs:
               grep -F "checkpoint claude" "$HOME/.claude/settings.json"
               ;;
             codex)
-              # Codex uses TOML array format: notify = ["<bin>", "checkpoint", "codex", ...]
-              grep -F "checkpoint" "$HOME/.codex/config.toml"
+              # Codex writes a feature flag to config.toml and the actual hook
+              # commands to hooks.json (separate file since the hooks refactor).
+              grep -F "codex_hooks" "$HOME/.codex/config.toml"
+              grep -F "checkpoint" "$HOME/.codex/hooks.json"
               ;;
             gemini)
               grep -F "checkpoint gemini" "$HOME/.gemini/settings.json"
@@ -260,9 +262,12 @@ jobs:
               if (-not (Select-String -Path $settings -Pattern "checkpoint claude")) { throw "Claude hooks not configured" }
             }
             "codex" {
+              # Codex writes a feature flag to config.toml and the actual hook
+              # commands to hooks.json (separate file since the hooks refactor).
               $config = Join-Path $env:USERPROFILE ".codex\config.toml"
-              # Codex uses TOML array format: notify = ["<bin>", "checkpoint", "codex", ...]
-              if (-not (Select-String -Path $config -Pattern "checkpoint")) { throw "Codex hooks not configured" }
+              if (-not (Select-String -Path $config -Pattern "codex_hooks")) { throw "Codex feature flag not set in config.toml" }
+              $hooks = Join-Path $env:USERPROFILE ".codex\hooks.json"
+              if (-not (Select-String -Path $hooks -Pattern "checkpoint")) { throw "Codex hooks not configured in hooks.json" }
             }
             "gemini" {
               $settings = Join-Path $env:USERPROFILE ".gemini\settings.json"
