@@ -1,0 +1,46 @@
+# Dockerfile for reproducing and validating the Zed IDE readonly-flood fix.
+#
+# Context: Zed IDE calls ~40 git commands/sec for its git panel, all of which
+# are readonly (status, diff, stash list, worktree list, cat-file, for-each-ref).
+# Before the fix these were enqueued to a serial ingest worker, causing >1 min
+# of backlog. After the fix, they are discarded before reaching the queue.
+#
+# Build: docker build -f docker/Dockerfile.readonly-flood-repro -t git-ai-readonly-repro .
+# Run:   docker run --rm git-ai-readonly-repro
+
+FROM rust:slim-bookworm AS builder
+
+WORKDIR /src
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git \
+        pkg-config \
+        libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy all build inputs (include_str! macros reference skills/ and agent-support/)
+COPY Cargo.toml Cargo.lock ./
+COPY src/ src/
+COPY benches/ benches/
+COPY skills/ skills/
+COPY agent-support/ agent-support/
+
+# Build the main binary (no bench feature needed for the repro itself)
+RUN cargo build --release
+
+# Runtime image
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git \
+        socat \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /src/target/release/git-ai /usr/local/bin/git-ai
+COPY docker/repro_readonly_flood.sh /usr/local/bin/repro_readonly_flood.sh
+RUN chmod +x /usr/local/bin/repro_readonly_flood.sh
+
+# Configure git
+RUN git config --global user.email "repro@example.com" && \
+    git config --global user.name "Repro Test"
+
+ENTRYPOINT ["/usr/local/bin/repro_readonly_flood.sh"]

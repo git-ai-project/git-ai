@@ -6,6 +6,7 @@ on:
     paths:
       - 'src/**'
       - 'tests/**'
+      - 'benches/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'Taskfile.yml'
@@ -18,6 +19,50 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Fast microbenchmark gate that runs on every PR.
+  # Measures daemon readonly-command fast-path throughput (criterion).
+  # Establishes a baseline for the Zed IDE readonly-flood fix.
+  readonly-flood-bench:
+    name: Readonly Flood Microbenchmarks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-readonly-bench-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-readonly-bench-
+            ${{ runner.os }}-perf-
+
+      - name: Run readonly flood benchmarks
+        run: |
+          cargo bench --bench readonly_flood --features bench \
+            -- --warm-up-time 3 --measurement-time 5 \
+               --output-format bencher | tee target/criterion-readonly-flood.txt
+
+      - name: Upload criterion benchmark report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: readonly-flood-bench-report
+          path: |
+            target/criterion/
+            target/criterion-readonly-flood.txt
+          if-no-files-found: ignore
+
   pr-smoke-nasty:
     if: github.event_name == 'pull_request'
     name: PR Smoke Nasty Benchmark
