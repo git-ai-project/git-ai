@@ -304,16 +304,20 @@ fn install_hooks_async_mode_trace2_target_routes_real_git_trace_to_daemon() {
     );
     wait_for_daemon_sockets(&repo);
 
+    // Use a mutating git command so the trace2 events flow through the full
+    // ingest pipeline and increment applied_seq. Readonly commands (like
+    // `git status`) are discarded by the daemon's readonly fast-path before
+    // reaching the ingest queue, so they never advance latest_seq.
     let mut git_command = Command::new(real_git_executable());
-    git_command.args(["status", "--short"]);
+    git_command.args(["config", "--local", "git-ai.tracing-test", "1"]);
     git_command.current_dir(repo.path());
     configure_test_home_env(&mut git_command, &repo);
     let git_output = git_command
         .output()
-        .expect("failed to run traced git status");
+        .expect("failed to run traced git config");
     assert!(
         git_output.status.success(),
-        "traced git status should succeed: stdout={} stderr={}",
+        "traced git config should succeed: stdout={} stderr={}",
         String::from_utf8_lossy(&git_output.stdout),
         String::from_utf8_lossy(&git_output.stderr)
     );
