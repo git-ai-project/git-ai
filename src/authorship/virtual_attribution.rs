@@ -811,16 +811,31 @@ impl VirtualAttributions {
         let checkpoint_va =
             Self::from_just_working_log(repo.clone(), base_commit.clone(), human_author)?;
 
-        // If checkpoint_va is empty, just return blame_va
-        if checkpoint_va.attributions.is_empty() {
-            return Ok(blame_va);
-        }
-
-        // Step 3: Merge blame and checkpoint attributions
-        // Checkpoint attributions should override blame attributions for overlapping lines
-        // Use the union of both VAs' file contents so files tracked only via blame/notes
-        // (committed AI work) are not dropped when INITIAL covers a disjoint set of files.
+        // Step 3: Merge blame and checkpoint attributions.
+        //
+        // IMPORTANT: The `final_state` that drives coordinate-space transformation must
+        // reflect the *current working directory*, not the base-commit content stored in
+        // `blame_va`.  Without this, when an AI line is deleted before an amend the blame
+        // VA still has that line in the original-commit coordinate space; comparing those
+        // line numbers directly against the amended-commit diff produces a spurious
+        // attestation for a line that no longer exists.
+        //
+        // Priority for `final_state` per file:
+        //   1. checkpoint_va.file_contents  (working-log entries already read the workdir)
+        //   2. current working directory    (for files with no AI checkpoints)
+        //   3. blame_va.file_contents       (fallback – preserves previous behaviour for
+        //                                    files that were deleted from the worktree)
         let mut final_state = checkpoint_va.file_contents.clone();
+        if let Ok(workdir) = repo.workdir() {
+            for pathspec in pathspecs {
+                if !final_state.contains_key(pathspec.as_str()) {
+                    let file_path = workdir.join(pathspec.as_str());
+                    if let Ok(content) = std::fs::read_to_string(&file_path) {
+                        final_state.insert(pathspec.clone(), content);
+                    }
+                }
+            }
+        }
         for (file, content) in &blame_va.file_contents {
             final_state
                 .entry(file.clone())
@@ -997,6 +1012,10 @@ impl VirtualAttributions {
                 file_attestation.add_entry(entry);
             }
         }
+
+        // Remove prompt/human records that have no corresponding attestation (e.g. from
+        // historical blame when an AI line was deleted before the commit was finalized).
+        authorship_log.prune_unreferenced_metadata();
 
         Ok(authorship_log)
     }
@@ -1523,6 +1542,10 @@ impl VirtualAttributions {
             file_blobs: HashMap::new(),
             humans: initial_humans,
         };
+
+        // Remove prompt/human records that have no corresponding attestation (e.g. from
+        // historical blame when an AI line was deleted before the commit was finalized).
+        authorship_log.prune_unreferenced_metadata();
 
         Ok((authorship_log, initial_attributions))
     }

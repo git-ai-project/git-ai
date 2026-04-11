@@ -582,6 +582,139 @@ fn test_amend_preserves_custom_attributes_from_config() {
     ]);
 }
 
+/// Bug regression: amend a commit and delete the AI-authored line.
+/// The amended note should NOT contain a prompt record for the deleted AI line.
+///
+/// Before the fix, `to_authorship_log_and_initial_working_log` copied ALL prompts from
+/// VirtualAttributions upfront without pruning them to only those referenced by
+/// actual attestations.  When an AI line was deleted in the amend the attestation
+/// was correctly absent, but the orphaned PromptRecord remained in the metadata.
+#[test]
+fn test_amend_delete_ai_line_removes_prompt_from_note() {
+    let repo = TestRepo::new();
+    let mut file = repo.filename("test.txt");
+
+    // Create a commit that contains both human and AI lines.
+    file.set_contents(crate::lines![
+        "human line 1",
+        "// AI authored line".ai(),
+        "human line 2"
+    ]);
+    repo.stage_all_and_commit("Initial commit with AI line")
+        .unwrap();
+
+    let original_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let original_note = repo
+        .read_authorship_note(&original_sha)
+        .expect("original commit should have a note");
+    let original_log =
+        AuthorshipLog::deserialize_from_string(&original_note).expect("should parse original note");
+    assert!(
+        !original_log.metadata.prompts.is_empty(),
+        "precondition: original commit should have prompt records"
+    );
+
+    // Amend: overwrite the file with only human content, deleting the AI line.
+    let file_path = repo.path().join("test.txt");
+    std::fs::write(&file_path, "human line 1\nhuman line 2\n").unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.git(&["commit", "--amend", "-m", "Amended - AI line deleted"])
+        .unwrap();
+
+    let amended_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let amended_note = repo
+        .read_authorship_note(&amended_sha)
+        .expect("amended commit should have a note");
+    let amended_log =
+        AuthorshipLog::deserialize_from_string(&amended_note).expect("should parse amended note");
+
+    assert!(
+        amended_log.metadata.prompts.is_empty(),
+        "amended note should have no prompts since the only AI line was deleted, \
+         but found orphaned prompts: {:?}",
+        amended_log.metadata.prompts.keys().collect::<Vec<_>>()
+    );
+}
+
+/// Bug regression (worse variant): amend a commit and delete an AI-authored line that
+/// was originally introduced by an *earlier* commit.
+///
+/// When the blame on the pre-amend commit surfaces prompt IDs from older commits,
+/// those foreign PromptRecords must NOT appear in the amended commit's note.
+/// Before the fix the note for the amended commit contained the earlier commit's
+/// PromptRecord even though it had no corresponding attestation.
+#[test]
+fn test_amend_delete_prior_commit_ai_line_no_foreign_prompt_in_note() {
+    let repo = TestRepo::new();
+    let mut file = repo.filename("test.txt");
+
+    // Commit A: introduces an AI line (prompt P1) and a human line.
+    file.set_contents(crate::lines![
+        "// AI authored line from commit A".ai(),
+        "human line from commit A"
+    ]);
+    repo.stage_all_and_commit("Commit A with AI line").unwrap();
+
+    let commit_a_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let commit_a_note = repo
+        .read_authorship_note(&commit_a_sha)
+        .expect("commit A should have a note");
+    let commit_a_log =
+        AuthorshipLog::deserialize_from_string(&commit_a_note).expect("should parse commit A note");
+    let commit_a_prompt_ids: Vec<String> = commit_a_log.metadata.prompts.keys().cloned().collect();
+    assert!(
+        !commit_a_prompt_ids.is_empty(),
+        "precondition: commit A should have prompt records"
+    );
+
+    // Commit B: a human-only addition on top of A.
+    // We write directly to avoid creating AI checkpoints for B.
+    let file_path = repo.path().join("test.txt");
+    std::fs::write(
+        &file_path,
+        "// AI authored line from commit A\nhuman line from commit A\nhuman line from commit B\n",
+    )
+    .unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.git(&["commit", "-m", "Commit B - human addition"])
+        .unwrap();
+
+    // Amend commit B: delete the AI line that came from commit A.
+    // After the amend, the file contains only human lines.
+    std::fs::write(
+        &file_path,
+        "human line from commit A\nhuman line from commit B\n",
+    )
+    .unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.git(&[
+        "commit",
+        "--amend",
+        "-m",
+        "Commit B amended - also deleted AI from A",
+    ])
+    .unwrap();
+
+    let amended_b_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let amended_b_note = repo
+        .read_authorship_note(&amended_b_sha)
+        .expect("amended B should have a note");
+    let amended_b_log = AuthorshipLog::deserialize_from_string(&amended_b_note)
+        .expect("should parse amended B note");
+
+    // The amended B note must NOT contain any of commit A's prompt IDs.
+    // They are foreign to commit B and have no corresponding attestation.
+    for prompt_id in &commit_a_prompt_ids {
+        assert!(
+            !amended_b_log.metadata.prompts.contains_key(prompt_id),
+            "Amended B's note should not contain prompt '{}' from commit A \
+             (foreign-prompt-leak bug): amended_b prompts = {:?}",
+            prompt_id,
+            amended_b_log.metadata.prompts.keys().collect::<Vec<_>>()
+        );
+    }
+}
+
 crate::reuse_tests_in_worktree!(
     test_amend_add_lines_at_top,
     test_amend_add_lines_in_middle,
@@ -594,4 +727,6 @@ crate::reuse_tests_in_worktree!(
     test_amend_with_partially_staged_mixed_content,
     test_amend_with_unstaged_middle_section,
     test_amend_repeated_round_trips_preserve_exact_line_authorship,
+    test_amend_delete_ai_line_removes_prompt_from_note,
+    test_amend_delete_prior_commit_ai_line_no_foreign_prompt_in_note,
 );

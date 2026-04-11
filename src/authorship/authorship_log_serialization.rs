@@ -157,6 +157,28 @@ impl AuthorshipLog {
             .unwrap()
     }
 
+    /// Remove prompt and human records that have no corresponding attestation entry.
+    ///
+    /// Called after attestations are fully built to prevent orphaned metadata from
+    /// leaking into the serialized note. Orphaned prompts occur when:
+    /// - An AI-authored line is deleted during a `git commit --amend`
+    /// - The amend logic loads prompts from historical blame (prior commits) but the
+    ///   corresponding lines are not present in the amended commit's diff
+    pub fn prune_unreferenced_metadata(&mut self) {
+        let referenced: std::collections::HashSet<&str> = self
+            .attestations
+            .iter()
+            .flat_map(|fa| fa.entries.iter())
+            .map(|entry| entry.hash.as_str())
+            .collect();
+        self.metadata
+            .prompts
+            .retain(|id, _| referenced.contains(id.as_str()));
+        self.metadata
+            .humans
+            .retain(|id, _| referenced.contains(id.as_str()));
+    }
+
     /// Serialize to the new text format
     pub fn serialize_to_string(&self) -> Result<String, fmt::Error> {
         let mut output = String::new();
