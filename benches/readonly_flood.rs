@@ -48,9 +48,7 @@ fn bench_classification(c: &mut Criterion) {
 
     // Subcommand-gated read-only cases
     group.bench_function("stash_list", |b| {
-        b.iter(|| {
-            is_definitely_read_only_invocation(black_box("stash"), black_box(Some("list")))
-        })
+        b.iter(|| is_definitely_read_only_invocation(black_box("stash"), black_box(Some("list"))))
     });
     group.bench_function("worktree_list", |b| {
         b.iter(|| {
@@ -63,9 +61,7 @@ fn bench_classification(c: &mut Criterion) {
         b.iter(|| is_definitely_read_only_invocation(black_box("commit"), black_box(None)))
     });
     group.bench_function("stash_pop_mutating", |b| {
-        b.iter(|| {
-            is_definitely_read_only_invocation(black_box("stash"), black_box(Some("pop")))
-        })
+        b.iter(|| is_definitely_read_only_invocation(black_box("stash"), black_box(Some("pop"))))
     });
 
     group.finish();

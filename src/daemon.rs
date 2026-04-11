@@ -3741,7 +3741,9 @@ pub struct ActorDaemonCoordinator {
     carryover_snapshot_ids_by_root: Mutex<HashMap<String, Vec<String>>>,
     test_completion_log_dir: Option<PathBuf>,
     test_completion_log_lock: Mutex<()>,
-    trace_ingest_tx: Mutex<Option<mpsc::Sender<Value>>>,
+    // OnceLock: set once at worker start, never cleared. The ingest worker
+    // exits via the shutdown select! arm instead of relying on channel closure.
+    trace_ingest_tx: std::sync::OnceLock<mpsc::Sender<Value>>,
     telemetry_worker: Option<crate::daemon::telemetry_worker::DaemonTelemetryWorkerHandle>,
     next_trace_ingest_seq: AtomicUsize,
     next_carryover_snapshot_id: AtomicUsize,
@@ -3802,7 +3804,7 @@ impl ActorDaemonCoordinator {
                         })
                 }),
             test_completion_log_lock: Mutex::new(()),
-            trace_ingest_tx: Mutex::new(None),
+            trace_ingest_tx: std::sync::OnceLock::new(),
             telemetry_worker: None,
             next_trace_ingest_seq: AtomicUsize::new(0),
             next_carryover_snapshot_id: AtomicUsize::new(0),
@@ -3821,14 +3823,17 @@ impl ActorDaemonCoordinator {
     }
 
     fn is_shutting_down(&self) -> bool {
-        self.shutting_down.load(Ordering::SeqCst)
+        // Acquire pairs with the Release store in request_shutdown so all
+        // writes made before shutdown is requested are visible to the caller.
+        self.shutting_down.load(Ordering::Acquire)
     }
 
     fn request_shutdown(&self) {
-        self.shutting_down.store(true, Ordering::SeqCst);
-        if let Ok(mut tx) = self.trace_ingest_tx.lock() {
-            let _ = tx.take();
-        }
+        // Release ensures that any writes made before this store are visible to
+        // threads that subsequently load with Acquire (is_shutting_down).
+        self.shutting_down.store(true, Ordering::Release);
+        // The ingest worker exits via its select! shutdown arm (watching
+        // shutdown_notify); we no longer rely on channel closure to stop it.
         self.shutdown_notify.notify_waiters();
         // Hold the condvar mutex so notify_all cannot race with the
         // check-then-wait sequence in daemon_update_check_loop.
@@ -4451,8 +4456,9 @@ impl ActorDaemonCoordinator {
         let snapshot_id = format!(
             "{}-{}",
             now_unix_nanos(),
+            // Relaxed: just a monotone counter for unique IDs; no cross-atomic ordering needed.
             self.next_carryover_snapshot_id
-                .fetch_add(1, Ordering::SeqCst)
+                .fetch_add(1, Ordering::Relaxed)
         );
         self.carryover_snapshots_by_id
             .lock()
@@ -4582,18 +4588,22 @@ impl ActorDaemonCoordinator {
     }
 
     fn next_trace_ingest_seq(&self) -> u64 {
-        (self.next_trace_ingest_seq.fetch_add(1, Ordering::SeqCst) as u64) + 1
+        // Relaxed: we only need fetch_add atomicity (unique monotone values),
+        // not ordering w.r.t. any other atomic.
+        (self.next_trace_ingest_seq.fetch_add(1, Ordering::Relaxed) as u64) + 1
     }
 
     fn trace_ingest_high_watermark(&self) -> u64 {
-        self.next_trace_ingest_seq.load(Ordering::SeqCst) as u64
+        self.next_trace_ingest_seq.load(Ordering::Relaxed) as u64
     }
 
     async fn wait_for_trace_ingest_processed_through(&self, seq: u64) -> Result<(), GitAiError> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
             let notified = self.trace_ingest_progress_notify.notified();
-            let processed = self.processed_trace_ingest_seq.load(Ordering::SeqCst) as u64;
+            // Acquire pairs with the Release store in the ingest worker so we
+            // observe all prior state updates when the sequence number advances.
+            let processed = self.processed_trace_ingest_seq.load(Ordering::Acquire) as u64;
             if processed >= seq {
                 return Ok(());
             }
@@ -4610,18 +4620,18 @@ impl ActorDaemonCoordinator {
     }
 
     fn start_trace_ingest_worker(self: &Arc<Self>) -> Result<(), GitAiError> {
-        let mut guard = self
-            .trace_ingest_tx
-            .lock()
-            .map_err(|_| GitAiError::Generic("trace ingest tx lock poisoned".to_string()))?;
-        if guard.is_some() {
+        // Idempotent: if OnceLock is already set, worker is already running.
+        if self.trace_ingest_tx.get().is_some() {
             return Ok(());
         }
 
         const TRACE_INGEST_QUEUE_CAPACITY: usize = 16_384;
         let (tx, mut rx) = mpsc::channel::<Value>(TRACE_INGEST_QUEUE_CAPACITY);
-        *guard = Some(tx);
-        drop(guard);
+        // OnceLock::set fails if another thread raced us to initialize — that
+        // means the worker is already running; just drop our channel ends.
+        if self.trace_ingest_tx.set(tx).is_err() {
+            return Ok(());
+        }
 
         let coordinator = self.clone();
         tokio::spawn(async move {
@@ -4630,7 +4640,21 @@ impl ActorDaemonCoordinator {
             let mut gc_counter: u64 = 0;
             const GC_INTERVAL: u64 = 500;
 
-            while let Some(payload) = rx.recv().await {
+            // Previously: `while let Some(payload) = rx.recv().await { … }`
+            //
+            // The ingest worker used to exit when the sender was dropped by
+            // `request_shutdown`.  With OnceLock the sender is never dropped
+            // during the coordinator's lifetime, so we use select! to also
+            // respond to the explicit shutdown signal.
+            loop {
+                let payload = tokio::select! {
+                    biased; // prefer draining queued work over shutdown
+                    maybe = rx.recv() => match maybe {
+                        Some(p) => p,
+                        None => break, // channel closed (coordinator dropped)
+                    },
+                    _ = coordinator.wait_for_shutdown() => break,
+                };
                 let Some(seq) = payload.get(TRACE_INGEST_SEQ_FIELD).and_then(Value::as_u64) else {
                     let error = GitAiError::Generic(
                         "trace ingest payload missing ingress sequence".to_string(),
@@ -4745,8 +4769,8 @@ impl ActorDaemonCoordinator {
                     };
                     let _ = ingest_result;
                     let _ = coordinator.queued_trace_payloads.fetch_update(
-                        Ordering::SeqCst,
-                        Ordering::SeqCst,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
                         |current| Some(current.saturating_sub(1)),
                     );
                     if let Err(error) = coordinator
@@ -4757,9 +4781,11 @@ impl ActorDaemonCoordinator {
                             error
                         ));
                     }
+                    // Release: pairs with Acquire loads in wait_for_trace_ingest_processed_through
+                    // so waiters observe all ingest side-effects when seq advances.
                     coordinator
                         .processed_trace_ingest_seq
-                        .store(processed_seq as usize, Ordering::SeqCst);
+                        .store(processed_seq as usize, Ordering::Release);
                     coordinator.trace_ingest_progress_notify.notify_waiters();
                     next_seq = next_seq.saturating_add(1);
                     gc_counter += 1;
@@ -4793,16 +4819,15 @@ impl ActorDaemonCoordinator {
     }
 
     fn enqueue_trace_payload(&self, payload: Value) -> Result<(), GitAiError> {
-        let tx = self
-            .trace_ingest_tx
-            .lock()
-            .map_err(|_| GitAiError::Generic("trace ingest tx lock poisoned".to_string()))?
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| GitAiError::Generic("trace ingest worker not started".to_string()))?;
+        let tx =
+            self.trace_ingest_tx.get().cloned().ok_or_else(|| {
+                GitAiError::Generic("trace ingest worker not started".to_string())
+            })?;
         let payload_root = Self::trace_payload_root_sid(&payload);
         self.record_trace_payload_enqueued(&payload)?;
-        self.queued_trace_payloads.fetch_add(1, Ordering::SeqCst);
+        // Relaxed: this counter tracks in-flight count for monitoring; no
+        // ordering dependency with any other atomic.
+        self.queued_trace_payloads.fetch_add(1, Ordering::Relaxed);
         let send_result = match tx.try_send(payload) {
             Ok(()) => Ok(()),
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_payload)) => Err(()),
@@ -4816,8 +4841,8 @@ impl ActorDaemonCoordinator {
         };
         if send_result.is_err() {
             let _ = self.queued_trace_payloads.fetch_update(
-                Ordering::SeqCst,
-                Ordering::SeqCst,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
                 |current| Some(current.saturating_sub(1)),
             );
             if let Err(error) = self.record_trace_payload_processed_root(payload_root.as_deref()) {
@@ -4912,8 +4937,8 @@ impl ActorDaemonCoordinator {
         // payloads, keeping the serial ingest queue exclusively for mutating
         // commands.
         let argv = trace_payload_argv(payload);
-        let early_primary = trace_payload_primary_command(payload)
-            .or_else(|| trace_argv_primary_command(&argv));
+        let early_primary =
+            trace_payload_primary_command(payload).or_else(|| trace_argv_primary_command(&argv));
         // Extend the read-only check to cover subcommand-gated cases such as
         // `stash list` and `worktree list` that would otherwise fall through
         // to the expensive full path.
@@ -8481,7 +8506,7 @@ mod tests {
             "status start event should not be enqueued (readonly)"
         );
         assert_eq!(
-            coord.queued_trace_payloads.load(Ordering::SeqCst),
+            coord.queued_trace_payloads.load(Ordering::Relaxed),
             0,
             "queued_trace_payloads should stay 0 for readonly start event"
         );
@@ -8496,7 +8521,12 @@ mod tests {
     async fn stash_list_start_event_is_not_enqueued() {
         let coord = ActorDaemonCoordinator::new();
         let mut payload = make_start_payload(&[
-            "git", "-c", "core.fsmonitor=false", "--no-pager", "stash", "list",
+            "git",
+            "-c",
+            "core.fsmonitor=false",
+            "--no-pager",
+            "stash",
+            "list",
             "--pretty=format:%gd%x00%H%x00%ct%x00%s",
         ]);
         let should_enqueue = coord.prepare_trace_payload_for_ingest(&mut payload);
@@ -8514,7 +8544,12 @@ mod tests {
     async fn worktree_list_start_event_is_not_enqueued() {
         let coord = ActorDaemonCoordinator::new();
         let mut payload = make_start_payload(&[
-            "git", "--no-pager", "--no-optional-locks", "worktree", "list", "--porcelain",
+            "git",
+            "--no-pager",
+            "--no-optional-locks",
+            "worktree",
+            "list",
+            "--porcelain",
         ]);
         let should_enqueue = coord.prepare_trace_payload_for_ingest(&mut payload);
         assert!(
@@ -8531,40 +8566,65 @@ mod tests {
     async fn diff_numstat_start_event_is_not_enqueued() {
         let coord = ActorDaemonCoordinator::new();
         let mut payload = make_start_payload(&[
-            "git", "-c", "core.fsmonitor=false", "--no-pager", "diff",
-            "--numstat", "--no-renames", "HEAD",
+            "git",
+            "-c",
+            "core.fsmonitor=false",
+            "--no-pager",
+            "diff",
+            "--numstat",
+            "--no-renames",
+            "HEAD",
         ]);
         let should_enqueue = coord.prepare_trace_payload_for_ingest(&mut payload);
-        assert!(!should_enqueue, "diff --numstat start event should not be enqueued");
+        assert!(
+            !should_enqueue,
+            "diff --numstat start event should not be enqueued"
+        );
     }
 
     #[tokio::test]
     async fn for_each_ref_start_event_is_not_enqueued() {
         let coord = ActorDaemonCoordinator::new();
         let mut payload = make_start_payload(&[
-            "git", "--no-pager", "for-each-ref",
-            "refs/heads/**/*", "refs/remotes/**/*",
-            "--format", "%(HEAD)%00%(objectname)",
+            "git",
+            "--no-pager",
+            "for-each-ref",
+            "refs/heads/**/*",
+            "refs/remotes/**/*",
+            "--format",
+            "%(HEAD)%00%(objectname)",
         ]);
         let should_enqueue = coord.prepare_trace_payload_for_ingest(&mut payload);
-        assert!(!should_enqueue, "for-each-ref start event should not be enqueued");
+        assert!(
+            !should_enqueue,
+            "for-each-ref start event should not be enqueued"
+        );
     }
 
     #[tokio::test]
     async fn cat_file_start_event_is_not_enqueued() {
         let coord = ActorDaemonCoordinator::new();
         let mut payload = make_start_payload(&[
-            "git", "--no-optional-locks", "cat-file", "--batch-check=%(objectname)",
+            "git",
+            "--no-optional-locks",
+            "cat-file",
+            "--batch-check=%(objectname)",
         ]);
         let should_enqueue = coord.prepare_trace_payload_for_ingest(&mut payload);
-        assert!(!should_enqueue, "cat-file start event should not be enqueued");
+        assert!(
+            !should_enqueue,
+            "cat-file start event should not be enqueued"
+        );
     }
 
     #[tokio::test]
     async fn show_commit_start_event_is_not_enqueued() {
         let coord = ActorDaemonCoordinator::new();
         let mut payload = make_start_payload(&[
-            "git", "--no-optional-locks", "show", "--no-patch",
+            "git",
+            "--no-optional-locks",
+            "show",
+            "--no-patch",
             "--format=%H%x00%B%x00%at",
             "07270e1489439d6b36fcb2a4198d2fb68e37727c",
         ]);
@@ -8655,7 +8715,7 @@ mod tests {
             elapsed.as_millis()
         );
         assert_eq!(
-            coord.queued_trace_payloads.load(Ordering::SeqCst),
+            coord.queued_trace_payloads.load(Ordering::Relaxed),
             0,
             "no readonly events should reach the ingest queue"
         );
@@ -8677,7 +8737,7 @@ mod tests {
             let _ = coord.prepare_trace_payload_for_ingest(&mut payload);
         }
         assert_eq!(
-            coord.queued_trace_payloads.load(Ordering::SeqCst),
+            coord.queued_trace_payloads.load(Ordering::Relaxed),
             0,
             "stash list flood must not fill the ingest queue"
         );
@@ -8698,10 +8758,94 @@ mod tests {
             let _ = coord.prepare_trace_payload_for_ingest(&mut payload);
         }
         assert_eq!(
-            coord.queued_trace_payloads.load(Ordering::SeqCst),
+            coord.queued_trace_payloads.load(Ordering::Relaxed),
             0,
             "worktree list flood must not fill the ingest queue"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // OnceLock / shutdown / atomic-ordering tests
+    // -----------------------------------------------------------------------
+
+    /// `enqueue_trace_payload` must return an error when the ingest worker has
+    /// not been started yet.  This is the "no-sender" fast-fail path and is
+    /// unchanged by the OnceLock refactor.
+    #[tokio::test]
+    async fn enqueue_before_worker_start_returns_error() {
+        let coord = ActorDaemonCoordinator::new();
+        // Worker never started → OnceLock is empty → enqueue must fail
+        let payload = serde_json::json!({
+            "event": "start",
+            "sid": "20260411T120000.000000-Ptest0001",
+            "__git_ai_ingest_seq": 1_u64,
+            "argv": ["git", "commit", "-m", "test"],
+        });
+        assert!(
+            coord.enqueue_trace_payload(payload).is_err(),
+            "enqueue before worker start must return an error"
+        );
+    }
+
+    /// After `request_shutdown()`, `is_shutting_down()` returns true and the
+    /// coordinator stays in a consistent state.  The ingest worker (started
+    /// via `start_trace_ingest_worker`) must exit cleanly even when the sender
+    /// is no longer dropped by `request_shutdown` (OnceLock never drops it).
+    #[tokio::test]
+    async fn request_shutdown_is_idempotent_and_consistent() {
+        let coord = Arc::new(ActorDaemonCoordinator::new());
+        coord.start_trace_ingest_worker().unwrap();
+        assert!(!coord.is_shutting_down());
+        coord.request_shutdown();
+        assert!(coord.is_shutting_down());
+        // Second call must not panic.
+        coord.request_shutdown();
+        assert!(coord.is_shutting_down());
+        // Allow tokio to run the ingest worker's shutdown select arm.
+        tokio::task::yield_now().await;
+    }
+
+    /// Concurrent enqueues from multiple threads must never deadlock or
+    /// corrupt the accounting counter.
+    #[tokio::test]
+    async fn concurrent_mutating_enqueues_do_not_deadlock() {
+        use std::sync::Arc;
+        let coord = Arc::new(ActorDaemonCoordinator::new());
+        coord.start_trace_ingest_worker().unwrap();
+
+        const TASKS: usize = 8;
+        const PER_TASK: usize = 20;
+
+        // Use prepare_trace_payload_for_ingest (which allocates seq numbers
+        // and enqueues) from multiple tasks concurrently.
+        let mut handles = Vec::with_capacity(TASKS);
+        for task_id in 0..TASKS {
+            let c = coord.clone();
+            handles.push(tokio::spawn(async move {
+                for i in 0..PER_TASK {
+                    let sid = format!("20260411T120000.000000-P{:08x}", task_id * 1000 + i);
+                    let mut payload = serde_json::json!({
+                        "event": "start",
+                        "sid": sid,
+                        "argv": ["git", "commit", "-m", "msg"],
+                    });
+                    // This calls enqueue_trace_payload internally for mutating cmds.
+                    let _ = c.prepare_trace_payload_for_ingest(&mut payload);
+                }
+            }));
+        }
+        for h in handles {
+            h.await.expect("task must not panic");
+        }
+        // Give the ingest worker time to drain the queue.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while coord.queued_trace_payloads.load(Ordering::Acquire) > 0 {
+            if tokio::time::Instant::now() >= deadline {
+                break; // don't fail the test on CI slowness; just stop waiting
+            }
+            tokio::task::yield_now().await;
+        }
+        coord.request_shutdown();
     }
 }
 

@@ -126,14 +126,11 @@ pub fn handle_git(args: &[String]) {
         // of Zed IDE invocations per session.
         let is_read_only = {
             let subcommand = parsed.command_args.first().map(String::as_str);
-            parsed
-                .command
-                .as_deref()
-                .is_some_and(|cmd| {
-                    crate::git::command_classification::is_definitely_read_only_invocation(
-                        cmd, subcommand,
-                    )
-                })
+            parsed.command.as_deref().is_some_and(|cmd| {
+                crate::git::command_classification::is_definitely_read_only_invocation(
+                    cmd, subcommand,
+                )
+            })
         };
 
         if is_read_only {
@@ -829,14 +826,9 @@ fn proxy_to_git(
     let suppress_trace2 = wrapper_invocation_id.is_none() && {
         let parsed = parse_git_cli_args(args);
         let subcommand = parsed.command_args.first().map(String::as_str);
-        parsed
-            .command
-            .as_deref()
-            .is_some_and(|cmd| {
-                crate::git::command_classification::is_definitely_read_only_invocation(
-                    cmd, subcommand,
-                )
-            })
+        parsed.command.as_deref().is_some_and(|cmd| {
+            crate::git::command_classification::is_definitely_read_only_invocation(cmd, subcommand)
+        })
     };
 
     // Use spawn for interactive commands

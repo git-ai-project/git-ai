@@ -125,19 +125,43 @@ mod tests {
     #[test]
     fn worktree_mutating_subcommands_are_not_read_only() {
         assert!(!is_definitely_read_only_invocation("worktree", Some("add")));
-        assert!(!is_definitely_read_only_invocation("worktree", Some("remove")));
-        assert!(!is_definitely_read_only_invocation("worktree", Some("move")));
-        assert!(!is_definitely_read_only_invocation("worktree", Some("lock")));
-        assert!(!is_definitely_read_only_invocation("worktree", Some("unlock")));
-        assert!(!is_definitely_read_only_invocation("worktree", Some("prune")));
+        assert!(!is_definitely_read_only_invocation(
+            "worktree",
+            Some("remove")
+        ));
+        assert!(!is_definitely_read_only_invocation(
+            "worktree",
+            Some("move")
+        ));
+        assert!(!is_definitely_read_only_invocation(
+            "worktree",
+            Some("lock")
+        ));
+        assert!(!is_definitely_read_only_invocation(
+            "worktree",
+            Some("unlock")
+        ));
+        assert!(!is_definitely_read_only_invocation(
+            "worktree",
+            Some("prune")
+        ));
         assert!(!is_definitely_read_only_invocation("worktree", None));
     }
 
     #[test]
     fn standard_read_only_commands_are_read_only_invocations_regardless_of_subcommand() {
         for cmd in &[
-            "status", "diff", "show", "log", "cat-file", "rev-parse", "for-each-ref",
-            "blame", "grep", "ls-files", "ls-tree",
+            "status",
+            "diff",
+            "show",
+            "log",
+            "cat-file",
+            "rev-parse",
+            "for-each-ref",
+            "blame",
+            "grep",
+            "ls-files",
+            "ls-tree",
         ] {
             assert!(
                 is_definitely_read_only_invocation(cmd, None),
@@ -152,7 +176,9 @@ mod tests {
 
     #[test]
     fn mutating_commands_are_not_read_only_invocations() {
-        for cmd in &["commit", "push", "pull", "rebase", "merge", "checkout", "reset", "fetch"] {
+        for cmd in &[
+            "commit", "push", "pull", "rebase", "merge", "checkout", "reset", "fetch",
+        ] {
             assert!(
                 !is_definitely_read_only_invocation(cmd, None),
                 "{cmd} should not be read-only"
