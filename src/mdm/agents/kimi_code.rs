@@ -141,10 +141,7 @@ impl HookInstaller for KimiCodeInstaller {
                         .unwrap_or("");
                     if current_cmd != desired_cmd {
                         let mut entry = toml::map::Map::new();
-                        entry.insert(
-                            "event".to_string(),
-                            toml::Value::String(event.to_string()),
-                        );
+                        entry.insert("event".to_string(), toml::Value::String(event.to_string()));
                         entry.insert(
                             "command".to_string(),
                             toml::Value::String(desired_cmd.clone()),
@@ -155,10 +152,7 @@ impl HookInstaller for KimiCodeInstaller {
                 None => {
                     // Add new hook entry
                     let mut entry = toml::map::Map::new();
-                    entry.insert(
-                        "event".to_string(),
-                        toml::Value::String(event.to_string()),
-                    );
+                    entry.insert("event".to_string(), toml::Value::String(event.to_string()));
                     entry.insert(
                         "command".to_string(),
                         toml::Value::String(desired_cmd.clone()),
@@ -168,10 +162,10 @@ impl HookInstaller for KimiCodeInstaller {
             }
         }
 
-        let new_content = toml::to_string_pretty(&parsed)
-            .map_err(|e| GitAiError::Generic(format!("Failed to serialize Kimi config.toml: {e}")))?;
+        let new_content = toml::to_string_pretty(&parsed).map_err(|e| {
+            GitAiError::Generic(format!("Failed to serialize Kimi config.toml: {e}"))
+        })?;
 
-        println!("{}", new_content);
         if existing_content == new_content {
             return Ok(None);
         }
@@ -220,8 +214,9 @@ impl HookInstaller for KimiCodeInstaller {
             return Ok(None);
         }
 
-        let new_content = toml::to_string_pretty(&parsed)
-            .map_err(|e| GitAiError::Generic(format!("Failed to serialize Kimi config.toml: {e}")))?;
+        let new_content = toml::to_string_pretty(&parsed).map_err(|e| {
+            GitAiError::Generic(format!("Failed to serialize Kimi config.toml: {e}"))
+        })?;
 
         let diff_output = generate_diff(&config_path, &existing_content, &new_content);
 
@@ -341,12 +336,14 @@ mod tests {
                 hooks[0].get("event").unwrap().as_str().unwrap(),
                 "PreToolUse"
             );
-            assert!(hooks[0]
-                .get("command")
-                .unwrap()
-                .as_str()
-                .unwrap()
-                .contains("checkpoint kimi-code"));
+            assert!(
+                hooks[0]
+                    .get("command")
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .contains("checkpoint kimi-code")
+            );
             assert_eq!(
                 hooks[1].get("event").unwrap().as_str().unwrap(),
                 "PostToolUse"
