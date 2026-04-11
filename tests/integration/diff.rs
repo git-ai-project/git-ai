@@ -2863,10 +2863,12 @@ fn test_diff_json_output_includes_human_id_in_hunks() {
             );
 
             // Verify the human_id can be resolved via the humans map
-            let human_record = humans.get(human_id).expect(&format!(
-                "human_id '{}' from hunk should be resolvable in top-level humans map",
-                human_id
-            ));
+            let human_record = humans.get(human_id).unwrap_or_else(|| {
+                panic!(
+                    "human_id '{}' from hunk should be resolvable in top-level humans map",
+                    human_id
+                )
+            });
             let author = human_record["author"]
                 .as_str()
                 .expect("human record should have author field");
