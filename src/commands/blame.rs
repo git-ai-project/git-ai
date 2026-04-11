@@ -1,5 +1,5 @@
 use crate::auth::CredentialStore;
-use crate::authorship::authorship_log::PromptRecord;
+use crate::authorship::authorship_log::{HumanRecord, PromptRecord};
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::prompt_utils::enrich_prompt_messages;
 use crate::authorship::working_log::CheckpointKind;
@@ -11,7 +11,7 @@ use crate::git::repository::{exec_git, exec_git_stdin};
 use crate::utils::normalize_to_posix;
 use chrono::{DateTime, FixedOffset, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::sync::LazyLock;
@@ -62,6 +62,8 @@ pub struct BlameAnalysisResult {
     pub line_authors: HashMap<u32, String>,
     pub prompt_records: HashMap<String, PromptRecord>,
     pub blame_hunks: Vec<BlameHunk>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub humans: BTreeMap<String, HumanRecord>,
 }
 
 struct PreparedBlameRequest {
@@ -405,14 +407,21 @@ impl Repository {
         let blame_hunks = self.blame_hunks_for_ranges(relative_file_path, line_ranges, options)?;
 
         // Step 2: Overlay AI authorship information.
-        let (line_authors, prompt_records, authorship_logs, prompt_commits, commits_with_notes) =
-            overlay_ai_authorship(self, &blame_hunks, relative_file_path, options)?;
+        let (
+            line_authors,
+            prompt_records,
+            humans,
+            authorship_logs,
+            prompt_commits,
+            commits_with_notes,
+        ) = overlay_ai_authorship(self, &blame_hunks, relative_file_path, options)?;
 
         Ok((
             BlameAnalysisResult {
                 line_authors,
                 prompt_records,
                 blame_hunks,
+                humans,
             },
             authorship_logs,
             prompt_commits,
@@ -541,6 +550,7 @@ impl Repository {
             line_authors,
             prompt_records,
             blame_hunks: _,
+            humans: _,
         } = analysis;
 
         if request.options.no_output {
@@ -1024,6 +1034,7 @@ fn overlay_ai_authorship(
     (
         HashMap<u32, String>,
         HashMap<String, PromptRecord>,
+        BTreeMap<String, HumanRecord>, // humans map
         Vec<AuthorshipLog>,
         HashMap<String, Vec<String>>,      // prompt_hash -> commit_shas
         std::collections::HashSet<String>, // commit SHAs with real authorship notes
@@ -1032,6 +1043,7 @@ fn overlay_ai_authorship(
 > {
     let mut line_authors: HashMap<u32, String> = HashMap::new();
     let mut prompt_records: HashMap<String, PromptRecord> = HashMap::new();
+    let mut humans: BTreeMap<String, HumanRecord> = BTreeMap::new();
     // Track which commits contain each prompt hash
     let mut prompt_commits: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
     // Track commit SHAs that have real (non-simulated) authorship notes
@@ -1058,8 +1070,16 @@ fn overlay_ai_authorship(
         };
 
         // If we have AI authorship data, look up the author for lines in this hunk
-        if let Some(authorship_log) = authorship_log {
+        if let Some(ref authorship_log) = authorship_log {
             commits_with_notes.insert(hunk.commit_sha.clone());
+
+            // Collect humans from this authorship log
+            for (human_id, human_record) in &authorship_log.metadata.humans {
+                humans
+                    .entry(human_id.clone())
+                    .or_insert_with(|| human_record.clone());
+            }
+
             // Check each line in this hunk for AI authorship using compact schema
             // IMPORTANT: Use the original line numbers from the commit, not the current line numbers
             let num_lines = hunk.range.1 - hunk.range.0 + 1;
@@ -1222,6 +1242,7 @@ fn overlay_ai_authorship(
     Ok((
         line_authors,
         prompt_records,
+        humans,
         authorship_logs,
         prompt_commits_vec,
         commits_with_notes,
