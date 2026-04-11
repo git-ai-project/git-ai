@@ -2246,7 +2246,7 @@ impl Repository {
         let output = exec_git_with_profile(&args, InternalGitProfile::PatchParse)?;
         let diff_output = String::from_utf8_lossy(&output.stdout);
 
-        let mut result = parse_diff_added_lines(&diff_output)?;
+        let (mut result, _deleted_count) = parse_diff_added_lines(&diff_output)?;
 
         if needs_post_filter && let Some(paths) = pathspecs {
             let nfc_paths: HashSet<String> = paths.iter().map(|s| s.nfc().collect()).collect();
@@ -2254,6 +2254,28 @@ impl Repository {
         }
 
         Ok(result)
+    }
+
+    /// Like [`diff_added_lines`] but also returns the total number of deleted
+    /// lines across all hunks in the diff.  Used by the post-commit stats-cost
+    /// estimator to detect deletion-heavy commits without a second git invocation.
+    pub fn diff_added_lines_with_deleted_count(
+        &self,
+        from_ref: &str,
+        to_ref: &str,
+    ) -> Result<(HashMap<String, Vec<u32>>, usize), GitAiError> {
+        let mut args = self.global_args_for_exec();
+        args.push("diff".to_string());
+        args.push("-U0".to_string());
+        args.push("--no-color".to_string());
+        args.push("--find-renames=1%".to_string());
+        args.push(from_ref.to_string());
+        args.push(to_ref.to_string());
+
+        let output = exec_git_with_profile(&args, InternalGitProfile::PatchParse)?;
+        let diff_output = String::from_utf8_lossy(&output.stdout);
+
+        parse_diff_added_lines(&diff_output)
     }
 
     /// Get list of changed files between two refs using `git diff --name-only`
@@ -2324,7 +2346,7 @@ impl Repository {
         let output = exec_git_with_profile(&args, InternalGitProfile::PatchParse)?;
         let diff_output = String::from_utf8_lossy(&output.stdout);
 
-        let mut result = parse_diff_added_lines(&diff_output)?;
+        let (mut result, _deleted_count) = parse_diff_added_lines(&diff_output)?;
 
         if needs_post_filter && let Some(paths) = pathspecs {
             let nfc_paths: HashSet<String> = paths.iter().map(|s| s.nfc().collect()).collect();
@@ -3342,19 +3364,30 @@ fn parse_git_version(version_str: &str) -> Option<(u32, u32, u32)> {
 ///
 /// This means: old file line 10 (2 lines), new file line 15 (5 lines)
 /// We extract the "new file" line numbers to know which lines were added.
-fn parse_diff_added_lines(diff_output: &str) -> Result<HashMap<String, Vec<u32>>, GitAiError> {
+///
+/// Also returns the total number of deleted lines across all hunks so that
+/// callers can estimate the cost of a deletion-heavy commit without a second
+/// git invocation.
+fn parse_diff_added_lines(
+    diff_output: &str,
+) -> Result<(HashMap<String, Vec<u32>>, usize), GitAiError> {
     let mut result: HashMap<String, Vec<u32>> = HashMap::new();
     let mut current_file: Option<String> = None;
+    let mut total_deleted: usize = 0;
 
     for line in diff_output.lines() {
         if let Some(path_opt) = parse_new_file_path_from_plus_header_line(line) {
             current_file = path_opt;
         } else if line.starts_with("@@ ") {
             // Parse hunk header: @@ -old_start,old_count +new_start,new_count @@
-            if let Some(ref file) = current_file
-                && let Some((added_lines, _is_pure_insertion)) = parse_hunk_header(line)
-            {
-                result.entry(file.clone()).or_default().extend(added_lines);
+            if let Some((added_lines, _is_pure_insertion, old_count)) = parse_hunk_header(line) {
+                // Count deleted lines for ALL hunks, including those from purely
+                // deleted files (where current_file is None because +++ /dev/null).
+                total_deleted += old_count as usize;
+                // Only record added-line numbers when there is a destination file.
+                if let Some(ref file) = current_file {
+                    result.entry(file.clone()).or_default().extend(added_lines);
+                }
             }
         }
     }
@@ -3365,7 +3398,7 @@ fn parse_diff_added_lines(diff_output: &str) -> Result<HashMap<String, Vec<u32>>
         lines.dedup();
     }
 
-    Ok(result)
+    Ok((result, total_deleted))
 }
 
 /// Parses the unified diff output to extract line numbers of added lines,
@@ -3386,7 +3419,7 @@ fn parse_diff_added_lines_with_insertions(
         } else if line.starts_with("@@ ") {
             // Parse hunk header: @@ -old_start,old_count +new_start,new_count @@
             if let Some(ref file) = current_file
-                && let Some((added_lines, is_pure_insertion)) = parse_hunk_header(line)
+                && let Some((added_lines, is_pure_insertion, _old_count)) = parse_hunk_header(line)
             {
                 all_lines
                     .entry(file.clone())
@@ -3448,7 +3481,12 @@ fn parse_new_file_path_from_plus_header_line(line: &str) -> Option<Option<String
 /// Format: @@ -old_start,old_count +new_start,new_count @@
 /// Returns (line numbers that were added, is_pure_insertion)
 /// is_pure_insertion is true when old_count=0, meaning these are new lines, not modifications
-fn parse_hunk_header(line: &str) -> Option<(Vec<u32>, bool)> {
+/// Returns `(added_line_numbers, is_pure_insertion, old_count)`.
+///
+/// `old_count` is the number of lines removed in the old file for this hunk
+/// (the value after the comma in `@@ -old_start,old_count …`).  Callers that
+/// only need the added-line numbers can discard it with `_`.
+fn parse_hunk_header(line: &str) -> Option<(Vec<u32>, bool, u32)> {
     // Find the part between @@ and @@
     let parts: Vec<&str> = line.split("@@").collect();
     if parts.len() < 2 {
@@ -3494,7 +3532,7 @@ fn parse_hunk_header(line: &str) -> Option<(Vec<u32>, bool)> {
 
     // If count is 0, no lines were added (only deleted)
     if count == 0 {
-        return Some((Vec::new(), false));
+        return Some((Vec::new(), false, old_count));
     }
 
     // Generate all line numbers in the range
@@ -3503,7 +3541,7 @@ fn parse_hunk_header(line: &str) -> Option<(Vec<u32>, bool)> {
     // Pure insertion if old_count is 0 (no lines from old file were modified)
     let is_pure_insertion = old_count == 0;
 
-    Some((lines, is_pure_insertion))
+    Some((lines, is_pure_insertion, old_count))
 }
 
 #[cfg(test)]
