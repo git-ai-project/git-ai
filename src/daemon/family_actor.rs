@@ -16,7 +16,7 @@ pub enum FamilyMsg {
     ApplyCheckpoint(oneshot::Sender<Result<ApplyAck, GitAiError>>),
     Status(oneshot::Sender<Result<FamilyStatus, GitAiError>>),
     GetWatermarks(oneshot::Sender<Result<WatermarkState, GitAiError>>),
-    UpdateWatermarks(WatermarkState),
+    UpdateWatermarks(WatermarkState, oneshot::Sender<Result<(), GitAiError>>),
     Shutdown,
 }
 
@@ -70,12 +70,16 @@ impl FamilyActorHandle {
     }
 
     pub async fn update_watermarks(&self, update: WatermarkState) -> Result<(), GitAiError> {
+        let (tx, rx) = oneshot::channel();
         self.tx
-            .send(FamilyMsg::UpdateWatermarks(update))
+            .send(FamilyMsg::UpdateWatermarks(update, tx))
             .await
             .map_err(|_| {
                 GitAiError::Generic("family actor update_watermarks send failed".to_string())
-            })
+            })?;
+        rx.await.map_err(|_| {
+            GitAiError::Generic("family actor update_watermarks receive failed".to_string())
+        })?
     }
 
     pub async fn shutdown(&self) -> Result<(), GitAiError> {
@@ -128,7 +132,7 @@ pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
                 FamilyMsg::GetWatermarks(respond_to) => {
                     let _ = respond_to.send(Ok(state.watermarks.clone()));
                 }
-                FamilyMsg::UpdateWatermarks(update) => {
+                FamilyMsg::UpdateWatermarks(update, respond_to) => {
                     for (path, mtime_ns) in update.per_file {
                         let entry = state.watermarks.per_file.entry(path).or_insert(0);
                         if mtime_ns > *entry {
@@ -136,16 +140,26 @@ pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
                         }
                     }
                     for (worktree, ts) in update.per_worktree {
+                        let worktree_prefix = if worktree.ends_with('/') {
+                            worktree.clone()
+                        } else {
+                            format!("{}/", worktree)
+                        };
                         let entry = state.watermarks.per_worktree.entry(worktree).or_insert(0);
                         if ts > *entry {
                             *entry = ts;
                             // Prune per-file watermarks superseded by this worktree watermark.
+                            // Only prune files belonging to this worktree (by path prefix),
+                            // leaving files from other worktrees untouched.
                             // A per-file entry older than worktree_wm would cause Tier 1 false
                             // positives: the file would appear stale even though it was captured
                             // by the full human checkpoint at worktree_wm.
-                            state.watermarks.per_file.retain(|_, file_ts| *file_ts > ts);
+                            state.watermarks.per_file.retain(|path, file_ts| {
+                                !path.starts_with(&worktree_prefix) || *file_ts > ts
+                            });
                         }
                     }
+                    let _ = respond_to.send(Ok(()));
                 }
                 FamilyMsg::Shutdown => break,
             }

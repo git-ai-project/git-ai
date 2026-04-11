@@ -1,4 +1,5 @@
 use crate::error::GitAiError;
+use crate::utils::{LockFile, debug_log};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -531,6 +532,10 @@ pub fn append_event_to_file(
     file_path: &std::path::Path,
     new_event: RewriteLogEvent,
 ) -> Result<(), GitAiError> {
+    // Acquire exclusive lock before the read-modify-write cycle
+    let lock_path = file_path.with_extension("lock");
+    let _lock = acquire_rewrite_lock(&lock_path);
+
     // Serialize new event
     let new_event_json = serde_json::to_string(&new_event)?;
 
@@ -567,6 +572,23 @@ pub fn append_event_to_file(
     std::fs::write(file_path, lines.join("\n"))?;
 
     Ok(())
+}
+
+/// Attempt to acquire the rewrite log lock with retries.
+/// Returns `Some(LockFile)` on success, `None` on failure (after logging a warning).
+fn acquire_rewrite_lock(lock_path: &std::path::Path) -> Option<LockFile> {
+    for attempt in 0..3 {
+        if let Some(lock) = LockFile::try_acquire(lock_path) {
+            return Some(lock);
+        }
+        if attempt < 2 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+    debug_log(
+        "Warning: failed to acquire rewrite log lock after 3 attempts, proceeding without lock",
+    );
+    None
 }
 
 #[cfg(test)]
