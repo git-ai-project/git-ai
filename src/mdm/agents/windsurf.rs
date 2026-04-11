@@ -1,8 +1,13 @@
 use crate::error::GitAiError;
-use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerParams};
-use crate::mdm::utils::{
-    binary_exists, generate_diff, home_dir, is_git_ai_checkpoint_command, write_atomic,
+use crate::mdm::hook_installer::{
+    HookCheckResult, HookInstaller, HookInstallerParams, InstallResult, UninstallResult,
 };
+use crate::mdm::utils::{
+    binary_exists, generate_diff, home_dir, install_vsc_editor_extension,
+    is_git_ai_checkpoint_command, is_github_codespaces, is_vsc_editor_extension_installed,
+    resolve_editor_cli, write_atomic,
+};
+use crate::utils::debug_log;
 use serde_json::{Value, json};
 use std::fs;
 use std::path::PathBuf;
@@ -204,15 +209,38 @@ impl HookInstaller for WindsurfInstaller {
     }
 
     fn check_hooks(&self, _params: &HookInstallerParams) -> Result<HookCheckResult, GitAiError> {
+        let resolved_cli = resolve_editor_cli("windsurf");
+        let has_cli = resolved_cli.is_some();
         let has_binary = binary_exists("windsurf");
         let has_dotfiles = home_dir().join(".codeium").join("windsurf").exists();
 
-        if !has_binary && !has_dotfiles {
+        if !has_cli && !has_binary && !has_dotfiles {
             return Ok(HookCheckResult {
                 tool_installed: false,
                 hooks_installed: false,
                 hooks_up_to_date: false,
             });
+        }
+
+        // Check if VS Code extension is installed
+        if let Some(cli) = &resolved_cli {
+            match is_vsc_editor_extension_installed(cli, "git-ai.git-ai-vscode") {
+                Ok(true) => {
+                    return Ok(HookCheckResult {
+                        tool_installed: true,
+                        hooks_installed: true,
+                        hooks_up_to_date: true,
+                    });
+                }
+                Ok(false) => {
+                    return Ok(HookCheckResult {
+                        tool_installed: true,
+                        hooks_installed: false,
+                        hooks_up_to_date: false,
+                    });
+                }
+                Err(_) => {}
+            }
         }
 
         // Check all hook locations
@@ -301,5 +329,97 @@ impl HookInstaller for WindsurfInstaller {
         } else {
             Ok(Some(all_diffs.join("\n")))
         }
+    }
+
+    fn install_extras(
+        &self,
+        _params: &HookInstallerParams,
+        dry_run: bool,
+    ) -> Result<Vec<InstallResult>, GitAiError> {
+        let mut results = Vec::new();
+
+        // Skip extension installation in GitHub Codespaces
+        // Extensions must be configured via devcontainer.json in Codespaces
+        if is_github_codespaces() {
+            results.push(InstallResult {
+                changed: false,
+                diff: None,
+                message: "Windsurf: Unable to install extension in GitHub Codespaces. Add to your devcontainer.json: \"customizations\": { \"vscode\": { \"extensions\": [\"git-ai.git-ai-vscode\"] } }".to_string(),
+            });
+            return Ok(results);
+        }
+
+        // Install VS Code extension
+        if let Some(cli) = resolve_editor_cli("windsurf") {
+            match is_vsc_editor_extension_installed(&cli, "git-ai.git-ai-vscode") {
+                Ok(true) => {
+                    results.push(InstallResult {
+                        changed: false,
+                        diff: None,
+                        message: "Windsurf: Extension already installed".to_string(),
+                    });
+                }
+                Ok(false) => {
+                    if dry_run {
+                        results.push(InstallResult {
+                            changed: true,
+                            diff: None,
+                            message: "Windsurf: Pending extension install".to_string(),
+                        });
+                    } else {
+                        println!("Installing extensions...");
+                        println!("\tInstalling extension 'git-ai.git-ai-vscode'...");
+                        match install_vsc_editor_extension(&cli, "git-ai.git-ai-vscode") {
+                            Ok(()) => {
+                                results.push(InstallResult {
+                                    changed: true,
+                                    diff: None,
+                                    message: "\tExtension 'git-ai.git-ai-vscode' was successfully installed.".to_string(),
+                                });
+                            }
+                            Err(e) => {
+                                debug_log(&format!(
+                                    "Windsurf: Error automatically installing extension: {}",
+                                    e
+                                ));
+                                results.push(InstallResult {
+                                    changed: false,
+                                    diff: None,
+                                    message: "Windsurf: Unable to automatically install extension. Please cmd+click on the following link to install: windsurf:extension/git-ai.git-ai-vscode (or search for 'git-ai-vscode' in the Windsurf extensions tab)".to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    results.push(InstallResult {
+                        changed: false,
+                        diff: None,
+                        message: format!("Windsurf: Failed to check extension: {}", e),
+                    });
+                }
+            }
+        } else {
+            results.push(InstallResult {
+                changed: false,
+                diff: None,
+                message: "Windsurf: Unable to automatically install extension. Please cmd+click on the following link to install: windsurf:extension/git-ai.git-ai-vscode (or search for 'git-ai-vscode' in the Windsurf extensions tab)".to_string(),
+            });
+        }
+
+        Ok(results)
+    }
+
+    fn uninstall_extras(
+        &self,
+        _params: &HookInstallerParams,
+        _dry_run: bool,
+    ) -> Result<Vec<UninstallResult>, GitAiError> {
+        Ok(vec![UninstallResult {
+            changed: false,
+            diff: None,
+            message: "Windsurf: Extension must be uninstalled manually through the editor"
+                .to_string(),
+        }])
     }
 }

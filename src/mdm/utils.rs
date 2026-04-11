@@ -261,6 +261,51 @@ fn get_editor_cli_candidates(cli_name: &str) -> Vec<(PathBuf, PathBuf)> {
                 }
             }
         }
+        "windsurf" => {
+            #[cfg(target_os = "macos")]
+            {
+                for apps_dir in [PathBuf::from("/Applications"), home.join("Applications")] {
+                    let app = apps_dir.join("Windsurf.app");
+                    candidates.push((
+                        app.join("Contents").join("MacOS").join("Windsurf"),
+                        app.join("Contents")
+                            .join("Resources")
+                            .join("app")
+                            .join("out")
+                            .join("cli.js"),
+                    ));
+                }
+            }
+            #[cfg(all(unix, not(target_os = "macos")))]
+            {
+                for base in [
+                    PathBuf::from("/opt/Windsurf"),
+                    home.join(".local").join("share").join("windsurf"),
+                    home.join(".local").join("share").join("Windsurf"),
+                ] {
+                    candidates.push((
+                        base.join("windsurf"),
+                        base.join("resources")
+                            .join("app")
+                            .join("out")
+                            .join("cli.js"),
+                    ));
+                }
+            }
+            #[cfg(windows)]
+            {
+                if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+                    let base = PathBuf::from(local_app_data).join("Programs").join("Windsurf");
+                    candidates.push((
+                        base.join("Windsurf.exe"),
+                        base.join("resources")
+                            .join("app")
+                            .join("out")
+                            .join("cli.js"),
+                    ));
+                }
+            }
+        }
         "code" => {
             #[cfg(target_os = "macos")]
             {
