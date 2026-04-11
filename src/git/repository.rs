@@ -2256,7 +2256,7 @@ impl Repository {
         Ok(result)
     }
 
-    /// Like [`diff_added_lines`] but also returns the total number of deleted
+    /// Like `diff_added_lines` but also returns the total number of deleted
     /// lines across all hunks in the diff.  Used by the post-commit stats-cost
     /// estimator to detect deletion-heavy commits without a second git invocation.
     pub fn diff_added_lines_with_deleted_count(
