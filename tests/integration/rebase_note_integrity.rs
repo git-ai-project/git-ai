@@ -75,6 +75,12 @@ fn files_in_note(note: &str) -> Vec<String> {
         .collect()
 }
 
+fn prompt_ids_in_note(note: &str) -> Vec<String> {
+    let log = AuthorshipLog::deserialize_from_string(note)
+        .expect("should parse authorship note as AuthorshipLog");
+    log.metadata.prompts.keys().cloned().collect()
+}
+
 /// Write `content` to `filename` in the repo's working directory, add, and
 /// commit via `git_og` (bypassing git-ai hooks). The content is written with
 /// a trailing newline so that 3-way merges work correctly when the feature
@@ -1092,6 +1098,161 @@ fn test_rebase_empty_file_does_not_panic_or_pollute_attribution() {
     );
 }
 
+/// Validate that after a rebase (slow path forced), each rebased commit's note
+/// contains only the prompts from ITS OWN session — not prompts from later commits.
+///
+/// The rebase engine uses per-commit-delta filtering (`active_ids`) so that only
+/// prompts whose AI lines appear in the specific commit's diff are written to that
+/// commit's note.  Prompts from future commits must never "leak back" into earlier
+/// commit notes.
+///
+/// ## Setup
+///
+/// * Two-commit feature branch: commit 1 appends 5 AI lines (session P1),
+///   commit 2 appends 5 more AI lines (session P2, new checkpoint → new ID).
+/// * Upstream prepends a header to the shared file — diverging blobs → slow path.
+///
+/// ## Expected behaviour
+///
+/// Each commit note reflects only its own session:
+///   * commit 1 original note: 1 prompt (P1)
+///   * commit 2 original note: 1 prompt (P2, ≠ P1)
+///   * commit 1′ note after rebase: 1 prompt (P1, same as original)
+///   * commit 2′ note after rebase: 1 prompt (P2, same as original)
+#[test]
+fn test_rebase_each_commit_note_has_only_its_own_session_prompt() {
+    let repo = TestRepo::new();
+
+    write_raw_commit(&repo, "work.rs", "fn base() {}", "Initial commit");
+    let default_branch = repo.current_branch();
+
+    // Upstream prepends to work.rs → diverges blobs after rebase → forces slow path.
+    write_raw_commit(
+        &repo,
+        "work.rs",
+        "// upstream header\nfn base() {}",
+        "Upstream: prepend header to work.rs",
+    );
+
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~1"])
+        .unwrap()
+        .trim()
+        .to_string();
+    repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
+
+    let mut file = repo.filename("work.rs");
+
+    // Commit 1 (P1): 5 AI lines appended.
+    file.set_contents(crate::lines![
+        "fn base() {}",
+        "fn p1_1() {}".ai(),
+        "fn p1_2() {}".ai(),
+        "fn p1_3() {}".ai(),
+        "fn p1_4() {}".ai(),
+        "fn p1_5() {}".ai()
+    ]);
+    repo.stage_all_and_commit("Commit 1: 5 AI lines (P1)")
+        .unwrap();
+
+    let commit1_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let commit1_note = repo
+        .read_authorship_note(&commit1_sha)
+        .expect("commit 1 should have a note before rebase");
+    let commit1_prompt_ids = prompt_ids_in_note(&commit1_note);
+    assert_eq!(
+        commit1_prompt_ids.len(),
+        1,
+        "precondition: commit 1 should have exactly 1 prompt (P1), got: {:?}",
+        commit1_prompt_ids
+    );
+
+    // Commit 2 (P2): 5 more AI lines appended via insert_at — new mock_ai session → new ID.
+    file.insert_at(
+        6,
+        crate::lines![
+            "fn p2_1() {}".ai(),
+            "fn p2_2() {}".ai(),
+            "fn p2_3() {}".ai(),
+            "fn p2_4() {}".ai(),
+            "fn p2_5() {}".ai()
+        ],
+    );
+    repo.stage_all_and_commit("Commit 2: 5 more AI lines (P2)")
+        .unwrap();
+
+    let commit2_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let commit2_note = repo
+        .read_authorship_note(&commit2_sha)
+        .expect("commit 2 should have a note before rebase");
+    let commit2_prompt_ids = prompt_ids_in_note(&commit2_note);
+    assert_eq!(
+        commit2_prompt_ids.len(),
+        1,
+        "precondition: commit 2 should have exactly 1 prompt (P2), got: {:?}",
+        commit2_prompt_ids
+    );
+    assert!(
+        commit2_prompt_ids != commit1_prompt_ids,
+        "precondition: P1 and P2 must have different IDs; \
+         P1={:?}, P2={:?}",
+        commit1_prompt_ids,
+        commit2_prompt_ids
+    );
+
+    // Rebase onto upstream (non-conflicting: upstream prepended, feature appended).
+    repo.git(&["rebase", &default_branch])
+        .expect("rebase should succeed without conflicts");
+
+    let new_sha2 = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let new_sha1 = repo
+        .git(&["rev-parse", "HEAD~1"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    // After rebase each commit's note must reflect only its own session.
+    let note1 = repo
+        .read_authorship_note(&new_sha1)
+        .expect("commit 1′ must have a note after rebase");
+    let note2 = repo
+        .read_authorship_note(&new_sha2)
+        .expect("commit 2′ must have a note after rebase");
+
+    let prompts1 = prompt_ids_in_note(&note1);
+    let prompts2 = prompt_ids_in_note(&note2);
+
+    // Commit 1′: must contain P1, must NOT contain P2 (future commit's prompt).
+    assert!(
+        prompts1
+            .iter()
+            .any(|id| commit1_prompt_ids.contains(id)),
+        "commit 1′ note must contain P1 (its own session), \
+         but found: {:?}",
+        prompts1
+    );
+    assert!(
+        !prompts1
+            .iter()
+            .any(|id| commit2_prompt_ids.contains(id)),
+        "REBASE NOTE CORRUPTION: commit 1′ note contains P2 (a LATER commit's \
+         prompt).  Prompts in 1′: {:?}. Commit-2 prompt IDs: {:?}.",
+        prompts1,
+        commit2_prompt_ids
+    );
+
+    // Commit 2′: must contain P2, must NOT contain P1 from an earlier session that
+    // leaked forward (P1 lines were already attributed in commit 1′).
+    assert!(
+        prompts2
+            .iter()
+            .any(|id| commit2_prompt_ids.contains(id)),
+        "commit 2′ note must contain P2 (its own session), \
+         but found: {:?}",
+        prompts2
+    );
+}
+
 crate::reuse_tests_in_worktree!(
     test_rebase_future_file_does_not_leak_into_earlier_commit_note,
     test_rebase_intermediate_commit_accepted_lines_not_inflated,
@@ -1103,4 +1264,5 @@ crate::reuse_tests_in_worktree!(
     test_rebase_attribution_loss_compounds_across_three_commits,
     test_rebase_same_line_overwritten_by_consecutive_commits,
     test_rebase_empty_file_does_not_panic_or_pollute_attribution,
+    test_rebase_each_commit_note_has_only_its_own_session_prompt,
 );
