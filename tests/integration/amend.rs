@@ -715,6 +715,81 @@ fn test_amend_delete_prior_commit_ai_line_no_foreign_prompt_in_note() {
     }
 }
 
+/// Amending a commit and deleting a KnownHuman-attributed line must preserve the
+/// HumanRecord in the note's `metadata.humans`.
+///
+/// The note is a historical record of every contributor that touched the commit.
+/// Deleting the attributed line removes the *attribution* (line coordinates), but
+/// the HumanRecord itself must remain — matching how PromptRecords are preserved
+/// via `checkpoint_prompt_ids` even when all attributed AI lines are deleted.
+#[test]
+fn test_amend_delete_known_human_line_preserves_human_record_in_note() {
+    let repo = TestRepo::new();
+    let mut file = repo.filename("test.txt");
+
+    // Create a commit that contains a mix of human-attributed and plain human lines.
+    // Using `.human()` triggers a `checkpoint mock_known_human` which stores an
+    // h_-prefixed HumanRecord in the note's metadata.humans.
+    file.set_contents(crate::lines![
+        "regular human line",
+        "// KnownHuman attested line".human(),
+        "another regular line"
+    ]);
+    repo.stage_all_and_commit("Initial commit with KnownHuman line")
+        .unwrap();
+
+    let original_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let original_note = repo
+        .read_authorship_note(&original_sha)
+        .expect("original commit should have a note");
+    let original_log =
+        AuthorshipLog::deserialize_from_string(&original_note).expect("should parse original note");
+    assert!(
+        !original_log.metadata.humans.is_empty(),
+        "precondition: original commit should have HumanRecord entries"
+    );
+    let original_human_ids: Vec<String> =
+        original_log.metadata.humans.keys().cloned().collect();
+
+    // Amend: overwrite the file with plain human content only, deleting the KnownHuman line.
+    let file_path = repo.path().join("test.txt");
+    std::fs::write(&file_path, "regular human line\nanother regular line\n").unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.git(&[
+        "commit",
+        "--amend",
+        "-m",
+        "Amended - KnownHuman line deleted",
+    ])
+    .unwrap();
+
+    let amended_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let amended_note = repo
+        .read_authorship_note(&amended_sha)
+        .expect("amended commit should have a note");
+    let amended_log =
+        AuthorshipLog::deserialize_from_string(&amended_note).expect("should parse amended note");
+
+    // The HumanRecord must survive the amend even though its attributed line was deleted.
+    // The note is a commit-level record of contributors; removing a line doesn't erase
+    // the contributor's association with the commit.
+    assert!(
+        !amended_log.metadata.humans.is_empty(),
+        "amended note should still contain the HumanRecord(s) from the original commit \
+         even though the KnownHuman line was deleted; got: {:?}",
+        amended_log.metadata.humans.keys().collect::<Vec<_>>()
+    );
+    for id in &original_human_ids {
+        assert!(
+            amended_log.metadata.humans.contains_key(id),
+            "HumanRecord '{}' present in original note must be preserved after amend; \
+             amended note has: {:?}",
+            id,
+            amended_log.metadata.humans.keys().collect::<Vec<_>>()
+        );
+    }
+}
+
 crate::reuse_tests_in_worktree!(
     test_amend_add_lines_at_top,
     test_amend_add_lines_in_middle,
@@ -729,4 +804,5 @@ crate::reuse_tests_in_worktree!(
     test_amend_repeated_round_trips_preserve_exact_line_authorship,
     test_amend_delete_ai_line_removes_prompt_from_note,
     test_amend_delete_prior_commit_ai_line_no_foreign_prompt_in_note,
+    test_amend_delete_known_human_line_preserves_human_record_in_note,
 );
