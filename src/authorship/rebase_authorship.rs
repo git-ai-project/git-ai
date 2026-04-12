@@ -803,12 +803,38 @@ fn try_reconstruct_attributions_from_notes_cached(
         }
 
         // Step 2: Overlay this commit's note attributions.
+        //
+        // Skip content-preserving lines when overlaying: when git's diff shows a Replace
+        // hunk for a line whose content is identical in old and new (e.g., appending to a
+        // file without a trailing newline makes the last original line appear "replaced"),
+        // the note attributes those "replaced" lines to this commit.  But those lines were
+        // actually written by an earlier commit — we must not let this commit overwrite them.
         if let Some(log) = parsed_logs.get(*commit) {
             for file_attestation in &log.attestations {
                 let file_path = &file_attestation.file_path;
                 if !pathspec_set.contains(file_path.as_str()) {
                     continue;
                 }
+
+                // Build the set of new-side line numbers that are content-preserving
+                // for this commit's hunks on this file.  These lines carry attribution
+                // from a prior commit and must not be overwritten by this commit's note.
+                let preserved_new_lines: HashSet<u32> =
+                    if let Some(file_hunks) = original_hunks.get(*commit)
+                        && let Some(hunks) = file_hunks.get(file_path.as_str())
+                    {
+                        let mut set = HashSet::new();
+                        for hunk in hunks {
+                            let n = count_content_preserving_lines(hunk);
+                            for i in 0..n {
+                                set.insert(hunk.new_start + i);
+                            }
+                        }
+                        set
+                    } else {
+                        HashSet::new()
+                    };
+
                 let attrs = file_attrs.entry(file_path.clone()).or_default();
                 for entry in &file_attestation.entries {
                     for range in &entry.line_ranges {
@@ -816,9 +842,32 @@ fn try_reconstruct_attributions_from_notes_cached(
                             crate::authorship::authorship_log::LineRange::Single(l) => (*l, *l),
                             crate::authorship::authorship_log::LineRange::Range(s, e) => (*s, *e),
                         };
+                        // Skip leading content-preserving lines in the note range,
+                        // but only when a prior commit already holds attribution for
+                        // that line.  The no-trailing-newline git artifact makes the
+                        // appending commit's note claim the last original line; we
+                        // must not let it overwrite an earlier commit's attribution.
+                        // However, if no prior attribution exists for the line (e.g.
+                        // the first commit in the chain), the commit is allowed to
+                        // claim it normally.
+                        let mut overlay_start = start;
+                        while overlay_start <= end && preserved_new_lines.contains(&overlay_start)
+                        {
+                            let already_attributed = attrs.iter().any(|a| {
+                                a.start_line <= overlay_start && overlay_start <= a.end_line
+                            });
+                            if already_attributed {
+                                overlay_start += 1;
+                            } else {
+                                break; // no prior claim — let this commit own the line
+                            }
+                        }
+                        if overlay_start > end {
+                            continue; // entire range is content-preserving, skip
+                        }
                         // Remove any existing attributions that overlap this range,
                         // then insert the new one.
-                        overlay_attribution(attrs, start, end, entry.hash.clone());
+                        overlay_attribution(attrs, overlay_start, end, entry.hash.clone());
                     }
                 }
             }
@@ -2381,6 +2430,11 @@ struct DiffHunk {
     /// Used by the hunk-based attribution path to stamp AI attribution on
     /// newly-inserted/replaced lines via content-matching.
     added_lines: Vec<String>,
+    /// Content of `-` lines from the unified diff output for this hunk.
+    /// Used to detect content-preserving Replace hunks (where git treats an
+    /// append-without-trailing-newline as a replace of the last line, but the
+    /// first added line is identical to the removed line — no real change).
+    removed_lines: Vec<String>,
 }
 
 /// Per-commit, per-file hunk information extracted from `git diff-tree -p -U0`.
@@ -2408,6 +2462,7 @@ fn parse_hunk_header(line: &str) -> Option<DiffHunk> {
         new_start,
         new_count,
         added_lines: Vec::new(),
+        removed_lines: Vec::new(),
     })
 }
 
@@ -2423,13 +2478,38 @@ fn parse_range_spec(spec: &str) -> Option<(u32, u32)> {
     }
 }
 
+/// Count the number of leading lines in a Replace hunk whose content is identical
+/// in both the old and new sides (content-preserving Replace).
+///
+/// This handles the git artifact where appending to a file without a trailing newline
+/// causes the diff to show a Replace of the last original line (since that line
+/// "gains" a newline).  When the first N removed lines equal the first N added lines,
+/// those N positions carry the same content and should be treated as preserved.
+fn count_content_preserving_lines(hunk: &DiffHunk) -> u32 {
+    if hunk.old_count == 0 || hunk.new_count == 0 {
+        return 0; // pure Insert or pure Delete: nothing to preserve
+    }
+    let max_check = (hunk.old_count as usize).min(hunk.new_count as usize);
+    hunk.removed_lines
+        .iter()
+        .zip(hunk.added_lines.iter())
+        .take(max_check)
+        .take_while(|(r, a)| r == a)
+        .count() as u32
+}
+
 /// Apply hunk-based line offset adjustments to existing line attributions.
 ///
 /// Instead of re-diffing file contents, this uses pre-computed hunk information from
 /// `git diff-tree -p -U0` to adjust attribution line numbers. For each hunk:
 /// - Lines before the hunk: keep at same position (with accumulated offset)
 /// - Lines in a deletion region: dropped (those lines were removed)
+/// - Lines in a content-preserving Replace region: kept at their new positions
 /// - Lines after the hunk: shifted by the net offset (new_count - old_count)
+///
+/// Content-preserving Replace detection handles the no-trailing-newline git artifact:
+/// appending to a file without a trailing newline causes git to show a Replace of the
+/// last original line (which merely gains a newline).  Those lines should NOT be dropped.
 ///
 /// This is O(attrs + hunks) instead of O(file_length) for the full diff approach.
 fn apply_hunks_to_line_attributions(
@@ -2442,7 +2522,9 @@ fn apply_hunks_to_line_attributions(
 
     // Build preserved segments: ranges of old line numbers that survive and their offset.
     // Between hunks, lines are preserved with an accumulated offset.
-    let mut segments: Vec<(u32, u32, i64)> = Vec::with_capacity(hunks.len() + 1);
+    // A segment is (old_start, old_end, offset): old lines [old_start..old_end] map to
+    // new lines [old_start+offset..old_end+offset].
+    let mut segments: Vec<(u32, u32, i64)> = Vec::with_capacity(hunks.len() * 2 + 1);
     let mut offset: i64 = 0;
     let mut prev_old_end: u32 = 1; // 1-indexed
 
@@ -2462,16 +2544,26 @@ fn apply_hunks_to_line_attributions(
             }
         }
 
-        // The hunk itself: old lines old_start..old_start+old_count-1 are deleted/replaced.
-        // No segment for these lines (they're removed).
-        // For pure insertion (old_count=0): no lines are removed, but offset changes.
+        // For Replace hunks (old_count > 0, new_count > 0), check if the leading lines
+        // are content-identical.  Content-preserving lines are NOT dropped — they carry
+        // their old attribution to the corresponding new positions.
+        let content_preserving_count = count_content_preserving_lines(hunk);
+        if content_preserving_count > 0 {
+            // These old lines map to the first content_preserving_count new lines.
+            // The offset for these preserved lines is new_start - old_start.
+            let preserved_old_start = hunk.old_start;
+            let preserved_old_end = hunk.old_start + content_preserving_count - 1;
+            let preserved_offset = hunk.new_start as i64 - hunk.old_start as i64;
+            segments.push((preserved_old_start, preserved_old_end, preserved_offset));
+        }
 
+        // Update offset: net lines added/removed by this hunk.
         offset += hunk.new_count as i64 - hunk.old_count as i64;
 
         if hunk.old_count == 0 {
             prev_old_end = hunk.old_start + 1; // after the insertion point
         } else {
-            prev_old_end = hunk.old_start + hunk.old_count; // after the deleted range
+            prev_old_end = hunk.old_start + hunk.old_count; // after the deleted/replaced range
         }
     }
 
@@ -2651,6 +2743,20 @@ fn run_diff_tree_with_hunks(
                 && let Some(last_hunk) = hunks.last_mut()
             {
                 last_hunk.added_lines.push(line[1..].to_string());
+            }
+            continue;
+        }
+
+        // Capture `-` lines (removed content) into the most-recent hunk for this file.
+        // The `---` file-header line is excluded. Used to detect content-preserving
+        // Replace hunks (append-without-trailing-newline git artifact).
+        if line.starts_with('-') && !line.starts_with("--- ") {
+            if let (Some(commit), Some(file)) = (&current_commit, &current_diff_file)
+                && let Some(file_hunks) = hunks_by_commit.get_mut(commit)
+                && let Some(hunks) = file_hunks.get_mut(file.as_str())
+                && let Some(last_hunk) = hunks.last_mut()
+            {
+                last_hunk.removed_lines.push(line[1..].to_string());
             }
             continue;
         }
@@ -2867,6 +2973,22 @@ pub fn rewrite_authorship_after_commit_amend_with_snapshot(
 
     // Update base commit SHA
     authorship_log.metadata.base_commit_sha = amended_commit.to_string();
+
+    // Carry forward HumanRecords from the original commit's note.
+    //
+    // The working log for `original_commit` no longer holds KnownHuman checkpoints
+    // by the time an amend fires — they were consumed when the original commit was
+    // first processed and that working log was deleted.  The authoritative source of
+    // human records for this commit is therefore the existing note on `original_commit`.
+    //
+    // We merge rather than overwrite so that any *new* KnownHuman work done in the
+    // current amend session (present in `authorship_log.metadata.humans` via the
+    // working-log checkpoint path) takes precedence over the historical record.
+    if let Ok(original_log) = get_reference_as_authorship_log_v3(repo, original_commit) {
+        for (id, record) in original_log.metadata.humans {
+            authorship_log.metadata.humans.entry(id).or_insert(record);
+        }
+    }
 
     // Inject custom attributes into all PromptRecords (same behavior as post_commit).
     // Always use Config::fresh() to support runtime config updates
@@ -6744,6 +6866,221 @@ mod tests {
                 vec![LineRange::Range(1, 10)],
                 "other.txt AI lines must remain at 1-10 (unchanged by rebase); got {:?}",
                 file_att.entries[0].line_ranges
+            );
+        }
+    }
+
+    /// Regression: after rebase the slow path must NOT leave orphaned PromptRecords in
+    /// intermediate commit notes.
+    ///
+    /// ## Bug (introduced when `prune_unreferenced_metadata` was removed from `to_authorship_log`)
+    ///
+    /// `rewrite_authorship_after_rebase_v2` seeds `current_va` from
+    /// `new_for_base_commit(source_head)` which loads ALL prompts referenced by source_head's
+    /// blame.  For each cherry-picked commit `transform_attributions_to_final_state` copies
+    /// prompts from the source VA without pruning ones that are no longer referenced in that
+    /// commit's attestations.  When an intermediate commit's note is then serialised via
+    /// `to_authorship_log`, the note contains orphaned PromptRecords from later commits.
+    ///
+    /// ## Setup
+    ///
+    ///   base  : feature.txt = lines 1-5 (human)
+    ///   A     : adds lines 6-10 to feature.txt (5 AI lines attributed to P1)
+    ///   B     : adds lines 11-15 to feature.txt (5 AI lines attributed to P2)
+    ///   main+ : prepends "header" to feature.txt → diverges blobs → forces slow path
+    ///
+    /// After cherry-picking A' and B' onto main:
+    ///   A' note: should only contain P1.  P2 must NOT be present (orphaned).
+    ///   B' note: should only contain P2 (per-commit-delta model: each note only
+    ///   has prompts from its own session's diff).
+    #[test]
+    fn rebase_v2_intermediate_note_has_no_orphaned_prompts_from_later_commits() {
+        use crate::authorship::authorship_log_serialization::generate_short_hash;
+
+        let repo = TmpRepo::new().expect("create tmp repo");
+
+        // --- Base commit ---
+        let base_content = "line1\nline2\nline3\nline4\nline5\n";
+        repo.write_file("feature.txt", base_content, true)
+            .expect("write base");
+        repo.commit_with_message("base").expect("commit base");
+        let default_branch = repo.current_branch().expect("get current branch name");
+
+        // --- Feature branch: commit A adds 5 AI lines (P1) ---
+        repo.create_branch("feature").expect("create feature branch");
+        repo.switch_branch("feature").expect("switch to feature");
+
+        let content_a =
+            "line1\nline2\nline3\nline4\nline5\nai-p1-1\nai-p1-2\nai-p1-3\nai-p1-4\nai-p1-5\n";
+        repo.write_file("feature.txt", content_a, true)
+            .expect("write feature.txt for commit A");
+        repo.commit_with_message("commit-A").expect("commit A");
+        let sha_a = repo.get_head_commit_sha().expect("sha A");
+
+        // Write note for commit A: P1 covers lines 6-10.
+        let agent_p1 = AgentId {
+            tool: "claude".to_string(),
+            id: "test-session-p1".to_string(),
+            model: "claude-test".to_string(),
+        };
+        let p1_hash = generate_short_hash(&agent_p1.id, &agent_p1.tool);
+        {
+            let mut log = AuthorshipLog::new();
+            log.metadata.base_commit_sha = sha_a.clone();
+            log.metadata.prompts.insert(
+                p1_hash.clone(),
+                PromptRecord {
+                    agent_id: agent_p1.clone(),
+                    human_author: None,
+                    messages: vec![],
+                    total_additions: 5,
+                    total_deletions: 0,
+                    accepted_lines: 5,
+                    overriden_lines: 0,
+                    messages_url: None,
+                    custom_attributes: None,
+                },
+            );
+            let mut file = FileAttestation::new("feature.txt".to_string());
+            file.add_entry(AttestationEntry::new(
+                p1_hash.clone(),
+                vec![LineRange::Range(6, 10)],
+            ));
+            log.attestations.push(file);
+            let note = log.serialize_to_string().expect("serialize note A");
+            notes_add(repo.gitai_repo(), &sha_a, &note).expect("write note A");
+        }
+
+        // --- Feature branch: commit B adds 5 more AI lines (P2) ---
+        let content_b = "line1\nline2\nline3\nline4\nline5\nai-p1-1\nai-p1-2\nai-p1-3\nai-p1-4\nai-p1-5\nai-p2-1\nai-p2-2\nai-p2-3\nai-p2-4\nai-p2-5\n";
+        repo.write_file("feature.txt", content_b, true)
+            .expect("write feature.txt for commit B");
+        repo.commit_with_message("commit-B").expect("commit B");
+        let sha_b = repo.get_head_commit_sha().expect("sha B");
+
+        // Write note for commit B: P1 covers lines 6-10, P2 covers lines 11-15.
+        let agent_p2 = AgentId {
+            tool: "claude".to_string(),
+            id: "test-session-p2".to_string(),
+            model: "claude-test".to_string(),
+        };
+        let p2_hash = generate_short_hash(&agent_p2.id, &agent_p2.tool);
+        assert_ne!(p1_hash, p2_hash, "P1 and P2 must have different hashes");
+        {
+            let mut log = AuthorshipLog::new();
+            log.metadata.base_commit_sha = sha_b.clone();
+            log.metadata.prompts.insert(
+                p1_hash.clone(),
+                PromptRecord {
+                    agent_id: agent_p1.clone(),
+                    human_author: None,
+                    messages: vec![],
+                    total_additions: 5,
+                    total_deletions: 0,
+                    accepted_lines: 5,
+                    overriden_lines: 0,
+                    messages_url: None,
+                    custom_attributes: None,
+                },
+            );
+            log.metadata.prompts.insert(
+                p2_hash.clone(),
+                PromptRecord {
+                    agent_id: agent_p2.clone(),
+                    human_author: None,
+                    messages: vec![],
+                    total_additions: 5,
+                    total_deletions: 0,
+                    accepted_lines: 5,
+                    overriden_lines: 0,
+                    messages_url: None,
+                    custom_attributes: None,
+                },
+            );
+            let mut file = FileAttestation::new("feature.txt".to_string());
+            file.add_entry(AttestationEntry::new(
+                p1_hash.clone(),
+                vec![LineRange::Range(6, 10)],
+            ));
+            file.add_entry(AttestationEntry::new(
+                p2_hash.clone(),
+                vec![LineRange::Range(11, 15)],
+            ));
+            log.attestations.push(file);
+            let note = log.serialize_to_string().expect("serialize note B");
+            notes_add(repo.gitai_repo(), &sha_b, &note).expect("write note B");
+        }
+
+        // --- Main branch: prepend a header (diverges blobs → forces slow path) ---
+        repo.switch_branch(&default_branch)
+            .expect("switch to default");
+        let main_content = format!("header\n{}", base_content);
+        repo.write_file("feature.txt", &main_content, true)
+            .expect("write main feature.txt");
+        repo.commit_with_message("main-advance")
+            .expect("commit main advance");
+
+        // --- Cherry-pick A and B onto main ---
+        repo.cherry_pick(&[&sha_a]).expect("cherry-pick A");
+        let new_a = repo.get_head_commit_sha().expect("new A sha");
+
+        repo.cherry_pick(&[&sha_b]).expect("cherry-pick B");
+        let new_b = repo.get_head_commit_sha().expect("new B sha");
+
+        // --- Invoke rewrite_authorship_after_rebase_v2 ---
+        super::rewrite_authorship_after_rebase_v2(
+            repo.gitai_repo(),
+            &sha_b,
+            &[sha_a.clone(), sha_b.clone()],
+            &[new_a.clone(), new_b.clone()],
+            "human-tester",
+        )
+        .expect("rewrite authorship after rebase");
+
+        // --- Verify new_A note: must only have P1, NOT P2 ---
+        {
+            let note_raw =
+                show_authorship_note(repo.gitai_repo(), &new_a).expect("read new_A note");
+            let log =
+                AuthorshipLog::deserialize_from_string(&note_raw).expect("parse new_A note");
+
+            assert!(
+                log.metadata.prompts.contains_key(&p1_hash),
+                "new_A note must contain P1 (which was attributed in commit A), \
+                 but prompts are: {:?}",
+                log.metadata.prompts.keys().collect::<Vec<_>>()
+            );
+            assert!(
+                !log.metadata.prompts.contains_key(&p2_hash),
+                "REBASE ORPHANED PROMPT BUG: new_A note contains P2, which was only \
+                 introduced in commit B (a later commit). P2 has no attestation in \
+                 commit A and must be pruned. Prompts found: {:?}",
+                log.metadata.prompts.keys().collect::<Vec<_>>()
+            );
+        }
+
+        // --- Verify new_B note: must have P2, must NOT have P1 ---
+        // Per-commit-delta model: each commit note only contains prompts from its
+        // own session's diff.  B's diff adds the P2 lines (11-15), so only P2 is
+        // active.  P1 lines were already present from commit A and are not part of
+        // B's delta, so P1 must not appear in B's note.
+        {
+            let note_raw =
+                show_authorship_note(repo.gitai_repo(), &new_b).expect("read new_B note");
+            let log =
+                AuthorshipLog::deserialize_from_string(&note_raw).expect("parse new_B note");
+
+            assert!(
+                log.metadata.prompts.contains_key(&p2_hash),
+                "new_B note must contain P2 (its own session), but prompts are: {:?}",
+                log.metadata.prompts.keys().collect::<Vec<_>>()
+            );
+            assert!(
+                !log.metadata.prompts.contains_key(&p1_hash),
+                "REBASE ORPHANED PROMPT BUG: new_B note contains P1, which belongs to \
+                 commit A's session and is not part of B's diff.  P1 must not appear \
+                 in B's note (per-commit-delta model).  Prompts found: {:?}",
+                log.metadata.prompts.keys().collect::<Vec<_>>()
             );
         }
     }
