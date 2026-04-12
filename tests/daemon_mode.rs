@@ -2377,13 +2377,11 @@ fn daemon_pure_trace_socket_stash_main_ops_emit_stash_events() {
         &mut expected_top_level_completions,
     )
     .expect("stash push should succeed");
-    traced_git_with_env(
-        &repo,
-        &["stash", "list"],
-        &env_refs,
-        &mut expected_top_level_completions,
-    )
-    .expect("stash list should succeed");
+    // `git stash list` is readonly — the daemon's readonly fast-path drops it
+    // before it reaches the ingest queue, so we run it without incrementing
+    // expected_top_level_completions and do not expect it in the rewrite log.
+    repo.git_og_with_env(&["stash", "list"], &env_refs)
+        .expect("stash list should succeed");
     traced_git_with_env(
         &repo,
         &["stash", "apply", "stash@{0}"],
@@ -2448,9 +2446,10 @@ fn daemon_pure_trace_socket_stash_main_ops_emit_stash_events() {
     let rewrite_log_path = git_common_dir(&repo).join("ai").join("rewrite_log");
     let rewrite_log =
         fs::read_to_string(&rewrite_log_path).expect("rewrite log should exist after stash ops");
+    // `stash list` is readonly and discarded by the daemon fast-path — only
+    // the mutating stash operations (create/apply/pop/drop) appear in the log.
     for expected_operation in [
         "\"operation\":\"Create\"",
-        "\"operation\":\"List\"",
         "\"operation\":\"Apply\"",
         "\"operation\":\"Pop\"",
         "\"operation\":\"Drop\"",
