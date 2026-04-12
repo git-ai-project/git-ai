@@ -4492,9 +4492,7 @@ impl ActorDaemonCoordinator {
                         input.root_sid
                     ))
                 })?;
-                let has_log = repo.storage.has_working_log(&old_head);
                 let wl_files = tracked_working_log_files(&repo, &old_head)?;
-                let _ = has_log;
                 file_paths.extend(wl_files);
             }
             "rebase" | "pull" => {
@@ -5437,7 +5435,14 @@ impl ActorDaemonCoordinator {
         let notifier_clone = notifier.clone();
         tokio::spawn(async move {
             loop {
-                notifier_clone.notified().await;
+                // Create the `Notified` future BEFORE acquiring the exec-lock and
+                // draining, so that any `notify_one()` fired *during* the drain is
+                // captured as a pending wakeup rather than lost.  Tokio's `Notify`
+                // stores at most one permit: calling `notify_one()` while no future
+                // is registered stores the permit; the subsequent `notified.await`
+                // at the bottom of the loop will see it and return immediately,
+                // triggering another drain pass instead of sleeping indefinitely.
+                let notified = notifier_clone.notified();
                 if coordinator.is_shutting_down() {
                     break;
                 }
@@ -5458,6 +5463,10 @@ impl ActorDaemonCoordinator {
                         family_clone, e
                     ));
                 }
+                // Wait for the next notification now that the drain pass is complete.
+                // Any `notify_one()` that fired during the drain will have stored a
+                // permit, so this await will return immediately in that case.
+                notified.await;
             }
         });
 
@@ -5558,7 +5567,6 @@ impl ActorDaemonCoordinator {
                     // At this point every prior command in this family has already
                     // been drained, so the working log is fully up-to-date.  If the
                     // eager capture found nothing, retry here.
-                    let was_snapshot_none = command.carryover_snapshot_id.is_none();
                     if command.carryover_snapshot_id.is_none() {
                         if let Some(worktree) = command.worktree.as_deref() {
                             match self.capture_carryover_snapshot_for_command(
@@ -5586,7 +5594,6 @@ impl ActorDaemonCoordinator {
                             }
                         }
                     }
-                    let _ = was_snapshot_none;
                     // Wrap the entire command + side-effect pipeline in catch_unwind
                     // so that a panic (e.g. from UTF-8 boundary issues in diff parsing)
                     // does not kill the daemon process.

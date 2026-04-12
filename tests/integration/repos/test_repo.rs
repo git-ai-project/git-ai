@@ -1682,6 +1682,10 @@ impl TestRepo {
     /// "Checkpoint queued" to stderr.  For those we must wait for the completion log to
     /// advance before tests can safely read the working log.
     ///
+    /// Multi-repo checkpoints where some repos were queued and some completed
+    /// synchronously print "Checkpoint dispatched" instead of "Checkpoint queued".
+    /// Both strings contain "queued" as a substring, so the same logic applies.
+    ///
     /// Live checkpoints (`wait=true`) print "Checkpoint completed" and their completion
     /// log entry is already written when the subprocess returns, so no waiting is needed.
     fn sync_queued_checkpoint_if_needed(&self, args: &[&str], output: &str, baseline: u64) {
@@ -1691,7 +1695,9 @@ impl TestRepo {
         if git_ai_primary_command(args) != Some("checkpoint") {
             return;
         }
-        if !output.contains("Checkpoint queued") {
+        // "Checkpoint queued" (single-repo async) and "Checkpoint dispatched"
+        // (multi-repo mix) both contain "queued" as a substring.
+        if !output.contains("queued") {
             return;
         }
         self.wait_for_daemon_total_completion_count(baseline, baseline.saturating_add(1));
